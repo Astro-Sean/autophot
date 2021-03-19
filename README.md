@@ -99,5 +99,8 @@ to every .c file.
 
 * If you experience errors with a particular file, the most effective means of debug is to share the file with a developer for diagnostic. Once bugs have been addressed all files will be deleted. **All shared data will be kept confidential**.
 
-<img src="https://media.giphy.com/media/ehkn6JLlzuayjGarJX/giphy.gif" width="40" height="40" />
+<center>
+	<img src="https://media.giphy.com/media/ehkn6JLlzuayjGarJX/giphy.gif" width="400" height="400" />
+</center>
+
 
