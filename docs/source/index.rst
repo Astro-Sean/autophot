@@ -3,7 +3,10 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to AutoPhOT's documentation!
+Automated Photometry Of Transients
+. class:: center
+
+(AutoPhoT))
 ====================================
 
 .. toctree::
@@ -12,6 +15,7 @@ Welcome to AutoPhOT's documentation!
 
    intro
    autophot
+   example
 
 
 Indices and tables
