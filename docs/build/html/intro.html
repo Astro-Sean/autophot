@@ -1,0 +1,116 @@
+
+<!DOCTYPE html>
+
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Introduction &#8212; AutoPhOT  documentation</title>
+    <link rel="stylesheet" href="_static/pygments.css" type="text/css" />
+    <link rel="stylesheet" href="_static/alabaster.css" type="text/css" />
+    <script id="documentation_options" data-url_root="./" src="_static/documentation_options.js"></script>
+    <script src="_static/jquery.js"></script>
+    <script src="_static/underscore.js"></script>
+    <script src="_static/doctools.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+   
+  <link rel="stylesheet" href="_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <div class="section" id="introduction">
+<h1>Introduction<a class="headerlink" href="#introduction" title="Permalink to this headline">¶</a></h1>
+<p><code class="docutils literal notranslate"><span class="pre">simpleble</span></code> is a high-level OO Python package which aims to provide an easy and intuitive way of interacting with nearby Bluetooth Low Energy (BLE) devices (GATT servers). In essence, this package is an extension of the <code class="docutils literal notranslate"><span class="pre">bluepy</span></code> package created by Ian Harvey (see <a class="reference external" href="https://github.com/IanHarvey/bluepy/">here</a>)</p>
+<p>The aim here was to define a single object which would allow users to perform the various operations performed by the <code class="docutils literal notranslate"><span class="pre">bluepy.btle.Peripheral</span></code>, <code class="docutils literal notranslate"><span class="pre">bluepy.btle.Scanner</span></code>, <code class="docutils literal notranslate"><span class="pre">bluepy.btle.Service</span></code> and <code class="docutils literal notranslate"><span class="pre">bluepy.btle.Characteristic</span></code> classes of <code class="docutils literal notranslate"><span class="pre">bluepy</span></code>, from one central place. This functionality is facilitated by the <code class="docutils literal notranslate"><span class="pre">simpleble.SimpleBleClient</span></code> and <code class="docutils literal notranslate"><span class="pre">simpleble.SimpleBleDevice</span></code> classes, where the latter is an extention/subclass of <code class="docutils literal notranslate"><span class="pre">bluepy.btle.Peripheral</span></code>, combined with properties of <code class="docutils literal notranslate"><span class="pre">bluepy.btle.ScanEntry</span></code>.</p>
+<p>The current implementation has been developed in Python 3 and tested on a Raspberry Pi Zero W, running Raspbian 9 (stretch), but should work with Python 2.7+ (maybe with minor modifications in terms of printing and error handling) and most Debian based OSs.</p>
+<div class="section" id="motivation">
+<h2>Motivation<a class="headerlink" href="#motivation" title="Permalink to this headline">¶</a></h2>
+<p>As a newbie experimenter/hobbyist in the field of IoT using BLE communications, I found it pretty hard to identify a Python package which would enable one to use a Raspberry Pi (Zero W inthis case) to swiftly scan, connect to and read/write from/to a nearby BLE device (GATT server).</p>
+<p>This package is intended to provide a quick, as well as (hopefully) easy to undestand, way of getting a simple BLE GATT client up and running, for all those out there, who, like myself, are hands-on learners and are eager to get their hands dirty from early on.</p>
+</div>
+<div class="section" id="limitations">
+<h2>Limitations<a class="headerlink" href="#limitations" title="Permalink to this headline">¶</a></h2>
+<ul class="simple">
+<li><p>As my main use-case scenario was to simply connect two devices, the current version of <code class="xref py py-class docutils literal notranslate"><span class="pre">simpleble.SimpleBleClient</span></code> has been designed and implemented with this use-case in mind. As such, if you are looking for a package to allow you to connect to multiple devices, then know that off-the-self this package DOES NOT allow you to do so. However, implementing such a feature is an easily achievable task, which has been planned for sometime in the near future and if there proves to be interest on the project, I would be happy to speed up the process.</p></li>
+<li><p>Only Read and Write operations are currently supported, but I am planning on adding Notifications soon.</p></li>
+<li><p>Although the interfacing operations of the <code class="xref py py-class docutils literal notranslate"><span class="pre">bluepy.btle.Service</span></code> and <code class="xref py py-class docutils literal notranslate"><span class="pre">bluepy.btle.Peripheral</span></code> classes have been brought forward to the <code class="xref py py-class docutils literal notranslate"><span class="pre">simpleble.SimpleBleClient</span></code> class, the same has not been done for the <code class="xref py py-class docutils literal notranslate"><span class="pre">bluepy.btle.Descriptor</span></code>, meaning that the <code class="xref py py-class docutils literal notranslate"><span class="pre">simpleble.SimpleBleClient</span></code> cannot be used to directly access the Descriptors. This can however be done easily by obtaining a handle of a <code class="xref py py-class docutils literal notranslate"><span class="pre">simpleble.SimpleBleDevice</span></code> object and calling the superclass <code class="xref py py-meth docutils literal notranslate"><span class="pre">bluepy.btle.Peripheral.getDescriptors()</span></code> method.</p></li>
+</ul>
+</div>
+</div>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="index.html">AutoPhOT</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="index.html">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" />
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>$('#searchbox').show(0);</script>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;2021, Seán Brennan.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 3.5.3</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.12</a>
+      
+      |
+      <a href="_sources/intro.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>
