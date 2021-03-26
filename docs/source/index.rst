@@ -6,12 +6,18 @@
 Automated Photometry Of Transients Documention
 ====================================
 
+A few words
+===========
+
+Put a couple words there
+
+
 .. toctree::
    :maxdepth: 2
    :caption: Contents:
 
    intro
-   autophot
+   autophot.packages
 
 
 Indices and tables
