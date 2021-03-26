@@ -10,8 +10,8 @@ Welcome to AutoPhOT's documentation!
    :maxdepth: 2
    :caption: Contents:
 
-intro
-autophot
+   intro
+   autophot
 
 
 Indices and tables
