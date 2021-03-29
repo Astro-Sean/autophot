@@ -1,10 +1,7 @@
 Installation
 ============
 
-
 AutoPhoT is available via `Anaconda`_ and can be easily installed using
-
-
 
 
 .. code-block:: bash
@@ -16,7 +13,8 @@ AutoPhoT is integrated with `Astrometry.net`_ and `HOTPANTS`_. For complete func
 
 
 ASTROMETRY.NET
-==============
+##############
+
 |
 
 
@@ -29,7 +27,9 @@ Instructions on how to install Astrometry.net can be found  `here <http://astrom
 |
 
 *HOTPANTS*
-==========
+##########
+
+
 The High Order Transform of Psf ANd Template Subtraction code (Hotpants) can be tricky to install but there are some nice comments on the installation process `here <https://okomestudio.net/biboroku/2010/03/installing-hotpants-5-1-10-on-mac-os-x-leopard/>`_
 
 
