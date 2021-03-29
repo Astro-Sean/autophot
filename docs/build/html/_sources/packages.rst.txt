@@ -1,8 +1,5 @@
-packages package
-================
-
-Submodules
-----------
+AutoPhoT Packages
+=================
 
 packages.aperture module
 ------------------------
