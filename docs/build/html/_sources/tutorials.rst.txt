@@ -4,4 +4,4 @@ Tutorials
 .. toctree::
    :maxdepth: 1
 
-   example_notebooks/*.ipynb
+   example_notebooks
