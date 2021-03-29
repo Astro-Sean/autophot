@@ -2,5 +2,6 @@ AutoPhot Modules
 ================
 
 .. toctree::
-   :hidden:
+   :maxdepth: 1
+   
    packages
