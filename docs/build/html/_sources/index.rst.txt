@@ -4,7 +4,7 @@
    contain the root `toctree` directive.
 
 Automated Photometry Of Transients Documention
-====================================
+==============================================
 
 A few words
 ===========
@@ -17,13 +17,11 @@ Put a couple words there
    :caption: Contents:
 
    intro
-   autophot.packages
+   packages
 
 
-.. automodule:: autophot
-   :members:
-   :undoc-members:
-   :show-inheritance:
+
+
 Indices and tables
 ==================
 
