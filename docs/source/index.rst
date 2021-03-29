@@ -17,7 +17,7 @@ Put a couple words there
    :caption: Contents:
 
    intro
-   autophot.packages
+   autophot.packages.aperature
 
 
 Indices and tables
