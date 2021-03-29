@@ -3,11 +3,8 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Automated Photometry Of Transients Documention
+Automated Photometry Of Transients Documentation
 ==============================================
-
-A few words
-===========
 
 The *Automated Photometry Of Transients* (AutoPHoT) is a novel photometry pipeline, built from the ground up on Python 3 using packages from Astropy and Photutils.
 
