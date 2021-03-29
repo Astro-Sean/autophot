@@ -17,7 +17,7 @@ Put a couple words there
    :caption: Contents:
 
    intro
-   modules
+   packages
 
 .. automodule:: autophot
   :members:
