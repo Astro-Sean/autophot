@@ -40,7 +40,7 @@
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
     <link rel="next" title="Tutorials" href="tutorials.html" />
-    <link rel="prev" title="Automated Photometry Of Transients Documention" href="index.html" /> 
+    <link rel="prev" title="Automated Photometry Of Transients Documentation" href="index.html" /> 
 </head>
 
 <body class="wy-body-for-nav">
@@ -88,9 +88,9 @@
               <p class="caption"><span class="caption-text">Contents:</span></p>
 <ul class="current">
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Installation</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#conda-installation">Conda Installation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#conda-install">Conda Install</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#astrometry-net">ASTROMETRY.NET</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#hotpants"><em>HOTPANTS</em></a></li>
+<li class="toctree-l2"><a class="reference internal" href="#hotpants">HOTPANTS</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="tutorials.html">Tutorials</a></li>
@@ -190,32 +190,35 @@
 </style>
 <div class="section" id="installation">
 <h1>Installation<a class="headerlink" href="#installation" title="Permalink to this headline">¶</a></h1>
-<div class="section" id="conda-installation">
-<h2>Conda Installation<a class="headerlink" href="#conda-installation" title="Permalink to this headline">¶</a></h2>
-<p>AutoPhoT is available via <a class="reference external" href="https://anaconda.org/astro-sean/autophot">Anaconda</a> and can be easily installed using:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$ conda install -c astro-sean autophot
-</pre></div>
-</div>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>The installation of AutoPHoT has been tested on a few machines, mostly running MacOS. If you experience any issues installing AutoPHoT, please raise an issues <a class="reference external" href="https://github.com/Astro-Sean/autophot/issues">here</a>.</p>
+</div>
+<div class="section" id="conda-install">
+<h2>Conda Install<a class="headerlink" href="#conda-install" title="Permalink to this headline">¶</a></h2>
+<p>AutoPhoT is available via <a class="reference external" href="https://anaconda.org/astro-sean/autophot">Anaconda</a> and can be easily installed using:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$ conda install -c astro-sean autophot
+</pre></div>
 </div>
 <p>AutoPhoT is integrated with <a class="reference external" href="http://astrometry.net/">Astrometry.net</a> and <a class="reference external" href="https://github.com/acbecker/hotpants">HOTPANTS</a>. For complete functionality you will need to install both of these programs on your machine.</p>
 </div>
 <div class="section" id="astrometry-net">
 <h2>ASTROMETRY.NET<a class="headerlink" href="#astrometry-net" title="Permalink to this headline">¶</a></h2>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The installation of Astrometry.net is not needed if you completely trust the WCS values on your image but even slightly incorrect WCS values can negatively affect measurements.</p>
+</div>
 <p>Instructions on how to install Astrometry.net can be found  <a class="reference external" href="http://astrometry.net/use.html">here</a>. Some users have reported success installing Astrometry.net using <a class="reference external" href="https://formulae.brew.sh/formula/astrometry-net">HomeBrew</a>. This has the added benefit of ease of use and well as automatically retrieving the necessary files needed for the plate solving algorithm.</p>
-<div class="line-block">
-<div class="line"><br /></div>
-</div>
 <p><strong>We recommend you perform an install with HomeBrew only if you understand the caveats</strong>.</p>
-<div class="line-block">
-<div class="line"><br /></div>
-</div>
 </div>
 <div class="section" id="hotpants">
-<h2><em>HOTPANTS</em><a class="headerlink" href="#hotpants" title="Permalink to this headline">¶</a></h2>
-<p>The High Order Transform of Psf ANd Template Subtraction code (Hotpants) can be tricky to install but there are some nice comments on the installation process <a class="reference external" href="https://okomestudio.net/biboroku/2010/03/installing-hotpants-5-1-10-on-mac-os-x-leopard/">here</a>.</p>
+<h2>HOTPANTS<a class="headerlink" href="#hotpants" title="Permalink to this headline">¶</a></h2>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>the Installation of HOTPANTS is not needed if you don’t require template subtraction.</p>
+</div>
+<p>The High Order Transform of Psf ANd Template Subtraction code (Hotpants) can be tricky to install.</p>
+<p>There are some nice tips on the installation process <a class="reference external" href="https://okomestudio.net/biboroku/2010/03/installing-hotpants-5-1-10-on-mac-os-x-leopard/">here</a>.</p>
 </div>
 </div>
 
@@ -226,7 +229,7 @@
           <footer>
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
         <a href="tutorials.html" class="btn btn-neutral float-right" title="Tutorials" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
-        <a href="index.html" class="btn btn-neutral float-left" title="Automated Photometry Of Transients Documention" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="index.html" class="btn btn-neutral float-left" title="Automated Photometry Of Transients Documentation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
     </div>
 
   <hr/>

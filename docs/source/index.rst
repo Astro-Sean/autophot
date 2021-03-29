@@ -4,7 +4,7 @@
    contain the root `toctree` directive.
 
 Automated Photometry Of Transients Documentation
-==============================================
+================================================
 
 The *Automated Photometry Of Transients* (AutoPHoT) is a novel photometry pipeline, built from the ground up on Python 3 using packages from Astropy and Photutils.
 
