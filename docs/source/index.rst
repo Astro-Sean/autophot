@@ -19,6 +19,11 @@ Put a couple words there
    intro
    modules
 
+.. toctree::
+  :maxdepth: 1
+
+  packages
+  
 .. automodule:: autophot
   :members:
 
