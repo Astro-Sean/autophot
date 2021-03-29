@@ -17,9 +17,10 @@ Put a couple words there
    :caption: Contents:
 
    intro
-   autophot.packages.aperature
 
 
+.. automodule:: autophot.packages
+  :members:
 Indices and tables
 ==================
 
