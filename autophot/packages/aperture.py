@@ -1,5 +1,15 @@
 
 def ap_phot(positions,data, radius ,r_in = None,r_out= None):
+
+    """[Summary]
+
+    :param positions: list of tuples containing (x,y) positions of object
+    :type positions: [ParamType](, optional)
+
+    :return: Returns lost of aperature measurements
+    :rtype: list
+    """
+
     try:
 
         from astropy.stats import sigma_clipped_stats
