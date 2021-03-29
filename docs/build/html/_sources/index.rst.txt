@@ -18,7 +18,6 @@ Put a couple words there
 
    intro
    modules
-   packages
 
 .. automodule:: autophot
   :members:

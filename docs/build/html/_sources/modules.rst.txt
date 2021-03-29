@@ -2,6 +2,6 @@ packages
 ========
 
 .. toctree::
-   :maxdepth: 4
+   :maxdepth: 0
 
    packages
