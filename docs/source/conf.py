@@ -30,6 +30,7 @@ author = 'Seán Brennan'
 extensions = ['sphinx.ext.autodoc',
               'nbsphinx',
               'sphinx.ext.mathjax',
+              'IPython.sphinxext.ipython_console_highlighting',
               # 'sphinxcontrib.bibtex'
 ]
 
