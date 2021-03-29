@@ -1,6 +1,7 @@
-example_notebooks
-=================
+packages
+========
 
 .. toctree::
    :maxdepth: 4
 
+   packages
