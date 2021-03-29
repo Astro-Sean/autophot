@@ -7,17 +7,16 @@ Subpackages
 .. toctree::
    :maxdepth: 4
 
-   intro
    autophot.example
    autophot.packages
 
 Submodules
 ----------
 
-autophot.autophot module
-------------------------
+autophot.autophot\_main module
+------------------------------
 
-.. automodule:: autophot.autophot
+.. automodule:: autophot.autophot_main
    :members:
    :undoc-members:
    :show-inheritance:

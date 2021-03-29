@@ -17,10 +17,13 @@ Put a couple words there
    :caption: Contents:
 
    intro
+   autophot.packages
 
 
-.. automodule:: autophot.packages
-  :members:
+.. automodule:: autophot
+   :members:
+   :undoc-members:
+   :show-inheritance:
 Indices and tables
 ==================
 
