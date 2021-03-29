@@ -1,10 +1,7 @@
-Automated Photometry
-====================
+Tutorials
+=========
 
-This is where automated photometry notebook will go
+.. toctree::
+   :maxdepth: 1
 
-Add your own catalog
-====================
-
-
-add your own catalog here
+   example_notebooks/autophot_example.ipynb

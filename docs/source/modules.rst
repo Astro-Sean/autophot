@@ -1,7 +1,6 @@
-AutoPhot Modules
-================
+example_notebooks
+=================
 
 .. toctree::
-   :maxdepth: 1
-   
-   packages
+   :maxdepth: 4
+
