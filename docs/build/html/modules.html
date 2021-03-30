@@ -7,7 +7,7 @@
   
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   
-  <title>Automated Photometry Of Transients Documentation &mdash; AutoPhOT  documentation</title>
+  <title>packages &mdash; AutoPhOT  documentation</title>
   
 
   
@@ -38,8 +38,7 @@
 
     
     <link rel="index" title="Index" href="genindex.html" />
-    <link rel="search" title="Search" href="search.html" />
-    <link rel="next" title="Installation" href="installation.html" /> 
+    <link rel="search" title="Search" href="search.html" /> 
 </head>
 
 <body class="wy-body-for-nav">
@@ -53,7 +52,7 @@
           
 
           
-            <a href="#">
+            <a href="index.html">
           
 
           
@@ -106,7 +105,7 @@
       <nav class="wy-nav-top" aria-label="top navigation">
         
           <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
-          <a href="#">AutoPhOT</a>
+          <a href="index.html">AutoPhOT</a>
         
       </nav>
 
@@ -137,15 +136,15 @@
 
   <ul class="wy-breadcrumbs">
     
-      <li><a href="#" class="icon icon-home"></a> &raquo;</li>
+      <li><a href="index.html" class="icon icon-home"></a> &raquo;</li>
         
-      <li>Automated Photometry Of Transients Documentation</li>
+      <li>packages</li>
     
     
       <li class="wy-breadcrumbs-aside">
         
           
-            <a href="_sources/index.rst.txt" rel="nofollow"> View page source</a>
+            <a href="_sources/modules.rst.txt" rel="nofollow"> View page source</a>
           
         
       </li>
@@ -182,53 +181,41 @@
     text-align: unset;
 }
 </style>
-<div class="section" id="automated-photometry-of-transients-documentation">
-<h1>Automated Photometry Of Transients Documentation<a class="headerlink" href="#automated-photometry-of-transients-documentation" title="Permalink to this headline">¶</a></h1>
-<p>The <em>Automated Photometry Of Transients</em> (AutoPHoT) is a novel photometry pipeline, built from the ground up on Python 3 using packages from Astropy and Photutils.</p>
-<div class="line-block">
-<div class="line"><br /></div>
-</div>
-<p>The motivation for AutoPhoT aims to provide a precise method for photometric calibration. AutoPHoT is designed to accept <em>.fits</em> images, regardless of telescope and instrument. This documentation will provide several tutorials which will allow you to execute AutoPhOT on your own images as well as create your own databases for photometric corrections.</p>
-<div class="admonition warning">
-<p class="admonition-title">Warning</p>
-<p>Documentation still under construction</p>
-</div>
-<div class="toctree-wrapper compound">
-<p class="caption"><span class="caption-text">Getting Started:</span></p>
-<ul>
-<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="installation.html#conda-install">Conda Install</a></li>
-<li class="toctree-l2"><a class="reference internal" href="installation.html#astrometry-net">ASTROMETRY.NET</a></li>
-<li class="toctree-l2"><a class="reference internal" href="installation.html#hotpants">HOTPANTS</a></li>
-</ul>
-</li>
-<li class="toctree-l1"><a class="reference internal" href="tutorials.html">Tutorials</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="example_notebooks/autophot_example.html">Operations for basic photometry using AutoPhOT</a></li>
-<li class="toctree-l2"><a class="reference internal" href="example_notebooks/call_database_example.html">Add a new telescope and instrument</a></li>
-<li class="toctree-l2"><a class="reference internal" href="example_notebooks/add_your_catalog_example.html">Add your own sequnce stars</a></li>
-</ul>
-</li>
-</ul>
-</div>
+<div class="section" id="packages">
+<h1>packages<a class="headerlink" href="#packages" title="Permalink to this headline">¶</a></h1>
 <div class="toctree-wrapper compound">
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="packages.html">packages package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="packages.html">packages package</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#submodules">Submodules</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.aperture">packages.aperture module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.apply_airmass_extinction">packages.apply_airmass_extinction module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.call_astrometry_net">packages.call_astrometry_net module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.call_catalog">packages.call_catalog module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.call_crayremoval">packages.call_crayremoval module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.call_datacheck">packages.call_datacheck module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.call_hotpants">packages.call_hotpants module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.call_locationcheck">packages.call_locationcheck module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.call_yaml">packages.call_yaml module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.check_tns">packages.check_tns module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.check_wcs">packages.check_wcs module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.color_correction">packages.color_correction module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.create_plots">packages.create_plots module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.find">packages.find module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.functions">packages.functions module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.get_template">packages.get_template module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.lightcurve">packages.lightcurve module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.limit">packages.limit module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.main">packages.main module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.psf">packages.psf module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.recover_output">packages.recover_output module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.rm_bkg">packages.rm_bkg module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.run">packages.run module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages.uncertain">packages.uncertain module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="packages.html#module-packages">Module contents</a></li>
+</ul>
+</li>
 </ul>
 </div>
-<span class="target" id="module-autophot"></span><dl class="py function">
-<dt id="autophot.get_distribution">
-<code class="sig-prename descclassname"><span class="pre">autophot.</span></code><code class="sig-name descname"><span class="pre">get_distribution</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dist</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#autophot.get_distribution" title="Permalink to this definition">¶</a></dt>
-<dd><p>Return a current distribution object for a Requirement or string</p>
-</dd></dl>
-
-</div>
-<div class="section" id="indices-and-tables">
-<h1>Indices and tables<a class="headerlink" href="#indices-and-tables" title="Permalink to this headline">¶</a></h1>
-<ul class="simple">
-<li><p><a class="reference internal" href="genindex.html"><span class="std std-ref">Index</span></a></p></li>
-<li><p><a class="reference internal" href="py-modindex.html"><span class="std std-ref">Module Index</span></a></p></li>
-<li><p><a class="reference internal" href="search.html"><span class="std std-ref">Search Page</span></a></p></li>
-</ul>
 </div>
 
 
@@ -236,9 +223,6 @@
            
           </div>
           <footer>
-    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
-        <a href="installation.html" class="btn btn-neutral float-right" title="Installation" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
-    </div>
 
   <hr/>
 

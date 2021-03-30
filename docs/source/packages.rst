@@ -1,5 +1,5 @@
-AutoPhOT packages
-=================
+packages package
+================
 
 Submodules
 ----------
