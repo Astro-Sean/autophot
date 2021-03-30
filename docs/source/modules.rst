@@ -1,7 +1,7 @@
-packages
+autophot
 ========
 
 .. toctree::
    :maxdepth: 4
 
-   packages
+   autophot
