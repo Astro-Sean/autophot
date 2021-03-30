@@ -22,8 +22,4 @@ The motivation for AutoPhoT aims to provide a precise method for photometric cal
 
    installation
    tutorials
-
-.. toctree::
-  :maxdepth: 1
-
-  packages
+   packages
