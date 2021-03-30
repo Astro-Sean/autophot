@@ -27,9 +27,3 @@ The motivation for AutoPhoT aims to provide a precise method for photometric cal
   :maxdepth: 1
 
   packages
-
-.. automodule:: autophot.packages
-  :imported-members:
-  :members:
-  :undoc-members:
-  :show-inheritance:
