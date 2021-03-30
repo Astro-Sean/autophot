@@ -23,3 +23,7 @@ The motivation for AutoPhoT aims to provide a precise method for photometric cal
    installation
    tutorials
    packages
+   
+.. automodule:: autophot
+  :members:
+  :undoc-members:
