@@ -30,9 +30,12 @@ author = 'Seán Brennan'
 extensions = ['sphinx.ext.autodoc',
               'nbsphinx',
               'sphinx.ext.mathjax',
+              'sphinx.ext.autosummary',
               'IPython.sphinxext.ipython_console_highlighting',
               # 'sphinxcontrib.bibtex'
 ]
+
+autosummary_generate = True
 
 source_suffix = ['.rst', '.ipynb']
 
@@ -63,7 +66,3 @@ html_theme_options = {
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ['_static']
-
-
-
-class_members_toctree = False
