@@ -39,7 +39,7 @@
     
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="AutoPhoT Packages" href="../packages.html" />
+    <link rel="next" title="packages package" href="../packages.html" />
     <link rel="prev" title="Add your own sequnce stars" href="add_your_catalog_example.html" /> 
 </head>
 
@@ -98,7 +98,7 @@
 </li>
 </ul>
 <ul>
-<li class="toctree-l1"><a class="reference internal" href="../packages.html">AutoPhoT Packages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../packages.html">packages package</a></li>
 </ul>
 
             
@@ -500,7 +500,8 @@ Successful copy of example.fits written to:
 <span class="c1"># Lets just see that everything is in place</span>
 <span class="n">dirpath</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">dirname</span><span class="p">(</span><span class="n">fpath</span><span class="p">)</span>
 
-<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;list of contects in: </span><span class="si">%s</span><span class="s1"> </span><span class="se">\n</span><span class="s1"> -&gt; </span><span class="si">%s</span><span class="s1">&#39;</span> <span class="o">%</span> <span class="p">(</span><span class="n">dirpath</span><span class="p">,</span><span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="n">dirpath</span><span class="p">)))</span><span class="c1"># returns list of folder contents</span>
+<span class="c1"># returns list of folder contents</span>
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;list of contects in: </span><span class="si">%s</span><span class="s1"> </span><span class="se">\n</span><span class="s1"> -&gt; </span><span class="si">%s</span><span class="s1">&#39;</span> <span class="o">%</span> <span class="p">(</span><span class="n">dirpath</span><span class="p">,</span><span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="n">dirpath</span><span class="p">)))</span>
 </pre></div>
 </div>
 </div>
@@ -548,7 +549,8 @@ Setting work directory (wdir) to: /Users/seanbrennan/Desktop/autophot_example
 </pre></div>
 </div>
 <div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre>
-<span></span><span class="c1"># set the catalog as before # Can choose skymapper, apass, pan_starrs, 2mass</span>
+<span></span><span class="c1"># set the catalog as before</span>
+<span class="c1"># Can choose skymapper, apass, pan_starrs, 2mass</span>
 <span class="n">syntax</span><span class="p">[</span><span class="s1">&#39;catalog&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="s1">&#39;skymapper&#39;</span>
 </pre></div>
 </div>
@@ -587,7 +589,9 @@ Setting work directory (wdir) to: /Users/seanbrennan/Desktop/autophot_example
 
 <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;Location of templates will be in : </span><span class="si">%s</span><span class="s1">&#39;</span> <span class="o">%</span> <span class="n">main_template_foler</span><span class="p">)</span>
 
-<span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">main_template_foler</span><span class="p">):</span> <span class="c1"># if the directory does not exis</span>
+<span class="c1"># if the directory does not exist</span>
+
+<span class="k">if</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">main_template_foler</span><span class="p">):</span>
     <span class="n">os</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">main_template_foler</span> <span class="p">)</span>
 
 </pre></div>
@@ -606,8 +610,8 @@ Location of templates will be in : /Users/seanbrennan/Desktop/autophot_example/t
 </pre></div>
 </div>
 <div class="input_area highlight-ipython3 notranslate"><div class="highlight"><pre>
-<span></span><span class="c1"># Lets check if it was created successfully</span>
-<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;list of contects in: </span><span class="si">%s</span><span class="s1"> </span><span class="se">\n</span><span class="s1"> -&gt; </span><span class="si">%s</span><span class="s1">&#39;</span> <span class="o">%</span> <span class="p">(</span><span class="n">dirpath</span><span class="p">,</span><span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="n">dirpath</span><span class="p">)))</span><span class="c1"># returns list of folder contents</span>
+<span></span><span class="c1"># returns list of folder contents</span>
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;list of contects in: </span><span class="si">%s</span><span class="s1"> </span><span class="se">\n</span><span class="s1"> -&gt; </span><span class="si">%s</span><span class="s1">&#39;</span> <span class="o">%</span> <span class="p">(</span><span class="n">dirpath</span><span class="p">,</span><span class="n">os</span><span class="o">.</span><span class="n">listdir</span><span class="p">(</span><span class="n">dirpath</span><span class="p">)))</span>
 </pre></div>
 </div>
 </div>
@@ -1227,7 +1231,7 @@ Done - Time Taken: 340.4
           </div>
           <footer>
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
-        <a href="../packages.html" class="btn btn-neutral float-right" title="AutoPhoT Packages" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="../packages.html" class="btn btn-neutral float-right" title="packages package" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
         <a href="add_your_catalog_example.html" class="btn btn-neutral float-left" title="Add your own sequnce stars" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
     </div>
 
