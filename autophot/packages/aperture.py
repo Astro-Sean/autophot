@@ -1,10 +1,16 @@
-
 def ap_phot(positions,data, radius ,r_in = None,r_out= None):
 
-    """[Summary]
+    """This is a summary of the aperture packge. This a robust aperture photometry packages for use in autophot
+
 
     :param positions: list of tuples containing (x,y) positions of object
-    :type positions: [ParamType](, optional)
+    :type positions: tuple
+
+    :param r_in: inner radius of background annulus
+    :type r_in: float
+
+    :param r_out: outer radius of background annulus
+    :type r_out: float
 
     :return: Returns lost of aperature measurements
     :rtype: list
