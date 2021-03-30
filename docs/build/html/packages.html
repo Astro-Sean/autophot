@@ -223,7 +223,11 @@
 <dd><p>This is a summary of the aperture packge. This a robust aperture photometry packages for use in autophot</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters</dt>
-<dd class="field-odd"><p><strong>positions</strong> (<em>[</em><em>ParamType</em><em>]</em><em>(</em><em>, </em><em>optional</em><em>)</em>) – list of tuples containing (x,y) positions of object</p>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>positions</strong> (<em>tuple</em>) – list of tuples containing (x,y) positions of object</p></li>
+<li><p><strong>r_in</strong> (<em>float</em>) – inner radius of background annulus</p></li>
+<li><p><strong>r_out</strong> (<em>float</em>) – outer radius of background annulus</p></li>
+</ul>
 </dd>
 <dt class="field-even">Returns</dt>
 <dd class="field-even"><p>Returns lost of aperature measurements</p>
