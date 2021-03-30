@@ -1,30 +1,18 @@
-'''
-Script with all the function used throughout AutoPHoT
-'''
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+def set_size(width,
+             aspect=1,
+             fraction=1):
 
+        """This is a summary of the aperture packge
 
-import numpy as np
-from scipy.optimize import least_squares
+        :param positions: list of tuples containing (x,y) positions of object
+        :type positions: [ParamType](, optional)
 
-
-
-def set_size(width,aspect=1,fraction=1):
-        """ Set aesthetic figure dimensions to avoid scaling in latex.
-
-        Parameters
-        ----------
-        width: float
-                Width in pts
-        fraction: float
-                Fraction of the width which you wish the figure to occupy
-        aspect: Float
-                height multiple of width
-
-        Returns
-        -------
-        fig_dim: tuple
-                Dimensions of figure in inches
+        :return: Returns lost of aperature measurements
+        :rtype: list
         """
+
         # Width of figure
         fig_width_pt = width * fraction
 
@@ -46,12 +34,15 @@ def set_size(width,aspect=1,fraction=1):
 
 def getheader(fpath):
 
-    '''
-    Attempt dynamic  header retrival
+    """Get fits image header. Find telescope header info based on "Telescop" header key
+    if multiple headers are found, concatination into one large header file
 
-    Look for sci image header assuming it is first in list of header
-    extensions
-    '''
+    :param fpath: Location of fits image
+    :type fpath: str
+
+    :return: header information
+    :rtype: object
+    """
 
     # Need to rename this function
     from astropy.io.fits import getheader
@@ -203,10 +194,11 @@ def mag(counts, zp,ct_gradient = False,dmag = False,airmass = None):
 
 
 
-'''
-Gaussian Function
-'''
+
 def gauss_sigma2fwhm(image_params):
+   '''
+    Gaussian Function
+   '''
 
 
    sigma = image_params['sigma']
@@ -247,11 +239,12 @@ def gauss_2d(image, x0,y0, sky , A, image_params):
     return  e.ravel()
 
 
-'''
-Moffat Profile
-'''
 
 def moffat_fwhm(image_params):
+
+   '''
+    Moffat Profile
+   '''
 
    alpha = image_params['alpha']
    beta = image_params['beta']
@@ -284,16 +277,6 @@ def moffat_2d(image, x0,y0, sky , A, image_params):
 
     return e.ravel()
 
-
-
-
-
-
-
-
-
-
-
 def pix_dist(x1,x2,y1,y2):
     import numpy as np
 
@@ -303,8 +286,6 @@ def pix_dist(x1,x2,y1,y2):
     r = np.sqrt(z1+z2)
 
     return np.array(r)
-
-
 
 def weighted_avg_and_std(values, weights):
     import numpy as np
@@ -369,7 +350,7 @@ def pixel_correction(x,m):
     elif diff/m < 0.5:
         return floor(x)
 
-# Whatever pixel (0,0 TL),coordinate on the image to the corrosponding corrdinate in center of pixel
+
 def array_correction(x):
     from numpy import ceil, floor
 
@@ -393,13 +374,18 @@ def norm(array):
 
     return norm_array
 
+
+
 def renorm(array,lb,up):
+    import numpy as np
     s = up - lb
     n =  (array - np.min(array))/(np.nanmax(array)-np.min(array))
     m = (s * n) + lb
     return m
 
 def find_2d_int_percent(count_percent,fwhm):
+    from scipy.optimize import least_squares
+    import numpy as np
 
     from scipy.integrate import dblquad
     sigma = fwhm/(2*np.sqrt(2*np.log(2)))
@@ -419,4 +405,3 @@ def scale_roll(x,xc,m):
     else:
         shift = int(dx *m)
     return shift
-
