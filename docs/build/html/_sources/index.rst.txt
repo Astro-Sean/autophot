@@ -18,7 +18,7 @@ The motivation for AutoPhoT aims to provide a precise method for photometric cal
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contents:
+   :caption: Getting Started:
 
    installation
    tutorials
@@ -30,6 +30,8 @@ The motivation for AutoPhoT aims to provide a precise method for photometric cal
 
 .. automodule:: autophot
   :members:
+  :undoc-members:
+  :show-inheritance:
 
 Indices and tables
 ==================
