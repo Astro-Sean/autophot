@@ -4,6 +4,12 @@ def ap_phot(positions,data, radius ,r_in = None,r_out= None):
 
 
     :param positions: list of tuples containing (x,y) positions of object
+        This is a test
+            - test 1
+            - test 2
+            - test3
+            #. test11
+            
     :type positions: tuple
 
     :param r_in: inner radius of background annulus
@@ -63,6 +69,7 @@ def ap_phot(positions,data, radius ,r_in = None,r_out= None):
             annulus_data_1d_nonan = annulus_data_1d[~np.isnan(annulus_data_1d)]
 
             _, median_sigclip,_ = sigma_clipped_stats(annulus_data_1d_nonan,
+
                                                        cenfunc = np.nanmedian,
                                                        stdfunc = np.nanstd)
             bkg_median.append(median_sigclip)
@@ -90,5 +97,3 @@ def ap_phot(positions,data, radius ,r_in = None,r_out= None):
 
 
     return aperture_sum,bkg_sum
-
-
