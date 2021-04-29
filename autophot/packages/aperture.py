@@ -4,12 +4,6 @@ def ap_phot(positions,data, radius ,r_in = None,r_out= None):
 
 
     :param positions: list of tuples containing (x,y) positions of object
-        This is a test
-            - test 1
-            - test 2
-            - test3
-            #. test11
-            
     :type positions: tuple
 
     :param r_in: inner radius of background annulus
