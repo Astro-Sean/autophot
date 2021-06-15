@@ -37,8 +37,7 @@ def SNR(R_star,R_sky,exp_t,RN,radius,G,D):
 
             star_shot_2 = R_star * exp_t
 
-            sky_shot_2 = R_sky * np.pi * (radius ** 2) * exp_t
-
+            sky_shot_2 = R_sky  * exp_t * np.pi * radius ** 2
 
             read_noise_2 = ((RN**2) + (G/2)**2) * np.pi * ( radius ** 2)
 

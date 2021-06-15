@@ -1,6 +1,6 @@
 def ap_phot(positions,data, radius ,r_in = None,r_out= None):
 
-    """This is a summary of the aperture packge. This a robust aperture photometry packages for use in autophot
+    """This a robust aperture photometry packages for use in autophot
 
 
     :param positions: list of tuples containing (x,y) positions of object
@@ -14,6 +14,8 @@ def ap_phot(positions,data, radius ,r_in = None,r_out= None):
 
     :return: Returns lost of aperature measurements
     :rtype: list
+    
+    TODO: Pass syntax to this file
     """
 
     try:

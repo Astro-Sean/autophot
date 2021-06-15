@@ -51,10 +51,6 @@ def AstrometryNetLOCAL(file, syntax = None):
         # location of executable [/Users/seanbrennan/AutoPhot_Development/AutoPHoT/astrometry.net/bin/solve-field]
         exe = syntax['solve_field_exe_loc']
 
-        # Create input for subprocess:
-
-
-
         # Guess image scale if f.o.v is not known
         if syntax['scale_type'] == None or syntax['try_guess_wcs']:
             scale = [(str("--guess-scale"))]
@@ -84,19 +80,13 @@ def AstrometryNetLOCAL(file, syntax = None):
         # if 'NAXIS1' in headinfo:
         #     scale = scale+ [("--height="      , str(syntax['NAXIS1'])),
         #                     # ("--width="      ,  str(syntax['NAXIS2']))]
-        # if not syntax['ignore_pointing']:
-
-
-
-
-
 
 
         include_args = [
 
             ('--no-remove-lines'),
             ('--uniformize=' , str(0)),
-            	("--overwrite"),
+            ("--overwrite"),
             ("--downsample="  , str(syntax['downsample']) ),  # Downsample image - good for large images
             ("--new-fits="    , str(None)), # Don't download new fits file with updated wcs
             ("--cpulimit="   ,  str(syntax['solve_field_timeout'])), # set time limit on subprocess
@@ -104,6 +94,7 @@ def AstrometryNetLOCAL(file, syntax = None):
             ("--index-xyls="  , str(None)),# don't need all these files
             ("--axy="         , str(None)),
             ("--scamp="       , str(None)),
+
             ("--corr="        , str(None)),
             ("--rdl="        ,  str(None)),
             ("--match="      ,  str(None)),
@@ -111,7 +102,9 @@ def AstrometryNetLOCAL(file, syntax = None):
             ("--height="      , str(syntax['NAXIS1'])), #set image height and width
             ("--width="      ,  str(syntax['NAXIS2'])),
             ("--no-plots"),
-            ("--no-verify"),
+            # ("--no-verify"),
+            # ("--crpix-center"),
+            # ("--no-tweak")
             # ("--tweak-order"), str(2)
             ]
 
@@ -146,7 +139,14 @@ def AstrometryNetLOCAL(file, syntax = None):
                                    preexec_fn=os.setsid)
 
             # Timeout command - will only run command for this long - ~30s works fine
-            pro.wait(syntax['solve_field_timeout'])
+            try:
+                pro.wait(syntax['solve_field_timeout'])
+            except:
+                print(args)
+
+
+                return np.nan
+
 
             try:
                 # Try to kill process to avoid memory errors / hanging process
@@ -172,6 +172,7 @@ def AstrometryNetLOCAL(file, syntax = None):
         else:
             logger.warning("-> FILE CHECK FAILURE - Return NAN <-")
             logger.debug(args)
+            print(args)
 
         return np.nan
 

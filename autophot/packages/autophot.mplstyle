@@ -9,8 +9,8 @@ figure.subplot.hspace : 0.1
 
 # LINES
 lines.linewidth : 0.5
-lines.markeredgewidth : 0.5
-lines.markersize : 1
+lines.markeredgewidth : 0.1
+lines.markersize : 2
 lines.solid_joinstyle : round
 lines.solid_capstyle : round
 
@@ -37,8 +37,8 @@ legend.labelspacing  : 0.5
 legend.fontsize      : 6
 
 
-figure.dpi : 300
+figure.dpi : 72
 scatter.marker : o
-savefig.dpi : 300
+savefig.dpi : 72
 savefig.transparent : False
 savefig.format : pdf

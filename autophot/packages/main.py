@@ -1,51 +1,19 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-'''
-
-- Main operations of AutoPHoT
-
-Inputs:
-
-    - object_info - yaml file:
-        TNS repsonse for target [dictionary]
-    - syntax - yaml file:
-        yaml file input [dictionary]
-    - fpath - str:
-        file path [str]
-
-Outputs:
-    - output:
-        dictionary out output photmetric data:
-            fname:
-                Orreginal file path
-            telescope:
-                Telescope used - needed for plotting
-            mjd:
-                Modified julian date
-            zp_[]:
-                Photometric zeropoint. dictionary key will be followed by filter name
-            zp_[]_err:
-                error on photometric zeropoint
-            []_inst:
-                Instrumental magnitude
-            []:
-                Calibarted magnitude
-            []_err:
-                Error on Calibarated magnitude
-            SNR:
-                Signal to noise ratio of target
-            lmag:
-                calibrated limiting magnitude
-    - fpath:
-        filepath to new fits image file
-
-'''
-
-
 def main(object_info,syntax,fpath):
+    '''
+    
+    :param object_info: DESCRIPTION
+    :type object_info: TYPE
+    :param syntax: DESCRIPTION
+    :type syntax: TYPE
+    :param fpath: DESCRIPTION
+    :type fpath: TYPE
+    :return: DESCRIPTION
+    :rtype: TYPE
 
+    '''
     # ensure to use copy of original inputed synatc instruction files
     syntax = syntax.copy()
 
@@ -59,9 +27,9 @@ def main(object_info,syntax,fpath):
     import pathlib
     import collections
     import lmfit
-    from pathlib import Path
     import time
     import logging
+    import datetime
     # from photutils import CircularAperture
 
     import matplotlib.pyplot as plt
@@ -82,20 +50,19 @@ def main(object_info,syntax,fpath):
     from astropy.coordinates import Angle
     from matplotlib.ticker import MultipleLocator
 
-
     # Proprietary modules
-    from autophot.packages.functions import weighted_avg_and_std, getheader,getimage,zeropoint, mag,set_size,pix_dist
+    from autophot.packages.functions import  getheader,getimage,find_zeropoint, find_mag,set_size,pix_dist
     from autophot.packages.functions import gauss_2d,gauss_fwhm2sigma,gauss_sigma2fwhm
     from autophot.packages.functions import moffat_2d,moffat_fwhm
     from autophot.packages.aperture import ap_phot
     from autophot.packages.check_wcs import updatewcs,removewcs
     from autophot.packages.call_astrometry_net import AstrometryNetLOCAL
-    from autophot.packages.call_hotpants import HOTterPANTS
+    from autophot.packages.template_subtraction import subtract
     from autophot.packages.call_yaml import yaml_syntax as cs
     from autophot.packages.uncertain import SNR
     from autophot.packages.get_template import get_pstars
     from autophot.packages.uncertain import sigma_mag_err
-    from autophot.packages.limit import limiting_magnitude_prob
+    from autophot.packages.limit import limiting_magnitude_prob,inject_sources
     from autophot.packages.call_crayremoval import run_astroscrappy
 
     import autophot.packages.find as find
@@ -105,13 +72,17 @@ def main(object_info,syntax,fpath):
 
 
 
-    # Fix the issatty error - https://stackoverflow.com/questions/47069239/consolebuffer-object-has-no-attribute-isatty
+    # Fix the issatty error
+    # https://stackoverflow.com/questions/47069239/consolebuffer-object-has-no-attribute-isatty
     sys.stdout.isatty = lambda: False
 
     warnings.simplefilter(action='ignore', category=FutureWarning)
 
     dir_path = os.path.dirname(os.path.realpath(__file__))
     plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
+
+    # Start time of this image
+    start_time = time.time()
 
 
     def border_msg(msg):
@@ -120,20 +91,27 @@ def main(object_info,syntax,fpath):
         result= h + '\n'"| "+msg+" |"'\n' + h
         print('1'+result)
 
-
-
-
     try:
+
+
 
         # Preparing output dictionary
         output = collections.OrderedDict({})
 
+        # paths can't end with backslash - remove if needed
         if syntax['fits_dir'] != None:
             if syntax['fits_dir'].endswith('/'):
                 syntax['fits_dir'] = syntax['fits_dir'][:-1]
 
         if syntax['wdir'].endswith('/'):
             syntax['wdir'] = syntax['wdir'][:-1]
+
+        if syntax['prepare_templates']:
+            # Will just work on /template/ folder
+            from autophot.packages.template_subtraction import prepare_templates
+            prepare_templates(fpath,syntax)
+
+            return
 
 # =============================================================================
 # Prepare new file
@@ -145,9 +123,10 @@ def main(object_info,syntax,fpath):
             work_loc = str(pathlib.Path(dirname(wdir)))
 
         else:
-            wdir = syntax['fits_dir']
-            new_dir = '_' + syntax['outdir_name']
 
+            wdir = syntax['fits_dir']
+
+            new_dir = '_' + syntax['outdir_name']
 
             base_dir = os.path.basename(wdir)
             work_loc = base_dir + new_dir
@@ -169,7 +148,8 @@ def main(object_info,syntax,fpath):
 
         base_wext = os.path.basename(fpath)
         base = os.path.splitext(base_wext)[0]
-
+        fname_ext = os.path.splitext(base_wext)[1]
+        
         # Replace Whitespaces with dash
         base = base.replace(' ','_')
 
@@ -196,6 +176,8 @@ def main(object_info,syntax,fpath):
 
             cur_dir = dirname(wdir)
 
+        syntax['base'] = base
+
         '''
         Move through list of subdirs,
         where the final copied file will be moved
@@ -205,7 +187,7 @@ def main(object_info,syntax,fpath):
         it will then create a new folder with name of file to which
         every output file is moved to
         '''
-        fname_ext = Path(fpath).suffix
+        # fname_ext = Path(fpath).suffix
 
         for i in range(len(sub_dirs)):
             if i: # If directory is not blank
@@ -222,6 +204,8 @@ def main(object_info,syntax,fpath):
         # new fpath for working fits file
         fpath = cur_dir + '/' + base + '_APT'+fname_ext
 
+        syntax['fpath'] = fpath
+
         # base is name [without extension]
         base = os.path.basename(fpath)
 
@@ -236,13 +220,18 @@ def main(object_info,syntax,fpath):
             sys.exit('No Target Info')
 
         if syntax == None:
-            sys.exit("No syntax input file"+"/n"+"*** I dont know what I'm doing! ***")
+            sys.exit("No syntax input file")
 
+        if syntax['prepare_templates']:
+            # Will just work on /template/ folder
+            from autophot.packages.call_hotpants import prepare_templates
+            prepare_templates(fpath,syntax)
 
+            return
 
-# =============================================================================
-# Set up logging file
-# =============================================================================
+        # =============================================================================
+        # Set up logging file
+        # =============================================================================
 
         for handler in logging.root.handlers[:]:
             handler.close()
@@ -258,23 +247,16 @@ def main(object_info,syntax,fpath):
 
 
         console = logging.StreamHandler()
+
         # define a Handler which writes INFO messages or higher to the sys.stderr
         console.setLevel(logging.INFO)
 
         # set a format which is simpler for console use
         formatter = logging.Formatter('%(message)s')
-        # formatter = logging.Formatter('%(filename)s: %(levelname)s: %(message)s')
-        # formatter = logging.Formatter('%(filename)s line:%(lineno)d - %(message)s','%m-%d %H:%M:%S')
-        # formatter = logging.Formatter('\x1b[80D\x1b[1A\x1b[K%(message)s')
-
-        # tell the handler to use this format
         console.setFormatter(formatter)
 
         # add the handler to the root logger
         logging.getLogger('').addHandler(console)
-
-
-        import datetime
         logging.info('File: '+str(base) + ' - PID: '+str(os.getpid()))
         logging.info('Start Time: %s' % str(datetime.datetime.now()) )
 
@@ -356,6 +338,7 @@ def main(object_info,syntax,fpath):
         inst = headinfo[inst_key]
 
 
+
         tele_syntax_yml = 'telescope.yml'
         teledata = cs(os.path.join(syntax['wdir'],tele_syntax_yml))
         tele_syntax = teledata.load_vars()
@@ -378,6 +361,10 @@ def main(object_info,syntax,fpath):
         output.update({'INSTRUME':inst_key})
         output.update({'instrument':inst})
         output.update({'mjd':mjd_date})
+
+
+        syntax['tele'] = telescope
+        syntax['inst'] = inst
 
 # =============================================================================
 # Find filter
@@ -509,7 +496,7 @@ def main(object_info,syntax,fpath):
                 pass
 
             if fpath == None:
-                    raise Exception
+                raise Exception
 
 # ============================================v=================================
 # Expsoure time
@@ -541,11 +528,11 @@ def main(object_info,syntax,fpath):
 
             logging.info('Exposure time: %.fs ' % exp_time)
 
-
+    
 
             if syntax['trim_edges']:
 
-                logging.info('Trimming edges of image by %d pixels' % syntax['trim_edges_pixels'])
+                logging.info('Trimming edges of image by +/- %d pixels' % syntax['trim_edges_pixels'])
 
                 image_trim = image[syntax['trim_edges_pixels']:image.shape[0]-syntax['trim_edges_pixels'],
                                    syntax['trim_edges_pixels']:image.shape[1]-syntax['trim_edges_pixels']]
@@ -570,8 +557,33 @@ def main(object_info,syntax,fpath):
                 syntax['NAXIS2'] = image.shape[1]
 
 
+# =============================================================================
+# Fix 2D image background
+# =============================================================================
+
+            if syntax['remove_imagebkg']:
+                logging.info('Removing image background')
+
+                # https://photutils.readthedocs.io/en/stable/background.html
+                from astropy.stats import SigmaClip
+                from photutils.background import Background2D, MedianBackground
+                sigma_clip_bkg = SigmaClip(sigma=3.)
+
+                bkg_estimator = MedianBackground()
 
 
+                bkg = Background2D(image, (50, 50),
+                                   filter_size=(3, 3),
+                                   sigma_clip=sigma_clip_bkg,
+                                   bkg_estimator=bkg_estimator)
+
+                image_nobkg = image - bkg.background
+
+                fits.writeto(fpath,
+                            image_nobkg.astype(np.single),
+                            headinfo,
+                            overwrite = True,
+                            output_verify = 'silentfix+ignore')
 
 
 # =============================================================================
@@ -660,7 +672,9 @@ def main(object_info,syntax,fpath):
 
                 except:
                     logging.warning('NO RA:DEC keywords found')
-    #
+
+
+
     #==============================================================================
     # WCS check
     #===========================================∂==================================
@@ -674,10 +688,23 @@ def main(object_info,syntax,fpath):
             hdu of the newly created file
             '''
 
-            if syntax['remove_wcs'] or syntax['trim_edges']:
+            try:
+
+                w1_old = wcs.WCS(headinfo)
+                existing_WCS = True
+            except:
+                print('No WCS found')
+                existing_WCS = False
+
+            if syntax['remove_wcs'] or syntax['trim_edges'] or not existing_WCS:
+
+                logging.info('\nPerforming Astrometry.net')
 
                 new_header = removewcs(headinfo,delete_keys = True)
-                fits.writeto(fpath,image.astype(np.single),new_header,overwrite = True,output_verify = 'silentfix+ignore')
+                fits.writeto(fpath,image.astype(np.single),
+                             new_header,
+                             overwrite = True,
+                             output_verify = 'silentfix+ignore')
                 headinfo = getheader(fpath)
 
             # search keywords for wcs validation
@@ -687,11 +714,14 @@ def main(object_info,syntax,fpath):
 
             # if no wcs values are found in headinfo, ignore file and exit loop (raise exception)
             if syntax['ignore_no_wcs']:
+
                 if any(i not in headinfo for i in wcs_keywords):
+
                     logging.info('No wcs found - ignoring_wcs setting == True')
                     raise Exception('ignore files w/o WCS')
 
             if 'UPWCS'  in headinfo:
+
                 # if UPWCS already excecuetde and found in header continue
                 logging.info('Astrometry.net already excuted')
 
@@ -699,7 +729,6 @@ def main(object_info,syntax,fpath):
 
 
                 '''
-
                 Try to solve for WCS
 
 
@@ -711,20 +740,63 @@ def main(object_info,syntax,fpath):
 
                 logging.info('No WCS values found - attempting to solve field')
 
+                if syntax['use_xylist']:
+
+                    mean_fwhm,df,syntax = find.fwhm(image,syntax)
+
+                    from astropy.table import Table
+
+                    n = np.vstack([df['x_pix'],df['y_pix']]).T
+
+                    tab = Table(n,names = ['x','y'])
+
+                    bintab = fits.BinTableHDU(tab)
+
+                    fpath_BINTABLE = os.path.join(syntax['write_dir'],'Sources_'+base+'.fits')
+
+                    bintab.writeto(fpath_BINTABLE,overwrite=True)
+
+                    fpath_astrometry  = fpath_BINTABLE
+
+                else:
+                    fpath_astrometry  = fpath
 
                 # Run local instance of Astrometry.net - returns filepath of wcs file
-                astro_check = AstrometryNetLOCAL(fpath, syntax= syntax)
+                astro_check = AstrometryNetLOCAL(fpath_astrometry, syntax= syntax)
 
-                # Open wcs fits file with wcs values
-                new_wcs  = fits.open(astro_check,ignore_missing_end = True)[0].header
+
 
                 old_headinfo = getheader(fpath)
 
-                # script used to update per-existing header file with new wcs values
-                headinfo_updated = updatewcs(old_headinfo,new_wcs)
+                try:
 
-                # update header to show wcs has been checked
-                headinfo_updated['UPWCS'] = ('T', 'updated WCS by APT')
+                    # Open wcs fits file with wcs values
+                    new_wcs  = fits.open(astro_check,ignore_missing_end = True)[0].header
+
+                    # script used to update per-existing header file with new wcs values
+                    headinfo_updated = updatewcs(old_headinfo,new_wcs)
+
+                    # update header to show wcs has been checked
+                    headinfo_updated['UPWCS'] = ('T', 'WCS by APT')
+
+                    updated_wcs = True
+
+
+                except:
+
+                    if not existing_WCS or syntax['force_wcs_redo']:
+                        raise Exception('No WCS found and could not solve with Astrometry.net: skipping file')
+
+                    print('Astrometry Failed - trying with original WCS')
+
+                    new_wcs = w1_old
+                    old_headinfo.update(w1_old.to_header())
+                    headinfo_updated = old_headinfo
+
+                    # update header to show wcs has been checked
+                    headinfo_updated['UPWCS'] = ('F', 'NOT WCS by APT')
+
+                    updated_wcs = False
 
                 # Write new header
                 fits.writeto(fpath,image.astype(np.single),headinfo_updated,overwrite = True,output_verify = 'silentfix+ignore')
@@ -733,10 +805,7 @@ def main(object_info,syntax,fpath):
                 logging.info('WCS saved to new file')
 
 
-
-
-
-                if syntax['update_wcs_scale']:
+                if syntax['update_wcs_scale'] and updated_wcs == True:
 
                     'Update image scale params from '
 
@@ -751,17 +820,10 @@ def main(object_info,syntax,fpath):
                     teledata.update_var(telescope,inst_key,inst,'scale_low' ,pixel_scale_value*0.9)
                     teledata.update_var(telescope,inst_key,inst,'scale_type','arcsecperpix')
 
-
-                    fov_AREA = pixel_scale_value * image.shape[0]  * image.shape[1]
+                    # fov_AREA = pixel_scale_value * image.shape[0]  * image.shape[1]
                     # if syntax['remove_cmrays' ]:
                     #     with open("/Users/seanbrennan/Desktop/autophot_paper/CR_versus_exposure.txt", "a") as myfile:
                     #         myfile.write('%.3f %d %.3f %.3f\n' % (syntax['exp_time'],syntax['CR_detections'],syntax['CR_time_taken'],fov_AREA))
-
-
-
-
-
-
 
             else:
                 logging.info('WCS found')
@@ -825,6 +887,8 @@ def main(object_info,syntax,fpath):
                    syntax['target_y_pix'] = target_y_pix
 
             elif syntax['target_name'] != None:
+                
+                try:
                     '''
                     Get target info from [pre-saved] TNS_response
                     '''
@@ -840,6 +904,8 @@ def main(object_info,syntax,fpath):
 
                     syntax['target_x_pix'] = target_x_pix
                     syntax['target_y_pix'] = target_y_pix
+                except:
+                    raise Exception('Failed to converg on target position - Are you sure %s is in this image?' % syntax['target_name'])
 
             else:
                try:
@@ -855,23 +921,58 @@ def main(object_info,syntax,fpath):
                except Exception as e:
                    logging.exception(e+'> NO RA:DEC keywords found - attempting astrometry without <')
 
-#==============================================================================
-# FWHM - Using total image source detection
-#==============================================================================
+            if syntax['use_local_stars'] or syntax['use_local_stars_for_PSF'] or syntax['use_local_stars_for_FWHM']:
+
+
+                from astropy import units as u
+
+                local_star_radius = Angle(float(syntax['use_source_arcmin']), u.arcmin)
+
+                local_points = w1.all_world2pix([syntax['target_ra'], syntax['target_ra']+local_star_radius.degree],
+                                                [syntax['target_dec'],syntax['target_dec']+local_star_radius.degree]
+                                                , 1)
+
+                local_radius = pix_dist(local_points[0][0],local_points[0][1],  local_points[1][0],local_points[1][1])
+
+
+
+                syntax['local_radius'] = local_radius
+
+                logging.info('Using stars within %d arcmin [%d px]' % (syntax['use_source_arcmin'],local_radius))
+
+            # =============================================================================
+            #             #
+            # =============================================================================
+
+            if syntax['mask_sources']:
+
+                syntax['mask_sources_XY_R']=[]
+
+                for RA_mask,DEC_mask,R_mask in syntax['mask_sources_RADEC_R']:
+
+                    mask_radius = Angle(float(R_mask), u.arcmin)
+
+                    local_points = w1.all_world2pix([RA_mask, RA_mask+mask_radius.degree],
+                                                    [DEC_mask,DEC_mask+mask_radius.degree],1)
+
+                    mask_radius = pix_dist(local_points[0][0],local_points[0][1],  local_points[1][0],local_points[1][1])
+
+                    syntax['mask_sources_XY_R'].append((local_points[0][0],local_points[1][0],float(mask_radius)))
+
+
+            #==============================================================================
+            # FWHM - Using total image source detection
+            #==============================================================================
 
             # get approx fwhm, dataframe of sources used and updated syntax
             # returns fwhm from gaussian fit - and dataframe of sources used
+
             mean_fwhm,df,syntax = find.fwhm(image,syntax)
 
-            # print(df.columns)
-
             mean_fwhm_err = np.nanstd(df['FWHM'])
-#
-
-
-
 
             if mean_fwhm < syntax['nyquist_limit'] and syntax['check_nyquist']:
+
                 logging.warning('FWHM [%.1f]<2.5 - Sampling errors - using aperture Photometry' % mean_fwhm)
                 syntax['do_ap_phot']  = True
                 do_ap = True
@@ -879,16 +980,39 @@ def main(object_info,syntax,fpath):
             elif mean_fwhm > 25:
                 logging.info('FWHM Error %.3f - check image quality' % round(mean_fwhm,3) )
                 raise Exception('Reductions failed - skipping')
+
             else:
-                logging.info('\nImage FWHM: %.3f +/- %.3f \n' % (mean_fwhm,mean_fwhm_err))
+
+                logging.info('\nFWHM: %.3f +/- %.3f' % (mean_fwhm,mean_fwhm_err))
 
                 for key,val in syntax['image_params'].items():
+                    if 'err' in key:
+                        continue
+                    logging.info('%s: %.3f +/- %.3f'% (key,val,syntax['image_params'][key+'_err']))
+                logging.info('\n')
 
-                    logging.info('%s:%.3f\n'% (key,val))
+            if mean_fwhm>15:
+                syntax['remove_bkg_poly'] = True
+                syntax['remove_bkg_surface'] = False
+                syntax['remove_bkg_local'] =  False
+                syntax['do_ap_phot'] = True
+                print('Switching to polynomial background fit and using aperture photometry\n')
 
-            if mean_fwhm>6:
-                print('Swtching to polynomial backgraound fit')
-                syntax['psf_bkg_poly'] = True
+            if syntax['use_xylist']:
+
+                mean_fwhm,df,syntax = find.fwhm(image,syntax)
+
+                from astropy.table import Table
+
+                n = np.vstack([df['x_pix'],df['y_pix']]).T
+
+                tab = Table(n,names = ['x','y'])
+
+                bintab = fits.BinTableHDU(tab)
+
+                fpath_BINTABLE = os.path.join(syntax['write_dir'],'Sources_'+base+'.fits')
+
+                bintab.writeto(fpath_BINTABLE,overwrite=True)
 
 
             # perform approx aperture photometry on sources
@@ -905,7 +1029,7 @@ def main(object_info,syntax,fpath):
 #==============================================================================
             if syntax['do_catalog']:
 
-                logging.info('Searching for viable sources')
+                logging.info('\nCatalog Matching')
 
                 while True:
 
@@ -913,18 +1037,21 @@ def main(object_info,syntax,fpath):
                     specificed_catalog = call_catalog.search(image,headinfo,target_coords,syntax,catalog_syntax,use_filter)
 
                     # Re-aligns catalog sources with source detection and centroid
-                    c,syntax = call_catalog.match(image,headinfo,target_coords,syntax,catalog_syntax,use_filter,specificed_catalog,mean_fwhm)
-
+                    c,syntax = call_catalog.match(image,headinfo,
+                                                  target_coords,
+                                                  syntax,
+                                                  catalog_syntax,use_filter,specificed_catalog,mean_fwhm)
+                
                     # If  UPWCS keyword, image has been already ran through ASTROMETRY, no need to recheck
-                    # c = c.drop(c[c['cp_dist'] > syntax['match_dist']].index)
+                    # c = c[c['cp_dist'] < syntax['match_dist']
+                    
                     # sigma clip distances - avoid mismatches default sigma = 3
-                    sigma_dist =  np.array(sigma_clipped_stats(c['cp_dist']))
+                    sigma_dist =  sigma_clipped_stats(c['cp_dist'].values.astype(float))
 
                     lower_x_bound = syntax['scale']
                     lower_y_bound = syntax['scale']
                     upper_x_bound = syntax['scale']
                     upper_y_bound = syntax['scale']
-
 
                     c = c[c.x_pix < image.shape[1] - upper_x_bound]
                     c = c[c.x_pix > lower_x_bound]
@@ -934,12 +1061,7 @@ def main(object_info,syntax,fpath):
                     if len(c) ==0:
                         raise Exception('Could NOT find any catalog sources in field')
 
-
-
-
-                    logging.info('Average pixel offset: %.3f '% np.nanmedian(list(sigma_dist)))
-
-
+                    logging.info('Median pixel offset: %.3f '% np.nanmedian(list(sigma_dist)))
 
 
                     '''
@@ -957,12 +1079,6 @@ def main(object_info,syntax,fpath):
                         logging.info('UPWCS found - skipping astrometry')
                         break
 
-
-                    # Sources from catalog match closly with recentered values, i.e we have a good match
-                    # If bad WCS values:
-                    #    wipe existing Valeus and run thourgh astrometry.net and
-                    #    re-run throgh catalog matching
-
                     logging.info('Removing and Rechecking WCS')
 
                     # remove wcs values and update -  will delete keys from header file
@@ -972,7 +1088,6 @@ def main(object_info,syntax,fpath):
                     fit_header_wcs_clean.writeto(fpath,
                                                  overwrite = True,
                                                  output_verify = 'silentfix+ignore')
-                    # fit_open.close()
 
                     # Run astromety - return filepath of wcs file
                     astro_check = AstrometryNetLOCAL(fpath,syntax = syntax)
@@ -983,7 +1098,7 @@ def main(object_info,syntax,fpath):
 
                     fit_open.writeto(os.getcwd()+'/' + base , overwrite = True,output_verify = 'silentfix+ignore')
 
-                    fpath = os.getcwd()+ '/' + base
+                    # fpath = os.getcwd()+ '/' + base
                     # fit_open.close()
 
                     fit_open = fits.open(fpath,ignore_missing_end = True)
@@ -1031,31 +1146,6 @@ def main(object_info,syntax,fpath):
 # Lets Phot!
 # =============================================================================
 
-            '''
-            Attempt psf photome
-            if it selected in input.yml - default: True
-            '''
-
-            if syntax['use_local_stars']:
-
-
-                from astropy import units as u
-
-                local_star_radius = Angle(float(syntax['use_source_arcmin']), u.arcmin)
-
-                local_points = w1.all_world2pix([syntax['target_ra'], syntax['target_ra']+local_star_radius.degree],
-                                                [syntax['target_dec'],syntax['target_dec']+local_star_radius.degree]
-                                                , 1)
-
-                local_radius = pix_dist(local_points[0][0],local_points[0][1],  local_points[1][0],local_points[1][1])
-
-
-
-                syntax['local_radius'] =local_radius
-
-                logging.info('Using stars within %d arcmin [%d px]' % (syntax['use_source_arcmin'],local_radius))
-
-
             if syntax['do_psf_phot'] and not syntax['do_ap_phot'] and not do_ap:
                 try:
 
@@ -1070,8 +1160,24 @@ def main(object_info,syntax,fpath):
                         - heights/amplitudes of sources used to make psf with x and y locations
                         - updated syntax
                     '''
+                    if syntax['use_PSF_starlist']:
+                        try:
+                            if not os.path.isfile(syntax['PSF_starlist']):
+                                print('Cannot find PSF starlist')
+                                
+                            df_PSF = pd.read_csv(syntax['PSF_starlist'],names=['ra', 'dec'],sep = ' ')
+                            x_pix,y_pix = w1.all_world2pix(df_PSF.ra.values,df_PSF.dec.values,1)
+                            
+                            df_PSF['x_pix']= x_pix
+                            df_PSF['y_pix'] = y_pix
+                        except:
+                            syntax['use_PSF_starlist'] = False
+                    else:
+                        df_PSF = df
+                        
+                        
 
-                    r_table,fwhm_fit,psf_heights,syntax = psf.build_r_table(image,df,syntax,mean_fwhm)
+                    r_table,fwhm_fit,psf_heights,syntax = psf.build_r_table(image,df_PSF,syntax,mean_fwhm)
 
                     # if it fails, select aperture photometry and exit this attempt
                     if fwhm_fit == None:
@@ -1093,6 +1199,9 @@ def main(object_info,syntax,fpath):
                         if mean_fwhm > 25:
                             logging.warning(' High FWHM %.3f' % round(mean_fwhm,1))
                             raise Exception
+                            
+                        syntax['dx'] = mean_fwhm/2
+                        syntax['dy'] = mean_fwhm/2
 
                         '''
                         Get data of sources used for psf
@@ -1105,7 +1214,8 @@ def main(object_info,syntax,fpath):
 
                         '''
 
-                        approx_psf_mag = float(mag(np.nanmean(psf_stats['psf_counts']),0))
+                        approx_psf_mag = float(find_mag(np.nanmean(psf_stats['psf_counts']),0))
+
                         logging.info('Approx PSF mag %.3f' % approx_psf_mag)
 
                         '''
@@ -1115,7 +1225,7 @@ def main(object_info,syntax,fpath):
                             - model_psf - function of psf model used - see psf.py module
                         '''
 
-                        c_psf,model_psf = psf.fit(image,c,r_table,syntax,mean_fwhm)
+                        c_psf,model_psf = psf.fit(image,c,r_table,syntax)
 
                         '''
                         Get counts/ magnitudes of sources from psf fitting
@@ -1128,7 +1238,7 @@ def main(object_info,syntax,fpath):
                         # print(c_psf.psf_counts)
 
                         # background flux
-                        bkg = np.median(c_psf['bkg'])/exp_time
+                        bkg = c_psf['bkg']/exp_time
 
                         # source flux
                         ap_sum = c_psf.psf_counts/exp_time
@@ -1138,6 +1248,11 @@ def main(object_info,syntax,fpath):
 
                         # Signal to noise of source
                         SNR_val = np.array(ap_sum/ap_sum_err)
+
+
+
+                        chi2 = c_psf['chi2']
+                        redchi2 = c_psf['redchi2']
 
 
 
@@ -1189,7 +1304,12 @@ def main(object_info,syntax,fpath):
             c_temp_dict['count_rate_bkg'] = bkg
             c_temp_dict['count_rate_star']= ap_sum
 
-            # print(c.columns)
+            try:
+                c_temp_dict['chi2'] = chi2
+                c_temp_dict['redchi2'] = redchi2
+            except:
+                 print('No PSF sources fitted')
+                 syntax['remove_catalog_poorfits'] = False
 
             # add to exisitng dataframe [c]
             c_add = pd.DataFrame.from_dict(c_temp_dict)
@@ -1197,19 +1317,32 @@ def main(object_info,syntax,fpath):
 
             c = pd.concat([c,c_add],axis = 1,sort = False)
 
+            # drop any poorly fit sources:
+            if syntax['remove_catalog_poorfits']:
+
+                redchi2_mean = np.nanmean(c['redchi2'])
+                redchi2_std = np.nanstd(c['redchi2'])
+
+                filtered_data = sigma_clip(c['redchi2'].values,
+                                           sigma_lower=None,sigma_upper = 3,
+                                           maxiters=None,
+                                           cenfunc='mean',
+                                           masked=True,
+                                           copy=False)
+
+                c = c[~filtered_data.mask]
+
+                c = c.drop(c[c['redchi2'] > redchi2_mean + 3 * redchi2_std].index)
+
             # drop if the counts are negative - account for mismatched source or very faint source
-            c = c.drop(c[c['count_rate_star'] < 0.0].index)
-
-
-            '''
-            if iso_cat == True:
-                remove sources that have a neighbouring source within a user-defined distance
-                given by iso_cat_dist.
-            '''
-
-            # if syntax['remove_sat'] :
-
+            c = c.drop(c[c['count_rate_star'] <= 0.0].index)
             c = c.drop(c[np.isnan(c['count_rate_star'])].index)
+
+            if syntax['matching_source_SNR']:
+                SNR_mask = abs(c['SNR']) <= syntax['matching_source_SNR_limt']
+
+                c = c.drop(c[SNR_mask].index)
+
 
 
             if syntax['iso_cat']:
@@ -1220,18 +1353,16 @@ def main(object_info,syntax,fpath):
 
             # Instrumental magnitude
             # print(c['count_rate_star'])
-            c['inst_'+str(use_filter)] = mag(c['count_rate_star'],0)
+            c['inst_'+str(use_filter)] = find_mag(c['count_rate_star'],0)
 
             # Error in instrumental Magnitude
 
             c = c.drop(c[c['inst_'+str(use_filter)]==0].index)
-            # c = c[abs(c['inst_'+str(use_filter)])>0.0 ]
 
             c_SNR_err = sigma_mag_err(c.SNR)
 
             c['inst_'+str(use_filter)+'_err'] = c_SNR_err
 
-            # print(c)
 
 
 # =============================================================================
@@ -1243,323 +1374,125 @@ def main(object_info,syntax,fpath):
             else:
                 ap_corr = 0
 
+
+
 # =============================================================================
 # Find Zeropoint
 # =============================================================================
 
             if syntax['do_zeropoint']:
+                from autophot.packages.zeropoint import get_zeropoint
+                zp_wa,c,syntax = get_zeropoint(c,image,headinfo,syntax)
 
-                try:
-                    '''
-                    initilaise dictionaries for zeropoint and errors
-                    '''
-                    zp = {}
-                    zp_err ={}
+             # =============================================================================
+            # Plot of image with sources used and target
+            # =============================================================================
+            plt.ioff()
 
+            fig_source_check = plt.figure(figsize = set_size(500,aspect = 0.5))
+
+
+            # from astropy.visualization.mpl_normalize import ImageNormalize
+            from astropy.visualization import  ZScaleInterval
 
+            x_pix_sources,y_pix_sources = w1.all_world2pix(c.ra.values,c.dec.values,1)
 
-                    # get magnitude errors on catalog source from SNR
+            # norm = ImageNormalize( stretch = SquaredStretch())
 
-                    dmag = {
-                        'U':['U','B'],
-                        'B':['B','V'],
-                        'V':['V','R'],
-                        'R':['V','R'],
-                        'I':['R','I'],
-                        'u':['u','g'],
-                        'g':['g','r'],
-                        'r':['g','r'],
-                        'i':['r','i'],
-                        'z':['i','z']
-                        }
+            vmin,vmax = (ZScaleInterval(nsamples = 600)).get_limits(image)
 
+            ax = fig_source_check.add_subplot(111)
 
-                    '''
-                    Add zeropoint [zp_[choosen filter]] and zeropoint error [zp_[choosen filter]_err]  to c dataframe:
+            ax.imshow(image,
+                      vmin = vmin,
+                      vmax = vmax,
+                      interpolation = 'nearest',
+                      origin = 'lower',
+                      aspect = 'equal',
+                      cmap = 'Greys')
 
-                    zeropoint:
-                        inputs:
-                            catalog magnitude:
-                            flux of star: given by count_rate_star
-                    '''
+            ax.scatter(np.array(c.x_pix),np.array(c.y_pix),
+                       marker = 's',
+                       facecolor = 'none',
+                       color = 'blue',
+                       # s = 15,
+                       label = 'Centroiding [%d]' % len(c.x_pix),
+                       zorder = 2)
 
+            ax.scatter(x_pix_sources,y_pix_sources,
+                       marker = '^',
+                       facecolor = 'none',
+                       edgecolor = 'green',
+                       # s = 15,
+                       label = 'Catalog sources [%d]' % len(x_pix_sources),
+                       zorder = 1
+                       )
 
-                    if syntax['apply_ct_zerpoint']:
-                        idx = np.where(np.logical_and(~np.isnan(c[dmag[use_filter][0]]) , ~np.isnan(c[dmag[use_filter][1]])))[0]
-                        c[dmag[use_filter][0]+'_'+dmag[use_filter][1]] = c[dmag[use_filter][0]] - c[dmag[use_filter][1]]
-                        ct_gradient  = -0.0078
-                        dmag = c[dmag[use_filter][0]+'_'+dmag[use_filter][1]]
-                    else:
-                        ct_gradient = None
-                        dmag = None
+            if syntax['target_name'] != 'None':
+                tname = syntax['target_name']
+            else:
+                tname = 'Center of Field'
 
-                    zp_mag_err = sigma_mag_err(c['SNR'])
+            ax.scatter([syntax['target_x_pix']],[syntax['target_y_pix']],
+                       marker = 'D',
+                       # s = 25,
+                       facecolor = 'None',
+                       edgecolor = 'gold',
+                       label = 'Target: %s' % tname)
 
+            if not do_ap:
+                ax.scatter(psf_heights.x_pix,psf_heights.y_pix,
+                           marker = 'o',
+                           color = 'red',
+                           # s = 15,
+                           facecolor = 'None',
+                           label = 'PSF Sources [%d]' % len(psf_heights),
+                           zorder = 3)
 
-                    c['zp_'+str(use_filter)] = np.array(zeropoint(c[str('cat_'+use_filter)], c['count_rate_star'],ct_gradient = ct_gradient,dmag = dmag))
 
-                    # error is magnitude error from catalog and instrumental revovery mangitude error from SNR added in qaudrature
-                    c['zp_'+str(use_filter)+'_err'] = np.array(np.sqrt( c[str('cat_'+use_filter)+'_err']**2 + zp_mag_err**2) )
+            if syntax['use_local_stars']:
 
-                    # dataframe has been updated with zeropiint calculations - now to sigma clip to get viable zeropiont
-                    zpoint = np.asarray(c['zp_'+str(use_filter)])
-                    zpoint_err = np.asarray(c['zp_'+str(use_filter)+'_err'])
+                local_radius_circle = plt.Circle( ( target_x_pix, target_y_pix ), syntax['local_radius'],
+                                                 color = 'red',
+                                                 ls = '--',
+                                                 label = 'Local Radius [%d px]' % syntax['local_radius'],
+                                                 fill=False)
+                ax.add_patch( local_radius_circle)
 
-                    # remove nan values and apply mask
-                    nanmask = np.array(~np.isnan(zpoint))
 
-                    zpoint = zpoint[nanmask]
-                    zpoint_err = zpoint_err[nanmask]
+            if syntax['mask_sources']:
 
+                for X_mask,Y_mask,R_mask in syntax['mask_sources_XY_R']:
+                    masked_radius_circle = plt.Circle( ( X_mask, Y_mask ), R_mask,
+                                                 color = 'green',
+                                                 ls = ':',
+                                                 label = 'Masked Region',
+                                                 fill=False)
+                    ax.add_patch(masked_radius_circle)
 
-                    if len(zpoint) == 0:
-                        zp_wa = [np.nan,np.nan]
-                        raise Exception('No Zeropoints estimates found')
 
+            ax.set_xlim(0,image.shape[1])
+            ax.set_ylim(0,image.shape[0])
 
+            ax.set_xlabel('X PIXEL')
+            ax.set_ylabel('Y PIXEL')
 
-                    zp_mask = np.array(sigma_clip(zpoint, sigma = syntax['zp_sigma']).mask)
+            lines_labels = [ax.get_legend_handles_labels() for ax in fig_source_check.axes]
+            handles,labels = [sum(i, []) for i in zip(*lines_labels)]
 
+            by_label = dict(zip(labels, handles))
 
-                    # Get instrumental magnitude for catalog sources from autophot photometry
-                    zp_inst_mag = mag(c['count_rate_star'],0)[nanmask]
+            fig_source_check.legend(by_label.values(), by_label.keys(),
+                         bbox_to_anchor=(0.5, 0.95),
+                       loc='center',
+                       ncol = 2,
+                       frameon=False)
 
-                    # clip according to zp_mask
-                    zpoint_clip = zpoint[~zp_mask]
-                    zpoint_err_clip = zpoint_err[~zp_mask]
-                    zp_inst_mag_clip =  zp_inst_mag[~zp_mask]
-                    '''
-                    Get weighted average of zeropoints weighted by their magnitude errors
-                    '''
-                    zpoint_err_clip[zpoint_err_clip == 0] = 1e-5
-                    zpoint_err_clip[np.isnan(zpoint_err_clip)] = 1e-5
+            if syntax['save_source_plot']:
+                fig_source_check.savefig(syntax['write_dir'] + '/' +'source_check_'+str(syntax['base'].split('.')[0])+'.pdf',
+                                         format = 'pdf',bbox_inches='tight')
 
-                    # return value [zp_wa[0]] and error  [zp_wa[1]]
-                    zp_wa =  weighted_avg_and_std(np.array(zpoint_clip),np.sqrt(1/zpoint_err_clip))
-
-                    logging.info('\n%s-band zeropoint: %.3f +/- %.3f \n' % (str(use_filter),zp_wa[0],zp_wa[1]))
-
-                    # Adding fwhm and Zeropoint to headerinfo
-                    headinfo['fwhm'] = (round(mean_fwhm,3), 'fwhm w/ autophot')
-                    headinfo['zp']   = (round(zp_wa[0],3), 'zp w/ autophot')
-
-                    fits.writeto(fpath,image.astype(np.single),
-                                 headinfo,
-                                 overwrite = True,
-                                 output_verify = 'silentfix+ignore')
-
-
-
-                    syntax['zeropoint'] = zp
-                    syntax['zeropoint_err'] = zp_err
-
-
-                except Exception as e:
-                    logging.exception(e)
-                    logging.critical('Zeropoint not Found')
-                    zp_wa = [np.nan,np.nan]
-                    pass
-
-                syntax['zp'] =zp_wa[0]
-                syntax['zp_err'] =zp_wa[1]
-
-                zp     = {'zp_'+str(use_filter):zp_wa[0]}
-                zp_err = {'zp_'+str(use_filter)+'_err':zp_wa[1]}
-
-                headinfo['ZP'] = (zp_wa[0],'ZP by AUTOPHOT')
-
-                # Observed magnitude
-                c[str(use_filter)] = mag(c['count_rate_star'],zp_wa[0])
-
-                # Error in observed magnitude
-                c[str(use_filter)+'_err'] = np.sqrt(c_SNR_err**2 + zp_wa[1]**2)
-
-
-
-
-
-# =============================================================================
-# Plot of image with sources used and target
-# =============================================================================
-                fig_source_check = plt.figure(figsize = set_size(500,aspect = 1))
-
-                try:
-                    # from astropy.visualization.mpl_normalize import ImageNormalize
-                    from astropy.visualization import  ZScaleInterval
-
-                    x_pix_sources,y_pix_sources = w1.all_world2pix(c.ra.values,c.dec.values,1)
-
-                    # norm = ImageNormalize( stretch = SquaredStretch())
-
-                    vmin,vmax = (ZScaleInterval(nsamples = 600)).get_limits(image)
-
-                    ax = fig_source_check.add_subplot(111)
-
-                    ax.imshow(image,
-                              vmin = vmin,
-                              vmax = vmax,
-                              interpolation = 'nearest',
-                              origin = 'lower',
-                              aspect = 'equal',
-                              cmap = 'Greys')
-
-                    ax.scatter(np.array(c.x_pix),np.array(c.y_pix),
-                               marker = 's',
-                               facecolor = 'none',
-                               color = 'blue',
-                               s = 15,
-                               label = 'Centroiding [%d]' % len(c.x_pix),
-                               zorder = 2)
-
-                    ax.scatter(x_pix_sources,y_pix_sources,
-                               marker = '^',
-                               facecolor = 'none',
-                               edgecolor = 'green',
-                               s = 15,
-                               label = 'Catalog sources [%d]' % len(x_pix_sources),
-                               zorder = 1
-                               )
-
-                    if syntax['target_name'] != 'None':
-                        tname = syntax['target_name']
-                    else:
-                        tname = 'Center of Field'
-
-                    ax.scatter([target_x_pix],[target_y_pix],
-                               marker = 'D',
-                               s = 25,
-                               facecolor = 'None',
-                               edgecolor = 'gold',
-                               label = 'Target: %s' % tname)
-
-                    if not do_ap:
-                        ax.scatter(psf_heights.x_pix,psf_heights.y_pix,
-                                   marker = 'o',
-                                   color = 'red',
-                                   s = 15,
-                                   facecolor = 'None',
-                                   label = 'PSF Sources [%d]' % len(psf_heights),
-                                   zorder = 3)
-                    if syntax['use_local_stars']:
-
-                        local_radius_circle = plt.Circle( ( target_x_pix, target_y_pix ), syntax['local_radius'],
-                                                         color = 'red',
-                                                         ls = '--',
-                                                         label = 'Local Radius [%d px]' % syntax['local_radius'],
-                                                         fill=False)
-                        ax.add_patch( local_radius_circle)
-                        ax.set_xlim(0,image.shape[1])
-                        ax.set_ylim(0,image.shape[0])
-
-
-
-                    ax.set_xlabel('X PIXEL')
-                    ax.set_ylabel('Y PIXEL')
-
-                    plt.legend(fancybox=True,
-                               ncol = 3,
-                               bbox_to_anchor=(0, 1.15, 1, 0),
-                               loc = 'upper center',
-                               frameon=False)
-
-                    if syntax['save_source_plot']:
-                        fig_source_check.savefig(cur_dir + '/' +'source_check_'+str(base.split('.')[0])+'.pdf',
-                                                 format = 'pdf',bbox_inches='tight')
-
-                    plt.close(fig_source_check)
-
-
-                except Exception as e:
-                    logging.exception(e)
-
-
-    # =============================================================================
-    #     Plotting Zeropoint hisograms w/ clipping
-    # =============================================================================
-                try:
-                    import matplotlib.gridspec as gridspec
-                    from scipy.optimize import curve_fit
-
-
-                    def gauss(x,a,x0,sigma):
-                        return a*np.exp(-(x-x0)**2/(2*sigma**2))
-
-                    fig_zeropoint = plt.figure(figsize = set_size(540,aspect = 1))
-
-                    gs = gridspec.GridSpec(2, 2)
-
-                    ax1 = fig_zeropoint.add_subplot(gs[:-1, :-1])
-                    ax2 = fig_zeropoint.add_subplot(gs[-1, :-1])
-                    ax3 = fig_zeropoint.add_subplot(gs[:, -1])
-
-                    markers, caps, bars = ax1.errorbar(zpoint,zp_inst_mag,xerr = zpoint_err,
-                                 label = 'Before clipping',
-                                 marker = 'o',
-                                 linestyle="None",
-                                 color = 'r',
-                                 capsize=1,
-                                 capthick=1)
-
-                    [bar.set_alpha(0.3) for bar in bars]
-                    [cap.set_alpha(0.3) for cap in caps]
-
-
-                    ax1.set_ylabel('Instrumental magnitude')
-                    ax1.set_xlabel('Zeropoint Magnitude')
-
-                    ax1.invert_yaxis()
-
-                    markers, caps, bars = ax2.errorbar(zpoint_clip,zp_inst_mag_clip,
-                                 xerr = zpoint_err_clip,
-                                 label = 'After clipping [$%s sigma$]' %  str(int(syntax['zp_sigma'])),
-                                 marker = 'o',
-                                 linestyle="None",
-                                 color = 'blue',
-                                 capsize=1,
-                                 capthick=1)
-
-                    [bar.set_alpha(0.3) for bar in bars]
-                    [cap.set_alpha(0.3) for cap in caps]
-
-
-
-                    ax2.set_ylabel('Instrumental Magnitude')
-                    ax2.set_xlabel('Zeropoint Magnitude')
-                    ax2.invert_yaxis()
-
-                    n, bins, patches = ax3.hist(zpoint_clip,
-                             bins = 'auto',
-                             color = 'green',
-                             label = 'Zeropoint Distribution',
-                             density = True)
-
-                    mean = zp_wa[0]
-                    sigma = 0.1
-
-                    bins_fix = [(bins[i-1] + bins[i]) / 2  for i in range(1,len(bins))]
-
-                    try:
-                        popt,pcov = curve_fit(gauss,bins_fix,n, p0=[np.max(n),mean,sigma])
-                        r = np.arange(np.min(bins_fix)-0.1,np.max(bins_fix)+0.1,0.01)
-                        ax3.plot(r,gauss(r,*popt),'r',label='Gaussian fit')
-                        ax3.xlim(np.min(bins_fix)-0.1,np.max(bins_fix)+0.1)
-                    except:
-                        pass
-
-                    ax3.set_xlabel('Zeropoint Magnitude')
-                    ax3.set_ylabel('Probability')
-
-                    for axes in [ax1,ax2,ax3]:
-                        axes.legend(loc = 'upper left',fancybox=True,frameon = False)
-
-                    if syntax['save_zp_plot']:
-                        fig_zeropoint.savefig(cur_dir + '/' +'zp_'+str(base.split('.')[0])+'.pdf',format = 'pdf')
-
-                    plt.close(fig_zeropoint)
-
-                except Exception as e:
-                    logging.exception(e)
-                    plt.close(fig_zeropoint)
+            plt.close(fig_source_check)
 
 
 # =============================================================================
@@ -1574,12 +1507,13 @@ def main(object_info,syntax,fpath):
                 try:
 
                     # Bin size in magnitudes
-                    b_size = 0.5
+                    b_size = 0.25
 
                     lim_err =  sigma_mag_err(syntax['lim_SNR'])
 
                     # Sort values by filter
                     c_mag_lim = c.sort_values(by = [str('cat_'+use_filter)])
+
 
                     # x values: autophot magnitudes
                     x = c_mag_lim[str(use_filter)].values
@@ -1590,18 +1524,20 @@ def main(object_info,syntax,fpath):
                     y_err =  np.sqrt(c_mag_lim[str(use_filter)+'_err'].values**2 + c_mag_lim[str('cat_'+use_filter)+'_err'].values**2)
 
                     # remove nans
-                    idx = (np.isnan(x)) | (x<=0.0)
+                    idx = (np.isnan(x)) | (x<=0.0) | np.isnan(x_err) | (y_err>1)
 
                     x = x[~idx]
                     y = y[~idx]
+                    y_err = y_err[~idx]
+                    x_err = x_err[~idx]
 
                     if len(x)  <= 1 :
                         logging.warning('Magnitude diagram not found')
                         mag_limit = np.nan
 
                     else:
-
-                        fig_magnitude = plt.figure(figsize = set_size(500,0.5))
+                        plt.ioff()
+                        fig_magnitude = plt.figure(figsize = set_size(500,aspect = 0.25))
 
                         grid = GridSpec(1, 2 ,wspace=0.05, hspace=0,width_ratios = [1,0.25])
 
@@ -1623,13 +1559,15 @@ def main(object_info,syntax,fpath):
                                     zorder = 10)
 
                         markers, caps, bars = ax1.errorbar(x,y,
-                                                        xerr = x_err,yerr = y_err,
-                                                        color = 'red',
-                                                        ecolor = 'black',
-                                                        marker = 'o',
-                                                        ls = '',
-                                                        label = r'$\Delta \ Mag$',
-                                                        zorder = 90)
+                                                           xerr = x_err,
+                                                           yerr = y_err,
+                                                           color = 'red',
+                                                           ecolor = 'black',
+                                                           capsize = 0.5,
+                                                           marker = 'o',
+                                                           ls = '',
+                                                           label = r'$\Delta \ Mag$',
+                                                           zorder = 90)
                         [bar.set_alpha(0.3) for bar in bars]
                         [cap.set_alpha(0.3) for cap in caps]
 
@@ -1679,11 +1617,11 @@ def main(object_info,syntax,fpath):
                                                     bins = int(np.ceil(len(y)/3)),
                                                     facecolor = 'green',
                                                     label = 'Zeropoint Distribution',
-                                                    density = False,
+                                                    density = True,
                                                     orientation = 'horizontal')
 
                         ax2.set_ylim(ax1.get_ylim()[0],ax1.get_ylim()[1])
-                        ax2.set_xlabel('Probability')
+                        ax2.set_xlabel('Probability Density')
                         ax2.yaxis.tick_right()
 
 
@@ -1696,7 +1634,7 @@ def main(object_info,syntax,fpath):
                         ax2.set_ylabel('')
 
                         ax1.legend(fancybox=True,
-                                   ncol = 3,
+                                   ncol = 4,
                                    bbox_to_anchor=(0, 1.01, 1, 0),
                                    loc = 'lower center',
                                    frameon=False
@@ -1727,7 +1665,7 @@ def main(object_info,syntax,fpath):
 
                         if syntax['save_mag_lim_plot']:
                             fig_magnitude.savefig(os.path.join(cur_dir,'mag_lim_'+str(base.split('.')[0])+'.pdf'),
-                                                  # bbox_inches='tight',
+                                                   bbox_inches='tight',
                                                   )
 
                         plt.close(fig_magnitude)
@@ -1762,94 +1700,8 @@ def main(object_info,syntax,fpath):
                 if np.isnan(mag_limit):
                     mag_limit = 20
 
-# =============================================================================
-# Do photometry on all sources
-# =============================================================================
-            if syntax['do_all_phot']:
-                logging.info(' --- Perform photometry on all sources in field ---')
-
-                _,df_all,_= find.fwhm(image,syntax,sigma_lvl = syntax['do_all_phot_sigma'],fwhm = mean_fwhm)
-
-                ra_all,dec_all = w1.all_pix2world(df_all.x_pix.values,df_all.y_pix.values,1 )
-
-                df_all['RA'] = ra_all
-                df_all['DEC'] = dec_all
-
-                photfile = 'phot_filter_%s_sigma_%d_%s.csv' % (use_filter,syntax['do_all_phot_sigma'],str(base.split('.')[0]))
-
-                if do_ap:
 
 
-                    positions  = list(zip(df_all.x_pix.values,df_all.y_pix.values))
-
-                    target,target_bkg = ap_phot(positions,
-                                                image,
-                                                radius = syntax['ap_size']    * mean_fwhm,
-                                                r_in   = syntax['r_in_size']  * mean_fwhm,
-                                                r_out  = syntax['r_out_size'] * mean_fwhm)
-
-                    source_flux = (target/exp_time)
-                    source_bkg = (target_bkg/exp_time)
-
-                    SNR_sources = SNR(source_flux,source_bkg,exp_time,0,syntax['ap_size']* mean_fwhm,gain,0)
-                    df_all['snr'] = SNR_sources
-                    df_all[use_filter] = mag(source_flux,zp_wa[0] ) + ap_corr
-
-                    mag_err = sigma_mag_err(SNR_sources)
-                    df_all[use_filter+'_err'] =  np.sqrt(mag_err**2 + zp_wa[1]**2)
-
-
-
-                else:
-                    positions = df_all[['x_pix','y_pix']]
-
-                    psf_sources,_ = psf.fit(image,
-                                            positions,
-                                            r_table,
-                                            syntax,
-                                            mean_fwhm)
-
-                    psf_sources_phot,_ = psf.do(psf_sources,
-                                                r_table,
-                                                syntax,
-                                                mean_fwhm)
-
-                    sources_flux = np.array(psf_sources_phot.psf_counts/exp_time)
-
-                    sources_err = np.array(psf_sources_phot.psf_counts_err/exp_time)
-
-                    SNR_sources = np.array(sources_flux/sources_err)
-
-                    mag_err = sigma_mag_err(SNR_sources)
-
-                    ra_all,dec_all = w1.all_pix2world(psf_sources_phot.x_pix.values,psf_sources_phot.y_pix.values,1 )
-
-                    df_all = pd.DataFrame([])
-                    df_all['RA'] = ra_all
-                    df_all['DEC'] = dec_all
-
-                    df_all['snr'] = SNR_sources
-                    df_all['flux_inst'] = psf_sources['H_psf']
-                    df_all[use_filter] = mag(sources_flux,zp_wa[0] )
-
-                    mag_err = sigma_mag_err(SNR_sources)
-                    df_all[use_filter+'_err'] =  np.sqrt(mag_err**2 + zp_wa[1]**2)
-
-
-
-                try:
-                    df_all.to_csv(syntax['write_dir']+photfile,index = False)
-                    logging.info('Photometry of all sources saved as: %s' % str(base.split('.')[0])+'.csv')
-                except Exception as e:
-
-
-                    exc_type, exc_obj, exc_tb = sys.exc_info()
-                    fname1 = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-                    logging.info(exc_type, fname1, exc_tb.tb_lineno,e)
-                    # sys.stdout = default_stdout
-                    logging.info('Warning - Table could not be saved to csv')
-                    # flog.close()
-                    pass
 
 # =============================================================================
 # Get Template
@@ -1859,14 +1711,15 @@ def main(object_info,syntax,fpath):
                                     c,
                                     r_table,
                                     syntax,
-                                    mean_fwhm,
+                                    # mean_fwhm,
                                     return_psf_model = True)
             except:
                 PSF_model = None
 
-            # print(PSF_model)
-            # print(PSF_model.shape)
             subtraction_ready = False
+
+
+
             if syntax['do_subtraction']:
 
 
@@ -1892,36 +1745,43 @@ def main(object_info,syntax,fpath):
                     else:
                         use_filter_template = use_filter
 
-
-
-
                     if syntax['use_user_template']:
                         logging.info('Using user template')
                         if not os.path.exists(syntax['fits_dir'] + '/templates'):
+                            
                             logging.info('Templates folder not found')
+                            
                         else:
+                            
                             logging.info('Found user templates')
 
 
                             if not os.path.exists(syntax['fits_dir'] + '/templates/' + use_filter_template + '_template'):
-                                logging.info('cannot find User filter template')
+                                
+                                logging.info('Cannot find User filter template')
+                                
                             else:
+                                
                                 list_dir = os.listdir(syntax['fits_dir'] + '/templates/' + use_filter_template + '_template')
+                                
                                 fits_list_dir = [i for i in list_dir if i.split('.')[-1] in ['fits','fts','fit']]
 
                                 if len(fits_list_dir) >1:
-                                    logging.info(syntax['fits_dir'] + '/templates/' + use_filter_template + '_template')
-                                    logging.info(os.listdir(syntax['fits_dir'] + '/templates/' + use_filter_template + '_template'))
-                                    logging.info('Check template folder - too many files in fodler')
+                                    
+                                    fits_list_dir = [i for i in fits_list_dir if 'PSF_model_' not in i and i.endswith(fname_ext)]
+                                    
+                                    # logging.info(syntax['fits_dir'] + '/templates/' + use_filter_template + '_template')
+                                    # logging.info(os.listdir(syntax['fits_dir'] + '/templates/' + use_filter_template + '_template'))
+                                    # logging.info('Check template folder - too many files in fodler')1
 #                                else:
                                 fpath_template = syntax['fits_dir'] + '/templates/' + use_filter_template+ '_template/' + fits_list_dir[0]
-#                                    subtraction_ready = True
                                 template_found = True
+                                
+                                print('Template filepath: %s ' % fpath_template)
 
                     if syntax['get_template'] and not template_found:
                         logging.info('Searching for template ...')
-#
-#                        # Template retrival from 2mass - shite because it's too faint
+
                         if syntax['catalog'] == '2mass':
                             try:
                                 from astroquery.skyview import SkyView
@@ -1933,7 +1793,6 @@ def main(object_info,syntax,fpath):
                             except Exception as e:
 
                                     logging.exception(e)
-
 
                         # Template retrival from panstarrs
                         if syntax['catalog'] == 'pan_starrs' or syntax['catalog'] == 'skymapper':
@@ -1980,6 +1839,7 @@ def main(object_info,syntax,fpath):
                         logging.info('Template not found')
                     else:
                         with fits.open(fpath_template,ignore_missing_end = True,lazy_load_hdus = True) as hdu:
+
                             headinfo_template = hdu[0].header
 
                             try:
@@ -1987,33 +1847,43 @@ def main(object_info,syntax,fpath):
                                     try:
                                         import astroalign as aa
 
-
-
-                                        # aa.MIN_MATCHES_FRACTION = 0.5
-                                        # aa.NUM_NEAREST_NEIGHBORS = 5
-                                        # aa.PIXEL_TOL = 4
-
                                         logging.info('Aligning via Astro Align')
-                                        aligned_image, footprint = aa.register(hdu[0].data.astype(float),
-                                                                                image.astype(float))
-                                        aligned_image[np.isnan(aligned_image)] = 1e-30
+                                        # stop
+                                        aligned_template, footprint = aa.register(hdu[0].data.astype(float),
+                                                                                image.astype(float),
+                                                                                detection_sigma = 15)
+                                        
 
                                     except Exception as e:
-                                        logging.info('ASTRO ALIGN failed: %s' % e)
-                                        syntax['use_reproject_interp'] = True
+                                        try:
+                                            raise  NotImplementedError
+                                            print('Image register failed %s \nAttempting point source alignment' % e)
+                                            from autophot.packages.call_hotpants  import point_source_align
+
+                                            template_calib = os.path.join(os.path.dirname(fpath_template),'calib_template.csv')
+
+                                            aligned_template = point_source_align(hdu[0].data.astype(float),c,pd.read_csv(template_calib))
+
+
+
+                                        except Exception as e:
+                                            logging.exception(e)
+                                            # logging.info('ASTRO ALIGN failed: %s' % e)
+                                            syntax['use_reproject_interp'] = True
+                                            pass
 
                                 if syntax['use_reproject_interp']:
                                     try:
                                         logging.info('Aligning via WCS')
 
                                         from reproject import reproject_interp
-                                        aligned_image, footprint = reproject_interp(hdu[0], headinfo)
-                                        aligned_image[(np.isnan(aligned_image)) | (aligned_image==0) ] = 1e-30
+                                        aligned_template, footprint = reproject_interp(hdu[0], headinfo)
+
                                     except Exception as e:
                                         logging.info('reproject_interp failed: %s' % e)
                                         raise Exception
 
-                                fits.writeto(fpath.replace(fname_ext,'_template')+fname_ext, aligned_image.astype(np.single), headinfo_template, overwrite=True,output_verify = 'silentfix+ignore')
+                                fits.writeto(fpath.replace(fname_ext,'_template')+fname_ext, aligned_template.astype(np.single), headinfo_template, overwrite=True,output_verify = 'silentfix+ignore')
                                 fpath_template = fpath.replace(fname_ext,'_template')+fname_ext
                                 subtraction_ready = True
 
@@ -2030,7 +1900,7 @@ def main(object_info,syntax,fpath):
                     logging.exception(e)
 
 
-# Check for template image
+            # Check for template image
 
             if syntax['get_template']:
                 if not os.path.isfile(fpath.replace(fname_ext,'_template')+fname_ext):
@@ -2039,29 +1909,44 @@ def main(object_info,syntax,fpath):
                     fpath_template = fpath.replace(fname_ext,'_template')+fname_ext
                     subtraction_ready = True
 
-# =============================================================================
-# Image subtraction using HOTPANTS
-# =============================================================================
 
+            
+            # =============================================================================
+            # Image subtraction using HOTPANTS
+            # =============================================================================
+           
+            syntax['subtraction_ready'] = subtraction_ready
+            
             if syntax['do_subtraction'] and subtraction_ready:
-                logging.info('Performing image subtraction using HOTPANTS')
+                #  This is where the template files are found
+                syntax['template_dir'] = syntax['fits_dir']+'/'+'templates/'+ use_filter_template + '_template'
 
-                fpath_sub = HOTterPANTS(fpath,fpath_template,syntax,psf = PSF_model)
+                fpath_sub = subtract(fpath,fpath_template,syntax,psf = PSF_model)
 
-# =============================================================================
-# Perform photometry on target
-# =============================================================================
+            if syntax['do_ap_on sub'] and subtraction_ready:
+                    do_ap = True
+                    syntax['do_ap_phot']
+                    logging.info('\nPerforming aperture photometry on subtracted image')
 
+            # =============================================================================
+            # Perform photometry on target
+            # =============================================================================
 
             if syntax['do_phot']:
 
-                dx = syntax['dx']
-                dy = syntax['dy']
-
                 if syntax['phot_on_sub'] and subtraction_ready:
+                    
                     image    = getimage(fpath_sub)
                     logging.info('Target photometry on subtracted image')
+                    
+                    syntax['remove_bkg_poly'] = True
+                    syntax['remove_bkg_surface'] = False
+                    syntax['remove_bkg_local'] =  False
+                    # syntax['do_ap_phot'] = True
+                    print('Switching to polynomial background fit for subtracted image\n')
+                    
                 else:
+                    
                     logging.info('Target photometry on original image')
 
                 image_copy  = image.copy()
@@ -2070,6 +1955,7 @@ def main(object_info,syntax,fpath):
 
                 close_up = image_copy[int(target_y_pix_TNS - syntax['scale']): int(target_y_pix_TNS + syntax['scale']),
                                       int(target_x_pix_TNS - syntax['scale']): int(target_x_pix_TNS + syntax['scale'])]
+                
                 from autophot.packages.rm_bkg import rm_bkg
 
                 close_up,bkg_surface = rm_bkg(close_up,syntax,close_up.shape[1]/2,close_up.shape[0]/2)
@@ -2078,80 +1964,28 @@ def main(object_info,syntax,fpath):
                 x = np.arange(0,2*syntax['scale'])
                 xx,yy= np.meshgrid(x,x)
 
-                # try:
 
-                #     pars = lmfit.Parameters()
-                #     pars.add('A',value = np.nanmax(close_up),min = 1e-3)
-                #     pars.add('x0',value = close_up.shape[1]/2,min = (close_up.shape[1]/2)-dx ,max = (close_up.shape[1]/2)+dx)
-                #     pars.add('y0',value = close_up.shape[0]/2,min = (close_up.shape[0]/2)-dy ,max = (close_up.shape[0]/2)+dy)
-                #     # pars.add('sky',value = 0)
-
-
-                #     if syntax['use_moffat']:
-                #         pars.add('alpha',value = syntax['image_params']['alpha'],
-                #                  min = 0,
-                #                  max = 25,
-                #                  vary = False)
-                #         pars.add('beta',value = syntax['image_params']['alpha'],
-                #                  min = 0,
-                #                  vary = syntax['vary_moff_beta'])
-
-
-                #     else:
-                #         pars.add('sigma',value = syntax['image_params']['sigma'],
-                #                  min = 0,
-                #                  max = gauss_fwhm2sigma(syntax['max_fit_fwhm']),
-                #                  vary = False)
-
-                #     if syntax['use_moffat']:
-                #         def residual(p):
-                #             p = p.valuesdict()
-                #             return (close_up - moffat_2d((xx,yy),p['x0'],p['y0'],0,p['A'],dict(alpha=p['alpha'],beta=p['beta'])).reshape(close_up.shape)).flatten()
-
-                #     else:
-                #         def residual(p):
-                #             p = p.valuesdict()
-                #             return (close_up - gauss_2d((xx,yy),p['x0'],p['y0'],0,p['A'],dict(sigma=p['sigma'])).reshape(close_up.shape)).flatten()
-
-                #     mini = lmfit.Minimizer(residual,
-                #                            pars,nan_policy = 'omit')
-
-                #     result = mini.minimize()
-
-                #     target_x_pix_corr= result.params['x0'].value - syntax['scale']
-                #     target_y_pix_corr= result.params['y0'].value - syntax['scale']
-
-                #     target_x_pix =  target_x_pix_corr + target_x_pix_TNS
-                #     target_y_pix =  target_y_pix_corr + target_y_pix_TNS
-
-                #     close_up = image[int(target_y_pix - syntax['scale']): int(target_y_pix + syntax['scale']),
-                #                       int(target_x_pix - syntax['scale']): int(target_x_pix + syntax['scale'])]
-
-                # except Exception as e:
-
-                #     logging.error('Could not fit gaussian profile to target - using TNS coords')
-                #     logging.exception(e)
-
-                #     target_x_pix = target_x_pix_TNS
-                #     target_y_pix = target_y_pix_TNS
-
-                #     target_x_pix_corr = syntax['scale']
-                #     target_y_pix_corr = syntax['scale']
-
-# =============================================================================
-# Subtraction image
-# =============================================================================
+                # =============================================================================
+                # Subtraction image
+                # =============================================================================
                 if syntax['save_subtraction_quicklook'] and subtraction_ready:
-                    fig_sub = plt.figure(figsize = set_size(240,aspect = 1))
+
+                    plt.ioff()
+                    fig_sub = plt.figure(figsize = set_size(250,aspect = 1))
 
                     ax1 = fig_sub.add_subplot(121)
                     ax2 = fig_sub.add_subplot(122)
+
                     plt.subplots_adjust(hspace=0.0,wspace=0.3)
 
                     image_sub_tmp = fits.getdata(fpath_sub)
 
+                    image_sub_tmp_limits = image_sub_tmp
 
-                    vmin,vmax = (ZScaleInterval(nsamples = 1200)).get_limits(image_sub_tmp)
+                    # image_sub_tmp_limits[image_sub_tmp_limits == 1e-30] = np.nan
+
+                    vmin,vmax = (ZScaleInterval(nsamples = 600)).get_limits(image_sub_tmp_limits)
+
 
                     ax1.imshow(image_sub_tmp,
                                vmin = vmin,
@@ -2159,9 +1993,10 @@ def main(object_info,syntax,fpath):
                                aspect ='auto',
                                interpolation = 'nearest',
                                origin = 'lower',
-                               cmap = 'Greys')
+                               # cmap = 'Greys'
+                               )
 
-                    # ax.set_zlim(vmin,vmax)
+
 
                     ax1.scatter([target_x_pix],[target_y_pix],marker = 'D',
                                facecolor = 'None',
@@ -2176,7 +2011,8 @@ def main(object_info,syntax,fpath):
                                aspect ='auto',
                                # interpolation = 'nearest',
                                origin = 'lower',
-                               cmap = 'Greys')
+                               # cmap = 'Greys'
+                               )
 
                     ax2.scatter(close_up.shape[0]/2,close_up.shape[0]/2,
                                 marker = '+',
@@ -2186,8 +2022,8 @@ def main(object_info,syntax,fpath):
                                s = 25,
                                label = 'Target: %s' % tname)
 
-                    ax1.set_title('Host Subtrated Image')
-                    ax2.set_title('Transient Cutout')
+                    ax1.set_title('Template subtracted image')
+                    ax2.set_title('Transient cutout')
                     ax1.set_xlabel('X PIXEL')
                     ax1.set_ylabel('Y PIXEL')
 
@@ -2205,10 +2041,17 @@ def main(object_info,syntax,fpath):
                     cb.ax.yaxis.set_offset_position('left')
                     cb.update_ticks()
 
-                    fig_sub.savefig(cur_dir + '/' +os.path.basename(fpath.replace(fname_ext,'_subtraction_QUICKLOOK'))+'.pdf',
-                                    bbox_inches='tight',)
+                    figfname = 'subtraction_QUICKLOOK_'+os.path.basename(fpath).replace(fname_ext,'') +'.pdf'
 
-                    plt.close()
+                    QL_sub_loc = os.path.join(cur_dir,figfname)
+
+                    fig_sub.savefig(QL_sub_loc,
+                                    bbox_inches='tight')
+
+                    plt.close(fig_sub)
+
+
+
 
 
 
@@ -2216,12 +2059,20 @@ def main(object_info,syntax,fpath):
 #               Work on target location
 # =============================================================================
 
+
+                dx = syntax['dx']
+                dy = syntax['dy']
+
                 pars = lmfit.Parameters()
+
                 pars.add('A',value = np.nanmax(close_up)*0.75,min = 1e-5)
+
                 pars.add('x0',value = close_up.shape[1]/2,
                          min = close_up.shape[1]/2 - dx,max = close_up.shape[1]/2 +dx)
+
                 pars.add('y0',value = close_up.shape[0]/2,
-                         min = close_up.shape[0]/2 - dx,max = close_up.shape[0]/2 +dx)
+                         min = close_up.shape[0]/2 - dy,max = close_up.shape[0]/2 +dy)
+
                 pars.add('sky',value = np.nanmedian(close_up))
 
 
@@ -2229,12 +2080,15 @@ def main(object_info,syntax,fpath):
                                  int(target_x_pix - syntax['scale']): int(target_x_pix + syntax['scale'])]
 
                 if syntax['use_moffat']:
+
                     pars.add('alpha',value = syntax['image_params']['alpha'],
                              min = 0,
-                             max = gauss_fwhm2sigma(syntax['max_fit_fwhm']) )
+                             max = gauss_fwhm2sigma(syntax['max_fit_fwhm']))
+
                     pars.add('beta',value = syntax['image_params']['beta'],
                              min = 0,
-                             vary = syntax['vary_moff_beta']  )
+                             vary = syntax['vary_moff_beta'])
+
 
                 else:
                     pars.add('sigma',value = syntax['image_params']['sigma'],
@@ -2242,16 +2096,20 @@ def main(object_info,syntax,fpath):
                              max = gauss_fwhm2sigma(syntax['max_fit_fwhm']) )
 
                 if syntax['use_moffat']:
+
                     def residual(p):
                         p = p.valuesdict()
                         return (close_up - moffat_2d((xx,yy),p['x0'],p['y0'],p['sky'],p['A'],dict(alpha=p['alpha'],beta=p['beta'])).reshape(close_up.shape)).flatten()
 
                 else:
+
                     def residual(p):
                         p = p.valuesdict()
                         return (close_up - gauss_2d((xx,yy),p['x0'],p['y0'],p['sky'],p['A'],dict(sigma=p['sigma'])).reshape(close_up.shape)).flatten()
 
-                mini = lmfit.Minimizer(residual, pars,nan_policy = 'omit')
+                mini = lmfit.Minimizer(residual,
+                                       pars,
+                                       nan_policy = 'omit')
                 result = mini.minimize(method = 'least_squares')
 
                 if syntax['use_moffat']:
@@ -2273,8 +2131,6 @@ def main(object_info,syntax,fpath):
                 target_x_pix_corr =  result.params['x0'].value
                 target_y_pix_corr =  result.params['y0'].value
 
-
-
                 positions  = list(zip([target_x_pix_corr],[target_y_pix_corr]))
 
                 target,target_bkg = ap_phot(positions,
@@ -2286,44 +2142,71 @@ def main(object_info,syntax,fpath):
                 target = (target/exp_time)[0]
                 target_bkg = (target_bkg/exp_time)[0]
 
-                # print(target,target_bkg)
 
-                if syntax['adjust_SN_loc']:
+                if syntax['adjust_SN_loc'] and not ( np.isnan(target_x_pix_corr) | np.isnan(target_y_pix_corr) ):
+                    
                     target_x_pix =  target_x_pix_corr  - 0.5*close_up.shape[1]  + target_x_pix_TNS
                     target_y_pix =  target_y_pix_corr  - 0.5*close_up.shape[0]  + target_y_pix_TNS
+                    
                 else:
+                    
                     target_x_pix = target_x_pix_TNS
                     target_y_pix = target_y_pix_TNS
-
+                
+                target_x_pix = float(target_x_pix)
+                target_y_pix = float(target_y_pix)
+                
                 SNR_target = SNR(target,target_bkg,exp_time,0,syntax['ap_size']*mean_fwhm,gain,0)
 
                 if not do_ap and not syntax['do_ap_phot'] :
 
-                    if mag(target,0) - approx_psf_mag < 0.25:
+                    if find_mag(target,0) - approx_psf_mag < 0.25:
+                        
                         if not syntax['force_psf']:
+                            
                             logging.warning('PSF not applicable')
-                            logging.warning('target mag [%.3f] <  PSF mag [%.3f]' % (mag(target,0),approx_psf_mag))
+                            logging.warning('target mag [%.3f] <  PSF mag [%.3f]' % (find_mag(target,0),approx_psf_mag))
                             logging.info('set "force_psf" = True to fix')
 
                             do_ap = True
                             ap_corr = ap_corr_base
 
-
-
                 if syntax['save_target_plot'] and (do_ap or (syntax['do_ap_on_sub'] and subtraction_ready)):
 
-                    fig_target = plt.figure(figsize = set_size(240,aspect = 1))
+                    # Aperture photometry plot
+                    from matplotlib.gridspec import  GridSpec
+                    from autophot.packages.functions import order_shift
 
-                    ax = fig_target.add_subplot(111)
+                    scale = order_shift(abs(close_up))
 
+                    close_up_plt = close_up/scale
 
-                    im = ax.imshow(close_up,
+                    plt.ioff()
+
+                    fig_target = plt.figure(figsize = set_size(250,aspect = 1))
+
+                    ncols = 2
+                    nrows = 2
+
+                    heights = [1,0.33]
+                    widths =  [1,0.33]
+
+                    grid = GridSpec(nrows, ncols ,wspace=0.1, hspace=0.1,
+                                    height_ratios=heights,
+                                    width_ratios = widths
+                                    )
+
+                    ax1   = fig_target.add_subplot(grid[0:1, 0:1])
+                    ax1_B = fig_target.add_subplot(grid[1, 0:1])
+                    ax1_R = fig_target.add_subplot(grid[0:1, 1])
+
+                    im = ax1.imshow(close_up_plt,
                                    interpolation = 'nearest',
                                    origin = 'lower',
-                                   aspect = 'equal',
+                                    aspect = 'auto',
                                    )
 
-                    ax.scatter(target_x_pix_corr,target_y_pix_corr,
+                    ax1.scatter(target_x_pix_corr,target_y_pix_corr,
                                label ='Centroid fit',
                                marker = '+',
                                s =20,
@@ -2333,43 +2216,102 @@ def main(object_info,syntax,fpath):
                                    label = 'Aperture',
                                    fill=False,
                                    color = 'red')
-                    circ2 = Circle((target_x_pix_corr,target_y_pix_corr),syntax['r_in_size'] * mean_fwhm,
-                                   label = 'Background Annulus',
-                                   fill=False,
-                                   color = 'red',
-                                   linestyle = '--')
-                    circ3 = Circle((target_x_pix_corr,target_y_pix_corr),syntax['r_out_size'] * mean_fwhm,
-                                   # label = 'Outer Annulus',
-                                   fill=False,
-                                   color = 'red',
-                                   linestyle = '--')
 
-                    ax.add_patch(circ1)
-                    ax.add_patch(circ2)
-                    ax.add_patch(circ3)
+                    r0_x = target_x_pix_corr
+                    r0_y = target_y_pix_corr
 
-                    ax.set_ylabel('Y PIXEL')
-                    ax.set_xlabel('X PIXEL')
+                    inner =  syntax['r_in_size'] * mean_fwhm
+                    outer =  syntax['r_out_size'] * mean_fwhm
 
-                    ax.legend(fancybox=True,
-                              ncol = 2,
-                              bbox_to_anchor=(0, 1.2, 1, 0),
-                              loc = 'upper center',
-                              frameon=False)
 
-                    divider = make_axes_locatable(ax)
+                    n, radii = 50, [inner , outer]
+                    theta = np.linspace(0, 2*np.pi, n, endpoint=True)
+                    xs = np.outer(radii, np.cos(theta))
+                    ys = np.outer(radii, np.sin(theta))
 
-                    cax = divider.append_axes("right", size="5%", pad=0.05)
-                    cb = fig_target.colorbar(im, cax=cax)
-                    cb.ax.set_ylabel('Counts', rotation=270,labelpad = 10)
+                    # in order to have a closed area, the circles
+                    # should be traversed in opposite directions
+                    xs[1,:] = xs[1,::-1]
+                    ys[1,:] = ys[1,::-1]
 
-                    cb.formatter.set_powerlimits((0, 0))
-                    cb.ax.yaxis.set_offset_position('left')
-                    cb.update_ticks()
+                    # ax = plt.subplot(111, aspect='equal')
+                    ax1.fill(r0_x+np.ravel(xs),
+                             r0_y+np.ravel(ys),
+                             color = 'red',
+                             alpha = 0.3)
+
+
+                    ax1.add_patch(circ1)
+
+                    ax1.set_ylabel('Y PIXEL')
+                    ax1_B.set_xlabel('X PIXEL')
+
+
+
+                    ax1_B.axvline(r0_x - (syntax['ap_size'] * mean_fwhm),ls = '-',color = 'red')
+                    ax1_B.axvline(r0_x + (syntax['ap_size'] * mean_fwhm),ls = '-',color = 'red')
+
+                    ax1_R.axhline(r0_y - (syntax['ap_size'] * mean_fwhm),ls = '-',color = 'red')
+                    ax1_R.axhline(r0_y + (syntax['ap_size'] * mean_fwhm),ls = '-',color = 'red')
+
+                    ax1_B.axvspan(r0_x - (syntax['r_in_size'] * mean_fwhm),
+                                  r0_x - (syntax['r_out_size'] * mean_fwhm),
+                                  color = 'red',
+                                  alpha = 0.3,
+                                  label = 'Background Area'
+                                  )
+
+                    ax1_B.axvspan(r0_x + (syntax['r_in_size'] * mean_fwhm),
+                                  r0_x + (syntax['r_out_size'] * mean_fwhm),
+                                  color = 'red',
+                                  alpha = 0.3)
+
+                    ax1_R.axhspan(r0_y - (syntax['r_in_size'] * mean_fwhm),
+                                  r0_y - (syntax['r_out_size'] * mean_fwhm),
+                                  color = 'red',
+                                  alpha = 0.3
+                                  )
+
+                    ax1_R.axhspan(r0_y + (syntax['r_in_size'] * mean_fwhm),
+                                  r0_y + (syntax['r_out_size'] * mean_fwhm),
+                                  color = 'red',
+                                  alpha = 0.3
+                                  )
+
+                    h, w = close_up_plt.shape
+
+                    x  = np.linspace(0, int(2*syntax['scale']), int(2*syntax['scale']))
+                    y  = np.linspace(0, int(2*syntax['scale']), int(2*syntax['scale']))
+
+                    X, Y = np.meshgrid(x, y)
+
+                    ax1_R.plot(close_up_plt[:,w//2],Y[:,w//2],marker = 'o',color = 'blue',label = '1D projection')
+                    ax1_B.plot(X[h//2,:],close_up_plt[h//2,:],marker = 'o',color = 'blue')
+
+
+                    ax1_R.xaxis.tick_top()
+                    ax1_R.yaxis.tick_right()
+
+                    ax1.xaxis.tick_top()
+
+                    ax1_B.set_ylabel('Counts [$10^{%d}$]' % np.log10(scale))
+
+                    ax1_R.set_xlabel('Counts [$10^{%d}$]' % np.log10(scale))
+
+                    lines_labels = [ax.get_legend_handles_labels() for ax in fig_target.axes]
+                    handles,labels = [sum(i, []) for i in zip(*lines_labels)]
+
+                    by_label = dict(zip(labels, handles))
+
+                    fig_target.legend(by_label.values(), by_label.keys(),
+                               bbox_to_anchor=(0.5, 0.95), loc='lower center',
+                               ncol = 2,
+                               frameon=False)
+
 
                     fig_target.savefig(cur_dir + '/' +'target_'+str(base.split('.')[0])+'.pdf',
-                                       bbox_inches='tight'
-                                       )
+                                       bbox_inches='tight')
+
 
                     plt.close(fig_target)
 
@@ -2383,7 +2325,6 @@ def main(object_info,syntax,fpath):
                                               c_target,
                                               r_table,
                                               syntax,
-                                              mean_fwhm,
                                               save_plot = syntax['save_target_plot'],
                                               show_plot = syntax['plot_target'] ,
                                               fname = str(base.replace(fname_ext,'')),
@@ -2401,6 +2342,7 @@ def main(object_info,syntax,fpath):
 
                     target_x_pix = c_psf_target['x_fitted']
                     target_y_pix = c_psf_target['y_fitted']
+                    # print('loc',target_x_pix,target_y_pix)
 
 
                     target_bkg = np.array(c_psf_target.bkg/exp_time)[0]
@@ -2423,58 +2365,89 @@ def main(object_info,syntax,fpath):
 
                 try:
                     syntax['image_radius']
-
                 except:
                     logging.warning('Image Radius not defined')
                     syntax['image_radius'] = 1.5 * mean_fwhm
+                
+                expand_scale = int(4*syntax['fwhm'])+0.5
 
-                if syntax['get_lim_mag_prob']:
+                # cut out an Expanded area around target x and y pixel - needs to be even
+                while expand_scale < syntax['scale']:
+                    expand_scale+=1
+                    
+                while expand_scale - syntax['scale'] <= syntax['fwhm']:
+                    expand_scale+=1
+                    
+                if (expand_scale - syntax['scale'] )% 2 != 0:
+                    expand_scale+=1
+                    
+                
 
-                    if SNR_target > 10 and abs(target_fwhm - mean_fwhm) < 0.5 and not syntax['force_lmag'] :
+                close_up_expand = image_copy[int(target_y_pix - expand_scale): int(target_y_pix + expand_scale),
+                                             int(target_x_pix - expand_scale): int(target_x_pix + expand_scale)]
+                
+                try:
+                     model = model_psf
+                     r_table = r_table
+                     
+                except:
+                    
+                    model = None
+                    r_table = None
+                    
+                if SNR_target > syntax['lmag_check_SNR'] and abs(target_fwhm - mean_fwhm) < 1 and not syntax['force_lmag'] :
 
-                            lmag = np.nan
-                            output.update({'lmag':lmag})
+                        lmag_prob = np.nan
+                        lmag_inject = np.nan
+                        
+                        output.update({'lmag_prob':lmag_prob})
+                        output.update({'lmag_inject':lmag_inject})
 
-                            logging.info('SNR = %.f - skipping limiting magnitude' % SNR_target)
-                            lmag_check = False
+                        logging.info('SNR = %.f - skipping limiting magnitude' % SNR_target)
+                        lmag_check = False
+                else:
+
+                    if abs(target_fwhm - mean_fwhm) > 1:
+                        logging.warning('Discrepancy in FWHM of %.1f pixels' % abs(target_fwhm - mean_fwhm))
+                        
+                    if SNR_target < syntax['lmag_check_SNR']:
+                        logging.warning('SNR = %.f - checking limiting magnitude' % SNR_target)
+
+                    
+                    if syntax['get_lim_mag_prob']:
+                    
+
+                        lmag_prob_inst,syntax = limiting_magnitude_prob(syntax,close_up_expand,model,r_table)
+    
+                        lmag_prob = lmag_prob_inst + zp_wa[0]
                     else:
-
-                        if abs(target_fwhm - mean_fwhm) > 0.5:
-                            logging.warning('Discrepancy in FWHM of %.1f pixels' % abs(target_fwhm - mean_fwhm))
-
-
-                        if SNR_target <10:
-                            logging.warning('SNR = %.f - checking limiting magnitude' % SNR_target)
-
-                        expand_scale = int(np.floor(2.5*syntax['image_radius']))+0.5
-
-                        # cut out an Expanded area around target x and y pixel - needs to be even
-
-                        while expand_scale < syntax['scale']:
-                            expand_scale+=1
-
+                        lmag_prob = np.nan
+                    
+                    
+                    
+                    if syntax['inject_sources'] and not (r_table is None):
+                        
+                        if not np.isnan(lmag_prob):
+                            lmag_guess = lmag_prob
+                        else:
+                            lmag_guess = None
                             
-                        if (expand_scale - syntax['scale'] )%2 !=0:
-                            expand_scale+=1
-
-                        # get close up at bigger scale to allow for injected sources to be well spaced
-                        close_up_expand = image_copy[int(target_y_pix - expand_scale): int(target_y_pix + expand_scale),
-                                                     int(target_x_pix - expand_scale): int(target_x_pix + expand_scale)]
-
-                        try:
-                             model = model_psf
-                             r_table = r_table
-                        except:
-                            model = None
-                            r_table = None
-
-                        lmag_inst,syntax = limiting_magnitude_prob(syntax,close_up_expand,model,r_table)
-
-                        lmag = lmag_inst + zp_wa[0]
-
-                        output.update({'lmag':lmag})
-
-
+                        lmag_inject_inst,syntax = inject_sources(syntax = syntax,
+                                                                 image = close_up_expand,
+                                                                 model = model,
+                                                                 r_table = r_table,
+                                                                 lmag_guess=lmag_guess)
+                        lmag_inject = lmag_inject_inst + zp_wa[0]
+                        
+                    else:
+                        
+                        if r_table is None:
+                            logging.info('PSF model not available - cannot perform limiting magnitude injection')
+                        
+                        lmag_inject = np.nan
+                        
+                    output.update({'lmag_prob':lmag_prob})
+                    output.update({'lmag_inject':lmag_inject})
 
 
                 # =============================================================================
@@ -2483,12 +2456,12 @@ def main(object_info,syntax,fpath):
 
                 SNR_error = sigma_mag_err(SNR_target)
 
-                fit_error  = mag(target,0) - mag(target+target_err,0)
+                fit_error  = find_mag(target,0) - find_mag(target+target_err,0)
 
                 target_mag_err = SNR_error + fit_error[0]
 
 
-                location_offset = pix_dist(target_x_pix,target_x_pix_TNS,target_y_pix,target_y_pix_TNS)
+                location_offset = float(pix_dist(target_x_pix,target_x_pix_TNS,target_y_pix,target_y_pix_TNS))
 
                 logging.info('Pixel Offset: %.3f' % location_offset)
 
@@ -2497,16 +2470,17 @@ def main(object_info,syntax,fpath):
                 # =============================================================================
                 # Output
                 # =============================================================================
+
                 # Don't include aperture correction unless aperature photometry is used
                 if not do_ap:
                     ap_corr = 0
+
+                # This will be put in later
                 corrections_included = ''
 
-                mag_target = mag(target,zp_wa[0]) + ap_corr
+                mag_target = find_mag(target,zp_wa[0]) + ap_corr
 
-
-
-                mag_inst={use_filter+'_inst':mag(target,0)}
+                mag_inst={use_filter+'_inst':find_mag(target,0)}
                 mag_inst_err={use_filter+'_inst_err':target_mag_err}
 
                 zp={'zp_'+use_filter:zp_wa[0]}
@@ -2520,25 +2494,25 @@ def main(object_info,syntax,fpath):
                 SNR_dict = {'SNR':SNR_target}
 
                 time_exe = {'time':str(datetime.datetime.now())}
-
                 # if mag_target[use_filter] == 0.0:
                     # logging.info(' Target not seen - SNR = 0 ')
                     # mag_target[use_filter] = [np.nan]
 
-                target_locx = {'xpix':target_x_pix}
-                target_locy = {'ypix':target_y_pix}
 
+                target_locx = {'xpix':float(target_x_pix)}
+                target_locy = {'ypix':float(target_y_pix)}
 
                 # Print outbursts
                 logging.info('\nTarget counts: %.3f +/- %.3f'% (target,target_err))
                 logging.info('Target SNR: %.3f +/- %.3f' % (SNR_target,SNR_error))
-                logging.info('Instrumental Magnitude: %.3f +/- %.3f' % (mag(target,0)[0],fit_error))
+                logging.info('Instrumental Magnitude: %.3f +/- %.3f' % (find_mag(target,0)[0],fit_error))
                 logging.info('Zeropoint: %.3f +/- %.3f' % (zp_wa[0],zp_wa[1]))
 
 
 
                 # Apply extinction airmass correction
                 if syntax['apply_airmass_extinction']:
+
                     from autophot.packages.apply_airmass_extinction import apply_airmass_extinction
 
                     telescope_location = tele_syntax[telescope][inst_key][inst]['location']
@@ -2559,43 +2533,37 @@ def main(object_info,syntax,fpath):
                         # add [subtract] airmass correction magnitude
                         mag_target-=airmass_correction
 
-                    # output.update({use_filter + '_AP':'ap'})
-
                 mag_target_dict = {use_filter+corrections_included:mag_target}
 
                 mag_err = np.sqrt(target_mag_err**2 + zp_wa[1]**2)
 
                 mag_target_err_dict = {use_filter+corrections_included+'_err':mag_err}
 
-
-
-
-
-
                 if do_ap:
                     output.update({'method':'ap'})
                 else:
                     output.update({'method':'psf'})
 
-                if not np.isnan(lmag):
-
-                    from autophot.packages.functions import beta_value
-
-                    beta = beta_value(syntax['lim_SNR'],syntax['maglim_std'],target*exp_time,mean = syntax['maglim_mean'])
-
-                    logging.info('Detection Probability [beta] %.2f%%:'%  (beta*100))
-
-
-                    detection_beta = {'beta':beta}
-
-                else:
-                    detection_beta = {'beta':1}
 
                 if subtraction_ready:
                     output.update({'subtraction':True})
                 else:
                     output.update({'subtraction':False})
 
+
+
+                if not lmag_check:
+                    logging.info('Limiting Magnitude: skipped')
+                    detection_beta = {'beta':1}
+                else:
+                    logging.info('Probablistic Limiting Magnitude: %.3f' % lmag_prob)
+                    logging.info('Injected Limiting Magnitude: %.3f' % lmag_inject)
+
+                    from autophot.packages.functions import beta_value
+
+                    beta = beta_value(syntax['lim_SNR'],syntax['maglim_std'],target*exp_time,mean = syntax['maglim_mean'])
+                    logging.info('Detection Probability [beta] %.2f%%:'%  (beta*100))
+                    detection_beta = {'beta':beta}
 
                 output.update(target_locx)
                 output.update(target_locy)
@@ -2612,12 +2580,9 @@ def main(object_info,syntax,fpath):
                 output.update(detection_beta)
                 output.update(location_offset_dict)
 
-
-                if not lmag_check:
-                    logging.info('Limiting Magnitude: skipped')
-                else:
-                    logging.info('Limiting Magnitude: %.3f' % lmag)
-
+                output.update({'time_taken':round(time.time() - start_time,1)})
+                
+                
                 logging.info('Target Magnitude: %.3f +/- %.3f ' % (mag_target,mag_err))
 
 
@@ -2625,7 +2590,7 @@ def main(object_info,syntax,fpath):
                 # Print message to tell about source detection
                 # =============================================================================
 
-                if lmag < mag_target or np.isnan(mag_target):
+                if (lmag_prob < mag_target and lmag_inject < mag_target) or np.isnan(mag_target):
                     lim_mag_check = False
                 else:
                     lim_mag_check = True
@@ -2662,9 +2627,128 @@ def main(object_info,syntax,fpath):
 
                 output_file = os.path.join(cur_dir,'out.csv')
 
+                for key,value in output.items():
+
+                    if isinstance(value,list):
+                        output[key] = value[0]
+
+                    if output[key] == np.nan:
+                        output[key] = 999
+
+
+
                 target_output = pd.DataFrame(output,columns=output.keys(), index=[0])
 
                 target_output.round(6).to_csv(output_file,index=False)
+
+            # =============================================================================
+            # Do photometry on all sources
+            # =============================================================================
+            if syntax['do_all_phot']:
+                logging.info(' \n--- Perform photometry on all sources in field ---')
+
+                _,df_all,_= find.fwhm(image,syntax,sigma_lvl = syntax['do_all_phot_sigma'],fwhm = mean_fwhm)
+
+                ra_all,dec_all = w1.all_pix2world(df_all.x_pix.values,df_all.y_pix.values,1 )
+
+                df_all['RA'] = ra_all
+                df_all['DEC'] = dec_all
+
+                photfile = 'phot_filter_%s_sigma_%d_%s.csv' % (use_filter,syntax['do_all_phot_sigma'],str(base.split('.')[0]))
+
+                if do_ap:
+
+
+                    positions  = list(zip(df_all.x_pix.values,df_all.y_pix.values))
+
+                    target,target_bkg = ap_phot(positions,
+                                                image,
+                                                radius = syntax['ap_size']    * mean_fwhm,
+                                                r_in   = syntax['r_in_size']  * mean_fwhm,
+                                                r_out  = syntax['r_out_size'] * mean_fwhm)
+
+                    source_flux = (target/exp_time)
+                    source_bkg = (target_bkg/exp_time)
+
+                    SNR_sources = SNR(source_flux,source_bkg,exp_time,0,syntax['ap_size']* mean_fwhm,gain,0)
+                    df_all['snr'] = SNR_sources
+                    df_all[use_filter] = find_mag(source_flux,zp_wa[0] ) + ap_corr
+
+                    mag_err = sigma_mag_err(SNR_sources)
+                    df_all[use_filter+'_err'] =  np.sqrt(mag_err**2 + zp_wa[1]**2)
+
+
+
+                else:
+                    positions = df_all[['x_pix','y_pix']]
+
+                    psf_sources,_ = psf.fit(image,
+                                            positions,
+                                            r_table,
+                                            syntax,
+                                            # mean_fwhm
+                                            )
+
+                    psf_sources_phot,_ = psf.do(psf_sources,
+                                                r_table,
+                                                syntax,
+                                                mean_fwhm)
+
+                    sources_flux = np.array(psf_sources_phot.psf_counts/exp_time)
+
+                    sources_err = np.array(psf_sources_phot.psf_counts_err/exp_time)
+
+                    SNR_sources = np.array(sources_flux/sources_err)
+
+                    mag_err = sigma_mag_err(SNR_sources)
+
+                    ra_all,dec_all = w1.all_pix2world(psf_sources_phot.x_pix.values,psf_sources_phot.y_pix.values,1 )
+
+                    df_all = pd.DataFrame([])
+                    df_all['RA'] = ra_all
+                    df_all['DEC'] = dec_all
+
+
+
+                    df_all['snr'] = SNR_sources
+                    df_all['flux_inst'] = psf_sources['H_psf']
+                    df_all[use_filter] = find_mag(sources_flux,zp_wa[0] )
+
+                    mag_err = sigma_mag_err(SNR_sources)
+                    df_all[use_filter+'_err'] =  np.sqrt(mag_err**2 + zp_wa[1]**2)
+
+                all_phot_loc = syntax['write_dir']+photfile
+
+
+
+                try:
+                    df_all.to_csv(all_phot_loc,index = False)
+                    logging.info('Photometry of all sources saved as: %s' % str(base.split('.')[0])+'.csv')
+                except Exception as e:
+
+
+                    exc_type, exc_obj, exc_tb = sys.exc_info()
+                    fname1 = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                    logging.info(exc_type, fname1, exc_tb.tb_lineno,e)
+                    # sys.stdout = default_stdout
+                    logging.info('Warning - Table could not be saved to csv')
+                    # flog.close()
+                    pass
+
+                if syntax['remove_all_sources']:
+                    logging.info(' \n--- Removing all sources in field ---')
+
+                    df_all['x_pix'] = psf_sources_phot.x_pix.values
+                    df_all['y_pix'] = psf_sources_phot.y_pix.values
+
+
+                    psf.fit(image,
+                            df_all,
+                            r_table,
+                            syntax,
+                            # mean_fwhm,
+                            return_psf_model = False,
+                            return_subtraction_image = True)
 
             logging.info('Time Taken [ %s ]: %ss' % (str(os.getpid()),round(time.time() - start)))
 

@@ -70,7 +70,9 @@ def plot_PSF_construction_grid(sources,image,syntax):
     return
 
 
-def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
+def plot_PSF_model_steps(sources_dict,syntax,image,it = 10):
+
+
 
 
     '''
@@ -85,6 +87,10 @@ def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
 
     from autophot.packages.functions import array_correction,rebin,set_size
 
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
+
+
 
     plt.ioff()
 
@@ -98,7 +104,7 @@ def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
 
     keys = list(sources_dict.keys())
 
-    fig = plt.figure(figsize = set_size(500,aspect=0.5))
+
 
     bbox_props = dict(boxstyle="round,pad=0.5", fc="none", ec="none", lw=0.1)
 
@@ -107,6 +113,10 @@ def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
     nrows = 3
 
     for i in range(it):
+        if i>=len(keys):
+            break
+
+        fig = plt.figure(figsize = set_size(500,aspect=0.5))
 
         PSF_data = sources_dict[keys[i]]
 
@@ -132,7 +142,7 @@ def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
                     marker = 's',
                     facecolors='none',
                     s=10,
-                    edgecolors='black',label = 'Image center')
+                    edgecolors='black',label = 'Cutout center')
 
 
         # ax1.axvline(close_up.shape[0]/2,color = 'black',linestyle = ':')
@@ -302,17 +312,17 @@ def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
                    frameon = False,
                    bbox_to_anchor=(0.2, 0.15),
                    ncol = 2,
-                   prop={'size': 7},
+                   # prop={'size': 7},
                    scatterpoints=1,)
 
 
 
         plt.savefig(os.path.join(save_loc,'%s_residual.pdf' % keys[i]),
-                    # bbox_inches='tight'
+                    bbox_inches='tight'
                     )
 
 
-        # plt.close()
+        plt.close()
 
 
 
