@@ -1,0 +1,40 @@
+# get version from setup.py
+{% set data = load_setup_py_data(setup_file='../setup.py', from_recipe_dir=True) %}
+
+package:
+  name: autophot
+  version: {{ data.get('version') }}
+
+source:
+  path: ../
+
+build:
+  noarch: python
+
+requirements:
+  build:
+    - python 3.6.*
+    - setuptools
+  run:
+    - astroquery >=0.4
+    - pyyaml >=5.3.1
+    - lmfit >=1.0.0
+    - python >=3.6
+    - astroscrappy >=1.0.8
+    - matplotlib
+    - photutils >=0.7.2
+    - astropy >=4.0
+    - numpy >=1.18.1
+    - pandas >=1.0.3
+    - reproject
+
+test:
+ imports:
+   - autophot
+
+about:
+  home: https://github.com/Astro-Sean/autophot
+  license: ccbysa-4.0
+  license_file: license
+  description: Automated Photometry of Transients Photometric Pipeline
+  summary: Preparing initial upload

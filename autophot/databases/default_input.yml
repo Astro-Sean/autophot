@@ -1,0 +1,484 @@
+AutoPhOT_input:
+
+  # ============================= #
+  # == INPUT data for AutoPhOT == #
+  # ============================= #
+  # Initial parameters setup #
+
+  # Directory where files are, doesn't matter if they're in folders, it will look for ( .fits .fts .fit )extension,
+  fits_dir: null
+
+   # work on single file
+  fname: null
+
+  fpath: null
+
+  #Location of where tns queries are saved as yaml files
+  object_dir: null
+
+  # Colout term directory - not yet implemented
+  ct_dir: null
+
+  # Location of calibration files
+  calib_dir: null
+
+  # Reduce data
+  reduce: False
+
+  # Crop image built for wht r
+  crop_image: True
+
+  # Method for processing - serial [sp] or multi-processing [mp] (not working)
+  method: sp
+
+  # Remove  wcs and use local astrometry.net
+  remove_wcs: False
+
+  # try to download template:
+  get_template: False
+
+  # Force to use of psf fitting
+  force_psf: False
+
+  # skip lmag if target is bright enough
+  skip_lmag: False
+
+  # User template
+  use_user_template: True
+
+  #Ignore files that don't have wcs
+  ignore_no_wcs: false
+
+  # Ignore file if no telescope name given:
+  ignore_no_telescop: false
+
+  # remove cosmic rays using astroscrappy
+  remove_cmrays: true
+
+  save_dataframe: False
+
+  # if source catalog fails, rerun astrometry - very buggy
+  allow_wcs_recheck: false
+
+  # name extension of output directory will have input directory name plus this extension
+  outdir_name: REDUCED
+
+  # output csv name
+  outcsv_name: REDUCED
+
+  verbose: True # True = show me everything false = print to log files
+
+  # regroup photometric points if they're taken on same night, re formats output table, buggy, leave as false
+  regroup: false
+
+  # if the code fails with some files yet to be done, turn to true, will scan through output directory and see whats already been done
+  restart: True
+
+  # recovery of each target_out.csv file
+  recover: True
+
+  # User chooses to perform photometry on subtracted image (need to give location) [true] or original image [false]
+  phot_on_sub: True
+
+  # Perform photometry on specific filter or list of filters
+  select_filter: False
+  # Only do this filter
+  do_filter:
+    -
+    -
+    -
+
+  # Use header ra and dec to get target
+  use_header_radec: false
+  do_phot: True
+  do_subtraction: False
+  do_zeropoint: True
+  do_mag_lim: True
+  get_lim_mag: false
+  get_lim_mag_prob: true
+
+  do_catalog: True # Broken leave as true
+
+  use_local_stars: False
+  use_local_stars_dist: 500 #in pixels from target
+
+  #=====================================
+  # Photometry on all sources in field
+  #=====================================
+
+  do_all_phot_sigma: 15
+
+  # Do all phot
+  do_all_phot: False
+  do_all_sub: False
+  make_limiting_gif: False
+
+  #=====================================
+  # Catalog Search
+  #=====================================
+
+  # choose catalog to use - options: [pan_starrs,2mass,apass,skymapper,gaia]
+  catalog: null
+
+  # If using a custom catalog look in this fpath
+  catalog_custom_fpath: null
+
+  # Radius [degs]  around target for catalog source detection
+  radius: 0.25
+
+  # Ignore source/catalog matching if source location and catalog location are greater than dist_lim
+  dist_lim: 10
+
+  # No idea
+  pixel_offset_dist: false
+
+  #=====================================
+  # Warnings
+  #=====================================
+  # Turn on/off [true/false] warnings
+
+  master_warnings: false
+  catalog_warnings: false
+
+  #=====================================
+  # Target
+  #=====================================
+
+  # Name of what you want to perform photometric on, uses TNS api
+  #. set to None and use target_ra and target_dec [degs] to manually choose target
+  target_name: null
+
+  # if no filter given, use force filter
+  force_filter: r
+
+  target_ra: null
+  target_dec: null
+
+  # using catalog given by force_catalog_csv_name - need to test this
+  force_catalog_csv: false
+
+  #=====================================
+  # scaling
+  #=====================================
+
+   # initial image size to take cutout
+  int_scale: 25
+
+  # Multiplier to set close up cutout size based on image scaling
+  scale_multipler: 3
+
+  #=====================================
+  # Comsic Ray removal
+  #=====================================
+  use_astroscrappy: True
+  use_lacosmic: False
+
+  #=====================================
+  # Function fitting
+  #=====================================
+
+  use_local_stars_for_PSF: False
+  use_local_stars: False
+  use_source_arcmin: 1
+
+  use_moffat: False
+  default_moff_beta: 4.765
+  vary_moff_beta: False
+  check_nyquist: False
+  nyquist_limit: 2
+  use_astroalign: False
+  use_reproject_interp: True
+  apply_airmass_extinction : False
+  plot_airmass: True
+  psf_bkg_surface: True
+  psf_bkg_local: False
+  psf_bkg_poly: False
+  psf_bkg_poly_degree: 1
+  fit_PSF_FWHM: False
+  trim_edges: False
+  trim_edges_pixels: 1500
+
+  #=====================================
+  # Source Detection
+  #=====================================
+
+  # Source Detection  initial threshold value, will iterate through - quite buggy - for good images 100 should be grand
+
+  threshold_value: 100
+
+  fudge_factor: 5
+  fine_fudge_factor: 0.2
+
+  isolate_sources: True
+  iso_scale: 10
+
+  clip_sigma: true
+  sigma_sigma_clip: 1
+  median_sigma_clip: 1
+  sigma_plot: false
+
+  fwhm_guess: 5
+  fwhm_sigma: 1
+  fwhm_iters: 3
+
+  # remove saturated sources
+  remove_sat: True
+
+  #ignore any sources within pix_bound from edge
+  remove_boundary_sources: true
+  pix_bound: 25
+
+  # min and max allow sources when doing source detection to find fwhm
+  min_source_lim: 2
+  max_source_lim: 500
+  source_max_iter: 30
+
+  plots_PSF_sources: False
+  plots_PSF_residual: False
+  show_residuals: False
+
+  ap_corr_plot: False
+  force_lmag: False
+
+  update_wcs_scale: False
+  probable_detection_limit: False
+  probable_detection_limt_beta: 0.95
+  try_guess_scale: False
+
+  save_subtraction_quicklook: True
+  adjust_SN_loc: True
+
+  do_ap_on_sub: False
+  #====================================
+  # Source Detection
+  #=====================================
+
+  # close up source detection
+  sigma_source: 3.
+  source_sigma_close_up: 3.
+
+  fwhm: 3.
+  iters: 3
+
+  max_fit_fwhm: 25
+
+  #====================================
+  # Catalog
+  #====================================
+  # if source/catalog locations greater than this value get rid of it
+  match_dist: 5
+
+  # close up threshold level for source detection
+  bkg_level: 5
+
+  iso_cat: true
+
+  iso_cat_dist: 10
+
+  # show a plot of sources not detected
+  show_non_detections: false
+
+
+
+  #====================================
+  # Photometry
+  #====================================
+
+  # USe psf or aperture photometry
+  # Use PSF by default and if it fails it will use aperture
+  do_psf_phot: True
+  do_ap_phot: False
+
+  psf_bkg_surface: True
+  psf_bkg_local: False
+  psf_bkg_poly: False
+  psf_bkg_poly_degree: 1
+
+  apply_ct_zerpoint: False
+
+  catalog_matching_dx: 7.5
+  catalog_matching_dy: 7.5
+
+  max_catalog_sources: 250
+
+  # plot of no detected sources
+  show_nondetect_plot: false
+
+  # Broken
+  clip_catalog_sources: true
+  clip_limit: 300
+  clip_catalog_sigma: 2
+
+  #=====================================
+  # Aperture Correction
+  #=====================================
+
+  # aperture radius = ap_size * fwhm
+  ap_size: 1.5
+
+  #larger ap size for aperture corrections
+  inf_ap_size: 2.5 # cannot be larger than scale_multipler
+
+  # sigma clip aperture corrections
+  ap_corr_sigma: 3
+
+  # innular and outer annulus for background estimate
+  r_in_size: 2.0
+  r_out_size: 2.75
+
+  #=====================================
+  # PSF fitting
+  #=====================================
+
+  # Number of sources used in psf (if available)
+  psf_source_no: 12
+
+  # worst cause scenario use this many psf sources
+  min_psf_source_no: 3
+
+  norm_count_sum: 0.99
+
+  # show residuals from psf fitting
+  show_residuals: false
+
+  # show residual and shift from building psf
+  r_table_shift_check: False
+
+  # regrid value for building psf -  value of 6 is fine
+  regrid_size: 8
+
+  # only use sources if their SNR is greater than this values
+  construction_SNR: 25
+
+  # Psf pixel limit - amount psf can move around from source location
+  dx: 1.5
+  dy: 1.5
+
+  # error estimate of psf fit from covariance matrix
+  use_confinterval: false #<- broken
+  use_covarience: true
+
+  #=====================================
+  # Astrometry Algorithm
+  #=====================================
+
+  # location of solve-field from astromety.net
+  solve_field_exe_loc: None
+  offset_param: 5.        # mean pixel distance criteria between trusting original WCS and looking it up
+  search_radius: 0.5
+
+  guess_scale: False
+  downsample: 2
+  solve_field_timeout: 45 #seconds
+
+  # update telescope.yml from output of astrometry.net
+  update_wcs_scale: True
+
+  # allow recheck of wcs if pixel offset from sources is too great
+  allow_recheck: False
+
+  #=====================================
+  # HOTPANTS
+  #=====================================
+
+  # Set by user
+  hotpants_exe_loc: None
+
+  # Timeout for template subtraction
+  hotpants_timeout: 300 #seconds
+
+  #=====================================
+  # ZeroPoint
+  #=====================================
+  # sigma clip zeropoint values
+  zp_sigma: 2.0
+  # plot zeropoint
+  zp_plot: false
+  # save zeropoint
+  save_zp_plot: true
+
+  #=====================================
+  # Target
+  #====================================
+
+  plot_target: false
+  save_target_plot: true
+
+  #=====================================
+  # Limiting Magnitude
+  #=====================================
+  # limiting signal to noise
+  lim_SNR: 5
+
+  # Mutiple of fwhm to insert test sources
+  test_site_size: 3
+
+  # fill in to insert source with artifical mag or leave black to use mag from AutoPhOT
+  inject_source_mag:
+
+  # place fake source on save_target_plot
+  inject_source_on_target: False
+
+  # place source randomly
+  inject_source_random: True
+
+  inject_sources_random_number: 5
+
+  # recover injected sources:
+  inject_source_recover: False
+
+  # Add possoin noise to injected source
+  inject_source_add_noise: False
+
+  inject_source_recover_dmag: 0.25
+
+  inject_source_recover_dmag_redo: 10
+
+  inject_source_recover_nsteps: 75
+
+
+
+  #=====================================
+  # Graphing
+  #=====================================
+
+  # some of this may or may not work
+  check_correlation: false
+  ap_corr_plot: false
+  params: false
+
+  all_source_plot: false
+  include_mag_lim: false
+
+  target_plot: false
+  source_plot: false
+  source_bkg_plot: false
+  image_plot: false
+
+  show_mag_lim_plot: false
+  save_mag_lim_plot: true
+  save_inject_mag_lim_plot: True
+  show_inject_mag_lim_plot: false
+  show_source_plot: false
+  save_source_plot: true
+
+  show_final_mags: false
+
+  zp_comp_plot: false
+  check_referneces: false
+  psf_residuals: false
+
+  # used for graphing
+  markers:
+  - 'o'
+  - 'D'
+  - 'X'
+  - 's'
+  - 'd'
+  - 'P'
+  - 'p'
+  - '>'
+  - '<'
+  - 'p'
+  - 'H'
+  - 'h'

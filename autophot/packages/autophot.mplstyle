@@ -1,0 +1,44 @@
+font.size : 6
+axes.titlesize : 6
+axes.labelsize : 6
+axes.linewidth : 0.5
+
+# Subplots
+figure.subplot.wspace : 0.1
+figure.subplot.hspace : 0.1
+
+# LINES
+lines.linewidth : 0.5
+lines.markeredgewidth : 0.5
+lines.markersize : 1
+lines.solid_joinstyle : round
+lines.solid_capstyle : round
+
+# DASHES
+lines.dash_capstyle : round
+lines.dash_joinstyle : round
+
+# Ticks
+xtick.labelsize : 6
+xtick.direction : in
+ytick.labelsize : 6
+ytick.direction : in
+
+xtick.major.size : 5
+xtick.minor.size : 3
+ytick.major.size : 5
+ytick.minor.size : 3
+
+# Legend
+legend.markerscale   : 1
+legend.handletextpad : 0.5
+legend.columnspacing : 0.5
+legend.labelspacing  : 0.5
+legend.fontsize      : 6
+
+
+figure.dpi : 300
+scatter.marker : o
+savefig.dpi : 300
+savefig.transparent : False
+savefig.format : pdf

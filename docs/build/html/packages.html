@@ -1,0 +1,956 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+  <meta charset="utf-8" />
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  
+  <title>packages package &mdash; AutoPhOT  documentation</title>
+  
+
+  
+  <link rel="stylesheet" href="_static/css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="_static/pygments.css" type="text/css" />
+
+  
+  
+
+  
+  
+
+  
+
+  
+  <!--[if lt IE 9]>
+    <script src="_static/js/html5shiv.min.js"></script>
+  <![endif]-->
+  
+    
+      <script type="text/javascript" id="documentation_options" data-url_root="./" src="_static/documentation_options.js"></script>
+        <script src="_static/jquery.js"></script>
+        <script src="_static/underscore.js"></script>
+        <script src="_static/doctools.js"></script>
+        <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
+    
+    <script type="text/javascript" src="_static/js/theme.js"></script>
+
+    
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="prev" title="Add your own sequnce stars" href="example_notebooks/add_your_catalog_example.html" /> 
+</head>
+
+<body class="wy-body-for-nav">
+
+   
+  <div class="wy-grid-for-nav">
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+          
+
+          
+            <a href="index.html">
+          
+
+          
+            
+            <img src="_static/logo.png" class="logo" alt="Logo"/>
+          
+          </a>
+
+          
+
+          
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+
+          
+        </div>
+
+        
+        <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+          
+            
+            
+              
+            
+            
+              <p class="caption"><span class="caption-text">Getting Started:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="tutorials.html">Tutorials</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">packages package</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#submodules">Submodules</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.aperture">packages.aperture module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.apply_airmass_extinction">packages.apply_airmass_extinction module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.call_astrometry_net">packages.call_astrometry_net module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.call_catalog">packages.call_catalog module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.call_crayremoval">packages.call_crayremoval module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.call_datacheck">packages.call_datacheck module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.call_hotpants">packages.call_hotpants module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.call_locationcheck">packages.call_locationcheck module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.call_yaml">packages.call_yaml module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.check_tns">packages.check_tns module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.check_wcs">packages.check_wcs module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.color_correction">packages.color_correction module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.create_plots">packages.create_plots module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.find">packages.find module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.functions">packages.functions module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.get_template">packages.get_template module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.lightcurve">packages.lightcurve module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.limit">packages.limit module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.main">packages.main module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.psf">packages.psf module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.recover_output">packages.recover_output module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.rm_bkg">packages.rm_bkg module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.run">packages.run module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.uncertain">packages.uncertain module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages">Module contents</a></li>
+</ul>
+</li>
+</ul>
+
+            
+          
+        </div>
+        
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" aria-label="top navigation">
+        
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">AutoPhOT</a>
+        
+      </nav>
+
+
+      <div class="wy-nav-content">
+        
+        <div class="rst-content">
+        
+          
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<div role="navigation" aria-label="breadcrumbs navigation">
+
+  <ul class="wy-breadcrumbs">
+    
+      <li><a href="index.html" class="icon icon-home"></a> &raquo;</li>
+        
+      <li>packages package</li>
+    
+    
+      <li class="wy-breadcrumbs-aside">
+        
+          
+            <a href="_sources/packages.rst.txt" rel="nofollow"> View page source</a>
+          
+        
+      </li>
+    
+  </ul>
+
+  
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+            
+  
+<style>
+/* CSS overrides for sphinx_rtd_theme */
+
+/* 24px margin */
+.nbinput.nblast.container,
+.nboutput.nblast.container {
+    margin-bottom: 19px;  /* padding has already 5px */
+}
+
+/* ... except between code cells! */
+.nblast.container + .nbinput.container {
+    margin-top: -19px;
+}
+
+.admonition > p:before {
+    margin-right: 4px;  /* make room for the exclamation icon */
+}
+
+/* Fix math alignment, see https://github.com/rtfd/sphinx_rtd_theme/pull/686 */
+.math {
+    text-align: unset;
+}
+</style>
+<div class="section" id="packages-package">
+<h1>packages package<a class="headerlink" href="#packages-package" title="Permalink to this headline">¶</a></h1>
+<div class="section" id="submodules">
+<h2>Submodules<a class="headerlink" href="#submodules" title="Permalink to this headline">¶</a></h2>
+</div>
+<div class="section" id="module-packages.aperture">
+<span id="packages-aperture-module"></span><h2>packages.aperture module<a class="headerlink" href="#module-packages.aperture" title="Permalink to this headline">¶</a></h2>
+<dl class="py function">
+<dt id="packages.aperture.ap_phot">
+<code class="sig-prename descclassname"><span class="pre">packages.aperture.</span></code><code class="sig-name descname"><span class="pre">ap_phot</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">positions</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">data</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">radius</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_in</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_out</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.aperture.ap_phot" title="Permalink to this definition">¶</a></dt>
+<dd><p>This is a summary of the aperture packge. This a robust aperture photometry packages for use in autophot</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>positions</strong> (<em>tuple</em>) – list of tuples containing (x,y) positions of object</p></li>
+<li><p><strong>r_in</strong> (<em>float</em>) – inner radius of background annulus</p></li>
+<li><p><strong>r_out</strong> (<em>float</em>) – outer radius of background annulus</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even"><p>Returns lost of aperature measurements</p>
+</dd>
+<dt class="field-odd">Return type</dt>
+<dd class="field-odd"><p>list</p>
+</dd>
+</dl>
+</dd></dl>
+
+</div>
+<div class="section" id="module-packages.apply_airmass_extinction">
+<span id="packages-apply-airmass-extinction-module"></span><h2>packages.apply_airmass_extinction module<a class="headerlink" href="#module-packages.apply_airmass_extinction" title="Permalink to this headline">¶</a></h2>
+<p>Created on Thu Nov 12 10:58:35 2020</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.apply_airmass_extinction.apply_airmass_extinction">
+<code class="sig-prename descclassname"><span class="pre">packages.apply_airmass_extinction.</span></code><code class="sig-name descname"><span class="pre">apply_airmass_extinction</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.apply_airmass_extinction.apply_airmass_extinction" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.call_astrometry_net">
+<span id="packages-call-astrometry-net-module"></span><h2>packages.call_astrometry_net module<a class="headerlink" href="#module-packages.call_astrometry_net" title="Permalink to this headline">¶</a></h2>
+<p>Created on Mon Oct 22 09:24:59 2018</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.call_astrometry_net.AstrometryNetLOCAL">
+<code class="sig-prename descclassname"><span class="pre">packages.call_astrometry_net.</span></code><code class="sig-name descname"><span class="pre">AstrometryNetLOCAL</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_astrometry_net.AstrometryNetLOCAL" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.call_catalog">
+<span id="packages-call-catalog-module"></span><h2>packages.call_catalog module<a class="headerlink" href="#module-packages.call_catalog" title="Permalink to this headline">¶</a></h2>
+<p>Created on Fri Nov  9 09:40:29 2018</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.call_catalog.match">
+<code class="sig-prename descclassname"><span class="pre">packages.call_catalog.</span></code><code class="sig-name descname"><span class="pre">match</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">headinfo</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_coords</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">catalog_syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">filter_</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">data</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_catalog.match" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.call_catalog.search">
+<code class="sig-prename descclassname"><span class="pre">packages.call_catalog.</span></code><code class="sig-name descname"><span class="pre">search</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">headinfo</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_coords</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">catalog_syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">filter_</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_catalog.search" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.call_crayremoval">
+<span id="packages-call-crayremoval-module"></span><h2>packages.call_crayremoval module<a class="headerlink" href="#module-packages.call_crayremoval" title="Permalink to this headline">¶</a></h2>
+<dl class="py function">
+<dt id="packages.call_crayremoval.run_astroscrappy">
+<code class="sig-prename descclassname"><span class="pre">packages.call_crayremoval.</span></code><code class="sig-name descname"><span class="pre">run_astroscrappy</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image_old</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_crayremoval.run_astroscrappy" title="Permalink to this definition">¶</a></dt>
+<dd><p>Function to call a instance of astroscrappy by Curtis McCully</p>
+<p>link: <a class="reference external" href="https://astroscrappy.readthedocs.io/en/latest/#functions">https://astroscrappy.readthedocs.io/en/latest/#functions</a></p>
+</dd></dl>
+
+</div>
+<div class="section" id="module-packages.call_datacheck">
+<span id="packages-call-datacheck-module"></span><h2>packages.call_datacheck module<a class="headerlink" href="#module-packages.call_datacheck" title="Permalink to this headline">¶</a></h2>
+<p>Instrument data</p>
+<p>Script to go through files in direcrtory and check if
+appropiate keywords are available in telescope.yml which is found
+in ‘wdir’</p>
+<dl class="py function">
+<dt id="packages.call_datacheck.checkteledata">
+<code class="sig-prename descclassname"><span class="pre">packages.call_datacheck.</span></code><code class="sig-name descname"><span class="pre">checkteledata</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">flst</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">filepath</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_datacheck.checkteledata" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.call_hotpants">
+<span id="packages-call-hotpants-module"></span><h2>packages.call_hotpants module<a class="headerlink" href="#module-packages.call_hotpants" title="Permalink to this headline">¶</a></h2>
+<p>Created on Thu Jul 18 12:10:34 2019</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.call_hotpants.HOTterPANTS">
+<code class="sig-prename descclassname"><span class="pre">packages.call_hotpants.</span></code><code class="sig-name descname"><span class="pre">HOTterPANTS</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">template</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">psf</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_hotpants.HOTterPANTS" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.call_hotpants.point_source_align">
+<code class="sig-prename descclassname"><span class="pre">packages.call_hotpants.</span></code><code class="sig-name descname"><span class="pre">point_source_align</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">template_image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image_sources</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">template_sources</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_hotpants.point_source_align" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.call_hotpants.prepare_templates">
+<code class="sig-prename descclassname"><span class="pre">packages.call_hotpants.</span></code><code class="sig-name descname"><span class="pre">prepare_templates</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">fpath</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">get_fwhm</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">clean_cosmic</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">redo_wcs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_hotpants.prepare_templates" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.call_locationcheck">
+<span id="packages-call-locationcheck-module"></span><h2>packages.call_locationcheck module<a class="headerlink" href="#module-packages.call_locationcheck" title="Permalink to this headline">¶</a></h2>
+<p>Created on Thu Nov 12 11:59:19 2020</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.call_locationcheck.add_telecope_location">
+<code class="sig-prename descclassname"><span class="pre">packages.call_locationcheck.</span></code><code class="sig-name descname"><span class="pre">add_telecope_location</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">telescope_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_locationcheck.add_telecope_location" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.call_locationcheck.check_telescope_location">
+<code class="sig-prename descclassname"><span class="pre">packages.call_locationcheck.</span></code><code class="sig-name descname"><span class="pre">check_telescope_location</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">telescope_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_locationcheck.check_telescope_location" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.call_yaml">
+<span id="packages-call-yaml-module"></span><h2>packages.call_yaml module<a class="headerlink" href="#module-packages.call_yaml" title="Permalink to this headline">¶</a></h2>
+<p>Package used for load yaml files and
+dumping/ updating yaml files to control AutoPhot Input</p>
+<dl class="simple">
+<dt>Input Parameters:</dt><dd><ul class="simple">
+<li><p>fname = name of yaml file</p></li>
+<li><p>dname = location of fname files, if None location will be direcotyr of call_yaml.py</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py class">
+<dt id="packages.call_yaml.yaml_syntax">
+<em class="property"><span class="pre">class</span> </em><code class="sig-prename descclassname"><span class="pre">packages.call_yaml.</span></code><code class="sig-name descname"><span class="pre">yaml_syntax</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filepath</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dict_name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_yaml.yaml_syntax" title="Permalink to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt id="packages.call_yaml.yaml_syntax.create_yaml">
+<code class="sig-name descname"><span class="pre">create_yaml</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_yaml.yaml_syntax.create_yaml" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt id="packages.call_yaml.yaml_syntax.load_vars">
+<code class="sig-name descname"><span class="pre">load_vars</span></code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_yaml.yaml_syntax.load_vars" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt id="packages.call_yaml.yaml_syntax.update_var">
+<code class="sig-name descname"><span class="pre">update_var</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">tele</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inst_key</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inst</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">key</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">new_val</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_yaml.yaml_syntax.update_var" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</div>
+<div class="section" id="module-packages.check_tns">
+<span id="packages-check-tns-module"></span><h2>packages.check_tns module<a class="headerlink" href="#module-packages.check_tns" title="Permalink to this headline">¶</a></h2>
+<p>Transient Name Server Query using AutoPhOT Bot</p>
+<dl class="py class">
+<dt id="packages.check_tns.TNS_query">
+<em class="property"><span class="pre">class</span> </em><code class="sig-prename descclassname"><span class="pre">packages.check_tns.</span></code><code class="sig-name descname"><span class="pre">TNS_query</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">objname</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.check_tns.TNS_query" title="Permalink to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt id="packages.check_tns.TNS_query.get_coords">
+<code class="sig-name descname"><span class="pre">get_coords</span></code><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#packages.check_tns.TNS_query.get_coords" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</div>
+<div class="section" id="module-packages.check_wcs">
+<span id="packages-check-wcs-module"></span><h2>packages.check_wcs module<a class="headerlink" href="#module-packages.check_wcs" title="Permalink to this headline">¶</a></h2>
+<p>Integration between standard fits file/format and output of Dustin Langs
+Astrometry.Net algorithim</p>
+<dl class="py function">
+<dt id="packages.check_wcs.removewcs">
+<code class="sig-prename descclassname"><span class="pre">packages.check_wcs.</span></code><code class="sig-name descname"><span class="pre">removewcs</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">parent_fits</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">delete_keys</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.check_wcs.removewcs" title="Permalink to this definition">¶</a></dt>
+<dd><ul class="simple">
+<li><p>removewcs:</p></li>
+</ul>
+<p>rename pre-existing keywords from header hdu given in keywords list.</p>
+<dl class="simple">
+<dt>parameters:</dt><dd><ul class="simple">
+<li><p>a: header information given via fits.open</p></li>
+<li><p>delete_keys: delete this keywords and thier values rather than renaming</p></li>
+</ul>
+</dd>
+<dt>retruns:</dt><dd><ul class="simple">
+<li><p>a: new header hdu with/without new keywords</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt id="packages.check_wcs.updatewcs">
+<code class="sig-prename descclassname"><span class="pre">packages.check_wcs.</span></code><code class="sig-name descname"><span class="pre">updatewcs</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">parent_fits</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wcs_fits</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.check_wcs.updatewcs" title="Permalink to this definition">¶</a></dt>
+<dd><ul class="simple">
+<li><p>updatewcs(a,b):</p></li>
+</ul>
+<p>Update header fits file ‘a’ with the header information with header fits file ‘b’</p>
+<p>paramters:
+- a: header information given via fits.open
+- b: header information  from astrometry.net query</p>
+<p>retruns:
+- a: header hdu with update keywords</p>
+</dd></dl>
+
+</div>
+<div class="section" id="module-packages.color_correction">
+<span id="packages-color-correction-module"></span><h2>packages.color_correction module<a class="headerlink" href="#module-packages.color_correction" title="Permalink to this headline">¶</a></h2>
+<p>Created on Wed Jul  1 11:01:48 2020</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.color_correction.NestedDictValues">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">NestedDictValues</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">d</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.NestedDictValues" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.build_db">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">build_db</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_REBIN</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">refresh</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ytol_upper</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ytol_lower</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.001</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_to_db</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.build_db" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.calc_zeropoint">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">calc_zeropoint</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">true_mag</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inst_mag</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ct</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mag_c1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mag_c2</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.calc_zeropoint" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.colorcorrect_transient">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">colorcorrect_transient</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tol</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1e-05</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_REBIN</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_convergent_plots</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">print_output</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.colorcorrect_transient" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.correct_zeropoint">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">correct_zeropoint</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_REBIN</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">print_output</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">overwrite</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.correct_zeropoint" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.find_available_colors">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">find_available_colors</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_REBIN</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">tol</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1e-05</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_convergent_plots</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">print_output</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.find_available_colors" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.find_nearest_idx">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">find_nearest_idx</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">array</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.find_nearest_idx" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.get_colorslope">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">get_colorslope</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_REBIN</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sigma</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">print_output</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">auto_update</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.get_colorslope" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.get_colorslope_emcee">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">get_colorslope_emcee</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">err_lim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nsteps</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1000</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">niter_burn</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">200</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nwalkers</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">250</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">do_all_combos</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">auto_update</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_corner_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.get_colorslope_emcee" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.iteration">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">iteration</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">mag_inst</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">zp</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ct</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">m1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">m2</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.iteration" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.lnlike">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">lnlike</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">theta</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">x</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">y</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">yerr</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.lnlike" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.lnprior">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">lnprior</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">theta</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.lnprior" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.lnprob">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">lnprob</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">theta</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">x</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">y</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">yerr</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.lnprob" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.load_obj">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">load_obj</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">fpath</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.load_obj" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.plot_color_histrogram">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">plot_color_histrogram</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">saveloc</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">title</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'None'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">xlabel</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'None'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ylabel</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'None'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.plot_color_histrogram" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.pm">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">pm</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">i</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.pm" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.rebin_lightcurve">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">rebin_lightcurve</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_colorcorrect_zeropoint</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weighted_average</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">check_lmag</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.rebin_lightcurve" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.save_colors">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">save_colors</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">loc</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">d</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">append</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">update_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.save_colors" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.color_correction.save_obj">
+<code class="sig-prename descclassname"><span class="pre">packages.color_correction.</span></code><code class="sig-name descname"><span class="pre">save_obj</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">obj</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fpath</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.color_correction.save_obj" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.create_plots">
+<span id="packages-create-plots-module"></span><h2>packages.create_plots module<a class="headerlink" href="#module-packages.create_plots" title="Permalink to this headline">¶</a></h2>
+<p>Created on Wed Sep 30 14:33:07 2020</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.create_plots.plot_PSF_construction_grid">
+<code class="sig-prename descclassname"><span class="pre">packages.create_plots.</span></code><code class="sig-name descname"><span class="pre">plot_PSF_construction_grid</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">sources</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.create_plots.plot_PSF_construction_grid" title="Permalink to this definition">¶</a></dt>
+<dd><p>Plot Sources used in creating PSF</p>
+</dd></dl>
+
+<dl class="py function">
+<dt id="packages.create_plots.plot_PSF_model_steps">
+<code class="sig-prename descclassname"><span class="pre">packages.create_plots.</span></code><code class="sig-name descname"><span class="pre">plot_PSF_model_steps</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">sources_dict</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">it</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">6</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.create_plots.plot_PSF_model_steps" title="Permalink to this definition">¶</a></dt>
+<dd><p>Plot out steps for PSF model for use in publication</p>
+</dd></dl>
+
+</div>
+<div class="section" id="module-packages.find">
+<span id="packages-find-module"></span><h2>packages.find module<a class="headerlink" href="#module-packages.find" title="Permalink to this headline">¶</a></h2>
+<p>Created on Fri Nov 16 14:13:14 2018</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.find.ap_correction">
+<code class="sig-prename descclassname"><span class="pre">packages.find.</span></code><code class="sig-name descname"><span class="pre">ap_correction</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">df</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.find.ap_correction" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.find.fwhm">
+<code class="sig-prename descclassname"><span class="pre">packages.find.</span></code><code class="sig-name descname"><span class="pre">fwhm</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sigma_lvl</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.find.fwhm" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.find.phot">
+<code class="sig-prename descclassname"><span class="pre">packages.find.</span></code><code class="sig-name descname"><span class="pre">phot</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">df</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">LOG</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.find.phot" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.functions">
+<span id="packages-functions-module"></span><h2>packages.functions module<a class="headerlink" href="#module-packages.functions" title="Permalink to this headline">¶</a></h2>
+<dl class="py function">
+<dt id="packages.functions.array_correction">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">array_correction</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">x</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.array_correction" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.beta_value">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">beta_value</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">n</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sigma</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">f_ul</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">mean</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.beta_value" title="Permalink to this definition">¶</a></dt>
+<dd><p>detection probability from
+<a class="reference external" href="http://web.ipac.caltech.edu/staff/fmasci/home/mystats/UpperLimits_FM2011.pdf">http://web.ipac.caltech.edu/staff/fmasci/home/mystats/UpperLimits_FM2011.pdf</a></p>
+</dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.find_2d_int_percent">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">find_2d_int_percent</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">count_percent</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.find_2d_int_percent" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.gauss_2d">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">gauss_2d</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">x0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">y0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sky</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">A</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image_params</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.gauss_2d" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.gauss_fwhm2sigma">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">gauss_fwhm2sigma</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image_params</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.gauss_fwhm2sigma" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.gauss_sigma2fwhm">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">gauss_sigma2fwhm</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image_params</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.gauss_sigma2fwhm" title="Permalink to this definition">¶</a></dt>
+<dd><p>Gaussian Function</p>
+</dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.getheader">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">getheader</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">fpath</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.getheader" title="Permalink to this definition">¶</a></dt>
+<dd><p>Get fits image header. Find telescope header info based on “Telescop” header key
+if multiple headers are found, concatination into one large header file</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd"><p><strong>fpath</strong> (<em>str</em>) – Location of fits image</p>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even"><p>header information</p>
+</dd>
+<dt class="field-odd">Return type</dt>
+<dd class="field-odd"><p>object</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.getimage">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">getimage</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">fpath</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.getimage" title="Permalink to this definition">¶</a></dt>
+<dd><p>Function to find image for filepath</p>
+</dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.mag">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">mag</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">counts</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">zp</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ct_gradient</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dmag</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">airmass</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.mag" title="Permalink to this definition">¶</a></dt>
+<dd><p>Calculate zeropint using:</p>
+<p>mag = - 2.5 * log10 (counts) + ct(dmag) + zp + airmass</p>
+<p>if negative counts code will return nan for</p>
+</dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.moffat_2d">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">moffat_2d</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">x0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">y0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sky</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">A</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image_params</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.moffat_2d" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.moffat_fwhm">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">moffat_fwhm</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image_params</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.moffat_fwhm" title="Permalink to this definition">¶</a></dt>
+<dd><p>Moffat Profile</p>
+</dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.norm">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">norm</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">array</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.norm" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.order_shift">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">order_shift</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">x</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.order_shift" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.pix_dist">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">pix_dist</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">x1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">x2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">y1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">y2</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.pix_dist" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.pixel_correction">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">pixel_correction</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">x</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">m</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.pixel_correction" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.rebin">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">rebin</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">arr</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">new_shape</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.rebin" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.renorm">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">renorm</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">array</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lb</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">up</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.renorm" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.scale_roll">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">scale_roll</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">x</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">xc</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">m</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.scale_roll" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.set_size">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">set_size</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">width</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">aspect</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fraction</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.set_size" title="Permalink to this definition">¶</a></dt>
+<dd><p>This is a summary of the aperture packge</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd"><p><strong>positions</strong> (<em>[</em><em>ParamType</em><em>]</em><em>(</em><em>, </em><em>optional</em><em>)</em>) – list of tuples containing (x,y) positions of object</p>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even"><p>Returns lost of aperature measurements</p>
+</dd>
+<dt class="field-odd">Return type</dt>
+<dd class="field-odd"><p>list</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.weighted_avg_and_std">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">weighted_avg_and_std</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">values</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weights</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.weighted_avg_and_std" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.weighted_median">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">weighted_median</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">data</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">weights</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.weighted_median" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.functions.zeropoint">
+<code class="sig-prename descclassname"><span class="pre">packages.functions.</span></code><code class="sig-name descname"><span class="pre">zeropoint</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">mag</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">counts</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ct_gradient</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dmag</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">airmass</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.zeropoint" title="Permalink to this definition">¶</a></dt>
+<dd><p>Calculate zeropint using:</p>
+<blockquote>
+<div><p>mag = -2.5 * log10 (counts) + ct(dmag) + zp + airmass</p>
+</div></blockquote>
+</dd></dl>
+
+</div>
+<div class="section" id="module-packages.get_template">
+<span id="packages-get-template-module"></span><h2>packages.get_template module<a class="headerlink" href="#module-packages.get_template" title="Permalink to this headline">¶</a></h2>
+<dl class="py function">
+<dt id="packages.get_template.get_pstars">
+<code class="sig-prename descclassname"><span class="pre">packages.get_template.</span></code><code class="sig-name descname"><span class="pre">get_pstars</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ra</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dec</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">output_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">filters</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'grizy'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">color</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.get_template.get_pstars" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.lightcurve">
+<span id="packages-lightcurve-module"></span><h2>packages.lightcurve module<a class="headerlink" href="#module-packages.lightcurve" title="Permalink to this headline">¶</a></h2>
+<p>Created on Fri Jun 26 16:52:19 2020</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.lightcurve.Vega2AB">
+<code class="sig-prename descclassname"><span class="pre">packages.lightcurve.</span></code><code class="sig-name descname"><span class="pre">Vega2AB</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">df</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">AB2Vega</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.lightcurve.Vega2AB" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.lightcurve.plot_lightcurve">
+<code class="sig-prename descclassname"><span class="pre">packages.lightcurve.</span></code><code class="sig-name descname"><span class="pre">plot_lightcurve</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sn_peak</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">check_fwhm</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm_limit</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pick_filter</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">[]</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">filter_spacing</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">error_lim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.25</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_error_lim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">show_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">show_colour_shift</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_REBIN</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">show_color_only</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ylim</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">[]</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">vega2AB</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">AB2vega</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.lightcurve.plot_lightcurve" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.limit">
+<span id="packages-limit-module"></span><h2>packages.limit module<a class="headerlink" href="#module-packages.limit" title="Permalink to this headline">¶</a></h2>
+<p>Created on Fri Mar  6 14:10:14 2020</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.limit.limiting_magnitude_prob">
+<code class="sig-prename descclassname"><span class="pre">packages.limit.</span></code><code class="sig-name descname"><span class="pre">limiting_magnitude_prob</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_table</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.limit.limiting_magnitude_prob" title="Permalink to this definition">¶</a></dt>
+<dd><dl class="simple">
+<dt>syntax - dict</dt><dd><p>dDtionary of input paramters</p>
+</dd>
+<dt>image - np.array</dt><dd><p>Image of region of interest with target in center of image</p>
+</dd>
+<dt>model - function</dt><dd><ul class="simple">
+<li><p>psf function from autophot</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt id="packages.limit.ranks">
+<code class="sig-prename descclassname"><span class="pre">packages.limit.</span></code><code class="sig-name descname"><span class="pre">ranks</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">sample</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.limit.ranks" title="Permalink to this definition">¶</a></dt>
+<dd><p>Return the ranks of each element in an integer sample.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt id="packages.limit.sample_with_minimum_distance">
+<code class="sig-prename descclassname"><span class="pre">packages.limit.</span></code><code class="sig-name descname"><span class="pre">sample_with_minimum_distance</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">n</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">[0,</span> <span class="pre">40]</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">k</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">4</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">d</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.limit.sample_with_minimum_distance" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.main">
+<span id="packages-main-module"></span><h2>packages.main module<a class="headerlink" href="#module-packages.main" title="Permalink to this headline">¶</a></h2>
+<ul class="simple">
+<li><p>Main operations of AutoPHoT</p></li>
+</ul>
+<p>Inputs:</p>
+<blockquote>
+<div><ul class="simple">
+<li><dl class="simple">
+<dt>object_info - yaml file:</dt><dd><p>TNS repsonse for target [dictionary]</p>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>syntax - yaml file:</dt><dd><p>yaml file input [dictionary]</p>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>fpath - str:</dt><dd><p>file path [str]</p>
+</dd>
+</dl>
+</li>
+</ul>
+</div></blockquote>
+<dl class="simple">
+<dt>Outputs:</dt><dd><ul class="simple">
+<li><dl class="simple">
+<dt>output:</dt><dd><dl class="simple">
+<dt>dictionary out output photmetric data:</dt><dd><dl class="simple">
+<dt>fname:</dt><dd><p>Orreginal file path</p>
+</dd>
+<dt>telescope:</dt><dd><p>Telescope used - needed for plotting</p>
+</dd>
+<dt>mjd:</dt><dd><p>Modified julian date</p>
+</dd>
+<dt>zp_[]:</dt><dd><p>Photometric zeropoint. dictionary key will be followed by filter name</p>
+</dd>
+<dt>zp_[]_err:</dt><dd><p>error on photometric zeropoint</p>
+</dd>
+<dt>[]_inst:</dt><dd><p>Instrumental magnitude</p>
+</dd>
+<dt>[]:</dt><dd><p>Calibarted magnitude</p>
+</dd>
+<dt>[]_err:</dt><dd><p>Error on Calibarated magnitude</p>
+</dd>
+<dt>SNR:</dt><dd><p>Signal to noise ratio of target</p>
+</dd>
+<dt>lmag:</dt><dd><p>calibrated limiting magnitude</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd>
+</dl>
+</li>
+<li><dl class="simple">
+<dt>fpath:</dt><dd><p>filepath to new fits image file</p>
+</dd>
+</dl>
+</li>
+</ul>
+</dd>
+</dl>
+<dl class="py function">
+<dt id="packages.main.main">
+<code class="sig-prename descclassname"><span class="pre">packages.main.</span></code><code class="sig-name descname"><span class="pre">main</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">object_info</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fpath</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.main.main" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.psf">
+<span id="packages-psf-module"></span><h2>packages.psf module<a class="headerlink" href="#module-packages.psf" title="Permalink to this headline">¶</a></h2>
+<p>Created on Tue Jan 29 12:24:07 2019</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.psf.build_r_table">
+<code class="sig-prename descclassname"><span class="pre">packages.psf.</span></code><code class="sig-name descname"><span class="pre">build_r_table</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">base_image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">selected_sources</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.psf.build_r_table" title="Permalink to this definition">¶</a></dt>
+<dd><p>Build tables of residuals from bright isolated sources given in selected_sources dataframe</p>
+<p>Function will function selected function to these sources and normialise there residaul array to build a residual image
+which will then be used to make a PSF for the image</p>
+</dd></dl>
+
+<dl class="py function">
+<dt id="packages.psf.do">
+<code class="sig-prename descclassname"><span class="pre">packages.psf.</span></code><code class="sig-name descname"><span class="pre">do</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">df</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">residual</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.psf.do" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.psf.fit">
+<code class="sig-prename descclassname"><span class="pre">packages.psf.</span></code><code class="sig-name descname"><span class="pre">fit</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sources</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">residual_table</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_psf_model</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">show_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rm_bkg_val</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hold_pos</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_fwhm</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_subtraction_image</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fname</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">no_print</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.psf.fit" title="Permalink to this definition">¶</a></dt>
+<dd><p>Fitting of PSF model to source</p>
+</dd></dl>
+
+</div>
+<div class="section" id="module-packages.recover_output">
+<span id="packages-recover-output-module"></span><h2>packages.recover_output module<a class="headerlink" href="#module-packages.recover_output" title="Permalink to this headline">¶</a></h2>
+<p>Created on Fri Apr 17 16:59:24 2020</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.recover_output.recover">
+<code class="sig-prename descclassname"><span class="pre">packages.recover_output.</span></code><code class="sig-name descname"><span class="pre">recover</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.recover_output.recover" title="Permalink to this definition">¶</a></dt>
+<dd><p>Go through each subdirectory and look for imput output file - recover data</p>
+<p>Takes in filepath from syntax file</p>
+<p>Looks for file ending in ‘_APT’ - the string placed on fits
+files that have been ran through looks for ‘target_output’ [old] or ‘out’
+csv files and concats them to DataFrame</p>
+<p>Writes outcsv_name in filepath</p>
+</dd></dl>
+
+</div>
+<div class="section" id="module-packages.rm_bkg">
+<span id="packages-rm-bkg-module"></span><h2>packages.rm_bkg module<a class="headerlink" href="#module-packages.rm_bkg" title="Permalink to this headline">¶</a></h2>
+<dl class="py function">
+<dt id="packages.rm_bkg.rm_bkg">
+<code class="sig-prename descclassname"><span class="pre">packages.rm_bkg.</span></code><code class="sig-name descname"><span class="pre">rm_bkg</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">source</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">xc</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">yc</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.rm_bkg.rm_bkg" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages.run">
+<span id="packages-run-module"></span><h2>packages.run module<a class="headerlink" href="#module-packages.run" title="Permalink to this headline">¶</a></h2>
+<p>Created on Tue Feb  5 09:08:45 2019</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.run.run_autophot">
+<code class="sig-prename descclassname"><span class="pre">packages.run.</span></code><code class="sig-name descname"><span class="pre">run_autophot</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">syntax</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.run.run_autophot" title="Permalink to this definition">¶</a></dt>
+<dd><p>This is the main function used to perform automated photometry</p>
+</dd></dl>
+
+</div>
+<div class="section" id="module-packages.uncertain">
+<span id="packages-uncertain-module"></span><h2>packages.uncertain module<a class="headerlink" href="#module-packages.uncertain" title="Permalink to this headline">¶</a></h2>
+<p>Created on Wed Mar  6 10:53:13 2019</p>
+<p>&#64;author: seanbrennan</p>
+<dl class="py function">
+<dt id="packages.uncertain.SNR">
+<code class="sig-prename descclassname"><span class="pre">packages.uncertain.</span></code><code class="sig-name descname"><span class="pre">SNR</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">R_star</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">R_sky</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">exp_t</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">RN</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">radius</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">G</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">D</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.uncertain.SNR" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt id="packages.uncertain.sigma_mag_err">
+<code class="sig-prename descclassname"><span class="pre">packages.uncertain.</span></code><code class="sig-name descname"><span class="pre">sigma_mag_err</span></code><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">SNR</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.uncertain.sigma_mag_err" title="Permalink to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</div>
+<div class="section" id="module-packages">
+<span id="module-contents"></span><h2>Module contents<a class="headerlink" href="#module-packages" title="Permalink to this headline">¶</a></h2>
+</div>
+</div>
+
+
+           </div>
+           
+          </div>
+          <footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+        <a href="example_notebooks/add_your_catalog_example.html" class="btn btn-neutral float-left" title="Add your own sequnce stars" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>
+        &#169; Copyright 2021, Seán Brennan.
+
+    </p>
+  </div>
+    
+    
+    
+    Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    
+    provided by <a href="https://readthedocs.org">Read the Docs</a>. 
+
+</footer>
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+  
+
+  <script type="text/javascript">
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script>
+
+  
+  
+    
+   
+
+</body>
+</html>
