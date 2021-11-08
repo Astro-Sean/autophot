@@ -171,4 +171,4 @@ The AutoPhOT paper is currently being written, for the time being please cite th
 
 ## Testing and Debugging
 
-If you experience errors with a particular file, the most effective means of debugging is to share the file with me ([Seán Brennan](mailto:sean.brennan2@ucdconnect.ie?subject=[AutoPhOT])) for diagnostic. Once bugs have been addressed all files will be deleted. **All shared data will be kept confidential**.
+If you experience errors with a particular file, the most effective means of debugging is to share the file with me ([Seán Brennan](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT)) for diagnostic. Once bugs have been addressed all files will be deleted. **All shared data will be kept confidential**.
