@@ -10,7 +10,7 @@ def load():
 
     import os
     from functools import reduce
-    from autophot.packages.call_yaml import yaml_syntax as cs
+    from autophot.packages.call_yaml import yaml_autophot_input as cs
 
     # Get location of this script
     filepath = os.path.dirname(os.path.abspath(__file__))
@@ -28,8 +28,8 @@ def load():
     default_input_filepath = reduce(os.path.join,[filepath,'databases',default_input])
 
     #  Load default commands
-    default_syntax = cs(default_input_filepath,'AutoPhOT_input').load_vars()
+    default_autophot_input = cs(default_input_filepath,'AutoPhOT_input').load_vars()
 
     print('Default input loaded in from: \n%s' % default_input_filepath )
 
-    return default_syntax
+    return default_autophot_input

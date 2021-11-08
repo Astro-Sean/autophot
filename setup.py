@@ -17,7 +17,8 @@ setuptools.setup(
     python_requires='>=3',
     package_data={'': ['databases/*.yml',
                        'example/example.fits',
-                       'databases/*.mplstyle']
+                       'databases/*.mplstyle'
+                       'packages/*.mplstyle']
                   },
 
     project_urls={

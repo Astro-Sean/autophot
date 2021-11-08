@@ -1,106 +1,86 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-
-def run_astroscrappy(image_old,syntax):
+def run_astroscrappy(image_with_CRs,
+                     gain = 1,
+                     use_astroscrappy = True,
+                     use_lacosmic = False):
+    '''
+    
+    :param image_with_CRs: DESCRIPTION
+    :type image_with_CRs: TYPE
+    :param gain: DESCRIPTION, defaults to 1
+    :type gain: TYPE, optional
+    :param use_astroscrappy: DESCRIPTION, defaults to True
+    :type use_astroscrappy: TYPE, optional
+    :param use_lacosmic: DESCRIPTION, defaults to False
+    :type use_lacosmic: TYPE, optional
+    :return: DESCRIPTION
+    :rtype: TYPE
 
     '''
-    Function to call a instance of astroscrappy by Curtis McCully
 
-    link: https://astroscrappy.readthedocs.io/en/latest/#functions
+    import time
+    import logging
+    import astroscrappy
+    import numpy as np
 
-    '''
     try:
-
-        import time
-        import logging
-        import astroscrappy
-        from threading import Thread
-
-        from numpy import sum as np_sum
-
-        # from numpy import inf as np_inf
-
-
 
         logger = logging.getLogger(__name__)
 
         logger.info('Detecting/removing cosmic ray sources')
 
+        if use_astroscrappy:
+            
+            # Function to call a instance of astroscrappy by Curtis McCully
 
-
-        if syntax['use_astroscrappy']:
-
-            #  is the program taking a while
-            taking_while = False
-
-            # output list
-            clean_image_lst= []
+            # link: https://astroscrappy.readthedocs.io/en/latest/#functions
 
             print('Starting Astroscrappy ... ',end = '')
 
-            # wrapper to move output to list
-            def wrapper(func, args, res):
-
-                res.append(func(*args))
-
-            # setup astroscrappy but don't call
-            def prep_astroscrappy():
-                return astroscrappy.detect_cosmics(image_old.data,sigclip=4.5, sigfrac=0.3,
-                                                   objlim=5.0, gain=syntax['gain'],
-                                                   satlevel=65535.0, pssl=0.0, niter=4,
-                                                   sepmed=True, cleantype='meanmask', fsmode='median',
-                                                   psfmodel='gauss', psffwhm=2.5, psfsize=7,
-                                                   psfk=None, psfbeta=4.765, verbose=False,
-                                                   )
-
-            cray_remove_thread = Thread(target=wrapper,
-                                    args = (prep_astroscrappy,(),clean_image_lst))
-
-            # start time of astrcoscappry
+            # Note start time
             cray_time = time.time()
 
-            # start thread
-            cray_remove_thread.start()
 
-            print('working ... ',end = '')
+            cray_free_image = astroscrappy.detect_cosmics(image_with_CRs.data,sigclip=4.5, sigfrac=0.3,
+                                                    objlim=5.0, gain=gain,
+                                                    satlevel=65535.0, 
+                                                    pssl=0.0, 
+                                                    niter=4,
+                                                    sepmed=True, 
+                                                    cleantype='meanmask', 
+                                                    fsmode='median',
+                                                    psfmodel='gauss', 
+                                                    psffwhm=2.5, 
+                                                    psfsize=7,
+                                                    psfk=None, 
+                                                    psfbeta=4.765, 
+                                                    verbose=False)
+                                                    
+            clean_image = cray_free_image[1]
+            CR_mask = cray_free_image[0]
 
-            # while astroscrapy is working keep alive with while loop
-            while cray_remove_thread.isAlive():
-                #  if it takes along time- print something to show it's not hung
-                if time.time() - cray_time  > 15 and not taking_while:
-                    print('this may take some time ... ',end = '')
-                    taking_while = True
-            end_time =time.time() -  cray_time
-            print('done')
+        elif use_lacosmic:
 
-            clean_image = clean_image_lst[0][1]
-            CR_mask = clean_image_lst[0][0]
-
-
-        elif syntax['use_lacosmic']:
             from ccdproc import cosmicray_lacosmic
             cray_time = time.time()
 
-            clean_image,CR_mask = cosmicray_lacosmic(image_old.data,sigclip=4.5, sigfrac=0.3,
-                                                     objlim=5.0, gain=syntax['gain'],
+            clean_image,CR_mask = cosmicray_lacosmic(image_with_CRs.data,sigclip=4.5, sigfrac=0.3,
+                                                     objlim=5.0, gain=gain,
                                                      satlevel=65535.0, pssl=0.0, niter=4,
                                                      sepmed=True, cleantype='meanmask', fsmode='median',
                                                      psfmodel='gauss', psffwhm=2.5, psfsize=7,
                                                      psfk=None, psfbeta=4.765, verbose=False)
-            end_time =time.time() -  cray_time
+            end_time = time.time() -  cray_time
+            
+            
+        logger.info('Contaminated pixels with Cosmic rays removed: %d' % np.sum(CR_mask))
 
 
-
-        print('Exposure time: %ds :: Cosmic Ray Detections: %d' % (syntax['exp_time'],np_sum(CR_mask)))
-
-        syntax['CR_detections'] = np_sum(CR_mask)
-        syntax['CR_time_taken'] = end_time
-
-
-        return clean_image,syntax
+        return clean_image
 
 
     except Exception as e:
+        logger.info('Could not remove Cosmic Rays!\n->%s\m Returning original image' % e)
         logger.exception(e)
-        return image_old
+        return image_with_CRs

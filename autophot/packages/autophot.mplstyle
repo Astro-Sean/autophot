@@ -1,4 +1,11 @@
-font.size : 6
+# Font options
+font.size: 8
+font.family: STIXGeneral
+mathtext.fontset: stix
+
+# LaTeX options
+text.usetex: False
+
 axes.titlesize : 6
 axes.labelsize : 6
 axes.linewidth : 0.5
@@ -10,7 +17,7 @@ figure.subplot.hspace : 0.1
 # LINES
 lines.linewidth : 0.5
 lines.markeredgewidth : 0.5
-lines.markersize : 1
+lines.markersize : 2
 lines.solid_joinstyle : round
 lines.solid_capstyle : round
 
@@ -31,14 +38,17 @@ ytick.minor.size : 3
 
 # Legend
 legend.markerscale   : 1
-legend.handletextpad : 0.5
-legend.columnspacing : 0.5
-legend.labelspacing  : 0.5
+legend.handletextpad : 0.25
+legend.columnspacing : 0.25
+legend.labelspacing  : 0.25
 legend.fontsize      : 6
 
 
-figure.dpi : 300
+#figure.dpi : 100
 scatter.marker : o
-savefig.dpi : 300
+#savefig.dpi : 300
 savefig.transparent : False
 savefig.format : pdf
+
+# Always plot ticks on top of data
+axes.axisbelow: False

@@ -1,13 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Wed Mar  6 10:53:13 2019
-
-@author: seanbrennan
-"""
-
-
-def SNR(R_star,R_sky,exp_t,RN,radius,G,D):
+def SNR(flux_star,flux_sky,exp_t,radius,G = 1,RN = 0,DC = 0 ):
     try:
 
         '''
@@ -30,19 +21,21 @@ def SNR(R_star,R_sky,exp_t,RN,radius,G,D):
         with warnings.catch_warnings():
             # Ignore  Runtime warnings
             warnings.simplefilter('ignore')
+            
 
             G = float(G)
 
-            counts_source = R_star * exp_t
+            counts_source = flux_star * exp_t
 
-            star_shot_2 = R_star * exp_t
+            star_shot_2 = flux_star * exp_t
+            
+            Area = np.pi * radius ** 2
 
-            sky_shot_2 = R_sky * np.pi * (radius ** 2) * exp_t
+            sky_shot_2 = flux_sky  * exp_t * Area
 
+            read_noise_2 = ((RN**2) + (G/2)**2) * Area
 
-            read_noise_2 = ((RN**2) + (G/2)**2) * np.pi * ( radius ** 2)
-
-            dark_noise_2 =  D * exp_t * np.pi * (radius ** 2)
+            dark_noise_2 =  DC * exp_t * Area
 
             SNR = counts_source / np.sqrt((star_shot_2 + sky_shot_2 +read_noise_2  + dark_noise_2))
 
@@ -57,13 +50,11 @@ def SNR(R_star,R_sky,exp_t,RN,radius,G,D):
 
 
 
-def sigma_mag_err(SNR):
+
+
+def SNR_err(SNR):
     try:
 
-        """
-        Magnitude error due to SNR
-
-        """
         import numpy as np
         import os
         import sys
@@ -72,8 +63,8 @@ def sigma_mag_err(SNR):
         if isinstance(SNR,int) or isinstance(SNR,float):
             if SNR <= 0:
                 return 0
-            sigma_err = np.array([2.5 * np.log10(1 + 1/SNR)])
-            return sigma_err[0]
+            SNR_err = np.array([2.5 * np.log10(1 + 1/SNR)])
+            return SNR_err[0]
 
 
         else:
@@ -82,19 +73,12 @@ def sigma_mag_err(SNR):
         # Remove SNR values if less than zero, replace with zero i.e source not detected
         SNR_cleaned = [i if i>0 else 0 for i in SNR]
 
-#        # If list with single value
-#        if len(SNR_cleaned)==1:
-#            SNR_cleaned = SNR_cleaned[0]
-
-
         if isinstance(SNR_cleaned,float):
-#            print('here')
             SNR_cleaned = np.array(SNR_cleaned)
-#        print(SNR_cleaned)
 
-
-
-        sigma_err = np.array([2.5 * np.log10(1 + 1/snr) if snr>0 else np.nan for snr in SNR_cleaned])
+        SNR_err = np.array([2.5 * np.log10(1 + 1/snr) if snr>0 else np.nan for snr in SNR_cleaned])
+        
+        return SNR_err
 
     except Exception as e:
         exc_type, exc_obj, exc_tb = sys.exc_info()
@@ -102,5 +86,5 @@ def sigma_mag_err(SNR):
         print(exc_type, fname, exc_tb.tb_lineno,e)
 
 
-    return sigma_err
+    return np.nan
 

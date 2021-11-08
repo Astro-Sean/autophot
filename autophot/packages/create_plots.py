@@ -1,76 +1,7 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Wed Sep 30 14:33:07 2020
 
-@author: seanbrennan
-"""
+def plot_PSF_model_steps(sources_dict,autophot_input,image,it = 10):
 
 
-
-
-
-def plot_PSF_construction_grid(sources,image,syntax):
-
-    '''
-    Plot Sources used in creating PSF
-    '''
-
-    import os
-    import matplotlib.pyplot as plt
-
-
-    plt.ioff()
-
-    dir_path = os.path.dirname(os.path.realpath(__file__))
-    plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
-
-
-    ncol = 2
-    nrow = len(sources)//ncol
-
-    fig, axs = plt.subplots(nrows=nrow, ncols=ncol,sharex = True,sharey = True)
-
-
-
-    for i in range(len(axs.reshape(-1))):
-        ax =axs.reshape(-1)[i]
-
-        xc = sources.loc[i].x_pix
-        yc = sources.loc[i].y_pix
-
-
-        x_best = sources.loc[i].x_best
-        y_best = sources.loc[i].y_best
-
-        ax.set_title(str(i))
-
-
-        source_close_up = image[int(yc)-syntax['scale']: int(yc) + syntax['scale'],
-                                int(xc)-syntax['scale']: int(xc) + syntax['scale']]
-
-        ax.axvline(source_close_up.shape[0]/2)
-        ax.axhline(source_close_up.shape[1]/2)
-
-
-        ax.axvline(x_best,color = 'red')
-        ax.axhline(y_best,color = 'red')
-
-
-        ax.imshow(source_close_up,aspect = 'auto')
-
-    plt.savefig('/Users/seanbrennan/Desktop/text.png',
-                # bbox_inches='tight'
-                )
-
-
-    plt.close()
-
-
-    return
-
-
-def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
 
 
     '''
@@ -85,20 +16,24 @@ def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
 
     from autophot.packages.functions import array_correction,rebin,set_size
 
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
+
+
 
     plt.ioff()
 
 
-    regriding_size =int(syntax['regrid_size'])
+    regriding_size =int(autophot_input['regrid_size'])
 
-    save_loc = os.path.join(syntax['write_dir'],'PSF_residual_shift_check')
+    save_loc = os.path.join(autophot_input['write_dir'],'PSF_residual_shift_check')
 
     pathlib.Path(save_loc).mkdir(parents = True, exist_ok=True)
 
 
     keys = list(sources_dict.keys())
 
-    fig = plt.figure(figsize = set_size(500,aspect=0.5))
+
 
     bbox_props = dict(boxstyle="round,pad=0.5", fc="none", ec="none", lw=0.1)
 
@@ -107,6 +42,10 @@ def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
     nrows = 3
 
     for i in range(it):
+        if i>=len(keys):
+            break
+
+        fig = plt.figure(figsize = set_size(500,aspect=1))
 
         PSF_data = sources_dict[keys[i]]
 
@@ -119,32 +58,32 @@ def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
 
         ax1 = fig.add_subplot(grid[1, 0])
 
-        ax1.set_title('Bright, Isolated Source')
+        ax1.set_title('Bright isolated source')
 
         close_up = PSF_data['close_up']
 
-        ax1.imshow(close_up,aspect = 'auto',origin = 'lower')
+        ax1.imshow(close_up,
+                   # 
+                   origin = 'lower')
 
         ax1.scatter(PSF_data['x_best'],PSF_data['y_best'],
                     s = 10,
-                    marker = 'x',color = 'red')
-        ax1.scatter(close_up.shape[0]/2,close_up.shape[0]/2,
+                    marker = 'x',
+                    color = 'red')
+        
+        ax1.scatter(close_up.shape[1]/2,close_up.shape[0]/2,
                     marker = 's',
                     facecolors='none',
                     s=10,
-                    edgecolors='black',label = 'Image center')
-
-
-        # ax1.axvline(close_up.shape[0]/2,color = 'black',linestyle = ':')
-        # ax1.axhline(close_up.shape[0]/2,color = 'black',label = 'Center of image',linestyle = ':')
-
-
+                    edgecolors='black',
+                    label = 'Cutout center')
+        
         ax2 = fig.add_subplot(grid[1 , 1])
         ax2.set_title('Subtract Model')
 
         residual = PSF_data['residual']
 
-        ax2.imshow(residual,aspect = 'auto',origin = 'lower')
+        ax2.imshow(residual,origin = 'lower')
         ax2.scatter(PSF_data['x_best'],PSF_data['y_best'],
                     s = 10,
                     marker = 'x',color = 'red')
@@ -166,7 +105,7 @@ def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
         residual_regrid = PSF_data['regrid']
 
         ax3.imshow(residual_regrid,
-                   aspect = 'auto',
+                   
                    origin = 'lower')
 
         ax3.scatter(array_correction(PSF_data['x_best']*regriding_size),array_correction(PSF_data['y_best']*regriding_size),
@@ -203,14 +142,14 @@ def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
         ax4 = fig.add_subplot(grid[0:3 , 4:6])
 
         ax4.set_title('Roll')
-        roll  = rebin(PSF_data['roll'],(int(2*syntax['scale']),int(2*syntax['scale'])))
+        roll  = rebin(PSF_data['roll'],(int(2*autophot_input['scale']),int(2*autophot_input['scale'])))
         roll = PSF_data['roll']
 
         x_roll = PSF_data['x_roll']
         y_roll = PSF_data['y_roll']
 
 
-        ax4.imshow(roll,aspect = 'auto',origin = 'lower')
+        ax4.imshow(roll,origin = 'lower')
         ax4.scatter(array_correction(x_roll +PSF_data['x_best']*regriding_size),array_correction(y_roll +PSF_data['y_best']*regriding_size),
                     marker = 'x',
                     color = 'red',
@@ -225,9 +164,9 @@ def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
         # ax5.set_title('Step: 5')
 
 
-        # roll_bin  = rebin(PSF_data['roll'],(2*syntax['scale'],2*syntax['scale']))
+        # roll_bin  = rebin(PSF_data['roll'],(2*autophot_input['scale'],2*autophot_input['scale']))
 
-        # ax5.imshow(roll_bin,aspect = 'auto',origin = 'lower')
+        # ax5.imshow(roll_bin,origin = 'lower')
 
 
         for ax in fig.axes:
@@ -298,21 +237,21 @@ def plot_PSF_model_steps(sources_dict,syntax,image,it = 3):
         lines, labels = fig.axes[-1].get_legend_handles_labels()
 
 
-        fig.legend(lines, labels, loc = 'lower left',
+        ax1.legend(lines, labels, loc = 'lower left',
                    frameon = False,
-                   bbox_to_anchor=(0.2, 0.15),
+                   bbox_to_anchor=(0.5, 1.2),
                    ncol = 2,
-                   prop={'size': 7},
+                   # prop={'size': 7},
                    scatterpoints=1,)
 
 
 
         plt.savefig(os.path.join(save_loc,'%s_residual.pdf' % keys[i]),
-                    # bbox_inches='tight'
+                    bbox_inches='tight'
                     )
 
 
-        # plt.close()
+        plt.close()
 
 
 

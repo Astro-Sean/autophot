@@ -1,18 +1,177 @@
 
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+def ask_question(question,
+                 default_answer = 'n',
+                 expect_answer_type = str ,
+                 options = None,
+                 ignore_type = False,
+                 ignore_word = 'skip'):
+
+    
+    while True:
+        
+        question_str = question +' \n( Press enter for %s ) \n' % (default_answer)
+        
+        if not (options is None):
+            if len(options) < 3:
+                question_str += '( Accepted answers - %s )\n' % ' or '.join(options)
+            else:
+                question_str += ' Accepted answers:\n'
+ 
+                for column1,column2,column3 in zip(options[::3],options[1::3],options[2::3]):
+                     question_str += '| - {:<3} - {:<3} - {:<} |\n'.format(column1,column2,column3)
+                
+            
+        question_str += '> '
+        
+        answer = (input(question_str) or default_answer) 
+        
+        
+        
+        # answer_format = None
+        
+        if answer == default_answer:
+            print('-> '+ str(answer))
+            return default_answer
+                
+        try:
+     
+            check_if_float = float(answer)
+            
+            if answer in ['True','False']:
+                answer_format = bool
+            else:
+                answer = float(answer)
+                answer_format = float
+
+                
+                
+        except:
+            answer_format = str
+
+            
+        
+        if answer != ignore_word or not ignore_type:
+            if answer_format != expect_answer_type:
+                      
+                print('\nIncorrect answer format - expected %s but detected %s' % (expect_answer_type,answer_format))
+                
+                continue
+        
+        if not (options is None):
+            
+            if answer not in options:
+                
+                print('\n %s not in accepted responses [%s] - try again' % (answer,', '.join(options)))
+                
+                continue
+        
+        return answer_format(answer)
 
 
-'''
- Instrument data
+def find_similar_words(words, search_word):
+    
+    import re
 
- Script to go through files in direcrtory and check if
- appropiate keywords are available in telescope.yml which is found
- in 'wdir'
+    filter = search_word
+    
+    regex = re.compile(".*".join(filter), re.IGNORECASE)
+    filtered_words = [word for word in words if regex.search(word)]
+    
+    # print(*filtered_words, sep="\n")
+    
+    return filtered_words
 
-'''
+def ask_for_keyword(keyword,
+                    header_keys,
+                    fname = None,
+                    expected_units = None,
+                    default = None,
+                    options = None):
+    
+    
+    # TODO: search through comments too!
+    similar_keywords = find_similar_words(list(header_keys), search_word = keyword)
+        
+    if len(similar_keywords) == 0:
+        print('\nCannot find any keywords similar to %s (File: %s)' % (keyword,fname))
+        KEY_idx = None
+        
+        
+    else:
+        
+        print('\nSimilar %s keywords found (File: %s) \n' % (keyword,fname))
+   
+        keywords_dict = dict(zip(range(1,len(similar_keywords)+1),similar_keywords))
+        
+        for idx,val in keywords_dict.items():
+            print('%s - %s' % (idx,val))
+            
+        while True:
+            if expected_units != None:
+                question = 'Select index that represents %s key in %s, type skip to give header key ' % (keyword,expected_units)
+            else:
+                question = 'Select index that represents %s key , type skip to give header key ' % (keyword)
+                
+            KEY_idx = ask_question(question,
+                                     default_answer = 1,
+                                     expect_answer_type = float,
+                                     ignore_word = 'skip',
+                                     ignore_type = True,
+                                     options = options)
+            
+            if KEY_idx != 'skip' and KEY_idx not in list(keywords_dict.keys()):
+                print('Index selection %d not availbale - try again' % KEY_idx)
+                continue
+            break
+            
+                                 
+        
 
-def checkteledata(syntax,flst,filepath = None):
+    if KEY_idx == 'skip' or len(similar_keywords) == 0:
+        
+        while True:
+            
+            if expected_units != None:
+                question = 'Enter header key that represents %s key in %s, type skip to give header key ' % (keyword,expected_units)
+            else:
+                question = 'Enter header key  that represents %s key , type skip to give header key ' % (keyword)
+        
+            KEY = ask_question(question,
+                                default_answer = 'ignore',
+                                expect_answer_type = str,
+                                ignore_type = True)
+            if KEY == 'ignore':
+                return None
+            
+            if KEY not in header_keys:
+                print('%s not found in header key - try again' % KEY)
+                continue
+                
+            break
+    else:
+        KEY = keywords_dict[KEY_idx]
+        
+    print('%s key == %s' % (keyword,KEY))
+    return KEY
+                
+                                    
+                                    
+                                    
+                                    
+
+def checkteledata(autophot_input,flst,filepath = None):
+    '''
+    
+    :param autophot_input: DESCRIPTION
+    :type autophot_input: TYPE
+    :param flst: DESCRIPTION
+    :type flst: TYPE
+    :param filepath: DESCRIPTION, defaults to None
+    :type filepath: TYPE, optional
+    :return: DESCRIPTION
+    :rtype: TYPE
+
+    '''
 
     import os,sys
     import yaml
@@ -24,6 +183,22 @@ def checkteledata(syntax,flst,filepath = None):
 
     # Get header information - priporeity script
     from autophot.packages.functions import getheader
+    
+    from astroplan import Observer
+    from astropy.coordinates import EarthLocation
+    
+    # For site locations
+    sites = EarthLocation.get_site_names()
+    sites = list(filter(None, sites))
+    
+    
+    sites_dicts = dict(zip(range(1,len(sites)),sites))
+    sites_dicts[0] = 'Custom Site Location'
+    sites_dicts = dict(sorted(sites_dicts.items(), key=lambda item: item[0]))
+    
+    max_site_name = max(sites_dicts, key=lambda i: len(sites_dicts[i]))
+    
+    sites_list = [' - '.join([str(key),str(val)]) for key,val in sites_dicts.items()]
 
     try:
         logger = logging.getLogger(__name__)
@@ -33,7 +208,7 @@ def checkteledata(syntax,flst,filepath = None):
     #  if specific filepath isn't given, use default
     if filepath == None:
 
-        filepath = os.path.join(syntax['wdir'],'telescope.yml')
+        filepath = os.path.join(autophot_input['wdir'],'telescope.yml')
         logger.info('\nUser instrument database: %s' % str(filepath))
 
     # create new telescope.yml file in directory if not already made
@@ -42,15 +217,14 @@ def checkteledata(syntax,flst,filepath = None):
             logger.info('No telescope.yml found: creating new one')
             pass
 
-    # load telescope.yml as exsiting var
+        # load telescope.yml as exsiting var
     with open(filepath, 'r') as stream:
         existing_var = yaml.load(stream, Loader=yaml.FullLoader)
-
     # if it's empty initialise and empty dictionary
     if existing_var == None:
         existing_var = {}
 
-    # telescopes list
+    # telescopes listpi
     tele_inst_dict = {}
 
     #  keys to upload
@@ -65,92 +239,18 @@ def checkteledata(syntax,flst,filepath = None):
     apply_inst_2_all = 'n'
 
     tele_key = 'TELESCOP'
+    inst_input = 'UNKNOWN'
+    inst_key = 'INSTRUME'
+            
 
     for name in flst:
         try:
             # Load header for every file
             headinfo = getheader(name)
-
-            '''
-            Check for all telescope keywords (whether they are in existing var or not)
-
-            looking for the keywrod that describes the name of the telescope, usually telescop, and assigning
-            this keyword to inst key
-
-            if it's not found print 'Cannot find TELESCOP'
-                > can ignore this and just label as unknown
-                > manually asign 'TELESCOP' with unser input name of telescope
+            
+            # TODO: returns list of files that don't have TELESCOPE or INSTRYMNE
 
 
-
-            finaly structure of this first loop with create a entry looking like:
-            (nested dictionaries)
-
-            telescope name [e.g ESO-NTT]:
-
-                - instrument key [e.g. INSTRUME]:
-
-                    - instrument name [e.g SOFI]:
-                        - [e.g. F.o.V, filter headers etc]
-
-                    - instrument name [e.g EFOSC]:
-                        -
-
-                - instrument key [if for some file the instrument name comes under something different]:
-
-                    - instrument name [e.g something under another instruemnt key]:
-                        -
-
-                    - instrument name :
-                        -
-            '''
-            try:
-                if 'TELESCOP' in headinfo and headinfo['TELESCOP'].strip() != '':
-                    pass
-                else:
-                    raise Exception
-            except:
-
-
-                #  Can't find name of telescope - ask user for name
-
-
-
-                # change syntax to True to allow this
-                if syntax['ignore_no_telescop']:
-                    logger.info('Renaming as UNKNOWN')
-                    tele_input = 'UNKNOWN'
-                    headinfo[tele_key] = (tele_input,'updated by autophot')
-                    fits.writeto(name,getimage(name),headinfo,
-                                 overwrite = True,output_verify = 'silentfix+ignore')
-
-                else:
-                    #  print all the keys
-                    if apply_tele_2_all == 'y':
-                        headinfo[tele_key] = (tele_input,'updated by autophot')
-                        fits.writeto(name,getimage(name),headinfo,
-                                     overwrite = True,output_verify = 'silentfix+ignore')
-
-                    else:
-                        print('Cannot find name of Telesceope for:\n %s\n'%name)
-                        tele_input = str(input(' Name of telescope?:'))
-
-                        if tele_input== '':
-                            tele_input = 'UNKNOWN'
-                            headinfo[tele_key] = (tele_input,'updated by autophot')
-                            fits.writeto(name,getimage(name),headinfo,
-                                         overwrite = True,output_verify = 'silentfix+ignore')
-                        else:
-                            headinfo[tele_key] = (tele_input,'updated by autophot')
-                            fits.writeto(name,getimage(name),headinfo,
-                                         overwrite = True,output_verify = 'silentfix+ignore')
-
-                        apply_tele_2_all = str(input('Apply to all?  y/[n]: ') or 'n')
-
-
-            # Now look for instrument key .... usually 'INSTRUME' by fits standard
-            inst_input = 'UNKNOWN'
-            inst_key = 'INSTRUME'
             try:
                 if 'INSTRUME' in headinfo:
                     pass
@@ -230,26 +330,22 @@ def checkteledata(syntax,flst,filepath = None):
     correct keywords to allow to automatic photometry
 
 
-    Autophot uses simple filter name syntax:
+    Autophot uses simple filter name autophot_input:
 
-    if filter is similar to catalog_filter_syntax it isn't asked for
+    if filter is similar to  available_filters it isn't asked for
     '''
 
-    catalog_filter_syntax = ['B','V','U','I','R','g','r','i',
-                             'z','y','u','v','J','H','K'] # should corrospond to catalog syntax
+    available_filters = list(autophot_input['W_eff'].keys())
 
-
-    logger.info('\n%d telescope(s) detected - checking header keywords' % len(tele_inst_dict))
+    logger.info('\n%d telescope(s) detected - checking header keywords\n' % len(tele_inst_dict))
 
 
     for t in tele_inst_dict.keys():
         print('- %s\n' %t)
 
-
-
-
     # for each detected catalog
     # Master loop
+    
     for i in list(tele_inst_dict.keys()):
 
         #  List of insturent keys that this telescope uses
@@ -257,15 +353,129 @@ def checkteledata(syntax,flst,filepath = None):
 
         if i not in existing_var:
             # if telescope doesn't existing add it
-            print('Adding new insturment: %s' % t)
+            print('Adding new Telescope: %s' % i)
 
             existing_var[i] = {}
-
+        
         # Can happen if you mess with telescope and delete some important data
         if existing_var[i] == None:
             existing_var[i] = {}
+            
+        
+        # add location
+        if 'location' not in existing_var[i]:
+            # for key,val in sites_dicts.items():
+            #     print('%3d - %s ' % (key,val))
+                
+            for column1,column2 in zip(sites_list[0:len(sites_list)//2],sites_list[len(sites_list)//2:]):
+                print(('{:<'+str(max_site_name)+'}   {:<}').format(column1,column2))
+            # sites_list
+                
+                
+            print('\nWhere is  %s located?' % i)
+            location_idx = ask_question('Select telescope location from list or enter your own',
+                                        default_answer = 'ignore', 
+                                        expect_answer_type = float,
+                                        options = None)
 
-
+            if location_idx is 'ignore':
+                print('Ignoring telescope location')
+                
+            
+                site_name = 'UNKNOWN'
+                site_lon = None
+                site_lat = None
+                site_alt = None
+                
+                
+            elif int(location_idx) == 0:
+                print('Adding User defined location')
+            
+                site_name = str(input('Name of telescope site [default: Custom Site]: ') or 'Custom Site')
+                
+                site_lon = float(input('Lonitude of telescope site in degress [default: None]: ') or None)
+                
+                site_lat = float(input('Latitude of telescope site in degress [default: None]: ') or None)
+                
+                site_alt = float(input('Altitude above sea level of telescope site in meters [default: 0]: ') or 0)
+                
+                
+            else:
+                print('Selected Site: %s' % Observer.at_site(sites_dicts[float(location_idx)]).name)
+                telescope_site =  Observer.at_site(sites_dicts[float(location_idx)])
+                site_name = telescope_site.name
+                site_lon = float(telescope_site.location.lon.deg)
+                site_lat = float(telescope_site.location.lat.deg)
+                site_alt = float(telescope_site.location.height.value)
+                
+                site_lon = round(site_lon,6)
+                site_lat = round(site_lat,6)
+                site_alt = round(site_alt)
+                
+                
+                
+            existing_var[i] = {}
+            existing_var[i]['location'] = {}
+            
+            existing_var[i]['location']['name'] = site_name
+            existing_var[i]['location']['lon'] = site_lon
+            existing_var[i]['location']['lat'] = site_lat
+            existing_var[i]['location']['alt'] = site_alt
+            
+        else:
+            site_name = existing_var[i]['location']['name']
+            site_alt = existing_var[i]['location']['alt']
+            print('Location found for %s: %s' % (i,existing_var[i]['location']['name']))
+            location_idx = 'pre-existing'
+            
+                
+        # =============================================================================
+        # Add atmosphereic extinction values 
+        # =============================================================================
+        if location_idx is not 'ignore':
+            
+            if 'extinction' not in existing_var[i] and not (site_alt is None):
+                
+                existing_var[i]['extinction'] = {}
+            
+                Use_RAYLEIGH_OZONE_extinction = False
+                
+                use_general_extinction = ask_question('Use general atmopsheric extinction for %s at %dm?' % (site_name,site_alt),
+                                                      default_answer = 'y',
+                                                      expect_answer_type = str ,
+                                                      options = ['y','n'])
+                if use_general_extinction == 'y':
+                    # Use_RAYLEIGH_OZONE_extinction = True
+                    from autophot.packages.airmass_extinction import Rayleigh_extinction,Ozone_extinction
+                    
+                    for f in available_filters:
+                        
+                        f_wave_eff = autophot_input['W_eff'][f]
+                        
+                        approx_airmase_ext = Rayleigh_extinction(f_wave_eff,existing_var[i]['location']['alt']/1000) + Ozone_extinction(f_wave_eff)
+                        # print(f,f_wave_eff,Rayleigh_extinction(f_wave_eff,existing_var[i]['location']['alt']),Ozone_extinction(f_wave_eff))
+                        
+                        
+                        existing_var[i]['extinction']['ex_%s' % f] = round(float(approx_airmase_ext),3)
+                    
+                else:
+                    use_USER_values = ask_question('Use your own atmosphereic extinction values?',
+                                                      default_answer = 'n',
+                                                      expect_answer_type = str ,
+                                                      options = ['y','n'])
+                    if use_USER_values == 'y':
+                        for f in available_filters:
+                            airmass_ext_f = ask_question('Aimass extinction for %s-band in mag / airmass?' % f,
+                                                          default_answer = 'skip',
+                                                          expect_answer_type = float ,
+                                                          options = None)
+                            
+                            
+                            existing_var[i]['extinction']['ex_%s' % f] = airmass_ext_f
+            
+        # =============================================================================
+        # Look for any attached insturments     
+        # =============================================================================
         for name in flst:
             fname = os.path.basename(name)
             if fname.endswith(('.fits','.fit','.fts')):
@@ -289,7 +499,7 @@ def checkteledata(syntax,flst,filepath = None):
                     fits.writeto(name,getimage(name),headinfo,
                                  overwrite = True,output_verify = 'silentfix+ignore')
 
-                    print(name)
+             
 
                 if tele_name == i:
 
@@ -312,129 +522,100 @@ def checkteledata(syntax,flst,filepath = None):
                             #  update tele_entry with name of telescope
                             existing_var[i][inst_key][inst_name] = {}
 
-                            label_inst_name = str(input('Simplified name [default: %s]: ' % headinfo[inst_key] ) or headinfo[inst_key])
-
+                            # label_inst_name = str(input('Simplified name [default: %s]: ' % (tele_name+'+'+headinfo[inst_key]) ) or tele_name+'+'+headinfo[inst_key])
+                            
+                            label_inst_name = ask_question('Enter name of Telescope and Instrument for labelling',
+                                                  default_answer = str(tele_name+'+'+headinfo[inst_key]),
+                                                  expect_answer_type = str ,
+                                                  # options = ['y','n']
+                                                  )
+        
                             # Name for labelling
                             existing_var[i][inst_key][inst_name]['Name']  = label_inst_name
 
                             # update  default filter keyword as FILTER
                             existing_var[i][inst_key][inst_name]['filter_key_0']  = 'FILTER'
 
-                            # Acceptted piel scale types accepted for astrometry.net
-                            accepted_scale_types = ['arcminwidth', 'arcsecperpix']
-
-                            print('\nInstrument pixel scale')
-
-                            print('Accepted scale units')
-
-                            for a in accepted_scale_types:
-                                logger.info("- '%s'" % a)
-
-                            while True:
-                                scale_units = (input('Scale units [type skip to ignore]: ') or None)
-
-                                if scale_units =='skip':
-                                    break
-
-                                if scale_units == None:
-                                    logger.info('Error: no entry given')
-                                    continue
-
-                                scale_units = str(scale_units.replace("'",'').replace('"',''))
-
-                                if scale_units not in accepted_scale_types:
-                                    logger.info('Error: %s not in %s' % (scale_units,accepted_scale_types))
-                                else:
-                                    break
-
-                            # plate scale of telescope
-                            plate = {'scale_high':'Upper','scale_low':'Lower'}
+                      
+                            pixel_scale = ask_question('Enter Pixel scale in arcsec/pixel',
+                                                  default_answer = 0.4,
+                                                  expect_answer_type = float,
+                                                  # options = ['y','n']
+                                                  )
 
                             # if unit type is skipped, skip upper and lower scales
-                            if scale_units == 'skip':
-
+                            if pixel_scale == 'skip':
+                                
                                 # update with scale type seeting to none/null
-                                existing_var[i][inst_key][inst_name]['scale_type'] = None
-
-                                for key,val in plate.items():
-                                    existing_var[i][inst_key][inst_name][key] = None
-
+                                existing_var[i][inst_key][inst_name]['pixel_scale'] = None
+                                
                             else:
 
                                 # update with scale type
-                                existing_var[i][inst_key][inst_name]['scale_type'] = scale_units
-
-                                #  else ask user for them and ensure upper limit is greater than lower limit
-                                while True:
-
-                                    for key, val in plate.items():
-                                        scale_limits = float(input(val+' scale for FOV [units: %s]: ' % scale_units) or np.nan)
-
-                                        if np.isnan(scale_limits):
-                                            logger.info('Error: No entry given')
-                                            continue
-
-                                        existing_var[i][inst_key][inst_name][key] = scale_limits
-                                    break
-
-                                    # if existing_var[i][inst_key][inst_name]['scale_low'] >= existing_var[i][key][inst_name]['scale_high']:
-                                    #     logger.info('Error: [scale_low] >= [scale_low] ... try again ...')
-                                    # else:
-                                    #     break
-
-                             # look for words with gain in it
-                            gain_keywords = [i for i in list(headinfo.keys()) if 'GAIN' in i]
-
+                                existing_var[i][inst_key][inst_name]['pixel_scale'] = float(pixel_scale)
+                        
+                            
+                            
                             # if specific gain keword not already entered, use gain as keyword in in header
                             if 'GAIN' not in existing_var[i][inst_key][inst_name]:
-                                print('\nSimilar gain keywords found')
-                                print('File: %s' % fname)
-                                for a in gain_keywords:
-                                    logger.info("- '%s'" % a)
-
-                                while True:
-                                    gain_key = (input('Instrument Gain key [type skip to ignore]\n[Telescope: %s :: Inst: %s]: ' % (i,inst_name)) or None)
-
-
-                                    if gain_key == None:
-                                        logger.info('Error: no entry made')
-                                        continue
-
-                                    elif gain_key == 'skip':
-                                        gain_key = None
-                                        break
-
-                                    else:
-                                        break
-
+                                
+                                GAIN_key = ask_for_keyword('GAIN', list(headinfo.keys()),
+                                                           fname = fname,
+                                                           expected_units = 'e/ADU',
+                                                           default = None,
+                                                           options = None)
+                                
                                 #  add gain keyword and value for gain
-                                existing_var[i][inst_key][inst_name]['GAIN'] = gain_key
-
-
-
-
-
-    from autophot.packages.call_locationcheck import check_telescope_location
-    from autophot.packages.call_locationcheck import add_telecope_location
-
-    syntax['location_fpath'] = syntax['wdir'] + 'locations.yml'
-
-    # print('Checking locations')
-    # for t in tele_inst_dict.keys():
-    #     for inst_key in tele_inst_dict[t]:
-    #         for inst_name in tele_inst_dict[t][inst_key]:
-    #             try:
-    #                 if 'location' not in existing_var[t][inst_key][inst_name]:
-    #                     # print('No location for telescope')
-    #                     site,syntax = check_telescope_location(syntax)
-
-    #                     if not site:
-    #                         # Add a new telescope to database and retrun site name
-    #                         site,syntax = add_telecope_location(syntax,'%s + %s ' % (t,inst_name))
-
-    #                     existing_var[t][inst_key][inst_name]['location'] = site
-    #             except:
-    #                 existing_var[t][inst_key][inst_name]['location'] = 'no_entry'
+                                existing_var[i][inst_key][inst_name]['GAIN'] = GAIN_key
+                                
+                                
+                            if 'RDNOISE' not in existing_var[i][inst_key][inst_name]:
+                                
+                                READNOISE_key = ask_for_keyword('READNOISE', list(headinfo.keys()),
+                                                           fname = fname,
+                                                           expected_units = 'e/pixel',
+                                                           default = None,
+                                                           options = None)
+                                
+                                #  add gain keyword and value for gain
+                                existing_var[i][inst_key][inst_name]['RDNOISE'] = READNOISE_key
+                            
+                            # Either ask for AIRMASS of SEC(z)
+                            AIRMASS_key_found = False
+                            if 'AIRMASS' not in existing_var[i][inst_key][inst_name]:
+                                
+                                AIRMASS_key = ask_for_keyword('AIRMASS', list(headinfo.keys()),
+                                                           fname = fname,
+                                                           # expected_units = 'None',
+                                                           default = None,
+                                                           options = None)
+                                
+                                #  add gain keyword and value for gain
+                                existing_var[i][inst_key][inst_name]['AIRMASS'] = AIRMASS_key
+                                AIRMASS_key_found = True
+                                
+                            if not AIRMASS_key_found:
+                                if 'sec(z)' not in existing_var[i][inst_key][inst_name]:
+                                
+                                    sec_z_key = ask_for_keyword('Sec(z)', list(headinfo.keys()),
+                                                               fname = fname,
+                                                                # expected_units = 'None',
+                                                               default = None,
+                                                               options = None)
+                                    
+                                    #  add gain keyword and value for gain
+                                    existing_var[i][inst_key][inst_name]['sec_z'] = sec_z
+                            
+                            # if 'DCURRENT' not in existing_var[i][inst_key][inst_name]:
+                                
+                            #     DCURRENT_key = ask_for_keyword('DCURRENT', list(headinfo.keys()),
+                            #                                fname = fname,
+                            #                                expected_units = 'e/s/pixel',
+                            #                                default = 'DCURRENT',
+                            #                                options = None)
+                                
+                            #     #  add gain keyword and value for gain
+                            #     existing_var[i][inst_key][inst_name]['DCURRENT'] = DCURRENT_key
 
 
 
@@ -447,7 +628,7 @@ def checkteledata(syntax,flst,filepath = None):
     so it is safer to loop over all files
     '''
 
-    print('Telscope data checked :: looking for filter information')
+    print('\nTelscope data checked :: looking for filter information')
 
     for name in flst:
 
@@ -462,19 +643,21 @@ def checkteledata(syntax,flst,filepath = None):
                 inst_name = headinfo[inst_key]
 
                 i = tele_name
-                j = 'INSTRUME'
-                k = headinfo[inst_key]
+                j = inst_key
+                k = inst_name
 
-                syntax['filter_key'] = 'FILTER'
+                TELE_INST_FILTER_KEY = 'FILTER'
 
                 if i not in existing_var:
                     # add new entry for instruement key
                     existing_var[i] = {}
+                    
                 if j not in existing_var[i]:
                     # add new entry for instruement key
                     existing_var[i][j] = {}
+                    
                 if k not in existing_var[i][j]:
-                    # add new entry for instruement key
+                    # add new entry for instruement 
                     existing_var[i][j][k] = {}
 
                 '''
@@ -489,84 +672,77 @@ def checkteledata(syntax,flst,filepath = None):
                 '''
                 # find matching intsrument key:
                 inst_keys = list(existing_var[i].keys())
-
-                logger.debug('Matching "INSTRUME" keys for %s: %s' % (i,inst_keys))
-
-                '''
-                Filter keyword - check filter keys in pre-existing keys
-                '''
+                inst_keys = [i for i in inst_keys if i != 'location']
+                
                 #  Load existing filter_key_[] in under telescope and instrument
                 pe_filter_keys =  [s for s in existing_var[i][j][k].keys() if "filter_key_" in s]
+                
+                avoid_filters = ['open','clear']
 
                 while True:
                     try:
-                        if headinfo['FILTER'].lower().replace(' ','') != 'clear':
-                            syntax['filter_key'] = 'FILTER'
+                        # Check if FILTER is in the header and isn't in the avoid filtes list
+                        if headinfo['FILTER'].lower().replace(' ','') not in avoid_filters:
+                            TELE_INST_FILTER_KEY = 'FILTER'
                             break
                         else:
                             raise Exception
                     except:
-
-                        # Look for pre-existing keywords
+                        
+                        # If we get here the word FILTEr isn't isn't in the header  
+                        # we have to find it by going through our list - ps_filter_keys
                         for pe in pe_filter_keys:
 
-                            '''
-                            Check pre-exising keys i.e filter_key_ followed by some number
-                            if it's found set use this key and no need to update (as it already exists)
-                            '''
-
                             if existing_var[i][j][k][pe] not in list(headinfo.keys()):
-                                #  pre-existing key not not found
+                                #  filter_key isn't in header - skip and try another
                                 continue
-                            else:
-                                # if it is check that it's not clear or empty  - if it isn't select  - it as current 'filter_key'
-                                if headinfo[existing_var[i][j][k][pe]].lower().replace(' ','') != 'clear' and headinfo[existing_var[i][j][k][pe]].lower().replace(' ','') != '':
-                                    syntax['filter_key'] = existing_var[i][j][k][pe]
-                                    break
-                                else: continue
+                            
+                            if headinfo[existing_var[i][j][k][pe]].lower().replace(' ','')  in avoid_filters:
+                                # filter key is in header file
+                                TELE_INST_FILTER_KEY = existing_var[i][j][k][pe]
+
+                            # if it is check that it's not clear or empty  - if it isn't select  - it as current 'filter_key'
+                            filter_check = headinfo[existing_var[i][j][k][pe]].lower().replace(' ','')
+                            if  filter_check not in avoid_filters and filter_check != '':
+                                TELE_INST_FILTER_KEY = existing_var[i][j][k][pe]
+                                break
+                            else: continue
                         break
 
 
+    
 
-                '''
-                Check that the key is in the headinfo
-                if it isn't create a new one ieratively
-                '''
-
-                if syntax['filter_key'] in headinfo:
+                if TELE_INST_FILTER_KEY in headinfo:
+                    # Second check to make sure that we ofund the right filter key - if not ask USER for new one
                     pass
 
                 else:
                     # if no filter keyword is found ask for a new one
-                    logger.info('\nNo pre-existing filter key found')
+                    print('\nCannot find Filter key for %s' % existing_var[i][j][k]['Name'])
 
+                    # try to help and look for words with 'fil' in it
+                    filter_keys = find_similar_words(list(headinfo.keys()), search_word = 'FIL')
+
+                    # ASK user for filter name
+                    filter_key_new = ask_for_keyword('FILTER', list(headinfo.keys()),
+                                                     fname = fname,
+                                                     expected_units = None,
+                                                     default = 'FILTER',
+                                                     options = None)
+                                
+                    TELE_INST_FILTER_KEY = str(filter_key_new)
+                    
+                    
                     #find lastest filer_key_[] value and add +1 to that
                     old_n = int(re.findall(r"[-+]?\d*\.\d+|\d+", pe)[0])
                     new_filter_header = pe.replace(str(old_n),str(old_n+1))
-
-                    '''
-                    Find key that corrosponds to filter name
-                    '''
-
-                    # try to help and look for words with 'fil' in it
-                    filter_keys = [i for i in dict(headinfo) if 'fil' in i.lower()]
-
-                    print('\nRelevant filter keywords found:')
-                    print('File: %s' % fname)
-
-                    print('\n*** [Key - Value] ***')
-                    for f in filter_keys:
-                        print('%s - %s' %  (f,headinfo[f]))
-
-                    filter_key_new = input('Corrosponding FILTER Keyword\n[Telescope: %s :: Inst: %s]: ' % (i,j))
-
-                    syntax['filter_key'] = str(filter_key_new)
-
+                    
+                    # add this new key to the telescope/instrumnet information
                     existing_var[i][j][k][new_filter_header] = filter_key_new
 
                     try:
                         #  Double check filter key has been defined
-                        syntax['filter_key'] =  filter_key_new
+                        TELE_INST_FILTER_KEY =  filter_key_new
 
                     except Exception as e:
                         logger.exception(e)
@@ -580,40 +756,40 @@ def checkteledata(syntax,flst,filepath = None):
                     r' -> r
 
                 '''
-
-
                 #if entry not already in pre-existing data - avoid redoing
-                if str(headinfo[syntax['filter_key']]).strip() not in existing_var[i][j][k]:
+                if str(headinfo[TELE_INST_FILTER_KEY]).strip() not in existing_var[i][j][k]:
 
                     '''
                     Add to unknown_filters if not already in unknown_filters
                     this is to only label the key even if it appears in in multiple files
                     '''
-                    unknown_filter = str(headinfo[syntax['filter_key']]).strip()
+                    
+                    unknown_filter = str(headinfo[TELE_INST_FILTER_KEY]).strip()
 
                     # if it is already in the standard system - without spaces
-                    if unknown_filter.strip() in catalog_filter_syntax:
-
+                    if unknown_filter.strip() in available_filters:
                         #  update entry with filter name
                         existing_var[i][j][k][unknown_filter.strip()] = unknown_filter.strip()
 
-                    elif unknown_filter not in catalog_filter_syntax:
-
-                        filter_default = 'no_filter'
-
-                        filter_name_convert = str(input('Corrosponding filter - %s\n[Telescope: %s :: Inst: %s]\n[default: %s]: '  % (unknown_filter,i,k,filter_default)) or filter_default)
-
+                    # elif unknown_filter not in  available_filters:
+                    else:
+                        
+                        filter_name_convert = ask_question('Corrosponding filter name for - %s?\n( Telescope: %s :: Inst: %s ) ' % (unknown_filter,i,k,),
+                                                          default_answer = 'no_filter',
+                                                          expect_answer_type = str ,
+                                                          options = available_filters)
+                                    
+                                    
                         existing_var[i][j][k][unknown_filter.strip()] = filter_name_convert
+                        
                         updated_filter_keys.append(unknown_filter)
-
+                        
+                    
+                        
+                        
+                        
         except Exception as e:
-            logger.exception(e)
-            pass
-
-
-        '''
-        Finally load and update telescope.yml
-        '''
+            raise Exception('Error with telescope header check: %s' % e)
 
         with open(filepath,'r') as yamlfile:
 
@@ -627,5 +803,5 @@ def checkteledata(syntax,flst,filepath = None):
 
         with open(filepath,'w+') as yamlfile:
             yaml.safe_dump(cur_yaml, yamlfile,default_flow_style=False)
-
-    return syntax
+        
+    return autophot_input

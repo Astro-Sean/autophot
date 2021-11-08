@@ -48,7 +48,6 @@ apass:
   i: !!str       i_mag
   i_err: !!str   e_i_mag
 
-
 pan_starrs:
   name: !!str   objName
   RA: !!str        raMean
@@ -57,20 +56,14 @@ pan_starrs:
   DEC_err: !!str   decMeanErr
   g: !!str     gMeanPSFMag
   g_err: !!str gMeanPSFMagErr
-  g_std: !!str gMeanPSFMagSTD
   r: !!str     rMeanPSFMag
   r_err: !!str rMeanPSFMagErr
-  r_std: !!str rMeanPSFMagSTD
   i: !!str     iMeanPSFMag
   i_err: !!str iMeanPSFMagErr
-  i_std: !!str iMeanPSFMagSTD
   z: !!str     zMeanPSFMag
   z_err: !!str zMeanPSFMagErr
-  z_std: !!str zMeanPSFMagSTD
   y: !!str     yMeanPSFMag
   y_err: !!str yMeanPSFMagErr
-  y_std: !!str yMeanPSFMagSTD
-
 
 # For skymapper, v and u filters are weird! https://www.cambridge.org/core/services/aop-cambridge-core/content/view/S132335801800005X
 skymapper:
@@ -113,8 +106,8 @@ sdss:
     r_err: !!str e_rmag
     i: !!str imag
     i_err: !!str e_imag
-    z: !!str imag
-    z_err: !!str e_imag
+    z: !!str zmag
+    z_err: !!str e_zmag
 
 gaia:
   name: !!str   source_id

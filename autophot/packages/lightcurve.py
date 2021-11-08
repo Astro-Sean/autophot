@@ -1,93 +1,152 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Fri Jun 26 16:52:19 2020
+def Vega2AB(df,AB2Vega = False):
+    
+    
+    '''
+     Convert VEGA to AB magnitude ( or vice versa ) from autophot output
+    :param df: Dataframe containg calibrated photometric output from AutoPhot
+    :type df: Pandas DataFrame
+    :param AB2Vega: Convert from AB to Vega magnitudes, defaults to False
+    :type AB2Vega: Bool, optional
+    :return: Appropiate corrected DataFrame
+    :rtype: Pandas DataFrame
 
-@author: seanbrennan
-"""
+    '''
+    import numpy as np
+    
+    df_AB = df.copy()
+    Vega2AB_dict = {
+                    # 'U':0.79,
+                    # 'B':-0.09,
+                    # 'V':0.02,
+                    # 'R':0.21,
+                    # 'I':0.45,
+                    # 'u':0.91,
+                    # 'g':-0.08,
+                    # 'r':0.16,
+                    # 'i':0.37,
+                    # 'z':0.54,
+                    'J': 0.929,
+                    'H': 1.394,
+                    'K': 1.859,
+#                    'S':-1.51,
+#                    'D':-1.69,
+#                    'A':-1.73,
+                    }
+    if AB2Vega:
+        for key in Vega2AB_dict:
+            Vega2AB_dict[key] *=  -1
+
+    for f in list(Vega2AB_dict.keys()):
+        try:
+            df_AB[f] = df[f] + Vega2AB_dict[f]
+            df_AB['lmag'][~np.isnan(df[f])] = df_AB['lmag'][~np.isnan(df[f])]  + Vega2AB_dict[f]
+        except:
+            print('ERROR: %s' % f)
+            pass
+    return df_AB
 
 
-
-
-
-# =============================================================================
-#
-# =============================================================================
-
-
-
-def plot_lightcurve(syntax,sn_peak = None,
-                    fwhm_limit = 1,
+def plot_lightcurve(autophot_input,sn_peak = None,
+                    check_fwhm = False,
+                    fwhm_limit = 2,
                     pick_filter = [],
-                    filter_spacing = 0.2,
-                    plot_error_lim = 0.01,
+                    filter_spacing = 0.5,
+                    error_lim = 0.25,
+                    max_error_lim = 3,
                     show_plot = True,
+                    show_colour_shift = False,
+                    use_REBIN= False,
+                    show_color_only = False,
+                    ylim = [],
                     vega2AB = False,
                     AB2vega = False):
+    '''
+     Rudimentary function to plot lightcurve from Autophot
+     
+     
+    :param autophot_input: DESCRIPTION
+    :type autophot_input: TYPE
+    :param sn_peak: DESCRIPTION, defaults to None
+    :type sn_peak: TYPE, optional
+    :param check_fwhm: DESCRIPTION, defaults to False
+    :type check_fwhm: TYPE, optional
+    :param fwhm_limit: DESCRIPTION, defaults to 1
+    :type fwhm_limit: TYPE, optional
+    :param pick_filter: DESCRIPTION, defaults to []
+    :type pick_filter: TYPE, optional
+    :param filter_spacing: DESCRIPTION, defaults to 0.2
+    :type filter_spacing: TYPE, optional
+    :param error_lim: DESCRIPTION, defaults to 0.25
+    :type error_lim: TYPE, optional
+    :param max_error_lim: DESCRIPTION, defaults to 1
+    :type max_error_lim: TYPE, optional
+    :param show_plot: DESCRIPTION, defaults to True
+    :type show_plot: TYPE, optional
+    :param show_colour_shift: DESCRIPTION, defaults to False
+    :type show_colour_shift: TYPE, optional
+    :param use_REBIN: DESCRIPTION, defaults to False
+    :type use_REBIN: TYPE, optional
+    :param show_color_only: DESCRIPTION, defaults to False
+    :type show_color_only: TYPE, optional
+    :param ylim: DESCRIPTION, defaults to []
+    :type ylim: TYPE, optional
+    :param vega2AB: DESCRIPTION, defaults to False
+    :type vega2AB: TYPE, optional
+    :param AB2vega: DESCRIPTION, defaults to False
+    :type AB2vega: TYPE, optional
+    :return: DESCRIPTION
+    :rtype: TYPE
+
+    '''
 
     import numpy as np
     import pandas as pd
-    import os,sys
+    import os
     import matplotlib.pyplot as plt
-
     from autophot.packages.functions import set_size
+    
+    from autophot.packages.functions import border_msg
+    
+    border_msg('Plotting multiband light curve')
+    
+    
 
     plt.ioff()
 
+    if use_REBIN:
+        output_fname = autophot_input['outcsv_name']+'_REBIN'+'.csv'
+    else:
+        output_fname = autophot_input['outcsv_name']+'.csv'
 
 
-    def Vega2AB(df,AB2Vega = False):
-        df_AB = df.copy()
-        Vega2AB_dict = {
-                        # 'U':0.79,
-                        # 'B':-0.09,
-                        # 'V':0.02,
-                        # 'R':0.21,
-                        # 'I':0.45,
-                        # 'u':0.91,
-                        # 'g':-0.08,
-                        # 'r':0.16,
-                        # 'i':0.37,
-                        # 'z':0.54,
-                        'J': 0.929,
-                        'H': 1.394,
-                        'K': 1.859,
-    #                    'S':-1.51,
-    #                    'D':-1.69,
-    #                    'A':-1.73,
-                        }
-        if AB2Vega:
-            for key in Vega2AB_dict:
-                Vega2AB_dict[key] *=  -1
+    out_dir = autophot_input['fits_dir']+'_'+autophot_input['outdir_name']
+    output_file_loc = os.path.join(out_dir,output_fname)
 
-        for f in list(Vega2AB_dict.keys()):
-            try:
-                df_AB[f] = df[f] + Vega2AB_dict[f]
-                df_AB['lmag'][~np.isnan(df[f])] = df_AB['lmag'][~np.isnan(df[f])]  + Vega2AB_dict[f]
-            except:
-                print('ERROR: %s' % f)
-                pass
-        return df_AB
+    import os
 
-    out_dir = syntax['fits_dir']+'_'+syntax['outdir_name']
-
-    output_file_loc =os.path.join(out_dir,syntax['outcsv_name']+ '.csv')
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
 
     if not os.path.exists(output_file_loc):
-        print('Cannot find output file')
+        print('Cannot find output file - Checking original file directory')
+        out_dir = autophot_input['fits_dir']
+        output_file_loc = os.path.join(out_dir,output_fname)
+    elif not os.path.exists(output_file_loc):
+        
         return
+    
     else:
-        data  = pd.read_csv(output_file_loc)
+        # print('Found it')
+        pass
 
-    if vega2AB:
-        data = Vega2AB(data)
+    data  = pd.read_csv(output_file_loc)
 
-    if AB2vega:
-        data = Vega2AB(data,Vega = True)
 
     markers = ['o','s','v','^','<','>','p',
                'P','*','h','H','+','X','d',
                'D','1','2','3','4','8']
+    
+    fillstyles = ['full','top','bottom','left','right']
 
     filters = ['K','H','J','z','I','i',
                'R','r','V','g','B','U','u']
@@ -96,98 +155,34 @@ def plot_lightcurve(syntax,sn_peak = None,
             'U': 'slateblue', 'B': 'b', 'V': 'yellowgreen', 'R': 'crimson', 'G': 'salmon',
             'I': 'chocolate', 'J': 'darkred', 'H': 'orangered', 'K': 'saddlebrown'}
 
+
+
     # List of telescopes used
     telelst= list(set(data.telescope.values))
-
+    
+    
     if len(pick_filter) != 0:
         used_filters = pick_filter
     else:
         used_filters  = [i for i in filters if i in list(data.columns)]
 
-
     tele_dict = dict(zip(telelst,markers))
+    
     filter_dict={i:cols[i] for i in used_filters}
 
     offset = {}
-    min_sep = 1
-    # filter_spacing = 0
 
+    for i in range(len(used_filters)):
+        offset[used_filters[i]]=filter_spacing*i
 
-    if sn_peak != None:
-        if len(used_filters)>1 and filter_spacing !=0:
-
-                peak_range = [sn_peak-50,sn_peak+50]
-
-                mid_filter = used_filters[len(used_filters)//2]
-                offset[mid_filter] = 0
-
-                upper_filters = used_filters[len(used_filters)//2:][1::]
-                lower_filters = used_filters[:len(used_filters)//2]
-
-                used_filter_data = data[['mjd',mid_filter,mid_filter+'_err']][~np.isnan(data[mid_filter].values)]
-
-                range_data_mid = used_filter_data[used_filter_data['mjd'].between(peak_range[0],peak_range[1])]
-
-                shift_old =0.
-
-                for i in upper_filters:
-                    try:
-
-                        used_filter_data = data[['mjd',i,i+'_err']][~np.isnan(data[i].values)]
-
-                        range_data = used_filter_data[used_filter_data['mjd'].between(peak_range[0],peak_range[1])]
-
-                        median = np.nanmin(range_data[i])
-
-                        shift = min_sep
-
-                        offset[i] = abs(shift) + abs(shift_old)
-
-
-
-                        shift_old = abs(shift) + abs(shift_old)
-
-                    except Exception as e:
-                       exc_type, exc_obj, exc_tb = sys.exc_info()
-                       fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-                       print(exc_type, fname, exc_tb.tb_lineno,e,i)
-
-
-                median_upper = np.nanmin(range_data_mid[mid_filter])
-                shift_old = 0.
-
-                for i in lower_filters[::-1]:
-                    try:
-
-                        used_filter_data = data[['mjd',i,i+'_err']][~np.isnan(data[i].values)]
-
-                        range_data = used_filter_data[used_filter_data['mjd'].between(peak_range[0],peak_range[1])]
-
-                        median = np.nanmin(range_data[i])
-
-                        shift = -min_sep
-
-                        offset[i] = - abs(shift) - abs(shift_old)
-
-                        median_upper = median - abs(shift) - abs(shift_old)
-
-                        shift_old = - abs(shift) - abs(shift_old)
-                    except Exception as e:
-                       exc_type, exc_obj, exc_tb = sys.exc_info()
-                       fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-                       print(exc_type, fname, exc_tb.tb_lineno,e,i)
-        else:
-            for i in used_filters:
-                offset[i]=0
-    else:
-            for i in range(len(used_filters)):
-                offset[used_filters[i]]=filter_spacing*i
 
 
 
     mjd = []
     mag = []
     mag_e = []
+    mag_color=[]
+    mag_color_e=[]
     color = []
     marker = []
     lmag = []
@@ -195,6 +190,7 @@ def plot_lightcurve(syntax,sn_peak = None,
     fname = []
     filters = []
     fwhm_source = []
+    beta = []
 
     mjd_range = [-np.inf,np.inf]
 
@@ -208,15 +204,40 @@ def plot_lightcurve(syntax,sn_peak = None,
         data_filters = data.iloc[data_filters_idx]
 
         mjd+=list(data_filters.mjd.values)
+
         mag+=list(data_filters[f].values + offset[f])
 
         mag_e+=list(data_filters[f+'_err'].values  )
+        
+        beta+=list(data_filters['beta'].values  )
 
-        fwhm_source += list( abs((data_filters['target_fwhm'] - data_filters['fwhm']).values))
+        if show_colour_shift == True and f+'_color_corrected' in data_filters:
 
-        SNR += list(data_filters.SNR.values  )
+            mag_color+=list(data_filters[f+'_color_corrected'].values + offset[f])
 
-        lmag+=list(data_filters.lmag.values+ offset[f])
+            mag_color_e+=list(data_filters[f+'_err'].values  )
+
+        else:
+            mag_color+=list([np.nan] * len(data_filters))
+            mag_color_e+=list([np.nan] * len(data_filters))
+
+        if not use_REBIN:
+            fwhm_source += list( abs((data_filters['target_fwhm'] - data_filters['fwhm']).values))
+            SNR += list(data_filters.SNR.values)
+            try:
+                lmag+=list(data_filters.lmag_inject.values+ offset[f])
+            except:
+                lmag+=list(data_filters.lmag.values+ offset[f])
+                
+
+        else:
+            fwhm_source += list([0] * len(data_filters))
+            SNR += list([np.nan] * len(data_filters))
+            lmag+= list([np.nan] * len(data_filters))
+
+
+
+
         color+=list([filter_dict[f]]*len(data_filters))
 
         marker+=[tele_dict[i] for i in data_filters.telescope ]
@@ -224,12 +245,15 @@ def plot_lightcurve(syntax,sn_peak = None,
         filters+= [f]*len(data_filters)
 
 
-    # =============================================================================
+# =============================================================================
+#
+# =============================================================================
 
-    plt.close('lightucurve_AUTOPHOT')
-    fig = plt.figure('lightucurve_AUTOPHOT',figsize = set_size(504.0,aspect = 0.75))
+
+    fig = plt.figure('lightcurve',figsize = set_size(500,aspect = 1))
 
     ax1 = fig.add_subplot(111)
+
     subp = [ax1]
 
     for axes in subp:
@@ -237,12 +261,16 @@ def plot_lightcurve(syntax,sn_peak = None,
 
     n_plotted = 0
 
-    for _x,_y, _y_e ,_y_l,_s, _c, _m ,_f,_fil,_fwhm in zip(mjd, mag, mag_e,lmag, SNR, color, marker, fname,filters,fwhm_source):
+    for _x,_y, _y_e ,_y_color, _y_color_e,_y_l,_s, _c, _m ,_f,_fil,_fwhm, beta_i in zip(mjd, mag, mag_e,mag_color,mag_color_e,lmag, SNR, color, marker, fname,filters,fwhm_source,beta):
 
             for axes in subp:
 
-                if  _y_l < _y or np.isnan(_y) or _fwhm>fwhm_limit:
-
+                if check_fwhm:
+                    check_fwhm_iter = _fwhm > fwhm_limit
+                else:
+                    check_fwhm_iter  = False
+                    
+                if  _y_l < _y or np.isnan(_y):
 
                     # plot Limiting magnitude
                     markers, caps, bars = axes.errorbar(_x, _y_l,yerr= [0.3],
@@ -255,34 +283,105 @@ def plot_lightcurve(syntax,sn_peak = None,
                                                         ls = 'None',
                                                         ecolor = 'black',
                                                         fillstyle = 'full',
-                                                        markeredgecolor = _c)
+                                                        markeredgecolor = _c
+                                                        )
                     n_plotted+=1
+
                     [bar.set_alpha(0.15) for bar in bars]
                     [cap.set_alpha(0.15) for cap in caps]
 
 
-                elif _y_e >= plot_error_lim:
+                elif _y_e >= error_lim:
+                    # if _y_e > 0.1:
+                    #     print('\n',_f,_y_e)
 
-                    # Source with errors
-                    markers, caps, bars = axes.errorbar(_x, _y,yerr = _y_e ,
-                                                        marker=_m,
-                                                        c=_c,
-                                                        capsize = 1,
-                                                        # fillstyle = 'none',
-                                                        markeredgecolor=_c,
-                                                        ecolor = 'black',
-                                                        alpha = 0.75)
-                    n_plotted+=1
-                    [bar.set_alpha(0.3) for bar in bars]
-                    [cap.set_alpha(0.3) for cap in caps]
+                    if show_colour_shift:
+                        # print(_y_color)
+
+                        # Source with errors
+                        markers, caps, bars = axes.errorbar(_x, _y_color,yerr = _y_color_e ,
+                                                            marker=_m,
+                                                            c=_c,
+                                                            capsize = 1,
+                                                            # fillstyle = 'none',
+                                                            # fillstyle = 'none',
+                                                            # markeredgecolor='none',
+                                                            ecolor = 'black',
+                                                            # markerhatch = '\\',
+                                                            alpha = 1)
+                        n_plotted+=1
+                        [bar.set_alpha(0.3) for bar in bars]
+                        [cap.set_alpha(0.3) for cap in caps]
+
+                        axes.scatter(_x, _y_color,
+                                 marker=_m,
+                                 # c=np.array([_c]),
+                                 # hatch = '.',
+                                 # facecolor='none',
+                                 edgecolor=_c,
+                                 alpha = 1)
+                        
+                        axes.scatter(_x, _y_color,
+                                 marker='s',
+                                 facecolor = 'none',
+                                 edgecolor = 'red',
+                                 # c=np.array([_c]),
+                                 # hatch = '.',
+                                 # facecolor='none',
+                                 # edgecolor=_c,
+                                 alpha = 1)
+                        
+                        # print(_y_color)
+
+                    if not show_color_only:
+
+
+                        # Source with errors
+                        markers, caps, bars = axes.errorbar(_x, _y,yerr = _y_e ,
+                                                            # marker=_m,
+                                                            marker=_m,
+                                                            c=_c,
+                                                            # c = 'red'
+                                                            capsize = 1,
+                                                            # fillstyle = 'none',
+                                                            markeredgecolor=_c,
+                                                            ecolor = 'black',
+                                                            # hatch = '\\',
+                                                            alpha = 0.5)
+                        n_plotted+=1
+                        [bar.set_alpha(0.3) for bar in bars]
+                        [cap.set_alpha(0.3) for cap in caps]
 
                 else:
 
-                    axes.scatter(_x, _y,
+                    if show_colour_shift == True:
+
+                        # Source with errors
+                        axes.scatter(_x, _y_color,
                                  marker=_m,
-                                 c=np.array([_c]),
+                                 # c=np.array([_c]),
+                                 hatch = '.',
+                                 facecolor='none',
                                  edgecolor=_c,
-                                 alpha = 0.75)
+                                 alpha = 0.5)
+                        axes.scatter(_x, _y_color,
+                                 marker='s',
+                                 facecolor = 'none',
+                                 edgecolor = 'red',
+                                 # c=np.array([_c]),
+                                 # hatch = '.',
+                                 # facecolor='none',
+                                 # edgecolor=_c,
+                                 alpha = 1)
+                        
+
+                    if not show_color_only:
+
+                        axes.scatter(_x, _y,
+                                     marker=_m,
+                                     c=np.array([_c]),
+                                     edgecolor=_c,
+                                     alpha = 0.5)
                     n_plotted+=1
 
             print('\rPlotting light curve %d / %d' % (n_plotted,len(mag)),end = '')
@@ -337,17 +436,37 @@ def plot_lightcurve(syntax,sn_peak = None,
     ax1.set_ylabel('Observed Magnitude + constant')
 
 
-    plt.savefig(os.path.join(syntax['fits_dir'],'lightcurve.pdf'),
-                # box_extra_artists=([first_legend,second_legend]),
-                        bbox_inches='tight')
+    if ylim:
+        ax1.set_ylim(ylim[0],ylim[1])
+
+    fig.tight_layout()
+    
+    
+    
+    wdir = autophot_input['fits_dir']
+
+    new_dir = '_' + autophot_input['outdir_name']
+
+    base_dir = os.path.basename(wdir)
+    work_loc = base_dir + new_dir
+
+    new_output_dir = os.path.join(os.path.dirname(wdir),work_loc)
+    
+    saveloc = os.path.join(new_output_dir,'lightcurve.pdf')
+
+    print('Saving lightcurve to: %s'% autophot_input['fits_dir'])
+    plt.savefig(saveloc,
+        box_extra_artists=([first_legend,second_legend]),
+                bbox_inches='tight')
+    
 
     if not show_plot:
         plt.close('all')
+        
     else:
-        plt.ion()
+        # plt.ion()
         plt.show()
 
-    plt.ion()
 
     return
 

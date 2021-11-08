@@ -1,32 +1,19 @@
-#!/usr/bin/python
 
-'''
+class yaml_autophot_input(object):
 
-Package used for load yaml files and
-dumping/ updating yaml files to control AutoPhot Input
-
-Input Parameters:
-    - fname = name of yaml file
-    - dname = location of fname files, if None location will be direcotyr of call_yaml.py
-
-'''
-
-
-class yaml_syntax(object):
-
-    def __init__(self,filepath = None,dict_name = None,syntax = None):
+    def __init__(self,filepath = None,dict_name = None,autophot_input = None):
 
          self.filepath  = filepath
          self.dict_name = dict_name
-         self.syntax = syntax
+         self.autophot_input = autophot_input
 
     def load_vars(self):
 
         import yaml
         import os
 
-        if self.syntax != None:
-            file_path = os.path.join(self.syntax['wdir'], self.filepath )
+        if self.autophot_input != None:
+            file_path = os.path.join(self.autophot_input['wdir'], self.filepath )
         else:
             file_path = self.filepath
 
