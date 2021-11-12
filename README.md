@@ -165,6 +165,8 @@ no further action is required.
 
 Check out my Jupyter Notebooks the get started with AutoPhOT [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks)
 
+**12-11-2021 These are outdated, new notebooks coming soon**
+
 ## Referencing
 
 The AutoPhOT paper is currently being written, for the time being please cite this [paper](https://arxiv.org/abs/2102.09572).
