@@ -78,7 +78,7 @@ We can search for the location of the solve-field command using the following:
 which solve-field
 ```
 
-It should be something similar to /usr/local/Cellar/astrometry-net/0.85_1 (without solve-field at the end). We then move our data folder to this directory:
+It should be something similar to /usr/local/Cellar/astrometry-net/0.85_1/solve-field (although maybe not exactly). Move our data folder to this directory using:
 
 ```bash
 cd ../
@@ -105,9 +105,9 @@ Next we need to modify the *Makefile*. HOTPANTS requires *CFITSIO* to be already
 brew install cfitsio
  ```
 
-Which will install the library in a directort similar to */usr/local/Cellar/cfitsio/4.0.0*. In this directory there should be two folders, *include* and *bin*.
+Which will install the library in a directory similar to */usr/local/Cellar/cfitsio/4.0.0* (although maybe not exactly). In this directory there should be two folders, *include* and *bin*.
 
-We need to update the *Makefile* for HOTPANTS to work correctly. We need to update the CFITSIOINCDIR and LIBDIR variables to point twoards the include and bin library respectively.
+We need to update the *Makefile* for HOTPANTS to work correctly. This file can be opened using a text editor. We need to update the CFITSIOINCDIR and LIBDIR variables to point towards the *include* and *bin* directories respectively.
 
 ```
 CFITSIOINCDIR=/usr/local/Cellar/cfitsio/4.0.0/include
@@ -125,7 +125,7 @@ Once installed, locate the *hotpants* executable and update 'hotpants_exe_loc' i
 
 **Known error with installation of HOTPANTS**
 
-There is a [known bug](https://github.com/acbecker/hotpants/issues/4) with the HOTPNATS installation on MacOS if installing on MacOS - if upon installation you get 'malloc.h' file not found, replace
+There is a [known bug](https://github.com/acbecker/hotpants/issues/4) with the HOTPNATS installation on MacOS if installing on MacOS - if upon installation you get 'malloc.h' file not found, replace:
 
 ```c
 #include <malloc.h>
@@ -139,7 +139,7 @@ with
  #include <stdlib.h>
  #endif
 ```
-to every .c file. Then you can run the *make* command
+to every .c file. Then you can run the *make* command.
 
 
 **If the user has no need for image subtraction or wants to use Zogy only, this step can be ignored.**
@@ -165,7 +165,9 @@ no further action is required.
 
 Check out my Jupyter Notebooks the get started with AutoPhOT [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks)
 
-**12-11-2021 These are outdated, new notebooks coming soon**
+If you wish to use the packages within AutoPhOT outside of the examples given, Documentation on each package is given [here](https://autophot.readthedocs.io/en/latest/)
+
+**12-11-2021 - These are outdated, new notebooks coming soon**
 
 ## Referencing
 
