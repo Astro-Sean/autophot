@@ -22,6 +22,8 @@ copyright = '2021, Seán Brennan'
 author = 'Seán Brennan'
 
 
+
+html_favicon = 'logo.ico'
 # -- General configuration ---------------------------------------------------
 
 # Add any Sphinx extension module names here, as strings. They can be
