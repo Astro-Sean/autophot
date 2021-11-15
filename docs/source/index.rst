@@ -18,15 +18,7 @@ The motivation for AutoPhoT aims to provide a precise method for photometric cal
    :caption: Getting Started
    installation
    tutorials
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Full Documentation
    packages
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Github and Citation
 
 .. automodule:: autophot
   :members:
