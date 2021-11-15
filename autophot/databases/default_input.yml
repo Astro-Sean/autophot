@@ -372,7 +372,7 @@ AutoPhOT_input:
   # =====================================
 
   # Number of sources used in psf (if available)
-  psf_source_no: 5
+  psf_source_no: 10
 
   # worst cause scenario use this many psf sources
   min_psf_source_no: 3
@@ -396,7 +396,10 @@ AutoPhOT_input:
   use_covarience: True
 
   # Save the PSF model as a fits file
-  save_PSF_models_fits: False
+  save_PSF_models_fits: True
+
+  # Save CSV file with information onf PSF stars
+  save_PSF_stars: False
 
   # User defined PSF stars
   use_PSF_starlist: False

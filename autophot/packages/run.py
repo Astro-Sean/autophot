@@ -1,17 +1,6 @@
 
 def run_autophot(autophot_input):
 
-    """
-    
-    This is the main function used to perform automated photometry
-    
-    The purpose of this package to to prepapre the list of files for use with the 
-    automated photometry aspect of AutoPhot.
-    
-    This includes remove files where the filter is not available in the selected catalog,
-    removing files that have already be redcued (set restart to True)
-    """
-
     from autophot.packages.functions import getheader
     from autophot.packages.check_tns import get_coords
     from autophot.packages.call_yaml import yaml_autophot_input as cs
@@ -22,10 +11,11 @@ def run_autophot(autophot_input):
     import sys
     import pathlib
     import pandas as pd
-    from os.path import dirname
+    import warnings
     import numpy as np
     from functools import reduce
     import logging
+    from autophot.packages.functions import border_msg
 
 
     logger = logging.getLogger(__name__)
@@ -36,17 +26,9 @@ def run_autophot(autophot_input):
     filter_removed = 0
     wrong_file_removed = 0
 
-    def border_msg(msg):
-        row = len(msg)
-        h = ''.join(['+'] + ['-' *row] + ['+'])
-        result= h + '\n'"|"+msg+"|"'\n' + h
-        print('\n'+result)
-
-    #==================================================================
-    # Original Data is not altered
-    # Create new directory within working directory
-    #==================================================================
-
+    # Create new directory within working directory    
+    
+    # Remove backslash if it is given
     if autophot_input['fits_dir'].endswith('/'):
         autophot_input['fits_dir'] = autophot_input['fits_dir'][:-1]
 
@@ -58,16 +40,16 @@ def run_autophot(autophot_input):
         autophot_input['restart'] = False
 
     elif not autophot_input['prepare_templates']:
+        
         flist = []
 
         new_dir = '_' + autophot_input['outdir_name']
         base_dir = os.path.basename(autophot_input['fits_dir']).replace(new_dir,'')
         work_loc = base_dir + new_dir
-
-        pathlib.Path(dirname(autophot_input['fits_dir'])+'/'+work_loc).mkdir(parents = True, exist_ok=True)
-        os.chdir(dirname(autophot_input['fits_dir'])+'/'+work_loc)
-
-
+        
+        work_fpath = os.path.join(autophot_input['fits_dir'],work_loc)
+        pathlib.Path(os.path.dirname(work_fpath)).mkdir(parents = True, exist_ok=True)
+        os.chdir(os.path.dirname(work_fpath))
 
         # Search for .fits files with template or subtraction in it
         # TODO: clean this up
@@ -98,12 +80,8 @@ def run_autophot(autophot_input):
     files_completed = False
 
     if autophot_input['restart'] and not autophot_input['prepare_templates']:
-
-        """
-        Pick up where left out in output folder
-        Search for output file in each folder
-        """
-
+        
+        # Pick up where left out in output folder
         flist_before = []
 
         for i in flist:
@@ -117,21 +95,16 @@ def run_autophot(autophot_input):
             
             file = file_nodots + file_ext
             
-
             clean_path = os.path.join(path, file).replace('_APT','').replace(' ','_').replace('_'+autophot_input['outdir_name'],'')
             
             clean_path_split = list(clean_path.split('/'))
-            # print(clean_path_split)
-            # print()
-            # raise Exception()
+
             sub_dirs = list(dict.fromkeys([i.replace(file_ext,'') for i in clean_path_split]))
             clean_path = '/'.join(sub_dirs)
             clean_fpath = os.path.join(clean_path,file.replace('_APT',''))
-            # print(clean_fpath)
 
             flist_before.append(clean_fpath)
             
-            # raise Exception()
 
         len_before = len(flist)
 
@@ -147,11 +120,9 @@ def run_autophot(autophot_input):
         for root, dirs, files in os.walk(output_folder.replace(' ','')):
             
             for fname in files:
-                # print(fname)
+                
                 if '_APT.f' in fname:
                     
-                    
-
                     if os.path.isfile(os.path.join(root, fname)) and os.path.isfile(os.path.join(root,'out.csv')):
 
 
@@ -166,14 +137,11 @@ def run_autophot(autophot_input):
                         
                         flist_restart.append(clean_path_new.replace('_APT','').replace(' ','_').replace('_'+autophot_input['outdir_name'],''))
 
-        if len(flist_before) ==0:
+        if len(flist_before) == 0:
             
             print('No ouput files found - skipping ')
             
         else:
-            # print(flist_restart)
-            # print(flist_before)
-            # raise Exception()
 
             flist_bool = [False if f in flist_restart else True for f in flist_before]
 
@@ -190,26 +158,22 @@ def run_autophot(autophot_input):
             files_removed += len_before - len_after
 
 
-    # =============================================================================
-    #     Go through files, check if I have their details
-    # =============================================================================
+
+    # Go through files, check if I have their details
     available_filters = []
-    
-    
-    # if not autophot_input['prepare_templates']:
+
+    #  Check that we have all the needed information
     autophot_input = checkteledata(autophot_input,flist)
 
     # =============================================================================
     # Import catalog specific naming conventions installed during autophot installation
-    # For new catalog: please email developer
+    # For new catalog: please email sean.brennan2@ucdconnect.ie
     # =============================================================================
     
-     
-     
-    # autophot_input translation file
-    filepath ='/'.join(os.path.dirname(os.path.abspath(__file__)).split('/')[0:-1])
+    filepath ='/'.join(os.path.os.path.dirname(os.path.abspath(__file__)).split('/')[0:-1])
     catalog_autophot_input_yml = 'catalog.yml'
-    catalog_autophot_input = cs(os.path.join(filepath+'/databases',catalog_autophot_input_yml),autophot_input['catalog']).load_vars()
+    catalog_autophot_input = cs(os.path.join(filepath+'/databases',catalog_autophot_input_yml),
+                                autophot_input['catalog']).load_vars()
 
     #  If catalog set to cutsom
     if autophot_input['catalog'] == 'custom':
@@ -244,19 +208,14 @@ def run_autophot(autophot_input):
     # =============================================================================
 
     if autophot_input['master_warnings']:
-        import warnings
+        
         warnings.filterwarnings("ignore")
 
     target_name = autophot_input['target_name']
 
-    '''
-    If no source information is given i.e look at a specific object
-    Will query Transient Name Server Server for target information
-    '''
-
     pathlib.Path(os.path.join(autophot_input['wdir'],'tns_objects')).mkdir(parents = True, exist_ok=True)
 
-    if autophot_input['target_name'] != None:
+    if autophot_input['target_name'] != None and autophot_input['TNS_BOT_ID'] != None:
 
         transient_path = reduce(os.path.join,[autophot_input['wdir'],'tns_objects',(target_name)+'.yml'])
 
@@ -266,11 +225,14 @@ def run_autophot(autophot_input):
             
         else:
             try:
-                print('\n> Checking TNS for %s information <' % autophot_input['target_name'])
+                print('\nChecking TNS for %s information' % autophot_input['target_name'])
 
         
                 # Retreive the data
-                TNS_response = get_coords(objname = target_name)
+                TNS_response = get_coords(objname = target_name,
+                                          TNS_BOT_ID = autophot_input['TNS_BOT_ID'],
+                                          TNS_BOT_NAME = autophot_input['TNS_BOT_NAME'],
+                                          TNS_BOT_API = autophot_input['TNS_BOT_API'])
 
                 # create a yaml file with object information
                 cs.create_yaml(transient_path,TNS_response)
@@ -289,37 +251,13 @@ def run_autophot(autophot_input):
             
         
     else:
+        continue_response = (input('No access to TNS and no RA/DEC given - do you wish to continue? [y/[n]]') or 'n')
         
-        TNS_response = {}
+        if continue_response != 'y':
+            raise Exception('No target information given and user wants to quit')
+        else:
+            TNS_response = {}
             
-            
-            
-    # =============================================================================
-    #         If selected - add galxies in FOV
-    # =============================================================================
-
-    if autophot_input['mask_galaxies'] and len(TNS_response) != 0 and 'neighbours_galaxy' not in TNS_response:
-        try:
-            from astroquery.ned import Ned
-            import astropy.units as u
-            from astropy import coordinates
-            co = coordinates.SkyCoord(ra= TNS_response['radeg'], dec= TNS_response['decdeg'],
-                                  unit=(u.deg, u.deg))
-            result_table = Ned.query_region(co, radius=0.25 * u.deg).to_pandas()
-            result_table_G = result_table[result_table.Type == 'G']
-            
-            if autophot_input['target_name'] != None:
-                neighbours = [(i['Object Name'],i['RA'],i['DEC']) for _, i in result_table_G.iterrows() ]
-                TNS_response['neighbours_galaxy'] = neighbours
-                cs.create_yaml(transient_path,TNS_response)
-                
-                
-        except Exception as e:
-            print('cannot connect to NED')
-            print(e)
-        
-
-
     # =============================================================================
     # Checking that selected catalog has appropiate filters - if not remove
     # =============================================================================
@@ -331,7 +269,7 @@ def run_autophot(autophot_input):
 
     for name in flist:
 
-        root = dirname(name)
+        root = os.path.dirname(name)
     
         fname = os.path.basename(name)
         
@@ -529,33 +467,18 @@ def run_autophot(autophot_input):
             print('Templates ready - Please check to make sure they are correct')
             print("set 'prepare_templates' to False and execute")
             print('------------------------------------------------------------')
-            return
+            sys.exit()
 
-
-
-        '''
-        Open any previous found output files and try to update it
-
-        otherwise ignore any previous files
-        '''
-
+        # Try to open an pre-existing data, if not make a new one
         try:
-            data = pd.read_csv(str(autophot_input['outcsv_name']+'.csv'),error_bad_lines=False)
+            data = pd.read_csv(str(autophot_input['outcsv_name']+'.csv'))
             update_data = pd.concat([data,new_entry],axis = 0,sort = False,ignore_index = True)
         except:
             update_data = new_entry
 
-        '''
-        Write data to new file
-        '''
+    
+        update_data.to_csv(autophot_input['outcsv_name']+'.csv',index = False)
 
-        try:
-            update_data.to_csv(str(autophot_input['outcsv_name']+'.csv'),index = False)
-        except Exception as e:
-            exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname1 = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            print(exc_type, fname1, exc_tb.tb_lineno,e)
-            print('CANNOT UPDATE OUTPUT CSV')
 
         print('\nDONE')
 
@@ -566,6 +489,8 @@ def run_autophot(autophot_input):
     # =============================================================================
 
     if autophot_input['method'] == 'mp':
+        raise Exception('This is untested - please using method == sp for the time ebing')
+        
         import multiprocessing
 
         import os
@@ -583,11 +508,12 @@ def run_autophot(autophot_input):
 
             signal.signal(signal.SIGINT, original_sigint_handler)
 
-            func = partial(main, TNS_response,autophot_input)
+            func = partial(main, TNS_response, autophot_input)
 
             chunksize, extra = divmod(len(flist) , 4 * multiprocessing.cpu_count())
             if extra:
                 chunksize += 1
+                
             print('\n'+'Chunksize:' ,chunksize)
 
             mp_output = []

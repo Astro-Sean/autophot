@@ -33,7 +33,7 @@ def find_aperture_correction(dataframe,
     import matplotlib.pyplot as plt
     from scipy.stats import norm
     
-    from autophot.packages.functions import find_mag
+    from autophot.packages.functions import calc_mag
     from autophot.packages.functions import set_size
     
     import logging
@@ -41,7 +41,7 @@ def find_aperture_correction(dataframe,
 
     
     # Get magnitude different between aperatrure and "infinite" aperture
-    aperture_difference = find_mag(dataframe['counts_inf_ap'] / dataframe['counts_ap'],0)
+    aperture_difference = calc_mag(dataframe['counts_inf_ap'] / dataframe['counts_ap'],0)
     
     aperture_difference = aperture_difference[~np.isnan(aperture_difference)]
     
@@ -139,7 +139,7 @@ def do_aperture_photometry(image,
     import logging
 
     from autophot.packages.aperture import measure_aperture_photometry
-    from autophot.packages.functions import find_mag
+    from autophot.packages.functions import calc_mag
     
     logger = logging.getLogger(__name__)
 

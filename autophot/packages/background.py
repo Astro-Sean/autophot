@@ -1,23 +1,38 @@
-def remove_background(source,
-                       autophot_input,
-                       xc=None,
-                       yc=None,
-                       use_image_seg_mask = False):
+def remove_background(source,fwhm = 7, xc=None, yc=None,
+                      remove_bkg_local = True, remove_bkg_surface = False,
+                      remove_bkg_poly  = False, remove_bkg_poly_degree = 1,
+                      bkg_level = 3
+                      ):
     '''
     
     :param source: DESCRIPTION
     :type source: TYPE
     :param autophot_input: DESCRIPTION
     :type autophot_input: TYPE
-    :param xc: DESCRIPTION, defaults to 0
+    :param fwhm: DESCRIPTION, defaults to 7
+    :type fwhm: TYPE, optional
+    :param xc: DESCRIPTION, defaults to None
     :type xc: TYPE, optional
-    :param yc: DESCRIPTION, defaults to 0
+    :param yc: DESCRIPTION, defaults to None
     :type yc: TYPE, optional
+    :param remove_bkg_local: DESCRIPTION, defaults to True
+    :type remove_bkg_local: TYPE, optional
+    :param remove_bkg_surface: DESCRIPTION, defaults to False
+    :type remove_bkg_surface: TYPE, optional
+    :param remove_bkg_poly: DESCRIPTION, defaults to False
+    :type remove_bkg_poly: TYPE, optional
+    :param remove_bkg_poly_degree: DESCRIPTION, defaults to 1
+    :type remove_bkg_poly_degree: TYPE, optional
+    :param bkg_level: DESCRIPTION, defaults to 3
+    :type bkg_level: TYPE, optional
+    :param : DESCRIPTION
+    :type : TYPE
     :raises Exception: DESCRIPTION
     :return: DESCRIPTION
     :rtype: TYPE
 
     '''
+
     # import sys,os
     import logging
     import warnings
@@ -25,47 +40,25 @@ def remove_background(source,
     
     from astropy.stats import SigmaClip
     from astropy.stats import sigma_clipped_stats
-    
     from astropy.modeling import models, fitting
     
     from photutils import CircularAperture
-    
-    # import warnings
-
-    
-    from photutils import (Background2D,
-                           SExtractorBackground,
-                           BkgIDWInterpolator,
-                           BkgZoomInterpolator)
+    from photutils import (Background2D,SExtractorBackground,BkgIDWInterpolator,BkgZoomInterpolator)
                            
-
 
     logger = logging.getLogger(__name__)
 
-    source_size = 1.5*autophot_input['fwhm']
-    
-    # aperture_radius = autophot_input['ap_size'] * autophot_input['fwhm']
-    # aperture_area = np.pi * aperture_radius **2
-
-    box = int(np.ceil(autophot_input['fwhm']))
-    filter_size = int(np.ceil(autophot_input['fwhm']))
+    source_size = 1.5*fwhm
+    box = int(np.ceil(fwhm))
+    filter_size = int(np.ceil(fwhm))
 
     if xc is None and yc is None:
-        
         yc = int(source.shape[1]/2)
         xc = int(source.shape[0]/2)
         
 
-    sigma_clip = SigmaClip(sigma=3)
-    
-    # from photutils.segmentation import make_source_mask
-    # with warnings.catch_warnings():
-    #     warnings.simplefilter("ignore")
-    #     mask_array = make_source_mask(source, 
-    #                                   nsigma=autophot_input['bkg_level'],
-    #                                   npixels=int(np.ceil(autophot_input['fwhm'])**2),
-    #                                   filter_fwhm=autophot_input['fwhm'])
-    # print(mask_array.astype(bool))
+    sigma_clip = SigmaClip(sigma=bkg_level)
+
     positions = [xc,yc]
     
     aperture = CircularAperture(positions,r=source_size)
@@ -74,15 +67,9 @@ def remove_background(source,
     
     mask_array = masks.to_image(shape=source.shape).astype(bool)
  
-   
-    # mask_array = mask_array.astype(int)
-    # if use_image_seg_mask:
-       
-    
-
 
     try:
-        if autophot_input['remove_bkg_surface']:
+        if remove_bkg_surface:
 
             
             background = Background2D(source,
@@ -91,8 +78,7 @@ def remove_background(source,
                                         filter_size = filter_size,
                                         sigma_clip = sigma_clip,
                                         bkg_estimator = SExtractorBackground(sigma_clip=sigma_clip),
-                                        # interpolator= BkgZoomInterpolator(order=1),
-                                        # edge_method = 'pad'
+                                        interpolator= BkgZoomInterpolator(order=1),
                                         )
 
 
@@ -110,12 +96,11 @@ def remove_background(source,
             _, _,noise = sigma_clipped_stats(backgroundfree_image_outside_aperture,
                                             cenfunc = np.nanmean,
                                             stdfunc = np.nanstd,
-                                            sigma=autophot_input['bkg_level'],)
+                                            sigma=bkg_level,)
 
-        elif autophot_input['remove_bkg_poly'] and not autophot_input['remove_bkg_local']:
+        elif remove_bkg_poly and not remove_bkg_local:
 
-            raise Exception('Not using poly fit anymore')
-            surface_function_init = models.Polynomial2D(degree=autophot_input['remove_bkg_poly_degree'])
+            surface_function_init = models.Polynomial2D(degree=remove_bkg_poly_degree)
 
             fit_surface = fitting.LevMarLSQFitter()
 
@@ -131,8 +116,6 @@ def remove_background(source,
 
             surface = surface_fit(xx,yy)
             
-            # median_surface = np.median(surface * mask_array)
-            
             surface_under_aperture = np.ma.array(surface, mask=1-mask_array)
             
             
@@ -140,23 +123,21 @@ def remove_background(source,
             
             source_background_free = source - surface
             
-                     
             backgroundfree_image_outside_aperture = np.ma.array(source_background_free, mask=mask_array)
             
             _, _,noise = sigma_clipped_stats(backgroundfree_image_outside_aperture,
-                                            cenfunc = np.nanmean,
-                                            stdfunc = np.nanstd,
-                                            sigma=autophot_input['bkg_level'],)
+                                             cenfunc = np.nanmedian,
+                                             stdfunc = np.nanstd,
+                                             sigma=bkg_level)
             
             
-
-
-        else:
+        elif remove_bkg_local:
+            
             source[mask_array.astype(bool)] == np.nan
 
             _, background, _ = sigma_clipped_stats(source,
                                            mask = mask_array,
-                                           cenfunc = np.median,
+                                           cenfunc = np.nanmedian,
                                            stdfunc = np.nanstd
                                            )
 
@@ -175,7 +156,7 @@ def remove_background(source,
             _, _,noise = sigma_clipped_stats(backgroundfree_image_outside_aperture,
                                             cenfunc = np.nanmedian,
                                             stdfunc = np.nanstd,
-                                            sigma=autophot_input['bkg_level'],)
+                                            sigma=bkg_level,)
             
             noise = np.nanstd(source_background_free)
             

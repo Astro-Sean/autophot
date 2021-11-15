@@ -162,7 +162,13 @@ def limiting_magnitude_prob(autophot_input,image,model = None,r_table = None,pri
 
         logger.info('Limiting threshold: %d sigma' % level)
 
-        image_no_surface,surface,surface_media,noise = remove_background(image,autophot_input,image.shape[1]/2,image.shape[0]/2)
+        image_no_surface,surface,surface_media,noise = remove_background(image,
+                                                                         remove_bkg_local = autophot_input['remove_bkg_local'], 
+                                                                            remove_bkg_surface = autophot_input['remove_bkg_surface'],
+                                                                            remove_bkg_poly   = autophot_input['remove_bkg_poly'],
+                                                                            remove_bkg_poly_degree = autophot_input['remove_bkg_poly_degree'],
+                                                                            bkg_level = autophot_input['bkg_level']
+                                                                            )
 
 
               
@@ -686,10 +692,10 @@ def inject_sources(autophot_input,
     import matplotlib.gridspec as gridspec
     
     from autophot.packages import psf
-    from autophot.packages.functions import find_mag
-    from autophot.packages.uncertain import SNR
+    from autophot.packages.functions import calc_mag
+    from autophot.packages.functions import SNR
     from autophot.packages.functions import set_size
-    from autophot.packages.uncertain import SNR_err
+    from autophot.packages.functions import SNR_err
     
     from photutils.datasets import make_noise_image
     from photutils.datasets.make import apply_poisson_noise
@@ -819,7 +825,7 @@ def inject_sources(autophot_input,
     else:
         user_mag_level = lmag_guess - autophot_input['zp']
             
-    user_mag_level = autophot_input['inject_source_mag'] - autophot_input['zp']
+    # user_mag_level = autophot_input['inject_source_mag'] - autophot_input['zp']
     
     start_mag = user_mag_level
     
@@ -1007,6 +1013,10 @@ def inject_sources(autophot_input,
         print('Ignoring %d / %d sources with high SNR' % (np.sum(~good_pos),len(good_pos)))
         injection_df = injection_df[good_pos]
     # print(injection_df)
+    
+    if np.sum(~good_pos) == len(good_pos):
+        print('Could not find any suitable area to testing artifical source injection ')
+        return np.nan,autophot_input
         
     from autophot.packages.functions import get_distinct_colors
     cols = get_distinct_colors(len(injection_df))
@@ -1191,8 +1201,8 @@ def inject_sources(autophot_input,
                     # recovered_sigma_detection[k][step_name].append((psf_height_flux) / psf_bkg_std_flux)
                     recovered_max_flux[k][step_name].append(psf_height_flux)
                     
-                    mag_recovered =  find_mag(psf_flux,0)
-                    mag_recovered_error = find_mag(psf_flux,0) - find_mag(psf_flux+psf_flux_err,0)
+                    mag_recovered =  calc_mag(psf_flux,0)
+                    mag_recovered_error = calc_mag(psf_flux,0) - calc_mag(psf_flux+psf_flux_err,0)
                     
 
                     inserted_magnitude[k][step_name].append(start_mag+dmag_step)

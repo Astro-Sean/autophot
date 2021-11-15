@@ -53,7 +53,7 @@ def build_r_table(base_image,selected_sources,autophot_input,fwhm,iterations = 1
     from autophot.packages.functions import rebin
     from autophot.packages.background import remove_background
     from autophot.packages.functions import pix_dist,gauss_sigma2fwhm
-    from autophot.packages.uncertain import SNR
+    from autophot.packages.functions import SNR
     from autophot.packages.aperture  import measure_aperture_photometry
     from autophot.packages.functions import gauss_2d,gauss_fwhm2sigma
     from autophot.packages.functions import moffat_2d,moffat_fwhm
@@ -225,9 +225,12 @@ def build_r_table(base_image,selected_sources,autophot_input,fwhm,iterations = 1
                                   int(selected_sources.x_pix[idx]-autophot_input['scale']): int(selected_sources.x_pix[idx]+autophot_input['scale'])]
                 
                 psf_image_bkg_free, bkg_surface, background, noise = remove_background(psf_image,
-                                                                                        autophot_input,
-                                                                                        psf_image.shape[1]/2,
-                                                                                        psf_image.shape[0]/2)
+                                                                                      remove_bkg_local = autophot_input['remove_bkg_local'], 
+                                                                                      remove_bkg_surface = autophot_input['remove_bkg_surface'],
+                                                                                      remove_bkg_poly   = autophot_input['remove_bkg_poly'],
+                                                                                      remove_bkg_poly_degree = autophot_input['remove_bkg_poly_degree'],
+                                                                                      bkg_level = autophot_input['bkg_level']
+                                                                                      )
 
 
                 x = np.arange(0,2*autophot_input['scale'])
@@ -237,11 +240,9 @@ def build_r_table(base_image,selected_sources,autophot_input,fwhm,iterations = 1
                 pars.add('A',value = 0.75*np.nanmax(psf_image_bkg_free),
                          min=0)
                 pars.add('x0',value = psf_image_bkg_free.shape[1]/2,
-                         min = 0
-                         
-                         
-                         ,
+                         min = 0,
                          max =psf_image_bkg_free.shape[1] )
+                
                 pars.add('y0',value = psf_image_bkg_free.shape[0]/2,
                          min = 0,
                          max =psf_image_bkg_free.shape[0])
@@ -295,9 +296,13 @@ def build_r_table(base_image,selected_sources,autophot_input,fwhm,iterations = 1
                                   int(xc_global-autophot_input['scale']): int(xc_global + autophot_input['scale'])]
 
                 psf_image_bkg_free,_,bkg_median,noise = remove_background(psf_image,
-                                                                          autophot_input,
-                                                                          psf_image.shape[1]/2,
-                                                                          psf_image.shape[0]/2)
+                                                                          xc=None, yc=None,
+                                                                          remove_bkg_local = autophot_input['remove_bkg_local'], 
+                                                                          remove_bkg_surface = autophot_input['remove_bkg_surface'],
+                                                                          remove_bkg_poly   = autophot_input['remove_bkg_poly'],
+                                                                          remove_bkg_poly_degree =   autophot_input['remove_bkg_poly_degree'],
+                                                                          bkg_level =autophot_input['bkg_level'] ,
+                                                                        )
 
                 psf_image_slice = psf_image_bkg_free[int(psf_image_bkg_free.shape[1]/2 - fitting_radius):int(psf_image_bkg_free.shape[1]/2 + fitting_radius) ,
                                                      int(psf_image_bkg_free.shape[0]/2 - fitting_radius):int(psf_image_bkg_free.shape[0]/2 + fitting_radius) ]
@@ -438,8 +443,7 @@ def build_r_table(base_image,selected_sources,autophot_input,fwhm,iterations = 1
                 
                 residual_counts_after = np.sum(rebin(residual_roll, (int(2*autophot_input['scale']),int(2*autophot_input['scale']))))
                 
-                
-                print('Before: %.3f :: After %.3f' % (residual_counts_before,residual_counts_after))
+        
                 
                 sources_used +=1
                 
@@ -448,10 +452,12 @@ def build_r_table(base_image,selected_sources,autophot_input,fwhm,iterations = 1
 
                 # Save details about each source used to make the PSF
                 sources_dict['PSF_%d'%sources_used]['x_pix']  = xc_global
+                
                 sources_dict['PSF_%d'%sources_used]['y_pix']  = yc_global
                 sources_dict['PSF_%d'%sources_used]['H_psf'] = float(H)
+                sources_dict['PSF_%d'%sources_used]['SNR']  = PSF_SNR
 
-                sources_dict['PSF_%d'%sources_used]['fwhm'] = PSF_FWHM
+                sources_dict['PSF_%d'%sources_used]['fwhm'] = psf_fwhm_fitted
                 sources_dict['PSF_%d'%sources_used]['chi2'] = chi2
                 sources_dict['PSF_%d'%sources_used]['x_best'] = xc_correction
                 sources_dict['PSF_%d'%sources_used]['y_best'] = yc_correction
@@ -493,9 +499,9 @@ def build_r_table(base_image,selected_sources,autophot_input,fwhm,iterations = 1
         
         construction_sources = pd.DataFrame.from_dict(sources_dict, orient='index',
                                                       columns=['x_pix','y_pix',
-                                                               'H_psf','H_psf_err',
-                                                               'fwhm',
-                                                               'x_best','y_best'])
+                                                               'H_psf',
+                                                               'H_psf_err',
+                                                               'fwhm'])
         construction_sources.reset_index(inplace = True)
         
         
@@ -663,447 +669,6 @@ def PSF_MODEL(xc, yc, sky, H, r_table, autophot_input, slice_scale = None,pad_sh
 
     return psf
     
-
-# =============================================================================
-# Testing of the PSF mode
-# =============================================================================
-
-def test_psf_model(image,PSF_model_sources,residual_table,autophot_input):
-    
-    from autophot.packages.background import remove_background
-    from autophot.packages.functions import set_size
-    
-    # Model used to fit PSF
-    from lmfit import Model
-    import numpy as np
-    import os
-    # test model on same PSF stars that it was built from and return plot 
-    fwhm = autophot_input['fwhm']
-    
-    fitting_radius = int(np.ceil(autophot_input['fitting_radius'] * fwhm))
-        
-    slice_scale = fitting_radius
-    pad_shape = None
-    
-    regriding_size = int(autophot_input['regrid_size'])
-    
-    dx = autophot_input['dx']
-    dy = autophot_input['dy']
-    
-    dx_vary = True
-    dy_vary = True
-    
-        
-    
-    # Define the PSF residual model
-    def psf_residual(x,x0,y0,A):
-
-        res =  PSF_MODEL(x0,y0,0,A,
-                            residual_table,
-                            autophot_input,
-                            slice_scale = slice_scale,
-                            pad_shape = pad_shape)
-                                
-        return res.flatten()
-    
-    
-    psf_residual_model = Model(psf_residual)
-    
-    psf_residual_model.set_param_hint('x0',
-                                      vary = dx_vary,
-                                      value = 0.5*residual_table.shape[1],
-                                      min   = 0.5*residual_table.shape[1]-dx,
-                                      max   = 0.5*residual_table.shape[1]+dx)
-    
-    # 0.5*residual_table.shape[1]+dx
-
-    psf_residual_model.set_param_hint('y0',
-                                      vary =dy_vary,
-                                      value = 0.5*residual_table.shape[0],
-                                      min   = 0.5*residual_table.shape[0]-dy,
-                                      max   = 0.5*residual_table.shape[0]+dy)
-
-    x_slice = np.arange(0,2*fitting_radius)
-    
-    xx_sl,yy_sl= np.meshgrid(x_slice,x_slice)
-    
-
-    for n  in range(len(PSF_model_sources.index)):
-        
-        print('Checking PSF model source stat %d / %d' % (n,len(PSF_model_sources)))
-         
-        idx = list(PSF_model_sources.index)[n]
-        
-        xc_global = PSF_model_sources.x_pix[idx]
-        yc_global = PSF_model_sources.y_pix[idx]
-           
-        source_base =   image[int(yc_global-autophot_input['scale']): int(yc_global + autophot_input['scale']),
-                              int(xc_global-autophot_input['scale']): int(xc_global + autophot_input['scale'])]
-        
-        # source_base = np.roll(source_base,1,axis  = 1)
-        source_bkg_free, bkg_surface, bkg_median,noise = remove_background(source_base,autophot_input)
-        
-        source = source_bkg_free[int(0.5*source_bkg_free.shape[1] - fitting_radius):int(0.5*source_bkg_free.shape[1] + fitting_radius) ,
-                                 int(0.5*source_bkg_free.shape[0] - fitting_radius):int(0.5*source_bkg_free.shape[0] + fitting_radius) ]
-           
-        psf_residual_model.set_param_hint('A',
-                                        value = 0.5 * np.nanmax(source),
-                                        min =1e-6,
-                                        max = 1.5*np.nanmax(abs(source)))
-             
-        psf_pars = psf_residual_model.make_params()
-
-        import warnings
-        with warnings.catch_warnings():
-                    
-            warnings.simplefilter("ignore")
-        
-                    
-            result = psf_residual_model.fit(data = source,
-                                                params = psf_pars,
-                                                x = np.ones(source.shape),
-                                                method = autophot_input['fitting_method'],
-                                                nan_policy = 'omit',
-                                                # weights = np.log10(source)
-                                                )
-            
-        xc = result.params['x0'].value
-    
-        yc = result.params['y0'].value
-    
-        H_psf = result.params['A'].value
-        
-        fitted_PSF = PSF_MODEL(xc,yc,0,H_psf,residual_table,autophot_input)
-        
-        subtracted_image = source_bkg_free - fitted_PSF
-        
-        import matplotlib.pyplot as plt
-        
-        
-        
-        fig = plt.figure(figsize = set_size(250,1))
-        
-        ax1 = fig.add_subplot(311)
-        ax2 = fig.add_subplot(312)
-        ax3 = fig.add_subplot(313)
-        
-        image_source = ax1.imshow(source_bkg_free,
-                   origin = 'lower')
-        
-        image_psf = ax2.imshow(fitted_PSF,
-                   origin = 'lower')
-        
-        image_residual = ax3.imshow(subtracted_image,
-                   origin = 'lower')
-        
-        cbar_ax1 = plt.colorbar(image_source,ax = [ax1])
-        cbar_ax2 = plt.colorbar(image_psf,ax = [ax2])
-        cbar_ax3 = plt.colorbar(image_residual,ax = [ax3])
-        
-        ax1.set_title('PSF model source')
-        ax2.set_title('Fitted PSF')
-        ax3.set_title('Residual')
-        
-        for ax in [ax1,ax2,ax3]:
-            ax.scatter(source_bkg_free.shape[1]/2,source_bkg_free.shape[0]/2,
-                       marker = '+',
-                       color = 'black',
-                       label = 'Image Center')
-            ax.scatter(xc,yc,
-                       marker = 'o',facecolor = 'none',edgecolor = 'red',label = 'Image Center')
-        
-        
-        for cbar in [cbar_ax1,cbar_ax2,cbar_ax3]:
-            cbar.set_label('Counts')
-        
-        save_loc = os.path.join(autophot_input['write_dir'],'TEST_PSF')
-
-        os.makedirs(save_loc, exist_ok=True)
-        fig.savefig(os.path.join(save_loc,'TEST_PSF_MODEL_%d.pdf' % idx),
-                     bbox_inches='tight')
-
-         # logger.info('Image %s / %s saved' % (str(idx),str(len(sources.index))))
-
-        plt.close(fig)
-
-
-    return None 
-    
-
-
-# =============================================================================
-# Check to see if update residual table will improve phototmetry
-# =============================================================================
-
-
-def update_residual_table(image,construction_sources,r_table,autophot_input,iterations = 10):
-    
-    
-    '''
-    Test to update PSF residual table 
-    '''
-    import numpy as np
-    import matplotlib.pyplot as plt
-    
-
-    import pandas as pd
-    import lmfit
-    import logging
-
-    import os
-    import warnings
-    import matplotlib.pyplot as plt
-    dir_path = os.path.dirname(os.path.realpath(__file__))
-    plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
-    
-    from photutils import DAOStarFinder
-    from astropy.stats import sigma_clipped_stats
-    from photutils import DAOStarFinder
-    
-    from autophot.packages.functions import scale_roll
-    from autophot.packages.functions import rebin
-    from autophot.packages.background import remove_background
-    from autophot.packages.functions import pix_dist,gauss_sigma2fwhm
-    from autophot.packages.uncertain import SNR
-    from autophot.packages.aperture  import measure_aperture_photometry
-    from autophot.packages.functions import gauss_2d,gauss_fwhm2sigma
-    from autophot.packages.functions import moffat_2d,moffat_fwhm
-    
-    
-    from lmfit import Model
-    import numpy as np
-    import os
-    
-    from autophot.packages.functions import gauss_2d,gauss_fwhm2sigma
-    from autophot.packages.functions import moffat_2d,moffat_fwhm
-    if autophot_input['use_moffat']:
-        
-        fitting_model = moffat_2d
-        fitting_model_fwhm = moffat_fwhm
-
-    else:
-        fitting_model = gauss_2d
-        fitting_model_fwhm = gauss_sigma2fwhm
-        
-    
-    # test model on same PSF stars that it was built from and return plot 
-    fwhm = autophot_input['fwhm']
-    
-    fitting_radius = int(np.ceil(autophot_input['fitting_radius'] * fwhm))
-        
-    slice_scale = fitting_radius
-    pad_shape = None
-    
-    regriding_size = int(autophot_input['regrid_size'])
-    
-    dx = autophot_input['dx']
-    dy = autophot_input['dy']
-    
-    dx_vary = True
-    dy_vary = True
-    
-    updated_residual_table =  np.repeat(np.repeat(r_table, regriding_size, axis=0), regriding_size, axis=1)
-    
-    
-    # Define the PSF residual model
-    
-    x_slice = np.arange(0,2*fitting_radius)
-    
-    xx_sl,yy_sl = np.meshgrid(x_slice,x_slice)
-    
-    # x = np.arange(0,2*autophot_input['scale'])
-    xx,yy = np.meshgrid(np.arange(0,2*autophot_input['scale']),np.arange(0,2*autophot_input['scale']))
-    
-    
-    
-    for iteration in range(iterations):
-        
-        r_table_iter = []
-        
-        def psf_residual(x,x0,y0,A):
-    
-            res =  PSF_MODEL(x0,y0,0,A,
-                             r_table,
-                             autophot_input,
-                             slice_scale = slice_scale,
-                             pad_shape = pad_shape)
-                                    
-            return res.flatten()
-    
-    
-        psf_residual_model = Model(psf_residual)
-        
-        psf_residual_model.set_param_hint('x0',
-                                          vary = dx_vary,
-                                          value = 0.5*r_table.shape[1],
-                                          min   = 0.5*r_table.shape[1]-dx,
-                                          max   = 0.5*r_table.shape[1]+dx)
-        
-        # 0.5*residual_table.shape[1]+dx
-    
-        psf_residual_model.set_param_hint('y0',
-                                          vary = dy_vary,
-                                          value = 0.5*r_table.shape[0],
-                                          min   = 0.5*r_table.shape[0]-dy,
-                                          max   = 0.5*r_table.shape[0]+dy)
-        
-        for idx in construction_sources.index:
-            
-
-            
-            psf_image = image[int(construction_sources.y_pix[idx]-autophot_input['scale']): int(construction_sources.y_pix[idx]+autophot_input['scale']),
-                              int(construction_sources.x_pix[idx]-autophot_input['scale']): int(construction_sources.x_pix[idx]+autophot_input['scale'])]
-            
-            psf_image_bkg_free,bkg_surface,background,noise = remove_background(psf_image,
-                                                    autophot_input,
-                                                    psf_image.shape[1]/2,
-                                                    psf_image.shape[0]/2)
-    
-            psf_image_slice = psf_image_bkg_free[int(psf_image_bkg_free.shape[1]/2 - fitting_radius):int(psf_image_bkg_free.shape[1]/2 + fitting_radius) ,
-                                                 int(psf_image_bkg_free.shape[0]/2 - fitting_radius):int(psf_image_bkg_free.shape[0]/2 + fitting_radius) ]
-    
-            import warnings
-            
-            psf_residual_model.set_param_hint('A',
-                                               value = 0.75 * np.nanmax(psf_image_slice),
-                                               min = 1e-6,
-                                               max = 1.5*np.nanmax(abs(psf_image_slice)))
-             
-            psf_pars = psf_residual_model.make_params()
-            
-            with warnings.catch_warnings():
-                        
-                warnings.simplefilter("ignore")
-            
-                        
-                result = psf_residual_model.fit(data = psf_image_slice,
-                                                params = psf_pars,
-                                                x = np.ones(psf_image_slice.shape),
-                                                method = autophot_input['fitting_method'],
-                                                nan_policy = 'omit',
-                                                    # weights = np.log10(source)
-                                                    )
-                # print(result.fit_report())
-                
-            xc = result.params['x0'].value 
-            yc = result.params['y0'].value 
-        
-            H_psf = result.params['A'].value
-            
-            # - fitting_radius +  autophot_input['scale']
-            
-            
-            xc_correction =  xc - fitting_radius + autophot_input['scale']
-            yc_correction =  yc - fitting_radius + autophot_input['scale']
-            
-            fitted_PSF = PSF_MODEL(xc,yc,0,H_psf,r_table,autophot_input)
-            
-            residual = psf_image_bkg_free - fitted_PSF
-                
-            # psf_mag.append(PSF_flux)
-            
-            residual = residual / H_psf
-            
-            residual_counts_before = np.sum(residual)
-    
-            residual_regrid = np.repeat(np.repeat(residual, regriding_size, axis=0), regriding_size, axis=1)
-    
-            x_roll = scale_roll(autophot_input['scale'],xc,regriding_size)
-            y_roll = scale_roll(autophot_input['scale'],yc,regriding_size)
-            # print(x_roll,y_roll)
-    
-            residual_roll = np.roll(np.roll(residual_regrid,y_roll,axis=0),x_roll,axis = 1)
-
-            r_table_iter.append(residual_roll)
-            # residual_table.append(residual_roll)
-            
-            residual_counts_after = np.sum(rebin(residual_roll, (int(2*autophot_input['scale']),int(2*autophot_input['scale']))))
-            # end subtraction
-            from autophot.packages.functions import set_size
-            fig = plt.figure(figsize = set_size(500,1))
-        
-            ax1 = fig.add_subplot(511)
-            ax2 = fig.add_subplot(512)
-            ax3 = fig.add_subplot(513)
-            ax4 = fig.add_subplot(514)
-            ax5 = fig.add_subplot(515)
-            
-            image_source = ax1.imshow(psf_image_bkg_free,
-                       origin = 'lower')
-            
-            image_psf = ax2.imshow(fitted_PSF,
-                       origin = 'lower')
-            
-            image_residual = ax3.imshow(residual*H_psf,
-                       origin = 'lower')
-            
-            new_residual_regrid = ax4.imshow(residual_regrid,
-                       origin = 'lower')
-            
-            new_residual = ax5.imshow(residual_roll,
-                       origin = 'lower')
-            
-            # cbar_ax1 = plt.colorbar(image_source,ax = [ax1])
-            # cbar_ax2 = plt.colorbar(image_psf,ax = [ax2])
-            # cbar_ax3 = plt.colorbar(image_residual,ax = [ax3])
-            
-            # ax1.set_title('PSF model source')
-            # ax2.set_title('Fitted PSF')
-            # ax3.set_title('Residual')
-            
-            for ax in [ax1,ax2,ax3]:
-                ax.scatter(psf_image_bkg_free.shape[1]/2,psf_image_bkg_free.shape[0]/2,
-                            marker = '+',
-                            color = 'black',
-                            label = 'Image Center')
-                ax.scatter(xc,yc,
-                            marker = 'o',facecolor = 'none',edgecolor = 'red',label = 'Image Center')
-            
-            
-            # for cbar in [cbar_ax1,cbar_ax2,cbar_ax3]:
-            #     cbar.set_label('Counts')
-            
-            save_loc = os.path.join(autophot_input['write_dir'],'TEST_PSF')
-    
-            os.makedirs(save_loc, exist_ok=True)
-            fig.savefig(os.path.join(save_loc,'TEST_PSF_MODEL_%d_iter_%d.pdf' % (idx, iteration)),
-                        bbox_inches='tight')
-            plt.close()
-
-         # logger.info('Image %s / %s saved' % (str(idx),str(len(sources.index))))
-
-        # end iteration
-        r_table_iter_median = np.nanmedian(np.dstack(r_table_iter),axis = -1)
-    
-        
-        updated_residual_table += r_table_iter_median
-        
-        r_table  = rebin(updated_residual_table, (int(2*autophot_input['scale']),int(2*autophot_input['scale'])))
-        fig = plt.figure(figsize = set_size(500,1))
-        
-        ax1 = fig.add_subplot(311)
-        ax2 = fig.add_subplot(312)
-        ax3 = fig.add_subplot(313)
-
-        
-        ax1.imshow(r_table_iter_median,
-                       origin = 'lower')
-        
-        ax2.imshow(updated_residual_table,
-                       origin = 'lower')
-        
-        ax3.imshow(r_table,
-                       origin = 'lower')
-            
-        
-        os.makedirs(save_loc, exist_ok=True)
-        fig.savefig(os.path.join(save_loc,'NEW_RTABLE_iter_%d.pdf' % ( iteration)),
-                    bbox_inches='tight')
-        plt.close()
-        
-
-    
-    return r_table
 
 # =============================================================================
 # Fit the PSF model
@@ -1317,8 +882,7 @@ def fit(image,
             yc = source_base.shape[0]/2
             
             if not remove_background_val:
-                
-                print('here')
+ 
                 
                 source_bkg_free = source_base
                 bkg_surface = np.ones(source_base.shape)
@@ -1330,7 +894,14 @@ def fit(image,
 
                 try:
 
-                    source_bkg_free, bkg_surface, bkg_median,noise = remove_background(source_base,autophot_input)
+                    source_bkg_free, bkg_surface, bkg_median,noise = remove_background(source_base,
+                                                                                       xc=None, yc=None,
+                                                                                       remove_bkg_local = autophot_input['remove_bkg_local'], 
+                                                                                       remove_bkg_surface = autophot_input['remove_bkg_surface'],
+                                                                                       remove_bkg_poly   = autophot_input['remove_bkg_poly'],
+                                                                                       remove_bkg_poly_degree =   autophot_input['remove_bkg_poly_degree'],
+                                                                                       bkg_level =autophot_input['bkg_level'] ,
+                                                                                        )
                     
                 except Exception as e:
                     

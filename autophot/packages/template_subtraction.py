@@ -442,7 +442,7 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
             from PyZOGY.subtract import run_subtraction 
             use_hotpants = False
         except ImportError as e:
-            print('PyZogy selected but not installed')
+            print('PyZogy selected but not installed: %s' % e)
             autophot_input['use_zogy'] = False
             
     if not use_hotpants and not autophot_input['use_zogy']:
@@ -563,17 +563,17 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
                                        n_stamps = 1,
                                        max_iterations = 10,
                                        
-                                       use_pixels  = False
+                                       use_pixels  = True
                                         # size_cut = True
                                         )
-                # sys.stdout = original_stdout # Reset the standard output to its original value
-    
+             
                 hdu = fits.PrimaryHDU(diff[0])
                 hdul = fits.HDUList([hdu])
                 hdul.writeto(str(file.replace(fname_ext,'_subtraction'+fname_ext)),
                              overwrite = True,
                              output_verify = 'silentfix+ignore')
-            except:
+            except Exception as e:
+                print('Pyzogy Failed [%s] - trying HOTPANTS' % e)
                 use_hotpants = True
                 
                 
@@ -593,6 +593,7 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
             # =============================================================================
 
             # Arguments to pass to HOTPANTS
+            
             include_args = [
                     # Input image
                             ('-inim',   str(file)),
@@ -605,52 +606,43 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
                     # Template lower limits
                             ('-tl',     str(np.nanmin(check_values_template))),
                     # Template upper limits
-                            ('-tu',     str(template_max+1)),
+                            ('-tu',     str(template_max+10)),
                     # Image upper limits
-                            ('-iu',     str(image_max+1)),
+                            ('-iu',     str(image_max+10)),
                     # Image mask
                             ('-imi',    str(footprint_loc)),
                     # Template mask
                             ('-tmi',    str(footprint_loc)),
                     # Image gain
-                            # ('-ig',     str(autophot_input['AIN'])),
+                            # ('-ig',     str(autophot_input['GAIN'])),
                     # Template gain
                             # ('-tg',     str(t_header['gain'])),
                     # Normalise to image[i]
-                            ('-n',      'i'),
+                            ('-n',  'i'),
                     # spatial order of kernel variation within region  
                             ('-ko', '1'),
                     # Verbosity - set to as output is sent to file
                             ('-v' , ' 0') ,
                     # number of each region's stamps in x dimension
-                            ('-nsx' , '5') ,
+                            ('-nsx' , '11') ,
                     # number of each re5ion's stamps in y dimension
-                            ('-nsy' , '10'), 
+                            ('-nsy' , '11'), 
                     # number of each region's stamps in x dimension
                     # RMS threshold forgood centroid in kernel fit
-                            ('-ft' , '10') ,
+                            ('-ft' , '20') ,
                     # threshold for sigma clipping statistics
-                            ('-ssig' , ' 5.0') ,
+                            ('-ssig' , '5.0') ,
                     # high sigma rejection for bad stamps in kernel fit
                             ('-ks' , '3.0'),
-                                               # number of each region's stamps in x dimension
-                            # ('-rss' , str(3*image_FWHM)) ,
+                    # convolution kernel half width
+                            # ('-r' , str(1.5*image_FWHM)) ,
+                    # number of centroids to use for each stamp 
+                            # ('-nss' , str(5))
         
                             ]
 
             args= [str(exe)]
 
-            if smooth_template:
-                
-                print('Adjusting fitting to smooth template')
-                fwhm_match = np.sqrt(image_FWHM**2 + template_FWHM**2)
-                sigma_match = fwhm_match/(2 * np.sqrt(2 * np.log(2)))
-
-                add_flag = ('-ng', '3 6 %.3f 4 %.3f 2 %.3f' % (0.5*sigma_match, sigma_match, 2*sigma_match))
-
-                include_args= include_args + [add_flag]
-
-            
             for i in include_args:
                 args[0] += ' ' + i[0] + ' ' + i[1]
             # =============================================================================

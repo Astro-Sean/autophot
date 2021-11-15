@@ -275,74 +275,6 @@ def search(image,
 
 
 
-def rematch_seqeunce_stars(df,autophot_input):
-    
-    import numpy as np
-    import pandas as pd
-    
-    from autophot.packages.functions import pix_dist
-
-    dmag = autophot_input['default_dmag']
-    rematch_df = df.copy()
-    
-    image_filter = autophot_input['filter']
-    
-    rematch_df_with_filter = rematch_df[~np.isnan(rematch_df[image_filter])]
-    rematch_df_without_filter = rematch_df[np.isnan(rematch_df[image_filter])]
-    
-    new_df = []
-
-    for index, row in rematch_df_with_filter.iterrows():
-        # For each source with a filter value - see is there also a source with the same value
-        xpix = float(row.x_pix)
-        ypix = float(row.y_pix)
-        
-        dist = pix_dist(xpix,rematch_df_without_filter.x_pix.values,ypix,rematch_df_without_filter.y_pix.values)
-        # print(dist)
-        near_sources = rematch_df_without_filter[(dist < fwhm) & (dist!=0)]
-        
-        if len(near_sources)==0:
-            new_df.append(row)
-            continue
-        
-        # print(near_sourcess)
-        for index, row_match in near_sources.iterrows():
-            for f in dmag.keys():
-                if f not in near_sources.columns:
-                    continue
-                if f == image_filter:
-                    continue
-                
-                if np.isnan(float(row_match[f])):
-                    continue
-                else:
-   
-                    # if not np.isnan(float(near_sources[f])):
-                    row[f] = float(row_match[f])
-                
-                    row[f+'_err'] = float(row_match[f+'_err'])
-            
-        new_df.append(row)
-            
-        # print(row)
-        
-    output_df = pd.chosen_catalogFrame(new_df)
-    
-    # output_df.to_csv('/Users/seanbrennan/Desktop/mactch1.csv')
-    output_df.reset_index(inplace= True)
-    
-    output_df = output_df.round({'x_pix': 2, 'y_pix': 2})
-    
-    output_df.drop_duplicates(subset=['x_pix', 'y_pix'],inplace = True )
-    
-    
-    # output_df.to_csv('/Users/seanbrennan/Desktop/mactch2.csv')
-    
-    
-    
-
-    return output_df
-
 
 def match(image,
           headinfo, 
@@ -571,8 +503,8 @@ def match(image,
             message = '\rMatching catalog to image: %d / %d :: Useful sources %d / %d '% (float(i)+1,
                                                                                         len(chosen_catalog.index),
                                                                                         useable_sources+1,
-                                                                                        len(chosen_catalog.index),
-                                                                                        )
+                                                                                       len(chosen_catalog.index),
+)
             print(message,end = '')
 
             # catalog pixel coordinates of source take as an approximate location
@@ -587,8 +519,7 @@ def match(image,
 
             image_filtermagnitude[image_filter].append(chosen_catalog[catalog_keywords[image_filter]][idx])
             image_filtermagnitude_err[image_filter+'_err'].append(chosen_catalog[catalog_keywords[image_filter+'_err']][idx])
-            
-            # default_dmag = autophot_input['default_dmag']
+
             for key,val in default_dmag.items():
                 
                 if key != image_filter:
@@ -706,7 +637,6 @@ def match(image,
                  # assume source closest to center is desired source
                  elif len(sources) > 1:
 
-                    # if autophot_input['match_catalog_locate_dist']:
 
                    r_vals = pix_dist(scale,np.array(sources['xcentroid']),
                                      scale,np.array(sources['ycentroid']))

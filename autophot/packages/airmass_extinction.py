@@ -5,11 +5,11 @@ def Rayleigh_extinction(lam,h):
     
     https://www.degruyter.com/document/doi/10.1515/astro-2017-0046/html
     
-    :param lam: Wavelegth in Ansgtrom
+    :param lam: Wavelegth in Angstrom
     :type lam: float 
-    :param h: Altiude of observatory in Km
+    :param h: Altiude of observatory/telescope in Km
     :type h: float
-    :return: Airmass extinction in mag per unit airmass
+    :return: Airmass extinction due to Rayleigh scattering in units of mag per unit airmass 
     :rtype: float
 
     '''
@@ -27,12 +27,13 @@ def Rayleigh_extinction(lam,h):
 
 
 def Ozone_extinction(lam):
+    
     '''
-    Extinction due to Ozone and water absorption
+    Extinction due to Ozone and water absorption in the atmosphere.
     
     :param lam: Wavelegth in Ansgtrom
     :type lam: float
-    :return: Airmass extinction in mag per unit airmass
+    :return: Airmass extinction due to Rayleigh scattering in units of mag per unit airmass 
     :rtype: float
 
     '''
@@ -44,20 +45,17 @@ def Ozone_extinction(lam):
    
     filepath = os.path.dirname(os.path.abspath(__file__))
     
-    
-    
     ozone_coeffs = reduce(os.path.join,['/'.join(filepath.split('/')[:-1]),'databases/extinction','ozone_coeff.txt'])
     # print(filepath)
 
     kappa_ozone = np.genfromtxt(ozone_coeffs)
-    # kappa_int = 0
+    
     kappa_lam = np.array([i[0] for i in kappa_ozone])
     kappa_ext_percm = np.array([i[1] for i in kappa_ozone])
 
-    
-    
     xnew = []
     ynew = []
+    
     for i in range(len(kappa_lam)):
         if kappa_lam[i] not in xnew:
             if kappa_lam[i]<1000:
@@ -83,6 +81,7 @@ def Ozone_extinction(lam):
     kappa_ext_percm= kappa_ext_percm[idx]
     
     kappa_int = interp1d(kappa_lam, kappa_ext_percm,kind='cubic')
+    
     # https://ozonewatch.gsfc.nasa.gov/facts/dobson_SH.html
     # Thickness of ozone layer at STP (3mm)
     T_oz = 0.3
@@ -93,8 +92,9 @@ def Ozone_extinction(lam):
     
     
 def Aerosol_extinction(lam,h,A0,H0,bs):
+    
     '''
-    Extinction due to particulates in the Air
+    Extinction due to particulates in the Air. 
     
     :param lam: Wavelegth in Ansgtrom
     :type lam: float 
@@ -117,8 +117,10 @@ def Aerosol_extinction(lam,h,A0,H0,bs):
     
     
 def X(secz):
+    
     '''
     Airmass equation taken from taken from Photometric calibration cookbook
+    
     # http://star-www.rl.ac.uk/star/docs/sc6.htx/sc6.html
     
     :param secz: secant of zenith angle in degress
@@ -134,7 +136,10 @@ def X(secz):
 
 
 
-def find_airmass_extinction(extinction_dictionary,header,autophot_input):
+def find_airmass_extinction(extinction_dictionary,
+                            header,
+                            image_filter,
+                            airmass_key):
     
     
     '''
@@ -148,21 +153,22 @@ def find_airmass_extinction(extinction_dictionary,header,autophot_input):
     :type airmass: float
     :param extinction_dictionary: Dictionary containing extinction in specific filters 
     :type extinction_dictionary: dict
-    :param autophot_input: Autophot control file
-    :type autophot_input: dict
+    :param image_filter: Filter used 
+    :type image_filter: str
+    :param airmass_key: Key corrosponding to airmass in header file
+    :type airmass_key: str
     :return: Airmass correction
     :rtype: Float
     
     '''
     
+    # TODO: change input parameters for simplicity
+    
     import logging
     
     logger = logging.getLogger(__name__)
 
-    image_filter = autophot_input['filter']
-    
-    AIRMASS_key= autophot_input['AIRMASS']
-    airmass = header[AIRMASS_key]
+    airmass = header[airmass_key]
     
     kappa_filter = extinction_dictionary['ex_'+image_filter]
     

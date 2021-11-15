@@ -1,19 +1,20 @@
-
+#todo: update this whole script
 class yaml_autophot_input(object):
 
-    def __init__(self,filepath = None,dict_name = None,autophot_input = None):
+    def __init__(self,filepath = None,dict_name = None,wdir = None):
 
          self.filepath  = filepath
          self.dict_name = dict_name
-         self.autophot_input = autophot_input
+         self.wdir = wdir
+         # self.autophot_input = autophot_input
 
     def load_vars(self):
 
         import yaml
         import os
 
-        if self.autophot_input != None:
-            file_path = os.path.join(self.autophot_input['wdir'], self.filepath )
+        if self.wdir != None:
+            file_path = os.path.join(self.wdir, self.filepath )
         else:
             file_path = self.filepath
 

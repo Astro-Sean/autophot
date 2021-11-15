@@ -125,12 +125,14 @@ def plot_lightcurve(autophot_input,sn_peak = None,
     import os
 
     dir_path = os.path.dirname(os.path.realpath(__file__))
+    
     plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
-
+    
     if not os.path.exists(output_file_loc):
-        print('Cannot find output file - Checking original file directory')
+        print('Cannot find output file in %s /n Checking original file directory' %  output_file_loc)
         out_dir = autophot_input['fits_dir']
         output_file_loc = os.path.join(out_dir,output_fname)
+        
     elif not os.path.exists(output_file_loc):
         
         return
@@ -454,9 +456,8 @@ def plot_lightcurve(autophot_input,sn_peak = None,
     
     saveloc = os.path.join(new_output_dir,'lightcurve.pdf')
 
-    print('Saving lightcurve to: %s'% autophot_input['fits_dir'])
+    print('Saving lightcurve to: %s' % new_output_dir)
     plt.savefig(saveloc,
-        box_extra_artists=([first_legend,second_legend]),
                 bbox_inches='tight')
     
 

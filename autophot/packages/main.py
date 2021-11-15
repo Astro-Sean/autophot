@@ -52,18 +52,17 @@ def main(object_info,autophot_input,fpath):
     from astropy.visualization import  ZScaleInterval
     from autophot.packages.aperture import plot_aperture
 
-
     # Proprietary modules developed for AUTOPHOT
-    from autophot.packages.functions import  getheader,getimage,find_zeropoint, find_mag,set_size,pix_dist
+    from autophot.packages.functions import  getheader,getimage,calc_mag,set_size,pix_dist
     from autophot.packages.functions import gauss_2d,gauss_fwhm2sigma,gauss_sigma2fwhm
     from autophot.packages.functions import moffat_2d,moffat_fwhm,border_msg
     from autophot.packages.check_wcs import updatewcs,removewcs
     from autophot.packages.call_astrometry_net import AstrometryNetLOCAL
     from autophot.packages.template_subtraction import subtract
     from autophot.packages.call_yaml import yaml_autophot_input as cs
-    from autophot.packages.uncertain import SNR
+    from autophot.packages.functions import SNR, SNR_err
     from autophot.packages.get_template import get_pstars
-    from autophot.packages.uncertain import SNR_err
+    
     from autophot.packages.limit import limiting_magnitude_prob,inject_sources
     from autophot.packages.call_crayremoval import run_astroscrappy
     from autophot.packages.functions import arcmins2pixel,pixel2arcsec
@@ -1199,7 +1198,7 @@ def main(object_info,autophot_input,fpath):
 
                     '''
 
-                    approx_psf_mag = float(np.nanmin(find_mag(psf_stats['psf_counts']/autophot_input['exp_time'],0)))
+                    approx_psf_mag = float(np.nanmin(calc_mag(psf_stats['psf_counts']/autophot_input['exp_time'],0)))
 
                     logging.info('Approx PSF mag %.3f mag' % approx_psf_mag)
 
@@ -1304,7 +1303,7 @@ def main(object_info,autophot_input,fpath):
                 ap_corr_err = ap_corr_base_err
 
             # Instrumental magnitude
-            c['inst_'+str(use_filter)] = find_mag(c['count_rate_star'],0) + ap_corr
+            c['inst_'+str(use_filter)] = calc_mag(c['count_rate_star'],0) + ap_corr
             # Error in instrumental Magnitude
             c_SNR_err = SNR_err(c.SNR)
 
@@ -2075,10 +2074,10 @@ def main(object_info,autophot_input,fpath):
                                  RN =  autophot_input['RDNOISE'],
                                  DC = 0 )
                 if not do_ap and not autophot_input['do_ap_phot'] :
-                    if find_mag(target_flux,0) - approx_psf_mag < 0.25:
+                    if abs(calc_mag(target_flux,0) - approx_psf_mag) > 1:
                         if not autophot_input['force_psf']:
                             logging.warning('PSF not applicable')
-                            logging.warning('target mag [%.3f] <  PSF mag [%.3f]' % (find_mag(target_flux,0),approx_psf_mag))
+                            logging.warning('target mag [%.3f] -  PSF mag [%.3f] > 1' % (calc_mag(target_flux,0),approx_psf_mag))
                             logging.info('set "force_psf" = True to fix')
                             do_ap = True
                             ap_corr = ap_corr_base
@@ -2242,6 +2241,8 @@ def main(object_info,autophot_input,fpath):
                         # logging.info('')
 
                     c_nondetect.round(6).to_csv(autophot_input['write_dir']+'catalog_non_detection_analysis_'+str(base.split('.')[0])+'_filter_'+str(use_filter)+'.csv',index = False)
+                    
+                    
                 # =============================================================================
                 #  TODO: wrong place for this -  Apply extinction airmass correction
                 # =============================================================================
@@ -2254,7 +2255,12 @@ def main(object_info,autophot_input,fpath):
 
                     else:
                         airmass_correction = find_airmass_extinction(tele_autophot_input[telescope]['extinction'],headinfo,autophot_input)
+                        find_airmass_extinction(extinction_dictionary = tele_autophot_input[telescope]['extinction'],
+                                                headinfo = headinfo,
+                                                image_filter = autophot_input['image_filter'],
+                                                airmass_key = AIRMASS_key)
                     output.update({'airmass_ext':float(airmass_correction)})
+                    
                 # =============================================================================
                 # Error on target magnitude
                 # =============================================================================
@@ -2262,10 +2268,9 @@ def main(object_info,autophot_input,fpath):
                 # Error due to SNR of target
                 SNR_error = SNR_err(SNR_target)
 
-                fit_error  = find_mag(target_flux,0) - find_mag(target_flux+target_err,0)
+                fit_error  = calc_mag(target_flux,0) - calc_mag(target_flux+target_err,0)
 
                 if autophot_input['target_error_compute_multilocation'] and not do_ap  :
-
 
                     fit_error_multiloc = compute_multilocation_err(close_up_expand,
                                                                     autophot_input,
@@ -2280,7 +2285,8 @@ def main(object_info,autophot_input,fpath):
 
                 else:
 
-                    fit_err = fit_error[0]
+                    fit_error = fit_error[0]
+                    
                 target_mag_err = SNR_error + fit_error
                 location_offset = float(pix_dist(target_x_pix,target_x_pix_TNS,target_y_pix,target_y_pix_TNS))
 
@@ -2299,9 +2305,10 @@ def main(object_info,autophot_input,fpath):
                 else:
                     ap_corr = ap_corr_base
                     ap_corr_err = ap_corr_base_err
+                    
                 # TODO: add in corrections
-                mag_target = find_mag(target_flux,zp_measurement[0]) + ap_corr
-                mag_inst={use_filter+'_inst':find_mag(target_flux,0)}
+                mag_target = calc_mag(target_flux,zp_measurement[0]) + ap_corr
+                mag_inst={use_filter+'_inst':calc_mag(target_flux,0)}
 
                 mag_inst_err={use_filter+'_inst_err':target_mag_err}
 
@@ -2310,8 +2317,7 @@ def main(object_info,autophot_input,fpath):
                 zp={'zp_'+use_filter:zp_measurement[0]}
 
                 zp_err={'zp_'+use_filter+'_err':zp_measurement[1]}
-                if np.isnan(zp_measurement[0]):
-                    raise Exception('No zeropoint found - skipping file ')
+                    
                 fwhm_out={'fwhm':image_fwhm,
                           'fwhm_err':image_fwhm_err}
                 target_fwhm_out = {'target_fwhm':target_fwhm}
@@ -2375,7 +2381,7 @@ def main(object_info,autophot_input,fpath):
                 logging.info('Target flux: %.3f +/- %.3f [counts/s]'% (target_flux,target_err))
                 logging.info('Noise: %.3f [counts/s]' % (target_bkg_std_flux*aperture_area))
                 logging.info('Target SNR: %.3f +/- %.3f' % (SNR_target,SNR_error))
-                logging.info('Instrumental Magnitude: %.3f +/- %.3f' % (find_mag(target_flux,0)[0],fit_error))
+                logging.info('Instrumental Magnitude: %.3f +/- %.3f' % (calc_mag(target_flux,0)[0],fit_error))
                 logging.info('Zeropoint: %.3f +/- %.3f' % (zp_measurement[0],zp_measurement[1]))
                 logging.info('Target Magnitude: %.3f +/- %.3f ' % (mag_target,mag_err))
                 if fwhm_check and lim_mag_check:
@@ -2429,7 +2435,7 @@ def main(object_info,autophot_input,fpath):
                                 RN =  autophot_input['RDNOISE'],
                                 DC = 0 )
                     df_all['snr'] = SNR_sources
-                    df_all[use_filter] = find_mag(source_flux,zp_measurement[0] ) + ap_corr
+                    df_all[use_filter] = calc_mag(source_flux,zp_measurement[0] ) + ap_corr
                     mag_err = SNR_err(SNR_sources)
                     df_all[use_filter+'_err'] =  np.sqrt(mag_err**2 + zp_measurement[1]**2)
                 else:
@@ -2455,7 +2461,7 @@ def main(object_info,autophot_input,fpath):
                     df_all['DEC'] = dec_all
                     df_all['snr'] = SNR_sources
                     df_all['flux_inst'] = psf_sources['H_psf']
-                    df_all[use_filter] = find_mag(sources_flux,zp_measurement[0] )
+                    df_all[use_filter] = calc_mag(sources_flux,zp_measurement[0] )
                     mag_err = SNR_err(SNR_sources)
                     df_all[use_filter+'_err'] =  np.sqrt(mag_err**2 + zp_measurement[1]**2)
                 try:

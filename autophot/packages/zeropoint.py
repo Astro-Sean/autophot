@@ -1,8 +1,8 @@
 def get_zeropoint(c,autophot_input,image = None,headinfo = None):
     
-    from autophot.packages.uncertain import SNR_err
-    from autophot.packages.functions import find_zeropoint
-    from autophot.packages.functions import find_mag,weighted_avg_and_std,set_size
+    from autophot.packages.functions import SNR_err
+    from autophot.packages.functions import calc_mag
+    from autophot.packages.functions import weighted_avg_and_std,set_size
 
     import os
     import numpy as np
@@ -82,7 +82,7 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
 
         # c = c[nanmask]
     
-        zp_inst_mag = find_mag(c['count_rate_star'],0)
+        zp_inst_mag = calc_mag(c['count_rate_star'],0)
         zpoint = np.asarray(c['zp_'+str(use_filter)])
         zpoint_err = np.asarray(c['zp_'+str(use_filter)+'_err'])
     

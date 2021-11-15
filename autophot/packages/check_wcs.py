@@ -1,28 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-
-'''
-Integration between standard fits file/format and output of Dustin Langs
-Astrometry.Net algorithim
-'''
-
-
 def removewcs(parent_fits, delete_keys = False):
 
-    '''
-    - removewcs:
-
-    rename pre-existing keywords from header hdu given in keywords list.
-
-    parameters:
-        - a: header information given via fits.open
-        - delete_keys: delete this keywords and thier values rather than renaming
-
-    retruns:
-        - a: new header hdu with/without new keywords
-
-    '''
 
     import logging
 
@@ -98,20 +78,6 @@ def removewcs(parent_fits, delete_keys = False):
 
 
 def updatewcs(parent_fits,wcs_fits):
-
-    '''
-
-    - updatewcs(a,b):
-
-    Update header fits file 'a' with the header information with header fits file 'b'
-
-    paramters:
-    - a: header information given via fits.open
-    - b: header information  from astrometry.net query
-
-    retruns:
-    - a: header hdu with update keywords
-    '''
 
     import logging
 
