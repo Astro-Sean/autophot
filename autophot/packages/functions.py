@@ -1,17 +1,30 @@
 def SNR(flux_star,flux_sky,exp_t,radius,G = 1,RN = 0,DC = 0 ):
-
-
     '''
+    
     S/N eqaution taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.pdf>`_
 
-    R_star = count raate from star [e / sec]
-    R_sky = count rate from sky annululs [median] [ e /second / pixel ]
-    exp_t = exposure time [s]
-    radius = radius of aperture [pixels]
-    G = gain [e /ADU]
-    RN = read noise
-    D = dark current [e / pixel / second]
+    
+    :param flux_star: flux (counts per second) coming from source
+    :type flux_star: array-like
+    :param flux_sky: flux (counts per second) associated with sky background
+    :type flux_sky: array-like
+    :param exp_t: Expsoure time in seconds
+    :type exp_t: float
+    :param radius: Radius of aperture in pixels
+    :type radius: float
+    :param G: GAIN on CCD, defaults to 1
+    :type G: float, optional
+    :param RN: Readnoise of CCD, defaults to 0
+    :type RN: float, optional
+    :param DC: Dark Current of CCD, defaults to 0
+    :type DC: float, optional
+    :return: Signal to noise of given soures
+    :rtype: array-like
+
     '''
+
+
+
 
     import numpy as np
     import warnings
