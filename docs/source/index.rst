@@ -24,13 +24,17 @@ The motivation for AutoPhoT aims to provide a precise method for photometric cal
    :caption: Tutorials
 
    tutorials
-      
+
 .. toctree::
    :maxdepth: 1
    :caption: Full Documentation
 
    packages
 
+.. toctree::
+  AutoPhot <https://github.com/Astro-Sean/autophot>
+  Notebooks <https://github.com/Astro-Sean/autophot/tree/master/example_notebooks>
+  :caption: Github
 
 .. automodule:: autophot
   :members:
