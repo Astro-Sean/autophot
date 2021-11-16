@@ -37,7 +37,8 @@ The motivation for AutoPhoT aims to provide a precise method for photometric cal
   
   :caption: Github
 
-  If you encounter an issues using AutoPhOT, please open an issues `here https://github.com/Astro-Sean/autophot/issues`_ or send me an email to :email:`Seán Brennan <sean.brennan2@ucdconnect.ie>`
+  If you encounter an issues using AutoPhOT, please open an issues `here https://github.com/Astro-Sean/autophot/issues`_ or send me an email to <mailto:sean.brennan2@ucdconnect.ie>`_
+
 
 
 .. automodule:: autophot
