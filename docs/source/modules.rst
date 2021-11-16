@@ -1,14 +1,9 @@
 FULL DOCUMENTATION
 ==================
 
+
 .. toctree::
-   :maxdepth: 4
+   :maxdepth: 1
+   :caption: AutoPhoT packages
 
    packages
-
-
-Github and Notebooks
-====================
-
-   .. toctree::
-      :maxdepth: 4

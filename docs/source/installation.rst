@@ -5,7 +5,7 @@ Installation
 Conda Install
 #############
 
-AutoPhoT is available via `Anaconda`_ and can be easily installed using:
+AutoPhoT is available via conda install and can be easily installed using:
 
 
 .. code-block:: bash

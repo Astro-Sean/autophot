@@ -1,5 +1,7 @@
 Tutorials
 =========
 
-.. toctree::
-   :maxdepth: 1
+
+   .. toctree::
+      :maxdepth: 4
+      :caption: Github and Notebooks
