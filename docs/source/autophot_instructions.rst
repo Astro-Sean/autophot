@@ -1,70 +1,72 @@
 
-COMMANDS
+Commands
 ========
 
-Below shows the commands that are able to be adjusted in AutoPhoT. Most of the time there is no need to change most of this values. However they may be useful for diagnsotic purposes
-GENERAL
-#######
+	This page gives commands that are able to be adjusted in AutoPhoT. Most of the time there is no need to change these values. However they may be useful for diagnsotic purposes.
+
+General Commands
+################
 
 .. note::
-   General commands needed to get AutoPhoT running
+   General commands needed to get AutoPhoT running.
 
-*fits_dir*: [default: None]
-  directory where files are containg images with  .fits .fts .fit extension. 
 
-*fname*: [default: None]
-  work on single file - deprecated 
+*fits_dir*:
+	 Directory where files are containing images with  .fits .fts .fit extension. Default: None
 
-*fpath*: [default: None]
-  work on directory - deprecated 
+*fname*:
+	 Work on single file - deprecated Default: None
 
-*object_dir*: [default: None]
-  location of where tns queries are saved as yaml files. this is updated by autophot. 
+*fpath*:
+	 Work on directory - deprecated Default: None
 
-*ct_dir*: [default: None]
-  colour term directory. this is updated by autophot. 
+*object_dir*:
+	 Location of where TNS queries are saved as yaml files. this is updated by autophot. Default: None
 
-*calib_dir*: [default: None]
-   location of calibration files 
+*ct_dir*:
+	 Colour term directory. this is updated by autophot. Default: None
 
-*method*: [default: sp]
-  method for processing - serial [sp] or multi-processing [mp] (not working) 
+*calib_dir*:
+	 Location of calibration files Default: None
 
-*ignore_no_telescop*: [default: False]
-  ignore file if no telescope name given (given by telescop header key) 
+*method*:
+	 Method for processing - serial [sp] or multi-processing [mp] (not working) Default: sp
 
-*outdir_name*: [default: REDUCED]
-  extension of output directory. for example if parent directry is sn1987a output directory will be sn1987a_reduced 
+*ignore_no_telescop*:
+	 Ignore file if no telescope name given (given by telescop header key) Default: False
 
-*outcsv_name*: [default: REDUCED]
-  output csv name containing all information from reduced files 
+*outdir_name*:
+	 Extension of output directory. for example if parent directry is sn1987a output directory will be sn1987a_reduced Default: REDUCED
 
-*ignore_no_filter*: [default: True]
-  ignore an image with no filter. 
+*outcsv_name*:
+	 Output csv name containing all information from reduced files Default: REDUCED
 
-*force_filter*: [default: r]
-  if *ignore_no_filter* is true, use this filter 
+*ignore_no_filter*:
+	 Ignore an image with no filter. Default: True
 
-*restart*: [default: False]
-  if the code fails with some files yet to be done, turn to true. this will scan through output directory and see whats already been done and ignore it. 
+*force_filter*:
+	 If *ignore_no_filter* is true, use this filter Default: r
 
-*recover*: [default: True]
-  recovery of each target_out.csv file into opuput file given by *outcsv_name* 
+*restart*:
+	 If the code fails with some files yet to be done, turn to true. this will scan through output directory and see whats already been done and ignore it. Default: False
 
-*select_filter*: [default: False]
-  if set to true, perform photometry on specific filter or list of filters given by *do_filter* 
+*recover*:
+	 Recovery of each target_out.csv file into opuput file given by *outcsv_name* Default: True
 
-*do_filter*: [default: [None]]
-  only do this filter if *select_filter* is true 
+*select_filter*:
+	 If set to true, perform photometry on specific filter or list of filters given by *do_filter* Default: False
 
-*target_name*: [default: None]
-  iau name of target for use with tns server 
+*do_filter*:
+	 Only do this filter if *select_filter* is true Default: [None]
 
-*target_ra*: [default: None]
-  target right ascension (ra) of target 
+*target_name*:
+	 Iau name of target for use with tns server Default: None
 
-*target_dec*: [default: None]
-  target declination (dec) of target 
+*target_ra*:
+	 Target right ascension (ra) of target Default: None
+
+*target_dec*:
+	 Target declination (dec) of target Default: None
 
 
 PREPROCESSING
@@ -72,19 +74,17 @@ PREPROCESSING
 
 .. note::
     image cleaning and precrossing
+*trim_edges*:
+	 If true, trim the sides of the image by the amount given in *trim_edges_pixels* Default: False
 
+*trim_edges_pixels*:
+	 If  *trim_edges* if true, trim the image by this amount Default: 50
 
-*trim_edges*: [default: False]
-  if true, trim the sides of the image by the amount given in *trim_edges_pixels* 
+*mask_sources*:
+	 If true, mask sources given in the list *mask_sources_radec_r* Default: False
 
-*trim_edges_pixels*: [default: 50]
-  if  *trim_edges* if true, trim the image by this amount 
-
-*mask_sources*: [default: False]
-  if true, mask sources given in the list *mask_sources_radec_r* 
-
-*mask_sources_RADEC_R*: [default: [None]]
-  if *mask_sources* is true, mask these sources. this is a list of tuples where each tuple contains (ra,dex, radius in arcmins) 
+*mask_sources_RADEC_R*:
+	 If *mask_sources* is true, mask these sources. this is a list of tuples where each tuple contains (ra,dex, radius in arcmins) Default: [None]
 
 
 PHOTOMETRY
@@ -92,58 +92,56 @@ PHOTOMETRY
 
 .. note::
     commands to control photometry
+*do_ap_phot*:
+	 Perform aperture photometry Default: False
 
+*force_psf*:
+	 Force to use of psf fitting Default: False
 
-*do_ap_phot*: [default: False]
-  perform aperture photometry 
+*use_local_stars*:
+	 If true, use local stars within *use_source_arcmin* for sequence stars Default: False
 
-*force_psf*: [default: False]
-  force to use of psf fitting 
+*use_local_stars_for_FWHM*:
+	 If true, use local stars within *use_source_arcmin* for fwhm sources Default: False
 
-*use_local_stars*: [default: False]
-  if true, use local stars within *use_source_arcmin* for sequence stars 
+*use_local_stars_for_PSF*:
+	 If true, use local stars within *use_source_arcmin* for psf model stars Default: False
 
-*use_local_stars_for_FWHM*: [default: False]
-  if true, use local stars within *use_source_arcmin* for fwhm sources 
+*use_source_arcmin*:
+	 Distance around *target_ra*/*target_dec* to use Default: 4
 
-*use_local_stars_for_PSF*: [default: False]
-  if true, use local stars within *use_source_arcmin* for psf model stars 
+*local_radius*:
+	 Default distance to look for sources Default: 1500
 
-*use_source_arcmin*: [default: 4]
-  distance around *target_ra*/*target_dec* to use 
+*find_optimum_radius*:
+	 Find and update aperature size based on curve of growth Default: False
 
-*local_radius*: [default: 1500]
-  default distance to look for sources 
+*plot_optimum_radius*:
+	 Plot distribution of curve of growths if *find_optimum_radius* is true Default: True
 
-*find_optimum_radius*: [default: False]
-  find and update aperature size based on curve of growth 
+*check_nyquist*:
+	 If true, check that fwhm of image does not fall below a limit given by *nyquist_limit*, if so, use aperture photometry Default: True
 
-*plot_optimum_radius*: [default: True]
-  plot distribution of curve of growths if *find_optimum_radius* is true 
+*nyquist_limit*:
+	 Pixel limit for fwhm to perform aperture photometry Default: 3
 
-*check_nyquist*: [default: True]
-  if true, check that fwhm of image does not fall below a limit given by *nyquist_limit*, if so, use aperture photometry 
+*ap_size*:
+	 Aperture radius = ap_size * fwhm Default: 1.5
 
-*nyquist_limit*: [default: 3]
-  pixel limit for fwhm to perform aperture photometry 
+*inf_ap_size*:
+	 Larger ap size for aperture corrections. cannot be larger than scale_multipler Default: 2.5
 
-*ap_size*: [default: 1.5]
-  aperture radius = ap_size * fwhm 
+*ap_corr_sigma*:
+	 Sigma clip aperture corrections Default: 3
 
-*inf_ap_size*: [default: 2.5]
-  larger ap size for aperture corrections. cannot be larger than scale_multipler 
+*ap_corr_plot*:
+	 Plot of aperature corretcions Default: False
 
-*ap_corr_sigma*: [default: 3]
-  sigma clip aperture corrections 
+*r_in_size*:
+	 Inner annulus for background estimate Default: 2.5
 
-*ap_corr_plot*: [default: False]
-  plot of aperature corretcions 
-
-*r_in_size*: [default: 2.5]
-  inner annulus for background estimate 
-
-*r_out_size*: [default: 3.5]
-   outer annulus for background estimate 
+*r_out_size*:
+	 Outer annulus for background estimate Default: 3.5
 
 
 TEMPLATES
@@ -151,10 +149,8 @@ TEMPLATES
 
 .. note::
     commands to control templates
-
-
-*use_user_template*: [default: True]
-  use template given by user. 
+*use_user_template*:
+	 Use template given by user. Default: True
 
 
 WCS
@@ -162,49 +158,47 @@ WCS
 
 .. note::
     comands when finding wcs values
+*ignore_no_wcs*:
+	 Ignore files that don't have wcs Default: False
 
+*allow_wcs_recheck*:
+	 If source catalog fails, rerun astrometry - very buggy Default: False
 
-*ignore_no_wcs*: [default: False]
- Ignore files that don't have wcs 
+*remove_wcs*:
+	 Remove  wcs and use local astrometry.net Default: True
 
-*allow_wcs_recheck*: [default: False]
-  if source catalog fails, rerun astrometry - very buggy 
+*force_wcs_redo*:
+	 Force images to have their wcs redone, if an image cannot be solved, skip Default: False
 
-*remove_wcs*: [default: True]
-  remove  wcs and use local astrometry.net 
+*solve_field_exe_loc*:
+	 Location of solve-field from astromety.net. this is required to solve for wcs. Default: None
 
-*force_wcs_redo*: [default: False]
-  force images to have their wcs redone, if an image cannot be solved, skip 
+*offset_param*:
+	 Mean pixel distance criteria between trusting original wcs and looking it up Default: 5.0
 
-*solve_field_exe_loc*: [default: None]
-  location of solve-field from astromety.net. this is required to solve for wcs. 
+*search_radius*:
+	 Distance around source to search for in astrometry.net Default: 0.25
 
-*offset_param*: [default: 5.0]
-  mean pixel distance criteria between trusting original wcs and looking it up 
+*downsample*:
+	 Downsample value to pass to astrometry Default: 2
 
-*search_radius*: [default: 0.25]
-  distance around source to search for in astrometry.net 
+*solve_field_timeout*:
+	 Seconds - check is this needed Default: 60
 
-*downsample*: [default: 2]
-  downsample value to pass to astrometry 
+*cpulimit*:
+	 Timeout duration for solve-fiel Default: 60
 
-*solve_field_timeout*: [default: 60]
- Seconds - check is this needed 
+*update_wcs_scale*:
+	 Update telescope.yml pixel scale for a instrument from output of astrometry.net Default: False
 
-*cpulimit*: [default: 60]
-  timeout duration for solve-fiel 
+*allow_recheck*:
+	 Allow recheck of wcs if pixel offset from sources is too great Default: False
 
-*update_wcs_scale*: [default: False]
-  update telescope.yml pixel scale for a instrument from output of astrometry.net 
+*ignore_pointing*:
+	 When solving plate - ignore pointing coordinates Default: False
 
-*allow_recheck*: [default: False]
-  allow recheck of wcs if pixel offset from sources is too great 
-
-*ignore_pointing*: [default: False]
-  when solving plate - ignore pointing coordinates 
-
-*use_xylist*: [default: False]
-  use coordinate list from source detection in astrometry.net 
+*use_xylist*:
+	 Use coordinate list from source detection in astrometry.net Default: False
 
 
 CATALOG
@@ -212,49 +206,47 @@ CATALOG
 
 .. note::
     commands to use with when working with catalog
+*catalog*:
+	 Choose catalog to use - options: [pan_starrs,2mass,apass,skymapper,gaia] Default: None
 
+*catalog_custom_fpath*:
+	 If using a custom catalog look in this fpath Default: None
 
-*catalog*: [default: None]
-  choose catalog to use - options: [pan_starrs,2mass,apass,skymapper,gaia] 
+*catalog_radius*:
+	 Radius [degs]  around target for catalog source detection Default: 0.25
 
-*catalog_custom_fpath*: [default: None]
-  if using a custom catalog look in this fpath 
+*dist_lim*:
+	 Ignore source/catalog matching if source location and catalog location are greater than dist_lim Default: 10
 
-*catalog_radius*: [default: 0.25]
-  radius [degs]  around target for catalog source detection 
+*match_dist*:
+	 If source/catalog locations greater than this value get rid of it Default: 25
 
-*dist_lim*: [default: 10]
-  ignore source/catalog matching if source location and catalog location are greater than dist_lim 
+*plot_catalog_nondetections*:
+	 Plot image of non show_non_detections Default: False
 
-*match_dist*: [default: 25]
-  if source/catalog locations greater than this value get rid of it 
+*include_IR_sequence_data*:
+	 Look for ir data alongside optical sequence data Default: True
 
-*plot_catalog_nondetections*: [default: False]
-  plot image of non show_non_detections 
+*show_non_detections*:
+	 Show a plot of sources not detected Default: False
 
-*include_IR_sequence_data*: [default: True]
-  look for ir data alongside optical sequence data 
+*matching_source_FWHM*:
+	 If true, matchicatalog sources that are within the image fwhm by *matching_source_fwhm_limt* Default: False
 
-*show_non_detections*: [default: False]
-  show a plot of sources not detected 
+*matching_source_FWHM_limt*:
+	 If *matching_source_fwhm* is true exlclud sources that differ by the image fwhm by this amount. Default: 2
 
-*matching_source_FWHM*: [default: False]
-  if true, matchicatalog sources that are within the image fwhm by *matching_source_fwhm_limt* 
+*remove_catalog_poorfits*:
+	 Remove sources that are not fitted well Default: False
 
-*matching_source_FWHM_limt*: [default: 2]
-  if *matching_source_fwhm* is true exlclud sources that differ by the image fwhm by this amount. 
+*catalog_matching_limit*:
+	 Remove sources fainter than this limit Default: 20
 
-*remove_catalog_poorfits*: [default: False]
-  remove sources that are not fitted well 
+*plot_ZP_image_analysis*:
+	 Plot showing how the zeropoint changes over the image Default: False
 
-*catalog_matching_limit*: [default: 20]
-  remove sources fainter than this limit 
-
-*plot_ZP_image_analysis*: [default: False]
-  plot showing how the zeropoint changes over the image 
-
-*max_catalog_sources*: [default: 1000]
-  max amount of catalog sources to use 
+*max_catalog_sources*:
+	 Max amount of catalog sources to use Default: 1000
 
 
 FWHM
@@ -262,16 +254,14 @@ FWHM
 
 .. note::
    no comment
+*int_scale*:
+	 Initial image size in pixels to take cutout Default: 25
 
+*scale_multipler*:
+	 Multiplier to set close up cutout size based on image scaling Default: 4
 
-*int_scale*: [default: 25]
-  initial image size in pixels to take cutout 
-
-*scale_multipler*: [default: 4]
-  multiplier to set close up cutout size based on image scaling 
-
-*max_fit_fwhm*: [default: 30]
-  maximum value to fit 
+*max_fit_fwhm*:
+	 Maximum value to fit Default: 30
 
 
 COSMIC_RAYS
@@ -279,16 +269,14 @@ COSMIC_RAYS
 
 .. note::
     commands for cosmic ray cleaning:
+*remove_cmrays*:
+	 If true, remove cosmic rays using astroscrappy Default: True
 
+*use_astroscrappy*:
+	 Use astroscrappy to remove comic rays Default: True
 
-*remove_cmrays*: [default: True]
-  if true, remove cosmic rays using astroscrappy 
-
-*use_astroscrappy*: [default: True]
-  use astroscrappy to remove comic rays 
-
-*use_lacosmic*: [default: False]
-  use lacosmic from ccdproc to remove comic rays 
+*use_lacosmic*:
+	 Use lacosmic from ccdproc to remove comic rays Default: False
 
 
 FITTING
@@ -296,37 +284,35 @@ FITTING
 
 .. note::
     commands describing how to perform fitting
+*fitting_method*:
+	 Fitting methods for analytical function fitting and psf fitting Default: least_square
 
+*use_moffat*:
+	 Use moffat function Default: False
 
-*fitting_method*: [default: least_square]
-  fitting methods for analytical function fitting and psf fitting 
+*default_moff_beta*:
+	 If *use_moffat* is true, set the beta term Default: 4.765
 
-*use_moffat*: [default: False]
-  use moffat function 
+*vary_moff_beta*:
+	 If *use_moffat* is true, allow the beta term to be fitted Default: False
 
-*default_moff_beta*: [default: 4.765]
-  if *use_moffat* is true, set the beta term 
+*bkg_level*:
+	 Set the background level in sigma_bkg Default: 3
 
-*vary_moff_beta*: [default: False]
-  if *use_moffat* is true, allow the beta term to be fitted 
+*remove_bkg_surface*:
+	 If true, remove a background using a fitted surface Default: True
 
-*bkg_level*: [default: 3]
-  set the background level in sigma_bkg 
+*remove_bkg_local*:
+	 If true, remove the surface equal to a flat surface at the local background median value Default: False
 
-*remove_bkg_surface*: [default: True]
-  if true, remove a background using a fitted surface 
+*remove_bkg_poly*:
+	 If true, remove a polynomail surface with degree set by *remove_bkg_poly_degree* Default: False
 
-*remove_bkg_local*: [default: False]
-  if true, remove the surface equal to a flat surface at the local background median value 
+*remove_bkg_poly_degree*:
+	 If *remove_bkg_poly* is true, remove a polynomail surface with this degree Default: 1
 
-*remove_bkg_poly*: [default: False]
-  if true, remove a polynomail surface with degree set by *remove_bkg_poly_degree* 
-
-*remove_bkg_poly_degree*: [default: 1]
-  if *remove_bkg_poly* is true, remove a polynomail surface with this degree 
-
-*fitting_radius*: [default: 1.5]
-  focus on small region where snr is highest with a radius equal to this value times the fwhm 
+*fitting_radius*:
+	 Focus on small region where snr is highest with a radius equal to this value times the fwhm Default: 1.5
 
 
 EXTINCTION
@@ -334,10 +320,8 @@ EXTINCTION
 
 .. note::
    no comment
-
-
-*apply_airmass_extinction*: [default: False]
-  if true, retrun airmass correction 
+*apply_airmass_extinction*:
+	 If true, retrun airmass correction Default: False
 
 
 SOURCE_DETECTION
@@ -345,64 +329,62 @@ SOURCE_DETECTION
 
 .. note::
     coammnds to control source detection algorithim
+*threshold_value*:
+	 Inital threshold value for source detection Default: 25
 
+*fwhm_guess*:
+	 Inital guess for the fwhm Default: 7
 
-*threshold_value*: [default: 25]
-  inital threshold value for source detection 
+*fudge_factor*:
+	 Large step for source dection Default: 5
 
-*fwhm_guess*: [default: 7]
-  inital guess for the fwhm 
+*fine_fudge_factor*:
+	 Small step for source dection if required Default: 0.2
 
-*fudge_factor*: [default: 5]
-  large step for source dection 
+*isolate_sources*:
+	 If true, isolate sources for fwhm determination by the amount given by *isolate_sources_fwhm_sep* times the fwhm Default: True
 
-*fine_fudge_factor*: [default: 0.2]
-  small step for source dection if required 
+*isolate_sources_fwhm_sep*:
+	 If *isolate_sources* is true, seperate sources by this amount times the fwhm. Default: 5
 
-*isolate_sources*: [default: True]
-  if true, isolate sources for fwhm determination by the amount given by *isolate_sources_fwhm_sep* times the fwhm 
+*init_iso_scale*:
+	 For inital guess, seperate sources by this amount times the fwhm. Default: 25
 
-*isolate_sources_fwhm_sep*: [default: 5]
-  if *isolate_sources* is true, seperate sources by this amount times the fwhm. 
+*sigmaclip_FWHM*:
+	 If true, sigma clip the fwhm values by the sigma given by *sigmaclip_fwhm_sigma* Default: True
 
-*init_iso_scale*: [default: 25]
-  for inital guess, seperate sources by this amount times the fwhm. 
+*sigmaclip_FWHM_sigma*:
+	 If *sigmaclip_fwhm* is true, sigma clip the values for the fwhm by this amount. Default: 3
 
-*sigmaclip_FWHM*: [default: True]
-  if true, sigma clip the fwhm values by the sigma given by *sigmaclip_fwhm_sigma* 
+*sigmclip_median*:
+	 If true, sigma clip the median background values by the sigma given by *sigmaclip_median_sigma* Default: True
 
-*sigmaclip_FWHM_sigma*: [default: 3]
-  if *sigmaclip_fwhm* is true, sigma clip the values for the fwhm by this amount. 
+*sigmaclip_median_sigma*:
+	 If *sigmaclip_median* is true, sigma clip the values for the median by this amount. Default: 3
 
-*sigmclip_median*: [default: True]
-  if true, sigma clip the median background values by the sigma given by *sigmaclip_median_sigma* 
+*save_image_analysis*:
+	 If true, save table of fwhm values for an image Default: False
 
-*sigmaclip_median_sigma*: [default: 3]
-  if *sigmaclip_median* is true, sigma clip the values for the median by this amount. 
+*plot_image_analysis*:
+	 If true, plot image displaying fwhm acorss the image Default: False
 
-*save_image_analysis*: [default: False]
- If true, save table of fwhm values for an image 
+*remove_sat*:
+	 Remove saturated sources Default: True
 
-*plot_image_analysis*: [default: False]
-  if true, plot image displaying fwhm acorss the image 
+*remove_boundary_sources*:
+	 If true, ignore any sources within pix_bound from edge Default: True
 
-*remove_sat*: [default: True]
-  remove saturated sources 
+*pix_bound*:
+	 If *remove_boundary_sources* is true, ignore sources within this amount from the image boundary Default: 25
 
-*remove_boundary_sources*: [default: True]
-  if true, ignore any sources within pix_bound from edge 
+*min_source_lim*:
+	 Minimum allowed sources when doing source detection to find fwhm. Default: 1
 
-*pix_bound*: [default: 25]
-  if *remove_boundary_sources* is true, ignore sources within this amount from the image boundary 
+*max_source_lim*:
+	 Maximum allowed sources when doing source detection to find fwhm. Default: 300
 
-*min_source_lim*: [default: 1]
-  minimum allowed sources when doing source detection to find fwhm. 
-
-*max_source_lim*: [default: 300]
-  maximum allowed sources when doing source detection to find fwhm. 
-
-*source_max_iter*: [default: 30]
-  maximum amount of iterations to perform source detection algorithim, if iters exceeded this value and error is raised. 
+*source_max_iter*:
+	 Maximum amount of iterations to perform source detection algorithim, if iters exceeded this value and error is raised. Default: 30
 
 
 LIMITING_MAGNITUDE
@@ -410,88 +392,86 @@ LIMITING_MAGNITUDE
 
 .. note::
    no comment
+*force_lmag*:
+	 Force limiting magnitude test at transient location. this may given incorrect values for bright sources Default: False
 
+*beta_limit*:
+	 Beta probability value. should not be set below 0.5 Default: 0.75
 
-*force_lmag*: [default: False]
-  force limiting magnitude test at transient location. this may given incorrect values for bright sources 
+*matching_source_SNR*:
+	 Cutoff for zeropoint sources Default: True
 
-*beta_limit*: [default: 0.75]
-  beta probability value. should not be set below 0.5 
+*matching_source_SNR_limit*:
+	  Default: 10
 
-*matching_source_SNR*: [default: True]
-  cutoff for zeropoint sources 
+*inject_lamg_use_ap_phot*:
+	 Perform the fake source recovery using aperture photometry Default: True
 
-*matching_source_SNR_limit*: [default: 10]
-  
+*injected_sources_additional_sources*:
+	 Iniject additional dither sources Default: True
 
-*inject_lamg_use_ap_phot*: [default: True]
-  perform the fake source recovery using aperture photometry 
+*injected_sources_additional_sources_position*:
+	 Set to minus 1 to move around the pixel only Default: 1
 
-*injected_sources_additional_sources*: [default: True]
-  iniject additional dither sources 
+*injected_sources_additional_sources_number*:
+	  Default: 3
 
-*injected_sources_additional_sources_position*: [default: 1]
-  set to minus 1 to move around the pixel only 
+*injected_sources_save_output*:
+	 Use beta as detection criteria Default: False
 
-*injected_sources_additional_sources_number*: [default: 3]
-  
+*injected_sources_use_beta*:
+	 For output plot, include sources randomly Default: True
 
-*injected_sources_save_output*: [default: False]
-      use beta as detection criteria 
+*plot_injected_sources_randomly*:
+	  Default: True
 
-*injected_sources_use_beta*: [default: True]
-      for output plot, include sources randomly 
+*check_catalog_nondetections*:
+	 Plot sources and nondetections Default: False
 
-*plot_injected_sources_randomly*: [default: True]
-  
+*include_catalog_nondetections*:
+	 Check limiting mag if below this value Default: False
 
-*check_catalog_nondetections*: [default: False]
-  plot sources and nondetections 
+*lmag_check_SNR*:
+	 Detection criteria Default: 5
 
-*include_catalog_nondetections*: [default: False]
-      check limiting mag if below this value 
+*lim_SNR*:
+	 Perform artifical source injection Default: 3
 
-*lmag_check_SNR*: [default: 5]
-      detection criteria 
+*inject_sources*:
+	 User defined inital magnitude if no initial guess is given Default: True
 
-*lim_SNR*: [default: 3]
-      perform artifical source injection 
+*inject_source_mag*:
+	 Add possion noise to injected psf Default: 19
 
-*inject_sources*: [default: True]
-      user defined inital magnitude if no initial guess is given 
+*inject_source_add_noise*:
+	 How many times are we injecting these noisy sources Default: False
 
-*inject_source_mag*: [default: 19]
-      add possion noise to injected psf 
+*inject_source_recover_dmag_redo*:
+	 Number of sources to inject Default: 3
 
-*inject_source_add_noise*: [default: False]
-      how many times are we injecting these noisy sources 
+*inject_source_cutoff_sources*:
+	 How many sources need to be lost to define criteria Default: 8
 
-*inject_source_recover_dmag_redo*: [default: 3]
-      number of sources to inject 
+*inject_source_cutoff_limit*:
+	 Max number of steps Default: 0.8
 
-*inject_source_cutoff_sources*: [default: 8]
-      how many sources need to be lost to define criteria 
+*inject_source_recover_nsteps*:
+	 Big step size Default: 50
 
-*inject_source_cutoff_limit*: [default: 0.8]
-      max number of steps 
+*inject_source_recover_dmag*:
+	 Fine step size Default: 0.5
 
-*inject_source_recover_nsteps*: [default: 50]
-      big step size 
+*inject_source_recover_fine_dmag*:
+	 Location from target in untits of fwhm Default: 0.05
 
-*inject_source_recover_dmag*: [default: 0.5]
-      fine step size 
+*inject_source_location*:
+	  Default: 3
 
-*inject_source_recover_fine_dmag*: [default: 0.05]
-      location from target in untits of fwhm 
+*inject_source_random*:
+	  Default: True
 
-*inject_source_location*: [default: 3]
-  
-
-*inject_source_random*: [default: True]
-  
-
-*inject_source_on_target*: [default: False]
-  
+*inject_source_on_target*:
+	  Default: False
 
 
 TARGET_PHOTOMETRY
@@ -499,10 +479,8 @@ TARGET_PHOTOMETRY
 
 .. note::
     target_phototmetry:
-
-
-*adjust_SN_loc*: [default: True]
-  if false, photometry is performed at transient position i.e. forced photometry 
+*adjust_SN_loc*:
+	 If false, photometry is performed at transient position i.e. forced photometry Default: True
 
 
 PSF
@@ -510,40 +488,38 @@ PSF
 
 .. note::
    no comment
+*psf_source_no*:
+	 Number of sources used in psf (if available) Default: 10
 
+*min_psf_source_no*:
+	 Worst cause scenario use this many psf sources Default: 3
 
-*psf_source_no*: [default: 10]
-  number of sources used in psf (if available) 
+*plot_PSF_residuals*:
+	 Show residuals from psf fitting Default: False
 
-*min_psf_source_no*: [default: 3]
-  worst cause scenario use this many psf sources 
+*plot_PSF_model_residual*:
+	 Plot residual from make the psf model Default: False
 
-*plot_PSF_residuals*: [default: False]
-  show residuals from psf fitting 
+*construction_SNR*:
+	 Only use sources if their snr is greater than this values Default: 25
 
-*plot_PSF_model_residual*: [default: False]
-  plot residual from make the psf model 
+*regrid_size*:
+	 Regrid value for building psf -  value of 10 is fine Default: 10
 
-*construction_SNR*: [default: 25]
-  only use sources if their snr is greater than this values 
+*save_PSF_models_fits*:
+	 Save the psf model as a fits file Default: True
 
-*regrid_size*: [default: 10]
-  regrid value for building psf -  value of 10 is fine 
+*save_PSF_stars*:
+	 Save csv file with information onf psf stars Default: False
 
-*save_PSF_models_fits*: [default: True]
-  save the psf model as a fits file 
+*use_PSF_starlist*:
+	 User defined psf stars Default: False
 
-*save_PSF_stars*: [default: False]
-  save csv file with information onf psf stars 
+*PSF_starlist*:
+	 Location of these psf stars Default: None
 
-*use_PSF_starlist*: [default: False]
-  user defined psf stars 
-
-*PSF_starlist*: [default: None]
-  location of these psf stars 
-
-*plot_source_selection*: [default: True]
-  plot source selection plot 
+*plot_source_selection*:
+	 Plot source selection plot Default: True
 
 
 TEMPLATE_SUBTRACTION
@@ -551,43 +527,41 @@ TEMPLATE_SUBTRACTION
 
 .. note::
    no comment
+*do_ap_on_sub*:
+	 Perfrom aperature photometry on subtrated image Default: False
 
+*ignore_FWHM_on_sub*:
+	  Default: True
 
-*do_ap_on_sub*: [default: False]
-  perfrom aperature photometry on subtrated image 
+*do_subtraction*:
+	 Set to true to perform image subtraction Default: False
 
-*ignore_FWHM_on_sub*: [default: True]
-  
+*use_astroalign*:
+	  Default: True
 
-*do_subtraction*: [default: False]
-  set to true to perform image subtraction 
+*use_reproject_interp*:
+	 Try to download template: Default: True
 
-*use_astroalign*: [default: True]
-  
+*get_template*:
+	 Save image of subtracted image Default: False
 
-*use_reproject_interp*: [default: True]
-      try to download template: 
+*save_subtraction_quicklook*:
+	 Set to truew to setup template files Default: True
 
-*get_template*: [default: False]
-      save image of subtracted image 
+*prepare_templates*:
+	 Set by user Default: False
 
-*save_subtraction_quicklook*: [default: True]
-      set to truew to setup template files 
+*hotpants_exe_loc*:
+	 Timeout for template subtraction Default: None
 
-*prepare_templates*: [default: False]
-      set by user 
+*hotpants_timeout*:
+	 Seconds Default: 300
 
-*hotpants_exe_loc*: [default: None]
-      timeout for template subtraction 
+*use_hotpants*:
+	  Default: True
 
-*hotpants_timeout*: [default: 300]
- Seconds 
-
-*use_hotpants*: [default: True]
-  
-
-*use_zogy*: [default: False]
-  
+*use_zogy*:
+	  Default: False
 
 
 ERROR
@@ -595,16 +569,14 @@ ERROR
 
 .. note::
    no comment
+*target_error_compute_multilocation*:
+	 Distant from location of best fit to inject transient for recovery Default: True
 
+*target_error_compute_multilocation_position*:
+	  Default: 0.5
 
-*target_error_compute_multilocation*: [default: True]
-      distant from location of best fit to inject transient for recovery 
-
-*target_error_compute_multilocation_position*: [default: 0.5]
-  
-
-*target_error_compute_multilocation_number*: [default: 10]
-  
+*target_error_compute_multilocation_number*:
+	  Default: 10
 
 
 ZEROPOINT
@@ -612,32 +584,29 @@ ZEROPOINT
 
 .. note::
    no comment
+*zp_sigma*:
+	 Plot zeropoint Default: 3
 
+*zp_plot*:
+	 Save zeropoint Default: False
 
-*zp_sigma*: [default: 3]
-      plot zeropoint 
+*save_zp_plot*:
+	 Plot zp versus snr Default: True
 
-*zp_plot*: [default: False]
-      save zeropoint 
+*plot_ZP_vs_SNR*:
+	 Calculate zp with mean and std Default: False
 
-*save_zp_plot*: [default: True]
-      plot zp versus snr 
+*zp_use_mean*:
+	 Fit vertical line to zp values Default: False
 
-*plot_ZP_vs_SNR*: [default: False]
-      calculate zp with mean and std 
+*zp_use_fitted*:
+	 Use median value and median std Default: True
 
-*zp_use_mean*: [default: False]
-      fit vertical line to zp values 
+*zp_use_median*:
+	 Use weighted avaerge of points Default: False
 
-*zp_use_fitted*: [default: True]
-      use median value and median std 
+*zp_use_WA*:
+	  Default: False
 
-*zp_use_median*: [default: False]
-      use weighted avaerge of points 
-
-*zp_use_WA*: [default: False]
-  
-
-*zp_use_max_bin*: [default: False]
-  use most common zeropoint i.e. the mode 
-
+*zp_use_max_bin*:
+	 Use most common zeropoint i.e. the mode Default: False
