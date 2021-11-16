@@ -2,9 +2,12 @@
 COMMANDS
 ========
 
-
+Below shows the commands that are able to be adjusted in AutoPhoT. Most of the time there is no need to change most of this values. However they may be useful for diagnsotic purposes
 GENERAL
 #######
+
+.. note::
+   General commands needed to get AutoPhoT running
 
 *fits_dir*: [default: None]
   directory where files are containg images with  .fits .fts .fit extension. 
@@ -258,7 +261,7 @@ FWHM
 ####
 
 .. note::
-   No comment
+   no comment
 
 
 *int_scale*: [default: 25]
@@ -330,7 +333,7 @@ EXTINCTION
 ##########
 
 .. note::
-   No comment
+   no comment
 
 
 *apply_airmass_extinction*: [default: False]
@@ -406,7 +409,7 @@ LIMITING_MAGNITUDE
 ##################
 
 .. note::
-   No comment
+   no comment
 
 
 *force_lmag*: [default: False]
@@ -506,7 +509,7 @@ PSF
 ###
 
 .. note::
-   No comment
+   no comment
 
 
 *psf_source_no*: [default: 10]
@@ -547,7 +550,7 @@ TEMPLATE_SUBTRACTION
 ####################
 
 .. note::
-   No comment
+   no comment
 
 
 *do_ap_on_sub*: [default: False]
@@ -591,7 +594,7 @@ ERROR
 #####
 
 .. note::
-   No comment
+   no comment
 
 
 *target_error_compute_multilocation*: [default: True]
@@ -608,7 +611,7 @@ ZEROPOINT
 #########
 
 .. note::
-   No comment
+   no comment
 
 
 *zp_sigma*: [default: 3]
