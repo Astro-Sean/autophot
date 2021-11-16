@@ -1,0 +1,26 @@
+*fits_dir*: [default: None]
+ # Directory where files are, doesn't matter if they're in folders, it will look for ( .fits .fts .fit ) extension 
+
+*fname*: [default: None]
+ # work on single file 
+
+*fpath*: [default: None]
+ # work on directory 
+
+*turn_off_warnings*: [default: None]
+ # Turn off warnings  # Location of calibration files 
+
+*object_dir*: [default: None]
+ #Location of where tns queries are saved as yaml files 
+
+*ct_dir*: [default: None]
+ # Colout term directory - not yet implemented 
+
+------------
+photometry
+------------
+# commands to perform photometry
+
+*do_ap*: [default: None]
+ # Perform aperture photometry 
+

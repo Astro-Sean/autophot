@@ -39,8 +39,8 @@ Welcome to AutoPHoT!
    packages
 
 .. toctree::
-   :maxdepth: 1
    :caption: Github
+
    AutoPhot <https://github.com/Astro-Sean/autophot>
    Notebooks <https://github.com/Astro-Sean/autophot/tree/master/example_notebooks>
 
