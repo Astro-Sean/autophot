@@ -1,3 +1,7 @@
+============
+Installation
+============
+
 Conda Install
 #############
 
