@@ -30,7 +30,8 @@ Welcome to AutoPHoT!
    :maxdepth: 1
    :caption: Tutorials
 
-   commands
+   instructions
+   
    tutorials
 
 
