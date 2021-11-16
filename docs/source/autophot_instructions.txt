@@ -1,6 +1,6 @@
--------
+=======
 GENERAL
--------
+=======
 *fits_dir*: [default: None]
   Directory where files are containg images with  .fits .fts .fit extension. 
 
@@ -56,11 +56,11 @@ GENERAL
   Target Right Ascension (RA) of target 
 
 *target_dec*: [default: None]
-  Target Declination (Dec) of target   =====================================   Pre-processing   ===================================== 
+  Target Declination (Dec) of target 
 
--------------
+=============
 PREPROCESSING
--------------
+=============
  image cleaning and precrossing
 
 *trim_edges*: [default: None]
@@ -75,9 +75,9 @@ PREPROCESSING
 *mask_sources_RADEC_R*: [default: None]
   if *mask_sources* is true, mask these sources. This is a list of tuples where each tuple contains (RA,Dex, radius in arcmins) 
 
-----------
+==========
 PHOTOMETRY
-----------
+==========
  commands to control photometry
 
 *do_ap_phot*: [default: None]
@@ -129,19 +129,19 @@ PHOTOMETRY
   inner annulus for background estimate 
 
 *r_out_size*: [default: None]
-   outer annulus for background estimate   =====================================   Templates   ===================================== 
+   outer annulus for background estimate 
 
----------
+=========
 TEMPLATES
----------
+=========
  Commands to control templates
 
 *use_user_template*: [default: None]
-  Use template given by user.   =====================================   WCS   ===================================== 
+  Use template given by user. 
 
----
+===
 WCS
----
+===
  Comands when finding WCS values
 
 *ignore_no_wcs*: [default: None]
@@ -184,11 +184,11 @@ WCS
   When solving plate - ignore pointing coordinates 
 
 *use_xylist*: [default: None]
-  use coordinate list from source detection in astrometry.net   =====================================   Catalog Search   ===================================== 
+  use coordinate list from source detection in astrometry.net 
 
--------
+=======
 CATALOG
--------
+=======
  Commands to use with when working with catalog
 
 *catalog*: [default: None]
@@ -231,11 +231,11 @@ CATALOG
   Plot showing how the zeropoint changes over the image 
 
 *max_catalog_sources*: [default: None]
-  Max amount of catalog sources to use   =====================================   FWHM   ===================================== 
+  Max amount of catalog sources to use 
 
-----
+====
 FWHM
-----
+====
 no comment
 
 *int_scale*: [default: None]
@@ -245,11 +245,11 @@ no comment
   Multiplier to set close up cutout size based on image scaling 
 
 *max_fit_fwhm*: [default: None]
-  maximum value to fit   =====================================   Image cleaning   ===================================== 
+  maximum value to fit 
 
------------
+===========
 COSMIC_RAYS
------------
+===========
  Commands for cosmic ray cleaning:
 
 *remove_cmrays*: [default: None]
@@ -259,11 +259,11 @@ COSMIC_RAYS
   use Astroscrappy to remove comic rays 
 
 *use_lacosmic*: [default: None]
-  use LaCosmic from CCDPROC to remove comic rays   =====================================   Function fitting   ===================================== 
+  use LaCosmic from CCDPROC to remove comic rays 
 
--------
+=======
 FITTING
--------
+=======
  Commands describing how to perform fitting
 
 *fitting_method*: [default: None]
@@ -294,19 +294,19 @@ FITTING
   if *remove_bkg_poly* is True, remove a polynomail surface with this degree 
 
 *fitting_radius*: [default: None]
-  Focus on small region where SNR is highest with a radius equal to this value times the FWHM   =====================================   Extinction   ===================================== 
+  Focus on small region where SNR is highest with a radius equal to this value times the FWHM 
 
-----------
+==========
 EXTINCTION
-----------
+==========
 no comment
 
 *apply_airmass_extinction*: [default: None]
-  if True, retrun airmass correction   =====================================   Source Detection   ===================================== 
+  if True, retrun airmass correction 
 
-----------------
+================
 SOURCE_DETECTION
-----------------
+================
  Coammnds to control source detection algorithim
 
 *threshold_value*: [default: None]
@@ -364,11 +364,11 @@ SOURCE_DETECTION
   maximum allowed sources when doing source detection to find fwhm. 
 
 *source_max_iter*: [default: None]
-  maximum amount of iterations to perform source detection algorithim, if iters exceeded this value and error is raised.   ====================================   Limiting Magnitude   ==================================== 
+  maximum amount of iterations to perform source detection algorithim, if iters exceeded this value and error is raised. 
 
-------------------
+==================
 LIMITING_MAGNITUDE
-------------------
+==================
 no comment
 
 *force_lmag*: [default: None]
@@ -450,19 +450,19 @@ no comment
   
 
 *inject_source_on_target*: [default: None]
-    ====================================   target_photometry   ==================================== 
+  
 
------------------
+=================
 TARGET_PHOTOMETRY
------------------
+=================
  target_phototmetry:
 
 *adjust_SN_loc*: [default: None]
-  if False, Photometry is performed at transient position i.e. forced photometry   =====================================   PSF fitting   ===================================== 
+  if False, Photometry is performed at transient position i.e. forced photometry 
 
----
+===
 PSF
----
+===
 no comment
 
 *psf_source_no*: [default: None]
@@ -496,11 +496,11 @@ no comment
   Location of these PSF stars 
 
 *plot_source_selection*: [default: None]
-  plot source selection plot   =====================================   Image subtraction   ===================================== 
+  plot source selection plot 
 
---------------------
+====================
 TEMPLATE_SUBTRACTION
---------------------
+====================
 no comment
 
 *do_ap_on_sub*: [default: None]
@@ -537,11 +537,11 @@ no comment
   
 
 *use_zogy*: [default: None]
-    =====================================   Calculating Error   ===================================== 
+  
 
------
+=====
 ERROR
------
+=====
 no comment
 
 *target_error_compute_multilocation*: [default: None]
@@ -551,11 +551,11 @@ no comment
   
 
 *target_error_compute_multilocation_number*: [default: None]
-    =====================================   ZeroPoint   ===================================== 
+  
 
----------
+=========
 ZEROPOINT
----------
+=========
 no comment
 
 *zp_sigma*: [default: None]
