@@ -4,7 +4,7 @@ MANUAL
 
 
 GENERAL
--------
+#######
 
 *fits_dir*: [default: None]
   Directory where files are containg images with  .fits .fts .fit extension. 
@@ -65,7 +65,7 @@ GENERAL
 
 
 PREPROCESSING
--------------
+#############
 
  image cleaning and precrossing
 *trim_edges*: [default: False]
@@ -82,7 +82,7 @@ PREPROCESSING
 
 
 PHOTOMETRY
-----------
+##########
 
  commands to control photometry
 *do_ap_phot*: [default: False]
@@ -138,7 +138,7 @@ PHOTOMETRY
 
 
 TEMPLATES
----------
+#########
 
  Commands to control templates
 *use_user_template*: [default: True]
@@ -146,7 +146,7 @@ TEMPLATES
 
 
 WCS
----
+###
 
  Comands when finding WCS values
 *ignore_no_wcs*: [default: False]
@@ -193,7 +193,7 @@ WCS
 
 
 CATALOG
--------
+#######
 
  Commands to use with when working with catalog
 *catalog*: [default: None]
@@ -240,7 +240,7 @@ CATALOG
 
 
 FWHM
-----
+####
 
 no comment
 *int_scale*: [default: 25]
@@ -254,7 +254,7 @@ no comment
 
 
 COSMIC_RAYS
------------
+###########
 
  Commands for cosmic ray cleaning:
 *remove_cmrays*: [default: True]
@@ -268,7 +268,7 @@ COSMIC_RAYS
 
 
 FITTING
--------
+#######
 
  Commands describing how to perform fitting
 *fitting_method*: [default: least_square]
@@ -303,7 +303,7 @@ FITTING
 
 
 EXTINCTION
-----------
+##########
 
 no comment
 *apply_airmass_extinction*: [default: False]
@@ -311,7 +311,7 @@ no comment
 
 
 SOURCE_DETECTION
-----------------
+################
 
  Coammnds to control source detection algorithim
 *threshold_value*: [default: 25]
@@ -373,7 +373,7 @@ SOURCE_DETECTION
 
 
 LIMITING_MAGNITUDE
-------------------
+##################
 
 no comment
 *force_lmag*: [default: False]
@@ -459,7 +459,7 @@ no comment
 
 
 TARGET_PHOTOMETRY
------------------
+#################
 
  target_phototmetry:
 *adjust_SN_loc*: [default: True]
@@ -467,7 +467,7 @@ TARGET_PHOTOMETRY
 
 
 PSF
----
+###
 
 no comment
 *psf_source_no*: [default: 10]
@@ -505,7 +505,7 @@ no comment
 
 
 TEMPLATE_SUBTRACTION
---------------------
+####################
 
 no comment
 *do_ap_on_sub*: [default: False]
@@ -546,7 +546,7 @@ no comment
 
 
 ERROR
------
+#####
 
 no comment
 *target_error_compute_multilocation*: [default: True]
@@ -560,7 +560,7 @@ no comment
 
 
 ZEROPOINT
----------
+#########
 
 no comment
 *zp_sigma*: [default: 3]
