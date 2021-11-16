@@ -23,7 +23,7 @@ author = 'Seán Brennan'
 
 
 
-html_favicon = 'logo.ico'
+html_favicon = 'favicon.ico'
 # -- General configuration ---------------------------------------------------
 
 # Add any Sphinx extension module names here, as strings. They can be
@@ -34,6 +34,7 @@ extensions = ['sphinx.ext.autodoc',
               'sphinx.ext.mathjax',
               'sphinx.ext.autosummary',
               'IPython.sphinxext.ipython_console_highlighting',
+              'sphinx.ext.autosectionlabel'
 
 
 ]
