@@ -31,7 +31,6 @@ Welcome to AutoPHoT!
    :caption: Tutorials
 
    instructions
-   
    tutorials
 
 

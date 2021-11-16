@@ -1,6 +1,4 @@
 Instructions
 ============
 
-   .. toctree::
-      :maxdepth: 1
-      :caption: Tutorials
+   .. include:: autophot_instructions.txt
