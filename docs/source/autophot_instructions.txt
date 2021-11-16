@@ -1,6 +1,7 @@
 =======
 GENERAL
 =======
+
 *fits_dir*: [default: None]
   Directory where files are containg images with  .fits .fts .fit extension. 
 
@@ -61,8 +62,8 @@ GENERAL
 =============
 PREPROCESSING
 =============
- image cleaning and precrossing
 
+ image cleaning and precrossing
 *trim_edges*: [default: None]
   if True, trim the sides of the image by the amount given in *trim_edges_pixels* 
 
@@ -78,8 +79,8 @@ PREPROCESSING
 ==========
 PHOTOMETRY
 ==========
- commands to control photometry
 
+ commands to control photometry
 *do_ap_phot*: [default: None]
   perform aperture photometry 
 
@@ -134,16 +135,16 @@ PHOTOMETRY
 =========
 TEMPLATES
 =========
- Commands to control templates
 
+ Commands to control templates
 *use_user_template*: [default: None]
   Use template given by user. 
 
 ===
 WCS
 ===
- Comands when finding WCS values
 
+ Comands when finding WCS values
 *ignore_no_wcs*: [default: None]
  Ignore files that don't have wcs 
 
@@ -189,8 +190,8 @@ WCS
 =======
 CATALOG
 =======
- Commands to use with when working with catalog
 
+ Commands to use with when working with catalog
 *catalog*: [default: None]
   choose catalog to use - options: [pan_starrs,2mass,apass,skymapper,gaia] 
 
@@ -236,8 +237,8 @@ CATALOG
 ====
 FWHM
 ====
-no comment
 
+no comment
 *int_scale*: [default: None]
   Initial image size in pixels to take cutout 
 
@@ -250,8 +251,8 @@ no comment
 ===========
 COSMIC_RAYS
 ===========
- Commands for cosmic ray cleaning:
 
+ Commands for cosmic ray cleaning:
 *remove_cmrays*: [default: None]
   If True, remove cosmic rays using astroscrappy 
 
@@ -264,8 +265,8 @@ COSMIC_RAYS
 =======
 FITTING
 =======
- Commands describing how to perform fitting
 
+ Commands describing how to perform fitting
 *fitting_method*: [default: None]
   fitting methods for analytical function fitting and PSF fitting 
 
@@ -299,16 +300,16 @@ FITTING
 ==========
 EXTINCTION
 ==========
-no comment
 
+no comment
 *apply_airmass_extinction*: [default: None]
   if True, retrun airmass correction 
 
 ================
 SOURCE_DETECTION
 ================
- Coammnds to control source detection algorithim
 
+ Coammnds to control source detection algorithim
 *threshold_value*: [default: None]
   inital threshold value for source detection 
 
@@ -369,8 +370,8 @@ SOURCE_DETECTION
 ==================
 LIMITING_MAGNITUDE
 ==================
-no comment
 
+no comment
 *force_lmag*: [default: None]
   Force limiting magnitude test at transient location. This may given incorrect values for bright sources 
 
@@ -455,16 +456,16 @@ no comment
 =================
 TARGET_PHOTOMETRY
 =================
- target_phototmetry:
 
+ target_phototmetry:
 *adjust_SN_loc*: [default: None]
   if False, Photometry is performed at transient position i.e. forced photometry 
 
 ===
 PSF
 ===
-no comment
 
+no comment
 *psf_source_no*: [default: None]
   Number of sources used in psf (if available) 
 
@@ -501,8 +502,8 @@ no comment
 ====================
 TEMPLATE_SUBTRACTION
 ====================
-no comment
 
+no comment
 *do_ap_on_sub*: [default: None]
   Perfrom aperature photometry on subtrated image 
 
@@ -542,8 +543,8 @@ no comment
 =====
 ERROR
 =====
-no comment
 
+no comment
 *target_error_compute_multilocation*: [default: None]
       Distant from location of best fit to inject transient for recovery 
 
@@ -556,8 +557,8 @@ no comment
 =========
 ZEROPOINT
 =========
-no comment
 
+no comment
 *zp_sigma*: [default: None]
       plot zeropoint 
 
