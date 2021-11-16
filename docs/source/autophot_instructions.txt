@@ -16,9 +16,9 @@
 *ct_dir*: [default: None]
  # Colout term directory - not yet implemented 
 
-------------
-photometry
-------------
+----------
+PHOTOMETRY
+----------
 # commands to perform photometry
 
 *do_ap*: [default: None]
