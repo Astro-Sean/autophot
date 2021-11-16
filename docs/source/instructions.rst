@@ -1,4 +1,4 @@
 Instructions
 ============
 
-   .. include:: autophot_instructions.txt
+   .. include:: autophot_instructions.rst
