@@ -34,7 +34,11 @@ The motivation for AutoPhoT aims to provide a precise method for photometric cal
 .. toctree::
   AutoPhot <https://github.com/Astro-Sean/autophot>
   Notebooks <https://github.com/Astro-Sean/autophot/tree/master/example_notebooks>
+  
   :caption: Github
+
+  If you encounter an issues using AutoPhOT, please open an issues `here https://github.com/Astro-Sean/autophot/issues`_ or send me an email to :email:`Seán Brennan <sean.brennan2@ucdconnect.ie>`
+
 
 .. automodule:: autophot
   :members:

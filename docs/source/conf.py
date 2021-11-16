@@ -34,11 +34,12 @@ extensions = ['sphinx.ext.autodoc',
               'sphinx.ext.mathjax',
               'sphinx.ext.autosummary',
               'IPython.sphinxext.ipython_console_highlighting',
+              'sphinxcontrib.email'
 
 ]
 
 autosummary_generate = True
-
+email_automode = True
 source_suffix = ['.rst', '.ipynb']
 
 
