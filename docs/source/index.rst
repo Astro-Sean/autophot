@@ -32,6 +32,7 @@ Welcome to AutoPHoT!
 
    instructions
    tutorials
+   autophot_instructions
 
 
 .. toctree::
