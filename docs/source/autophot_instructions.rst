@@ -1,6 +1,6 @@
 
-MANUAL
-======
+COMMANDS
+========
 
 
 GENERAL
@@ -67,8 +67,8 @@ GENERAL
 PREPROCESSING
 #############
 
-.. code-block:: ruby
-     image cleaning and precrossing
+.. note::
+    image cleaning and precrossing
 
 
 *trim_edges*: [default: False]
@@ -87,8 +87,8 @@ PREPROCESSING
 PHOTOMETRY
 ##########
 
-.. code-block:: ruby
-     commands to control photometry
+.. note::
+    commands to control photometry
 
 
 *do_ap_phot*: [default: False]
@@ -146,8 +146,8 @@ PHOTOMETRY
 TEMPLATES
 #########
 
-.. code-block:: ruby
-     commands to control templates
+.. note::
+    commands to control templates
 
 
 *use_user_template*: [default: True]
@@ -157,8 +157,8 @@ TEMPLATES
 WCS
 ###
 
-.. code-block:: ruby
-     comands when finding wcs values
+.. note::
+    comands when finding wcs values
 
 
 *ignore_no_wcs*: [default: False]
@@ -207,8 +207,8 @@ WCS
 CATALOG
 #######
 
-.. code-block:: ruby
-     commands to use with when working with catalog
+.. note::
+    commands to use with when working with catalog
 
 
 *catalog*: [default: None]
@@ -257,8 +257,8 @@ CATALOG
 FWHM
 ####
 
-.. code-block:: ruby
-    No comment
+.. note::
+   No comment
 
 
 *int_scale*: [default: 25]
@@ -274,8 +274,8 @@ FWHM
 COSMIC_RAYS
 ###########
 
-.. code-block:: ruby
-     commands for cosmic ray cleaning:
+.. note::
+    commands for cosmic ray cleaning:
 
 
 *remove_cmrays*: [default: True]
@@ -291,8 +291,8 @@ COSMIC_RAYS
 FITTING
 #######
 
-.. code-block:: ruby
-     commands describing how to perform fitting
+.. note::
+    commands describing how to perform fitting
 
 
 *fitting_method*: [default: least_square]
@@ -329,8 +329,8 @@ FITTING
 EXTINCTION
 ##########
 
-.. code-block:: ruby
-    No comment
+.. note::
+   No comment
 
 
 *apply_airmass_extinction*: [default: False]
@@ -340,8 +340,8 @@ EXTINCTION
 SOURCE_DETECTION
 ################
 
-.. code-block:: ruby
-     coammnds to control source detection algorithim
+.. note::
+    coammnds to control source detection algorithim
 
 
 *threshold_value*: [default: 25]
@@ -405,8 +405,8 @@ SOURCE_DETECTION
 LIMITING_MAGNITUDE
 ##################
 
-.. code-block:: ruby
-    No comment
+.. note::
+   No comment
 
 
 *force_lmag*: [default: False]
@@ -494,8 +494,8 @@ LIMITING_MAGNITUDE
 TARGET_PHOTOMETRY
 #################
 
-.. code-block:: ruby
-     target_phototmetry:
+.. note::
+    target_phototmetry:
 
 
 *adjust_SN_loc*: [default: True]
@@ -505,8 +505,8 @@ TARGET_PHOTOMETRY
 PSF
 ###
 
-.. code-block:: ruby
-    No comment
+.. note::
+   No comment
 
 
 *psf_source_no*: [default: 10]
@@ -546,8 +546,8 @@ PSF
 TEMPLATE_SUBTRACTION
 ####################
 
-.. code-block:: ruby
-    No comment
+.. note::
+   No comment
 
 
 *do_ap_on_sub*: [default: False]
@@ -590,8 +590,8 @@ TEMPLATE_SUBTRACTION
 ERROR
 #####
 
-.. code-block:: ruby
-    No comment
+.. note::
+   No comment
 
 
 *target_error_compute_multilocation*: [default: True]
@@ -607,8 +607,8 @@ ERROR
 ZEROPOINT
 #########
 
-.. code-block:: ruby
-    No comment
+.. note::
+   No comment
 
 
 *zp_sigma*: [default: 3]
