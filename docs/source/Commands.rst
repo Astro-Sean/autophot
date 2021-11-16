@@ -1,4 +1,4 @@
 Commands
 ========
 
-.. include:: <autophot_instructions.txt>
+.. include:: autophot_instructions.txt

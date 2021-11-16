@@ -30,11 +30,12 @@ Welcome to AutoPHoT!
    :maxdepth: 1
    :caption: Tutorials
 
-   tutorials
    commands
+   tutorials
+
 
 .. toctree::
-   :maxdepth: 0
+   :maxdepth: 1
    :caption: Full Documentation
 
    packages
