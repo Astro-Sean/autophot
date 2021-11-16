@@ -31,6 +31,7 @@ Welcome to AutoPHoT!
    :caption: Tutorials
 
    tutorials
+   commands
 
 .. toctree::
    :maxdepth: 1
