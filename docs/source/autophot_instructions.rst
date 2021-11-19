@@ -4,8 +4,8 @@ Commands
 
 	This page gives commands that are able to be adjusted in AutoPhoT. Most of the time there is no need to change these values. However they may be useful for diagnsotic purposes.
 
-General Commands
-################
+General
+-------
 
 .. note::
    General commands needed to get AutoPhoT running.
@@ -13,7 +13,8 @@ General Commands
 
 To change these parameters use:
 
-.. code-block:: python
+.. code-block::  python
+
    autophot_input[**command**] = **new value**
 
 *fits_dir* [str] 
