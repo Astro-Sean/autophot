@@ -1,9 +1,9 @@
-Packages available in the AutoPHoT pipeline
-===========================================
+Packages
+========
 
 packages.aperture module
 ------------------------
-s
+
 .. automodule:: packages.aperture
    :members:
    :undoc-members:

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Packages available in the AutoPHoT pipeline &mdash; AutoPhOT  documentation</title>
+  <title>Packages &mdash; AutoPhOT  documentation</title>
       <link rel="stylesheet" href="_static/pygments.css" type="text/css" />
       <link rel="stylesheet" href="_static/css/theme.css" type="text/css" />
     <link rel="shortcut icon" href="_static/favicon.ico"/>
@@ -19,7 +19,7 @@
     <script src="_static/js/theme.js"></script>
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
-    <link rel="prev" title="Tutorials" href="tutorials.html" /> 
+    <link rel="prev" title="Commands" href="autophot_instructions.html" /> 
 </head>
 
 <body class="wy-body-for-nav"> 
@@ -44,12 +44,14 @@
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
 <ul>
+<li class="toctree-l1"><a class="reference internal" href="instructions.html">Instructions</a></li>
 <li class="toctree-l1"><a class="reference internal" href="tutorials.html">Tutorials</a></li>
+<li class="toctree-l1"><a class="reference internal" href="autophot_instructions.html">Commands</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">Full Documentation</span></p>
 <ul class="current">
-<li class="toctree-l1 current"><a class="current reference internal" href="#">Packages available in the AutoPHoT pipeline</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#packages-aperture-module">packages.aperture module</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Packages</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#module-packages.aperture">packages.aperture module</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#packages-apply-airmass-extinction-module">packages.apply_airmass_extinction module</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#module-packages.call_astrometry_net">packages.call_astrometry_net module</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#module-packages.call_catalog">packages.call_catalog module</a></li>
@@ -77,6 +79,7 @@
 </ul>
 </li>
 </ul>
+<p class="caption" role="heading"><span class="caption-text">Github</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/Astro-Sean/autophot">AutoPhot</a></li>
 <li class="toctree-l1"><a class="reference external" href="https://github.com/Astro-Sean/autophot/tree/master/example_notebooks">Notebooks</a></li>
@@ -96,7 +99,7 @@
           <div role="navigation" aria-label="Page navigation">
   <ul class="wy-breadcrumbs">
       <li><a href="index.html" class="icon icon-home"></a> &raquo;</li>
-      <li>Packages available in the AutoPHoT pipeline</li>
+      <li>Packages</li>
       <li class="wy-breadcrumbs-aside">
             <a href="_sources/packages.rst.txt" rel="nofollow"> View page source</a>
       </li>
@@ -130,22 +133,112 @@
     text-align: unset;
 }
 </style>
-<div class="section" id="packages-available-in-the-autophot-pipeline">
-<h1>Packages available in the AutoPHoT pipeline<a class="headerlink" href="#packages-available-in-the-autophot-pipeline" title="Permalink to this headline"></a></h1>
-<div class="section" id="packages-aperture-module">
-<h2>packages.aperture module<a class="headerlink" href="#packages-aperture-module" title="Permalink to this headline"></a></h2>
-<p>s
-.. automodule:: packages.aperture</p>
-<blockquote>
-<div><dl class="field-list simple">
-<dt class="field-odd">members</dt>
-<dd class="field-odd"><p></p></dd>
-<dt class="field-even">undoc-members</dt>
-<dd class="field-even"><p></p></dd>
-<dt class="field-odd">show-inheritance</dt>
-<dd class="field-odd"><p></p></dd>
+<div class="section" id="packages">
+<h1>Packages<a class="headerlink" href="#packages" title="Permalink to this headline"></a></h1>
+<div class="section" id="module-packages.aperture">
+<span id="packages-aperture-module"></span><h2>packages.aperture module<a class="headerlink" href="#module-packages.aperture" title="Permalink to this headline"></a></h2>
+<dl class="py function">
+<dt class="sig sig-object py" id="packages.aperture.do_aperture_photometry">
+<span class="sig-prename descclassname"><span class="pre">packages.aperture.</span></span><span class="sig-name descname"><span class="pre">do_aperture_photometry</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dataframe</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ap_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.7</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inf_ap_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2.5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_in_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.9</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_out_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2.2</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.aperture.do_aperture_photometry" title="Permalink to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>image</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+<li><p><strong>dataframe</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+<li><p><strong>fwhm</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+<li><p><strong>ap_size</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to 1.7</p></li>
+<li><p><strong>inf_ap_size</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to 2.5</p></li>
+<li><p><strong>r_in_size</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to 1.9</p></li>
+<li><p><strong>r_out_size</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to 2.2</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even"><p>DESCRIPTION</p>
+</dd>
+<dt class="field-odd">Return type</dt>
+<dd class="field-odd"><p>TYPE</p>
+</dd>
 </dl>
-</div></blockquote>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="packages.aperture.find_aperture_correction">
+<span class="sig-prename descclassname"><span class="pre">packages.aperture.</span></span><span class="sig-name descname"><span class="pre">find_aperture_correction</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dataframe</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">write_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">base</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ap_corr_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.aperture.find_aperture_correction" title="Permalink to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dataframe</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+<li><p><strong>image</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+<li><p><strong>write_dir</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to None</p></li>
+<li><p><strong>base</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to None</p></li>
+<li><p><strong>ap_corr_plot</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to False</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even"><p>DESCRIPTION</p>
+</dd>
+<dt class="field-odd">Return type</dt>
+<dd class="field-odd"><p>TYPE</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="packages.aperture.find_optimum_aperture_size">
+<span class="sig-prename descclassname"><span class="pre">packages.aperture.</span></span><span class="sig-name descname"><span class="pre">find_optimum_aperture_size</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dataframe</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">exp_time</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">write_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">base</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ap_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.7</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inf_ap_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2.5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_in_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.9</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_out_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2.2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">GAIN</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">RDNOISE</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">plot_optimum_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.aperture.find_optimum_aperture_size" title="Permalink to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dataframe</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+<li><p><strong>image</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+<li><p><strong>exp_time</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+<li><p><strong>fwhm</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+<li><p><strong>write_dir</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+<li><p><strong>base</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+<li><p><strong>ap_size</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to 1.7</p></li>
+<li><p><strong>inf_ap_size</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to 2.5</p></li>
+<li><p><strong>r_in_size</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to 1.9</p></li>
+<li><p><strong>r_out_size</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to 2.2</p></li>
+<li><p><strong>GAIN</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to 1</p></li>
+<li><p><strong>RDNOISE</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to 0</p></li>
+<li><p><strong>plot_optimum_radius</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to False</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even"><p>DESCRIPTION</p>
+</dd>
+<dt class="field-odd">Return type</dt>
+<dd class="field-odd"><p>TYPE</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="packages.aperture.measure_aperture_photometry">
+<span class="sig-prename descclassname"><span class="pre">packages.aperture.</span></span><span class="sig-name descname"><span class="pre">measure_aperture_photometry</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">positions</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">data</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">radius</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_in</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_out</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.aperture.measure_aperture_photometry" title="Permalink to this definition"></a></dt>
+<dd><p>This a robust aperture photometry packages for use in autophot</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>positions</strong> (<em>tuple</em>) – list of tuples containing (x,y) positions of object</p></li>
+<li><p><strong>r_in</strong> (<em>float</em>) – inner radius of background annulus</p></li>
+<li><p><strong>r_out</strong> (<em>float</em>) – outer radius of background annulus</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even"><p>Returns lost of aperture measurements</p>
+</dd>
+<dt class="field-odd">Return type</dt>
+<dd class="field-odd"><p>list</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="packages.aperture.plot_aperture">
+<span class="sig-prename descclassname"><span class="pre">packages.aperture.</span></span><span class="sig-name descname"><span class="pre">plot_aperture</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">close_up</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_x_pix_corr</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_y_pix_corr</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ap_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_in_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_out_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">write_dir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">base</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">background_value</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.aperture.plot_aperture" title="Permalink to this definition"></a></dt>
+<dd></dd></dl>
+
 </div>
 <div class="section" id="packages-apply-airmass-extinction-module">
 <h2>packages.apply_airmass_extinction module<a class="headerlink" href="#packages-apply-airmass-extinction-module" title="Permalink to this headline"></a></h2>
@@ -154,7 +247,7 @@
 <span id="packages-call-astrometry-net-module"></span><h2>packages.call_astrometry_net module<a class="headerlink" href="#module-packages.call_astrometry_net" title="Permalink to this headline"></a></h2>
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.call_astrometry_net.AstrometryNetLOCAL">
-<span class="sig-prename descclassname"><span class="pre">packages.call_astrometry_net.</span></span><span class="sig-name descname"><span class="pre">AstrometryNetLOCAL</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">NAXIS1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">NAXIS2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solve_field_exe_loc</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pixel_scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">try_guess_wcs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ignore_pointing</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_ra</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_dec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">search_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">downsample</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cpulimit</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">180</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solve_field_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">180</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_astrometry_net.AstrometryNetLOCAL" title="Permalink to this definition"></a></dt>
+<span class="sig-prename descclassname"><span class="pre">packages.call_astrometry_net.</span></span><span class="sig-name descname"><span class="pre">AstrometryNetLOCAL</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">NAXIS1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">NAXIS2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solve_field_exe_loc</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pixel_scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ignore_pointing</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_ra</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">target_dec</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">search_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">downsample</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cpulimit</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">180</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">solve_field_timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">180</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_astrometry_net.AstrometryNetLOCAL" title="Permalink to this definition"></a></dt>
 <dd><dl class="field-list simple">
 <dt class="field-odd">Parameters</dt>
 <dd class="field-odd"><ul class="simple">
@@ -261,7 +354,24 @@
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.call_datacheck.ask_question">
 <span class="sig-prename descclassname"><span class="pre">packages.call_datacheck.</span></span><span class="sig-name descname"><span class="pre">ask_question</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">question</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">default_answer='n'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">expect_answer_type=&lt;class</span> <span class="pre">'str'&gt;</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">options=None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ignore_type=False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ignore_word='skip'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_datacheck.ask_question" title="Permalink to this definition"></a></dt>
-<dd></dd></dl>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>default_answer</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to ‘n’</p></li>
+<li><p><strong>expect_answer_type</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to str</p></li>
+<li><p><strong>options</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to None</p></li>
+<li><p><strong>ignore_type</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to False</p></li>
+<li><p><strong>ignore_word</strong> (<em>TYPE</em><em>, </em><em>optional</em>) – DESCRIPTION, defaults to ‘skip’</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even"><p>DESCRIPTION</p>
+</dd>
+<dt class="field-odd">Return type</dt>
+<dd class="field-odd"><p>TYPE</p>
+</dd>
+</dl>
+</dd></dl>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.call_datacheck.checkteledata">
@@ -285,8 +395,22 @@
 
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.call_datacheck.find_similar_words">
-<span class="sig-prename descclassname"><span class="pre">packages.call_datacheck.</span></span><span class="sig-name descname"><span class="pre">find_similar_words</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">words</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">search_word</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_datacheck.find_similar_words" title="Permalink to this definition"></a></dt>
-<dd></dd></dl>
+<span class="sig-prename descclassname"><span class="pre">packages.call_datacheck.</span></span><span class="sig-name descname"><span class="pre">find_similar_words</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">words</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">search_words</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.call_datacheck.find_similar_words" title="Permalink to this definition"></a></dt>
+<dd><dl class="field-list simple">
+<dt class="field-odd">Parameters</dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>words</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+<li><p><strong>search_words</strong> (<em>TYPE</em>) – DESCRIPTION</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns</dt>
+<dd class="field-even"><p>DESCRIPTION</p>
+</dd>
+<dt class="field-odd">Return type</dt>
+<dd class="field-odd"><p>TYPE</p>
+</dd>
+</dl>
+</dd></dl>
 
 </div>
 <div class="section" id="packages-call-hotpants-module">
@@ -535,7 +659,7 @@ If a pixel position is more than halfway accros a pixel roundup, else round down
 
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.functions.calc_mag">
-<span class="sig-prename descclassname"><span class="pre">packages.functions.</span></span><span class="sig-name descname"><span class="pre">calc_mag</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">flux</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">zp</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.calc_mag" title="Permalink to this definition"></a></dt>
+<span class="sig-prename descclassname"><span class="pre">packages.functions.</span></span><span class="sig-name descname"><span class="pre">calc_mag</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">flux</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gain</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">zp</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.functions.calc_mag" title="Permalink to this definition"></a></dt>
 <dd><p>Calculate magnitude of apoint source</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters</dt>
@@ -1116,95 +1240,13 @@ If image does not have correct shape i.e. 2 dimensional it will raise an error</
 
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.limit.inject_sources">
-<span class="sig-prename descclassname"><span class="pre">packages.limit.</span></span><span class="sig-name descname"><span class="pre">inject_sources</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">autophot_input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_table</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">plot_steps</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_cutouts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lmag_guess</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">print_progress</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_plot_to_folder</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.limit.inject_sources" title="Permalink to this definition"></a></dt>
-<dd><p>Artificial source injection within a given image to determine the maximum magnitude a source may have and not be detected to within a given signal to noise ratio (SNR)</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters</dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>autophot_input</strong> (<em>dict</em>) – Option Dictionary for autophot</p></li>
-<li><p><strong>image</strong> (<em>2D numpy array</em>) – Cutout around target position. Must be large enough to enclose PSF model.</p></li>
-<li><p><strong>model</strong> (<em>Function</em><em>, </em><em>optional</em>) – Model to use for modeling sources. This will accept the PSF model created using psf.build,if None using a 2D analytical function, either Gaussian of Moffat, defaults to None</p></li>
-<li><p><strong>r_table</strong> (<em>2D numpy array</em><em>, </em><em>optional</em>) – Residual table from PSF.build. Required to perform artificial source injection with PSF model, defaults to None</p></li>
-<li><p><strong>plot_steps</strong> (<em>Boolean</em><em>, </em><em>optional</em>) – Return images of each step during source injection. Will save to folder named “limiting_gif” in output folder, defaults to False</p></li>
-<li><p><strong>save_cutouts</strong> (<em>Boolean</em><em>, </em><em>optional</em>) – Plot an image of final source injected at limiting magnitude, defaults to False</p></li>
-<li><p><strong>lmag_guess</strong> (<em>Float</em><em>, </em><em>optional</em>) – Initial guess at limiting magnitude. If None use value from ‘inject_source_mag’ in autophot_input dictionary, defaults to None</p></li>
-</ul>
-</dd>
-<dt class="field-even">Required autophot_input keywords for this package</dt>
-<dd class="field-even"><ul class="simple">
-<li><p>c_counts/r_counts (float): Check to make sure PSF successfully created. These param gives the number of counts under a normalised PSF model as well as within the residual table</p></li>
-<li><p>exp_time (float): Exposure time in seconds</p></li>
-<li><p>fwhm (float): Full width half maximum of image in pixels</p></li>
-<li><p>use_moffat (boolean): Boolean on whether to use moffat (True) or Gaussian (False) in PSF model, default to False.</p></li>
-<li><p>image_params (dict): this dictionary describes the analytical model usinged in the PSF model. If a gaussian function is used this dictionary should contain the key “sigma” and the corresponding value. If a moffat function is function this dictionary should contained ‘alpha’ and ‘beta’ values’. These values are found and updated the autophot_input in find.fwhm.</p></li>
-<li><p>zp (float): Zeropoint of the image</p></li>
-<li><p>gain (float): Gain of image in e/ADU</p></li>
-<li><p>ap_size (float): Aperture size in pixels</p></li>
-<li><p>lim_SNR (float): Signal to Noise detection criteria, default to 3</p></li>
-<li><p>inject_source_recover_nsteps (int): Number of steps to take, default is 100</p></li>
-<li><p>inject_source_recover_dmag (float): Large magnitude step, default is 0.25 mag</p></li>
-<li><p>inject_source_recover_fine_dmag (float): fine magnitude step, default is 0.1 mag</p></li>
-<li><p>inject_source_add_noise (boolean): Inject random noise with artificial source, default is True</p></li>
-<li><p>inject_source_recover_dmag_redo (int): If poisson noise is added, how many times to re-inject the same source with random noise added, default is 3</p></li>
-<li><p>inject_source_cutoff_sources (float, must be &lt;= 1): Percentage of sources needed to be ‘lost’/found’ to define the limiting magnitude, default is 0.8</p></li>
-<li><p>write_dir (str): Working directory where plots will be saved</p></li>
-<li><p>base (str): basename of file, used for saving plots</p></li>
-</ul>
-</dd>
-<dt class="field-odd">Raises</dt>
-<dd class="field-odd"><p><strong>Exception</strong> – DESCRIPTION</p>
-</dd>
-<dt class="field-even">Returns</dt>
-<dd class="field-even"><p>Returns Value for injected limiting magnitude and updated autophot_input file</p>
-</dd>
-<dt class="field-odd">Return type</dt>
-<dd class="field-odd"><p>Tuple of limiting magnitude (float) and autophot_input file (dictionary)</p>
-</dd>
-</dl>
-</dd></dl>
+<span class="sig-prename descclassname"><span class="pre">packages.limit.</span></span><span class="sig-name descname"><span class="pre">inject_sources</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fpath</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">exp_time</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ap_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.7</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">25</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">zeropoint</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_in_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_out_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">injected_sources_use_beta</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">beta_limit</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.75</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gain</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rdnoise</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_lmag_use_ap_phot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_moffat</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image_params</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fitting_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">regriding_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lim_SNR</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bkg_level</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_recover_dmag</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.5</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_recover_fine_dmag</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.05</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_mag</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">21</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_recover_nsteps</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">50</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_recover_dmag_redo</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_cutoff_sources</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_cutoff_limit</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.8</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">subtraction_ready</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">unity_PSF_counts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_add_noise</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_location</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">injected_sources_additional_sources</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">injected_sources_additional_sources_position</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">injected_sources_additional_sources_number</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">plot_injected_sources_randomly</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">injected_sources_save_output</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_table</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">plot_steps</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_cutouts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lmag_guess</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">print_progress</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_plot_to_folder</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fitting_method</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'least_sqaure'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_local</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_surface</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_poly</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_poly_degree</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.limit.inject_sources" title="Permalink to this definition"></a></dt>
+<dd></dd></dl>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.limit.limiting_magnitude_prob">
-<span class="sig-prename descclassname"><span class="pre">packages.limit.</span></span><span class="sig-name descname"><span class="pre">limiting_magnitude_prob</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">autophot_input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_table</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">print_progress</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.limit.limiting_magnitude_prob" title="Permalink to this definition"></a></dt>
-<dd><p>Find the probable limiting magnitude arond a given tagrte location.
-Methodlology discussed in  ‘F. Masci 2011 &lt;<a class="reference external" href="https://www.semanticscholar.org/paper/Computing-flux-upper-limits-for-non-detections-Masci/6c14bb440637fb6c6c3bad6ce42c2bca7383c735">https://www.semanticscholar.org/paper/Computing-flux-upper-limits-for-non-detections-Masci/6c14bb440637fb6c6c3bad6ce42c2bca7383c735</a>&gt;’__.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters</dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>autophot_input</strong> (<em>dict</em>) – AutoPhOT control dictionary</p></li>
-<li><p><strong>image</strong> (<em>2D array</em>) – 2D image array of target location, typically given as an expanding cutout of the target lcoation</p></li>
-<li><p><strong>model</strong> (<em>Model function</em>) – PSF model ,if available, if not a gaussian is used. Default = None</p></li>
-<li><p><strong>r_table</strong> (<em>2D array</em>) – residual lookup table for build the PSF Default = None</p></li>
-</ul>
-</dd>
-<dt class="field-even">Required autophot_input keywords for this package</dt>
-<dd class="field-even"><ul class="simple">
-<li><p>c_counts/r_counts (float): Check to make sure PSF successfully created. These param gives the number of counts under a normalised PSF model as well as within the residual table</p></li>
-<li><p>exp_time (float): Exposure time in seconds</p></li>
-<li><p>fwhm (float): Full width half maximum of image in pixels</p></li>
-<li><p>use_moffat (boolean): Boolean on whether to use moffat (True) or Gaussian (False) in PSF model, default to False.</p></li>
-<li><p>image_params (dict): this dictionary describes the analytical model usinged in the PSF model. If a gaussian function is used this dictionary should contain the key “sigma” and the corresponding value. If a moffat function is function this dictionary should contained ‘alpha’ and ‘beta’ values’. These values are found and updated the autophot_input in find.fwhm.</p></li>
-<li><p>zp (float): Zeropoint of the image</p></li>
-<li><p>gain (float): Gain of image in e/ADU</p></li>
-<li><p>ap_size (float): Aperture size in pixels</p></li>
-<li><p>lim_SNR (float): Signal to Noise detection criteria, default to 3 (sigma)</p></li>
-<li><p>bkg_level (float): Sigma level of background noise, default to 3 (sigma)</p></li>
-<li><p>probable_detection_limit (boolean): Use beta detection criteria rather than sigma limit</p></li>
-<li><p>inject_source_random (boolean): Inject sources around the target location with the probable limiting magnitiude</p></li>
-<li><p>inject_source_cutoff_sources (int): Number of random sources to add around the target</p></li>
-<li><p>inject_source_on_target (boolean): Inject a source on target</p></li>
-<li><p>inject_source_add_noise (boolean): Add some Possion noise to the artifically inject sources</p></li>
-<li><p>write_dir (str): Working directory where plots will be saved.</p></li>
-</ul>
-</dd>
-</dl>
-<p>returns:
-(tuple): tuple containing:</p>
-<blockquote>
-<div><p>mag_level: derived value for limting magnitude
-autophot_input: updated AutoPhOT control dictionary</p>
-</div></blockquote>
-</dd></dl>
+<span class="sig-prename descclassname"><span class="pre">packages.limit.</span></span><span class="sig-name descname"><span class="pre">limiting_magnitude_prob</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fpath</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lim_SNR</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bkg_level</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">7</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ap_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.7</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">exp_time</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">gain</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image_params</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">regriding_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fitting_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_cutoff_sources</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">6</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_location</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_on_target</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_random</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">inject_source_add_noise</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_moffat</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">unity_PSF_counts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">model</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_table</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">print_progress</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_local</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_surface</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_poly</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_poly_degree</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">subtraction_ready</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">injected_sources_use_beta</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.limit.limiting_magnitude_prob" title="Permalink to this definition"></a></dt>
+<dd></dd></dl>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.limit.ranks">
@@ -1272,7 +1314,7 @@ autophot_input: updated AutoPhOT control dictionary</p>
 <span id="packages-psf-module"></span><h2>packages.psf module<a class="headerlink" href="#module-packages.psf" title="Permalink to this headline"></a></h2>
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.psf.PSF_MODEL">
-<span class="sig-prename descclassname"><span class="pre">packages.psf.</span></span><span class="sig-name descname"><span class="pre">PSF_MODEL</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">xc</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">yc</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sky</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">H</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_table</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autophot_input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">slice_scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pad_shape</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.psf.PSF_MODEL" title="Permalink to this definition"></a></dt>
+<span class="sig-prename descclassname"><span class="pre">packages.psf.</span></span><span class="sig-name descname"><span class="pre">PSF_MODEL</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">xc</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">yc</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sky</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">H</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_table</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image_params</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_moffat</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fitting_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">regriding_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">slice_scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pad_shape</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.psf.PSF_MODEL" title="Permalink to this definition"></a></dt>
 <dd><blockquote>
 <div><p>Point Spread Function model for use in Autophot. This function is used in psf.fit and numerous limiting magnitude packages to effectively model point sources in an image.</p>
 </div></blockquote>
@@ -1313,7 +1355,7 @@ autophot_input: updated AutoPhOT control dictionary</p>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.psf.build_r_table">
-<span class="sig-prename descclassname"><span class="pre">packages.psf.</span></span><span class="sig-name descname"><span class="pre">build_r_table</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">base_image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">selected_sources</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autophot_input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iterations</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.psf.build_r_table" title="Permalink to this definition"></a></dt>
+<span class="sig-prename descclassname"><span class="pre">packages.psf.</span></span><span class="sig-name descname"><span class="pre">build_r_table</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">base_image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">selected_sources</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">exp_time</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image_params</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fpath</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">GAIN</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rdnoise</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_moffat</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">vary_moff_beta</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fitting_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">regrid_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_PSF_starlist</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_local_stars_for_PSF</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prepare_templates</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">25</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ap_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.7</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_in_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">r_out_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">local_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1500</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bkg_level</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">psf_source_no</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">min_psf_source_no</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">construction_SNR</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">25</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_local</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_surface</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_poly</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_poly_degree</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fit_PSF_FWHM</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_fit_fwhm</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">30</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fitting_method</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'least_sqaure'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_PSF_stars</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">plot_PSF_model_residual</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_PSF_models_fits</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.psf.build_r_table" title="Permalink to this definition"></a></dt>
 <dd></dd></dl>
 
 <dl class="py function">
@@ -1323,88 +1365,13 @@ autophot_input: updated AutoPhOT control dictionary</p>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.psf.do">
-<span class="sig-prename descclassname"><span class="pre">packages.psf.</span></span><span class="sig-name descname"><span class="pre">do</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">df</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">residual</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autophot_input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.psf.do" title="Permalink to this definition"></a></dt>
-<dd><p>Function to perform PSF model measurment. converts height of PSF model to counts under the PSF within a defined aperature size.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters</dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>df</strong> (<em>Pandas.DataFrame</em>) – dataframe contain amplitude and amplitude error (in counts) of PSF from <em>psf.fit</em> function</p></li>
-<li><p><strong>residual</strong> (<em>np.array</em>) – 2D image of residual table</p></li>
-<li><p><strong>autophot_input</strong> (<em>dict</em>) – AutoPhot control dictionary</p></li>
-</ul>
-</dd>
-</dl>
-<p>Required autophot_input keywords:</p>
-<blockquote>
-<div><ul class="simple">
-<li><p><strong>use_moffat</strong> (<em>boolean</em>): Use a moffat function as the base analytical function for the PSf model</p></li>
-<li><p><strong>image_params</strong> (<em>dict</em>): dictionary containing values of analytical function. if ‘use_moffat’ dictionary should contain ‘alpha’ and ‘beta’ keys and their values, else dictionary should contain ‘sigma’ and its value</p></li>
-<li><p><strong>scale</strong> (<em>float</em>): size of cutout around a specific target position (image shape = [2*scale,2*scale])</p></li>
-<li><p><strong>ap_size</strong> (<em>float</em>): Aperture size in pixels</p></li>
-</ul>
-</div></blockquote>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters</dt>
-<dd class="field-odd"><p><strong>FWHM</strong> (<em>float</em>) – Full Width Half Maximum of image used to set integration radius</p>
-</dd>
-<dt class="field-even">Returns</dt>
-<dd class="field-even"><p><ul class="simple">
-<li><p><strong>df</strong> (<em>pandas DataFrame</em>) Original DataFrame with <em>psf_counts</em> and <em>psf_counts_err</em> columns</p></li>
-<li><p><strong>autophot_input</strong> (<em>dict</em>) Updated autophot_input file</p></li>
-</ul>
-</p>
-</dd>
-</dl>
-</dd></dl>
+<span class="sig-prename descclassname"><span class="pre">packages.psf.</span></span><span class="sig-name descname"><span class="pre">do</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">df</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">residual_image</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ap_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.7</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">7</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">unity_PSF_counts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">unity_residual_counts</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_moffat</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image_params</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.psf.do" title="Permalink to this definition"></a></dt>
+<dd></dd></dl>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.psf.fit">
-<span class="sig-prename descclassname"><span class="pre">packages.psf.</span></span><span class="sig-name descname"><span class="pre">fit</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sources</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">residual_table</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">autophot_input</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_psf_model</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">show_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_background_val</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hold_pos</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_fwhm</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_subtraction_image</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">no_print</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_closeup</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.psf.fit" title="Permalink to this definition"></a></dt>
-<dd><p>PSF fitting packages.</p>
-<p>This package uses the PSF model created in psf.build to fit for every source in an image. Can return a plot of the subtracted image for the User 
-:param image: 2D image of containg stars with which the user wishes the measure
-:type image: numpy array
-:param sources: DataFarme of sources containing location of sources
-:type sources: pandas DataFrame
-:param residual_table: PSF residual table from psf.build
-:type residual_table: numpy array
-:param autophot_input: Autophot control dictionary
-:type autophot_input: dict</p>
-<dl class="field-list simple">
-<dt class="field-odd">Required autophot_input</dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>fwhm</strong> (<em>float</em>): FWHM to use with PSF model. Must be the same FWHM used in building the PSF model</p></li>
-<li><p><strong>regrid_size</strong> (<em>int</em>): rebin size for residual image shift</p></li>
-<li><p><strong>use_moffat</strong> (<em>boolean</em>): Use a moffat function as the base analytical function for the PSf model</p></li>
-<li><p><strong>image_params</strong> (<em>dict</em>): dictionary containing values of analytical function. if ‘use_moffat’ dictionary should contain ‘alpha’ and ‘beta’ keys and their values, else dictionary should contain ‘sigma’ and its value</p></li>
-<li><p><strong>scale</strong> (<em>float</em>): size of cutout around a specific target position (image shape = [2*scale,2*scale])</p></li>
-<li><p><strong>dx</strong>/<strong>dx</strong> (<em>float</em>/<em>float</em>): if hold_pos is False, allow PDF model to move by dx/dy during fitting</p></li>
-<li><p><strong>remove_sat* (**boolean</strong>): if True, remove any sources brighter than the count level set using <em>sat_lvl</em></p></li>
-</ul>
-</dd>
-<dt class="field-even">Parameters</dt>
-<dd class="field-even"><ul class="simple">
-<li><p><strong>return_psf_model</strong> (<em>boolean</em><em>, </em><em>optional</em>) – If True, return the PSF model, defaults to False</p></li>
-<li><p><strong>save_plot</strong> (<em>boolen</em><em>, </em><em>optional</em>) – Save plot of PSF subtraction, defaults to False</p></li>
-<li><p><strong>show_plot</strong> (<em>boolen</em><em>, </em><em>optional</em>) – Show plot of PSF subtraction, defaults to False</p></li>
-<li><p><strong>remove_background_val</strong> (<em>boolean</em><em>, </em><em>optional</em>) – if False, do not perform background subtraction to source proir to fitting PSF model, defaults to True</p></li>
-<li><p><strong>hold_pos</strong> (<em>boolean</em><em>, </em><em>optional</em>) – if True, Force PSF to fit source at percise location given in “sources” dataframe. IF false, PSF model is allowed to fit with a pixel tolerence given by ‘dx’/’dy’ given in autophot_input, defaults to False</p></li>
-<li><p><strong>return_fwhm</strong> (<em>boolean</em><em>, </em><em>optional</em>) – If true return the FWHM of the source proir to PSF fitting, defaults to False</p></li>
-</ul>
-</dd>
-</dl>
-<p>:param return_subtraction_image:If true, return and save an image of the PSF subtraction, defaults to False
-:type return_subtraction_image: boolean, optional
-:param no_print: If true, do not print any fitting information from this package, defaults to False
-:type no_print: boolean, optional
-:return:</p>
-<blockquote>
-<div><ul class="simple">
-<li><p><strong>PSF_sources</strong> (<em>pandas DataFrame</em>): Dataframe containing output parameters from PSF fitting. Use with psf.do to compute instrumental magnitudes</p></li>
-<li><p><strong>PSF_MODEL</strong>  (<em>function</em>): PSF model</p></li>
-</ul>
-</div></blockquote>
-</dd></dl>
+<span class="sig-prename descclassname"><span class="pre">packages.psf.</span></span><span class="sig-name descname"><span class="pre">fit</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">image</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sources</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">residual_table</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fwhm</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fpath</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fitting_radius</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">regriding_size</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">scale</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">25</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bkg_level</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_sat</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sat_lvl</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">65536</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_moffat</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">image_params</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">fitting_method</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'least_sqaure'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_psf_model</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">save_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">show_plot</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_background_val</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hold_pos</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_fwhm</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_subtraction_image</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">no_print</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">return_closeup</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_local</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_surface</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_poly</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">remove_bkg_poly_degree</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">plot_PSF_residuals</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#packages.psf.fit" title="Permalink to this definition"></a></dt>
+<dd></dd></dl>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="packages.psf.sigma_clip_list_of_list">
@@ -1463,7 +1430,7 @@ TODO: Change output file name calling</p>
            </div>
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
-        <a href="tutorials.html" class="btn btn-neutral float-left" title="Tutorials" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="autophot_instructions.html" class="btn btn-neutral float-left" title="Commands" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
     </div>
 
   <hr/>

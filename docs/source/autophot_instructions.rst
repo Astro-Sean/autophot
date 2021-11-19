@@ -126,7 +126,7 @@ PREPROCESSING
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['preprocessing'][**command**] = **new value**
 
 *trim_edges* [bool] 
@@ -159,7 +159,7 @@ PHOTOMETRY
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['photometry'][**command**] = **new value**
 
 *do_ap_phot* [bool] 
@@ -257,7 +257,7 @@ TEMPLATES
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['templates'][**command**] = **new value**
 
 *use_user_template* [bool] 
@@ -275,7 +275,7 @@ WCS
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['wcs'][**command**] = **new value**
 
 *ignore_no_wcs* [bool] 
@@ -373,7 +373,7 @@ CATALOG
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['catalog'][**command**] = **new value**
 
 *use_catalog* [str] 
@@ -456,7 +456,7 @@ COSMIC_RAYS
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['cosmic_rays'][**command**] = **new value**
 
 *remove_cmrays* [bool] 
@@ -484,7 +484,7 @@ FITTING
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['fitting'][**command**] = **new value**
 
 *fitting_method* [str] 
@@ -547,7 +547,7 @@ EXTINCTION
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['extinction'][**command**] = **new value**
 
 *apply_airmass_extinction* [bool] 
@@ -565,7 +565,7 @@ SOURCE_DETECTION
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['source_detection'][**command**] = **new value**
 
 *threshold_value* [float] 
@@ -693,7 +693,7 @@ LIMITING_MAGNITUDE
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['limiting_magnitude'][**command**] = **new value**
 
 *force_lmag* [bool] 
@@ -841,7 +841,7 @@ TARGET_PHOTOMETRY
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['target_photometry'][**command**] = **new value**
 
 *adjust_SN_loc* [bool] 
@@ -864,7 +864,7 @@ PSF
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['psf'][**command**] = **new value**
 
 *psf_source_no* [int] 
@@ -937,7 +937,7 @@ TEMPLATE_SUBTRACTION
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['template_subtraction'][**command**] = **new value**
 
 *do_ap_on_sub* [bool] 
@@ -1015,7 +1015,7 @@ ERROR
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['error'][**command**] = **new value**
 
 *target_error_compute_multilocation* [bool] 
@@ -1043,7 +1043,7 @@ ZEROPOINT
 To change these parameters use:
 
 .. code-block::  python
-   pygments_style = 'sphinx'
+
    autophot_input['zeropoint'][**command**] = **new value**
 
 *zp_sigma* [float] 

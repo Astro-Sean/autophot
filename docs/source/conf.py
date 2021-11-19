@@ -34,8 +34,7 @@ extensions = ['sphinx.ext.autodoc',
               'sphinx.ext.mathjax',
               'sphinx.ext.autosummary',
               'IPython.sphinxext.ipython_console_highlighting',
-              'sphinx.ext.autosectionlabel',
-              'sphinxcontrib.osexample'
+              'sphinx.ext.autosectionlabel'
 
 
 ]
@@ -44,6 +43,7 @@ autosummary_generate = True
 
 source_suffix = ['.rst', '.ipynb']
 
+pygments_style = 'sphinx'
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
