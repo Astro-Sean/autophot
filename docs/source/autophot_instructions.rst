@@ -97,10 +97,12 @@ PREPROCESSING
 
 .. note::
    This section focuses on several steps during preprocessing.
-	To change these parameters using `autophot_input['preprocessing'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['preprocessing'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['preprocessing'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['preprocessing'][**'command'**] = **new value**`
 *trim_edges* [bool] 
 	If True, trim the sides of the image by the amount given in *trim_edges_pixels*. 
 	Default: **False**
@@ -123,10 +125,12 @@ PHOTOMETRY
 
 .. note::
    Commands to control photometry
-	To change these parameters using `autophot_input['photometry'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['photometry'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['photometry'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['photometry'][**'command'**] = **new value**`
 *do_ap_phot* [bool] 
 	Perform aperture photometry. 
 	Default: **False**
@@ -201,10 +205,12 @@ TEMPLATES
 
 .. note::
    Commands to control templates
-	To change these parameters using `autophot_input['templates'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['templates'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['templates'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['templates'][**'command'**] = **new value**`
 *use_user_template* [bool] 
 	Use template given by user. 
 	Default: **True**
@@ -215,10 +221,12 @@ WCS
 
 .. note::
    Comands when finding WCS values
-	To change these parameters using `autophot_input['wcs'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['wcs'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['wcs'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['wcs'][**'command'**] = **new value**`
 *ignore_no_wcs* [bool] 
 	Ignore files that don't have wcs. 
 	Default: **False**
@@ -293,10 +301,12 @@ CATALOG
 
 .. note::
    Commands to use with when working with catalog
-	To change these parameters using `autophot_input['catalog'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['catalog'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['catalog'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['catalog'][**'command'**] = **new value**`
 *use_catalog* [str] 
 	choose catalog to use - options: [pan_starrs,2mass,apass,skymapper,gaia]. 
 	Default: **None**
@@ -359,10 +369,12 @@ COSMIC_RAYS
 
 .. note::
    Commands for cosmic ray cleaning:
-	To change these parameters using `autophot_input['cosmic_rays'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['cosmic_rays'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['cosmic_rays'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['cosmic_rays'][**'command'**] = **new value**`
 *remove_cmrays* [bool] 
 	If True, remove cosmic rays using astroscrappy. 
 	Default: **True**
@@ -381,10 +393,12 @@ FITTING
 
 .. note::
    Commands describing how to perform fitting
-	To change these parameters using `autophot_input['fitting'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['fitting'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['fitting'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['fitting'][**'command'**] = **new value**`
 *fitting_method* [str] 
 	fitting methods for analytical function fitting and PSF fitting. 
 	Default: **least_square**
@@ -431,10 +445,12 @@ EXTINCTION
 
 .. note::
    no comment
-	To change these parameters using `autophot_input['extinction'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['extinction'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['extinction'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['extinction'][**'command'**] = **new value**`
 *apply_airmass_extinction* [bool] 
 	If True, retrun airmass correction. 
 	Default: **False**
@@ -445,10 +461,12 @@ SOURCE_DETECTION
 
 .. note::
    Coammnds to control source detection algorithim
-	To change these parameters using `autophot_input['source_detection'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['source_detection'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['source_detection'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['source_detection'][**'command'**] = **new value**`
 *threshold_value* [float] 
 	threshold value for source detection. 
 	Default: **25**
@@ -547,10 +565,12 @@ LIMITING_MAGNITUDE
 
 .. note::
    no comment
-	To change these parameters using `autophot_input['limiting_magnitude'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['limiting_magnitude'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['limiting_magnitude'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['limiting_magnitude'][**'command'**] = **new value**`
 *force_lmag* [bool] 
 	Force limiting magnitude test at transient location. This may given incorrect values for bright sources. 
 	Default: **False**
@@ -665,10 +685,12 @@ TARGET_PHOTOMETRY
 
 .. note::
    These commands focus on settings when dealing with the photometry at the target position.
-	To change these parameters using `autophot_input['target_photometry'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['target_photometry'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['target_photometry'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['target_photometry'][**'command'**] = **new value**`
 *adjust_SN_loc* [bool] 
 	if False, Photometry is performed at transient position i.e. forced photometry. 
 	Default: **True**
@@ -683,10 +705,12 @@ PSF
 
 .. note::
    These commands focus on settings when dealing with the Point spread fitting photometry package.
-	To change these parameters using `autophot_input['psf'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['psf'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['psf'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['psf'][**'command'**] = **new value**`
 *psf_source_no* [int] 
 	Number of sources used in the image to build the PSF model. 
 	Default: **10**
@@ -741,10 +765,12 @@ TEMPLATE_SUBTRACTION
 
 .. note::
    no comment
-	To change these parameters using `autophot_input['template_subtraction'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['template_subtraction'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['template_subtraction'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['template_subtraction'][**'command'**] = **new value**`
 *do_ap_on_sub* [bool] 
 	If True, Perfrom aperature photometry on subtrated image rather than PSF (if available/selected). 
 	Default: **False**
@@ -803,10 +829,12 @@ ERROR
 
 .. note::
    Commands for controlling error calculations
-	To change these parameters using `autophot_input['error'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['error'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['error'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['error'][**'command'**] = **new value**`
 *target_error_compute_multilocation* [bool] 
 	Do Snoopy-style error. 
 	Default: **False**
@@ -825,10 +853,12 @@ ZEROPOINT
 
 .. note::
    no comment
-	To change these parameters using `autophot_input['zeropoint'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['zeropoint'][**'command'**] = **new value**`
 
 
-	To change these parameters using `autophot_input['zeropoint'][**'command'**] = **new value**`
+
+To change these parameters using `autophot_input['zeropoint'][**'command'**] = **new value**`
 *zp_sigma* [float] 
 	Sigma clip values when cleaning up the zeropoint measurements. 
 	Default: **3**
