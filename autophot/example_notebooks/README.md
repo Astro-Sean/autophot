@@ -2,7 +2,6 @@
   <img src=https://github.com/Astro-Sean/autophot/blob/master/logo.png>
 </p>
 
-
 # Example Notebooks for using AutoPhOT
 
 We provide several Jupyter Notebooks on how to use AutoPHoT. If there is an aspect of AutoPhOT that is confusing, feel free to email me ([Seán Brennan](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT)) or open an issue [here](https://github.com/Astro-Sean/autophot/issues).
