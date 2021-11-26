@@ -69,7 +69,7 @@ def SNR_err(SNR):
     if isinstance(SNR,int) or isinstance(SNR,float):
         if SNR <= 0:
             return 0
-        SNR_err = np.array([2.5 * np.log10(1 + 1/SNR)])
+        SNR_err = np.array([2.5 * np.log10(1 + (1/SNR))])
         return SNR_err[0]
 
 
@@ -82,7 +82,7 @@ def SNR_err(SNR):
     if isinstance(SNR_cleaned,float):
         SNR_cleaned = np.array(SNR_cleaned)
 
-    SNR_err = np.array([2.5 * np.log10(1 + 1/snr) if snr>0 else np.nan for snr in SNR_cleaned])
+    SNR_err = np.array([2.5 * np.log10(1 + (1/snr)) if snr>0 else np.nan for snr in SNR_cleaned])
 
     return SNR_err
 
@@ -417,7 +417,7 @@ def f_ul(n,beta_p,sigma):
 
 
 
-def calc_mag(flux, zp):
+def calc_mag(flux, gain, zp):
     '''
     Calculate magnitude of apoint source
     
@@ -437,7 +437,7 @@ def calc_mag(flux, zp):
     if isinstance(flux,float):
         flux = [flux]
 
-    mag_inst = np.array([-2.5*np.log10(i)+zp if i > 0.0 else np.nan for i in flux ])
+    mag_inst = np.array([-2.5*np.log10(i*gain)+zp if i > 0.0 else np.nan for i in flux ])
 
     return mag_inst
 

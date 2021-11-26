@@ -53,7 +53,7 @@ def recover(autophot_input,update_fpath = True):
 
 
                 if os.path.isfile(os.path.join(root, 'out.csv')):
-                    csv = pd.read_csv(os.path.join(root, 'out.csv'),error_bad_lines=False)
+                    csv = pd.read_csv(os.path.join(root, 'out.csv'))
                     
                     if update_fpath:
                         old_fpath = csv['fname'].values[0]
@@ -64,7 +64,7 @@ def recover(autophot_input,update_fpath = True):
                     csv_recover.append(csv)
                     
                 elif os.path.isfile(os.path.join(root, 'target_ouput.csv')):
-                    csv = pd.read_csv(os.path.join(root, 'target_ouput.csv'),error_bad_lines=False)
+                    csv = pd.read_csv(os.path.join(root, 'target_ouput.csv'))
                     csv.to_csv(os.path.join(root, 'out.csv'),index = False)
                     csv_recover.append(csv)
                     

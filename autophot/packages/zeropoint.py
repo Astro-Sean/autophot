@@ -1,4 +1,19 @@
-def get_zeropoint(c,autophot_input,image = None,headinfo = None):
+def get_zeropoint(c,image = None,headinfo = None,
+                  fpath = None,
+                  use_filter = None,
+                  matching_source_SNR = True,
+                  matching_source_SNR_limit =10,
+                  GAIN = 1,
+                  fwhm = 7,
+                  zp_sigma = 3,
+                  zp_use_fitted = True,
+                  zp_use_mean = False,
+                  zp_use_max_bin = False,
+                  zp_use_median = False,
+                  zp_use_WA = False,
+                  plot_ZP_image_analysis = False,
+                  plot_ZP_vs_SNR = False
+                  ):
     
     from autophot.packages.functions import SNR_err
     from autophot.packages.functions import calc_mag
@@ -8,35 +23,40 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
-    
-    from astropy.stats import sigma_clip
+
     from astropy.io import fits
+    from astropy.stats import sigma_clip, mad_std
 
     import logging
     logging = logging.getLogger(__name__)
     
     #  prevent copy warning errors
     pd.options.mode.chained_assignment = None
+    
+    base = os.path.basename(fpath)
+    write_dir = os.path.dirname(fpath)
+    base = os.path.splitext(base)[0]
 
   
     dir_path = os.path.dirname(os.path.realpath(__file__))
     plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
  
-
-    mean_fwhm = autophot_input['fwhm']
-    fpath = autophot_input['fpath']
-    use_filter = autophot_input['image_filter']
+    limit = matching_source_SNR_limit
+    # fpath = autophot_input['fpath']
+    # use_filter = autophot_input['image_filter']
     
     # remove sources that are low SNR
-    if autophot_input['matching_source_SNR'] :
+    if matching_source_SNR :
         print('Checking for suitable catalog sources')
         len_all_SNR = len(c)
-        limit = autophot_input['matching_source_SNR_limit']
-        SNR_mask = abs(c['SNR'].values) >= autophot_input['matching_source_SNR_limit']
+        
+        SNR_mask = abs(c['SNR'].values) >= limit
+        
         if np.sum(SNR_mask) > 0 :
             c['acceptable_SNR'] = SNR_mask
+            
         else:
-            print('No sequence soures with SNR > %d' % autophot_input['matching_source_SNR_limit'])
+            print('No sequence soures with SNR > %d' % limit)
             while limit > 5:
                 logging.info('Checking for source at SNR > %d' % limit)
                 SNR_mask = abs(c['SNR'].values) >= limit
@@ -62,7 +82,7 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
     try:
 
         zp = {}
-        zp_err ={}
+        # zp_err ={}
 
         zp_mag_err = SNR_err(c['SNR'].values.astype(float))
         
@@ -77,12 +97,8 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
         zpoint = np.asarray(c['zp_'+str(use_filter)])
         zpoint_err = np.asarray(c['zp_'+str(use_filter)+'_err'])
 
-        # remove nan values and apply mask
-        # nanmask = (np.array(~np.isnan(zpoint))) & (zpoint_err<2)
-
-        # c = c[nanmask]
     
-        zp_inst_mag = calc_mag(c['count_rate_star'],0)
+        zp_inst_mag = calc_mag(c['flux_star'],GAIN,0)
         zpoint = np.asarray(c['zp_'+str(use_filter)])
         zpoint_err = np.asarray(c['zp_'+str(use_filter)+'_err'])
     
@@ -90,12 +106,12 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
         if len(zpoint) == 0:
             zp = [np.nan,np.nan]
             raise Exception(' WARNING! No Zeropoints estimates found')
-        from astropy.stats import sigma_clip, mad_std
+        
         
         
         if len(c['zp_'+str(use_filter)].values)>3:
             zp_mask = sigma_clip(c['zp_'+str(use_filter)].values,
-                                 sigma = autophot_input['zp_sigma'],
+                                 sigma = zp_sigma,
                                  maxiters = 10,
                                  cenfunc = np.nanmedian,
                                  stdfunc = mad_std).mask
@@ -161,22 +177,22 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
         else:
             zp_most_often = [np.nan]
             
-        if autophot_input['zp_use_fitted'] and not autophot_input['zp_use_mean'] and not autophot_input['zp_use_max_bin']:
+        if zp_use_fitted and not zp_use_mean and not zp_use_max_bin:
 
             zp = zp_fitted
             logging.info('\nFitted %s-band zeropoint: %.3f +/- %.3f \n' % (str(use_filter),zp[0],zp[1]))
 
-        elif autophot_input['zp_use_max_bin'] and not autophot_input['zp_use_mean']:
+        elif zp_use_max_bin and not zp_use_mean:
 
             zp = zp_most_often
             logging.info('\nMode %s-band zeropoint: %.3f +/- %.3f \n' % (str(use_filter),zp[0],zp[1]))
 
-        elif autophot_input['zp_use_median'] and not autophot_input['zp_use_mean']:
+        elif zp_use_median and not zp_use_mean:
 
             zp = zp_median
             logging.info('\nMedian %s-band zeropoint: %.3f +/- %.3f \n' % (str(use_filter),zp[0],zp[1]))
 
-        elif autophot_input['zp_use_WA']and not autophot_input['zp_use_mean']:
+        elif zp_use_WA and not zp_use_mean:
 
             zp = zp_wa
             logging.info('\nWeighted %s-band zeropoint: %.3f +/- %.3f \n' % (str(use_filter),zp[0],zp[1]))
@@ -187,7 +203,7 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
              
         # Adding fwhm and Zeropoint to headerinfo
         if headinfo != None:
-            headinfo['fwhm'] = (round(mean_fwhm,3), 'fwhm w/ autophot')
+            headinfo['fwhm'] = (round(fwhm,3), 'fwhm w/ autophot')
             headinfo['zp']   = (round(zp[0],3), 'zp w/ autophot')
             
             fits.writeto(fpath,image.astype(np.single),
@@ -195,19 +211,19 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
                          overwrite = True,
                          output_verify = 'silentfix+ignore')
 
-        autophot_input['zeropoint'] = zp
-        autophot_input['zeropoint_err'] = zp_err
+        # autophot_input['zeropoint'] = zp
+        # autophot_input['zeropoint_err'] = zp_err
 
 
     except Exception as e:
         logging.exception(e)
         logging.critical('Zeropoint not Found')
         zp = [np.nan,np.nan]
-        return zp,c,autophot_input
+        return zp,c
 
 
-    autophot_input['zp'] = zp[0]
-    autophot_input['zp_err'] =zp[1]
+    # autophot_input['zp'] = zp[0]
+    # autophot_input['zp_err'] =zp[1]
 
     
 
@@ -264,7 +280,7 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
     markers, caps, bars = ax2.errorbar(zpoint_clip,zp_inst_mag_clip,
                  xerr = zpoint_err_clip,
                  yerr = c['inst_'+str(use_filter)+'_err'][~zp_mask],
-                 label = 'After clipping [%d$\\sigma$]' % int(autophot_input['zp_sigma']),
+                 label = 'After clipping [%d$\\sigma$]' % int(zp_sigma),
                  marker = 'o',
                  linestyle="None",
                  color = 'blue',
@@ -287,19 +303,19 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
             density = True,
             color = 'green')
     
-    if autophot_input['zp_use_fitted'] and not autophot_input['zp_use_mean'] and not autophot_input['zp_use_max_bin']:
+    if zp_use_fitted and not zp_use_mean and not zp_use_max_bin:
         
         ax3.axvline(zp_fitted[0],color = 'black',ls = (0,(5,1)),label = 'Fitted')
         
-    elif autophot_input['zp_use_max_bin'] and not autophot_input['zp_use_mean']:
+    elif zp_use_max_bin and not zp_use_mean:
     
         ax3.axvline(zp_most_often[0],color = 'black',ls = '-.',label = 'Mode')
         
-    elif autophot_input['zp_use_median'] and not autophot_input['zp_use_mean']:
+    elif zp_use_median  and not zp_use_mean:
     
         ax3.axvline(zp_median[0],color = 'black',ls = '-',label = 'Median')
         
-    elif autophot_input['zp_use_WA']and not autophot_input['zp_use_mean']:
+    elif zp_use_WA and not zp_use_mean:
         
         ax3.axvline(zp_mean[0],color = 'black',ls = ':',label = 'Mean')
         
@@ -333,8 +349,8 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
                ncol = 4,
                frameon=False)
         
- 
-    fig_zeropoint.savefig(autophot_input['write_dir'] + '/' +'zeropoint_'+str(autophot_input['base'].split('.')[0])+'.pdf',
+    save_loc = os.path.join(write_dir,'zeropoint_'+base+'.pdf')
+    fig_zeropoint.savefig(save_loc,
                           bbox_inches = 'tight',
                           format = 'pdf')
         
@@ -342,7 +358,7 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
         
 
         
-    if autophot_input['plot_ZP_image_analysis'] and not (image is None):
+    if plot_ZP_image_analysis and not (image is None):
  
         from scipy.stats import norm
         import matplotlib as mpl
@@ -395,13 +411,7 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
         
         ax1.set_xticklabels([])
         ax1.set_yticklabels([])
-        
-        ax1.scatter([autophot_input['target_x_pix']],[autophot_input['target_y_pix']],
-                   marker = 'D',
-                   s = 25,
-                   facecolor = 'None',
-                   edgecolor = 'gold')
-        
+
         ax1_R.scatter(c['zp_'+str(use_filter)].values,c['y_pix'].values,
                       cmap=cmap,
                       norm = norm,
@@ -447,7 +457,7 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
         ax1_B.set_ylabel('Zeropoint [mag]')
         ax1_B.set_xlabel('X pixel')
         
-        figname = os.path.join(autophot_input['write_dir'],'zeropoint_analysis_'+autophot_input['base']+'.pdf')
+        figname = os.path.join(write_dir,'zeropoint_analysis_'+base+'.pdf')
         
         fig.savefig(figname,
                     format = 'pdf',
@@ -456,7 +466,7 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
         plt.close(fig)
 
         
-    if autophot_input['plot_ZP_vs_SNR']:
+    if plot_ZP_vs_SNR:
         
         plt.ioff()
         
@@ -485,7 +495,7 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
         
         ax1.set_yscale('log')
         
-        figname = os.path.join(autophot_input['write_dir'],'zeropoint_SNR_'+autophot_input['base']+'.pdf')
+        figname = os.path.join(write_dir,'zeropoint_SNR_'+base+'.pdf')
         
         fig.savefig(figname,
                     format = 'pdf',
@@ -494,4 +504,4 @@ def get_zeropoint(c,autophot_input,image = None,headinfo = None):
         
         plt.close(fig)
         
-    return zp,c,autophot_input
+    return zp,c

@@ -41,7 +41,7 @@ def find_aperture_correction(dataframe,
 
     
     # Get magnitude different between aperatrure and "infinite" aperture
-    aperture_difference = calc_mag(dataframe['counts_inf_ap'] / dataframe['counts_ap'],0)
+    aperture_difference = calc_mag(dataframe['counts_inf_ap'] / dataframe['counts_ap'],1,0)
     
     aperture_difference = aperture_difference[~np.isnan(aperture_difference)]
     
@@ -534,7 +534,7 @@ def find_optimum_aperture_size(dataframe,
     
     from random import uniform
     
-    from autophot.packages.uncertain import SNR,SNR_err
+    from autophot.packages.functions import SNR,SNR_err
     import matplotlib.pyplot as plt
     from autophot.packages.functions import set_size
     

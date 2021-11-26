@@ -1,108 +1,160 @@
 def prepare_templates(fpath,
-                      autophot_input,
+                      wdir,
+                      write_dir,
+                      tele_autophot_input ,
                       get_fwhm = True,
+                      build_psf = True,
                       clean_cosmic = True,
+                      use_astroscrappy = True,
+                      solve_field_exe_loc = None,
+                      use_lacosmic = False,
+                      use_filter = None,
                       redo_wcs = True,
-                      build_psf = True):
-
-    
+                      target_ra = None,
+                      target_dec = None,
+                      search_radius = 0.5,
+                      cpu_limit= 180,
+                      downsample = 2,
+                      threshold_value = 25,
+                      ap_size = 1.7,
+                      inf_ap_size = 2.5,
+                      r_in_size = 2,
+                      r_out_size = 3,
+                      use_moffat = True,
+                      psf_source_no = 10,
+                      fitting_method = 'least_sqaure',
+                      regriding_size  = 10,
+                      fitting_radius = 1.3
+                      
+                      ):
     
     import os
-    import numpy as np
+    import logging
     from astropy.io import fits
     from autophot.packages.functions import getheader,getimage
-    from autophot.packages.call_yaml import yaml_autophot_input as cs
-
+    from autophot.packages import psf
+    from autophot.packages.aperture import do_aperture_photometry
+    from autophot.packages.call_astrometry_net import AstrometryNetLOCAL
+    from autophot.packages.check_wcs import updatewcs,removewcs
+    from autophot.packages.find import get_fwhm
+        
+    base = os.path.basename(fpath)
     write_dir = os.path.dirname(fpath)
-    base = ''.join(os.path.basename(fpath).split('.')[:-1])
+    base = os.path.splitext(base)[0]
 
 
-    wdir = autophot_input['wdir']
-    print('Preparing templates')
-    print('Write Directory: %s' % write_dir )
-    
-    print('Base Directory: %s' %  base)
+    logger = logging.getLogger(__name__)
+
+
+    logger.info('Preparing templates')
+    logger.info('Write Directory: %s' % write_dir )
+
 
     if base.startswith('PSF_model'):
-        print('ignoring PSF_MODEL in file: %s' % base)
+        logger.info('ignoring PSF_MODEL in file: %s' % base)
         return
 
     dirpath = os.path.dirname(fpath)
     
     image = getimage(fpath)
-    
-    header = getheader(fpath)
+    headinfo = getheader(fpath)
     
     try:
-        telescope = header['TELESCOP']
+        telescope = headinfo['TELESCOP']
     except:
         telescope  = 'UNKNOWN'
-        header['TELESCOP'] = 'UNKNOWN'
+        headinfo['TELESCOP'] = 'UNKNOWN'
 
     if telescope  == '':
         telescope  = 'UNKNOWN'
-        header['TELESCOP'] = 'UNKNOWN'
+        headinfo['TELESCOP'] = 'UNKNOWN'
 
     inst_key = 'INSTRUME'
-    inst = header[inst_key]
+    inst = headinfo[inst_key]
 
-    tele_autophot_input_yml = 'telescope.yml'
-    teledata = cs(os.path.join(wdir,tele_autophot_input_yml))
-    tele_autophot_input = teledata.load_vars()
-    
-    GAIN=1
-    
+
+
+    if 'rdnoise' in tele_autophot_input[telescope][inst_key][inst]:
+
+        rdnoise_key = tele_autophot_input[telescope][inst_key][inst]['rdnoise']
+
+        if rdnoise_key is None:
+            rdnoise = 0 
+        elif rdnoise_key in headinfo:
+            rdnoise = headinfo[rdnoise_key]
+        else:
+            rdnoise = 0 
+         
+    else:
+        logging.info('Read noise key not found for template file')
+        rdnoise = 0
+        
+    logging.info('Read Noise: %.1f [e^- /pixel]' % rdnoise)
+
+
     if 'GAIN' in tele_autophot_input[telescope][inst_key][inst]:
-                
+
         GAIN_key = tele_autophot_input[telescope][inst_key][inst]['GAIN']
- 
+
         if GAIN_key is None:
             GAIN = 1
-            
-        elif GAIN_key in header:
-            
-            GAIN = header[GAIN_key]
-    else:
+        elif GAIN_key in headinfo:
+            GAIN = headinfo[GAIN_key]
+        else:
+            GAIN=1
         
-        GAIN=1
+  
+    logging.info('Template GAIN: %.1f [e^- /count]' % GAIN)
         
     
-
-    try:
-        for i in ['EXPTIME','EXP_TIME','TIME-INT']:
-            if i in header:
-                exp_time = header[i]
-                break
-        raise Exception
-    except:
-        exp_time = 1
+    # print(list(headinfo.keys()))
+    # try:
+    for i in ['EXPTIME','EXP_TIME','TIME-INT']:
+        if i in list(headinfo.keys()):
+            template_exp_time = headinfo[i]
+            break
+    # raise Exception()
+    # except Exception as e:
+    #     template_exp_time = 1
         
-    header['exp_time'] = exp_time
-    # autophot_input['exp_time'] = exp_time
+    if isinstance(template_exp_time, str):
+       template_exp_time_split = template_exp_time.split('/')
+       if len(template_exp_time_split)>1:
+           template_exp_time = float(template_exp_time_split[0])
+       else:
+           template_exp_time = float(template_exp_time)
+           
+       
+    logging.info('Template Exposure Time: %.1f [s]' % template_exp_time)
+       
+    if telescope == 'MPI-2.2':
+        if use_filter in ['J','H','K']:
+            logging.info('Detected GROND IR - setting pixel scale to 0.3')
+            pixel_scale = 0.3
+        else:
+            logging.info('Detected GROND Optical - setting pixel scale to 0.16')
+            pixel_scale = 0.16
+    else:
+
+        pixel_scale   = tele_autophot_input[telescope][inst_key][inst]['pixel_scale']
 
 
-    # autophot_input['GAIN'] = 1
-    RDNOISE = 1
-    # GAIN = GAIN
-    exp_time = exp_time
     
     # Write new header
-    header = getheader(fpath)
-    header['GAIN'] = GAIN
+    updated_header = getheader(fpath)
+    updated_header['GAIN'] = GAIN
     
-    autophot_input['exp_time'] = exp_time
-    autophot_input['GAIN'] = GAIN
-    autophot_input['RDNOISE'] = 0    
+    updated_header['exp_time'] = template_exp_time
+    updated_header['GAIN'] = GAIN
+    updated_header['RDNOISE'] = rdnoise
     
     fits.writeto(fpath,
                  image,
-                 header,
+                 updated_header,
                  overwrite = True,
                  output_verify = 'silentfix+ignore')
 
-    if isinstance(exp_time, str):
-       exp_time = exp_time.split('/')
-       exp_time = float(exp_time[0])
+
 
     
 
@@ -112,38 +164,48 @@ def prepare_templates(fpath,
 
         from autophot.packages.call_crayremoval import run_astroscrappy
         
-
-        image= run_astroscrappy(fits.PrimaryHDU(image),
-                                gain = GAIN,
-                                use_astroscrappy = autophot_input['use_astroscrappy'],
-                                use_lacosmic = autophot_input['use_lacosmic'])
+        if 'CRAY_RM'  not in updated_header:
+            headinfo = getheader(fpath)
+            # image with cosmic rays
+            image_old = fits.PrimaryHDU(image)
+            
+            image = run_astroscrappy(image_old,
+                                     gain = GAIN,
+                                     use_astroscrappy =use_astroscrappy,
+                                     use_lacosmic = use_lacosmic)
+        
+            # Update header and write to new file
+            updated_header['CRAY_RM'] = ('T', 'Comsic rays w/astroscrappy ')
+            fits.writeto(fpath,
+                         image,
+                         updated_header,
+                         overwrite = True,
+                         output_verify = 'silentfix+ignore')
+            logging.info('Cosmic rays removed - image updated')
+        
+        else:
+        
+            logging.info('Cosmic sources pre-cleaned - skipping!')
         
         
     if redo_wcs:
-        
-        
-        import numpy as np
-        from autophot.packages.call_astrometry_net import AstrometryNetLOCAL
-        from autophot.packages.check_wcs import updatewcs,removewcs
+
         
         # Run local instance of Astrometry.net - returns filepath of wcs file
         astro_check = AstrometryNetLOCAL(fpath,
-                                         NAXIS1 = autophot_input['NAXIS1'],
-                                         NAXIS2 = autophot_input['NAXIS2'],
-                                         solve_field_exe_loc = autophot_input['solve_field_exe_loc'],
-                                         pixel_scale = autophot_input['pixel_scale'],
-                                         try_guess_wcs = autophot_input['try_guess_wcs'],
-                                         ignore_pointing = autophot_input['ignore_pointing'],
-                                          target_ra = autophot_input['target_ra'],
-                                          target_dec = autophot_input['target_dec'],
-                                         search_radius = autophot_input['search_radius'],
-                                         downsample = autophot_input['downsample'],
-                                         cpulimit = autophot_input['cpulimit'],
-                                         solve_field_timeout = autophot_input['solve_field_timeout']);
+                                        solve_field_exe_loc = solve_field_exe_loc,
+                                        pixel_scale = pixel_scale,
+                                        ignore_pointing = False,
+                                        target_ra = target_ra,
+                                        target_dec = target_dec,
+                                        search_radius = search_radius,
+                                        downsample = downsample,
+                                        cpulimit = cpu_limit)
     
         old_header = getheader(fpath)
     
         try:
+            old_header = removewcs(headinfo,delete_keys = True)
     
             # Open wcs fits file with wcs values
             new_wcs  = fits.open(astro_check,ignore_missing_end = True)[0].header
@@ -154,76 +216,72 @@ def prepare_templates(fpath,
             # update header to show wcs has been checked
             header_updated['UPWCS'] = ('T', 'WCS by APT')
     
-            updated_wcs = True
             
             os.remove(astro_check)
     
         except Exception as e:
             
-            print('Error with template WCS: %s' % fpath)
+            logger.info('Error with template WCS: %s' % e)
     
         # Write new header
         fits.writeto(fpath,image,
                      header_updated,
                      overwrite = True,
                      output_verify = 'silentfix+ignore')
-        header = getheader(fpath)
 
 
 
     if get_fwhm or build_psf:
  
-        from autophot.packages.find import get_fwhm
 
-        image_fwhm,df,scale,image_params = get_fwhm(image,
-                                                       write_dir,
-                                                       base,
-                                                       threshold_value = autophot_input['threshold_value'],
-                                                       fwhm_guess = autophot_input['fwhm_guess'],
-                                                       bkg_level = autophot_input['bkg_level'],
-                                                       max_source_lim = autophot_input['max_source_lim'],
-                                                       min_source_lim = autophot_input['min_source_lim'],
-                                                       int_scale = autophot_input['int_scale'],
-                                                       fudge_factor = autophot_input['fudge_factor'],
-                                                       fine_fudge_factor = autophot_input['fine_fudge_factor'],
-                                                       source_max_iter = autophot_input['source_max_iter'],
-                                                       sat_lvl = autophot_input['sat_lvl'],
-                                                       lim_SNR = autophot_input['lim_SNR'],
-                                                       scale_multipler = autophot_input['scale_multipler'],
-                                                       sigmaclip_FWHM = autophot_input['sigmaclip_FWHM'],
-                                                       sigmaclip_FWHM_sigma = autophot_input['sigmaclip_FWHM_sigma'],
-                                                       sigmaclip_median = autophot_input['sigmaclip_median'],
-                                                       isolate_sources = autophot_input['isolate_sources'],
-                                                       isolate_sources_fwhm_sep = autophot_input['isolate_sources_fwhm_sep'],
-                                                       init_iso_scale = autophot_input['init_iso_scale'],
-                                                       remove_boundary_sources = autophot_input['remove_boundary_sources'],
-                                                       pix_bound = autophot_input['pix_bound'],
-                                                       sigmaclip_median_sigma = autophot_input['sigmaclip_median_sigma'],
-                                                       save_FWHM_plot = autophot_input['save_FWHM_plot'],
-                                                       plot_image_analysis = autophot_input['plot_image_analysis'],
-                                                       save_image_analysis = autophot_input['save_image_analysis'],
-                                                       use_local_stars_for_FWHM = autophot_input['use_local_stars_for_FWHM'],
-                                                       prepare_templates = autophot_input['prepare_templates'],
-                                                       image_filter = autophot_input['image_filter'],
-                                                       target_name = autophot_input['target_name'],
-                                                       # target_x_pix = autophot_input['target_x_pix'],
-                                                       # target_y_pix = autophot_input['target_y_pix'],
-                                                       # local_radius = autophot_input['local_radius'],
-                                                       # mask_sources = autophot_input['mask_sources'],
-                                                       # mask_sources_XY_R = autophot_input['mask_sources_XY_R'],
-                                                       remove_sat = autophot_input['remove_sat'],
-                                                       use_moffat = autophot_input['use_moffat'],
-                                                       default_moff_beta = autophot_input['default_moff_beta'],
-                                                       vary_moff_beta = autophot_input['vary_moff_beta'],
-                                                       max_fit_fwhm = autophot_input['max_fit_fwhm'],
-                                                       fitting_method = autophot_input['fitting_method'],
-                                                       
-                                                       
-                                                       )
-        autophot_input['fwhm'] = image_fwhm
-        autophot_input['scale'] = scale
-        autophot_input['image_params'] = image_params
-        header['FWHM'] = image_fwhm
+
+        template_fwhm,df,scale,image_params = get_fwhm(image,
+                                                   write_dir,
+                                                   base,
+                                                   threshold_value = threshold_value,
+                                                   # fwhm_guess = autophot_input['source_detection']['fwhm_guess,
+                                                   # bkg_level = autophot_input['fitting']['bkg_level'],
+                                                   # max_source_lim = autophot_input['source_detection']['max_source_lim'],
+                                                   # min_source_lim = autophot_input['source_detection']['min_source_lim'],
+                                                   # int_scale = autophot_input['source_detection']['int_scale'],
+                                                   # fudge_factor = autophot_input['source_detection']['fudge_factor'],
+                                                   # fine_fudge_factor = autophot_input['source_detection']['fine_fudge_factor'],
+                                                   # source_max_iter = autophot_input['source_detection']['source_max_iter'],
+                                                   # sat_lvl = autophot_input['sat_lvl'],
+                                                   # lim_SNR = autophot_input['limiting_magnitude']['lim_SNR'],
+                                                   # scale_multipler = autophot_input['source_detection']['scale_multipler'],
+                                                   # sigmaclip_FWHM = autophot_input['source_detection']['sigmaclip_FWHM'],
+                                                   # sigmaclip_FWHM_sigma = autophot_input['source_detection']['sigmaclip_FWHM_sigma'],
+                                                   # sigmaclip_median = autophot_input['source_detection']['sigmaclip_median'],
+                                                   # isolate_sources = autophot_input['source_detection']['isolate_sources'],
+                                                   # isolate_sources_fwhm_sep = autophot_input['source_detection']['isolate_sources_fwhm_sep'],
+                                                   # init_iso_scale = autophot_input['source_detection']['init_iso_scale'],
+                                                   # remove_boundary_sources = autophot_input['source_detection']['remove_boundary_sources'],
+                                                   # pix_bound = autophot_input['source_detection']['pix_bound'],
+                                                   # sigmaclip_median_sigma = autophot_input['source_detection']['sigmaclip_median_sigma'],
+                                                   # save_FWHM_plot = autophot_input['source_detection']['save_FWHM_plot'],
+                                                   # plot_image_analysis = autophot_input['source_detection']['plot_image_analysis'],
+                                                   # save_image_analysis = autophot_input['source_detection']['save_image_analysis'],
+                                                   # use_local_stars_for_FWHM = autophot_input['photometry']['use_local_stars_for_FWHM'],
+                                                    prepare_templates = True,
+                                                   # image_filter = autophot_input['image_filter'],
+                                                   # target_name = autophot_input['target_name'],
+                                                   # target_x_pix = None,
+                                                   # target_y_pix = None,
+                                                   # local_radius = autophot_input['photometry']['local_radius'],
+                                                   # mask_sources = autophot_input['preprocessing']['mask_sources'],
+                                                   # mask_sources_XY_R = None,
+                                                   # remove_sat = autophot_input['source_detection']['remove_sat'],
+                                                    use_moffat = use_moffat ,
+                                                   # default_moff_beta = autophot_input['fitting']['default_moff_beta'],
+                                                   # vary_moff_beta = autophot_input['fitting']['vary_moff_beta'],
+                                                   # max_fit_fwhm = autophot_input['source_detection']['max_fit_fwhm'],
+                                                   # fitting_method = autophot_input['fitting']['fitting_method']
+                                                   )
+        # autophot_input['fwhm'] = image_fwhm
+        # autophot_input['scale'] = scale
+        # autophot_input['image_params'] = image_params
+        # header['FWHM'] = image_fwhm
         
         
 
@@ -232,21 +290,50 @@ def prepare_templates(fpath,
 
 
     if build_psf:
-        from autophot.packages import psf
-        from autophot.packages.aperture import do_aperture_photometry
 
-        df = do_aperture_photometry(image = image,
+        df_PSF = do_aperture_photometry(image = image,
                                         dataframe = df,
-                                        fwhm= autophot_input['fwhm'],
-                                        ap_size = autophot_input['ap_size'],
-                                        inf_ap_size = autophot_input['inf_ap_size'],
-                                        r_in_size = autophot_input['r_in_size'],
-                                        r_out_size = autophot_input['r_out_size'])
+                                        fwhm = template_fwhm,
+                                        ap_size = ap_size,
+                                        inf_ap_size =inf_ap_size,
+                                        r_in_size =r_in_size,
+                                        r_out_size = r_out_size)
 
-        r_table,fwhm_fit,psf_heights,autophot_input = psf.build_r_table(image,
-                                                                        df,
-                                                                        autophot_input,
-                                                                        image_fwhm)
+        psf.build_r_table(base_image = image,
+                            selected_sources = df_PSF,
+                            fwhm = template_fwhm,
+                            exp_time = template_exp_time,
+                            image_params = image_params,
+                            fpath = fpath,
+                            GAIN = GAIN,
+                            rdnoise = rdnoise,
+                            use_moffat = use_moffat,
+                            vary_moff_beta = False,
+                            fitting_radius = fitting_radius,
+                            regrid_size = regriding_size,
+                            # use_PSF_starlist = autophot_input['psf']['use_PSF_starlist'],
+                            use_local_stars_for_PSF = False,
+                            prepare_templates = True,
+                            scale = scale,
+                            ap_size = ap_size,
+                            r_in_size = r_in_size,
+                            r_out_size = r_out_size,
+                            # local_radius = autophot_input['photometry']['local_radius'],
+                            # bkg_level = autophot_input['fitting']['bkg_level'],
+                            psf_source_no = psf_source_no,
+                            # min_psf_source_no = autophot_input['psf']['min_psf_source_no'],
+                            construction_SNR = 5,
+                            remove_bkg_local = True,
+                            remove_bkg_surface = False,
+                            remove_bkg_poly = False,
+                            remove_bkg_poly_degree = 1,
+                            # fit_PSF_FWHM = autophot_input['psf']['fit_PSF_FWHM'],
+                            # max_fit_fwhm = autophot_input['source_detection']['max_fit_fwhm'],
+                            fitting_method = fitting_method,
+                            save_PSF_stars = False,
+                            # plot_PSF_model_residuals = autophot_input['psf']['plot_PSF_model_residuals'],
+                            save_PSF_models_fits = True)
+
 
         pass
 
@@ -259,158 +346,14 @@ def prepare_templates(fpath,
 
 
 
-def point_source_align(template_image,image_sources,template_sources):
-    
-    import numpy as np
-    import itertools
-    import operator
-
-    aligned_template = np.nan
-
-    image_sources = image_sources.head(10)
-
-
-    set_B = [list(image_sources['x_pix'].values),list(image_sources['y_pix'].values)]
-
-
-    set_A = [list(template_sources['x_pix'].values),list(template_sources['y_pix'].values)]
-
-    print(set_A)
-
-    # print(set_A,set_B)
-
-    set_Ax, set_Ay = (set_A)
-    set_A = []
-    for i in range(len(set_Ax)):
-        set_A.append([set_Ax[i],set_Ay[i]])
-    # normalize set B data to set A format
-    set_Bx, set_By = (set_B)
-    set_B = []
-    for i in range(len(set_Bx)):
-        set_B.append([set_Bx[i],set_By[i]])
 
 
 
-    # create index combinations of both lists
-    set_A_tri = list(itertools.combinations(range(len(set_A)), 3))
-    set_B_tri = list(itertools.combinations(range(len(set_B)), 3))
+def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
+             hotpants_timeout=45,
+             template_dir = None,psf = None, mask_border = False, pix_bound = None,footprint = None,
+             remove_sat  = False,zogy_use_pixel = False):
 
-    # print( set_A_tri )
-    # print( set_B_tri )
-    # print( len(set_A_tri) )
-    # print( len(set_B_tri) )
-
-    def distance(x1,x2,y1,y2):
-        return np.sqrt( (x2 - x1)**2 + (y2 - y1)**2 )
-
-    def tri_sides(set_x, set_x_tri):
-
-        triangles = []
-        for i in range(len(set_x_tri)):
-
-            point1 = set_x_tri[i][0]
-            point2 = set_x_tri[i][1]
-            point3 = set_x_tri[i][2]
-
-            point1x, point1y = set_x[point1][0], set_x[point1][1]
-            point2x, point2y = set_x[point2][0], set_x[point2][1]
-            point3x, point3y = set_x[point3][0], set_x[point3][1]
-
-            len1 = distance(point1x,point1y,point2x,point2y)
-            len2 = distance(point1x,point1y,point3x,point3y)
-            len3 = distance(point2x,point2y,point3x,point3y)
-
-            min_side = min(len1,len2,len3)
-            len1/=min_side
-            len2/=min_side
-            len3/=min_side
-            t=[len1,len2,len3]
-            t.sort()
-            triangles.append(t)
-
-        return triangles
-
-    A_triangles = tri_sides(set_A, set_A_tri)
-    B_triangles = tri_sides(set_B, set_B_tri)
-
-
-
-    def list_subtract(list1,list2):
-
-        return np.absolute(np.array(list1)-np.array(list2))
-
-    sums = []
-    threshold = 1
-    print('working')
-    for i in range(len(A_triangles)):
-        for j in range(len(B_triangles)):
-            k = sum(list_subtract(A_triangles[i], B_triangles[j]))
-            if k < threshold:
-                sums.append([i,j,k])
-    # sort by smallest sum
-    sums = sorted(sums, key=operator.itemgetter(2))
-
-    # print( sums )
-    print( 'winner %s' % sums[0])
-    match_A = set_A_tri[sums[0][0]]
-    match_B = set_B_tri[sums[0][1]]
-    print( 'triangle A %s matches triangle B %s' % (match_A, match_B) )
-
-    match_A_pts = []
-    match_B_pts = []
-    for i in range(3):
-        match_A_pts.append(set_A[match_A[i]])
-        match_B_pts.append(set_B[match_B[i]])
-
-    print( 'triangle A has points %s' % match_A_pts )
-    print( 'triangle B has points %s' % match_B_pts )
-
-
-    print('\n Matching')
-
-    print('Image -> Catalog')
-    for i in range(len(match_A_pts)):
-        print('%s -> %s'% (match_A_pts[i],match_B_pts[i]))
-
-    print('\nCatalog Matching')
-
-
-    import astroalign as aa
-
-    # Align template with Image
-
-    # transform, (source_list, target_list) = aa.find_transform(np.array(match_A_pts), np.array(match_B_pts))
-    transform = aa.estimate_transform('affine', np.array(match_B_pts), np.array(match_A_pts))
-
-    aligned_template = aa.apply_transform(transform, template_image.astype(float),template_image.astype(float))
-
-
-    return aligned_template[0]
-
-
-def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_bound = None,footprint = None ):
-    '''
-    
-    Function for performing template subtractioon Astronmical images using AutoPhot
-    
-    
-    :param file: DESCRIPTION
-    :type file: TYPE
-    :param template: DESCRIPTION
-    :type template: TYPE
-    :param autophot_input: DESCRIPTION
-    :type autophot_input: TYPE
-    :param psf: DESCRIPTION, defaults to None
-    :type psf: TYPE, optional
-    :param mask_border: DESCRIPTION, defaults to True
-    :type mask_border: TYPE, optional
-    :param pix_bound: DESCRIPTION, defaults to None
-    :type pix_bound: TYPE, optional
-    :raises NotImplementedError: DESCRIPTION
-    :return: DESCRIPTION
-    :rtype: TYPE
-
-    '''
     import subprocess
     import os
     import sys
@@ -418,50 +361,54 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
     from pathlib import Path
     import signal
     import time
-    from autophot.packages.functions import  getheader,getimage
+    from autophot.packages.functions import getimage,getheader
     from astropy.io import fits
     import logging
     import warnings
+    from astropy.wcs import WCS
 
     logger = logging.getLogger(__name__)
     
+    base = os.path.basename(file)
+    write_dir = os.path.dirname(file)
+    base = os.path.splitext(base)[0]
+
     
-    # By default, use HOTPANTS:
-    use_hotpants = True
+    logger.info('\nImage subtracion')
+    if hotpants_exe_loc is None and not use_zogy:
+        use_zogy = True
+
+        logger.info('HOTPANTS selected but exe file location not found, trying PyZogy')
+        hotpants_exe_loc = True
         
-        
+    if use_zogy: # Check if zogy is available 
     
-    if autophot_input['solve_field_exe_loc'] is None:
-        use_hotpants = False
-        if not  autophot_input['use_zogy']:
-            print('HOTPANTS exe location not found, trying PyZogy')
-            autophot_input['use_zogy'] = True
-        
-    if autophot_input['use_zogy']:
         try:
             from PyZOGY.subtract import run_subtraction 
-            use_hotpants = False
+            use_zogy = True
         except ImportError as e:
-            print('PyZogy selected but not installed: %s' % e)
-            autophot_input['use_zogy'] = False
+            logger.info('PyZogy selected but not installed: %s' % e)
+            use_zogy = False
             
-    if not use_hotpants and not autophot_input['use_zogy']:
+    if use_zogy and not hotpants_exe_loc:
         warnings.warn('No suitable template subtraction package found/nPlease check installation instructions!,/n returning original image')
         return np.nan
         
-        
-        
-
+    
     try:
 
         # convolve_image = False
-        smooth_template = False
+        # smooth_template = False
         
         # Get file extension and template data
         fname_ext = Path(file).suffix
 
         # Open image and template
         file_image     = getimage(file)
+        
+        image_header = getheader(file)
+        
+        original_wcs = WCS(image_header)
 
         # header = getheader(file)
         template_image = getimage(template)
@@ -476,21 +423,20 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
         # footprint_template = np.zeros(template_image.shape).astype(bool)
         
         footprint[ ( np.isnan(file_image)) | np.isnan(template_image) ] = 1
-
             
         # footprint = abs(footprint)
         if mask_border:
             
             if not (pix_bound is None):
-                pix_bound = autophot_input['pix_bound']
+                pix_bound = pix_bound
                 
-            footprint[autophot_input['pix_bound']: - autophot_input['pix_bound'],
-                      autophot_input['pix_bound']: - autophot_input['pix_bound']] = False
+            footprint[pix_bound: - pix_bound,
+                      pix_bound: - pix_bound] = False
         
         hdu = fits.PrimaryHDU(footprint.astype(int))
         hdul = fits.HDUList([hdu])
 
-        footprint_loc = os.path.join(autophot_input['write_dir'],'footprint_'+autophot_input['base']+fname_ext)
+        footprint_loc = os.path.join(write_dir,'footprint_'+base+fname_ext)
         
         hdul.writeto(footprint_loc,
                       overwrite=True,
@@ -500,7 +446,7 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
 
         check_values_template = template_image[~footprint]
 
-        if autophot_input['remove_sat']:
+        if  remove_sat  :
 
             image_max = [np.nanmax(check_values_image) if np.nanmax(check_values_image) < 2**16 else  + 2**16][0]
 
@@ -511,33 +457,23 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
             image_max = np.nanmax(check_values_image)
 
             template_max = np.nanmax(np.nanmax(check_values_template))
-
-
-        t_header = getheader(template)
-
-        image_FWHM = autophot_input['fwhm']
-
-        # template_FWHM = t_header['FWHM']s
         
-        if autophot_input['use_zogy']:
+        if use_zogy:
             try:
-            
-                autophot_input['use_hotpants'] = False
-                # raise NotImplementedError('Zogy not yet implemented, shwich to HOTPANTS')
-                
+
                 # Get filename for saving
                 base = os.path.splitext(os.path.basename(file))[0]
                 
                 logger.info('Performing image subtraction using PyZOGY')
                 
-                PyZOGY_log = autophot_input['write_dir'] + base + '_ZOGY.txt'
+                # PyZOGY_log = write_dir + base + '_ZOGY.txt'
                 # original_stdout = sys.stdout # Save a reference to the original standard output
     
                    
-                image_psf = os.path.join(autophot_input['write_dir'],'PSF_model_'+autophot_input['base']+'.fits')
+                image_psf = os.path.join(write_dir,'PSF_model_'+base.replace('_image_cutout','')+'.fits')
     
                 from glob import glob
-                template_psf = glob(os.path.join(autophot_input['template_dir'],'PSF_model_*'))[0]
+                template_psf = glob(os.path.join(template_dir,'PSF_model_*'))[0]
                 
                 logger.info('Using Image : %s' % file)
                 logger.info('Using Image PSF: %s' % image_psf)
@@ -546,24 +482,22 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
                 
                 logger.info('\nRunning Zogy...\n')
                 
-                # print(image_max,template_max)
+                # logger.info(image_max,template_max)
                 
                 diff = run_subtraction(science_image = file,
                                        reference_image = template,
                                        science_psf = image_psf,
                                        reference_psf = template_psf,
                                        reference_mask = footprint,
-                                       # science_mask = footprint,
-                                   
-                                        show = False,
+                                       science_mask = footprint,
+                                       show = False,
                                        # sigma_cut = 3,
                                        normalization = "science",
                                        science_saturation = 10+image_max,
                                        reference_saturation = 10+template_max,
                                        n_stamps = 1,
                                        max_iterations = 10,
-                                       
-                                       use_pixels  = True
+                                       use_pixels  = zogy_use_pixel
                                         # size_cut = True
                                         )
              
@@ -573,12 +507,12 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
                              overwrite = True,
                              output_verify = 'silentfix+ignore')
             except Exception as e:
-                print('Pyzogy Failed [%s] - trying HOTPANTS' % e)
-                use_hotpants = True
+                logger.info('Pyzogy Failed [%s] - trying HOTPANTS' % e)
+                use_zogy = False
                 
                 
 
-        if use_hotpants:
+        if not use_zogy :
             
             logger.info('Performing image subtraction using HOTPANTS')
 
@@ -586,7 +520,7 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
             base = os.path.splitext(os.path.basename(file))[0]
 
             # Location of executable for hotpants
-            exe = autophot_input['hotpants_exe_loc']
+            exe = hotpants_exe_loc
 
             # =============================================================================
             # Argurments to send to HOTPANTS process - list of tuples
@@ -651,32 +585,28 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
 
             start = time.time()
             
-            HOTPANTS_log = autophot_input['write_dir'] + base + '_HOTterPANTS.txt'
+            HOTPANTS_log = write_dir + base + '_HOTterPANTS.txt'
             
-            # print(args, file=open(HOTPANTS_log, 'w'))
+            # logger.info(args, file=open(HOTPANTS_log, 'w'))
 
     
             with  open(HOTPANTS_log, 'w')  as FNULL:
                 
-                
-                
-                
-
                 pro = subprocess.Popen(args,shell=True, stdout=FNULL, stderr=FNULL)
                 print('ARGUMENTS:', args, file=FNULL)
 
                 # Timeout
-                pro.wait(autophot_input['hotpants_timeout'])
+                pro.wait(hotpants_timeout)
 
                 try:
                     # Try to kill process to avoid memory errors / hanging process
                     os.killpg(os.getpgid(pro.pid), signal.SIGTERM)
-                    print('HOTPANTS PID killed')
-                    print(args)
+                    logger.info('HOTPANTS PID killed')
+                    logger.info(args)
                 except:
                     pass
 
-            print('HOTPANTS finished: %ss' % round(time.time() - start) )
+            logger.info('HOTPANTS finished: %ss' % round(time.time() - start) )
             
         # =============================================================================
         # Check that subtraction file has been created
@@ -687,19 +617,32 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
 
             if file_size == 0:
                 
-                print('File was created but nothing written')
+                logger.info('File was created but nothing written')
 
                 return np.nan
             
             else:
                 
-                print('Subtraction saved as %s' % os.path.splitext(os.path.basename(file.replace(fname_ext,'_subtraction'+fname_ext)))[0])
+                logger.info('Subtraction saved as %s' % os.path.splitext(os.path.basename(file.replace(fname_ext,'_subtraction'+fname_ext)))[0])
+                
+                original_wcs
+                
+                template_header = getheader(output_fpath)
+                template_image = getimage(output_fpath)
+                template_header.update(original_wcs.to_header())
+                
+                fits.writeto(output_fpath,
+                            template_image,
+                            template_header,
+                            overwrite = True,
+                             output_verify = 'silentfix+ignore')
+                
                 
                 return output_fpath
             
         if not os.path.isfile(output_fpath):
             
-            print('File was not created')
+            logger.info('File was not created')
             
             return np.nan
 
@@ -707,12 +650,12 @@ def subtract(file,template,autophot_input,psf = None, mask_border = False, pix_b
 
         exc_type, exc_obj, exc_tb = sys.exc_info()
         fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-        print(exc_type, fname, exc_tb.tb_lineno,e)
+        logger.info(exc_type, fname, exc_tb.tb_lineno,e)
         
         try:
                 # Try to kill process to avoid memory errors / hanging process
             os.killpg(os.getpgid(pro.pid), signal.SIGTERM)
-            print('HOTPANTS PID killed')
+            logger.info('HOTPANTS PID killed')
         except:
             pass
 

@@ -2,18 +2,17 @@
 # -*- coding: utf-8 -*-
 
 def AstrometryNetLOCAL(file,
-                       NAXIS1,
-                       NAXIS2,
+                       NAXIS1 = None,
+                       NAXIS2 = None,
                        solve_field_exe_loc = None,
                        pixel_scale = None,
-                       try_guess_wcs = False,
                        ignore_pointing = False,
                        target_ra = None,
                        target_dec = None,
                        search_radius = 1,
                        downsample = 2,
                        cpulimit = 180,
-                       solve_field_timeout = 180
+   
                        ):
     '''
     
@@ -57,12 +56,10 @@ def AstrometryNetLOCAL(file,
     import signal
     import time
     import logging
-
+    
+  
     try:
-        
-        if solve_field_exe_loc is None:
-            raise Exception('Please enter "solve_field_exe_loc" to solve for WCS')
-
+ 
         logger = logging.getLogger(__name__)
 
         #Open file and get header information
@@ -78,13 +75,15 @@ def AstrometryNetLOCAL(file,
         wcs_file = base + ".wcs.fits"
 
         # location of executable [/Users/seanbrennan/AutoPhot_Development/AutoPHoT/astrometry.net/bin/solve-field]
-        exe = solve_field_exe_loc
+        exe = str(solve_field_exe_loc)
+        
+        
+        if exe == str(None):
+            raise Exception('Please enter "solve_field_exe_loc" to solve for WCS')
+
 
         # Guess image scale if f.o.v is not known
-        if pixel_scale == None or try_guess_wcs:
-            scale = [(str("--guess-scale"))]
-
-        elif try_guess_wcs:
+        if pixel_scale == None:
             scale = [(str("--guess-scale"))]
 
         else:
@@ -105,6 +104,18 @@ def AstrometryNetLOCAL(file,
                     scale = scale + tar_args
                 except:
                     pass
+                
+        if NAXIS1 is None or NAXIS2 is None:
+            from autophot.packages.functions import getheader,getimage
+            image = getimage(file)
+            headinfo = getheader(file)
+            
+            if 'NAXIS1' in headinfo and 'NAXIS' in headinfo:
+                NAXIS1 = headinfo['NAXIS1']
+                NAXIS2 = headinfo['NAXIS2']
+            else:
+                NAXIS1 = image.shape[0]
+                NAXIS2 = image.shape[1]
 
 
 
@@ -121,7 +132,6 @@ def AstrometryNetLOCAL(file,
             ("--index-xyls="  , str(None)),# don't need all these files
             ("--axy="         , str(None)),
             ("--scamp="       , str(None)),
-
             ("--corr="        , str(None)),
             ("--rdl="        ,  str(None)),
             ("--match="      ,  str(None)),
@@ -155,6 +165,7 @@ def AstrometryNetLOCAL(file,
         astrometry_log_fpath = os.path.join(write_dir,base + '_astrometry.log')
 
         with open(astrometry_log_fpath, 'w') as FNULL:
+            
 
             '''
             Call processto run astronmetry.net using solve-field command and list of keywords
@@ -162,6 +173,7 @@ def AstrometryNetLOCAL(file,
 
             print all output from astrometry to a .log file to help with any debugging
             '''
+            # print(args)
             logger.info('ASTROMETRY started...' )
             pro = subprocess.Popen(args,
                                    shell=True,
@@ -171,9 +183,9 @@ def AstrometryNetLOCAL(file,
 
             # Timeout command - will only run command for this long - ~30s works fine
             try:
-                pro.wait(solve_field_timeout)
+                pro.wait(cpulimit)
             except:
-                print(args)
+                
 
 
                 return np.nan

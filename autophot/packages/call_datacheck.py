@@ -5,6 +5,22 @@ def ask_question(question,
                  options = None,
                  ignore_type = False,
                  ignore_word = 'skip'):
+    '''
+                     
+    :param default_answer: DESCRIPTION, defaults to 'n'
+    :type default_answer: TYPE, optional
+    :param expect_answer_type: DESCRIPTION, defaults to str
+    :type expect_answer_type: TYPE, optional
+    :param options: DESCRIPTION, defaults to None
+    :type options: TYPE, optional
+    :param ignore_type: DESCRIPTION, defaults to False
+    :type ignore_type: TYPE, optional
+    :param ignore_word: DESCRIPTION, defaults to 'skip'
+    :type ignore_word: TYPE, optional
+    :return: DESCRIPTION
+    :rtype: TYPE
+
+    '''
 
     
     while True:
@@ -16,7 +32,13 @@ def ask_question(question,
                 question_str += '( Accepted answers - %s )\n' % ' or '.join(options)
             else:
                 question_str += ' Accepted answers:\n'
- 
+                
+                if not isinstance(options,list):
+                    options = list(options)
+                    
+                options+=[' '] * (1+len(options)%3)
+
+                
                 for column1,column2,column3 in zip(options[::3],options[1::3],options[2::3]):
                      question_str += '| - {:<3} - {:<3} - {:<} |\n'.format(column1,column2,column3)
                 
@@ -68,18 +90,34 @@ def ask_question(question,
         return answer_format(answer)
 
 
-def find_similar_words(words, search_word):
+def find_similar_words(words, search_words):
+    '''
     
-    import re
+    :param words: DESCRIPTION
+    :type words: TYPE
+    :param search_words: DESCRIPTION
+    :type search_words: TYPE
+    :return: DESCRIPTION
+    :rtype: TYPE
 
-    filter = search_word
+    '''
+    import re
     
-    regex = re.compile(".*".join(filter), re.IGNORECASE)
-    filtered_words = [word for word in words if regex.search(word)]
+    matching_words = []
     
-    # print(*filtered_words, sep="\n")
     
-    return filtered_words
+    if not isinstance(search_words,list) or isinstance(search_words,str):
+        search_words = [search_words]
+    
+    # print(search_words)
+    for search_word in search_words:
+    
+        regex = re.compile(".*".join(search_word), re.IGNORECASE)
+        filtered_words = [word for word in words if regex.search(word)]
+        matching_words+=filtered_words
+        # print(filtered_words)
+ 
+    return matching_words
 
 def ask_for_keyword(keyword,
                     header_keys,
@@ -90,7 +128,7 @@ def ask_for_keyword(keyword,
     
     
     # TODO: search through comments too!
-    similar_keywords = find_similar_words(list(header_keys), search_word = keyword)
+    similar_keywords = find_similar_words(list(header_keys.keys()), search_words = keyword)
         
     if len(similar_keywords) == 0:
         print('\nCannot find any keywords similar to %s (File: %s)' % (keyword,fname))
@@ -102,9 +140,9 @@ def ask_for_keyword(keyword,
         print('\nSimilar %s keywords found (File: %s) \n' % (keyword,fname))
    
         keywords_dict = dict(zip(range(1,len(similar_keywords)+1),similar_keywords))
-        
+        print('Index - Key - value')
         for idx,val in keywords_dict.items():
-            print('%s - %s' % (idx,val))
+            print('%s - %s - %s  ' % (idx,val,header_keys[val] ))
             
         while True:
             if expected_units != None:
@@ -176,7 +214,7 @@ def checkteledata(autophot_input,flst,filepath = None):
     import os,sys
     import yaml
     import re
-    import numpy as np
+    # import numpy as np
     import logging
     from astropy.io import fits
     from autophot.packages.functions import getimage
@@ -186,6 +224,7 @@ def checkteledata(autophot_input,flst,filepath = None):
     
     from astroplan import Observer
     from astropy.coordinates import EarthLocation
+    from autophot.packages.call_yaml import yaml_autophot_input as cs
     
     # For site locations
     sites = EarthLocation.get_site_names()
@@ -301,7 +340,7 @@ def checkteledata(autophot_input,flst,filepath = None):
 
             if tele == '' or tele == None:
                 tele = 'UNKNOWN'
-                headinfo[tele_key] = (tele_input,'updated by autophot')
+                headinfo[tele_key] = (tele,'updated by autophot')
                 fits.writeto(name,getimage(name),headinfo,
                              overwrite = True,output_verify = 'silentfix+ignore')
 
@@ -334,14 +373,20 @@ def checkteledata(autophot_input,flst,filepath = None):
 
     if filter is similar to  available_filters it isn't asked for
     '''
-
-    available_filters = list(autophot_input['W_eff'].keys())
+    base_filepath ='/'.join(os.path.os.path.dirname(os.path.abspath(__file__)).split('/')[0:-1])
+    filters_yml = 'filters.yml'
+    filters_input = cs(os.path.join(base_filepath+'/databases',filters_yml )).load_vars()
+    
+    
+    
+                               
+    available_filters = list(filters_input['W_eff'].keys())
 
     logger.info('\n%d telescope(s) detected - checking header keywords\n' % len(tele_inst_dict))
 
-
+    print('Found Telescopes:')
     for t in tele_inst_dict.keys():
-        print('- %s\n' %t)
+        print('\n - %s' %t)
 
     # for each detected catalog
     # Master loop
@@ -360,10 +405,27 @@ def checkteledata(autophot_input,flst,filepath = None):
         # Can happen if you mess with telescope and delete some important data
         if existing_var[i] == None:
             existing_var[i] = {}
-            
         
+        if 'location' not in existing_var[i]:
+            add_location = ask_question('Do you want to update location of %s' % (i),
+                                                  default_answer = 'n',
+                                                  expect_answer_type = str ,
+                                                  options = ['y','n'])
+                
+            if add_location =='n' :
+                existing_var[i]['location']={'name':None,
+                                             'alt':None,
+                                             'lat':None,
+                                             'lon':None}
+                location_idx = 'ignore'
+        else:
+            location_idx = 'ignore'
+        
+   
         # add location
         if 'location' not in existing_var[i]:
+            
+            
             # for key,val in sites_dicts.items():
             #     print('%3d - %s ' % (key,val))
                 
@@ -372,13 +434,13 @@ def checkteledata(autophot_input,flst,filepath = None):
             # sites_list
                 
                 
-            print('\nWhere is  %s located?' % i)
+            print('\nWhere is %s located?' % i)
             location_idx = ask_question('Select telescope location from list or enter your own',
                                         default_answer = 'ignore', 
                                         expect_answer_type = float,
                                         options = None)
 
-            if location_idx is 'ignore':
+            if location_idx == 'ignore':
                 print('Ignoring telescope location')
                 
             
@@ -421,18 +483,13 @@ def checkteledata(autophot_input,flst,filepath = None):
             existing_var[i]['location']['lon'] = site_lon
             existing_var[i]['location']['lat'] = site_lat
             existing_var[i]['location']['alt'] = site_alt
-            
-        else:
-            site_name = existing_var[i]['location']['name']
-            site_alt = existing_var[i]['location']['alt']
-            print('Location found for %s: %s' % (i,existing_var[i]['location']['name']))
-            location_idx = 'pre-existing'
+
             
                 
         # =============================================================================
         # Add atmosphereic extinction values 
         # =============================================================================
-        if location_idx is not 'ignore':
+        if location_idx != 'ignore':
             
             if 'extinction' not in existing_var[i] and not (site_alt is None):
                 
@@ -450,7 +507,7 @@ def checkteledata(autophot_input,flst,filepath = None):
                     
                     for f in available_filters:
                         
-                        f_wave_eff = autophot_input['W_eff'][f]
+                        f_wave_eff = filters_input['W_eff'][f]
                         
                         approx_airmase_ext = Rayleigh_extinction(f_wave_eff,existing_var[i]['location']['alt']/1000) + Ozone_extinction(f_wave_eff)
                         # print(f,f_wave_eff,Rayleigh_extinction(f_wave_eff,existing_var[i]['location']['alt']),Ozone_extinction(f_wave_eff))
@@ -559,7 +616,7 @@ def checkteledata(autophot_input,flst,filepath = None):
                             # if specific gain keword not already entered, use gain as keyword in in header
                             if 'GAIN' not in existing_var[i][inst_key][inst_name]:
                                 
-                                GAIN_key = ask_for_keyword('GAIN', list(headinfo.keys()),
+                                GAIN_key = ask_for_keyword('GAIN', headinfo,
                                                            fname = fname,
                                                            expected_units = 'e/ADU',
                                                            default = None,
@@ -571,7 +628,7 @@ def checkteledata(autophot_input,flst,filepath = None):
                                 
                             if 'RDNOISE' not in existing_var[i][inst_key][inst_name]:
                                 
-                                READNOISE_key = ask_for_keyword('READNOISE', list(headinfo.keys()),
+                                READNOISE_key = ask_for_keyword('READNOISE', headinfo,
                                                            fname = fname,
                                                            expected_units = 'e/pixel',
                                                            default = None,
@@ -584,7 +641,7 @@ def checkteledata(autophot_input,flst,filepath = None):
                             AIRMASS_key_found = False
                             if 'AIRMASS' not in existing_var[i][inst_key][inst_name]:
                                 
-                                AIRMASS_key = ask_for_keyword('AIRMASS', list(headinfo.keys()),
+                                AIRMASS_key = ask_for_keyword('AIRMASS', headinfo,
                                                            fname = fname,
                                                            # expected_units = 'None',
                                                            default = None,
@@ -597,14 +654,14 @@ def checkteledata(autophot_input,flst,filepath = None):
                             if not AIRMASS_key_found:
                                 if 'sec(z)' not in existing_var[i][inst_key][inst_name]:
                                 
-                                    sec_z_key = ask_for_keyword('Sec(z)', list(headinfo.keys()),
+                                    sec_z_key = ask_for_keyword('Sec(z)', headinfo,
                                                                fname = fname,
                                                                 # expected_units = 'None',
                                                                default = None,
                                                                options = None)
                                     
                                     #  add gain keyword and value for gain
-                                    existing_var[i][inst_key][inst_name]['sec_z'] = sec_z
+                                    existing_var[i][inst_key][inst_name]['sec_z_key'] = sec_z_key
                             
                             # if 'DCURRENT' not in existing_var[i][inst_key][inst_name]:
                                 
@@ -628,7 +685,9 @@ def checkteledata(autophot_input,flst,filepath = None):
     so it is safer to loop over all files
     '''
 
-    print('\nTelscope data checked :: looking for filter information')
+    print('\n-> Telescope check complete')
+          
+    print('\nChecking Filter keywords and database')
 
     for name in flst:
 
@@ -721,10 +780,11 @@ def checkteledata(autophot_input,flst,filepath = None):
                     print('\nCannot find Filter key for %s' % existing_var[i][j][k]['Name'])
 
                     # try to help and look for words with 'fil' in it
-                    filter_keys = find_similar_words(list(headinfo.keys()), search_word = 'FIL')
+                    # filter_keys = find_similar_words(list(headinfo.keys()), search_words = ['FILTER','FIL'])
 
                     # ASK user for filter name
-                    filter_key_new = ask_for_keyword('FILTER', list(headinfo.keys()),
+                    Filter_search_words = ['FL','FIL','FILTER']
+                    filter_key_new = ask_for_keyword(Filter_search_words, headinfo,
                                                      fname = fname,
                                                      expected_units = None,
                                                      default = 'FILTER',
@@ -790,6 +850,9 @@ def checkteledata(autophot_input,flst,filepath = None):
                         
         except Exception as e:
             raise Exception('Error with telescope header check: %s' % e)
+            
+        
+        
 
         with open(filepath,'r') as yamlfile:
 
@@ -803,5 +866,6 @@ def checkteledata(autophot_input,flst,filepath = None):
 
         with open(filepath,'w+') as yamlfile:
             yaml.safe_dump(cur_yaml, yamlfile,default_flow_style=False)
-        
-    return autophot_input
+    
+    print('\n-> Filter check complete')
+    return 

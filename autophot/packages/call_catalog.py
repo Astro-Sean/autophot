@@ -310,10 +310,9 @@ def match(image,
     
     
     print('\nMatching Catalog sources to image\n')
+    
     import warnings
-
     import numpy as np
-    import matplotlib.pyplot as plt
 
     import pandas as pd
     import lmfit
@@ -324,11 +323,11 @@ def match(image,
     from astropy.stats import sigma_clipped_stats
 
 
-    from autophot.packages.functions import pix_dist,set_size
-    import os
+    from autophot.packages.functions import pix_dist
+
 
     import logging
-    import warnings
+
     # with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     logger = logging.getLogger(__name__)
@@ -400,7 +399,7 @@ def match(image,
         chosen_catalog = chosen_catalog[chosen_catalog['y_pix'] < image.shape[0] - pix_bound ]
         chosen_catalog = chosen_catalog[chosen_catalog['y_pix'] > pix_bound ]
         
-        print('Removed %d sources too close to bounary' % (len_before-len(chosen_catalog)))
+        print('Removed %d sources too close to boundary or off image' % (len_before-len(chosen_catalog)))
 
 
     # Sort by the brighest sources first
