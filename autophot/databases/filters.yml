@@ -1,0 +1,124 @@
+default_dmag:
+  B: # B band color
+  - - B
+    - V
+  - - B
+    - U
+  - - B
+    - g
+  I:
+  - - I
+    - R
+  - - I
+    - z
+  - - I
+    - i
+  R:
+  - - R
+    - I
+  - - R
+    - V
+  - - R
+    - i
+
+  U:
+  - - U
+    - B
+  - - U
+    - g
+
+  V:
+  - - B
+    - V
+  - - V
+    - R
+  - - V
+    - g
+  - - V
+    - r
+
+  g:
+  - - g
+    - r
+  - - g
+    - u
+  - - g
+    - B
+  - - g
+    - V
+  i:
+  - - i
+    - r
+  - - i
+    - z
+  - - i
+    - I
+  - - i
+    - R
+  r:
+  - - r
+    - g
+  - - r
+    - i
+  - - r
+    - V
+  u:
+  - - u
+    - g
+  z:
+  - - z
+    - i
+  - - z
+    - I
+  J:
+  - - J
+    - H
+  - - J
+    - Z
+  H:
+  - - H
+    - J
+  - - H
+    - K
+  K:
+  - - K
+    - H
+
+
+# =====================================
+# Graphing
+# =====================================
+
+
+# Colorus of filters used in plotting
+filter_colors:
+  B: b
+  G: salmon
+  H: orangered
+  I: chocolate
+  J: darkred
+  K: saddlebrown
+  R: crimson
+  U: slateblue
+  V: yellowgreen
+  g: g
+  i: goldenrod
+  r: r
+  u: dodgerblue
+  z: k
+
+# Effective wavelengths
+W_eff:
+  H: 16300
+  I: 7980
+  J: 12200
+  K: 21900
+  R: 6410
+  U: 3600
+  B: 4380
+  V: 5450
+  g: 4830
+  i: 7670
+  r: 6260
+  u: 3560
+  z: 8890
