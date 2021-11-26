@@ -7,7 +7,7 @@
 We provide several Jupyter Notebooks on how to use AutoPHoT. If there is an aspect of AutoPhOT that is confusing, feel free to email me ([Seán Brennan](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT Notebooks)) or open an issue [here](https://github.com/Astro-Sean/autophot/issues).
 
 ## Basic Operations
-For a notebook example on the basic operations of AutoPHoT, click  [here](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/autophot_example.ipynb)
+For a notebook example on the basic operations of AutoPHoT, click  [here](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/basic_example.ipynb)
 
 This notebook demonstrates:
   * How to load in and execute AutoPHoT on an example dataset
@@ -15,7 +15,7 @@ This notebook demonstrates:
 
 ## Using AutoPHoT with Template subtraction
 
-AutoPhOT is integrated with several popular template subtraction packages, click [here](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/Template%20Subtraction%20Example.ipynb)!
+AutoPhOT is integrated with several popular template subtraction packages, click [here](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/template_subtraction_and_WCS.ipynb)!
 
 This notebook demonstrates:
 
