@@ -3,18 +3,42 @@
 </p>
 
 
-## Example Notebooks
-Basic example on how to preform photometry on example fits image
-*  [autophot_example](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/autophot_example.ipynb)
+# Example Notebooks for using AutoPhOT
 
-In depth look on how to setup telescope.yml file for quick photometry
-* [example_call_database](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/example_call_database.ipynb)
+We provide several Jupyter Notebooks on how to use AutoPHoT. If there is an aspect of AutoPhOT that is confusing, feel free to email me ([Seán Brennan](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT)) or open an issue [here](https://github.com/Astro-Sean/autophot/issues).
 
-How to setup directory structure and HOTPANTS for image subtraction
-* [Image subtraction](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/Template%20Subtraction%20Example.ipynb)
+## Basic Operations
+For an notebook example on the basic operations of AutoPHoT, click  [here](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/autophot_example.ipynb)
 
-How to use your own photometric catalog
-* [add_your_catalog_example](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/add_your_catalog_example.ipynb)
+This notebook demonstrates:
+  * How to load in and execute AutoPHoT on an example dataset
+  * Perform photometry on a target using it's RA and Dec.
+
+## Using AutoPHoT with Template subtraction
+
+AutoPhOT is integrated with several popular template subtraction packages, click [here](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/Template%20Subtraction%20Example.ipynb)!
+
+This notebook demonstrates:
+
+* Updating AutoPhOT to correct WCS values using Astrometry.Net
+* Correct directory structure to template images.
+* How to setup AutoPHoT to find the necessary template subtraction pipelines.
+* Perform several preprocessing steps on the template images
+
+## Telescope.yml
+
+For insights on how AutoPhOT saves telescope and instrument information, click [here](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/example_call_database.ipynb)!
+
+This notebook demonstrates:
+* The overall structure of the *telescope.yml* file
+* Check new images for correct header keywords
 
 
-**While AutoPhOT is being developed - please contact me with comments/suggestions on how to improve user experience.**
+## Using your own catalog of sequence stars
+
+For a example of how to use your own set of sequence stars for photometric calibration, click [here](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/add_your_catalog_example.ipynb)!
+
+This notebook demonstrates:
+
+* How to update AutoPhOT to accept your own add_your_catalog_example
+* Check that the given catalog file is in the correct structure.
