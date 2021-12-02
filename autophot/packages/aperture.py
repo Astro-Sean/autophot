@@ -1,42 +1,83 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+def compute_phot_error(flux_variance,sky_std,sky_annulus_area,ap_area,gain=1.0):
+    '''
+    
+    Computes the flux errors using the DAOPHOT style computation. This code has been adapted from 
+     `here <https://github.com/spacetelescope/wfc3_photometry/blob/master/photometry_tools/photometry_with_errors.py`_. 
+     This function is used in combination with aperture photometry packages.
+     
+    :param flux_variance: flux varience of target
+    :type flux_variance: float
+    :param sky_std: standard deviation of background
+    :type sky_std: float
+    :param sky_annulus_area: Area of annulus used to find standard deviation of background
+    :type sky_annulus_area: float
+    :param ap_area: Area under aperture where flux varience is measured
+    :type ap_area: float
+    :param gain: Gain of image in $e^{-}$ per ADU, defaults to 1.0
+    :type gain: floar, optional
+    :return: Flux error of flux measurement
+    :rtype: float
+
+    '''
+    """"""
+    
+    bg_variance_terms = (ap_area * sky_std ** 2. ) \
+                        * (1. + ap_area/sky_annulus_area)
+                        
+    variance = flux_variance / gain + bg_variance_terms
+    
+    flux_error = variance ** .5
+    
+    return flux_error
+
+
 def find_aperture_correction(dataframe,
-                             image,
                              write_dir = None,
                              base = None,
                              ap_corr_plot = False):
     '''
+    Package used to find aperture correction for use in aperture photometry.
+    This correction accounts for the fact that we use an aperture size of finite
+    size when a point source ay have flux extending out to much larger radii. This function performs aperture photometry on
+    several bright isolated sources using a normal aperture size and a larger aperture size. An aperture correction can then be
+    found using the following formula:
     
-    :param dataframe: DESCRIPTION
-    :type dataframe: TYPE
-    :param image: DESCRIPTION
-    :type image: TYPE
-    :param write_dir: DESCRIPTION, defaults to None
-    :type write_dir: TYPE, optional
-    :param base: DESCRIPTION, defaults to None
-    :type base: TYPE, optional
-    :param ap_corr_plot: DESCRIPTION, defaults to False
-    :type ap_corr_plot: TYPE, optional
-    :return: DESCRIPTION
-    :rtype: TYPE
+    .. math::
+    
+       \begin{align}
+       apcorr = -2.5 Log_{ 10 }( \frac{ F_{inf} }{ F_{ap} } )
+       \end{align}
+    
+    where :math:`F_{inf}` is the flux measured under a small aperture size and :math:`F_{ap}` is the flux found under the normal aperture size used.
+    
+    :param dataframe: Dataframe containing columns with :math:`\mathit{counts\_inf\_ap}`  and :math:`\mathit{counts\_ap}` representing   :math:`F_{inf}` and  :math:`F_{ap}` respectively.
+    :type dataframe: Dataframe
+    :param write_dir: If ap_corr_plot is True, this param is the write directory of the histogram plot of the aperture corrections. , defaults to None
+    :type write_dir: str, optional
+    :param base: If ap_corr_plot is True, base is the filename appended onto the word "aperture_correction_" when naming the histogram plot of the aperture corrections. , defaults to None
+    :type base: str , optional
+    :param ap_corr_plot: If True, save a plot of the distribution of aperture corrections , defaults to False
+    :type ap_corr_plot: bool, optional
+    :return: Aperture corrections and error on aperture correction given by the standard deviation. 
+    :rtype: Tuple
+'''
 
-    '''
     
 
     import os
-
     import logging
-
     import numpy as np
-    from astropy.stats import sigma_clip
-    import matplotlib.pyplot as plt
     from scipy.stats import norm
+    import matplotlib.pyplot as plt
+    from astropy.stats import sigma_clip
     
     from autophot.packages.functions import calc_mag
     from autophot.packages.functions import set_size
     
-    import logging
+
     logger = logging.getLogger(__name__)
 
     
@@ -52,7 +93,7 @@ def find_aperture_correction(dataframe,
 
     aperture_correction_cleaned = aperture_difference[mask]
     
-    aperture_correction = np.nanmean(aperture_correction_cleaned)
+    aperture_correction = np.nanmedian(aperture_correction_cleaned)
     aperture_correction_err = np.nanstd(aperture_correction_cleaned)
     
     logger.info('Aperture correction: %.3f +/- %.3f [ mag ]' % (aperture_correction,aperture_correction_err))
@@ -112,23 +153,25 @@ def do_aperture_photometry(image,
                            r_in_size = 1.9,
                            r_out_size = 2.2):
     '''
+
+    Perform aperture photometry using two aperture sizes on a series of targets.
     
-    :param image: DESCRIPTION
-    :type image: TYPE
-    :param dataframe: DESCRIPTION
-    :type dataframe: TYPE
-    :param fwhm: DESCRIPTION
-    :type fwhm: TYPE
-    :param ap_size: DESCRIPTION, defaults to 1.7
-    :type ap_size: TYPE, optional
-    :param inf_ap_size: DESCRIPTION, defaults to 2.5
-    :type inf_ap_size: TYPE, optional
-    :param r_in_size: DESCRIPTION, defaults to 1.9
-    :type r_in_size: TYPE, optional
-    :param r_out_size: DESCRIPTION, defaults to 2.2
-    :type r_out_size: TYPE, optional
-    :return: DESCRIPTION
-    :rtype: TYPE
+    :param image: 2D image containing sources to be measured using aperture photometry
+    :type image: 2D array
+    :param dataframe: Dataframe containing :math:`\mathit{x\_pix}` and :math:`\mathit{y\_pix}` columns representing the X, Y pixel locations of a source.
+    :type dataframe: Dataframe
+    :param fwhm: Full Width Half Maximum (FWHM) of image. This is used to calibrated aperture and annulus size.
+    :type fwhm: Float
+    :param ap_size: Multiple of FWHM to be used as standard aperture size, defaults to 1.7
+    :type ap_size: float, optional
+    :param inf_ap_size: Multiple of FWHM to be used as larger, :math:`\mathit{infinite}` aperture size, defaults to 2.5
+    :type inf_ap_size: float, optional
+    :param r_in_size: Multiple of FWHM to be used as inner radius of background annulus, defaults to 1.9
+    :type r_in_size: float, optional
+    :param r_out_size: Multiple of FWHM to be used as outer radius of background annulus, defaults to 2.2
+    :type r_out_size: float, optional
+    :return: Returns a dataframe containing original :math:`\mathit{x\_pix}` and :math:`\mathit{y\_pix}` columns as well as columns  :math:`\mathit{counts\_inf\_ap}`  and :math:`\mathit{counts\_ap}` containing counts under the apertures given by :math:`\mathit{ap\_size}` and :math:`\mathit{inf\_ap\_size}`
+    :rtype: Dataframe
 
     '''
     
@@ -139,7 +182,6 @@ def do_aperture_photometry(image,
     import logging
 
     from autophot.packages.aperture import measure_aperture_photometry
-    from autophot.packages.functions import calc_mag
     
     logger = logging.getLogger(__name__)
 
@@ -156,10 +198,11 @@ def do_aperture_photometry(image,
 
             try:
 
-                aperture_counts,_,_,_ = measure_aperture_photometry(positions,image,
-                                                                           radius = val,
-                                                                           r_in = val + r_in_size   * fwhm,
-                                                                           r_out = val + r_out_size * fwhm)
+                aperture_counts,aperture_counts_error,_,_,_ = measure_aperture_photometry(positions,
+                                                                                          image,
+                                                                                          ap_size = val,
+                                                                                          r_in = val + r_in_size   * fwhm,
+                                                                                          r_out = val + r_out_size * fwhm)
                                                                            
 
                 dataframe['counts_'+str(key)] = aperture_counts
@@ -178,28 +221,53 @@ def do_aperture_photometry(image,
         fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
         logger.info(exc_type, fname, exc_tb.tb_lineno,e)
 
-
-
     return dataframe
 
-def measure_aperture_photometry(positions, data, radius ,r_in = None,r_out= None):
 
-    """This a robust aperture photometry packages for use in autophot
+# =============================================================================
+# Measure Aperture photometry
+# =============================================================================
+def measure_aperture_photometry(positions,
+                                image,
+                                gain = 1, 
+                                bkg_level = 3,
+                                ap_size = 1.7,
+                                r_in = 1.9,
+                                r_out = 2.2):
+    '''
+        
+    Main package to perform aperture photometry. The counts under an aperture are found using:
 
+    .. math::
+    
+       \begin{align}
+       counts = F_{ap} \times T_{exp} = \sum_{ap}(counts) - \langle counts_{sky} \rangle * n
+       \end{align}
 
-    :param positions: list of tuples containing (x,y) positions of object
-    :type positions: tuple
+    where :math:`F_{ap}` is the flux under an aperture, :math:`T_{exp}` is the exposure time of the observations in seconds. :math:`\sum_{ap}(counts)` defines the counts summed up under an aperture, :math:`\langle counts_{sky} \rangle` is the average background level assumed to be under the aperture (and the flux we want to measure) and n is the number of pixels in the aperture (:math:`n=\pi r_{ap} ^2`, where :math:`r_{ap}` is the radius of the aperture.)
 
-    :param r_in: inner radius of background annulus
-    :type r_in: float
-
-    :param r_out: outer radius of background annulus
-    :type r_out: float
-
-    :return: Returns lost of aperture measurements
+    :param positions: List of tuples containing x,y positions. For example:  :math:`positions = [(1,2),(3,4)]`
+    :type positions: List of Tuples
+    :param image: 2D image containing sources which we want to measure with aperture photometry
+    :type image: 2D array
+    :param gain: Gain of observation in :math:`e^{-1}\ per\ ADU`, defaults to 1
+    :type gain: float, optional
+    :param bkg_level: Number of standard deviations about the mean background below which was assume is due background fluctuations rather than any source flux , defaults to 3
+    :type bkg_level: float, optional
+    :param ap_size: Multiple of FWHM to be used as standard aperture size, defaults to 1.7
+    :type ap_size: float, optional
+    :param inf_ap_size: Multiple of FWHM to be used as larger, :math:`\mathit{infinite}` aperture size, defaults to 2.5
+    :type inf_ap_size: float, optional
+    :param r_in_size: Multiple of FWHM to be used as inner radius of background annulus, defaults to 1.9
+    :type r_in_size: float, optional
+    :param r_out_size: Multiple of FWHM to be used as outer radius of background annulus, defaults to 2.2
+    :type r_out_size: float, optional
+    :return: Returns the aperture sum, the error on the aperture sum, the max_pixel found within the aperture, the median value of the background and the standard deviation of the background.
     :rtype: list
     
-    """
+
+    '''
+    
 
     try:
 
@@ -207,6 +275,7 @@ def measure_aperture_photometry(positions, data, radius ,r_in = None,r_out= None
         from photutils import aperture_photometry
         from photutils import CircularAperture, CircularAnnulus
         import numpy as np
+        from photutils.datasets import make_noise_image
         import os,sys
 
         if r_in == None or r_out == None:
@@ -219,10 +288,10 @@ def measure_aperture_photometry(positions, data, radius ,r_in = None,r_out= None
             positions = list(positions)
         
         # List of aperture for use on the image
-        apertures = CircularAperture(positions, r=radius)
+        apertures = CircularAperture(positions, r=ap_size)
         
         # Area of aperture
-        area = np.pi * radius ** 2
+        area = np.pi * ap_size ** 2
         
         # Create annulus to get background value with inner/outer radii
         annulus_apertures = CircularAnnulus(positions, r_in=r_in, r_out=r_out)
@@ -232,14 +301,31 @@ def measure_aperture_photometry(positions, data, radius ,r_in = None,r_out= None
         aperture_masks = apertures.to_mask(method='center')
         
         # Warning for development - shouldn't pop up
-        if r_out >= data.shape[0] or r_out > data.shape[1]:
+        if r_out >= image.shape[0] or r_out > image.shape[1]:
             print('Error - Apphot - Annulus size greater than image size')
 
         # list of bkg median for each aperture/source
         bkg_median = []
         bkg_std = []
         max_pixel = [] 
-
+        
+        area_sky_annulus = np.pi*(r_out)**2 - np.pi*(r_in)**2
+        
+        # data_possion_ready = data
+        
+        if np.any(image < 0):
+            
+            error_array = None
+            
+        else:
+        
+            possion_noise = make_noise_image(image.shape,
+                                            distribution = 'poisson',
+                                            mean = image,
+                                            seed = np.random.randint(0,1e3))
+      
+            error_array = possion_noise
+            
         if not isinstance(annulus_masks,list):
             annulus_masks = list(annulus_masks)
             
@@ -248,73 +334,90 @@ def measure_aperture_photometry(positions, data, radius ,r_in = None,r_out= None
 
         # get background for each source
         for annulus_mask,aperture_mask in zip(annulus_masks,aperture_masks):
+            
+            
             median_sigclip = np.nan
             std_sigclip = np.nan
             max_pixel_value = np.nan
-            try:
             
-                annulus_data = annulus_mask.multiply(data)
-                
-                annulus_data_1d = annulus_data[annulus_mask.data > 0]
-                annulus_data_1d_nonan = annulus_data_1d[~np.isnan(annulus_data_1d)]
-                
-                aperture_data = aperture_mask.multiply(data)
-                
-                aperture_data_1d = aperture_data[aperture_mask.data > 0]
-                aperture_data_1d_nonan = aperture_data_1d[~np.isnan(aperture_data_1d)]
-    
-                mean_sigclip, median_sigclip,std_sigclip = sigma_clipped_stats(annulus_data_1d_nonan,
-                                                           cenfunc = np.nanmean,
-                                                           stdfunc = np.nanstd,
-                                                           sigma= 3)
-    
-                std_sigclip = np.nanstd(annulus_data_1d_nonan)
-                max_pixel_value = np.nanmax(aperture_data_1d_nonan)
-                
-                
-            except:
-                pass
+        
+            annulus_data = annulus_mask.multiply(image)
+            annulus_data_1d = annulus_data[annulus_mask.data > 0]
+            annulus_data_1d_nonan = annulus_data_1d[~np.isnan(annulus_data_1d)]
             
+            aperture_data = aperture_mask.multiply(image)
+            aperture_data_1d = aperture_data[aperture_mask.data > 0]
+            aperture_data_1d_nonan = aperture_data_1d[~np.isnan(aperture_data_1d)]
+
+            mean_sigclip, median_sigclip, std_sigclip = sigma_clipped_stats(annulus_data_1d_nonan,
+                                                                            cenfunc = np.nanmedian,
+                                                                            stdfunc = np.nanstd,
+                                                                            sigma= 3)
+
+
+
+            std_sigclip = np.nanstd(annulus_data_1d_nonan)
+            max_pixel_value = np.nanmax(aperture_data_1d_nonan)
+     
             bkg_median.append(median_sigclip)
             bkg_std.append(std_sigclip)
-            max_pixel.append(max_pixel_value)
+            max_pixel.append(max_pixel_value - median_sigclip)
 
         bkg_median = np.array(bkg_median)
         bkg_std = np.array(bkg_std)
         
-        # Max value within aperture minus background median
-        max_pixel = np.array(max_pixel) - bkg_median
+        # Max value within aperture
+        max_pixel = np.array(max_pixel) 
         
         # perform aperure photometry on image using list of apertures
-        phot = aperture_photometry(data, apertures)
+        phot = aperture_photometry(image, apertures,error = error_array)
         phot = phot.to_pandas()
+       
 
         phot['annulus_median'] = bkg_median
         phot['annulus_std'] = bkg_std
         phot['aperture_bkg'] = bkg_median * area
 
-        # print(phot['aperture_sum'], phot['aperture_bkg'])
-        phot['aper_sum_bkgsub'] = phot['aperture_sum'] - phot['aperture_bkg']
-
-        aperture_sum = phot['aper_sum_bkgsub'].values
+        phot['aperture_sum_bkgsub'] = phot['aperture_sum'] - phot['aperture_bkg']
         
-        bkg_median = phot['annulus_median'].values
+        aperture_sum = phot['aperture_sum_bkgsub'].values
+        
+        if error_array is None:
+            aperture_sum_error = compute_phot_error(flux_variance = aperture_sum,
+                                                    sky_std = bkg_std,
+                                                    sky_annulus_area=area_sky_annulus,
+                                                    ap_area=area,
+                                                    gain=gain)
+            
+        else:
+            aperture_sum_error = compute_phot_error(flux_variance = phot['aperture_sum_err'].values**2,
+                                                    sky_std = bkg_std,
+                                                    sky_annulus_area=area_sky_annulus,
+                                                    ap_area=area,
+                                                    gain=gain)
+       
+        
+   
 
         # aperture_sum[aperture_sum<=0] = 0
 
     except Exception as e:
-            exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            print(exc_type, fname, exc_tb.tb_lineno,e)
+        exc_type, exc_obj, exc_tb = sys.exc_info()
+        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+        print(exc_type, fname, exc_tb.tb_lineno,e)
 
 
 
-    return aperture_sum, max_pixel, bkg_median, bkg_std
+    return aperture_sum, aperture_sum_error, max_pixel, bkg_median, bkg_std
 
 
 
 
 
+
+# =============================================================================
+# PLOT APERTURE CLOSEUP
+# =============================================================================
 def plot_aperture(close_up,
                   target_x_pix_corr,
                   target_y_pix_corr,
@@ -491,9 +594,12 @@ def find_optimum_aperture_size(dataframe,
                                fwhm,
                                write_dir,
                                base,
-                               ap_size = 1.7,inf_ap_size = 2.5,
-                               r_in_size = 1.9,r_out_size = 2.2,
-                               GAIN = 1, RDNOISE = 0,
+                               ap_size = 1.7,
+                               inf_ap_size = 2.5,
+                               r_in_size = 1.9,
+                               r_out_size = 2.2,
+                               GAIN = 1, 
+                               RDNOISE = 0,
                                plot_optimum_radius = False):
     '''
     
@@ -529,10 +635,8 @@ def find_optimum_aperture_size(dataframe,
     '''
     
     import numpy as np
-    import pandas as pd
     import os
-    
-    from random import uniform
+
     
     from autophot.packages.functions import SNR,SNR_err
     import matplotlib.pyplot as plt
@@ -542,16 +646,11 @@ def find_optimum_aperture_size(dataframe,
     logger = logging.getLogger(__name__)
 
     
-    
-    optimum_size = 0 
-    
     step_size = 0.1
     
     search_size = np.arange(0.1,5,step_size)
     
-    default_ap_size = ap_size
-    default_infinite_ap_size = inf_ap_size
-    
+
     idx = dataframe['include_fwhm']
 
     dataframe = dataframe[idx].head(25)
@@ -564,12 +663,12 @@ def find_optimum_aperture_size(dataframe,
 
         s_in = r_in_size
         s_out = r_out_size
-        
-        aperture_counts ,_, aperture_bkg_counts,_ = measure_aperture_photometry(positions,
-                                                                                                                         image,
-                                                                                                                         radius =  s     * fwhm,
-                                                                                                                         r_in =    s_in  * fwhm,
-                                                                                                                         r_out =   s_out * fwhm)
+    
+        aperture_counts,aperture_counts_error ,_, aperture_bkg_counts,_ = measure_aperture_photometry(positions,
+                                                                                        image,
+                                                                                        ap_size =  s     * fwhm,
+                                                                                        r_in =    s_in  * fwhm,
+                                                                                        r_out =   s_out * fwhm)
         # Background flux from annulus
         aperture_bkg_flux = aperture_bkg_counts/exp_time
     
@@ -579,12 +678,12 @@ def find_optimum_aperture_size(dataframe,
     
         # SNR from ccd equation
         SNR_val = SNR(flux_star = aperture_flux ,
-                        flux_sky = aperture_bkg_flux ,
-                        exp_t = exp_time,
-                        radius = s * fwhm,
-                        G  = GAIN,
-                        RN = RDNOISE,
-                        DC = 0 )
+                      flux_sky = aperture_bkg_flux ,
+                      exp_t = exp_time,
+                      radius = s * fwhm,
+                      G  = GAIN,
+                      RN = RDNOISE,
+                      DC = 0 )
         
         SNR_val_err = SNR_err(SNR_val)
         
@@ -605,7 +704,7 @@ def find_optimum_aperture_size(dataframe,
     for i in range(len(SNR_val)):
         sum_distribution.append(np.array([j[1][i] for j in output]))
         
-    sum_distribution = np.nanmean(sum_distribution,axis=0)
+    sum_distribution = np.nanmedian(sum_distribution,axis=0)
     sum_distribution_max_idx = np.argmax(sum_distribution)
     optimum_radius = search_size[sum_distribution_max_idx]  * 1.5
     
