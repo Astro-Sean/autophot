@@ -5,7 +5,8 @@ def compute_phot_error(flux_variance,sky_std,sky_annulus_area,ap_area,gain=1.0):
     '''
     
     Computes the flux errors using the DAOPHOT style computation. This code has been adapted from 
-     `here <https://github.com/spacetelescope/wfc3_photometry/blob/master/photometry_tools/photometry_with_errors.py`_. 
+    `here <https://github.com/spacetelescope/wfc3_photometry/blob/master/photometry_tools/photometry_with_errors.py>`_
+    
      This function is used in combination with aperture photometry packages.
      
     :param flux_variance: flux varience of target
@@ -47,9 +48,9 @@ def find_aperture_correction(dataframe,
     
     .. math::
     
-       \begin{align}
+  
        apcorr = -2.5 Log_{ 10 }( \frac{ F_{inf} }{ F_{ap} } )
-       \end{align}
+     
     
     where :math:`F_{inf}` is the flux measured under a small aperture size and :math:`F_{ap}` is the flux found under the normal aperture size used.
     
@@ -240,9 +241,9 @@ def measure_aperture_photometry(positions,
 
     .. math::
     
-       \begin{align}
+      
        counts = F_{ap} \times T_{exp} = \sum_{ap}(counts) - \langle counts_{sky} \rangle * n
-       \end{align}
+       
 
     where :math:`F_{ap}` is the flux under an aperture, :math:`T_{exp}` is the exposure time of the observations in seconds. :math:`\sum_{ap}(counts)` defines the counts summed up under an aperture, :math:`\langle counts_{sky} \rangle` is the average background level assumed to be under the aperture (and the flux we want to measure) and n is the number of pixels in the aperture (:math:`n=\pi r_{ap} ^2`, where :math:`r_{ap}` is the radius of the aperture.)
 
