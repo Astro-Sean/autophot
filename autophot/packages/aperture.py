@@ -49,7 +49,7 @@ def find_aperture_correction(dataframe,
     .. math::
     
   
-       apcorr = -2.5 \times  Log_{ 10 }( \\frac{ F_{inf} }{ F_{ap} } )
+       apcorr = -2.5 \times  Log_{ 10 }(  F_{inf} / F_{ap}  )
      
     
     where :math:`F_{inf}` is the flux measured under a small aperture size and :math:`F_{ap}` is the flux found under the normal aperture size used.
