@@ -242,10 +242,10 @@ def measure_aperture_photometry(positions,
     .. math::
     
       
-       counts = F_{ap} \times T_{exp} = \sum_{ap}(counts) - \langle counts_{sky} \rangle * n
+       counts = F_{ap} \\times T_{exp} = \\sum_{ap}(counts) - \\langle counts_{sky} \\rangle \\times n
        
 
-    where :math:`F_{ap}` is the flux under an aperture, :math:`T_{exp}` is the exposure time of the observations in seconds. :math:`\sum_{ap}(counts)` defines the counts summed up under an aperture, :math:`\langle counts_{sky} \rangle` is the average background level assumed to be under the aperture (and the flux we want to measure) and n is the number of pixels in the aperture (:math:`n=\pi r_{ap} ^2`, where :math:`r_{ap}` is the radius of the aperture.)
+    where :math:`F_{ap}` is the flux under an aperture, :math:`T_{exp}` is the exposure time of the observations in seconds. :math:`\sum_{ap}(counts)` defines the counts summed up under an aperture, :math:`\\langle counts_{sky} \\rangle` is the average background level assumed to be under the aperture (and the flux we want to measure) and n is the number of pixels in the aperture (:math:`n=\pi r_{ap} ^2`, where :math:`r_{ap}` is the radius of the aperture.)
 
     :param positions: List of tuples containing x,y positions. For example:  :math:`positions = [(1,2),(3,4)]`
     :type positions: List of Tuples
