@@ -95,8 +95,7 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
     :type wdir: str
     :param base: Name of file to distinctly label plots and tables
     :type base: str
-    :param threshold_value: Initial threshold value for which to search for sources. The detection criteria is initial set to look for sources
-    :math:`threshold\_value \times \sigma_{bkg}` where:math:`\sigma_{bkg}` is the standard deviation of the image. This value is updated during execution , defaults to 25
+    :param threshold_value: Initial threshold value for which to search for sources. The detection criteria is initial set to look for sources :math:`threshold\_value \times \sigma_{bkg}` where:math:`\sigma_{bkg}` is the standard deviation of the image. This value is updated during execution , defaults to 25
     :type threshold_value: float, optional
     :param fwhm_guess: initial guess for the FWHM, this is updated once any source are found, defaults to 5
     :type fwhm_guess: float, optional
