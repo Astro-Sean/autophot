@@ -108,15 +108,11 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
     :type min_source_lim: int, optional
     :param int_scale: Initial size of the cutout to place around sources. This value is updated, defaults to 25
     :type int_scale: int, optional
-    :param fudge_factor: Large step size when increasing/decreasing the
-    :math:`threshold\_value`, defaults to 5
+    :param fudge_factor: Large step size when increasing/decreasing the:math:`threshold\_value`, defaults to 5
     :type fudge_factor: float, optional
-    :param fine_fudge_factor: If the code runs into an issue when there is too large of a change in sources detected per step size, we assumed that we are now detecting background noise. In this case we switch to this value and change the
-    :math:`threshold\_value`, by a small increment. This is also used if the
-    :math:`threshold\_value` drops below :math:`5\sigma_bkg` defaults to 0.1
+    :param fine_fudge_factor: If the code runs into an issue when there is too large of a change in sources detected per step size, we assumed that we are now detecting background noise. In this case we switch to this value and change the :math:`threshold\_value`, by a small increment. This is also used if the :math:`threshold\_value` drops below :math:`5\sigma_bkg` defaults to 0.1
     :type fine_fudge_factor: float, optional
-    :param source_max_iter: Backstop to inhibit the source detection algorithm to execute for too long. The code my take a long time if initial too many sources are found and you start of with too long of an initial
-    :math:`threshold\_value`, or if it cannot find any sources about the background level defaults to 50
+    :param source_max_iter: Backstop to inhibit the source detection algorithm to execute for too long. The code my take a long time if initial too many sources are found and you start of with too long of an initial :math:`threshold\_value`, or if it cannot find any sources about the background level defaults to 50
     :type source_max_iter: Init, optional
     :param sat_lvl: Counts level above which any detected source is deemed saturated and discarded, defaults to 65536
     :type sat_lvl: float, optional
