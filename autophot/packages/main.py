@@ -2394,7 +2394,7 @@ def main(object_info,autophot_input,fpath):
                                                                             injected_sources_use_beta = autophot_input['limiting_magnitude']['injected_sources_use_beta'])
 
                     lmag_prob = lmag_prob_inst + zp_measurement[0]
-                    print('Probable Limiting Magnitude: %.1f [mag]' % lmag_prob)
+                    print('Probable Limiting Magnitude: %.3f [mag]' % lmag_prob)
                 else:
                     lmag_prob = np.nan
 
@@ -2476,99 +2476,104 @@ def main(object_info,autophot_input,fpath):
                 c_nondetect["inject_lmag"] = [np.nan] * len(c_nondetect)
     
                 for index,catalog_x_pix,catalog_y_pix,catalog_magnitude in zip(c_nondetect.index,c_nondetect.x_pix.values,c_nondetect.y_pix.values,c_nondetect['cat_'+use_filter]):
-                    print('\nPerforming analysis on  source %d / %d' % (counter,sample_size))
+                    try:
+                        print('\nPerforming analysis on  source %d / %d' % (counter,sample_size))
+        
+                        catalog_close_up_expand = image_copy[int(catalog_y_pix - expand_scale): int(catalog_y_pix + expand_scale),
+                                                     int(catalog_x_pix - expand_scale): int(catalog_x_pix + expand_scale)]
+        
+                        catalog_lmag_prob_inst = limiting_magnitude_prob(image = catalog_close_up_expand,
+                                                                                model = model,
+                                                                                r_table = r_table,
+                                                                                fpath = autophot_input['fpath'],
+                                                                                lim_SNR = autophot_input['limiting_magnitude']['lim_SNR'],
+                                                                                bkg_level = autophot_input['fitting']['bkg_level'],
+                                                                                fwhm = autophot_input['fwhm'],
+                                                                                ap_size = autophot_input['photometry']['ap_size'],
+                                                                                exp_time = autophot_input['exp_time'],
+                                                                                gain = autophot_input['gain'],
+                                                                                image_params = autophot_input['image_params'],
+                                                                                regriding_size = autophot_input['psf']['regriding_size'],
+                                                                                fitting_radius = autophot_input['fitting']['fitting_radius'],
+                                                                                inject_source_cutoff_sources = autophot_input['limiting_magnitude']['inject_source_cutoff_sources'],
+                                                                                inject_source_location = autophot_input['limiting_magnitude']['inject_source_location'],
+                                                                                inject_source_on_target = autophot_input['limiting_magnitude']['inject_source_on_target'],
+                                                                                inject_source_random = autophot_input['limiting_magnitude']['inject_source_random'],
+                                                                                inject_source_add_noise = autophot_input['limiting_magnitude']['inject_source_add_noise'],
+                                                                                use_moffat = autophot_input['fitting']['use_moffat'],
+                                                                                unity_PSF_counts = autophot_input['unity_PSF_counts'],
+                                                                                print_progress = False,
+                                                                                plot_probable_limit  = False,
+                                                                                remove_bkg_local = autophot_input['fitting']['remove_bkg_local'],
+                                                                                remove_bkg_surface = autophot_input['fitting']['remove_bkg_surface'],
+                                                                                remove_bkg_poly = autophot_input['fitting']['remove_bkg_poly'],
+                                                                                remove_bkg_poly_degree = autophot_input['fitting']['remove_bkg_poly_degree'],
+                                                                                subtraction_ready = autophot_input['subtraction_ready'],
+                                                                                injected_sources_use_beta = autophot_input['limiting_magnitude']['injected_sources_use_beta'])
+                        
+                        catalog_lmag_prob = catalog_lmag_prob_inst + zp_measurement[0]
+                        
+                        
+                        catalog_lmag_inject_inst =       inject_sources(image = catalog_close_up_expand,
+                                                        fwhm = autophot_input['fwhm'],
+                                                        fpath = autophot_input['fpath'],
+                                                        exp_time = autophot_input['exp_time'],
+                                                        ap_size = autophot_input['photometry']['ap_size'],
+                                                        scale = autophot_input['scale'],
+                                                        zeropoint = zp_measurement[0],
+                                                        r_in_size = autophot_input['photometry']['r_in_size'],
+                                                        r_out_size = autophot_input['photometry']['r_out_size'],
+                                                        injected_sources_use_beta = autophot_input['limiting_magnitude']['injected_sources_use_beta'],
+                                                        beta_limit = autophot_input['limiting_magnitude']['beta_limit'],
+                                                        gain = autophot_input['gain'],
+                                                        rdnoise = autophot_input['rdnoise'],
+                                                        inject_lmag_use_ap_phot = autophot_input['limiting_magnitude']['inject_lmag_use_ap_phot'],
+                                                        use_moffat = autophot_input['fitting']['use_moffat'],
+                                                        image_params = image_params,
+                                                        fitting_radius = autophot_input['fitting']['fitting_radius'],
+                                                        regriding_size = autophot_input['psf']['regriding_size'],
+                                                        lim_SNR = autophot_input['limiting_magnitude']['lim_SNR'],
+                                                        bkg_level = autophot_input['fitting']['bkg_level'],
+                                                        inject_source_recover_dmag = autophot_input['limiting_magnitude']['inject_source_recover_dmag'],
+                                                        inject_source_recover_fine_dmag = autophot_input['limiting_magnitude']['inject_source_recover_fine_dmag'],
+                                                        inject_source_mag = autophot_input['limiting_magnitude']['inject_source_mag'],
+                                                        inject_source_recover_nsteps = autophot_input['limiting_magnitude']['inject_source_recover_nsteps'],
+                                                        inject_source_recover_dmag_redo = autophot_input['limiting_magnitude']['inject_source_recover_dmag_redo'],
+                                                        inject_source_cutoff_sources = autophot_input['limiting_magnitude']['inject_source_cutoff_sources'],
+                                                        inject_source_cutoff_limit = autophot_input['limiting_magnitude']['inject_source_cutoff_limit'],
+                                                        subtraction_ready = autophot_input['subtraction_ready'],
+                                                        unity_PSF_counts = unity_PSF_counts,
+                                                        inject_source_add_noise = autophot_input['limiting_magnitude']['inject_source_add_noise'],
+                                                        inject_source_location = autophot_input['limiting_magnitude']['inject_source_location'],
+                                                        injected_sources_additional_sources = autophot_input['limiting_magnitude']['injected_sources_additional_sources'],
+                                                        injected_sources_additional_sources_position = autophot_input['limiting_magnitude']['injected_sources_additional_sources_position'],
+                                                        injected_sources_additional_sources_number = autophot_input['limiting_magnitude']['injected_sources_additional_sources_number'],
+                                                        plot_injected_sources_randomly = autophot_input['limiting_magnitude']['plot_injected_sources_randomly'],
+                                                        injected_sources_save_output = False,
+                                                        model = model,
+                                                        r_table = r_table,
+                                                        print_progress = False,
+                                                        
+                                  
+                                                        lmag_guess = catalog_lmag_prob[0],
+                                                 
+                                                        fitting_method = autophot_input['fitting']['fitting_method'],
+                                                        remove_bkg_local = autophot_input['fitting']['remove_bkg_local'],
+                                                        remove_bkg_surface = autophot_input['fitting']['remove_bkg_surface'],
+                                                        remove_bkg_poly = autophot_input['fitting']['remove_bkg_poly'],
+                                                        remove_bkg_poly_degree = autophot_input['fitting']['remove_bkg_poly_degree'])
     
-                    catalog_close_up_expand = image_copy[int(catalog_y_pix - expand_scale): int(catalog_y_pix + expand_scale),
-                                                 int(catalog_x_pix - expand_scale): int(catalog_x_pix + expand_scale)]
-    
-                    catalog_lmag_prob_inst = limiting_magnitude_prob(image = catalog_close_up_expand,
-                                                                            model = model,
-                                                                            r_table = r_table,
-                                                                            fpath = autophot_input['fpath'],
-                                                                            lim_SNR = autophot_input['limiting_magnitude']['lim_SNR'],
-                                                                            bkg_level = autophot_input['fitting']['bkg_level'],
-                                                                            fwhm = autophot_input['fwhm'],
-                                                                            ap_size = autophot_input['photometry']['ap_size'],
-                                                                            exp_time = autophot_input['exp_time'],
-                                                                            gain = autophot_input['gain'],
-                                                                            image_params = autophot_input['image_params'],
-                                                                            regriding_size = autophot_input['psf']['regriding_size'],
-                                                                            fitting_radius = autophot_input['fitting']['fitting_radius'],
-                                                                            inject_source_cutoff_sources = autophot_input['limiting_magnitude']['inject_source_cutoff_sources'],
-                                                                            inject_source_location = autophot_input['limiting_magnitude']['inject_source_location'],
-                                                                            inject_source_on_target = autophot_input['limiting_magnitude']['inject_source_on_target'],
-                                                                            inject_source_random = autophot_input['limiting_magnitude']['inject_source_random'],
-                                                                            inject_source_add_noise = autophot_input['limiting_magnitude']['inject_source_add_noise'],
-                                                                            use_moffat = autophot_input['fitting']['use_moffat'],
-                                                                            unity_PSF_counts = autophot_input['unity_PSF_counts'],
-                                                                            print_progress = False,
-                                                                            remove_bkg_local = autophot_input['fitting']['remove_bkg_local'],
-                                                                            remove_bkg_surface = autophot_input['fitting']['remove_bkg_surface'],
-                                                                            remove_bkg_poly = autophot_input['fitting']['remove_bkg_poly'],
-                                                                            remove_bkg_poly_degree = autophot_input['fitting']['remove_bkg_poly_degree'],
-                                                                            subtraction_ready = autophot_input['subtraction_ready'],
-                                                                            injected_sources_use_beta = autophot_input['limiting_magnitude']['injected_sources_use_beta'])
-                    
-                    catalog_lmag_prob = catalog_lmag_prob_inst + zp_measurement[0]
-                    
-                    
-                    catalog_lmag_inject_inst =       inject_sources(image = catalog_close_up_expand,
-                                                    fwhm = autophot_input['fwhm'],
-                                                    fpath = autophot_input['fpath'],
-                                                    exp_time = autophot_input['exp_time'],
-                                                    ap_size = autophot_input['photometry']['ap_size'],
-                                                    scale = autophot_input['scale'],
-                                                    zeropoint = zp_measurement[0],
-                                                    r_in_size = autophot_input['photometry']['r_in_size'],
-                                                    r_out_size = autophot_input['photometry']['r_out_size'],
-                                                    injected_sources_use_beta = autophot_input['limiting_magnitude']['injected_sources_use_beta'],
-                                                    beta_limit = autophot_input['limiting_magnitude']['beta_limit'],
-                                                    gain = autophot_input['gain'],
-                                                    rdnoise = autophot_input['rdnoise'],
-                                                    inject_lmag_use_ap_phot = autophot_input['limiting_magnitude']['inject_lmag_use_ap_phot'],
-                                                    use_moffat = autophot_input['fitting']['use_moffat'],
-                                                    image_params = image_params,
-                                                    fitting_radius = autophot_input['fitting']['fitting_radius'],
-                                                    regriding_size = autophot_input['psf']['regriding_size'],
-                                                    lim_SNR = autophot_input['limiting_magnitude']['lim_SNR'],
-                                                    bkg_level = autophot_input['fitting']['bkg_level'],
-                                                    inject_source_recover_dmag = autophot_input['limiting_magnitude']['inject_source_recover_dmag'],
-                                                    inject_source_recover_fine_dmag = autophot_input['limiting_magnitude']['inject_source_recover_fine_dmag'],
-                                                    inject_source_mag = autophot_input['limiting_magnitude']['inject_source_mag'],
-                                                    inject_source_recover_nsteps = autophot_input['limiting_magnitude']['inject_source_recover_nsteps'],
-                                                    inject_source_recover_dmag_redo = autophot_input['limiting_magnitude']['inject_source_recover_dmag_redo'],
-                                                    inject_source_cutoff_sources = autophot_input['limiting_magnitude']['inject_source_cutoff_sources'],
-                                                    inject_source_cutoff_limit = autophot_input['limiting_magnitude']['inject_source_cutoff_limit'],
-                                                    subtraction_ready = autophot_input['subtraction_ready'],
-                                                    unity_PSF_counts = unity_PSF_counts,
-                                                    inject_source_add_noise = autophot_input['limiting_magnitude']['inject_source_add_noise'],
-                                                    inject_source_location = autophot_input['limiting_magnitude']['inject_source_location'],
-                                                    injected_sources_additional_sources = autophot_input['limiting_magnitude']['injected_sources_additional_sources'],
-                                                    injected_sources_additional_sources_position = autophot_input['limiting_magnitude']['injected_sources_additional_sources_position'],
-                                                    injected_sources_additional_sources_number = autophot_input['limiting_magnitude']['injected_sources_additional_sources_number'],
-                                                    plot_injected_sources_randomly = autophot_input['limiting_magnitude']['plot_injected_sources_randomly'],
-                                                    injected_sources_save_output = autophot_input['limiting_magnitude']['injected_sources_save_output'],
-                                                    model = model,
-                                                    r_table = r_table,
-                                                    print_progress = False,
-                                                    
-                              
-                                                    lmag_guess = catalog_lmag_prob[0],
-                                             
-                                                    fitting_method = autophot_input['fitting']['fitting_method'],
-                                                    remove_bkg_local = autophot_input['fitting']['remove_bkg_local'],
-                                                    remove_bkg_surface = autophot_input['fitting']['remove_bkg_surface'],
-                                                    remove_bkg_poly = autophot_input['fitting']['remove_bkg_poly'],
-                                                    remove_bkg_poly_degree = autophot_input['fitting']['remove_bkg_poly_degree'])
-
-                    
-    
-                    catalog_lmag_inject = catalog_lmag_inject_inst + zp_measurement[0]
-    
-                    logging.info('\nCatalog Magnitude: %.3f [mag]\nInjected:%.3f [mag]\nProbable:%.3f [mag]\n' % (catalog_magnitude,catalog_lmag_inject,catalog_lmag_prob))
-    
-                    c_nondetect.at[index, "inject_lmag"] = catalog_lmag_inject
-                    c_nondetect.at[index, "prob_lmag"] = catalog_lmag_prob
+                        
+        
+                        catalog_lmag_inject = catalog_lmag_inject_inst + zp_measurement[0]
+        
+                        logging.info('\nCatalog Magnitude: %.3f [mag]\nInjected:%.3f [mag]\nProbable:%.3f [mag]\n' % (catalog_magnitude,catalog_lmag_inject,catalog_lmag_prob))
+        
+                        c_nondetect.at[index, "inject_lmag"] = catalog_lmag_inject
+                        c_nondetect.at[index, "prob_lmag"] = catalog_lmag_prob
+                        
+                    except:
+                        pass
                     counter+=1
                     # logging.info('')
     

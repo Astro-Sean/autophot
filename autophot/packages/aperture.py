@@ -7,17 +7,20 @@ def compute_phot_error(flux_variance,sky_std,sky_annulus_area,ap_area,gain=1.0):
     Computes the flux errors using the DAOPHOT style computation. This code has been adapted from 
     `here <https://github.com/spacetelescope/wfc3_photometry/blob/master/photometry_tools/photometry_with_errors.py>`_
     
-     This function is used in combination with aperture photometry packages.
+    This function is used in combination with aperture photometry packages. The flux error is given by:
+    
+    .. math::
+       \delta flux = \\frac{flux~variance / gain}{(area_{ap} \\times \\sigma_{bkg} ^2( \\times 1 + \\frac{area_{ap}}{area_{sky,annulus}}}
      
-    :param flux_variance: flux varience of target
+    :param flux_variance: flux variance of target
     :type flux_variance: float
     :param sky_std: standard deviation of background
     :type sky_std: float
     :param sky_annulus_area: Area of annulus used to find standard deviation of background
     :type sky_annulus_area: float
-    :param ap_area: Area under aperture where flux varience is measured
+    :param ap_area: Area under aperture where flux variance is measured
     :type ap_area: float
-    :param gain: Gain of image in :math:`e^{-}$` per ADU, defaults to 1.0
+    :param gain: Gain of image in :math:`e^{-}` per ADU, defaults to 1.0
     :type gain: floar, optional
     :return: Flux error of flux measurement
     :rtype: float
@@ -25,8 +28,7 @@ def compute_phot_error(flux_variance,sky_std,sky_annulus_area,ap_area,gain=1.0):
     '''
     """"""
     
-    bg_variance_terms = (ap_area * sky_std ** 2. ) \
-                        * (1. + ap_area/sky_annulus_area)
+    bg_variance_terms = (ap_area * sky_std ** 2. ) * (1. + ap_area/sky_annulus_area)
                         
     variance = flux_variance / gain + bg_variance_terms
     

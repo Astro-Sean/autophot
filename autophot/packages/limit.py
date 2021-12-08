@@ -106,6 +106,7 @@ def limiting_magnitude_prob(image,fpath,
                             remove_bkg_poly_degree = 1,
                             subtraction_ready = False,
                             injected_sources_use_beta = False,
+                            plot_probable_limit = True,
                         ):
 
     
@@ -305,7 +306,14 @@ def limiting_magnitude_prob(image,fpath,
         f_ul_beta = f_ul(n = lim_SNR, beta_p = beta, sigma = std)
         
         count_ul = f_ul_beta
+        
+        # =============================================================================
+        # Convert counts to magnitudes
+        # =============================================================================
 
+        flux  = count_ul / exp_time
+
+        mag_level = calc_mag(flux,gain,0)
         
         if print_progress:
             logging.info('Mean: %s - std: %s' % (round(mean,3),round(std,3)))
@@ -316,297 +324,293 @@ def limiting_magnitude_prob(image,fpath,
         # =============================================================================
         # Plot histogram of background values
         # =============================================================================
-        plt.ioff()
         
-        limiting_mag_figure = plt.figure(figsize = set_size(250,aspect = 1.5))
-
-        ncols = 2
-        nrows = 2
-
-        heights = [0.75,1]
-        # widths = []
-
-        gs = GridSpec(nrows, ncols ,
-                      wspace=0.4 ,
-                      hspace=0.5,
-                      height_ratios=heights,
-                       # width_ratios = widths
-                       )
-        
-        ax0 = limiting_mag_figure.add_subplot(gs[0, :])
-        ax1 = limiting_mag_figure.add_subplot(gs[1, 0])
-        ax2 = limiting_mag_figure.add_subplot(gs[1, 1])
-        
-        
-
-        
-        ax1.scatter(exclud_x,exclud_y,
-                    color ='red',
-                    marker = 'x',
-                    alpha = 0.1,
-                    label = 'Encluded areas',
-                    zorder = 2)
-
-        # the histogram of the data
-        n, bins, patches = ax0.hist(list(fake_mags.values()),
-                                    density=True,
-                                    bins = 'auto',
-                                    facecolor='blue',
-                                    histtype = 'step',
-                                    align = 'mid',
-                                    alpha=1,
-                                    label = 'Pseudo-Counts\nDistribution')
-        
-        line_kwargs = dict(ymin = 0,ymax = 0.75, alpha=0.5,color='black',ls = '--')
-
-        ax0.axvline(mean, alpha=0.5,color='black',ls = '--')
-        
-        ax0.axvline(mean + 1*std,**line_kwargs)
-        ax0.text(mean + 1*std,np.max(n),r'$1\sigma_{bkg}$',
-                 rotation = -90,va = 'top',ha = 'center',fontsize = 4)
-        
-        ax0.axvline(mean + 2*std,**line_kwargs)
-        ax0.text(mean + 2*std,np.max(n),r'$2\sigma_{bkg}$',
-                 rotation = -90,va = 'top',ha = 'center',fontsize = 4)
-
-        ax0.axvline(mean + level*std,**line_kwargs)
-        ax0.text(mean + level*std,np.max(n),r'$'+str(level)+r'\sigma_{bkg}$',
-                 rotation = -90,va = 'top',ha = 'center',fontsize = 4)
-        
-        
-        ax0.axvline(mean+f_ul_beta,ymin = 0,ymax = 0.65, alpha=0.5,
-                    color='black',ls = '--')
-        ax0.text(mean+f_ul_beta,np.max(n),r'$F_{UL,\beta=%.2f}$ '%beta,
-                 rotation = -90,va = 'top',ha = 'center',fontsize = 4)
-        
-
-
-        x_fit = np.linspace(ax0.get_xlim()[0], ax0.get_xlim()[1], 250)
-       
-        ax0.plot(x_fit, gauss_1d(x_fit,*popt),
-                 label = 'Gaussian Fit',
-                 color = 'red')
-
-
-        ax0.set_xlabel('Pseudo-Counts [counts]')
-        ax0.set_ylabel('Probability Distribution')
-
-        im2 = ax1.imshow(image_no_surface,origin='lower',
-                         aspect = 'auto',
-                         interpolation = 'nearest')
-
-        divider = make_axes_locatable(ax2)
-        cax = divider.append_axes("right", size="5%", pad=0.05)
-        cb = limiting_mag_figure.colorbar(im2, cax=cax)
-        cb.ax.set_ylabel('Counts', rotation=270,labelpad = 5)
-        cb.update_ticks()
-
-        ax1.set_title('Image - Surface')
-        
-        # =============================================================================
-        # Convert counts to magnitudes
-        # =============================================================================
-
-        flux  = count_ul / exp_time
-
-        mag_level = calc_mag(flux,gain,0)
-
-        # =============================================================================
-        # We now have an upper and lower estimate of the the limiting magnitude
-        # =============================================================================
-
-        fake_sources = np.zeros(image.shape)
-        
-        try:
+        if plot_probable_limit:
+            plt.ioff()
             
-            if unity_PSF_counts is None:
-                pass
-
-            model_label = 'PSF'
-
-            def mag2image(m):
-                '''
-                Convert magnitude to height of PSF
-                '''
-                Amplitude  = (exp_time/(unity_PSF_counts))*(10**(m/-2.5))
-
-                return Amplitude
+            limiting_mag_figure = plt.figure(figsize = set_size(250,aspect = 1.5))
+    
+            ncols = 2
+            nrows = 2
+    
+            heights = [0.75,1]
+            # widths = []
+    
+            gs = GridSpec(nrows, ncols ,
+                          wspace=0.4 ,
+                          hspace=0.5,
+                          height_ratios=heights,
+                           # width_ratios = widths
+                           )
             
-            # PSF model that matches close-up shape around target
-            def input_model(x,y,H):
-                return model(x, y, 0, H, r_table, fwhm, image_params,use_moffat = use_moffat, fitting_radius = fitting_radius,regriding_size = regriding_size,pad_shape = image.shape)        
-
-        except:
-
-            '''
-            if PSF model isn't available - use Gaussian instead
-
-            '''
-            logging.info('PSF model not available\n- Using Gaussian for probable limiting magnitude')
+            ax0 = limiting_mag_figure.add_subplot(gs[0, :])
+            ax1 = limiting_mag_figure.add_subplot(gs[1, 0])
+            ax2 = limiting_mag_figure.add_subplot(gs[1, 1])
             
-            model_label = 'Gaussian'
-
-            sigma = fwhm / 2*np.sqrt(2*np.log(2))
             
-   
-
-            def mag2image(m):
-                '''
-                Convert magnitude to height of Gaussian
-                '''
-
-                #  Volumne/counts under 2d gaussian for a magnitude m
-                volume =  (10**(m/-2.5)) * exp_time
-
-                # https://en.wikipedia.org/wiki/Gaussian_function
-                Amplitude =  volume/(2*np.pi*sigma**2)
-
-                return Amplitude
-
-            def input_model(x,y,A):
-
-                # x = np.arange(0,image.shape[0])
-                xx,yy= np.meshgrid(np.arange(0,image.shape[1]),np.arange(0,image.shape[0]))
-
-
-
-                if use_moffat:
-                    model = moffat_2d((xx,yy),x,y,0,A,image_params)
-
-                else:
-                    model = gauss_2d((xx,yy),x,y,0,A,image_params)
-                    
-                return model.reshape(image.shape)
+    
             
-        # =============================================================================
-        #  What magnitude do you want this target to be?
-        # =============================================================================
-
-        inject_source_mag = mag2image(mag_level)
-
-        # Number of sources
-        source_no =inject_source_cutoff_sources
-        
-        random_sources = PointsInCircum(inject_source_location*fwhm,
-                                        image.shape,n=source_no)
-        
-        xran = [abs(i[0]) for i in random_sources]
-        yran = [abs(i[1]) for i in random_sources]
-
-        # =============================================================================
-        # Inject sources
-        # =============================================================================
-        
-        try:
+            ax1.scatter(exclud_x,exclud_y,
+                        color ='red',
+                        marker = 'x',
+                        alpha = 0.1,
+                        label = 'Encluded areas',
+                        zorder = 2)
+    
+            # the histogram of the data
+            n, bins, patches = ax0.hist(list(fake_mags.values()),
+                                        density=True,
+                                        bins = 'auto',
+                                        facecolor='blue',
+                                        histtype = 'step',
+                                        align = 'mid',
+                                        alpha=1,
+                                        label = 'Pseudo-Counts\nDistribution')
             
-            if inject_source_random:
-
-                for i in range(0,len(random_sources)):
-                    
-
-                    fake_source_i = input_model(xran[i], yran[i],inject_source_mag)
-
-                    if inject_source_add_noise:
-
-                        nan_idx = np.isnan(fake_source_i)
-                        fake_source_i[nan_idx] = 0
-
-                        fake_source_i[fake_source_i<0] = 0
-
-                        fake_source_i = make_noise_image(fake_source_i.shape,
-                                                        distribution = 'poisson',
-                                                        mean = fake_source_i,
-                                                        seed = np.random.randint(0,1e3))
-                        
-                    fake_sources += fake_source_i
-                    
-                    ax2.scatter(xran[i],yran[i],
-                                marker = 'o',
-                                s=150,
-                                facecolors='none',
-                                edgecolors='r',
-                                # label = 'Masked area',
-                                alpha = 0.25
-                                )
-                    ax2.scatter([],[],
-                                marker = 'o',
-                                facecolors='none',
-                                edgecolors='r',
-                                alpha = 0.1,
-                                label = 'Injected Source')
-
-            if inject_source_on_target:
-
-                fake_source_on_target = input_model(image.shape[1]/2,image.shape[0]/2,inject_source_mag)
-
-                if inject_source_add_noise:
-                    
-                    nan_idx = np.isnan(fake_source_on_target)
-                    fake_source_on_target[nan_idx] = 1e-6
-                    fake_source_on_target[fake_source_on_target<0] = 0
-
-                    fake_source_on_target = make_noise_image(fake_source_on_target.shape,
-                                                    distribution = 'poisson',
-                                                    mean = fake_source_on_target,
-                                                    seed = np.random.randint(0,1e3))
-
-                fake_sources += fake_source_on_target
-                
-                ax2.scatter(image.shape[1]/2,image.shape[0]/2,
-                            marker = 'o',s=150,
-                            facecolors='none',
-                            edgecolors='black',
-                            alpha = 0.5)
-                
-                ax2.annotate('On\nTarget', (image.shape[1]/2, -1+image.shape[0]/2),
-                             color='black',
-                             alpha = 0.5,
-                             ha='center')
-
-
-            im1 = ax2.imshow(image_no_surface + fake_sources,
-                              aspect = 'auto',
-                              origin = 'lower',
+            line_kwargs = dict(ymin = 0,ymax = 0.75, alpha=0.5,color='black',ls = '--')
+    
+            ax0.axvline(mean, alpha=0.5,color='black',ls = '--')
+            
+            ax0.axvline(mean + 1*std,**line_kwargs)
+            ax0.text(mean + 1*std,np.max(n),r'$1\sigma_{bkg}$',
+                     rotation = -90,va = 'top',ha = 'center',fontsize = 4)
+            
+            ax0.axvline(mean + 2*std,**line_kwargs)
+            ax0.text(mean + 2*std,np.max(n),r'$2\sigma_{bkg}$',
+                     rotation = -90,va = 'top',ha = 'center',fontsize = 4)
+    
+            ax0.axvline(mean + level*std,**line_kwargs)
+            ax0.text(mean + level*std,np.max(n),r'$'+str(level)+r'\sigma_{bkg}$',
+                     rotation = -90,va = 'top',ha = 'center',fontsize = 4)
+            
+            
+            ax0.axvline(mean+f_ul_beta,ymin = 0,ymax = 0.65, alpha=0.5,
+                        color='black',ls = '--')
+            ax0.text(mean+f_ul_beta,np.max(n),r'$F_{UL,\beta=%.2f}$ '%beta,
+                     rotation = -90,va = 'top',ha = 'center',fontsize = 4)
+            
+    
+    
+            x_fit = np.linspace(ax0.get_xlim()[0], ax0.get_xlim()[1], 250)
+           
+            ax0.plot(x_fit, gauss_1d(x_fit,*popt),
+                     label = 'Gaussian Fit',
+                     color = 'red')
+    
+    
+            ax0.set_xlabel('Pseudo-Counts [counts]')
+            ax0.set_ylabel('Probability Distribution')
+    
+            im2 = ax1.imshow(image_no_surface,origin='lower',
+                             aspect = 'auto',
                              interpolation = 'nearest')
-            ax2.set_title(' Injected %s Sources ' % model_label)
+    
+            divider = make_axes_locatable(ax2)
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            cb = limiting_mag_figure.colorbar(im2, cax=cax)
+            cb.ax.set_ylabel('Counts', rotation=270,labelpad = 5)
+            cb.update_ticks()
+    
+            ax1.set_title('Image - Surface')
             
-         
-
-        except Exception as e:
+  
+    
+            # =============================================================================
+            # We now have an upper and lower estimate of the the limiting magnitude
+            # =============================================================================
+    
+            fake_sources = np.zeros(image.shape)
             
-            logging.exception(e)
-            im1=ax2.imshow(image - surface , origin='lower',aspect = 'auto',)
-            ax2.set_title('[ERROR] Fake Sources [%s]' % model_label)
-
-
-        divider = make_axes_locatable(ax1)
-        cax = divider.append_axes("right", size="5%", pad=0.05)
-        cb = limiting_mag_figure.colorbar(im1, cax=cax)
-        cb.ax.set_ylabel('Counts', rotation=270,labelpad = 5)
-      
-        cb.ax.yaxis.set_offset_position('left')
-
-
-
-        lines_labels = [ax.get_legend_handles_labels() for ax in limiting_mag_figure.axes]
-        handles,labels = [sum(i, []) for i in zip(*lines_labels)]
-
-        by_label = dict(zip(labels, handles))
-
-        leg = limiting_mag_figure.legend(by_label.values(), by_label.keys(),
-                                         bbox_to_anchor=(0.5, 0.87 ),
-                                         loc='lower center',
-                                         ncol = 4,
-                                         frameon=False)
-        
-        for lh in leg.legendHandles: 
-            lh.set_alpha(1)
-
-        save_loc = os.path.join(write_dir,'limiting_mag_prob_'+base+'.pdf')
-        limiting_mag_figure.savefig(save_loc,
-                                        bbox_inches='tight',
-                                        format = 'pdf')
-        plt.close(limiting_mag_figure)
+            try:
+                
+                if unity_PSF_counts is None:
+                    pass
+    
+                model_label = 'PSF'
+    
+                def mag2image(m):
+                    '''
+                    Convert magnitude to height of PSF
+                    '''
+                    Amplitude  = (exp_time/(unity_PSF_counts))*(10**(m/-2.5))
+    
+                    return Amplitude
+                
+                # PSF model that matches close-up shape around target
+                def input_model(x,y,H):
+                    return model(x, y, 0, H, r_table, fwhm, image_params,use_moffat = use_moffat, fitting_radius = fitting_radius,regriding_size = regriding_size,pad_shape = image.shape)        
+    
+            except:
+    
+                '''
+                if PSF model isn't available - use Gaussian instead
+    
+                '''
+                logging.info('PSF model not available\n- Using Gaussian for probable limiting magnitude')
+                
+                model_label = 'Gaussian'
+    
+                sigma = fwhm / 2*np.sqrt(2*np.log(2))
+                
+       
+    
+                def mag2image(m):
+                    '''
+                    Convert magnitude to height of Gaussian
+                    '''
+    
+                    #  Volumne/counts under 2d gaussian for a magnitude m
+                    volume =  (10**(m/-2.5)) * exp_time
+    
+                    # https://en.wikipedia.org/wiki/Gaussian_function
+                    Amplitude =  volume/(2*np.pi*sigma**2)
+    
+                    return Amplitude
+    
+                def input_model(x,y,A):
+    
+                    # x = np.arange(0,image.shape[0])
+                    xx,yy= np.meshgrid(np.arange(0,image.shape[1]),np.arange(0,image.shape[0]))
+    
+    
+    
+                    if use_moffat:
+                        model = moffat_2d((xx,yy),x,y,0,A,image_params)
+    
+                    else:
+                        model = gauss_2d((xx,yy),x,y,0,A,image_params)
+                        
+                    return model.reshape(image.shape)
+                
+            # =============================================================================
+            #  What magnitude do you want this target to be?
+            # =============================================================================
+    
+            inject_source_mag = mag2image(mag_level)
+    
+            # Number of sources
+            source_no =inject_source_cutoff_sources
+            
+            random_sources = PointsInCircum(inject_source_location*fwhm,
+                                            image.shape,n=source_no)
+            
+            xran = [abs(i[0]) for i in random_sources]
+            yran = [abs(i[1]) for i in random_sources]
+    
+            # =============================================================================
+            # Inject sources
+            # =============================================================================
+            
+            try:
+                
+                if inject_source_random:
+    
+                    for i in range(0,len(random_sources)):
+                        
+    
+                        fake_source_i = input_model(xran[i], yran[i],inject_source_mag)
+    
+                        if inject_source_add_noise:
+    
+                            nan_idx = np.isnan(fake_source_i)
+                            fake_source_i[nan_idx] = 0
+    
+                            fake_source_i[fake_source_i<0] = 0
+    
+                            fake_source_i = make_noise_image(fake_source_i.shape,
+                                                            distribution = 'poisson',
+                                                            mean = fake_source_i,
+                                                            seed = np.random.randint(0,1e3))
+                            
+                        fake_sources += fake_source_i
+                        
+                        ax2.scatter(xran[i],yran[i],
+                                    marker = 'o',
+                                    s=150,
+                                    facecolors='none',
+                                    edgecolors='r',
+                                    # label = 'Masked area',
+                                    alpha = 0.25
+                                    )
+                        ax2.scatter([],[],
+                                    marker = 'o',
+                                    facecolors='none',
+                                    edgecolors='r',
+                                    alpha = 0.1,
+                                    label = 'Injected Source')
+    
+                if inject_source_on_target:
+    
+                    fake_source_on_target = input_model(image.shape[1]/2,image.shape[0]/2,inject_source_mag)
+    
+                    if inject_source_add_noise:
+                        
+                        nan_idx = np.isnan(fake_source_on_target)
+                        fake_source_on_target[nan_idx] = 1e-6
+                        fake_source_on_target[fake_source_on_target<0] = 0
+    
+                        fake_source_on_target = make_noise_image(fake_source_on_target.shape,
+                                                        distribution = 'poisson',
+                                                        mean = fake_source_on_target,
+                                                        seed = np.random.randint(0,1e3))
+    
+                    fake_sources += fake_source_on_target
+                    
+                    ax2.scatter(image.shape[1]/2,image.shape[0]/2,
+                                marker = 'o',s=150,
+                                facecolors='none',
+                                edgecolors='black',
+                                alpha = 0.5)
+                    
+                    ax2.annotate('On\nTarget', (image.shape[1]/2, -1+image.shape[0]/2),
+                                 color='black',
+                                 alpha = 0.5,
+                                 ha='center')
+    
+    
+                im1 = ax2.imshow(image_no_surface + fake_sources,
+                                  aspect = 'auto',
+                                  origin = 'lower',
+                                 interpolation = 'nearest')
+                ax2.set_title(' Injected %s Sources ' % model_label)
+                
+             
+    
+            except Exception as e:
+                
+                logging.exception(e)
+                im1=ax2.imshow(image - surface , origin='lower',aspect = 'auto',)
+                ax2.set_title('[ERROR] Fake Sources [%s]' % model_label)
+    
+    
+            divider = make_axes_locatable(ax1)
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            cb = limiting_mag_figure.colorbar(im1, cax=cax)
+            cb.ax.set_ylabel('Counts', rotation=270,labelpad = 5)
+          
+            cb.ax.yaxis.set_offset_position('left')
+    
+    
+    
+            lines_labels = [ax.get_legend_handles_labels() for ax in limiting_mag_figure.axes]
+            handles,labels = [sum(i, []) for i in zip(*lines_labels)]
+    
+            by_label = dict(zip(labels, handles))
+    
+            leg = limiting_mag_figure.legend(by_label.values(), by_label.keys(),
+                                             bbox_to_anchor=(0.5, 0.87 ),
+                                             loc='lower center',
+                                             ncol = 4,
+                                             frameon=False)
+            
+            for lh in leg.legendHandles: 
+                lh.set_alpha(1)
+    
+            save_loc = os.path.join(write_dir,'limiting_mag_prob_'+base+'.pdf')
+            limiting_mag_figure.savefig(save_loc,
+                                            bbox_inches='tight',
+                                            format = 'pdf')
+            plt.close(limiting_mag_figure)
 
     # master try/except
     except Exception as e:
@@ -636,13 +640,6 @@ def fractional_change(i,i_minus_1):
 
 
 
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Fri Nov 19 12:32:51 2021
-
-@author: seanbrennan
-"""
 
 def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                     zeropoint = 0, r_in_size = 2, r_out_size = 3,
@@ -813,7 +810,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     else:
         user_mag_level = lmag_guess - zeropoint
             
-    # user_mag_level = inject_source_mag - zeropoint
+    user_mag_level = inject_source_mag - zeropoint
     
     start_mag = user_mag_level
 

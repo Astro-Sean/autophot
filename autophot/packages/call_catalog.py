@@ -470,6 +470,7 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
     import numpy as np
     import pandas as pd
     import logging
+    import warnings
     
     from photutils import DAOStarFinder
     from astropy.stats import sigma_clipped_stats
@@ -478,10 +479,7 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
     from autophot.packages.functions import moffat_2d,moffat_fwhm
     from autophot.packages.functions import gauss_sigma2fwhm,gauss_2d,gauss_fwhm2sigma
 
-
-
-
-    border_msg('Matching Catalog sources to image')
+    border_msg('Matching catalog sources to image')
         
 
     logger = logging.getLogger(__name__)
@@ -719,14 +717,15 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
 
                  try:
              
-
-                    daofind = DAOStarFinder(fwhm      = fwhm,
-                                            threshold = bkg_level*std,
-                                            sharplo   =  0.2,sharphi = 1.0,
-                                            roundlo   = -1.0,roundhi = 1.0
-                                            )
-    
-                    sources = daofind(close_up - median)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        daofind = DAOStarFinder(fwhm      = fwhm,
+                                                threshold = bkg_level*std,
+                                                sharplo   =  0.2,sharphi = 1.0,
+                                                roundlo   = -1.0,roundhi = 1.0
+                                                )
+        
+                        sources = daofind(close_up - median)
     
                     # If no source is found - skip
                     if sources is None:

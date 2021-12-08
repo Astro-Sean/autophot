@@ -644,9 +644,7 @@ def recover(fits_dir,outdir_name='REDUCED',outcsv_name='REDUCED',
             infile_name = 'out.csv',update_fpath = True,print_msg = True):
     '''
     
-            Iterate through output folder given by *fits_dir* and *outdir_name*
-    name, search for files corresponding to *outfile_name* and concatenate into a
-    single file named *outcsv_name*
+            Iterate through output folder given by *fits_dir* and *outdir_name*, search for files corresponding to *outfile_name* and concatenate into a single file named *outcsv_name*
     
     :param fits_dir: Location of original directory containing *FITS* images
     :type fits_dir: str

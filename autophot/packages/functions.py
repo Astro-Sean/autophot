@@ -806,7 +806,7 @@ def weighted_avg_and_std(values, weights):
 
     :param values: array of values
     :type values: array
-    :param weights: weighs associated with values
+    :param weights: weights associated with values
     :type weights: array
     :return: weighted average and varience
     :rtype: tuple
