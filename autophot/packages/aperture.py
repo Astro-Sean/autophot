@@ -10,7 +10,7 @@ def compute_phot_error(flux_variance,sky_std,sky_annulus_area,ap_area,gain=1.0):
     This function is used in combination with aperture photometry packages. The flux error is given by:
     
     .. math::
-       \delta flux = \\frac{flux~variance / gain}{(area_{ap} \\times \\sigma_{bkg} ^2( \\times 1 + \\frac{area_{ap}}{area_{sky,annulus}}}
+       \delta flux = \\frac{flux~variance / gain}{(area_{ap} \\times \\sigma_{bkg} ^2) \\times 1 + \\frac{area_{ap}}{area_{sky,annulus}}}
      
     :param flux_variance: flux variance of target
     :type flux_variance: float
