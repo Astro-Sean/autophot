@@ -2470,7 +2470,7 @@ def main(object_info,autophot_input,fpath):
                 border_msg('Performing catalog non detections analysis')
     
                 sample_size = 100
-                counter = 0
+                counter = 1
     
                 c_nondetect = c[c.SNR<25].sample(sample_size)
                 c_nondetect["inject_lmag"] = [np.nan] * len(c_nondetect)

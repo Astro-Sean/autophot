@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-def AstrometryNetLOCAL(file,
-                       solve_field_exe_loc = None,
-                       pixel_scale = None,
-                       target_ra = None,
-                       target_dec = None,
+def AstrometryNetLOCAL(file,solve_field_exe_loc = None,pixel_scale = None,
+                       target_ra = None,target_dec = None,
                        search_radius = 1,
                        downsample = 2,
                        cpulimit = 180
@@ -20,35 +17,22 @@ def AstrometryNetLOCAL(file,
     
     :param file: Filepath of *FITS* file which needs corrected WCS values
     :type file: str
-    :param solve_field_exe_loc: Filepath location of the *solve-field* executable,
-    see `here <https://github.com/Astro-Sean/autophot>`_ for instruction on how to
-    find this path, defaults to None
+    :param solve_field_exe_loc: Filepath location of the *solve-field* executable, see `here <https://github.com/Astro-Sean/autophot>`_ for instruction on how to find this path, defaults to None
     :type solve_field_exe_loc: str, optional
-    :param pixel_scale: Pixel scale in :math:`arcseconds / pixel`. We recommend you
-    include this variable as it can greatly speed up computation times and lower
-    the risk of failures, defaults to None
+    :param pixel_scale: Pixel scale in :math:`arcseconds / pixel`. We recommend you include this variable as it can greatly speed up computation times and lower the risk of failures, defaults to None
     :type pixel_scale: float, optional
-    :param target_ra: Right ascension (RA) of target in degrees i.e. where are we
-    looking on the sky. Telling Astrometry approximately where it is looking can
-    greatly speed up computation times and lower the risk of failures , defaults to
-    None
+    :param target_ra: Right ascension (RA) of target in degrees i.e. where are we looking on the sky. Telling Astrometry approximately where it is looking can greatly speed up computation times and lower the risk of failures , defaults to None
     :type target_ra: float, optional
-    :param target_dec: Declination ascension (RA) of target in degrees, defaults to
-    None
+    :param target_dec: Declination ascension (RA) of target in degrees, defaults to None
     :type target_dec: float, optional
-    :param search_radius: Radius in degrees around target RA and Dec to search for
-    correct location., defaults to 1
+    :param search_radius: Radius in degrees around target RA and Dec to search for correct location., defaults to 1
     :type search_radius: TYPE, optional
-    :param downsample: For larger images it may be useful to downsample them to
-    speed up computation times, defaults to 2
+    :param downsample: For larger images it may be useful to downsample them to speed up computation times, defaults to 2
     :type downsample: int, optional
-    :param cpulimit: Execution time limit in seconds for the local version of
-    Astrometry.net. If the code run time exceeds this value, the script will exit,
-    defaults to 180
+    :param cpulimit: Execution time limit in seconds for the local version of Astrometry.net. If the code run time exceeds this value, the script will exit, defaults to 180
     :type cpulimit: float, optional
     :raises Exception: If no output WCS file is created an excepted is raise
-    :return: Returns the filepath of the WCS file created from the image saved to
-    the same parent directory as the image.
+    :return: Returns the filepath of the WCS file created from the image saved to the same parent directory as the image.
     :rtype: str
 
     '''

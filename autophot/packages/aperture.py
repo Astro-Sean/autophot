@@ -628,10 +628,10 @@ def find_optimum_aperture_size(dataframe,
                                plot_optimum_radius = False):
     '''
 
-    Find the optimum aperture radius for a given image. Although the initial guess of :math:`1.7 \times FWHM` is a suitable guess for the aperture size of an image. Irregular / symmetric point spread functions (PSF) may require a slightly larger or smaller aperture size. This function uses several well isolated sources and finds their Signal to noise ratio (S/N) using the following equation
+    Find the optimum aperture radius for a given image. Although the initial guess of :math:`1.7 \\times FWHM` is a suitable guess for the aperture size of an image. Irregular / symmetric point spread functions (PSF) may require a slightly larger or smaller aperture size. This function uses several well isolated sources and finds their Signal to noise ratio (S/N) using the following equation
 
     .. math::
-       S/N = \frac{ F_{ap} }{ F_{ap} + F_{sky,ap,n} + (RN ^2 + \frac{G^2}{4} \times n_{pix}) + (D \times n_{pix} \times t_exp) } ^{0.5}
+       S/N = \\frac{ F_{ap} }{ F_{ap} + F_{sky,ap,n} + (RN ^2 + \\frac{G^2}{4} \\times n_{pix}) + (D \\times n_{pix} \\times t_{exp}) } ^{0.5}
       
      where :math:`F_{ap}` is the flux under and aperture of a specific radius, and likewise :math:`F_{sky,ap,n}` is the flux due to the sky background under the same aperture. By varying the size of the aperture, we produce a curve of growth model for how the S/N ratio behaves for different radii. This package iterations through a small radii towards a very large radii and notes how the S/N changes for a sample of sources. Where these sources reach a maximum (which :math:`\mathit{should}` be the same for all point sources) is considered the optimum aperture size, where we obtain the option ratio of source flux and background noise.
 

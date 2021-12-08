@@ -44,8 +44,7 @@ def run_autophot(autophot_input):
     
     :param autophot_input: AutoPHOT input dictionary
     :type autophot_input: dict
-    :return: Creates a csv file containing photometric data for transient in
-    dataset
+    :return: Creates a csv file containing photometric data for transient indataset
     :rtype: Dataframe saved to work directory
 
     '''
@@ -651,24 +650,17 @@ def recover(fits_dir,outdir_name='REDUCED',outcsv_name='REDUCED',
     
     :param fits_dir: Location of original directory containing *FITS* images
     :type fits_dir: str
-    :param outdir_name: Name of output directory concatenation i.e. what is the
-    name concatenated onto the parent directory from *fits_dir*, defaults to
-    'REDUCED'
+    :param outdir_name: Name of output directory concatenation i.e. what is the name concatenated onto the parent directory from *fits_dir*, defaults to 'REDUCED'
     :type outdir_name: ste, optional
-    :param outcsv_name: Name of file to save data which will be saved in
-    *outdir_name*, defaults to 'REDUCED'
+    :param outcsv_name: Name of file to save data which will be saved in *outdir_name*, defaults to 'REDUCED'
     :type outcsv_name: str, optional
-    :param infile_name: Name of output file which contains photometric information
-    on each image, defaults to 'out.csv'
+    :param infile_name: Name of output file which contains photometric information on each image, defaults to 'out.csv'
     :type infile_name: str, optional
-    :param update_fpath: If True, make sure the "*fpath*" variable in *outcsv_name*
-    is correct, defaults to True
+    :param update_fpath: If True, make sure the "*fpath*" variable in *outcsv_name* is correct, defaults to True
     :type update_fpath: bool, optional
-    :param print_msg: If True print a message saying that the script is working,
-    defaults to True
+    :param print_msg: If True print a message saying that the script is working, defaults to True
     :type print_msg: bool, optional
-    :return: Produces an output csv file with the name given by *outcsv_name* in
-    the directory given by *fits_dir* with *outdir_name* appended onto it.
+    :return: Produces an output csv file with the name given by *outcsv_name* in the directory given by *fits_dir* with *outdir_name* appended onto it.
     :rtype: TYPE
     
 

@@ -129,7 +129,7 @@ def set_size(width,aspect=1):
 
      .. math ::
          
-        \\phi = (5^{1\2} + 1) / 2 \\approx 1.618
+        \\phi = (5^{0.5} + 1) / 2 \\approx 1.618
 
     The ratio of the given width and height is set to the golden ratio
 
