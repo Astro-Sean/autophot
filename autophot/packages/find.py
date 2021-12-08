@@ -95,122 +95,78 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
     :type wdir: str
     :param base: Name of file to distinctly label plots and tables
     :type base: str
-    :param threshold_value: Initial threshold value for which to search for
-    sources. The detection criteria is initial set to look for sources
-    :math:`threshold\_value \times \sigma_{bkg}` where:math:`\sigma_{bkg}` is the
-    standard deviation of the image. This value is updated during execution. ,
-    defaults to 25
+    :param threshold_value: Initial threshold value for which to search for sources. The detection criteria is initial set to look for sources
+    :math:`threshold\_value \times \sigma_{bkg}` where:math:`\sigma_{bkg}` is the standard deviation of the image. This value is updated during execution , defaults to 25
     :type threshold_value: float, optional
-    :param fwhm_guess: initial guess for the FWHM, this is updated once any source
-    are found, defaults to 5
+    :param fwhm_guess: initial guess for the FWHM, this is updated once any source are found, defaults to 5
     :type fwhm_guess: float, optional
-    :param bkg_level: The number of standard deviations to use for both the lower
-    and upper clipping limit when determining the background level,  defaults to 3
+    :param bkg_level: The number of standard deviations to use for both the lower and upper clipping limit when determining the background level,  defaults to 3
     :type bkg_level: float, optional
-    :param max_source_lim: Maximum number of sources to search for. If more sources
-    are found, increase threshold value, defaults to 1000
+    :param max_source_lim: Maximum number of sources to search for. If more sources are found, increase threshold value, defaults to 1000
     :type max_source_lim: int, optional
-    :param min_source_lim: Minimum amount of sources to search for. If less than
-    this value are found, an error is raise, defaults to 2
+    :param min_source_lim: Minimum amount of sources to search for. If less than this value are found, an error is raise, defaults to 2
     :type min_source_lim: int, optional
-    :param int_scale: Initial size of the cutout to place around sources. This
-    value is updated, defaults to 25
+    :param int_scale: Initial size of the cutout to place around sources. This value is updated, defaults to 25
     :type int_scale: int, optional
     :param fudge_factor: Large step size when increasing/decreasing the
     :math:`threshold\_value`, defaults to 5
     :type fudge_factor: float, optional
-    :param fine_fudge_factor: If the code runs into an issue when there is too
-    large of a change in sources detected per step size, we assumed that we are now
-    detecting background noise. In this case we switch to this value and change the
+    :param fine_fudge_factor: If the code runs into an issue when there is too large of a change in sources detected per step size, we assumed that we are now detecting background noise. In this case we switch to this value and change the
     :math:`threshold\_value`, by a small increment. This is also used if the
     :math:`threshold\_value` drops below :math:`5\sigma_bkg` defaults to 0.1
     :type fine_fudge_factor: float, optional
-    :param source_max_iter: Backstop to inhibit the source detection algorithm to
-    execute for too long. The code my take a long time if initial too many sources
-    are found and you start of with too long of an initial
-    :math:`threshold\_value`, or if it cannot find any sources about the background
-    level defaults to 50
+    :param source_max_iter: Backstop to inhibit the source detection algorithm to execute for too long. The code my take a long time if initial too many sources are found and you start of with too long of an initial
+    :math:`threshold\_value`, or if it cannot find any sources about the background level defaults to 50
     :type source_max_iter: Init, optional
-    :param sat_lvl: Counts level above which any detected source is deemed
-    saturated and discarded, defaults to 65536
+    :param sat_lvl: Counts level above which any detected source is deemed saturated and discarded, defaults to 65536
     :type sat_lvl: float, optional
-    :param lim_theshold_value: If the threshold_value decreases below this value,
-    use :math:`fine\_fudge\_factor`, defaults to 5
+    :param lim_theshold_value: If the threshold_value decreases below this value, use :math:`fine\_fudge\_factor`, defaults to 5
     :type lim_theshold_value: float, optional
-    :param scale_multipler: Integer times the FWHM used when creating the new
-    cutout size, defaults to 4
+    :param scale_multipler: Integer times the FWHM used when creating the new cutout size, defaults to 4
     :type scale_multipler: int, optional
-    
     :param sigmaclip_FWHM_sigma: DESCRIPTION, defaults to 3
     :type sigmaclip_FWHM_sigma: TYPE, optional
-    
     :param sigmaclip_median_sigma: DESCRIPTION, defaults to 3
     :type sigmaclip_median_sigma: TYPE, optional
-    
-    :param isolate_sources_fwhm_sep: Isolate detected sources by this amount times
-    the FWHM, defaults to 5
+    :param isolate_sources_fwhm_sep: Isolate detected sources by this amount times the FWHM, defaults to 5
     :type isolate_sources_fwhm_sep: float, optional
-    :param init_iso_scale: Initial distance to isolated detected sources by,
-    defaults to 25
+    :param init_iso_scale: Initial distance to isolated detected sources by, defaults to 25
     :type init_iso_scale: float, optional
-    :param pix_bound: Ignore sources near the edge of the image. Value given in
-    pixels, defaults to 25
+    :param pix_bound: Ignore sources near the edge of the image. Value given in pixels, defaults to 25
     :type pix_bound: float, optional
-    :param save_FWHM_plot: If True, plot a distribution of the FWHM values,
-    defaults to False
+    :param save_FWHM_plot: If True, plot a distribution of the FWHM values, defaults to False
     :type save_FWHM_plot: bool, optional
-    :param image_analysis: If True, plot a distribution of the FWHM values across
-    the image and save this information as a *csv* file, defaults to False
+    :param image_analysis: If True, plot a distribution of the FWHM values across the image and save this information as a *csv* file, defaults to False
     :type image_analysis: bool, optional
-    :param use_local_stars_for_FWHM: If True, use stars within *local_radius*
-    pixels to determine the FWHM. This is useful if there is a spread of FWHM
-    values across the image, defaults to False
+    :param use_local_stars_for_FWHM: If True, use stars within *local_radius pixels to determine the FWHM. This is useful if there is a spread of FWHM values across the image, defaults to False
     :type use_local_stars_for_FWHM: bool, optional
-    :param prepare_templates: IF True, preform FWHM measurements on template image,
-    defaults to False
+    :param prepare_templates: IF True, preform FWHM measurements on template image, defaults to False
     :type prepare_templates: bool, optional
-    
-    :param fitting_method: Fitting method when measuring the FWHM, defaults to
-    'least_square'
+    :param fitting_method: Fitting method when measuring the FWHM, defaults to 'least_square'
     :type fitting_method: str, optional
-    :param local_radius: Distance from target location to search for stars and find
-    FWHM value, defaults to 1000
+    :param local_radius: Distance from target location to search for stars and find FWHM value, defaults to 1000
     :type local_radius: float, optional
-    :param mask_sources_XY_R: List of tuples containing sources to be masked in
-    formation [(x_pix,y_pix,radius)], defaults to None
+    :param mask_sources_XY_R: List of tuples containing sources to be masked in formation [(x_pix,y_pix,radius)], defaults to None
     :type mask_sources_XY_R: List of Tuples, optional
-    :param remove_sat: If True, remove sources that have a maximum brightness
-    greater than *sat_lvl*, defaults to True
+    :param remove_sat: If True, remove sources that have a maximum brightness greater than *sat_lvl*, defaults to True
     :type remove_sat: bool, optional
     :param use_moffat: If True, use a moffat function for FWHM fitting defaults to
-
     :type use_moffat: bool, optional
-    :param default_moff_beta: Default value for the Moffat function exponent,
-    defaults to 4.765
+    :param default_moff_beta: Default value for the Moffat function exponent, defaults to 4.765
     :type default_moff_beta: float, optional
-    :param vary_moff_beta: If True, allowing the :math:`\beta` exponent in the
-    Moffat function to vary. This may become unstable, defaults to False
+    :param vary_moff_beta: If True, allowing the :math:`\beta` exponent in the Moffat function to vary. This may become unstable, defaults to False
     :type vary_moff_beta: bool, optional
-    :param max_fit_fwhm: Maximum FWHM allowed when fitting analytical function,
-    defaults to 30
+    :param max_fit_fwhm: Maximum FWHM allowed when fitting analytical function, defaults to 30
     :type max_fit_fwhm: float, optional
-    :param target_x_pix: X pixel coordinate of target. If given, exclude the
-    general location of the target when fitting for the FWHM defaults to None
+    :param target_x_pix: X pixel coordinate of target. If given, exclude the general location of the target when fitting for the FWHM defaults to None
     :type target_x_pix: float, optional
-    :param target_y_pix: Y pixel coordinate of target.If given, exclude the general
-    location of the target when fitting for the FWHM, defaults to None
+    :param target_y_pix: Y pixel coordinate of target.If given, exclude the general location of the target when fitting for the FWHM, defaults to None
     :type target_y_pix: float, optional
-    :param scale: If known, preset the cutout size to this value. Cutout size =
-    (:math:`2\times scale`, :math:`2 \times scale`), defaults to None
+    :param scale: If known, preset the cutout size to this value. Cutout size = (:math:`2\times scale`, :math:`2 \times scale`), defaults to None
     :type scale: int, optional
-    :param use_catalog: If True, use a catalog containing the columns *x_pix* and
-    *y_pix* instead of using source detection. This variable source correspond to
-    the filepath of the catalog *csv* file, defaults to None
+    :param use_catalog: If True, use a catalog containing the columns *x_pix* and *y_pix* instead of using source detection. This variable source correspond tothe filepath of the catalog *csv* file, defaults to None
     :type use_catalog: str, optional
-    
-    :return: Returns the image FWHM, a dataframe containing information on the
-    fitted sources, the updated cutout scale and the :math:`image\_params`
-    dictionary containing information on the best fitting analytical model
+    :return: Returns the image FWHM, a dataframe containing information on thefitted sources, the updated cutout scale and the :math:`image\_params` dictionary containing information on the best fitting analytical model
     :rtype: List of objects
     
 
