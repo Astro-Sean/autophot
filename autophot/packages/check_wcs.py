@@ -19,11 +19,9 @@ def removewcs(parent_header, delete_keys = False):
     *RADESYS*
     
     
-    :param parent_header: Header object containing WCS information which we want to
-    erase
+    :param parent_header: Header object containing WCS information which we want to erase
     :type parent_header: *FITS* Header object
-    :param delete_keys: If True, delete these keys, else concatenate "*_*" onto
-    them, defaults to False
+    :param delete_keys: If True, delete these keys, else concatenate "*_*" onto them, defaults to False
     :type delete_keys: bool, optional
     :return: Corrected header file will corrected/deleted WCS keys
     :rtype: *FITS* Header object
@@ -81,8 +79,7 @@ def updatewcs(parent_header,wcs_fits):
     
     Update *parent_header* with WCS keys from *wcs_fits* header
     
-    :param parent_header: Header file with outdated or missing WCS keywords and
-    values
+    :param parent_header: Header file with outdated or missing WCS keywords and  values
     :type parent_header: Header Object
     :param wcs_fits: Header file with corrected WCS keywords and values
     :type wcs_fits: Header Object

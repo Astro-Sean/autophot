@@ -10,11 +10,9 @@ def create_circular_mask(h, w, center=None, radius=None):
     :type h: int
     :param w: width of image
     :type w: int
-    :param center: pixel location of mask, if none, mask out center of image
-    defaults to None
+    :param center: pixel location of mask, if none, mask out center of image defaults to None
     :type center: tuple with x, y pixel position, optional
-    :param radius: radius of mask in pixels, if none, use the smallest distance
-    between the center and image walls defaults to None
+    :param radius: radius of mask in pixels, if none, use the smallest distance between the center and image walls defaults to None
     :type radius: float, optional
     :return: image with shape h,w with masked regions
     :rtype: 2D array with height *h* and width *w*

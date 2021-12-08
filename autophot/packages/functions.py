@@ -5,9 +5,9 @@ def SNR(flux_star,flux_sky,exp_t,radius,G = 1,RN = 0,DC = 0 ):
 
 
     .. math::
-       S/N = \frac{ F_{ap} }{ F_{ap} + F_{sky,ap,n} + (RN ^2 + \frac{G^2}{4} \times n_{pix}) + (D \times n_{pix} \times t_exp) } ^{0.5}
+       S/N = \\frac{ F_{ap} }{ F_{ap} + F_{sky,ap,n} + (RN ^2 + \\frac{G^2}{4} \\times n_{pix}) + (D \\times n_{pix} \\times t_exp) } ^{0.5}
    
-    where :math:`F_{ap}` is the flux under and aperture of a specific radius, and likewise :math:`F_{sky,ap,n}` is the flux due to the sky background under the same aperture. In other words :math:`F_{sky,ap,n} = \langle counts_{sky_ap}  \rangle / T_{exp} \times n` where :math:`n = \pi r ^2`.
+    where :math:`F_{ap}` is the flux under and aperture of a specific radius, and likewise :math:`F_{sky,ap,n}` is the flux due to the sky background under the same aperture. In other words :math:`F_{sky,ap,n} = \langle counts_{sky_ap}  \rangle / T_{exp} \\times n` where :math:`n = \pi r ^2`.
     
     :param flux_star: Flux in :math:`counts / second` that we assume is coming from source.
     :type flux_star: float
@@ -54,13 +54,13 @@ def SNR_err(SNR):
 
 
     .. math :: 
-       m \pm \delta m = -2.5 \times log_{10} ( S \pm N) 
+       m \\pm \delta m = -2.5 \\times log_{10} ( S \\pm N) 
 
-       \rightarrow = -2.5 \times log_{10} ( S  (1 \pm N / S ) )
+       \\rightarrow = -2.5 \\times log_{10} ( S  (1 \\pm N / S ) )
 
-       \rightarrow = -2.5 \times log_{10} ( S )   -2.5 \times log_{10}(1 \pm N / S ) )
+       \\rightarrow = -2.5 \\times log_{10} ( S )   -2.5 \\times log_{10}(1 \\pm N / S ) )
 
-       \delta m = \mp 2.5\times log_{10} (1 + \frac{1}{S/N}) \approx \mp 1.0875 (N / S})
+       \delta m = \mp 2.5\\times log_{10} (1 + \\frac{1}{S/N}) \\approx \mp 1.0875 (N / S})
 
     :param SNR: Signal to noise ratio of a point-like source. 
     :type SNR: float
@@ -126,7 +126,7 @@ def set_size(width,aspect=1):
      Function to generate size of figures produced by AutoPhot. To specify the dimensions of a figure in matplotlib we use the figsize argument. However, the figsize argument takes inputs in inches and we have the width of our document in pts. To set the figure size we construct a function to convert from pts to inches and to determine an aesthetic figure height using the golden ratio. The golden ratio is given by:
 
      .. math ::
-        \phi = (5^{1\2} + 1) / 2 \approx 1.618
+        \\phi = (5^{1\2} + 1) / 2 \\approx 1.618
 
     The ratio of the given width and height is set to the golden ratio
 
@@ -135,7 +135,7 @@ def set_size(width,aspect=1):
 
     :param width: Width of figure in pts. 1pt == 1/72 inches
     :type width: float
-    :param aspect: Aspect of image i.e. :math:`height  = width / \phi \times \mathit{aspect}`, default  = 1
+    :param aspect: Aspect of image i.e. :math:`height  = width / \\phi \\times \mathit{aspect}`, default  = 1
     :type aspect: float
     :return: Returns tuple of width, height in inches ready for use.
     :rtype: Tuple
@@ -335,7 +335,7 @@ def pixel2arcsec(value,pixel_scale):
     Convert distance in pixel to distance in arcsecs using the following equation:
     
     .. math::
-       arcsec = pixel \times 3600 \times pixel\_scale
+       arcsec = pixel \\times 3600 \\times pixel\_scale
     
     :param value: linear distance in pixels
     :type value: float
@@ -357,7 +357,7 @@ def arcmins2pixel(value,pixel_scale):
     Convert distance given in Arc minutes to distance in linear pixel coordinates  using the following equation:
     
     .. math::
-       pixels = 60/3600  \times pixel\_scale \times arcmins
+       pixels = 60/3600  \\times pixel\_scale \\times arcmins
     
     :param value: linear distance in arcmins
     :type value: float
@@ -416,11 +416,11 @@ def beta_value(n,f_ul,sigma,noise = 0):
     False negatives function for the fraction of real sources that go undetected. This is implemented in AutoPHOT to determine whether a source,  more specifically it's flux, can be confidently assumed to arise from the source and not be associated with the background noise distribution. We describe the probability that a suspected source can be confidently assumed to be seperate from the flux due to the background by:
     
     .. math::
-       1 - \beta = \beta{\prime} = \frac{1}{2}(1 - \mathit{erf} \frac{n\sigma_{bkg} - f_{source}}{\sigma_{bkg} \sqrt{2}})
+       1 - \\beta = \\beta{\\prime} = \\frac{1}{2}(1 - \mathit{erf} \\frac{n\sigma_{bkg} - f_{source}}{\sigma_{bkg} \\sqrt{2}})
        
-    where :math:`\beta{\prime}` is the confident that source is not apart of the underlying noise distribution, :math:`\mathit{erf}` is the `Error function <https://mathworld.wolfram.com/Erf.html>`_, :math:`f_{source}` is the brightest pixel that can be associated with a source, and :math:`\sigma_{bkg}` is the standard deviation of the background noise distribution.
+    where :math:`\\beta{\\prime}` is the confident that source is not apart of the underlying noise distribution, :math:`\mathit{erf}` is the `Error function <https://mathworld.wolfram.com/Erf.html>`_, :math:`f_{source}` is the brightest pixel that can be associated with a source, and :math:`\sigma_{bkg}` is the standard deviation of the background noise distribution.
      
-    In other words, :math:`100\times (1-\beta) \%` of the
+    In other words, :math:`100\\times (1-\\beta) \%` of the
     sources with flux :math:`f_{source}` will have flux measurements > :math:`n\sigma_{bkg}`
     
     
@@ -462,21 +462,21 @@ def f_ul(n,beta_p,sigma,):
     Flux upper limit for an environment with a Gaussian like noise distribution. This value represents the flux required, above which we can confidently assume that a flux measurement is likely due to a genuine source and not apart of the underlying noise distribution i.e a spurious noise spike. We calculate the flux upper limit :math:`F_{UL}` by:
     
     .. math::
-       F_{UL} = [n + \sqrt{2}\times \mathit{erf} ^{-1}(2\beta{\prime} - 1)]\sigma_{bkg}
+       F_{UL} = [n + \\sqrt{2}\\times \mathit{erf} ^{-1}(2\\beta{\\prime} - 1)]\sigma_{bkg}
     
     
-    where *n* is the confidence of the measure (typically set to *3*, equivalent to a :math:`3\sigma` confidence),  :math:`\mathit{erf}^{-1}` is the `Inverse Error function <https://mathworld.wolfram.com/Erf.html>`_, :math:`\beta{\prime}` is the desired confidence of the measurement, and :math:`n\sigma_{bkg}` is the standard deviation of the background noise distribution.
+    where *n* is the confidence of the measure (typically set to *3*, equivalent to a :math:`3\sigma` confidence),  :math:`\mathit{erf}^{-1}` is the `Inverse Error function <https://mathworld.wolfram.com/Erf.html>`_, :math:`\\beta{\\prime}` is the desired confidence of the measurement, and :math:`n\sigma_{bkg}` is the standard deviation of the background noise distribution.
     
     Credit: `F. Masci <http://web.ipac.caltech.edu/staff/fmasci/home/mystats/UpperLimits_FM2011.pdf>`_
     
     
     :param n: Level above background to be considered a genuine detection. Typical values are :math:`n = 3`, which equations to a :math:`3\sigma` confidence level, or in other words there is a 0.135% probability that the measured flux is a spurious noise spike. 
     :type n: float
-    :param beta_p: Probability that a flux measurement is likely due to a genuine source and not apart of the underlying noise distribution. Set to  :math:`0 \rightarrow 1`, although a more realistic range  :math:`0.5 \rightarrow 0.98`.  Defaults to 0.75
+    :param beta_p: Probability that a flux measurement is likely due to a genuine source and not apart of the underlying noise distribution. Set to  :math:`0 \\rightarrow 1`, although a more realistic range  :math:`0.5 \\rightarrow 0.98`.  Defaults to 0.75
     :type beta_p: float, optional
     :param sigma: Standard deviation of background
     :type sigma: flost
-    :return: Flux upper limit that allows use to place a confidence on a measure given by the :math:`\beta{\prime}` term.
+    :return: Flux upper limit that allows use to place a confidence on a measure given by the :math:`\\beta{\\prime}` term.
     :rtype: float
 
 
@@ -498,7 +498,7 @@ def calc_mag_error(flux,noise):
     Magnitude error is given by:
 
     .. math::
-       \delta m = \pm 2.5Log_{10}(1 + \frac{1}{S/N}) \approx 1.0857 \times N/S
+       \delta m = \\pm 2.5Log_{10}(1 + \\frac{1}{S/N}) \\approx 1.0857 \\times N/S
        
     :param flux: Flux measurement
     :type flux: float
@@ -548,7 +548,7 @@ def gauss_sigma2fwhm(image_params):
     function. The FWHM of a gaussian is then given by:
     
     .. math::
-    FWHM = 2\times \sqrt{2\times Log_e(2)}\times \sigma
+    FWHM = 2\\times \\sqrt{2\\times Log_e(2)}\\times \sigma
     
     where :math:`\sigma` is the standard deviation of the Gaussian profile
     
@@ -576,7 +576,7 @@ def gauss_fwhm2sigma(fwhm,image_params = None):
     function to sigma value. The FWHM of a gaussian is then given by:
     
     .. math::
-       \sigma= \frac{FWHM}{2\times \sqrt{2\times Log_e(2)}}
+       \sigma= \\frac{FWHM}{2\\times \\sqrt{2\\times Log_e(2)}}
     
     
     
@@ -600,7 +600,7 @@ def gauss_1d(x,A,x0,sigma):
     1D gaussian function given by:
     
     .. math::
-    G = A \times e^{-\frac{x-x_o}{2\times \sigma^2}}
+    G = A \\times e^{-\\frac{x-x_o}{2\\times \sigma^2}}
     
     where *G* is the 1D gaussian function, *A* is the amplitude, *x* is the linear
     range of the function, :math:`x_0` is the center of the function, and
@@ -633,7 +633,7 @@ def gauss_2d(image, x0, y0, sky , A, image_params):
     2D gaussian function given by:
     
     .. math::
-       G = A \times e^{-\frac{(x-x_o)^2 - (y-y_0)^2}{2\times \sigma^2}} + sky
+       G = A \\times e^{-\\frac{(x-x_o)^2 - (y-y_0)^2}{2\\times \sigma^2}} + sky
      
     where *G* is the 2D gaussian function, *A* is the amplitude, *x* and *y* are the linear
     range of the function, :math:`x_0` and :math:`y_0` are the centers of the function,
@@ -683,9 +683,9 @@ def moffat_fwhm(image_params):
     Calculate FWHM from Moffat function using: 
     
     .. math::
-       FWHM = 2 \times \alpha \times \sqrt{2^{\frac{1}{\beta}}-1}
+       FWHM = 2 \\times \alpha \\times \\sqrt{2^{\\frac{1}{\\beta}}-1}
     
-    where :math:`\alpha` corresponds to the width of moffat function and :math:`\beta` describes the wings
+    where :math:`\alpha` corresponds to the width of moffat function and :math:`\\beta` describes the wings
     
     :param image_params: Dictionary containing 2 keys: *alpha* corresponding to the fitted width of the moffat function and *beta* describing the wings.
     :type image_params: dict
@@ -712,7 +712,7 @@ def moffat_2d(image, x0,y0, sky , A, image_params):
     
     .. math::
     
-    M(A,x_o,y_o,sky)= A\times (1+\frac{(x-x_o)^2 + (y-y_0)^2}{\sigma^2})^{-\beta} +
+    M(A,x_o,y_o,sky)= A\\times (1+\\frac{(x-x_o)^2 + (y-y_0)^2}{\sigma^2})^{-\\beta} +
     sky
     
     
@@ -761,7 +761,7 @@ def pix_dist(x1,x2,y1,y2):
     given by:
     
     .. math ::
-       d = \sqrt{(x_1 - x_2) + (y_1 - y_2)^2}
+       d = \\sqrt{(x_1 - x_2) + (y_1 - y_2)^2}
     
     :param x1: x position of point 1
     :type x1: float
@@ -870,7 +870,7 @@ def norm(array):
     
     
     .. math::
-       |A| = \frac{A - min(A)}{max(A)-min(A)}
+       |A| = \\frac{A - min(A)}{max(A)-min(A)}
     
     
     

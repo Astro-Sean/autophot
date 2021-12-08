@@ -124,7 +124,6 @@ def limiting_magnitude_prob(image,fpath,
 
         from photutils.datasets import make_noise_image
         from photutils import DAOStarFinder
-        from astropy.stats import sigma_clipped_stats
         from mpl_toolkits.axes_grid1 import make_axes_locatable
         from autophot.packages.background import remove_background
         from autophot.packages.functions import set_size,calc_mag
@@ -780,7 +779,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         
         
     if print_progress:
-        border_msg(' Performing full magnitude recovery test using injected sources')
+        border_msg('Performing full magnitude recovery test using injected sources')
     
     # Dictionaries to track sources 
     inserted_magnitude = {}

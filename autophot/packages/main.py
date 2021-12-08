@@ -2508,7 +2508,10 @@ def main(object_info,autophot_input,fpath):
                                                                             remove_bkg_poly_degree = autophot_input['fitting']['remove_bkg_poly_degree'],
                                                                             subtraction_ready = autophot_input['subtraction_ready'],
                                                                             injected_sources_use_beta = autophot_input['limiting_magnitude']['injected_sources_use_beta'])
+                    
                     catalog_lmag_prob = catalog_lmag_prob_inst + zp_measurement[0]
+                    
+                    
                     catalog_lmag_inject_inst =       inject_sources(image = catalog_close_up_expand,
                                                     fwhm = autophot_input['fwhm'],
                                                     fpath = autophot_input['fpath'],
@@ -2550,7 +2553,7 @@ def main(object_info,autophot_input,fpath):
                                                     print_progress = False,
                                                     
                               
-                                                    lmag_guess = catalog_lmag_prob,
+                                                    lmag_guess = catalog_lmag_prob[0],
                                              
                                                     fitting_method = autophot_input['fitting']['fitting_method'],
                                                     remove_bkg_local = autophot_input['fitting']['remove_bkg_local'],

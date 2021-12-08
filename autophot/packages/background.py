@@ -56,45 +56,22 @@ def remove_background(image,fwhm = 7, xc=None, yc=None,
     
     :param image: 2D array with target location at the center.
     :type image: 2D array
-    :param fwhm: Full Width Half Maximum (FWHM) of an image. This is used to update
-    the surface grid
-    and masked regions of the image, defaults to 7
+    :param fwhm: Full Width Half Maximum (FWHM) of an image. This is used to update the surface grid and masked regions of the image, defaults to 7
     :type fwhm: float, optional
-    :param xc: X pixel location of the image. If not given, the target location is
-    assumed to be in the
-    center of the image, defaults to None
+    :param xc: X pixel location of the image. If not given, the target location is assumed to be in the center of the image, defaults to None
     :type xc: float, optional
-    :param yc: Y pixel location of the image. If not given, the target location is
-    assumed to be in the
-    center of the image, defaults to None
+    :param yc: Y pixel location of the image. If not given, the target location is assumed to be in the center of the image, defaults to None
     :type yc: float, optional
-    :param remove_bkg_local: If True, use the local median of the image and
-    subtract this to produce a
-    background free image, see above, defaults to True
+    :param remove_bkg_local: If True, use the local median of the image and subtract this to produce a background free image, see above, defaults to True
     :type remove_bkg_local: Boolean, optional
-    :param remove_bkg_surface: If True, use the background fitted surface of the
-    image and subtract
-    this to produce a background free image, see above, defaults to False
+    :param remove_bkg_surface: If True, use the background fitted surface of the image and subtract this to produce a background free image, see above, defaults to False
     :type remove_bkg_surface: Boolean, optional
     :param remove_bkg_poly: DESCRIPTION, defaults to False
-    :type remove_bkg_poly: If True, use the background polynomial surface of the
-    image and subtract
-    this to produce a background free image, see above, optional
-    :param remove_bkg_poly_degree: If remove_bkg_poly is True, this is the degree
-    of the polynomial
-    fitted to the image, 1 = flat surface, 2 = 2nd order polynomial etc, defaults
-    to 1
+    :type remove_bkg_poly: If True, use the background polynomial surface of the image and subtract this to produce a background free image, see above, optional fitted to the image, 1 = flat surface, 2 = 2nd order polynomial etc, defaults  to 1
     :type remove_bkg_poly_degree: TYPE, optional
-    :param bkg_level: The number of standard deviations, below which is assumed to
-    be due to the
-    background noise distribution, defaults to 3
+    :param bkg_level: The number of standard deviations, below which is assumed to be due to the background noise distribution, defaults to 3
     :type bkg_level: float, optional
-    :return: Return the original image with the pre-selected background removed,
-    the fitted background
-    itself, the median value of this background at the position of the target
-    (performed using crude
-    aperture photometry) and the noise of this background surface (taken as the
-    standard deviation)
+    :return: Return the original image with the pre-selected background removed, the fitted background itself, the median value of this background at the position of the target (performed using crude aperture photometry) and the noise of this background surface (taken as the standard deviation)
     :rtype: Tuple
     
     '''

@@ -40,51 +40,37 @@ def get_zeropoint(c,image = None,headinfo = None, fpath = None, use_filter = Non
     to find the zeropoint.
     
     
-    :param c: Data Frame containing catalog magnitudes and instrumental magnitudes
-    for sources in the field. For a given filters *f* these two measurements should
-    be found under the columns headers *cat_f* and *inst_f*.
+    :param c: Data Frame containing catalog magnitudes and instrumental magnitudes for sources in the field. For a given filters *f* these two measurements should be found under the columns headers *cat_f* and *inst_f*.
     :type c: DataFrame
-    :param image: 2D image containing stars in the field. This is needed if plots
-    are desired., defaults to None
+    :param image: 2D image containing stars in the field. This is needed if plots are desired., defaults to None
     :type image: 2D array, optional
     :param headinfo: Header for image, defaults to None
     :type headinfo: *Fits* header object, optional
-    :param fpath: File path for *Fits* file, used for saving plots, defaults to
-    None
+    :param fpath: File path for *Fits* file, used for saving plots, defaults to None
     :type fpath: str, optional
     :param use_filter: Name of filter used in image , defaults to None
     :type use_filter: str, optional
-    :param matching_source_SNR_limit: S/N ratio cutoff, sources with a S/N lower
-    than this value are discarded, defaults to 10
+    :param matching_source_SNR_limit: S/N ratio cutoff, sources with a S/N lower than this value are discarded, defaults to 10
     :type matching_source_SNR_limit: float, optional
     :param GAIN: GAIN on CCD in :math:`e^{-1} /  ADU`, defaults to 1
     :type GAIN: float, optional
     :param fwhm:  Full Width Half Maximum (FWHM) of an image., defaults to 7
     :type fwhm: float, optional
-    :param zp_sigma: The number of standard deviations to use for both the lower
-    and upper clipping limit., defaults to 3
+    :param zp_sigma: The number of standard deviations to use for both the lower and upper clipping limit., defaults to 3
     :type zp_sigma: float, optional
-    :param zp_use_fitted: If True, fit a vertical line to the zero point
-    measurements with an error equal to the diagonal on the covariance matrix,
-    defaults to True
+    :param zp_use_fitted: If True, fit a vertical line to the zero point measurements with an error equal to the diagonal on the covariance matrix, defaults to True
     :type zp_use_fitted: bool, optional
-    :param zp_use_mean: If True, find the zero point using the mean with the error
-    equal to the standard deviation of the distribution, defaults to False
+    :param zp_use_mean: If True, find the zero point using the mean with the error equal to the standard deviation of the distribution, defaults to False
     :type zp_use_mean: bool, optional
-    :param zp_use_max_bin: If True, using the max bin of the distribution with an
-    error equal to the bin width, defaults to False
+    :param zp_use_max_bin: If True, using the max bin of the distribution with an error equal to the bin width, defaults to False
     :type zp_use_max_bin: bool, optional
-    :param zp_use_median: If True, use the median value of the distribution with an
-    error equal to the median absolute deviation, defaults to False
+    :param zp_use_median: If True, use the median value of the distribution with an error equal to the median absolute deviation, defaults to False
     :type zp_use_median: bool, optional
-    :param plot_ZP_image_analysis: If True, produce a plot of the zeropoint across
-    the image, defaults to False
+    :param plot_ZP_image_analysis: If True, produce a plot of the zeropoint across the image, defaults to False
     :type plot_ZP_image_analysis: bool, optional
-    :param plot_ZP_vs_SNR: If True, produce a plot of the zeropoint  versus S/N,
-    defaults to False
+    :param plot_ZP_vs_SNR: If True, produce a plot of the zeropoint  versus S/N, defaults to False
     :type plot_ZP_vs_SNR: TYPE, optional
-    :return: Returns a tuple containing the zeropoint and the error on the
-    zeropoint as well as the original dataframe with updated columns.
+    :return: Returns a tuple containing the zeropoint and the error on the zeropoint as well as the original dataframe with updated columns.
     :rtype: Tuple and dataframe
 
     '''

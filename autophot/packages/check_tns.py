@@ -34,9 +34,7 @@ def get_coords(objname,TNS_BOT_ID =None,TNS_BOT_NAME = None,TNS_BOT_API = None):
     `Credit: Nikola Knezevic
     <https://www.wis-tns.org/content/tns-getting-started>`_
     
-    :param objname: Name of the tranisnet in the International Astronomical Union
-    (IAU) format .e.g 1987A, 2009ip, NOT SN1987A. Errors will arise if non-standard names are
-    used e.g. OGLE123
+    :param objname: Name of the tranisnet in the International Astronomical Union (IAU) format .e.g 1987A, 2009ip, NOT SN1987A. Errors will arise if non-standard names are used e.g. OGLE123
     :type objname: Str
     :param TNS_BOT_ID: Identification code of your BOT, defaults to None
     :type TNS_BOT_ID: float, optional
@@ -44,8 +42,7 @@ def get_coords(objname,TNS_BOT_ID =None,TNS_BOT_NAME = None,TNS_BOT_API = None):
     :type TNS_BOT_NAME: str, optional
     :param TNS_BOT_API: API code for your BOT, defaults to None
     :type TNS_BOT_API: str, optional
-    :return: Returns a dictionary containing information on the desired transient
-    which includes latest coordinates.
+    :return: Returns a dictionary containing information on the desired transientwhich includes latest coordinates.
     :rtype: dict
 
     '''
