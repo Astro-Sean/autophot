@@ -1,65 +1,71 @@
 def SNR(flux_star,flux_sky,exp_t,radius,G = 1,RN = 0,DC = 0 ):
     '''
-    
-    S/N eqaution taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.pdf>`_
 
+    Compute the signal to noise ratio (S/N) equation taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.pdf>`_.
+
+
+    .. math::
+       S/N = \frac{ F_{ap} }{ F_{ap} + F_{sky,ap,n} + (RN ^2 + \frac{G^2}{4} \times n_{pix}) + (D \times n_{pix} \times t_exp) } ^{0.5}
+   
+    where :math:`F_{ap}` is the flux under and aperture of a specific radius, and likewise :math:`F_{sky,ap,n}` is the flux due to the sky background under the same aperture. In other words :math:`F_{sky,ap,n} = \langle counts_{sky_ap}  \rangle / T_{exp} \times n` where :math:`n = \pi r ^2`.
     
-    :param flux_star: flux (counts per second) coming from source
-    :type flux_star: array-like
-    :param flux_sky: flux (counts per second) associated with sky background
-    :type flux_sky: array-like
-    :param exp_t: Expsoure time in seconds
+    :param flux_star: Flux in :math:`counts / second` that we assume is coming from source.
+    :type flux_star: float
+    :param flux_sky: Flux in :math:`mean\ counts /  second / pixel` that we assume is coming from sky background.
+    :type flux_sky: float
+    :param exp_t: Exposure time in seconds.
     :type exp_t: float
-    :param radius: Radius of aperture in pixels
+    :param radius: Radius of aperture in pixels.
     :type radius: float
-    :param G: GAIN on CCD, defaults to 1
+    :param G: GAIN on CCD in :math:`e^{-1} /  ADU` , defaults to 1.
     :type G: float, optional
-    :param RN: Readnoise of CCD, defaults to 0
+    :param RN: Read noise of CCD in :math:`e^{-1} /  pixel`, defaults to 0.
     :type RN: float, optional
-    :param DC: Dark Current of CCD, defaults to 0
+    :param DC: Dark Current of CCD in :math:`e^{-1} /  pixel  /  second`, defaults to 0.
     :type DC: float, optional
-    :return: Signal to noise of given soures
-    :rtype: array-like
+    :return: Signal to noise of given source
+    :rtype: float
 
     '''
 
-
-
-
+    G = float(G)
+    
     import numpy as np
-    import warnings
 
-    with warnings.catch_warnings():
-        # Ignore  Runtime warnings
-        warnings.simplefilter('ignore')
+    counts_source = flux_star * exp_t
 
+    Area = np.pi * radius ** 2
 
-        G = float(G)
+    sky_shot = flux_sky  * exp_t * Area
 
-        counts_source = flux_star * exp_t
+    read_noise = ((RN**2) + (G/2)**2) * Area
 
-        star_shot_2 = flux_star * exp_t
+    dark_noise =  DC * exp_t * Area
 
-        Area = np.pi * radius ** 2
+    SNR = counts_source / np.sqrt(counts_source + sky_shot + read_noise  + dark_noise)
 
-        sky_shot_2 = flux_sky  * exp_t * Area
+    return SNR
 
-        read_noise_2 = ((RN**2) + (G/2)**2) * Area
-
-        dark_noise_2 =  DC * exp_t * Area
-
-        SNR = counts_source / np.sqrt((star_shot_2 + sky_shot_2 +read_noise_2  + dark_noise_2))
-
-        return SNR
 
 def SNR_err(SNR):
+    
     '''
-    S/N eqaution and associated error taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.pdf>`_
+    Error associated with signal to noise ratio (S/N). Equation  taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.pdf>`_. Where can associated the error on the instrumental magnitude of a source as:
 
-    :param SNR: Signal to noise ratio
-    :type SNR: array-like
-    :return: Error associated with SNR
-    :rtype: array-like
+
+    .. math :: 
+       m \pm \delta m = -2.5 \times log_{10} ( S \pm N) 
+
+       \rightarrow = -2.5 \times log_{10} ( S  (1 \pm N / S ) )
+
+       \rightarrow = -2.5 \times log_{10} ( S )   -2.5 \times log_{10}(1 \pm N / S ) )
+
+       \delta m = \mp 2.5\times log_{10} (1 + \frac{1}{S/N}) \approx \mp 1.0875 (N / S})
+
+    :param SNR: Signal to noise ratio of a point-like source. 
+    :type SNR: float
+    :return: Error associated with that source's S / N
+    :rtype: float
 
     '''
     
@@ -71,8 +77,7 @@ def SNR_err(SNR):
             return 0
         SNR_err = np.array([2.5 * np.log10(1 + (1/SNR))])
         return SNR_err[0]
-
-
+    
     else:
         SNR = np.array(SNR)
 
@@ -89,22 +94,25 @@ def SNR_err(SNR):
 
 
 def trim_zeros_slices(arr):
+    
     '''
-    Traim 2d array of horizontal or vertical rows completely filled with zeroes
+
+    TriM a 2D array of horizontal or vertical rows completely filled with zeroes. This is useful when aligning two images When  doing so if there isn't significant overlap between the two images, the resultant images may have vertical and horizontal lines completely filled with zeroes. This function will accept an image with said zeroed columns/row and return a smaller image with those arrays removed. This function will not exclude partially filled columns or rows.
     
-    Credit: https://stackoverflow.com/questions/55917328/numpy-trim-zeros-in-2d-or-3d
+    Credit: `Stackoverflow <https://stackoverflow.com/questions/55917328/numpy-trim-zeros-in-2d-or-3d>`_
+
     
-    :param arr: 2D array-like with horizontal or vertical rows/columns filled with zeroes 
-    :type arr: array-like
-    :return: 2d array which has been cleaned of zero columns and index map for original array 
+    :param arr: 2D array with horizontal or vertical rows/columns filled with zeroes.
+    :type arr: 2D array.
+    :return: 2D array which has been cleaned of zero columns and index map for original array.
     :rtype: tuple
 
     '''
     
-    
     import numpy as np
 
     boolean_array = np.zeros(arr.shape).astype(bool)
+    
     slices = tuple(slice(idx.min(), idx.max() + 1) for idx in np.nonzero(arr))
 
     boolean_array[slices] = True
@@ -115,13 +123,21 @@ def trim_zeros_slices(arr):
 
 def set_size(width,aspect=1):
     '''
-     Function to generate size of figures produced by AutoPhot
+     Function to generate size of figures produced by AutoPhot. To specify the dimensions of a figure in matplotlib we use the figsize argument. However, the figsize argument takes inputs in inches and we have the width of our document in pts. To set the figure size we construct a function to convert from pts to inches and to determine an aesthetic figure height using the golden ratio. The golden ratio is given by:
+
+     .. math ::
+        \phi = (5^{1\2} + 1) / 2 \approx 1.618
+
+    The ratio of the given width and height is set to the golden ratio
+
+
+    Credit: `jwalton.info <https://jwalton.info/Embed-Publication-Matplotlib-Latex/>`_
 
     :param width: Width of figure in pts. 1pt == 1/72 inches
     :type width: float
-    :param aspect: Aspect of image i.e. height  = width / golden ratio * aspect, default  = 1
+    :param aspect: Aspect of image i.e. :math:`height  = width / \phi \times \mathit{aspect}`, default  = 1
     :type aspect: float
-    :return: Returns tuple of width,height in inches ready for use.
+    :return: Returns tuple of width, height in inches ready for use.
     :rtype: Tuple
 
     '''
@@ -148,17 +164,21 @@ def set_size(width,aspect=1):
 
 
 def get_distinct_colors(n):
+    
     '''
-    Get a list of n distinct colors
+    Given a number of colors desired, :math:`\mathit{n}` generate a list of :math:`\mathit{n} approximately distinct colours.
+
+    Credit: `StackOverflow <https://stackoverflow.com/questions/37299142/how-to-set-a-colormap-which-can-give-me-over-20-distinct-colors-in-matplotlib>`_
+    
+   
     :param n: number of desired distinct colours
     :type n: int
     :return: List of rgb colours to be used in figure
     :rtype: list
-
+    
     '''
-    # https://stackoverflow.com/questions/37299142/how-to-set-a-colormap-which-can-give-me-over-20-distinct-colors-in-matplotlib
-
     colors = []
+    
     from colorsys import hls_to_rgb
     import numpy as np
 
@@ -171,37 +191,60 @@ def get_distinct_colors(n):
     return colors
 
 
-def border_msg(msg):
+def border_msg(msg,body = '-',corner = '+',):
     '''
-    Print a message to console surrounded by a border
     
-    :param msg: Message to display
+    Produce a print statement where the text is surrounded by a box. For example:
+    
+    .. code-block :: python
+    
+       > border_msg('Hello There')
+       > +-----------+ 
+         |Hello There|
+         +-----------+
+    
+       > border_msg('General Kenobi',body = '=',corner = '!')
+       > !==============!
+         |General Kenobi|
+         !==============!
+                   
+    :param msg: String message which will be printed to screen.
     :type msg: str
-    :return: displayed string with border
-    :rtype: N/A
+    :param body: String character to represent body around message, defaults to '-'
+    :type body: str, optional
+    :param corner: String character to represent the four corners around message, defaults to '+'
+    :type corner: trs, optional
+    :return: Original string with borner around it.
+    :rtype: Print statement
 
     '''
-    row = len(msg)
-    h = ''.join(['+'] + ['-' *row] + ['+'])
+
+    row = len(msg.strip()) - ((len(corner)-1)*len(corner))
+    h = ''.join([corner] + [body*row] + [corner])
     result= h + '\n'"|"+msg+"|"'\n' + h
     print('\n' + result + '\n')
     return
     
 
 def error_log(value,error):
+    
     '''
-    Calculate error on value which is displyed in log form
+    
+    Calculate relative error on value which is displayed in log form
+    
+    Credit: `Here <https://faculty.washington.edu/stuve/log_error.pdf>`_
+    
     
     :param value: Value with associated error
-    :type value: array-like
-    :param error: Error assocaited with vlaue
-    :type error: array-like
-    :return: error in log form
-    :rtype: array-like
+    :type value: float
+    :param error: Error associated with value
+    :type error: float
+    :return: Error in log form
+    :rtype: float
 
     '''
 
-    log10_err = 0.434 * error.value
+    log10_err = 0.434 * error / value
 
     return log10_err
 
@@ -209,14 +252,14 @@ def error_log(value,error):
 def getheader(fpath):
 
     """
-    Get fits image header. Find correcct telescope header info based on "Telescop" header key
-    if multiple headers are found, concatination into one large header file
+    
+    Robust function to get header from :math:`FITS` image for use in AutoPHOT. Due to a :math:`FITS` image typically having multiple headers, which may have useful important information spread across multiples heres, this function returns (if appropriate) a single header file containing all needed header files. This function aims to find correct telescope header info based on "Telescop" header key.
 
-    :param fpath: Location of fits image
+    :param fpath: Location of fits image which contains a header file
     :type fpath: str
-
     :return: header information
-    :rtype: object
+    :rtype: header object
+    
     """
 
     # Need to rename this function
@@ -263,10 +306,14 @@ def getheader(fpath):
 def order_shift(x):
     
     '''
-    Get the order of magnitude of an array. Use to shift array to between 0-10
-
-    :param x: Array of values
-    :type x: numpy array
+    Get the order of magnitude of an array. Use to shift array to between 0-10: The fucntion uses the following equation to find the order of magnitude of an array.
+    
+    .. math::
+    
+       order\_of\_mag (x) = 10^{MAX(FLOOR(Log_{10}(x)))}
+    
+    :param x: Array of values 
+    :type x: float
     :return: Order of magnitude
     :rtype: float
 
@@ -284,15 +331,19 @@ def order_shift(x):
 def pixel2arcsec(value,pixel_scale):
 
     '''
-    Convert distance in pixel to distance in arcsecs
 
+    Convert distance in pixel to distance in arcsecs using the following equation:
+    
+    .. math::
+       arcsec = pixel \times 3600 \times pixel\_scale
+    
     :param value: linear distance in pixels
-    :type value: array_like
-    :param pixel_scale: pixel scale of image in degrees
+    :type value: float
+    :param pixel_scale: Pixel scale of image in degrees. This is typically the output format when using Astropy's :math:`wcs.utils.proj\_plane\_pixel\_scales(w)` function, where :math:`w` is an images WCS object. 
     :type pixel_scale: float
-    :return: linear distance in arsecs
-    :rtype: array_like
-
+    :return: linear distance in arcseconds
+    :rtype: float
+    
     '''
 
     arcsecs =  value * (3600*pixel_scale)
@@ -303,31 +354,35 @@ def pixel2arcsec(value,pixel_scale):
 def arcmins2pixel(value,pixel_scale):
 
     '''
-    Convert distance given in arcmins to distance in pixels
-
+    Convert distance given in Arc minutes to distance in linear pixel coordinates  using the following equation:
+    
+    .. math::
+       pixels = 60/3600  \times pixel\_scale \times arcmins
+    
     :param value: linear distance in arcmins
-    :type value: array_like
-    :param pixel_scale: pixel scale of image in degrees
+    :type value: float
+    :param pixel_scale: Pixel scale of image in degrees. This is typically the output format when using Astropy's :math:`wcs.utils.proj\_plane\_pixel\_scales(w)` function, where :math:`w` is an images WCS object. 
     :type pixel_scale: float
     :return: linear distance in pixels
-    :rtype: array_like
+    :rtype: float
+
 
     '''
 
-    arcsecs = (60 * (1/(3600*pixel_scale))) * value
+    pixels = (60 * (1/(3600*pixel_scale))) * value
 
-    return arcsecs
+    return pixels
 
 
 def getimage(fpath):
+    
     '''
-    Find a 2D image from a given file path. 
-    If image does not have correct shape i.e. 2 dimensional it will raise an error
-
-    :param fpath: Filepath towards fits image
+    For a given :math:`\mathit{FITS}` file, search through header a look for 2D image using the ":math:`\mathit{sci}`" attribute. A error is raise if the image found is not a 2D array e.g. if a :math:`\mathit{FITS\ cube}` is given,
+    
+    :param fpath: File path towards :math:`\mathit{FITS}` file.
     :type fpath: str
-    :return: returns 2D image
-    :rtype: numpy array
+    :return: 2D image
+    :rtype: array
 
     '''
 
@@ -354,24 +409,34 @@ def getimage(fpath):
 
     return image
 
-def beta_value(n,sigma,f_ul,noise = 0):
+
+def beta_value(n,f_ul,sigma,noise = 0):
 
     '''
-
-    Detection probability from
-    http://web.ipac.caltech.edu/staff/fmasci/home/mystats/UpperLimits_FM2011.pdf
-
-    :param n:  Level above background to be considered a genuine detection
+    False negatives function for the fraction of real sources that go undetected. This is implemented in AutoPHOT to determine whether a source,  more specifically it's flux, can be confidently assumed to arise from the source and not be associated with the background noise distribution. We describe the probability that a suspected source can be confidently assumed to be seperate from the flux due to the background by:
+    
+    .. math::
+       1 - \beta = \beta{\prime} = \frac{1}{2}(1 - \mathit{erf} \frac{n\sigma_{bkg} - f_{source}}{\sigma_{bkg} \sqrt{2}})
+       
+    where :math:`\beta{\prime}` is the confident that source is not apart of the underlying noise distribution, :math:`\mathit{erf}` is the `Error function <https://mathworld.wolfram.com/Erf.html>`_, :math:`f_{source}` is the brightest pixel that can be associated with a source, and :math:`\sigma_{bkg}` is the standard deviation of the background noise distribution.
+     
+    In other words, :math:`100\times (1-\beta) \%` of the
+    sources with flux :math:`f_{source}` will have flux measurements > :math:`n\sigma_{bkg}`
+    
+    
+    Credit: `F. Masci <http://web.ipac.caltech.edu/staff/fmasci/home/mystats/UpperLimits_FM2011.pdf>`_
+    
+    
+    :param n:  Level above background to be considered a genuine detection. Typical values are :math:`n = 3`, which equations to a :math:`3\sigma` confidence level, or in other words there is a 0.135% probability that the measured flux is a spurious noise spike. 
     :type n: float
-    :param sigma: background standard deviation
+    :param sigma: Background standard deviation.
     :type sigma: float
-    :param f_ul: detected counts from measured photometry
+    :param f_ul: Brightest pixel value that can be associated with a suspected source.
     :type f_ul: float
-    :param mean: Mean offset, defaults to 0
-    :type mean: float, optional
-    :return: Beta prime value which describes the confidence to which a source can be consider real
+    :param noise Mean offset of flux measurement. This value should be included if the measurement of the source is not background subtracted, defaults to 0
+    :type noise: float, optional
+    :return: False negatives probability which describes the confidence to which a source can be consider real and not be associated with a spurious noise spike.
     :rtype: float
-
     '''
 
     from scipy.special import erf
@@ -386,24 +451,34 @@ def beta_value(n,sigma,f_ul,noise = 0):
 
     z = ((n*sigma) - (f_ul-noise))/(sqrt(2)*sigma)
 
-    beta = 0.5 *(1 - erf(z))
+    beta = 0.5 * (1 - erf(z))
 
     return beta
 
-def f_ul(n,beta_p,sigma):
 
+def f_ul(n,beta_p,sigma,):
+    
     '''
-    Detection flux upper limit from
-    http://web.ipac.caltech.edu/staff/fmasci/home/mystats/UpperLimits_FM2011.pdf
-
-    :param n: Equivalnt sigma detection limit e.g. 3sigma
+    Flux upper limit for an environment with a Gaussian like noise distribution. This value represents the flux required, above which we can confidently assume that a flux measurement is likely due to a genuine source and not apart of the underlying noise distribution i.e a spurious noise spike. We calculate the flux upper limit :math:`F_{UL}` by:
+    
+    .. math::
+       F_{UL} = [n + \sqrt{2}\times \mathit{erf} ^{-1}(2\beta{\prime} - 1)]\sigma_{bkg}
+    
+    
+    where *n* is the confidence of the measure (typically set to *3*, equivalent to a :math:`3\sigma` confidence),  :math:`\mathit{erf}^{-1}` is the `Inverse Error function <https://mathworld.wolfram.com/Erf.html>`_, :math:`\beta{\prime}` is the desired confidence of the measurement, and :math:`n\sigma_{bkg}` is the standard deviation of the background noise distribution.
+    
+    Credit: `F. Masci <http://web.ipac.caltech.edu/staff/fmasci/home/mystats/UpperLimits_FM2011.pdf>`_
+    
+    
+    :param n: Level above background to be considered a genuine detection. Typical values are :math:`n = 3`, which equations to a :math:`3\sigma` confidence level, or in other words there is a 0.135% probability that the measured flux is a spurious noise spike. 
     :type n: float
-    :param beta_p: Detection Probability, should not be set to below 3 for practicality
-    :type beta_p: float
-    :param sigma: Standard deviation of background values
+    :param beta_p: Probability that a flux measurement is likely due to a genuine source and not apart of the underlying noise distribution. Set to  :math:`0 \rightarrow 1`, although a more realistic range  :math:`0.5 \rightarrow 0.98`.  Defaults to 0.75
+    :type beta_p: float, optional
+    :param sigma: Standard deviation of background
     :type sigma: flost
-    :return: Flux upper limit with some probabilistic meaning
+    :return: Flux upper limit that allows use to place a confidence on a measure given by the :math:`\beta{\prime}` term.
     :rtype: float
+
 
     '''
     
@@ -416,17 +491,37 @@ def f_ul(n,beta_p,sigma):
     return f_ul
 
 
+def calc_mag_error(flux,noise):
+    
+    '''
+    Calculate magnitude error due to noise on flux measurement. 
+    Magnitude error is given by:
 
-def calc_mag(flux, gain, zp):
+    .. math::
+       \delta m = \pm 2.5Log_{10}(1 + \frac{1}{S/N}) \approx 1.0857 \times N/S
+       
+    :param flux: Flux measurement
+    :type flux: float
+    :param noise: Error on flux measurement
+    :type noise: float
+    :return: Magnitude error due to noise on flux measurement
+    :rtype: float
+
+    '''
+    
+    return 1.0857 * noise/flux
+
+def calc_mag(flux, gain=1, zp=0):
+    
     '''
     Calculate magnitude of apoint source
     
     :param flux: Flux in counts per second measured from source
-    :type flux: array-like
+    :type flux: array
     :param zp: Zeropoint to place measurement on standard system
-    :type zp: array-like
+    :type zp: array
     :return: Magnitude of source on standard system
-    :rtype: array-like
+    :rtype: array
 
     '''
 
@@ -436,6 +531,8 @@ def calc_mag(flux, gain, zp):
     # Iitial list with zeropoint
     if isinstance(flux,float):
         flux = [flux]
+
+    gain = 1
 
     mag_inst = np.array([-2.5*np.log10(i*gain)+zp if i > 0.0 else np.nan for i in flux ])
 
@@ -447,9 +544,16 @@ def calc_mag(flux, gain, zp):
 def gauss_sigma2fwhm(image_params):
 
     '''
-    Convert sigma value to full width half maximum for gaussian function
-
-    :param image_params: Dictionary containing the key "sigma" with corrosponding value
+        Convert sigma value to full width half maximum (FWHM) for gaussian
+    function. The FWHM of a gaussian is then given by:
+    
+    .. math::
+    FWHM = 2\times \sqrt{2\times Log_e(2)}\times \sigma
+    
+    where :math:`\sigma` is the standard deviation of the Gaussian profile
+    
+    :param image_params: Dictionary containing the key *sigma* with corresponding
+    value
     :type image_params: dict
     :return: Full width half maximum value
     :rtype: float
@@ -468,13 +572,17 @@ def gauss_sigma2fwhm(image_params):
 def gauss_fwhm2sigma(fwhm,image_params = None):
 
     '''
-    Convert fwhm to sigma value for gaussian funciton
-
-    :param fwhm: full width half maximum
+        Convert  full width half maximum (FWHM) for gaussian
+    function to sigma value. The FWHM of a gaussian is then given by:
+    
+    .. math::
+       \sigma= \frac{FWHM}{2\times \sqrt{2\times Log_e(2)}}
+    
+    
+    
+    :param fwhm: full width half maximum of the gaussian profile
     :type fwhm: float
-    :param image_params: Not needed for this function, defaults to None
-    :type image_params: dict, optional
-    :return: sigma value
+    :return: Sigma value (standard deviation) of the gaussian profile
     :rtype: float
 
     '''
@@ -489,19 +597,27 @@ def gauss_fwhm2sigma(fwhm,image_params = None):
 def gauss_1d(x,A,x0,sigma):
 
     '''
-    Returns 1 d gaussian function
-
-
-    :param x: linear range of gaussian function
-    :type x: numpy array
+    1D gaussian function given by:
+    
+    .. math::
+    G = A \times e^{-\frac{x-x_o}{2\times \sigma^2}}
+    
+    where *G* is the 1D gaussian function, *A* is the amplitude, *x* is the linear
+    range of the function, :math:`x_0` is the center of the function, and
+    :math:`\sigma` is the standard deviation.
+    
+    
+    :param x: Linear range of gaussian function
+    :type x: 1D array
     :param A: Amplitude of gaussian function
     :type A: float
     :param x0: Center/maximum of gaussian function
     :type x0: float
     :param sigma: sigma/width of gaussian function
     :type sigma: float
-    :return: Returns 1 dimention function with length equal to length of imput x array
-    :rtype: numpy array
+    :return: Returns 1 dimensional function with length equal to length of input x
+    array
+    :rtype: 1D array
 
     '''
 
@@ -514,22 +630,29 @@ def gauss_1d(x,A,x0,sigma):
 def gauss_2d(image, x0, y0, sky , A, image_params):
 
     '''
-    Returns 2D gaussian function
-
-    :param image: 2 dimentions grid to map Guassian on
-    :type image: 2D numpy array
-    :param x0: x-center of gaussian funciton
+    2D gaussian function given by:
+    
+    .. math::
+       G = A \times e^{-\frac{(x-x_o)^2 - (y-y_0)^2}{2\times \sigma^2}} + sky
+     
+    where *G* is the 2D gaussian function, *A* is the amplitude, *x* and *y* are the linear
+    range of the function, :math:`x_0` and :math:`y_0` are the centers of the function,
+    :math:`\sigma` is the standard deviation, and *sky* is the amplitude offset of the function
+    
+    :param image: 2 dimensional grid to map Gaussian onto 
+    :type image: 2D array
+    :param x0: x-center of gaussian function
     :type x0: float
-    :param y0: y-center of gaussian funciton
+    :param y0: y-center of gaussian function
     :type y0: float
     :param sky: sky/offset of gaussian function
     :type sky: float
     :param A: Amplitude of gaussian function
     :type A: float
-    :param image_params: Dictionary containing the key "sigma" with corrosponding value
+    :param image_params: Dictionary containing the key *sigma* with corresponding value
     :type image_params: dict
     :return: 2D gaussian function with the same shape as image input
-    :rtype: 2D numpy array
+    :rtype: 2D array
 
     '''
 
@@ -557,11 +680,16 @@ def moffat_fwhm(image_params):
     
     '''
 
-    Get FWHM rom Mofat function
-
-    :param image_params: Dictionary containing 2 keys: "alpha" corrosponding to fitting width of moffat function and 'beta' describing the wings
+    Calculate FWHM from Moffat function using: 
+    
+    .. math::
+       FWHM = 2 \times \alpha \times \sqrt{2^{\frac{1}{\beta}}-1}
+    
+    where :math:`\alpha` corresponds to the width of moffat function and :math:`\beta` describes the wings
+    
+    :param image_params: Dictionary containing 2 keys: *alpha* corresponding to the fitted width of the moffat function and *beta* describing the wings.
     :type image_params: dict
-    :return: Full width half maximum
+    :return: Full width half maximum of moffat function
     :rtype: float
 
     '''
@@ -579,23 +707,34 @@ def moffat_fwhm(image_params):
 def moffat_2d(image, x0,y0, sky , A, image_params):
 
     '''
-    Returns 2D moffat function
-    https://www.ltam.lu/physique/astronomy/projects/star_prof/star_prof.html
-
-    :param image: 2 dimentions grid to map Moffat on
-    :type image: 2D numpy array
-    :param x0: x-center of Moffat funciton
+    Returns 2D moffat function which is given by:
+    
+    
+    .. math::
+    
+    M(A,x_o,y_o,sky)= A\times (1+\frac{(x-x_o)^2 + (y-y_0)^2}{\sigma^2})^{-\beta} +
+    sky
+    
+    
+    `Credit: ltam
+    <https://www.ltam.lu/physique/astronomy/projects/star_prof/star_prof.html>`_
+    
+    
+    :param image: 2 dimensions grid to map Moffat on
+    :type image: 2D  array
+    :param x0: x-center of Moffat function
     :type x0: float
-    :param y0: y-center of Moffat funciton
+    :param y0: y-center of Moffat function
     :type y0: float
     :param sky: sky/offset of Moffat function
     :type sky: float
     :param A: Amplitude of Moffat function
     :type A: float
-    :param image_params: Dictionary containing the keys "alpha" and "beta" with their corrosponding values
+    :param image_params: Dictionary containing the keys "alpha" and "beta" with
+    their corresponding values
     :type image_params: dict
     :return: 2D Moffat function with the same shape as image input
-    :rtype: 2D numpy array
+    :rtype: 2D  array
 
     '''
     (x,y) = image
@@ -618,8 +757,12 @@ def moffat_2d(image, x0,y0, sky , A, image_params):
 def pix_dist(x1,x2,y1,y2):
 
     '''
-    Find the linear distance between two sets of points (x1,y1) -> (x2,y2)
-
+    Find the linear distance between two sets of points (x1,y1) -> (x2,y2) 
+    given by:
+    
+    .. math ::
+       d = \sqrt{(x_1 - x_2) + (y_1 - y_2)^2}
+    
     :param x1: x position of point 1
     :type x1: float
     :param x2: x position of point 2
@@ -648,9 +791,9 @@ def weighted_avg_and_std(values, weights):
     Return the average of an array of values with given weights
 
     :param values: array of values
-    :type values: numpy array
+    :type values: array
     :param weights: weighs associated with values
-    :type weights: numpy array
+    :type weights: array
     :return: weighted average and varience
     :rtype: tuple
 
@@ -677,14 +820,16 @@ def weighted_avg_and_std(values, weights):
 
 
 def rebin(arr, new_shape):
+    
     '''
      Rebin an array into a specific 2D shape
+     
     :param arr: Array of values
-    :type arr: Numpy array
+    :type arr: array
     :param new_shape: New shape with which to rebin array into
     :type new_shape: tuple
     :return: rebinned array
-    :rtype: numpy array
+    :rtype: array
 
     '''
     shape = (new_shape[0], arr.shape[0] // new_shape[0],
@@ -692,64 +837,12 @@ def rebin(arr, new_shape):
     return arr.reshape(shape).mean(-1).mean(1)
 
 
-def weighted_median(data, weights):
-
-
-    '''
-    Return the weighted median of an array of values with given weights
-
-    :param values: array of values
-    :type values: numpy array
-    :param weights: weighs associated with values
-    :type weights: numpy array
-    :return: weighted mean
-    :rtype: tuple
-
-    '''
-
-    import numpy as np
-
-    data, weights = np.array(data).squeeze(), np.array(weights).squeeze()
-    s_data, s_weights = map(np.array, zip(*sorted(zip(data, weights))))
-    midpoint = 0.5 * sum(s_weights)
-    if any(weights > midpoint):
-        w_median = (data[weights == np.max(weights)])[0]
-    else:
-        cs_weights = np.cumsum(s_weights)
-        idx = np.where(cs_weights <= midpoint)[0][-1]
-        if cs_weights[idx] == midpoint:
-            w_median = np.mean(s_data[idx:idx+2])
-        else:
-            w_median = s_data[idx+1]
-    return w_median
-
-
-
-
-# def pixel_correction(x,m):
-    
-#     '''
-#     Correct the float nature of pixel position. NOT NEEDED FOR AUTOPHOT
-
-#     '''
-
-#     from numpy import ceil, floor
-
-#     diff =  x - int(x)
-
-#     if diff/m >= 0.5 or  diff ==0:
-#         return ceil(x) - 0.5
-
-#     elif diff/m < 0.5:
-#         return floor(x)
-
-
 def array_correction(x):
 
     '''
 
-    Correct the float nature of pixel position used in numpy. 
-    If a pixel position is more than halfway accros a pixel roundup, else round down
+    Correct the float nature of pixel position used in numpy. If a pixel position 
+    is more than halfway accros a pixel roundup, else round down.
 
     :param x: pixel position
     :type x: float
@@ -773,12 +866,18 @@ def array_correction(x):
 def norm(array):
     
     '''
-    Normalise array to between 0 and 1 while ignoring nans
-
-    :param array: Array of values
-    :type array: numpy  array
+    Normalise array to between 0 and 1 while ignoring nans using the following:
+    
+    
+    .. math::
+       |A| = \frac{A - min(A)}{max(A)-min(A)}
+    
+    
+    
+    :param array: array of values
+    :type array: arrat
     :return: Normalised array
-    :rtype: numpy  array
+    :rtype: arrat
 
     '''
 
@@ -790,29 +889,14 @@ def norm(array):
     return norm_array
 
 
-# def fin1d_2d_int_percent(count_percent,fwhm):
-
-#     '''
-#     Not needed for Autophot
-#     '''
-
-#     from scipy.optimize import least_squares
-#     import numpy as np
-
-#     from scipy.integrate import dblquad
-#     sigma = fwhm/(2*np.sqrt(2*np.log(2)))
-
-#     A = 1 / (2 * np.pi * sigma **2)
-#     gauss = lambda y,x: A * np.exp( -1 * (((y)**2+(x)**2)/(2*sigma**2)))
-#     fit = lambda x0: (count_percent - dblquad(gauss, -1*x0,x0,lambda x: -1*x0,lambda x: x0)[0])
-
-#     r = least_squares(fit,x0 = 3)
-#     return r.x[0]
-
 
 def scale_roll(x,xc,m):
+    
     '''
-    Used in building PSF function. when shiting and aligning residual tables this functions trnalets pixel shifts between different images cutouts
+    Used in building PSF function. When shiting and aligning residual tables this
+    functions translates pixel shifts between different images cutouts.
+    
+    
     :param x: pixel position
     :type x: gloat
     :param xc: pixel position to which we want to move to
@@ -824,29 +908,29 @@ def scale_roll(x,xc,m):
 
     '''
 
-
-
     dx = (x - xc)
+    
     if m !=1:
+        
         shift = int(round(dx * m))
+        
     else:
+        
         shift = int(dx * m)
+        
+        
     return shift
 
-def find_entry(new_df,date):
-
-    row = new_df[new_df.Date == date]
-
-    print(row.T)
 
 def round_half(number):
+    
     '''
     Round a number to half integer values i.ie +/-0.5
     
     :param number: Values to be rounded
-    :type number: array-like
+    :type number: array
     :return: Values rounded to their nearest 0.5
-    :rtype: array-like
+    :rtype: array
 
     '''
     return round(number * 2) / 2
@@ -855,14 +939,8 @@ def to_latex(autophot_input,peak = None):
 
     
     '''
-    Produce output table in latex-ready format
-    
-    :param autophot_input: Autophot input dictionary
-    :type autophot_input: dict
-    :param peak: Reference eposh of transient to set Phase column, defaults to None
-    :type peak: float, optional
-    :return: Latex ready table saved to output folder
-    :rtype: N/A
+    work in progress
+
 
     '''
 

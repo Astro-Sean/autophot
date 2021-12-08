@@ -1,76 +1,86 @@
-def sigma_clip_list_of_list(list_of_list,shape = None):
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
+                  fpath, GAIN=1, rdnoise=0, use_moffat = True, 
+                  fitting_radius = 1.3, regrid_size = 10, use_PSF_starlist = False,
+                  use_local_stars_for_PSF = False, prepare_templates = False,
+                  scale = 25, ap_size = 1.7, r_in_size = 2, r_out_size = 3,
+                  local_radius = 1500, bkg_level = 3, psf_source_no = 10,
+                  min_psf_source_no =3, construction_SNR =25, remove_bkg_local = True,
+                  remove_bkg_surface = False, remove_bkg_poly = False,
+                  remove_bkg_poly_degree = 1,
+                  fitting_method = 'least_sqaure', 
+                  save_PSF_stars = False, plot_PSF_model_residual = False, 
+                  save_PSF_models_fits = False
+                  ):
     '''
     
-    :param list_of_list: DESCRIPTION
-    :type list_of_list: TYPE
-    :param shape: DESCRIPTION, defaults to None
-    :type shape: TYPE, optional
+    Build the PSF model from bright, well isolated sources in the field.
+    
+    
+    :param base_image: 2D array  containing sources
+    :type base_image: 2D array
+    :param selected_sources: DataFrame object containing *xcentroid* and *ycentroid* columns given the XY pixel location of a source. Dataframe may also containing *include_fwhm* and *include_median* which should contain either *True* or *False* on whether to include a given source based in it's FWHM and/or background median respectively.
+    :type selected_sources: DataFrame
+    :param fwhm: Full Width Half Maximum (FWHM) of an image
+    :type fwhm: float
+    :param exp_time: Exposure time ins seconds of an image. This is used to calculate the S/N of a potential source.
+    :type exp_time: float
+    :param image_params: Dictionary containing analytical model params. If a moffat is used, this dictionary should containing *alpha* and *beta* and their respective values, else if a gaussian is used, this dictionary should include *sigma* and its value.
+    :type image_params: dict
+    :param fpath: Filepath of *FITS* image used. 
+    :type fpath: str
+    :param GAIN: GAIN on CCD in :math:`e^{-1} /  ADU` , defaults to 1.
+    :type GAIN: float, optional
+    :param rdnoise: Read noise of CCD in :math:`e^{-1} /  pixel`, defaults to 0.
+    :type rdnoise: float, optional
+    :param use_moffat: If True, use a moffat function for FWHM fitting defaults to True
+    :type use_moffat: bool, optional
+    :param fitting_radius: zoomed region around location of best fit to focus fitting. This allows for the fitting to be concentrated on high S/N areas and not fit the low S/N wings of the PSF, defaults to 1.3
+    :type fitting_radius: float, optional
+    :param regrid_size: When expanding to larger pseudo-resolution, what zoom factor to use, defaults to 10
+    :type regrid_size: int, optional
+    :param use_PSF_starlist: If True, *selected_soures* has been provided by the USer and this variable is required to ignore several source cleaning steps, defaults to False
+    :type use_PSF_starlist: bool, optional
+    :param use_local_stars_for_PSF: if True, use sources within a radius given by *local_radius*, defaults to False
+    :type use_local_stars_for_PSF: bool, optional
+    :param prepare_templates: IF True, build PSF model on template image, defaults to False
+    :type prepare_templates: bool, optional
+    :param scale: Size of image cutout. Image cutout size = (:math:`2 \times scale`, :math:`2 \times scale`), defaults to 25
+    :type scale: int, optional
+    :param ap_size: Multiple of FWHM to be used as standard aperture size, defaults to 1.7
+    :type ap_size: float, optional
+    :param r_in_size: Multiple of FWHM to be used as inner radius of background annulus, defaults to 1.9
+    :type r_in_size: float, optional
+    :param r_out_size: Multiple of FWHM to be used as outer radius of background annulus, defaults to 2.2
+    :type r_out_size: float, optional
+    :param local_radius: Radius to look for PSF sources around target position, defaults to 1500
+    :type local_radius: int, optional
+    :param bkg_level: The number of standard deviations, below which is assumed to be due to the background noise distribution, defaults to 3
+    :type bkg_level: float, optional
+    :param psf_source_no: Number of sources used to build PSF model, defaults to 10
+    :type psf_source_no: int, optional
+    :param min_psf_source_no: Minimum number  of sources used to build PSF model with. If less than this number of sources are available, PSF photometry is not used, defaults to 3
+    :type min_psf_source_no: int, optional
+    :param construction_SNR: Minimum S/N ratio require for a source to be used in the PSF model, defaults to 25
+    :type construction_SNR: int, optional
+    :param remove_bkg_local: If True, use the local median of the image and subtract this to produce a background free image, see above, defaults to True
+    :type remove_bkg_local: Boolean, optional
+    :param remove_bkg_surface: If True, use the background fitted surface of the image and subtract this to produce a background free image, see above, defaults to False
+    :type remove_bkg_surface: Boolean, optional
+    :type remove_bkg_poly: If True, use the background polynomial surface of the image and subtract this to produce a background free image, see above, optional
+    :param remove_bkg_poly_degree: If remove_bkg_poly is True, this is the degree of the polynomial fitted to the image, 1 = flat surface, 2 = 2nd order polynomial etc, defaults to 1
+    :param fitting_method: DESCRIPTION, defaults to 'least_sqaure'
+    :type fitting_method: TYPE, optional
+    :param save_PSF_stars: If True, save the information on the stars used to build the PSF model, defaults to False
+    :type save_PSF_stars: bool, optional
+    :param save_PSF_models_fits: If True, save a *FITS* image of the PSF model, normalised to unity, defaults to False
+    :type save_PSF_models_fits: bool, optional
     :return: DESCRIPTION
     :rtype: TYPE
 
     '''
-    
-    
-    import numpy as np
-    from astropy.stats import sigma_clip
-    
-    if shape is None:
-        shape = list_of_list[0].shape
-        
-    list_of_pixels =  np.dstack(list_of_list)
-    
-    new_images = np.zeros(shape)
-    
-    for i in range(new_images.shape[1]):
-        for j in range(new_images.shape[0]):
-            
-            c = sigma_clip(list_of_pixels[i,j],
-                           maxiters=None,
-                           cenfunc=np.nanmedian,
-                           masked=False,
-                           )
-            c = list_of_pixels[i,j]
-            
-            new_images[i][j] = np.nanmedian(c)
-            
-    return new_images
-
-
-def build_r_table(base_image,
-                  selected_sources,
-                  fwhm,
-                  exp_time,
-                  image_params,
-                  fpath,
-                  GAIN=1,
-                  rdnoise=0,
-                  use_moffat = True,
-                  vary_moff_beta = False,
-                  fitting_radius = 1.3,
-                  regrid_size = 10,
-                  use_PSF_starlist = False,
-                  use_local_stars_for_PSF = False,
-                  prepare_templates = False,
-                  scale = 25,
-                  ap_size = 1.7,
-                  r_in_size = 2,
-                  r_out_size = 3,
-                  local_radius = 1500,
-                  bkg_level = 3,
-                  psf_source_no = 10,
-                  min_psf_source_no =3,
-                  construction_SNR =25,
-                  remove_bkg_local = True,
-                  remove_bkg_surface = False,
-                  remove_bkg_poly = False,
-                  remove_bkg_poly_degree = 1,
-                  fit_PSF_FWHM = False,
-                  max_fit_fwhm = 30,
-                  fitting_method = 'least_sqaure',
-                  save_PSF_stars = False,
-                  plot_PSF_model_residual = False,
-                  save_PSF_models_fits = False
-                  ):
     
     import os
     import warnings
@@ -79,29 +89,48 @@ def build_r_table(base_image,
     import lmfit
     import logging
 
-
-    import matplotlib.pyplot as plt
-    dir_path = os.path.dirname(os.path.realpath(__file__))
-    plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
-    
     from photutils import DAOStarFinder
     from astropy.stats import sigma_clipped_stats
     
     from autophot.packages.functions import scale_roll
     from autophot.packages.functions import rebin
-    from autophot.packages.background import remove_background
-    from autophot.packages.functions import pix_dist,gauss_sigma2fwhm
-    from autophot.packages.functions import SNR
+    from autophot.packages.functions import pix_dist
+    from autophot.packages.functions import SNR,border_msg
     from autophot.packages.aperture  import measure_aperture_photometry
-    from autophot.packages.functions import gauss_2d,gauss_fwhm2sigma
+    from autophot.packages.functions import gauss_2d,gauss_sigma2fwhm
     from autophot.packages.functions import moffat_2d,moffat_fwhm
-
+    from autophot.packages.background import remove_background
+    
+    if not use_PSF_starlist:
+        border_msg('Building PSF model using stars in the field')
+    else:
+        border_msg('Building PSF model using user defined sources')
+        
     warnings.simplefilter(action='ignore', category=FutureWarning)
     
     
     base = os.path.basename(fpath)
     write_dir = os.path.dirname(fpath)
     base = os.path.splitext(base)[0]
+
+    logger = logging.getLogger(__name__)
+
+    image = base_image.copy()
+
+    # Only fit to a small image with radius ~the fwhm
+    fitting_radius = int(np.ceil( fitting_radius* fwhm))
+    x_slice = np.arange(0,2*fitting_radius)
+    xx_sl,yy_sl= np.meshgrid(x_slice,x_slice)
+
+    # for matchinf each source residual image with will regrid the image for shifting later
+    regriding_size = int(regrid_size)
+    
+
+    residual_table = []
+
+    if regriding_size % 2 > 0:
+        logger.info('regrid size must be even adding 1')
+        regriding_size += 1
 
     if use_moffat:
         
@@ -112,78 +141,53 @@ def build_r_table(base_image,
         fitting_model = gauss_2d
         fitting_model_fwhm = gauss_sigma2fwhm
         
+        
+    
+    # FWHM/sigma fits
+    fwhm_fit = []
+
+    # what sources will be used
+    construction_sources = []
+    
+    # Remove sources that don't have FWHM values
+    if not use_PSF_starlist:
+        selected_sources = selected_sources[~np.isnan(selected_sources['FWHM'])]
+    
+    if 'include_fwhm' in selected_sources and not use_PSF_starlist:
+        if np.sum(selected_sources['include_fwhm'])>10:
+            selected_sources = selected_sources[selected_sources['include_fwhm']]
+        
+    if 'include_median' in selected_sources and not use_PSF_starlist:
+        if np.sum(selected_sources['include_median'])>10:
+            selected_sources = selected_sources[selected_sources['include_median']]
+        
+    if use_local_stars_for_PSF and not prepare_templates and not use_PSF_starlist:
+
+        # Use local stars given by 'use_acrmin' parameter
+        selected_sources_test = selected_sources[selected_sources['dist'] <= local_radius]
+
+        selected_sources  = selected_sources_test
+        
+    
+        
+    if not use_PSF_starlist:
+        
+        high_counts_idx = [i for i in selected_sources.counts_ap.sort_values(ascending = False).index]
+        max_sources_used  = psf_source_no
+        
+    else:
+        
+        max_sources_used = len(selected_sources.index)
+        high_counts_idx = selected_sources.index
+        
+    sources_used = 0
+    n = 0
+    failsafe = 0
+    psf_mag = []
+    sources_dict = {}
+    
+    
     try:
-
-        logger = logging.getLogger(__name__)
-
-        image = base_image.copy()
-
-        # Only fit to a small image with radius ~the fwhm
-        fitting_radius = int(np.ceil( fitting_radius* fwhm))
-        x_slice = np.arange(0,2*fitting_radius)
-        xx_sl,yy_sl= np.meshgrid(x_slice,x_slice)
-
-        # for matchinf each source residual image with will regrid the image for shifting later
-        regriding_size = int(regrid_size)
-        
-
-        residual_table = []
-
-        if regriding_size % 2 > 0:
-            logger.info('regrid size must be even adding 1')
-            regriding_size += 1
-
-        # FWHM/sigma fits
-        fwhm_fit = []
-
-        # what sources will be used
-        construction_sources = []
-        
-        # Some test - if available to fine useful sources
-        if not use_PSF_starlist:
-            selected_sources = selected_sources[~np.isnan(selected_sources['FWHM'])]
-        
-        if 'include_fwhm' in selected_sources and not use_PSF_starlist:
-            if np.sum(selected_sources['include_fwhm'])>10:
-                selected_sources = selected_sources[selected_sources['include_fwhm']]
-            
-        if 'include_median' in selected_sources and not use_PSF_starlist:
-            if np.sum(selected_sources['include_median'])>10:
-                selected_sources = selected_sources[selected_sources['include_median']]
-            
-
-
-        if use_local_stars_for_PSF and not prepare_templates and not use_PSF_starlist:
-
-            # Use local stars given by 'use_acrmin' parameter
-            selected_sources_test = selected_sources[selected_sources['dist'] <= local_radius]
-
-            selected_sources  = selected_sources_test
-            
-        
-            
-        if not use_PSF_starlist:
-            
-            high_counts_idx = [i for i in selected_sources.counts_ap.sort_values(ascending = False).index]
-            max_sources_used  = psf_source_no
-            
-        else:
-            
-            max_sources_used = len(selected_sources.index)
-            high_counts_idx = selected_sources.index
-            
-        sources_used = 0
-        n = 0
-        failsafe = 0
-        psf_mag = []
-        sources_dict = {}
-
-        
-        if  use_PSF_starlist:
-            logger.info('\nBuilding PSF model with User source list (%d)' % len(high_counts_idx))
-        else:
-            logger.info('\nBuilding PSF model and residual table')
-            
         while sources_used <= psf_source_no-1:
 
             if failsafe>25:
@@ -211,16 +215,19 @@ def build_r_table(base_image,
                 # Inital guess at where psf source is is
                 psf_image = image[int(selected_sources.y_pix[idx]-scale): int(selected_sources.y_pix[idx] + scale),
                                   int(selected_sources.x_pix[idx]-scale): int(selected_sources.x_pix[idx] + scale)]
+                
                 if not use_PSF_starlist:
                     
                     psf_fwhm_fitted = selected_sources.FWHM[idx]
+                    
                 else:
+                    
                     psf_fwhm_fitted = np.nan
                     
                 
                 mean, median, std = sigma_clipped_stats(psf_image,
-                                        sigma = bkg_level,
-                                        maxiters = 10)
+                                                        sigma = bkg_level,
+                                                        maxiters = 10)
                 
                 daofind = DAOStarFinder(fwhm      = fwhm,
                                         threshold = 5 * std,
@@ -235,9 +242,10 @@ def build_r_table(base_image,
                     logger.info('Cannot detect any point source - skipping')
                         
                     continue
-                    
                 
-                sources = sources.to_pandas()
+                else:
+                    
+                    sources = sources.to_pandas()
                 
                 
                 if len(sources)>1:
@@ -268,8 +276,8 @@ def build_r_table(base_image,
                                                                                       remove_bkg_surface = remove_bkg_surface,
                                                                                       remove_bkg_poly   = remove_bkg_poly,
                                                                                       remove_bkg_poly_degree = remove_bkg_poly_degree,
-                                                                                      bkg_level = bkg_level
-                                                                                      )
+                                                                                      bkg_level = bkg_level)
+                                                                                      
 
                 x = np.arange(0,2*scale)
                 xx,yy= np.meshgrid(x,x)
@@ -277,6 +285,7 @@ def build_r_table(base_image,
                 pars = lmfit.Parameters()
                 pars.add('A',value = 0.75*np.nanmax(psf_image_bkg_free),
                          min=0)
+                
                 pars.add('x0',value = psf_image_bkg_free.shape[1]/2,
                          min = 0,
                          max =psf_image_bkg_free.shape[1] )
@@ -288,17 +297,16 @@ def build_r_table(base_image,
                 if use_moffat:
                     pars.add('alpha',value = image_params['alpha'],
                              min = 0,
-                             vary =  fit_PSF_FWHM )
+                             vary =  False )
                     pars.add('beta',value = image_params['beta'],
                              min = 0,
-                             vary = vary_moff_beta or fit_PSF_FWHM  )
+                             vary = False  )
 
                 else:
                     pars.add('sigma', value = image_params['sigma'],
                              min = 0,
-                             max = gauss_fwhm2sigma(max_fit_fwhm),
-                              vary = vary_moff_beta or fit_PSF_FWHM
-                             )
+                             vary = False)
+                             
 
                 if use_moffat:
                     def residual(p):
@@ -348,10 +356,12 @@ def build_r_table(base_image,
                 pars = lmfit.Parameters()
                 pars.add('A',value = np.nanmean(psf_image_slice),
                          min = 1e-6,
-                         max = np.nanmax(psf_image_slice)*3 )
+                         max = np.nanmax(psf_image_slice)*1.5 )
+                
                 pars.add('x0',value = psf_image_slice.shape[1]/2,
                          min = 1,
                          max = psf_image_slice.shape[1])
+                
                 pars.add('y0',value = psf_image_slice.shape[0]/2,
                          min = 1,
                          max = psf_image_slice.shape[0] )
@@ -360,18 +370,17 @@ def build_r_table(base_image,
 
                     pars.add('alpha',value = image_params['alpha'],
                              min = 0,
-                             vary =  fit_PSF_FWHM )
+                             vary =  False)
 
                     pars.add('beta',value = image_params['beta'],
                              min = 0,
-                             vary = vary_moff_beta or fit_PSF_FWHM  )
+                             vary = False  )
 
                 else:
 
                     pars.add('sigma', value = image_params['sigma'],
                              min = 0,
-                             max = gauss_fwhm2sigma(max_fit_fwhm),
-                             vary =  fit_PSF_FWHM)
+                             vary =  False)
                              
 
                 if use_moffat:
@@ -398,9 +407,9 @@ def build_r_table(base_image,
 
                 positions  = list(zip([xc_global],[yc_global]))
 
-                psf_counts,psf_maxpixels,psf_bkg,psf_bkg_std = measure_aperture_photometry(positions,
+                psf_counts,psf_counts_error,psf_maxpixels,psf_bkg,psf_bkg_std = measure_aperture_photometry(positions,
                                                                  image,
-                                                                 radius = ap_size    * fwhm,
+                                                                 ap_size = ap_size    * fwhm,
                                                                  r_in   = r_in_size  * fwhm,
                                                                  r_out  = r_out_size * fwhm)
                 
@@ -763,6 +772,9 @@ def fit(image,
     dir_path = os.path.dirname(os.path.realpath(__file__))
     plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
     
+    if not no_print:
+        print('\nFitting PSF to image')
+    
      
     base = os.path.basename(fpath)
     write_dir = os.path.dirname(fpath)
@@ -864,8 +876,8 @@ def fit(image,
         noise = np.nan
         max_pixel = np.nan
         
-        if not return_fwhm and not no_print:
-            
+        # if not return_fwhm and not no_print:
+        if not no_print:
             print('\rFitting PSF to source: %d / %d ' % (n+1,len(sources)), end = '')
 
         try:
@@ -885,38 +897,29 @@ def fit(image,
             xc = source_base.shape[1]/2
             yc = source_base.shape[0]/2
             
-            if not remove_background_val:
- 
+
+
+            try:
+
+                source_bkg_free, bkg_surface, bkg_median, noise = remove_background(source_base,
+                                                                                   remove_bkg_local = remove_bkg_local, 
+                                                                                   remove_bkg_surface = remove_bkg_surface,
+                                                                                   remove_bkg_poly   = remove_bkg_poly,
+                                                                                   remove_bkg_poly_degree = remove_bkg_poly_degree,
+                                                                                   bkg_level = bkg_level
+                                                                                   )
+
+                                                                                    
                 
-                source_bkg_free = source_base
-                bkg_surface = np.ones(source_base.shape)
-                bkg_median = np.nanmedian(source_base)
+            except Exception as e:
                 
-                # print('->',np.nanmedian(source_base) )
+                print('cannot fit background')
+
+                psf_params.append((idx,x_fitted,y_fitted,xc,yc,bkg_median,noise,H,H_psf_err,max_pixel,chi2,redchi2))
+
+                logger.exception(e)
                 
-            else:
-
-                try:
-
-                    source_bkg_free, bkg_surface, bkg_median,noise = remove_background(source_base,
-                                                                                       remove_bkg_local = remove_bkg_local, 
-                                                                                       remove_bkg_surface = remove_bkg_surface,
-                                                                                       remove_bkg_poly   = remove_bkg_poly,
-                                                                                       remove_bkg_poly_degree = remove_bkg_poly_degree,
-                                                                                       bkg_level = bkg_level
-                                                                                       )
-
-                                                                                        
-                    
-                except Exception as e:
-                    
-                    print('cannot fit background')
-
-                    psf_params.append((idx,x_fitted,y_fitted,xc,yc,bkg_median,noise,H,H_psf_err,max_pixel,chi2,redchi2))
-
-                    logger.exception(e)
-                    
-                    continue
+                continue
                 
             # if return_fwhm:
             #     print('bkg_median: %6.f' % bkg_median)
@@ -924,7 +927,8 @@ def fit(image,
             source = source_bkg_free[int(0.5*source_bkg_free.shape[1] - fitting_radius):int(0.5*source_bkg_free.shape[1] + fitting_radius) ,
                                      int(0.5*source_bkg_free.shape[0] - fitting_radius):int(0.5*source_bkg_free.shape[0] + fitting_radius) ]
             
-            max_pixel = np.nanmax(source)
+            
+            
             
             if source.shape != (int(2*fitting_radius),int(2*fitting_radius)) or np.sum(np.isnan(source)) == len(source):
             
@@ -968,6 +972,10 @@ def fit(image,
 
                 H_psf = result.params['A'].value
                 H_psf_err = result.params['A'].stderr
+                
+                max_pixel = np.nanmax(source)
+                
+                
       
                 chi2 = result.chisqr
                 redchi2 = result.redchi
@@ -981,8 +989,8 @@ def fit(image,
         
                 
                 if return_fwhm:
-                    if not no_print:
-                        logger.info('\nFitting function to source to get FWHM')
+                    # if not no_print:
+                    # logger.info('\nFitting function to source to get FWHM')
                         
                     # print(x_fitted_shape,y_fitted_shape,fitting_radius)
                         
@@ -1057,8 +1065,8 @@ def fit(image,
                     else:
                         target_PSF_FWHM = fitting_model_fwhm(dict(sigma=result.params['sigma']))
     
-                    if not no_print:
-                        logger.info('Target FWHM: %.3f [ pixels ]\n' % target_PSF_FWHM)
+                    # if not no_print:
+                    #     logger.info('Target FWHM: %.3f [ pixels ]\n' % target_PSF_FWHM)
                
                 
                 
@@ -1380,7 +1388,7 @@ def fit(image,
                     else:
                         
                         save_loc = os.path.join(write_dir,'target_psf_'+base+'.pdf')
-                        print('saving image to ',save_loc)
+                        
                         fig.savefig(save_loc,bbox_inches='tight')
 
                     plt.close(fig)
@@ -1481,7 +1489,6 @@ def do(df,residual_image= None,
 
     from photutils import CircularAperture
     from photutils import aperture_photometry
-    from scipy.integrate import dblquad
     import logging
     import numpy as np
     
@@ -1548,11 +1555,10 @@ def do(df,residual_image= None,
         logger.info('Unity Residual table: %.1f [counts] ' % unity_residual_counts)
     
     df['psf_counts']     = df.H_psf.values * unity_PSF_counts
+
+    df['psf_counts_err'] = df.H_psf_err.values * unity_PSF_counts
+
     
-    try:
-        df['psf_counts_err'] = df.H_psf_err.values * unity_PSF_counts
-    except:
-        df['psf_counts_err'] = [np.nan] * len(df.H_psf_err.values)
     
     if find_unity_PSF_counts:
         return df,unity_PSF_counts
@@ -1569,18 +1575,33 @@ def do(df,residual_image= None,
 
 def compute_multilocation_err(image,
                               fwhm,
+                              PSF_model,
+                              image_params,
+                              exp_time,
+                              fpath,
+                              scale,
+                              unity_PSF_counts,
                               target_error_compute_multilocation_number = 5,
                               target_error_compute_multilocation_position = 1,
                               use_moffat = True,
-                              image_params = None,
+                              fitting_method = 'least_sqaure',
+                              ap_size = 1.7,
                               fitting_radius = 1.3,
                               regriding_size = 10,
-                             
+                          
+         
+           
+                              
                               xfit = None,
                               yfit = None,
                               Hfit = None,
-                              MODEL = None,
-                              r_table = None):
+                              
+                              r_table = None,
+                              remove_bkg_local = True,
+                              remove_bkg_surface = False,
+                              remove_bkg_poly = False,
+                              remove_bkg_poly_degree = 1,
+                              bkg_level = 3):
     
     import numpy as np
     import pandas as pd
@@ -1602,8 +1623,15 @@ def compute_multilocation_err(image,
     injection_df.columns = ['x_pix','y_pix']
     injection_df.reset_index(inplace = True,drop = True)
     
-    Fitted_PSF = MODEL(xfit, yfit, 0, Hfit, r_table,image_params,use_moffat = use_moffat,fitting_radius = fitting_radius,regriding_size = regriding_size,pad_shape = image.shape)
-
+    Fitted_PSF = PSF_model(xfit, yfit, 0, Hfit,
+                       r_table,
+                       fwhm,
+                       image_params,
+                       use_moffat = use_moffat,
+                       fitting_radius = fitting_radius,
+                       regriding_size = regriding_size,
+                       pad_shape = image.shape)
+# xc, yc, sky, H, r_table, fwhm,image_params,use_moffat = True, fitting_radius = 1.3,regriding_size =10 ,slice_scale = None,pad_shape = None
     # Remove PSF from image
     residual_image = image - Fitted_PSF
     
@@ -1611,43 +1639,56 @@ def compute_multilocation_err(image,
     
     magnitudes_recovered = []
     
+    
+    
     for i in range(len(injection_df)):
         
-        print('\rComputing error for target location: %d / %d' % (i+1,len(injection_df) ) ,
-              end = '',
-              flush = True)
-        
-        test_PSF = MODEL(injection_df['x_pix'].values[i],injection_df['y_pix'].values[i],0,Hfit, 
-                             r_table,
-                             autophot_input,
-                             pad_shape = image.shape)
-        
-        
+        test_PSF = PSF_model(injection_df['x_pix'].values[i],injection_df['y_pix'].values[i],
+                         0,
+                         Hfit, 
+                         r_table,
+                         fwhm,
+                         image_params,
+                         use_moffat = use_moffat,
+                         fitting_radius = fitting_radius,
+                         regriding_size = regriding_size,
+                         pad_shape = image.shape)
 
+        psf_fit  = psf.fit(image = residual_image + test_PSF,
+                        sources = injection_df.iloc[[i]],
+                        residual_table = r_table,
+                        fwhm = fwhm,
+                        fpath = fpath,
+                        fitting_radius = fitting_radius,
+                        regriding_size = regriding_size,
+                        scale = scale,
+                        use_moffat = use_moffat,
+                        image_params = image_params,
+                        fitting_method = fitting_method,
+                        hold_pos = hold_psf_position,
+                        return_fwhm = True,
+                        no_print = True,
+                        remove_bkg_local = remove_bkg_local, 
+                        remove_bkg_surface = remove_bkg_surface,
+                        remove_bkg_poly   = remove_bkg_poly,
+                        remove_bkg_poly_degree = remove_bkg_poly_degree,
+                        bkg_level = bkg_level)
+       
+        psf_params = psf.do(df = psf_fit,
+                    residual_image = r_table,
+                    ap_size = ap_size,
+                    fwhm = fwhm,
+                    unity_PSF_counts =unity_PSF_counts,
+                    use_moffat = use_moffat,
+                    image_params = image_params)
         
-        psf_fit = psf.fit(residual_image + test_PSF,
-                            injection_df.iloc[[i]], 
-                            r_table,
-                            autophot_input,
-                            # return_fwhm = True,
-                            no_print = True,
-                            hold_pos = hold_psf_position,
-                            save_plot = False,
-                            # remove_background_val = True
-                            )
+        psf_flux = psf_params['psf_counts'].values/exp_time
         
-        psf_params,_ = psf.do(psf_fit,
-                              r_table,
-                              autophot_input,
-                              autophot_input['fwhm'])
-        
-        psf_flux = psf_params['psf_counts'].values/autophot_input['exp_time']
-        
-        magnitudes_recovered.append(calc_mag(psf_flux,autophot_input['GAIN'],0)[0])
+        magnitudes_recovered.append(calc_mag(psf_flux)[0])
       
     error = np.nanstd(magnitudes_recovered)
     
     
-    print('\nError from %d measuresments: %.3f' % (N,error))              
+    print('Error from multlocation [%d] recovery: %.3f [mag]' % (N,error))              
     
     return error

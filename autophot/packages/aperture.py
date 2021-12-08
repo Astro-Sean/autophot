@@ -17,7 +17,7 @@ def compute_phot_error(flux_variance,sky_std,sky_annulus_area,ap_area,gain=1.0):
     :type sky_annulus_area: float
     :param ap_area: Area under aperture where flux varience is measured
     :type ap_area: float
-    :param gain: Gain of image in $e^{-}$ per ADU, defaults to 1.0
+    :param gain: Gain of image in :math:`e^{-}$` per ADU, defaults to 1.0
     :type gain: floar, optional
     :return: Flux error of flux measurement
     :rtype: float
@@ -255,13 +255,13 @@ def measure_aperture_photometry(positions,
     :type gain: float, optional
     :param bkg_level: Number of standard deviations about the mean background below which was assume is due background fluctuations rather than any source flux , defaults to 3
     :type bkg_level: float, optional
-    :param ap_size: Multiple of FWHM to be used as standard aperture size, defaults to 1.7
+    :param ap_size: Size of aperture to be used as standard aperture size, defaults to 1.7
     :type ap_size: float, optional
-    :param inf_ap_size: Multiple of FWHM to be used as larger, :math:`\mathit{infinite}` aperture size, defaults to 2.5
+    :param inf_ap_size:  Size of aperture to be used as larger, :math:`\mathit{infinite}` aperture size, defaults to 2.5
     :type inf_ap_size: float, optional
-    :param r_in_size: Multiple of FWHM to be used as inner radius of background annulus, defaults to 1.9
+    :param r_in_size:  Size of aperture to be used as inner radius of background annulus, defaults to 1.9
     :type r_in_size: float, optional
-    :param r_out_size: Multiple of FWHM to be used as outer radius of background annulus, defaults to 2.2
+    :param r_out_size:  Size of aperture to be used as outer radius of background annulus, defaults to 2.2
     :type r_out_size: float, optional
     :return: Returns the aperture sum, the error on the aperture sum, the max_pixel found within the aperture, the median value of the background and the standard deviation of the background.
     :rtype: list
@@ -322,8 +322,7 @@ def measure_aperture_photometry(positions,
         
             possion_noise = make_noise_image(image.shape,
                                             distribution = 'poisson',
-                                            mean = image,
-                                            seed = np.random.randint(0,1e3))
+                                            mean = image)
       
             error_array = possion_noise
             
@@ -336,12 +335,10 @@ def measure_aperture_photometry(positions,
         # get background for each source
         for annulus_mask,aperture_mask in zip(annulus_masks,aperture_masks):
             
-            
             median_sigclip = np.nan
             std_sigclip = np.nan
             max_pixel_value = np.nan
             
-        
             annulus_data = annulus_mask.multiply(image)
             annulus_data_1d = annulus_data[annulus_mask.data > 0]
             annulus_data_1d_nonan = annulus_data_1d[~np.isnan(annulus_data_1d)]
@@ -354,16 +351,15 @@ def measure_aperture_photometry(positions,
                                                                             cenfunc = np.nanmedian,
                                                                             stdfunc = np.nanstd,
                                                                             sigma= 3)
-
-
-
-            std_sigclip = np.nanstd(annulus_data_1d_nonan)
-            max_pixel_value = np.nanmax(aperture_data_1d_nonan)
+            
+            # std_sigclip = np.nanstd(annulus_data_1d_nonan)
+            max_pixel_value = np.nanmax(aperture_data_1d_nonan) - mean_sigclip
      
             bkg_median.append(median_sigclip)
             bkg_std.append(std_sigclip)
-            max_pixel.append(max_pixel_value - median_sigclip)
+            max_pixel.append(max_pixel_value)
 
+        # Background median and standard deviation of annulus
         bkg_median = np.array(bkg_median)
         bkg_std = np.array(bkg_std)
         
@@ -371,7 +367,7 @@ def measure_aperture_photometry(positions,
         max_pixel = np.array(max_pixel) 
         
         # perform aperure photometry on image using list of apertures
-        phot = aperture_photometry(image, apertures,error = error_array)
+        phot = aperture_photometry(image, apertures, error = error_array)
         phot = phot.to_pandas()
        
 
@@ -380,6 +376,8 @@ def measure_aperture_photometry(positions,
         phot['aperture_bkg'] = bkg_median * area
 
         phot['aperture_sum_bkgsub'] = phot['aperture_sum'] - phot['aperture_bkg']
+        
+        phot.at[phot['aperture_sum_bkgsub']<=0,'aperture_sum_bkgsub'] = 0 
         
         aperture_sum = phot['aperture_sum_bkgsub'].values
         
@@ -397,10 +395,7 @@ def measure_aperture_photometry(positions,
                                                     ap_area=area,
                                                     gain=gain)
        
-        
-   
 
-        # aperture_sum[aperture_sum<=0] = 0
 
     except Exception as e:
         exc_type, exc_obj, exc_tb = sys.exc_info()
@@ -429,6 +424,36 @@ def plot_aperture(close_up,
                   write_dir,
                   base,
                   background_value = None):
+    '''
+
+    Package used for plotting close up of aperture photometry on point source. Package produces a cutout showing a closeup of a given target, the aperture placement and size,and the annulus used for the sky background. Additionally, projections along the X and Y plane are given to aid the User in evaluating the aperture placement
+
+
+    :param close_up: 2D image containing target. Image does not need to be background subtracted
+    :type close_up: 2D Array
+    :param target_x_pix_corr: X Pixel coordinate of target within :math:`close\_up` image. 
+    :type target_x_pix_corr: float
+    :param target_y_pix_corr: y Pixel coordinate of target within :math:`close\_up` image. 
+    :type target_y_pix_corr: float
+    :param fwhm: Full Width Half Maximum of image. This is used to set the size for the apertures and annulli. 
+    :type fwhm: float
+    :param ap_size: Size of aperture to be used as standard aperture size, defaults to 1.7
+    :type ap_size: float, optional
+    :param r_in_size:  Size of aperture to be used as inner radius of background annulus, defaults to 1.9
+    :type r_in_size: float, optional
+    :param r_out_size:  Size of aperture to be used as outer radius of background annulus, defaults to 2.2
+    :type r_out_size: float, optional
+    :param write_dir: Directory where to place the image.
+    :type write_dir: str
+    :param base: Name of file which is appended onto ':math:`\mathit{target\_ap\_}`'.
+    :type base: str
+    :param background_value: If given, plot the background value assumed for the image, defaults to None
+    :type background_value: float, optional
+    :return: Produces a pdf plot of the target with an aperture and annuli. The file is saved to ':math:`\mathit{write\_dir}`' with the name ':math:`\mathit{target\_ap\_}`'. + :math:`\mathit{base}`.
+    :rtype: PDF plot
+
+
+    '''
     
     # Aperture photometry plot
     import numpy as np
@@ -468,7 +493,7 @@ def plot_aperture(close_up,
     ax1_B = fig_target.add_subplot(grid[1, 0:1])
     ax1_R = fig_target.add_subplot(grid[0:1, 1])
     
-    im = ax1.imshow(close_up_plt,
+    ax1.imshow(close_up_plt,
                    interpolation = 'nearest',
                    origin = 'lower',
                     aspect = 'auto',
@@ -596,44 +621,52 @@ def find_optimum_aperture_size(dataframe,
                                write_dir,
                                base,
                                ap_size = 1.7,
-                               inf_ap_size = 2.5,
                                r_in_size = 1.9,
                                r_out_size = 2.2,
                                GAIN = 1, 
                                RDNOISE = 0,
                                plot_optimum_radius = False):
     '''
-    
-    :param dataframe: DESCRIPTION
-    :type dataframe: TYPE
-    :param image: DESCRIPTION
-    :type image: TYPE
-    :param exp_time: DESCRIPTION
-    :type exp_time: TYPE
-    :param fwhm: DESCRIPTION
-    :type fwhm: TYPE
-    :param write_dir: DESCRIPTION
-    :type write_dir: TYPE
-    :param base: DESCRIPTION
-    :type base: TYPE
-    :param ap_size: DESCRIPTION, defaults to 1.7
-    :type ap_size: TYPE, optional
-    :param inf_ap_size: DESCRIPTION, defaults to 2.5
-    :type inf_ap_size: TYPE, optional
-    :param r_in_size: DESCRIPTION, defaults to 1.9
-    :type r_in_size: TYPE, optional
-    :param r_out_size: DESCRIPTION, defaults to 2.2
-    :type r_out_size: TYPE, optional
-    :param GAIN: DESCRIPTION, defaults to 1
-    :type GAIN: TYPE, optional
-    :param RDNOISE: DESCRIPTION, defaults to 0
-    :type RDNOISE: TYPE, optional
-    :param plot_optimum_radius: DESCRIPTION, defaults to False
-    :type plot_optimum_radius: TYPE, optional
-    :return: DESCRIPTION
-    :rtype: TYPE
 
+    Find the optimum aperture radius for a given image. Although the initial guess of :math:`1.7 \times FWHM` is a suitable guess for the aperture size of an image. Irregular / symmetric point spread functions (PSF) may require a slightly larger or smaller aperture size. This function uses several well isolated sources and finds their Signal to noise ratio (S/N) using the following equation
+
+    .. math::
+       S/N = \frac{ F_{ap} }{ F_{ap} + F_{sky,ap,n} + (RN ^2 + \frac{G^2}{4} \times n_{pix}) + (D \times n_{pix} \times t_exp) } ^{0.5}
+      
+     where :math:`F_{ap}` is the flux under and aperture of a specific radius, and likewise :math:`F_{sky,ap,n}` is the flux due to the sky background under the same aperture. By varying the size of the aperture, we produce a curve of growth model for how the S/N ratio behaves for different radii. This package iterations through a small radii towards a very large radii and notes how the S/N changes for a sample of sources. Where these sources reach a maximum (which :math:`\mathit{should}` be the same for all point sources) is considered the optimum aperture size, where we obtain the option ratio of source flux and background noise.
+
+
+       
+    :param dataframe: Dataframe containing :math:`\mathit{x\_pix}` and :math:`\mathit{y\_pix}` columns representing the X, Y pixel locations of a source. Dataframe source also include :math:`\mathit{include\_fwhm}`. This column source be a boolean list where :math:`\mathit{True}` dictates that a source source be included in the optimum radius investigation and :math:`\mathit{False}` meaning it is excluded.
+    :type dataframe: Dataframe
+    :param image: 2D image containing sources to be measured using aperture photometry
+    :type image: 2D array
+    :param exp_time: Exposure time in seconds of image.
+    :type exp_time: float
+    :param fwhm: Full Width Half Maximum (FWHM) of image. This is used to calibrated aperture and annulus size.
+    :type fwhm: Float
+    :param write_dir: Directory where to place the image.
+    :type write_dir: str
+    :param base: Name of file which is appended onto ':math:`\mathit{target\_ap\_}`'.
+    :type base: str
+    :param ap_size: Multiple of FWHM to be used as standard aperture size, defaults to 1.7
+    :type ap_size: float, optional
+    :param inf_ap_size: Multiple of FWHM to be used as larger, :math:`\mathit{infinite}` aperture size, defaults to 2.5
+    :type inf_ap_size: float, optional
+    :param r_in_size: Multiple of FWHM to be used as inner radius of background annulus, defaults to 1.9
+    :type r_in_size: float, optional
+    :param r_out_size: Multiple of FWHM to be used as outer radius of background annulus, defaults to 2.2
+    :type r_out_size: float, optional
+    :param GAIN: Gain of image in :math:`e^{-}$ per ADU`, defaults to 1.0
+    :type GAIN: float, optional
+    :param RDNOISE: Read Noise of image  of image in :math:`e^{-}$ per pixel`, defaults to 0
+    :type RDNOISE: float, optional
+    :param plot_optimum_radius: If true, saves of plot of the curve of growths for a sample of sources  saved to :math:`\mathit{write\_dir}` with the name ":math:`\mathit{optimum\_aperture\_}`". + :math:`\mathit{base}`, defaults to False
+    :type plot_optimum_radius: boolean, optional
+    :return: Gives the optim radius in units of FWHM.
+    :rtype: Float
     '''
+
     
     import numpy as np
     import os
@@ -733,9 +766,6 @@ def find_optimum_aperture_size(dataframe,
             
             max_SNR = np.nanmax([j[1][i] for j in output])
             
-            # sum_distribution.append(np.array([j[1][i] for j in output]))
-            
-            
             ax1.plot([j[0][i] for j in output],
                      [j[1][i] for j in output] / max_SNR,
                      # yerr = [j[2][i] for j in output] / max_SNR,
@@ -801,7 +831,6 @@ def find_optimum_aperture_size(dataframe,
                         )
         
         plt.close(fig)
-    
     
     
     

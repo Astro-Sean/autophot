@@ -1,25 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-def run_astroscrappy(image_with_CRs,
+def remove_cosmic_rays(image_with_CRs,
                      gain = 1,
-                     use_astroscrappy = True,
                      use_lacosmic = False):
     '''
+
+    Function to remove Cosmic Rays from an image. Cosmic Rays (CRs) are high energy
+    particles that impact the CCD detector and can result in bright points or
+    streaks on the CCD image. For images with long exposure times, CRs can be
+    problematic as they may lie on top of regions or sources of interest This
+    fucntion can using either `Astroscrappy
+    <https://astroscrappy.readthedocs.io/en/latest/#functions>`_ or `LACosmic
+    <https://ccdproc.readthedocs.io/en/latest/api/ccdproc.cosmicray_lacosmic.html>`_
+    and returns an image cleaned of cosmic rays
     
-    :param image_with_CRs: DESCRIPTION
-    :type image_with_CRs: TYPE
-    :param gain: DESCRIPTION, defaults to 1
-    :type gain: TYPE, optional
-    :param use_astroscrappy: DESCRIPTION, defaults to True
-    :type use_astroscrappy: TYPE, optional
-    :param use_lacosmic: DESCRIPTION, defaults to False
-    :type use_lacosmic: TYPE, optional
-    :return: DESCRIPTION
-    :rtype: TYPE
+    :param image_with_CRs: File Path to *fits* image that is contaminated by cosmic
+    rays.
+    :type image_with_CRs: str
+    :param gain: Gain of the image (electrons / ADU). We always need to work in
+    electrons for cosmic ray detection., defaults to 1
+    :type gain: float, optional
+    :param use_lacosmic: If True, use LAComic from CCDProc rather that
+    astroscrappy, defaults to False
+    :type use_lacosmic: boolean, optional
+    :return: Returns an image that has been cleaned of cosmic rays
+    :rtype: 2D array    
 
     '''
 
-    import time
+
     import logging
     import astroscrappy
     import numpy as np
@@ -30,17 +39,11 @@ def run_astroscrappy(image_with_CRs,
 
         logger.info('Detecting/removing cosmic ray sources')
 
-        if use_astroscrappy:
+        if not use_lacosmic:
             
-            # Function to call a instance of astroscrappy by Curtis McCully
-
-            # link: https://astroscrappy.readthedocs.io/en/latest/#functions
+    
 
             print('Starting Astroscrappy ... ',end = '')
-
-            # Note start time
-            cray_time = time.time()
-
 
             cray_free_image = astroscrappy.detect_cosmics(image_with_CRs.data,sigclip=4.5, sigfrac=0.3,
                                                     objlim=5.0, gain=gain,
@@ -60,18 +63,26 @@ def run_astroscrappy(image_with_CRs,
             clean_image = cray_free_image[1]
             CR_mask = cray_free_image[0]
 
-        elif use_lacosmic:
+        else:
 
             from ccdproc import cosmicray_lacosmic
-            cray_time = time.time()
 
-            clean_image,CR_mask = cosmicray_lacosmic(image_with_CRs.data,sigclip=4.5, sigfrac=0.3,
+
+            clean_image,CR_mask = cosmicray_lacosmic(image_with_CRs.data,sigclip=4.5, 
+                                                     sigfrac=0.3,
                                                      objlim=5.0, gain=gain,
-                                                     satlevel=65535.0, pssl=0.0, niter=4,
-                                                     sepmed=True, cleantype='meanmask', fsmode='median',
-                                                     psfmodel='gauss', psffwhm=2.5, psfsize=7,
-                                                     psfk=None, psfbeta=4.765, verbose=False)
-            end_time = time.time() -  cray_time
+                                                     satlevel=65535.0, 
+                                                     pssl=0.0, niter=4,
+                                                     sepmed=True, 
+                                                     cleantype='meanmask', 
+                                                     fsmode='median',
+                                                     psfmodel='gauss', 
+                                                     psffwhm=2.5, 
+                                                     psfsize=7,
+                                                     psfk=None, 
+                                                     psfbeta=4.765,
+                                                     verbose=False)
+            # end_time = time.time() -  cray_time
             
             
         logger.info('Contaminated pixels with Cosmic rays removed: %d' % np.sum(CR_mask))

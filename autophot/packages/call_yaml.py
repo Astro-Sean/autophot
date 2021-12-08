@@ -1,4 +1,4 @@
-#todo: update this whole script
+#todo: too messy and doesn't fit in with the other formats - update this whole script
 class yaml_autophot_input(object):
 
     def __init__(self,filepath = None,dict_name = None,wdir = None):

@@ -1,6 +1,54 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 def run_autophot(autophot_input):
+    '''
+    Function to run on image dataset and setup list of files for use in AutoPHOT.
+    This function performs the following tasks:
+    
+    1. Searches through a given file path and makes list of acceptable images to
+    use.  This script will look for files with the following extension:
+    
+    
+    1. *.fist*
+    2. *.fit*
+    3. *.fts* 
+    4. *fits.fz*
+    
+    Science images must not include the following in their filepath as these
+    filenames are used later on in AutoPHOT (and will end with the same extension
+    as the input image) and may cause errors:
+    
+    1. *subtraction*
+    2. *template*
+    3. *.wcs.* 
+    4. *footprint*
+    5. *PSF_model_*
+    6. *sources_*
+    
+    2. Run through this filelist and check if the correct information is available
+    in the *telescope.yml file using the *checkteledata* function.
+    
+    3. If a Transient Name Server (TNS) bot isavailable, return the latest
+    coordinates of a given target.
+    
+    4. Search though the file list and remove any file that has an *IMAGETYP* of
+    *bias*, *zero*, *flat*, *WAVE* , or *LAMP*  or an *OBS_MODE* of
+    *spectroscopy*.
+    
+    5. Run the final file list through the AutoPHoT pipeline
+    
+    
+    See `here
+    <https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/basic_example.ipynb>`_
+    for an example.
+    
+    :param autophot_input: AutoPHOT input dictionary
+    :type autophot_input: dict
+    :return: Creates a csv file containing photometric data for transient in
+    dataset
+    :rtype: Dataframe saved to work directory
+
+    '''
 
     from autophot.packages.functions import getheader
     from autophot.packages.check_tns import get_coords
@@ -32,8 +80,6 @@ def run_autophot(autophot_input):
     if autophot_input['fits_dir'].endswith('/'):
         autophot_input['fits_dir'] = autophot_input['fits_dir'][:-1]
 
-
-
     # fit fname defined and not fits_dir add file location to fits flists
     if autophot_input['fname'] != None:
         flist = [autophot_input['fname']]
@@ -52,17 +98,18 @@ def run_autophot(autophot_input):
         os.chdir(os.path.dirname(work_fpath))
 
         # Search for .fits files with template or subtraction in it
-        # TODO: clean this up
+        # TODO: What a silly bit of code - clean this up
         for root, dirs, files in os.walk(autophot_input['fits_dir']):
             for fname in files:
                 if fname.endswith((".fits",'.fit','.fts','fits.fz')):
                     if 'templates' not in root and 'template' not in autophot_input['fits_dir']:
                         if 'template' not in fname and 'template' not in autophot_input['fits_dir'] :
                             if 'subtraction' not in fname:
-                                if 'WCS' not in fname:
+                                if '.wcs' not in fname:
                                     if 'PSF_model' not in fname:
                                         if 'footprint' not in fname:
-                                            flist.append(os.path.join(root, fname))
+                                            if 'sources_' not in fname:
+                                                flist.append(os.path.join(root, fname))
     else:
         flist = []
         new_dir = '_' + autophot_input['outdir_name']
@@ -157,8 +204,6 @@ def run_autophot(autophot_input):
 
             files_removed += len_before - len_after
 
-
-
     # Go through files, check if I have their details
     available_filters = []
 
@@ -205,6 +250,7 @@ def run_autophot(autophot_input):
     # =============================================================================
     # Include IR sequence points
     # =============================================================================
+    
     if autophot_input['catalog']['include_IR_sequence_data']:
         available_filters+=['J','H','K']
         available_filters = list(set(available_filters))
@@ -589,3 +635,114 @@ def run_autophot(autophot_input):
             print('DONE')
             return
         main_mp()
+
+
+
+
+
+
+def recover(fits_dir,outdir_name='REDUCED',outcsv_name='REDUCED',
+            infile_name = 'out.csv',update_fpath = True,print_msg = True):
+    '''
+    
+            Iterate through output folder given by *fits_dir* and *outdir_name*
+    name, search for files corresponding to *outfile_name* and concatenate into a
+    single file named *outcsv_name*
+    
+    :param fits_dir: Location of original directory containing *FITS* images
+    :type fits_dir: str
+    :param outdir_name: Name of output directory concatenation i.e. what is the
+    name concatenated onto the parent directory from *fits_dir*, defaults to
+    'REDUCED'
+    :type outdir_name: ste, optional
+    :param outcsv_name: Name of file to save data which will be saved in
+    *outdir_name*, defaults to 'REDUCED'
+    :type outcsv_name: str, optional
+    :param infile_name: Name of output file which contains photometric information
+    on each image, defaults to 'out.csv'
+    :type infile_name: str, optional
+    :param update_fpath: If True, make sure the "*fpath*" variable in *outcsv_name*
+    is correct, defaults to True
+    :type update_fpath: bool, optional
+    :param print_msg: If True print a message saying that the script is working,
+    defaults to True
+    :type print_msg: bool, optional
+    :return: Produces an output csv file with the name given by *outcsv_name* in
+    the directory given by *fits_dir* with *outdir_name* appended onto it.
+    :rtype: TYPE
+    
+
+    '''
+
+
+
+    import pandas as pd
+    import os,sys
+    from autophot.packages.functions import border_msg
+    
+    if print_msg:
+        border_msg('Recovering output files')
+
+
+    if fits_dir.endswith('/'):
+        fits_dir = fits_dir[:-1]
+
+    recover_dir = fits_dir + '_' + outdir_name
+
+    csv_recover = []
+    
+    if not  os.path.isdir(recover_dir):
+        print('%s not found !' % recover_dir)
+        
+        recover_dir = fits_dir
+        
+        print('Looking in %s ' % recover_dir)
+        
+    if print_msg:
+        print('Recovering Output from %s...' % recover_dir)
+    
+    for root, dirs, files in os.walk(recover_dir):
+        for fname in files:
+            if fname.endswith((".fits",'.fit','.fts','fits.fz')):
+
+
+                if os.path.isfile(os.path.join(root, infile_name)):
+                    csv = pd.read_csv(os.path.join(root, infile_name))
+                    
+                    if update_fpath:
+                        old_fpath = csv['fname'].values[0]
+                        image_fname = os.path.basename(old_fpath)
+                        new_fpath = os.path.join(root,image_fname)
+                        csv['fname'] = new_fpath
+                        
+                    csv_recover.append(csv)
+                
+
+                else:
+                    # print('No output found for: %s' % fname)
+                    pass
+    try:
+
+        data = pd.concat(csv_recover,axis = 0,sort = False,ignore_index = True)
+
+        data.drop_duplicates(subset='fname', keep="last",inplace = True)
+
+        for col in data.columns:
+            if 'Unnamed' in col:
+                del data[col]
+
+        output_file = os.path.join(recover_dir, str(outcsv_name) + '.csv')
+
+        data.round(6).to_csv(output_file,index = False)
+
+        print('\nData recovered :: Output File:\n%s' % output_file)
+
+
+    except Exception as e:
+        exc_type, exc_obj, exc_tb = sys.exc_info()
+        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+        print(exc_type, fname, exc_tb.tb_lineno,e)
+        print('> Data not saved <')
+        
+        
+        

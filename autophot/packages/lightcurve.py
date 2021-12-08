@@ -1,52 +1,8 @@
-def Vega2AB(df,AB2Vega = False):
-    
-    
-    '''
-     Convert VEGA to AB magnitude ( or vice versa ) from autophot output
-    :param df: Dataframe containg calibrated photometric output from AutoPhot
-    :type df: Pandas DataFrame
-    :param AB2Vega: Convert from AB to Vega magnitudes, defaults to False
-    :type AB2Vega: Bool, optional
-    :return: Appropiate corrected DataFrame
-    :rtype: Pandas DataFrame
 
-    '''
-    import numpy as np
-    
-    df_AB = df.copy()
-    Vega2AB_dict = {
-                    # 'U':0.79,
-                    # 'B':-0.09,
-                    # 'V':0.02,
-                    # 'R':0.21,
-                    # 'I':0.45,
-                    # 'u':0.91,
-                    # 'g':-0.08,
-                    # 'r':0.16,
-                    # 'i':0.37,
-                    # 'z':0.54,
-                    'J': 0.929,
-                    'H': 1.394,
-                    'K': 1.859,
-#                    'S':-1.51,
-#                    'D':-1.69,
-#                    'A':-1.73,
-                    }
-    if AB2Vega:
-        for key in Vega2AB_dict:
-            Vega2AB_dict[key] *=  -1
-
-    for f in list(Vega2AB_dict.keys()):
-        try:
-            df_AB[f] = df[f] + Vega2AB_dict[f]
-            df_AB['lmag'][~np.isnan(df[f])] = df_AB['lmag'][~np.isnan(df[f])]  + Vega2AB_dict[f]
-        except:
-            print('ERROR: %s' % f)
-            pass
-    return df_AB
-
-
-def plot_lightcurve(autophot_input,sn_peak = None,
+def plot_lightcurve(fits_dir,
+                    outcsv_name = 'REDUCED',
+                    outdir_name = 'REDUCED',
+                    sn_peak = None,
                     check_fwhm = False,
                     fwhm_limit = 2,
                     pick_filter = [],
@@ -57,47 +13,8 @@ def plot_lightcurve(autophot_input,sn_peak = None,
                     show_colour_shift = False,
                     use_REBIN= False,
                     show_color_only = False,
-                    ylim = [],
-                    vega2AB = False,
-                    AB2vega = False):
-    '''
-     Rudimentary function to plot lightcurve from Autophot
-     
-     
-    :param autophot_input: DESCRIPTION
-    :type autophot_input: TYPE
-    :param sn_peak: DESCRIPTION, defaults to None
-    :type sn_peak: TYPE, optional
-    :param check_fwhm: DESCRIPTION, defaults to False
-    :type check_fwhm: TYPE, optional
-    :param fwhm_limit: DESCRIPTION, defaults to 1
-    :type fwhm_limit: TYPE, optional
-    :param pick_filter: DESCRIPTION, defaults to []
-    :type pick_filter: TYPE, optional
-    :param filter_spacing: DESCRIPTION, defaults to 0.2
-    :type filter_spacing: TYPE, optional
-    :param error_lim: DESCRIPTION, defaults to 0.25
-    :type error_lim: TYPE, optional
-    :param max_error_lim: DESCRIPTION, defaults to 1
-    :type max_error_lim: TYPE, optional
-    :param show_plot: DESCRIPTION, defaults to True
-    :type show_plot: TYPE, optional
-    :param show_colour_shift: DESCRIPTION, defaults to False
-    :type show_colour_shift: TYPE, optional
-    :param use_REBIN: DESCRIPTION, defaults to False
-    :type use_REBIN: TYPE, optional
-    :param show_color_only: DESCRIPTION, defaults to False
-    :type show_color_only: TYPE, optional
-    :param ylim: DESCRIPTION, defaults to []
-    :type ylim: TYPE, optional
-    :param vega2AB: DESCRIPTION, defaults to False
-    :type vega2AB: TYPE, optional
-    :param AB2vega: DESCRIPTION, defaults to False
-    :type AB2vega: TYPE, optional
-    :return: DESCRIPTION
-    :rtype: TYPE
-
-    '''
+                    ylim = []):
+  
 
     import numpy as np
     import pandas as pd
@@ -109,17 +26,18 @@ def plot_lightcurve(autophot_input,sn_peak = None,
     
     border_msg('Plotting multiband light curve')
     
-    
+    if fits_dir.endswith('/'):
+        fits_dir = fits_dir[:-1]
 
     plt.ioff()
 
     if use_REBIN:
-        output_fname = autophot_input['outcsv_name']+'_REBIN'+'.csv'
+        output_fname = outcsv_name+'_REBIN'+'.csv'
     else:
-        output_fname = autophot_input['outcsv_name']+'.csv'
+        output_fname = outcsv_name+'.csv'
 
 
-    out_dir = autophot_input['fits_dir']+'_'+autophot_input['outdir_name']
+    out_dir = fits_dir+'_'+outdir_name
     output_file_loc = os.path.join(out_dir,output_fname)
 
     import os
@@ -130,7 +48,7 @@ def plot_lightcurve(autophot_input,sn_peak = None,
     
     if not os.path.exists(output_file_loc):
         print('Cannot find output file in %s /n Checking original file directory' %  output_file_loc)
-        out_dir = autophot_input['fits_dir']
+        out_dir = fits_dir
         output_file_loc = os.path.join(out_dir,output_fname)
         
     elif not os.path.exists(output_file_loc):
@@ -445,9 +363,9 @@ def plot_lightcurve(autophot_input,sn_peak = None,
     
     
     
-    wdir = autophot_input['fits_dir']
+    wdir = fits_dir
 
-    new_dir = '_' + autophot_input['outdir_name']
+    new_dir = '_' + outdir_name
 
     base_dir = os.path.basename(wdir)
     work_loc = base_dir + new_dir
@@ -456,9 +374,8 @@ def plot_lightcurve(autophot_input,sn_peak = None,
     
     saveloc = os.path.join(new_output_dir,'lightcurve.pdf')
 
-    print('Saving lightcurve to: %s' % new_output_dir)
-    plt.savefig(saveloc,
-                bbox_inches='tight')
+    print('S\naving lightcurve to: %s' % new_output_dir)
+    plt.savefig(saveloc,bbox_inches='tight')
     
 
     if not show_plot:

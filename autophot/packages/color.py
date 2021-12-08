@@ -1,73 +1,80 @@
-import os 
-import pickle
+# import os 
+# import pickle
 # load pickle file to dictionary
-def load_obj(fpath):
+# def load_obj(fpath):
+#     '''
+    
+#     :param fpath: DESCRIPTION
+#     :type fpath: TYPE
+#     :return: DESCRIPTION
+#     :rtype: TYPE
 
-    if not fpath.endswith('.pkl'):
-        fpath+= '.pkl'
+#     '''
 
-    with open(fpath, 'rb') as f:
-        return pickle.load(f)
+#     if not fpath.endswith('.pkl'):
+#         fpath+= '.pkl'
 
-# save object as pickle files
-def save_obj(obj,fpath):
+#     with open(fpath, 'rb') as f:
+#         return pickle.load(f)
 
-    if not fpath.endswith('.pkl'):
-        fpath+= '.pkl'
+# # save object as pickle files
+# def save_obj(obj,fpath):
+#     '''
+    
+#     :param obj: DESCRIPTION
+#     :type obj: TYPE
+#     :param fpath: DESCRIPTION
+#     :type fpath: TYPE
+#     :return: DESCRIPTION
+#     :rtype: TYPE
 
-    dirname = os.path.dirname(fpath)
-    os.makedirs(dirname, exist_ok=True)
+#     '''
 
-    with open(fpath + '.pkl', 'wb') as f:
-        pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)
+#     if not fpath.endswith('.pkl'):
+#         fpath+= '.pkl'
+
+#     dirname = os.path.dirname(fpath)
+#     os.makedirs(dirname, exist_ok=True)
+
+#     with open(fpath + '.pkl', 'wb') as f:
+#         pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)
 
 # plus minus funciton
 pm = lambda i: ("+" if float(i) >= 0 else "") + '%.3f' % float(i)
 
-# colors for plotting
-cols = {'u': 'dodgerblue', 'g': 'g', 'r': 'r', 'i': 'goldenrod', 'z': 'k', 'y': '0.5',
-        'Y': '0.5', 'U': 'slateblue', 'B': 'b', 'V': 'yellowgreen', 'R': 'crimson', 'G': 'salmon',
-        'I': 'chocolate', 'J': 'darkred', 'H': 'orangered', 'K': 'saddlebrown',
-        'S': 'mediumorchid', 'D': 'purple', 'A': 'midnightblue',
-        'F': 'hotpink', 'N': 'magenta', 'o': 'darkorange', 'c': 'cyan','W1':'#f46d43','W2':'#9e0142'}
 
-def find_available_colors(autophot_input,
+
+def find_available_colors(wdir,
+                          fits_dir,
+                          outdir_name = 'REDUCED',
                           tele_autophot_input_yml = 'telescope.yml',
                           use_REBIN = True,
                           tol = 1e-3,
                           save_convergent_plots = True,
                           print_output = False):
-    '''
     
-    Should be execute first for color correction and calibration - check dataset
-    :param autophot_input: DESCRIPTION
-    :type autophot_input: TYPE
-    :param tele_autophot_input_yml: DESCRIPTION, defaults to 'telescope.yml'
-    :type tele_autophot_input_yml: TYPE, optional
-    :param use_REBIN: DESCRIPTION, defaults to True
-    :type use_REBIN: TYPE, optional
-    :param tol: DESCRIPTION, defaults to 1e-5
-    :type tol: TYPE, optional
-    :param save_convergent_plots: DESCRIPTION, defaults to True
-    :type save_convergent_plots: TYPE, optional
-    :param print_output: DESCRIPTION, defaults to False
-    :type print_output: TYPE, optional
-    :return: DESCRIPTION
-    :rtype: TYPE
+    
 
-    '''
 
 
     import itertools
     import os
     import pandas as pd
     import numpy as np
+    
+    from autophot.packages.functions import border_msg
+
     from autophot.packages.call_yaml import yaml_autophot_input as cs
+    
+    if fits_dir.endswith('/'):
+        fits_dir = fits_dir[:-1]
+        
+    border_msg('Searching for available color information',body = '=')
+    
+    unavailable_epochs = {}
 
-    teledata = cs(os.path.join(autophot_input['wdir'],tele_autophot_input_yml))
-    tele_autophot_input = teledata.load_vars()
 
-    default_output_loc = autophot_input['fits_dir']+'_'+autophot_input['outdir_name']
+    default_output_loc = '_'.join([fits_dir,outdir_name])
 
     calib_files = {}
 
@@ -82,9 +89,12 @@ def find_available_colors(autophot_input,
                  calib_files[i] = (out_loc,calib_loc)
                  i+=1
 
-    default_dmag = autophot_input['default_dmag']
-    # print(default_dmag)
-
+    base_filepath ='/'.join(os.path.os.path.dirname(os.path.abspath(__file__)).split('/')[0:-1])
+    filters_yml = 'filters.yml'
+    filters_input = cs(os.path.join(base_filepath+'/databases',filters_yml )).load_vars()
+    
+    default_dmag = filters_input['default_dmag']
+    
     OutFile  = pd.concat([pd.read_csv(i[0]) for i in calib_files.values()],ignore_index = True)
     OutFile.set_index = list(calib_files.keys())
     
@@ -115,6 +125,7 @@ def find_available_colors(autophot_input,
             
             if tele not in required_color_terms:
                 required_color_terms[tele] = {}
+                
                 
             if inst_key not in required_color_terms[tele]:
                 required_color_terms[tele][inst_key] = {}
@@ -202,22 +213,50 @@ def find_available_colors(autophot_input,
                         break
                     
                 if not combo_found:
-
-                    print('\nNo Color Combination for MJD: %d' % (epoch))
-                    print('Filter: %s :: Available Filters: %s' %(f,list(Filter_loc.keys())))
-                    print('Tele: %s :: InstKey: %s :: Inst: %s' % (tele,inst_key,inst))
+                    
+                    # msg = '\nMissing %s band on %.1f MJD\n\t [Tele: %s :: InstKey: %s :: Inst: %s]' % ( f, epoch,  tele,inst_key,inst) 
+                    if tele not in unavailable_epochs:
+                        unavailable_epochs[tele] = {}
+                        
+                    if inst_key not in unavailable_epochs[tele]:
+                        unavailable_epochs[tele][inst_key] = {}
+                        
+                    if inst not in unavailable_epochs[tele][inst_key]:
+                        unavailable_epochs[tele][inst_key][inst] = {}
+                        
+                    if f not in unavailable_epochs[tele][inst_key][inst]:
+                        unavailable_epochs[tele][inst_key][inst][f] = []
+                        
+                    unavailable_epochs[tele][inst_key][inst][f].append(epoch)
     
-    from autophot.packages.functions import border_msg
+  
     for tele in required_color_terms:
         for inst_key in required_color_terms[tele]:
             for inst in required_color_terms[tele][inst_key]:
-                border_msg('Tele: %s :: InstKey: %s :: Inst:  %s' % (tele,inst_key,inst))
+                border_msg('Tele: %s :: InstKey: %s :: Inst:  %s' % (tele,inst_key,inst),corner = '<>')
+                
                 for f in required_color_terms[tele][inst_key][inst]:
                     
                     for cc in  list(set(required_color_terms[tele][inst_key][inst][f])):
                         
                         
                         print('Required Color terms for %s-band:\n %s' % (f,cc))
+                        
+    for tele in unavailable_epochs:
+        for inst_key in unavailable_epochs[tele]:
+            for inst in unavailable_epochs[tele][inst_key]:
+                if len(unavailable_epochs[tele][inst_key][inst])==0:
+                    continue
+                border_msg('Missing Filters for Tele: %s :: Inst:  %s' % (tele,inst),corner = '!')
+                
+                
+                for f in unavailable_epochs[tele][inst_key][inst]:
+                    missing_epochs = ', '.join([str(i) for i in unavailable_epochs[tele][inst_key][inst][f]])
+                    print('Missing color bands for %s-band on %s' % (f,missing_epochs))
+
+    print('\nRequired color combination written to file[s] output files [%s]' % 'outs.csv')
+    
+    
     return
 
 
@@ -226,81 +265,9 @@ def find_available_colors(autophot_input,
 # =============================================================================
 # Build database of colors
 # =============================================================================
-def plot_color_histrogram(data,saveloc,
-                          title = 'None',
-                          xlabel = 'None',
-                          ylabel = 'None'):
-    '''
-    
-    Plot distribution of color slope for given instrument and save to specific folder
-    
-    :param data: DESCRIPTION
-    :type data: TYPE
-    :param saveloc: DESCRIPTION
-    :type saveloc: TYPE
-    :param title: DESCRIPTION, defaults to 'None'
-    :type title: TYPE, optional
-    :param xlabel: DESCRIPTION, defaults to 'None'
-    :type xlabel: TYPE, optional
-    :param ylabel: DESCRIPTION, defaults to 'None'
-    :type ylabel: TYPE, optional
-    :return: DESCRIPTION
-    :rtype: TYPE
-
-    '''
-    
-    
-    import matplotlib.pyplot as plt
-    plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
-    from autophot.packages.functions import set_size
-
-    plt.ioff()
-
-    fig = plt.figure(figsize = set_size(500,1))
-    ax1 = fig.add_subplot(111)
-
-    ax1.errorbar(data['x'],data['y'],
-                 yerr = data['y_e'],
-                 xerr = data['x_e'],
-                 ls = '',
-                 lw = 0.5,
-                 marker = 'o',
-                 color = 'blue',
-                 ecolor = 'black',
-                 capsize = 2)
-    if title:
-        ax1.set_title(title)
-
-    if xlabel:
-        ax1.set_xlabel(xlabel)
-
-    if ylabel:
-        ax1.set_ylabel(ylabel)
-
-    fig.savefig(saveloc,bbox_inches = 'tight')
-
-    plt.close(fig)
-
-
-    return
-
-
 
 def save_colors(loc,d,append = True,update_plot = False):
-    '''
-    
-    :param loc: DESCRIPTION
-    :type loc: TYPE
-    :param d: DESCRIPTION
-    :type d: TYPE
-    :param append: DESCRIPTION, defaults to True
-    :type append: TYPE, optional
-    :param update_plot: DESCRIPTION, defaults to False
-    :type update_plot: TYPE, optional
-    :return: DESCRIPTION
-    :rtype: TYPE
 
-    '''
     
     from datetime import date
     import os
@@ -362,18 +329,24 @@ def save_colors(loc,d,append = True,update_plot = False):
                         with open(os.path.join(CI_loc,txtname), 'a+') as file:
                             file.write(text)
 
-                        if update_plot:
-                            figname = '%s_band_CI_%s_%s.pdf' % (f,CI.split('_')[0],CI.split('_')[1])
-                            saveloc = os.path.join(CI_loc,figname)
-                            plot_color_histrogram(df_new,saveloc,
-                                                  title = 'CI %s -> %s -> %s' % (tele,inst_key,inst),
-                                                  xlabel = '$M_{%s,Cat} - M_{%s,Cat}$' % tuple(CI.split('_')),
-                                                  ylabel  = '$M_{%s,Cat} - M_{%s,Inst} - ZP_{%s}$' %(f,f,f))
+                        # if update_plot:
+                        #     figname = '%s_band_CI_%s_%s.pdf' % (f,CI.split('_')[0],CI.split('_')[1])
+                        #     saveloc = os.path.join(CI_loc,figname)
+                        #     plot_color_histrogram(df_new,saveloc,
+                        #                           title = 'CI %s -> %s -> %s' % (tele,inst_key,inst),
+                        #                           xlabel = '$M_{%s,Cat} - M_{%s,Cat}$' % tuple(CI.split('_')),
+                        #                           ylabel  = '$M_{%s,Cat} - M_{%s,Inst} - ZP_{%s}$' %(f,f,f))
     return
 
 
 
-def build_db(autophot_input,
+
+# =============================================================================
+# BUILD DATABSE
+# =============================================================================
+def build_db(fits_dir,
+             wdir,
+             outdir_name='REDUCED',
              use_REBIN = True,
              refresh = False,
              ytol_upper = 1,
@@ -403,18 +376,24 @@ def build_db(autophot_input,
     import pandas as pd
     import pathlib
     import numpy as np
+    from autophot.packages.call_yaml import yaml_autophot_input as cs
+    from autophot.packages.functions import border_msg
 
     
-    print('\nCompiling database to build color terms\n')
+    border_msg('Compiling database to build color terms',body = '=')
 
     # get calibration files from each file down in autophot
     calib_files = []
+    
+        
+    if fits_dir.endswith('/'):
+        fits_dir = fits_dir[:-1]
 
     # Where the output folder should be 
-    default_output_loc = autophot_input['fits_dir']+'_'+autophot_input['outdir_name']
+    default_output_loc = '_'.join([fits_dir,outdir_name])
     
     # Where the color information is going to be saved
-    color_dir = os.path.join(autophot_input['wdir'],'color')
+    color_dir = os.path.join(wdir,'color')
 
     # go and get calibration files for each image 
     for root, dirs, files in os.walk(default_output_loc):
@@ -422,7 +401,7 @@ def build_db(autophot_input,
              if fname.startswith(('image_calib')):
                  calib_files.append(os.path.join(root,fname))
 
-    print('\nFound %d calibration files\n' % len(calib_files))
+    print('Found %d calibration files\n' % len(calib_files))
 
     
 
@@ -430,7 +409,11 @@ def build_db(autophot_input,
 
     pathlib.Path(color_dir).mkdir(parents = True, exist_ok=True)
  
-    default_dmag = autophot_input['default_dmag']
+    base_filepath ='/'.join(os.path.os.path.dirname(os.path.abspath(__file__)).split('/')[0:-1])
+    filters_yml = 'filters.yml'
+    filters_input = cs(os.path.join(base_filepath+'/databases',filters_yml )).load_vars()
+    
+    default_dmag = filters_input['default_dmag']
     
     for i in range(len(calib_files)):
 
@@ -439,11 +422,11 @@ def build_db(autophot_input,
         try:
 
             # load in calib file
-            calib_file = pd.read_csv(calib_files[i],error_bad_lines=False)
+            calib_file = pd.read_csv(calib_files[i])
 
             #  get out.csv path
             out_file = os.path.join(os.path.dirname(calib_files[i]),'out.csv')
-            info_file = pd.read_csv(out_file,error_bad_lines=False)
+            info_file = pd.read_csv(out_file)
 
             inst_key = str(info_file['INSTRUME'][0])
             inst = str(info_file['instrument'][0])
@@ -477,7 +460,7 @@ def build_db(autophot_input,
             if inst not in master_dict[telescop][inst_key].keys():
                 master_dict[telescop][inst_key][inst]={}
                 
-            found_available_colors=False
+            # found_available_colors=False
             
             # add inverse too
             color_combo = color_combo + [i[::-1] for i in color_combo]
@@ -500,7 +483,8 @@ def build_db(autophot_input,
                     
                     # print('found %s in calibration file ' % cc[0])
                     
-                    found_available_colors = True
+                    # found_available_colors = True
+                    pass
 
                 if CI not in master_dict[telescop][inst_key][inst][colorfilter]:
 
@@ -526,7 +510,7 @@ def build_db(autophot_input,
                 
                 # Included zeropoint from image to make the yaxis hover around zero
                 zp  = float(info_file['zp_%s' % colorfilter][0])
-                zp_e =float(info_file['zp_%s_err' % colorfilter][0])
+                # zp_e =float(info_file['zp_%s_err' % colorfilter][0])
 
                 yaxis = mcat - minst - zp
                 yaxis_err = np.sqrt(mcat_e**2 + minst_e**2)
@@ -555,7 +539,7 @@ def build_db(autophot_input,
     print(' ... done')
 
     # Save these to "color" folder in working dir -
-    fpath = os.path.join(autophot_input['wdir'],'color')
+    fpath = os.path.join(wdir,'color')
 
     # data with nest telescope/instrument structure with a pickle file
     save_colors(fpath,master_dict)
@@ -652,7 +636,10 @@ def EMCEE_main(p0,nwalkers,niter,ndim,lnprob,args,niter_burn=100):
 
     return sampler, pos, prob, state
 
-def get_colorslope_emcee(autophot_input,
+def get_colorslope_emcee(wdir,
+                         fits_dir,
+                         outcsv_name = 'REDUCED',
+                         outdir_name = 'REDUCED',
                          err_lim=2,
                          nsteps = 1500,
                          niter_burn = 200,
@@ -668,46 +655,48 @@ def get_colorslope_emcee(autophot_input,
                          include_inverse = True):
 
     import os
-    import scipy.optimize as op
+    # import scipy.optimize as op
     from autophot.packages.call_yaml import yaml_autophot_input as cs
     from autophot.packages.functions import set_size,border_msg
-    import emcee
+    # import emcee
     import pandas as pd
     import numpy as np
     import warnings
     from scipy import stats
     from astropy.stats import sigma_clip
     import matplotlib.pyplot as plt
-    import os
+    from datetime import date
     
+    if fits_dir.endswith('/'):
+        fits_dir = fits_dir[:-1]
     
-    
+    base_filepath ='/'.join(os.path.os.path.dirname(os.path.abspath(__file__)).split('/')[0:-1])
     dir_path = os.path.dirname(os.path.realpath(__file__))
     plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
 
     # dd/mm/YY
-    from datetime import date
     today = date.today().strftime("%d_%m_%Y")
     
     # Directory where colors info is saved
-    color_dir = os.path.join(autophot_input['wdir'],'color')
+    color_dir = os.path.join(wdir,'color')
 
     # telescope information
     tele_autophot_input_yml = 'telescope.yml'
-    teledata = cs(os.path.join(autophot_input['wdir'],tele_autophot_input_yml))
+    teledata = cs(os.path.join(wdir,tele_autophot_input_yml))
     tele_autophot_input = teledata.load_vars()
 
-
+    
+    filters_yml = 'filters.yml'
+    filters_input = cs(os.path.join(base_filepath+'/databases',filters_yml )).load_vars()
+    default_dmag = filters_input['default_dmag']
+    filter_cols = filters_input['filter_colors']
+    
     # get color_equation files from each file down in autophot
     TeleInst = {}
 
-    m_guess = 0
-    b_guess = 0
-    f_guess = 0.5
-
     # load in output file - Usually names REDCUED csv
-    output_fname = autophot_input['outcsv_name']+'.csv'
-    OutFile_loc = os.path.join( autophot_input['fits_dir'] + '_' +autophot_input['outdir_name'], output_fname)
+    output_fname = outcsv_name+'.csv'
+    OutFile_loc = os.path.join( fits_dir + '_' +outdir_name, output_fname)
     OutFile = pd.read_csv(OutFile_loc)
 
     # look in outfile for what color combinations we need
@@ -741,7 +730,7 @@ def get_colorslope_emcee(autophot_input,
         elif not 'color_combo' in row and fit_all:
             
             # Lets fit all information that we have
-            color_combo = autophot_input['default_dmag'][Filter]
+            color_combo = default_dmag[Filter]
             color_combo = '_'.join(color_combo) 
     
         else:
@@ -759,6 +748,9 @@ def get_colorslope_emcee(autophot_input,
                 TeleInst[tele][inst_key][inst][Filter].append(color_combo)
     
     # Check that we have all the correct color terms ready to go
+    
+    
+    border_msg('Fitting color slope using ECMEE',body = '=')
     for tele in TeleInst.keys():
         for inst_key in TeleInst[tele].keys():
             for inst in TeleInst[tele][inst_key].keys():
@@ -778,7 +770,7 @@ def get_colorslope_emcee(autophot_input,
     for tele in TeleInst.keys():
         for inst_key in TeleInst[tele].keys():
             for inst in TeleInst[tele][inst_key].keys():
-                border_msg('Tele: %s :: InstKey: %s :: Inst:  %s' % (tele,inst_key,inst))
+                border_msg('Tele: %s :: InstKey: %s :: Inst:  %s' % (tele,inst_key,inst),corner = '<>')
                 for f in list(TeleInst[tele][inst_key][inst].keys()):
                     required_cc =  ', '.join(list(set(TeleInst[tele][inst_key][inst][f])))
                     print('Required Color terms for %s-band:\n %s' % (f,required_cc))
@@ -800,7 +792,7 @@ def get_colorslope_emcee(autophot_input,
 
                 tmp = {}
                 
-                border_msg('Tele: %s :: InstKey: %s :: Inst:  %s' % (tele,inst_key,inst))
+                border_msg('Tele: %s :: InstKey: %s :: Inst:  %s' % (tele,inst_key,inst),corner = '*')
 
                 for f in TeleInst[tele][inst_key][inst].keys():
 
@@ -917,7 +909,7 @@ def get_colorslope_emcee(autophot_input,
                             # y_e[y_e>0.3] = 0.1
 
 
-                            print('\nFitting: %s :: %s - %s' % (f,cc[0],cc[1]))
+                            print('Fitting: %s :: %s - %s\n' % (f,cc[0],cc[1]))
 
                             ndim = 5
                             p0 = np.array([0, 0, 0.7, 0.0, np.log(2.0)])
@@ -1011,8 +1003,9 @@ def get_colorslope_emcee(autophot_input,
                                 ax1 = fig.add_subplot(spec[0, :])
                                 ax2 = fig.add_subplot(spec[1, :],sharex = ax1)
                                 
-                                col = autophot_input['filter_colors'][f]
+                                col = filter_cols[f]
                                 alpha = 1
+                                
                                 if use_sigma_clip:
                                     alpha = 0.1
                                     markers, caps, bars =  ax1.errorbar(x,y,
@@ -1051,12 +1044,12 @@ def get_colorslope_emcee(autophot_input,
                                 
                                 linefit = m_mcmc[0]*CI_data['x']+b_mcmc[0]
                                 
-                                slope_high = m_mcmc[0]+m_mcmc[1]
-                                slope_low  = m_mcmc[0]-m_mcmc[2]
+                                # slope_high = m_mcmc[0]+m_mcmc[1]
+                                # slope_low  = m_mcmc[0]-m_mcmc[2]
                                 
                                 # print(slope_high,slope_low)
-                                linefit_upperr =  slope_high*x_plot+b_mcmc[0] + b_mcmc[1] 
-                                linefit_lowerr =  slope_low*x_plot+b_mcmc[0] - b_mcmc[2] 
+                                # linefit_upperr =  slope_high*x_plot+b_mcmc[0] + b_mcmc[1] 
+                                # linefit_lowerr =  slope_low*x_plot+b_mcmc[0] - b_mcmc[2] 
                                 
                                 # print(linefit_upperr)
                                 ax1.plot(x_plot, linefit_plot,
@@ -1127,9 +1120,7 @@ def get_colorslope_emcee(autophot_input,
         if bool(to_update):
 
             # If there is something to update
-            print('\n--------------------------')
-            print('Updating Telescope.yml ... ')
-            print('--------------------------\n')
+            border_msg('Updating Telescope.yml',corner = '!')
             teledata.update_var(tele,inst_key,inst,'color_index',to_update)
 
     return
@@ -1143,7 +1134,11 @@ def calc_zeropoint(true_mag,inst_mag,ct,mag_c1,mag_c2):
     return zeropoint
 
 
-def correct_zeropoint(autophot_input,
+def correct_zeropoint(wdir,
+                      fits_dir,
+                      outcsv_name = 'REDUCED',
+                      outdir_name = 'REDUCED',
+                      matching_source_SNR_limit = 10,
                       use_REBIN = True,
                       return_plot = True,
                       print_output= False,
@@ -1151,30 +1146,43 @@ def correct_zeropoint(autophot_input,
 
 
     from autophot.packages.call_yaml import yaml_autophot_input as cs
-    from autophot.packages.recover_output import recover
-    from autophot.packages.functions import set_size
+    # from autophot.packages.recover_output import recover
+    from autophot.packages.functions import set_size,border_msg
+    
+    from astropy.stats import sigma_clip, mad_std
+    
+    
     import os
     import pandas as pd
     import numpy as np
+  
+    import matplotlib.pyplot as plt
+    
+        
+    if fits_dir.endswith('/'):
+        fits_dir = fits_dir[:-1]
+    
+    
+    base_filepath ='/'.join(os.path.os.path.dirname(os.path.abspath(__file__)).split('/')[0:-1])
     
     dir_path = os.path.dirname(os.path.realpath(__file__))
-    import matplotlib.pyplot as plt
+    
     plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
 
     tele_autophot_input_yml = 'telescope.yml'
 
-    teledata = cs(os.path.join(autophot_input['wdir'],tele_autophot_input_yml))
+    teledata = cs(os.path.join(wdir,tele_autophot_input_yml))
     tele_autophot_input = teledata.load_vars()
 
     # Look for all the calibration files in the output folder
-    print('\nColor correcting zeropoint magnitudes')
-    print('-------------------------------------\n')
+    border_msg('Color correcting zeropoint magnitudes',body = '=')
+    # print('-------------------------------------\n')
 
-    # default_output_loc = autophot_input['fits_dir']+'_'+autophot_input['outdir_name']
+    # default_output_loc = fits_dir+'_'+outdir_name
 
     # dmag = autophot_input['default_dmag']
 
-    default_output_loc = autophot_input['fits_dir']+'_'+autophot_input['outdir_name']
+    default_output_loc = fits_dir+'_'+outdir_name
 
     calib_files = {}
     # go and get calibration files
@@ -1192,6 +1200,13 @@ def correct_zeropoint(autophot_input,
     OutFile.set_index = list(calib_files.keys())
 
     FilterSet = []
+    
+    filters_yml = 'filters.yml'
+    base_filepath ='/'.join(os.path.os.path.dirname(os.path.abspath(__file__)).split('/')[0:-1])
+    filters_input = cs(os.path.join(base_filepath+'/databases',filters_yml )).load_vars()
+    default_dmag = filters_input['default_dmag']
+    cols = filters_input['filter_colors']
+    
 
     for i, value in calib_files.items():
 
@@ -1200,30 +1215,21 @@ def correct_zeropoint(autophot_input,
         OutFile = pd.read_csv(files [0])
         CalibFile = pd.read_csv(files [1])
         
-        # TODO: fix this 
-        import logging as logger
-        try:
-            logger = logging.getLogger(__name__)
-        except:
-            pass
-        
-        # remove sources that are low SNR
-        if autophot_input['matching_source_SNR'] :
-            len_all_SNR = len(CalibFile)
-            limit = autophot_input['matching_source_SNR_limt']
-            SNR_mask = abs(CalibFile['SNR'].values) >= autophot_input['matching_source_SNR_limt']
-            if np.sum(SNR_mask) > 0 :
-                CalibFile = CalibFile[SNR_mask]
-            else:
-                print('No sequence soures with SNR > %d' % autophot_input['matching_source_SNR_limt'])
-                while limit > 5:
-                    logger.info('Checking for source at SNR > %d' % limit)
-                    SNR_mask = abs(CalibFile['SNR'].values) >= limit
-                    if np.sum(SNR_mask) > 0 :
-                        CalibFile = CalibFile[SNR_mask]
-                        break
-                    else:
-                        limit-=0.5
+
+        limit = matching_source_SNR_limit
+        SNR_mask = abs(CalibFile['SNR'].values) >= matching_source_SNR_limit
+        if np.sum(SNR_mask) > 0 :
+            CalibFile = CalibFile[SNR_mask]
+        else:
+            print('No sequence soures with SNR > %d' % matching_source_SNR_limit)
+            while limit > 5:
+                # logger.info('Checking for source at SNR > %d' % limit)
+                SNR_mask = abs(CalibFile['SNR'].values) >= limit
+                if np.sum(SNR_mask) > 0 :
+                    CalibFile = CalibFile[SNR_mask]
+                    break
+                else:
+                    limit-=0.5
         
         
         
@@ -1232,7 +1238,7 @@ def correct_zeropoint(autophot_input,
         inst_key = OutFile['INSTRUME'].values[0]
         inst = OutFile['instrument'].values[0]
         
-        Filter = [i for i in OutFile if i in autophot_input['default_dmag']]
+        Filter = [i for i in OutFile if i in default_dmag]
         
         if len(Filter) == 0:
             # print('Cannot find filter name')
@@ -1288,7 +1294,7 @@ def correct_zeropoint(autophot_input,
         
         
         CT = CT_params['m']
-        CT_err = CT_params['m_err']
+        # CT_err = CT_params['m_err']
 
         if 'cat_'+CC[0] not in CalibFile or 'cat_'+CC[1] not in CalibFile:
             missing_filter = [i for i in CC if i not in CalibFile ]
@@ -1305,10 +1311,10 @@ def correct_zeropoint(autophot_input,
 
                                                 )
         
-        from astropy.stats import sigma_clip, mad_std
+
         # from autophpt.packages import
         zp_mask = sigma_clip(colorcorrect_zeropoint,
-                              sigma = autophot_input['zp_sigma'],
+                              sigma = 3,
                               maxiters = 10,
                               cenfunc = np.nanmedian,
                               stdfunc = mad_std).mask
@@ -1385,13 +1391,13 @@ def correct_zeropoint(autophot_input,
            OutFile.round(3).to_csv(files[0],index = False)
 
 
-    recover(autophot_input)
+    # recover(autophot_input)
     
     return_plot = False
     if return_plot:
 
-        output_fname = autophot_input['outcsv_name']+'.csv'
-        OutFile_loc = os.path.join( autophot_input['fits_dir'] + '_' +autophot_input['outdir_name'], output_fname)
+        output_fname = outcsv_name+'.csv'
+        OutFile_loc = os.path.join( fits_dir + '_' +outdir_name, output_fname)
         OutFile = pd.read_csv(OutFile_loc)
         
         plt.ioff()
@@ -1454,6 +1460,7 @@ def correct_zeropoint(autophot_input,
 # =============================================================================
 
 def find_nearest_idx(array, value):
+    import numpy as np
     idx = (np.abs(array - value)).argmin()
     return idx
 
@@ -1466,142 +1473,12 @@ def NestedDictValues(d):
       yield v
 
 #  print floats with plus or minus as str
-pm = lambda i: ("+" if float(i) >= 0 else "") + '%.3f'%float(i)
+pm = lambda i: ("+" if float(i) >= 0 else "") + '%.3f' % float(i)
 
 # Function for solving color terms:
 def iteration(mag_inst,zp,ct,m1,m2):
     true_mag = mag_inst + zp + ct*(m1-m2)
     return true_mag
-
-
-def rebin_lightcurve(autophot_input,
-                     use_colorcorrect_zeropoint = True,
-                     weighted_average = False,
-                     check_lmag = False
-                     ):
-
-    import pandas as pd
-    import os
-    import itertools
-
-    output_fname = autophot_input['outcsv_name']+'.csv'
-    OutFile_loc = os.path.join( autophot_input['fits_dir'] + '_' +autophot_input['outdir_name'], output_fname)
-    OutFile = pd.read_csv(OutFile_loc)
-
-    mjd_span  = list(set(np.floor(OutFile.mjd.values)))
-
-    df_rebin = []
-
-    for epoch in mjd_span:
-
-        idx = np.floor(OutFile.mjd) == epoch
-
-        epoch_OutFile_all = OutFile[idx]
-
-        # Get list of telescopes, keys and instruments:
-        tele_list = list(set(epoch_OutFile_all['TELESCOP']))
-        inst_key_list = list(set(epoch_OutFile_all['INSTRUME']))
-        inst_list = list(set(epoch_OutFile_all['instrument']))
-
-        combine_list = [tele_list,inst_key_list,inst_list]
-
-        tele_inst_master = list(itertools.product(*combine_list))
-
-        for i in tele_inst_master:
-
-            tele = i[0]
-            inst_key = i[1]
-            inst = i[2]
-
-            correct_tele_inst_idx = (epoch_OutFile_all['TELESCOP'].values == tele) & (epoch_OutFile_all['INSTRUME'].values == inst_key) & (epoch_OutFile_all['instrument'].values == inst)
-            epoch_OutFile = epoch_OutFile_all[correct_tele_inst_idx]
-
-            # print(epoch_OutFile)
-            epoch_filters=[]
-
-            for index, row in epoch_OutFile.iterrows():
-
-                if len(row) == 0:
-                    # No observations for these instrument combo at this epoch, skip
-                    continue
-
-                Filter = [i for i in dict(row).keys() if i in autophot_input['default_dmag'].keys() and row[i] != 999 and not np.isnan(row[i])][0]
-
-                if Filter in epoch_filters:
-                    continue
-                else:
-                    epoch_filters.append(Filter)
-
-                epoch_filter_obs = epoch_OutFile.dropna(subset=[Filter])
-
-                if len(epoch_filter_obs) == 0:
-                    continue
-                # print(epoch_filter_obs[Filter])
-
-                df_row = pd.DataFrame([])
-                
-                if use_colorcorrect_zeropoint:
-
-                    mag = epoch_filter_obs[Filter+'_inst'].values + epoch_filter_obs['zp_%s_color_corrected'% Filter].values
-
-                    #TODO: Fix this
-                    mag_err =  epoch_filter_obs[Filter+'_err'].values
-
-                else:
-                    mag =  epoch_filter_obs[Filter].values
-                    mag_err =  epoch_filter_obs[Filter+'_err'].values
-
-                if len(mag)==0:
-                    print(epoch_filter_obs['fname'].values)
-
-                if len(mag)>1:
-
-                    epoch_mag_mean = np.nanmean(mag)
-                    epoch_mag_std = np.nanstd(mag)
-                    df_row['rebin'] = [True]
-                    df_row['fname'] = ['+'.join(epoch_filter_obs['fname'].values)]
-
-
-                else:
-                    
-                    epoch_mag_mean = mag[0]
-                    epoch_mag_std = mag_err[0]
-
-                    df_row['rebin'] = [False]
-                    df_row['fname'] = epoch_filter_obs['fname'].values
-
-
-
-                df_row['mjd'] = [np.mean(epoch_filter_obs['mjd'].values)]
-
-                df_row['telescope'] = list(set(epoch_filter_obs['telescope']))
-                df_row['instrument'] = list(set(epoch_filter_obs['instrument']))
-                df_row['TELESCOP'] = list(set(epoch_filter_obs['TELESCOP']))
-                df_row['INSTRUME'] = list(set(epoch_filter_obs['INSTRUME']))
-
-                cc = list(set(epoch_filter_obs['color_combo']))
-
-                df_row['color_combo'] = cc
-
-                df_row[Filter] = [epoch_mag_mean]
-                df_row[Filter+'_err'] = [epoch_mag_std]
-                df_rebin.append(df_row)
-
-
-
-
-
-
-    # print(df_rebin)
-    df_rebin = pd.concat(df_rebin,ignore_index = True)
-
-    output_fname_REBIN = autophot_input['outcsv_name']+'_REBIN'+'.csv'
-    OutFile_REBIN_loc = os.path.join( autophot_input['fits_dir'] + '_' +autophot_input['outdir_name'], output_fname_REBIN)
-
-    df_rebin.to_csv(OutFile_REBIN_loc,index = False)
-
-
-    return True
 
 
 
@@ -1644,7 +1521,10 @@ def jacobi(A,b,tol = 1e-6,N=100,x0=None):
 
 
 
-def colorcorrect_transient(autophot_input,
+def colorcorrect_transient(wdir,
+                           fits_dir,
+                           outcsv_name = 'REDUCED',
+                           outdir_name = 'REDUCED',
                            tol = 1e-5,
                            use_REBIN = False,
                            save_convergent_plots = True,
@@ -1673,32 +1553,45 @@ def colorcorrect_transient(autophot_input,
     import os
     from autophot.packages.call_yaml import yaml_autophot_input as cs
     from autophot.packages.functions import set_size,border_msg
-    from autophot.packages.recover_output import recover
+    # from autophot.packages.recover_output import recover
 
     import pandas as pd
     import numpy as np
     
     
     import matplotlib.pyplot as plt
+    
+    if fits_dir.endswith('/'):
+        fits_dir = fits_dir[:-1]
+    
+    
     dir_path = os.path.dirname(os.path.realpath(__file__))
     plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
     
+    
+    filters_yml = 'filters.yml'
+    base_filepath ='/'.join(os.path.os.path.dirname(os.path.abspath(__file__)).split('/')[0:-1])
+    filters_input = cs(os.path.join(base_filepath+'/databases',filters_yml )).load_vars()
+    
+    default_dmag = filters_input['default_dmag']
+    cols = filters_input['filter_colors']
+    
 
-    print('Correcting transient with color corrections')
+    border_msg('Correcting transient with color corrections',body = '=')
 
     tele_autophot_input_yml = 'telescope.yml'
 
-    teledata = cs(os.path.join(autophot_input['wdir'],tele_autophot_input_yml))
+    teledata = cs(os.path.join(wdir,tele_autophot_input_yml))
     tele_autophot_input = teledata.load_vars()
 
 
     # load in output file - Usually names REDCUED csv
     if use_REBIN:
-        output_fname = autophot_input['outcsv_name']+'_REBIN'+'.csv'
+        output_fname = outcsv_name+'_REBIN'+'.csv'
     else:
-        output_fname = autophot_input['outcsv_name']+'.csv'
+        output_fname = outcsv_name+'.csv'
 
-    OutFile_loc = os.path.join( autophot_input['fits_dir'] + '_' +autophot_input['outdir_name'], output_fname)
+    OutFile_loc = os.path.join( fits_dir + '_' +outdir_name, output_fname)
     OutFile = pd.read_csv(OutFile_loc)
 
 
@@ -1736,7 +1629,7 @@ def colorcorrect_transient(autophot_input,
             for index, row in epoch_OutFile.iterrows():
            
                 try:
-                    Filter = [i for i in dict(row).keys() if i in autophot_input['default_dmag'].keys() and not np.isnan(row[i])][0]
+                    Filter = [i for i in dict(row).keys() if i in default_dmag.keys() and not np.isnan(row[i])][0]
                 except:
                     print('Can not find filter infotmation check file : %s' % row['fname'])
                     continue
@@ -1762,7 +1655,7 @@ def colorcorrect_transient(autophot_input,
                     else:
                         raise Exception
                 except:
-                    print('\nNo color info at this Epoch ... skipping')
+                    print('No color info at this Epoch for %s-band ... skipping' % f)
                     # print('Filename: %s' % OutFile['fname'].values[0])
                     continue
 
@@ -1818,24 +1711,9 @@ def colorcorrect_transient(autophot_input,
                     ZP_c1 = 0
                     ZP_c2 = 0
                         
-                
-                    
-                iter_c1_i = MAG_C1 + ZP_c1
-                iter_c2_i = MAG_C2 + ZP_c2
-
-                
-                
                 # start counter
                 i = 1
 
-                c1_x = [i]
-                c1_y = [iter_c1_i]
-
-                c2_x = [i]
-                c2_y = [iter_c2_i]
-                # print('\n%s - %s' % (tele,inst))
-                # # print('%s : CT %.3f' % (c1,CT_c1) )
-                # # print('%s : CT %.3f' % (c2,CT_c2) )
                 
                 A = np.array([[1-CT_c1,CT_c1],
                               [CT_c2,1-CT_c2]])
@@ -1944,11 +1822,13 @@ def colorcorrect_transient(autophot_input,
 
                 if print_output:
               
-                    print('%s [Slope: %.3f]:: %.3f ->  %.3f d%s: %.3f' % (c1,CT_c1,c1_init[c1],c1_w_CC,c1,c1_init[c1]-c1_w_CC))
-                    print('%s [Slope: %.3f]:: %.3f ->  %.3f d%s: %.3f\n' % (c2,CT_c2,c2_init[c2],c2_w_CC,c2,c2_init[c2]-c2_w_CC))
+                    print('%s [Slope: %s]:: %.3f ->  %.3f d%s: %s' % (c1,pm(CT_c1),c1_init[c1],c1_w_CC,c1,pm(c1_init[c1]-c1_w_CC)))
+                    print('%s [Slope: %s]:: %.3f ->  %.3f d%s: %s\n' % (c2,pm(CT_c2),c2_init[c2],c2_w_CC,c2,pm(c2_init[c2]-c2_w_CC)))
 
 
     OutFile.to_csv(OutFile_loc,index = False)
+    
+    border_msg('Color corrected transietn magnitudes saved to:\n%s' % OutFile_loc,corner = '!')
 
     return
 

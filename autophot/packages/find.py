@@ -3,18 +3,21 @@
 
 def create_circular_mask(h, w, center=None, radius=None):
     '''
-    Create mask centered wihtin a image with height *h* and width *w* centered on *center* with a radius *radius*
+    Create mask centered within a image with height *h* and width *w* centered on
+    *center* with a radius *radius*
     
     :param h: height of image
     :type h: int
     :param w: width of image
     :type w: int
-    :param center: pixel location of mask, defaults to None
-    :type center: tuple with x,y position, optional
-    :param radius: radius of mask in pixels, defaults to None
+    :param center: pixel location of mask, if none, mask out center of image
+    defaults to None
+    :type center: tuple with x, y pixel position, optional
+    :param radius: radius of mask in pixels, if none, use the smallest distance
+    between the center and image walls defaults to None
     :type radius: float, optional
     :return: image with shape h,w with masked regions
-    :rtype: numpy array
+    :rtype: 2D array with height *h* and width *w*
 
     '''
     import numpy as np
@@ -54,35 +57,165 @@ def combine(dictionaries):
     return combined_dict
     
 
-def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
-             bkg_level = 3, max_source_lim = 1000, min_source_lim = 2,
+def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
+             bkg_level = 3, max_source_lim = 1000, min_source_lim = 2, 
              int_scale = 25, fudge_factor = 5, fine_fudge_factor = 0.1,
-             source_max_iter = 50, sat_lvl = 65536, lim_SNR = 3,
-             scale_multipler = 4, sigmaclip_FWHM = True, 
-             sigmaclip_FWHM_sigma = 3, sigmaclip_median = True,
-             sigmaclip_median_sigma = 3, isolate_sources = False,
-             isolate_sources_fwhm_sep = 5, init_iso_scale = 25,
-             remove_boundary_sources = True, pix_bound = 25,
-             save_FWHM_plot = False, 
-             image_analysis = False,
-             save_image_analysis = False,
-             plot_image_analysis = False,
-             use_local_stars_for_FWHM = False, prepare_templates = False,
-             default_moff_beta= 4.765, vary_moff_beta = False,
-             max_fit_fwhm = 30, fitting_method = 'least_square',
-             local_radius = 1000, mask_sources = False,
-             mask_sources_XY_R = None, remove_sat = True, use_moffat = True,
-             image_filter = None, target_name = None, target_x_pix = None,
-             target_y_pix = None, scale = None, use_catalog = None,
-             sigma_lvl = None, fwhm = None
+             source_max_iter = 50, sat_lvl = 65536, lim_threshold_value = 3, scale_multipler = 4,
+             sigmaclip_FWHM_sigma = 3, 
+             sigmaclip_median_sigma = 3, 
+             isolate_sources_fwhm_sep = 5, init_iso_scale = 25, 
+             pix_bound = 25, save_FWHM_plot = False, image_analysis = False,
+             use_local_stars_for_FWHM = False, prepare_templates = False, 
+             vary_moff_beta = False, default_moff_beta= 4.765,
+             max_fit_fwhm = 30, fitting_method = 'least_square', 
+             local_radius = 1000, mask_sources_XY_R = [], 
+             remove_sat = True, use_moffat = True,
+             target_name = None, target_x_pix = None, target_y_pix = None, 
+             scale = None, use_catalog = None, sigma_lvl = None, fwhm = None
              ):
+    '''
     
-    # TODO: ADD in documentation - broken :/
+        Robust function to find FWHM in an image. 
+    
+    The Full Width Half Maximum (FWHM) of point sources in an image is determined
+    by the astronomical seeing when the image was taken, as well as the telescope
+    and instrument optics.
+    
+    AutoPHOT needs to adapt to the number of point sources in an images. A deep
+    image with a large field of view (FoV) will have considerably more sources than
+    a shallow image with a small FoV. Too few sources may lead to poorly sampled
+    (or incorrect) values of the FWHM, while too many sources may indicate the
+    detection threshold is too low (i.e. background noise is detected as a source)
+    and needlessly increases the computation time.
     
     
+    :param image: Image containing sources
+    :type image: 2D array
+    :param wdir: File Path location for where to save plots and tables
+    :type wdir: str
+    :param base: Name of file to distinctly label plots and tables
+    :type base: str
+    :param threshold_value: Initial threshold value for which to search for
+    sources. The detection criteria is initial set to look for sources
+    :math:`threshold\_value \times \sigma_{bkg}` where:math:`\sigma_{bkg}` is the
+    standard deviation of the image. This value is updated during execution. ,
+    defaults to 25
+    :type threshold_value: float, optional
+    :param fwhm_guess: initial guess for the FWHM, this is updated once any source
+    are found, defaults to 5
+    :type fwhm_guess: float, optional
+    :param bkg_level: The number of standard deviations to use for both the lower
+    and upper clipping limit when determining the background level,  defaults to 3
+    :type bkg_level: float, optional
+    :param max_source_lim: Maximum number of sources to search for. If more sources
+    are found, increase threshold value, defaults to 1000
+    :type max_source_lim: int, optional
+    :param min_source_lim: Minimum amount of sources to search for. If less than
+    this value are found, an error is raise, defaults to 2
+    :type min_source_lim: int, optional
+    :param int_scale: Initial size of the cutout to place around sources. This
+    value is updated, defaults to 25
+    :type int_scale: int, optional
+    :param fudge_factor: Large step size when increasing/decreasing the
+    :math:`threshold\_value`, defaults to 5
+    :type fudge_factor: float, optional
+    :param fine_fudge_factor: If the code runs into an issue when there is too
+    large of a change in sources detected per step size, we assumed that we are now
+    detecting background noise. In this case we switch to this value and change the
+    :math:`threshold\_value`, by a small increment. This is also used if the
+    :math:`threshold\_value` drops below :math:`5\sigma_bkg` defaults to 0.1
+    :type fine_fudge_factor: float, optional
+    :param source_max_iter: Backstop to inhibit the source detection algorithm to
+    execute for too long. The code my take a long time if initial too many sources
+    are found and you start of with too long of an initial
+    :math:`threshold\_value`, or if it cannot find any sources about the background
+    level defaults to 50
+    :type source_max_iter: Init, optional
+    :param sat_lvl: Counts level above which any detected source is deemed
+    saturated and discarded, defaults to 65536
+    :type sat_lvl: float, optional
+    :param lim_theshold_value: If the threshold_value decreases below this value,
+    use :math:`fine\_fudge\_factor`, defaults to 5
+    :type lim_theshold_value: float, optional
+    :param scale_multipler: Integer times the FWHM used when creating the new
+    cutout size, defaults to 4
+    :type scale_multipler: int, optional
+    
+    :param sigmaclip_FWHM_sigma: DESCRIPTION, defaults to 3
+    :type sigmaclip_FWHM_sigma: TYPE, optional
+    
+    :param sigmaclip_median_sigma: DESCRIPTION, defaults to 3
+    :type sigmaclip_median_sigma: TYPE, optional
+    
+    :param isolate_sources_fwhm_sep: Isolate detected sources by this amount times
+    the FWHM, defaults to 5
+    :type isolate_sources_fwhm_sep: float, optional
+    :param init_iso_scale: Initial distance to isolated detected sources by,
+    defaults to 25
+    :type init_iso_scale: float, optional
+    :param pix_bound: Ignore sources near the edge of the image. Value given in
+    pixels, defaults to 25
+    :type pix_bound: float, optional
+    :param save_FWHM_plot: If True, plot a distribution of the FWHM values,
+    defaults to False
+    :type save_FWHM_plot: bool, optional
+    :param image_analysis: If True, plot a distribution of the FWHM values across
+    the image and save this information as a *csv* file, defaults to False
+    :type image_analysis: bool, optional
+    :param use_local_stars_for_FWHM: If True, use stars within *local_radius*
+    pixels to determine the FWHM. This is useful if there is a spread of FWHM
+    values across the image, defaults to False
+    :type use_local_stars_for_FWHM: bool, optional
+    :param prepare_templates: IF True, preform FWHM measurements on template image,
+    defaults to False
+    :type prepare_templates: bool, optional
+    
+    :param fitting_method: Fitting method when measuring the FWHM, defaults to
+    'least_square'
+    :type fitting_method: str, optional
+    :param local_radius: Distance from target location to search for stars and find
+    FWHM value, defaults to 1000
+    :type local_radius: float, optional
+    :param mask_sources_XY_R: List of tuples containing sources to be masked in
+    formation [(x_pix,y_pix,radius)], defaults to None
+    :type mask_sources_XY_R: List of Tuples, optional
+    :param remove_sat: If True, remove sources that have a maximum brightness
+    greater than *sat_lvl*, defaults to True
+    :type remove_sat: bool, optional
+    :param use_moffat: If True, use a moffat function for FWHM fitting defaults to
+
+    :type use_moffat: bool, optional
+    :param default_moff_beta: Default value for the Moffat function exponent,
+    defaults to 4.765
+    :type default_moff_beta: float, optional
+    :param vary_moff_beta: If True, allowing the :math:`\beta` exponent in the
+    Moffat function to vary. This may become unstable, defaults to False
+    :type vary_moff_beta: bool, optional
+    :param max_fit_fwhm: Maximum FWHM allowed when fitting analytical function,
+    defaults to 30
+    :type max_fit_fwhm: float, optional
+    :param target_x_pix: X pixel coordinate of target. If given, exclude the
+    general location of the target when fitting for the FWHM defaults to None
+    :type target_x_pix: float, optional
+    :param target_y_pix: Y pixel coordinate of target.If given, exclude the general
+    location of the target when fitting for the FWHM, defaults to None
+    :type target_y_pix: float, optional
+    :param scale: If known, preset the cutout size to this value. Cutout size =
+    (:math:`2\times scale`, :math:`2 \times scale`), defaults to None
+    :type scale: int, optional
+    :param use_catalog: If True, use a catalog containing the columns *x_pix* and
+    *y_pix* instead of using source detection. This variable source correspond to
+    the filepath of the catalog *csv* file, defaults to None
+    :type use_catalog: str, optional
+    
+    :return: Returns the image FWHM, a dataframe containing information on the
+    fitted sources, the updated cutout scale and the :math:`image\_params`
+    dictionary containing information on the best fitting analytical model
+    :rtype: List of objects
     
 
-    
+    '''
+
 
     from astropy.stats import sigma_clipped_stats
  
@@ -91,7 +224,6 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
-    import lmfit
     from astropy.stats import sigma_clip
     import logging
     import os
@@ -99,9 +231,11 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
     
     from autophot.packages.functions import gauss_sigma2fwhm,gauss_2d,gauss_fwhm2sigma
     from autophot.packages.functions import moffat_2d,moffat_fwhm
-    from autophot.packages.functions import set_size,pix_dist
+    from autophot.packages.functions import set_size,pix_dist,border_msg
 
     logger = logging.getLogger(__name__)
+    
+    border_msg('Finding Full Width Half Maximum')
     
     dir_path = os.path.dirname(os.path.realpath(__file__))
     plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
@@ -170,7 +304,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
         
         mask = np.zeros(image.shape)
 
-    if mask_sources and not prepare_templates:
+    if len(mask_sources_XY_R)>0 and not prepare_templates:
 
         h, w = mask.shape
         for X_mask,Y_mask,R_mask in mask_sources_XY_R:
@@ -192,13 +326,13 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
         
         if image_median > 60000 and remove_sat:
             
-            logger.info('High background level [%d counts] - ignoring saturated  stars' % median)
+            logger.info('High background level [%d counts] - ignoring saturated  stars' % image_median)
 
             remove_sat = False
 
         if not (sigma_lvl is None):
             
-            logger.debug('Image stats: Mean %.3f :: Median %.3f :: std %.3f' % (mean,median,std))
+            logger.debug('Image stats: Mean %.3f :: Median %.3f :: std %.3f' % (image_mean,image_median,image_std))
 
 
         # decrease
@@ -246,7 +380,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
         #  Setup FWHM fitting model
         # =============================================================================
 
-        shape = int(2*int_scale),int(2*int_scale)
+        # shape = int(2*int_scale),int(2*int_scale)
         
         x_pix = np.arange(0, 2 * int_scale)
         y_pix = np.arange(0, 2 * int_scale)
@@ -319,7 +453,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
 
                 else:
                     search_image[int(target_y_pix)-int_scale: int(target_y_pix) + int_scale,
-                                 int(target_x_pix)-int_scale: int(target_x_pix) + int_scale] =  imagel_median * np.ones((int(2*int_scale),int(2*int_scale)))
+                                 int(target_x_pix)-int_scale: int(target_x_pix) + int_scale] =  image_median * np.ones((int(2*int_scale),int(2*int_scale)))
         except:
             print('Target position not defined - ignoring for now')
             
@@ -329,12 +463,10 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                 # Use sources given in Catalog/Sequence stars
                 if using_catalog_sources:
                     
-                    sources = use_catalog
+                    sources = pd.read_csv(use_catalog,sep = ' ')
+                   
                     sources = sources.rename(columns={'x_pix': 'xcentroid', 'y_pix': 'ycentroid'})
-                    
-                    sources = sources[~np.isnan(sources[image_filter])]
-                    
-                    sources = sources.sort_values(by = image_filter ,ascending = True).head(100)
+
                 
                     if len(sources) == 0:
                         using_catalog_sources = not using_catalog_sources
@@ -352,16 +484,16 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                     threshold_value_check = threshold_value + n - m
 
                     # if <=0 reverse previous drop and and fine_fudge factor
-                    if threshold_value_check  < lim_SNR and not decrease_increment:
+                    if threshold_value_check  < lim_threshold_value and not decrease_increment:
                         
-                            logger.warning('Threshold value has gone below background limit [%d sigma] - increasing by smaller increment ' % lim_SNR)
+                            logger.warning('Threshold value has gone below background limit [%d sigma] - increasing by smaller increment ' % lim_threshold_value)
 
                             # revert previous decrease
                             decrease_increment = True
                             
                             m = fudge_factor
                             
-                    elif threshold_value_check  < lim_SNR and decrease_increment:
+                    elif threshold_value_check  < lim_threshold_value and decrease_increment:
                         
                         raise Exception('FWHM detection failed - cannot find suitable threshold value ')
                         
@@ -490,6 +622,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                             m = 0
                             
                         except Exception as e:
+                            print(e)
                             pass
                         
                     
@@ -543,14 +676,16 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
 
                     continue
                 
-                if remove_boundary_sources and not decrease_increment:
+ 
 
-                    with_boundary = len(sources)
+                with_boundary = len(sources)
 
-                    sources = sources[sources['xcentroid'] < image.shape[1] - pix_bound ]
-                    sources = sources[sources['xcentroid'] > pix_bound ]
-                    sources = sources[sources['ycentroid'] < image.shape[0] - pix_bound ]
-                    sources = sources[sources['ycentroid'] > pix_bound ]
+                sources = sources[sources['xcentroid'] < image.shape[1] - pix_bound ]
+                sources = sources[sources['xcentroid'] > pix_bound ]
+                sources = sources[sources['ycentroid'] < image.shape[0] - pix_bound ]
+                sources = sources[sources['ycentroid'] > pix_bound ]
+                
+                if with_boundary - len(sources) >0:
 
                     logger.info('Removed %d sources near boundary' % (with_boundary - len(sources)))
 
@@ -587,7 +722,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                         if len(dist) == 0:
                             dist = [0]
 
-                        if min(dist) <= init_iso_scale and isolate_sources and not using_catalog_sources:
+                        if min(dist) <= init_iso_scale  and not using_catalog_sources:
 
                             not_isolated+=1
 
@@ -707,15 +842,15 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                             bkg_approx = result.params['sky'].value
   
                             # TODO: Find better way to ignore low SNR catalog sources if it is used
-                            if using_catalog_sources and A<5*std:
+                            # if using_catalog_sources and A<5*std:
                                  
-                                 fwhm_list.append(np.nan)
-                                 fwhm_list_err.append(np.nan)
-                                 medianlst.append(np.nan)
-                                 x_rc.append(x0)
-                                 y_rc.append(y0)
+                            #      fwhm_list.append(np.nan)
+                            #      fwhm_list_err.append(np.nan)
+                            #      medianlst.append(np.nan)
+                            #      x_rc.append(x0)
+                            #      y_rc.append(y0)
 
-                                 continue
+                            #      continue
 
                             if remove_sat:
                                  
@@ -738,8 +873,8 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                                  source_image_params = dict(alpha=result.params['alpha'].value,
                                                             beta=result.params['beta'].value)
 
-                                 source_image_params_STD = dict(alpha=result.params['alpha'].stderr,
-                                                                beta=result.params['beta'].stderr)
+                                 # source_image_params_STD = dict(alpha=result.params['alpha'].stderr,
+                                 #                                beta=result.params['beta'].stderr)
                                  
                                  fwhm_fit = fitting_model_fwhm(source_image_params)
                                  # TODO add in moffat error 
@@ -821,7 +956,6 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                 isolated_sources['min_seperation'] = list([np.nanmin(i[i>0]) for i in seperations ])
                 isolated_sources.reset_index(inplace = True,drop = True)
                 
-            
                     
                 if sigma_lvl is None and not using_catalog_sources:
 
@@ -849,7 +983,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                         continue
 
 
-                    if sigmaclip_FWHM:
+                    if not using_catalog_sources:
                         
                         from astropy.stats import  mad_std
                         
@@ -861,7 +995,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                                                 cenfunc = np.nanmedian,
                                                 stdfunc = mad_std)
                         
-                        if np.sum(FWHM_mask.mask)== 0 or len(isolated_sources)<5:
+                        if np.sum(FWHM_mask.mask)== 0 or len(isolated_sources)<5 or  using_catalog_sources:
                             isolated_sources['include_fwhm'] = [True] * len(isolated_sources)
                             
                             fwhm_array =  isolated_sources['FWHM'].values
@@ -876,7 +1010,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                         isolated_sources['include_fwhm'] = [True] * len(isolated_sources)
                             
                             
-                    if sigmaclip_median:
+                    if  not  using_catalog_sources:
 
                         median_mask = sigma_clip(isolated_sources['median'].values,
                                                   sigma=sigmaclip_median_sigma,
@@ -885,7 +1019,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                                                   cenfunc = np.nanmedian,
                                                   stdfunc = mad_std)
                         
-                        if np.sum(median_mask) == 0 or np.sum(~median_mask.mask)<5:
+                        if np.sum(median_mask) == 0 or np.sum(~median_mask.mask)<5 or using_catalog_sources:
                             isolated_sources['include_median'] = [True] * len(isolated_sources)
                             # fwhm_array =  isolated_sources['FWHM'].values
                             pass
@@ -903,7 +1037,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                     
                     image_fwhm =  np.nanmean(fwhm_array)
                     
-                    if isolate_sources and len(isolated_sources)>5:
+                    if len(isolated_sources)>5:
                     
                         too_close = isolated_sources['min_seperation']<=isolate_sources_fwhm_sep * image_fwhm
                        
@@ -922,7 +1056,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                 logger.exception(e)
                 break
 
-
+        
 
         #  End of loop
         image_params_combine = combine(image_params)
@@ -932,11 +1066,14 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
             val = np.array(val)
             image_params_out[key] = np.nanmedian(val)
             image_params_out[key+'_err'] = np.nanstd(val)
-
-        idx = (isolated_sources['include_median']) & (isolated_sources['include_fwhm']) 
         
-        if np.sum(idx) == len(isolated_sources):
-            # If this removes all sources - ignore this step
+        if not  using_catalog_sources:
+            idx = (isolated_sources['include_median']) & (isolated_sources['include_fwhm']) 
+            
+            if np.sum(idx) == len(isolated_sources):
+                # If this removes all sources - ignore this step
+                idx = [True]*len(isolated_sources)
+        else:
             idx = [True]*len(isolated_sources)
             
             
@@ -947,8 +1084,8 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
             
             logging.warning('\nLarge error on FWHM - returning plots for user diagnostic')
             save_FWHM_plot = True
-            plot_image_analysis = True
-            save_image_analysis = True
+            image_analysis = True
+            # save_image_analysis = True
             
         # Update and set image cutout scale
         scale = int(np.ceil(scale_multipler * image_fwhm)) + 0.5
@@ -991,7 +1128,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
 
             ax1.axvline(image_fwhm,color = 'black',ls = '--',label = ' FWHM')
 
-            figname = os.path.join(write_dir,'fwhm_histogram_'+base+'.pdf')
+            figname = os.path.join(wdir,'fwhm_histogram_'+base+'.pdf')
 
             fig.savefig(figname,
                         format = 'pdf',
@@ -1001,7 +1138,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
             plt.close(fig)
 
 
-        if plot_image_analysis:
+        if image_analysis:
 
             import matplotlib as mpl
             from astropy.visualization import  ZScaleInterval
@@ -1045,7 +1182,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
                                                      fill=False)
                 ax1.add_patch( local_radius_circle)
                 
-            if mask_sources:
+            if len(mask_sources_XY_R)!=0:
 
                 for X_mask,Y_mask,R_mask in mask_sources_XY_R:
                     masked_radius_circle = plt.Circle( ( X_mask, Y_mask ), R_mask,
@@ -1133,7 +1270,7 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
             ax1_R.set_ylim(0,image.shape[0])
             ax1_B.set_xlim(0,image.shape[1])
 
-            figname = os.path.join(write_dir,'image_analysis_'+base+'.pdf')
+            figname = os.path.join(wdir,'image_analysis_'+base+'.pdf')
             
             fig.savefig(figname,
                         format = 'pdf',
@@ -1142,12 +1279,10 @@ def get_fwhm(image, write_dir, base, threshold_value = 25, fwhm_guess = 5,
             
             plt.close(fig)
 
-
-        if save_image_analysis:
             
             # Save FWHM analayis to file
 
-            isolated_sources.round(3).to_csv(os.path.join(write_dir,'image_analysis_'+base+'.csv'))
+            isolated_sources.round(3).to_csv(os.path.join(wdir,'image_analysis_'+base+'.csv'))
 
 
         return image_fwhm,isolated_sources,scale,image_params_out

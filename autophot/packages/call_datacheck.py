@@ -116,8 +116,10 @@ def find_similar_words(words, search_words):
         filtered_words = [word for word in words if regex.search(word)]
         matching_words+=filtered_words
         # print(filtered_words)
+        
+        
  
-    return matching_words
+    return list(set(matching_words))
 
 def ask_for_keyword(keyword,
                     header_keys,

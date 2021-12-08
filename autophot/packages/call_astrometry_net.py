@@ -2,57 +2,63 @@
 # -*- coding: utf-8 -*-
 
 def AstrometryNetLOCAL(file,
-                       NAXIS1 = None,
-                       NAXIS2 = None,
                        solve_field_exe_loc = None,
                        pixel_scale = None,
-                       ignore_pointing = False,
                        target_ra = None,
                        target_dec = None,
                        search_radius = 1,
                        downsample = 2,
-                       cpulimit = 180,
-   
+                       cpulimit = 180
                        ):
     '''
     
-    :param file: DESCRIPTION
-    :type file: TYPE
-    :param NAXIS1: DESCRIPTION
-    :type NAXIS1: TYPE
-    :param NAXIS2: DESCRIPTION
-    :type NAXIS2: TYPE
-    :param solve_field_exe_loc: DESCRIPTION, defaults to None
-    :type solve_field_exe_loc: TYPE, optional
-    :param pixel_scale: DESCRIPTION, defaults to None
-    :type pixel_scale: TYPE, optional
-    :param try_guess_wcs: DESCRIPTION, defaults to False
-    :type try_guess_wcs: TYPE, optional
-    :param ignore_pointing: DESCRIPTION, defaults to False
-    :type ignore_pointing: TYPE, optional
-    :param target_ra: DESCRIPTION, defaults to None
-    :type target_ra: TYPE, optional
-    :param target_dec: DESCRIPTION, defaults to None
-    :type target_dec: TYPE, optional
-    :param search_radius: DESCRIPTION, defaults to 1
+    Call a locally installed version of `Astrometry.net
+    <https://astrometry.net/use.html>`_ to redo World Coordinates system (WCS)
+    values for a given image. Astrometry.net must be installed on your machine with
+    the correct index files for package to work sucessfully. Instructions on how do
+    do so may be found `here <https://github.com/Astro-Sean/autophot>`_.
+    
+    :param file: Filepath of *FITS* file which needs corrected WCS values
+    :type file: str
+    :param solve_field_exe_loc: Filepath location of the *solve-field* executable,
+    see `here <https://github.com/Astro-Sean/autophot>`_ for instruction on how to
+    find this path, defaults to None
+    :type solve_field_exe_loc: str, optional
+    :param pixel_scale: Pixel scale in :math:`arcseconds / pixel`. We recommend you
+    include this variable as it can greatly speed up computation times and lower
+    the risk of failures, defaults to None
+    :type pixel_scale: float, optional
+    :param target_ra: Right ascension (RA) of target in degrees i.e. where are we
+    looking on the sky. Telling Astrometry approximately where it is looking can
+    greatly speed up computation times and lower the risk of failures , defaults to
+    None
+    :type target_ra: float, optional
+    :param target_dec: Declination ascension (RA) of target in degrees, defaults to
+    None
+    :type target_dec: float, optional
+    :param search_radius: Radius in degrees around target RA and Dec to search for
+    correct location., defaults to 1
     :type search_radius: TYPE, optional
-    :param downsample: DESCRIPTION, defaults to 2
-    :type downsample: TYPE, optional
-    :param cpulimit: DESCRIPTION, defaults to 180
-    :type cpulimit: TYPE, optional
-    :param solve_field_timeout: DESCRIPTION, defaults to 180
-    :type solve_field_timeout: TYPE, optional
-    :raises Exception: DESCRIPTION
-    :return: DESCRIPTION
-    :rtype: TYPE
+    :param downsample: For larger images it may be useful to downsample them to
+    speed up computation times, defaults to 2
+    :type downsample: int, optional
+    :param cpulimit: Execution time limit in seconds for the local version of
+    Astrometry.net. If the code run time exceeds this value, the script will exit,
+    defaults to 180
+    :type cpulimit: float, optional
+    :raises Exception: If no output WCS file is created an excepted is raise
+    :return: Returns the filepath of the WCS file created from the image saved to
+    the same parent directory as the image.
+    :rtype: str
 
     '''
 
+    
+
     import subprocess
     import os
-    import shutil
     import numpy as np
-    from autophot.packages.functions import getheader
+    from autophot.packages.functions import getheader,getimage
     import signal
     import time
     import logging
@@ -68,11 +74,12 @@ def AstrometryNetLOCAL(file,
         # get filename from filepath used to name new WCS fits file contained WCS header with values
         base = os.path.basename(file)
         base = os.path.splitext(base)[0]
+      
 
-        write_dir = os.path.dirname(file)
+        dirname = os.path.dirname(file)
 
         # new of output.fits file
-        wcs_file = base + ".wcs.fits"
+        wcs_file = os.path.join(dirname,base.replace('sources_','') + ".wcs.fits")
 
         # location of executable [/Users/seanbrennan/AutoPhot_Development/AutoPHoT/astrometry.net/bin/solve-field]
         exe = str(solve_field_exe_loc)
@@ -80,6 +87,7 @@ def AstrometryNetLOCAL(file,
         
         if exe == str(None):
             raise Exception('Please enter "solve_field_exe_loc" to solve for WCS')
+            # return np.nan
 
 
         # Guess image scale if f.o.v is not known
@@ -91,31 +99,26 @@ def AstrometryNetLOCAL(file,
                     ("--scale-low="    , str(pixel_scale*0.25)),
                     ("--scale-high="   , str(pixel_scale*1.25))]
 
+        if target_ra != None and target_dec != None:
+            try:
 
-        if not ignore_pointing:
-
-            if target_ra != None and target_dec != None:
-                try:
-
-                    tar_args = [("--ra="     , str(target_ra)), # target location on sky, used to narrow down cone search
-                                ("--dec="    , str(target_dec)),
-                                ("--radius=" , str(search_radius)) # radius of search around target for matching sources to index deafult 0.5 deg
-                                ]
-                    scale = scale + tar_args
-                except:
-                    pass
+                tar_args = [("--ra="     , str(target_ra)), # target location on sky, used to narrow down cone search
+                            ("--dec="    , str(target_dec)),
+                            ("--radius=" , str(search_radius)) # radius of search around target for matching sources to index deafult 0.5 deg
+                            ]
+                scale = scale + tar_args
                 
-        if NAXIS1 is None or NAXIS2 is None:
-            from autophot.packages.functions import getheader,getimage
+            except:
+                pass
+
+
+        if 'NAXIS1' in headinfo and 'NAXIS' in headinfo:
+            NAXIS1 = headinfo['NAXIS1']
+            NAXIS2 = headinfo['NAXIS2']
+        else:
             image = getimage(file)
-            headinfo = getheader(file)
-            
-            if 'NAXIS1' in headinfo and 'NAXIS' in headinfo:
-                NAXIS1 = headinfo['NAXIS1']
-                NAXIS2 = headinfo['NAXIS2']
-            else:
-                NAXIS1 = image.shape[0]
-                NAXIS2 = image.shape[1]
+            NAXIS1 = image.shape[0]
+            NAXIS2 = image.shape[1]
 
 
 
@@ -162,18 +165,10 @@ def AstrometryNetLOCAL(file,
 
         start = time.time()
         
-        astrometry_log_fpath = os.path.join(write_dir,base + '_astrometry.log')
+        astrometry_log_fpath = os.path.join(dirname,base + '_astrometry.log')
 
         with open(astrometry_log_fpath, 'w') as FNULL:
-            
-
-            '''
-            Call processto run astronmetry.net using solve-field command and list of keywords
-            given in args list or tuples
-
-            print all output from astrometry to a .log file to help with any debugging
-            '''
-            # print(args)
+ 
             logger.info('ASTROMETRY started...' )
             pro = subprocess.Popen(args,
                                    shell=True,
@@ -184,10 +179,9 @@ def AstrometryNetLOCAL(file,
             # Timeout command - will only run command for this long - ~30s works fine
             try:
                 pro.wait(cpulimit)
+                
             except:
                 
-
-
                 return np.nan
 
 
@@ -200,16 +194,12 @@ def AstrometryNetLOCAL(file,
         logger.info('ASTROMETRY finished: %ss' % round(time.time() - start) )
 
         # check if file is there - if so return filepath if not return nan
-        if os.path.isfile(os.path.join(os.getcwd(), wcs_file)):
-
-            # Move file into new file directory
-            shutil.move(os.path.join(os.getcwd(), wcs_file),
-                        os.path.join(write_dir,  wcs_file))
+        if os.path.isfile(wcs_file):
 
             # astrometry creates this none file - delete it
             os.remove(os.path.join(os.getcwd(), 'None'))
 
-            return  os.path.join(write_dir, wcs_file)
+            return   wcs_file
 
 
         else:

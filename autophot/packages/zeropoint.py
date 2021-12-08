@@ -1,22 +1,97 @@
-def get_zeropoint(c,image = None,headinfo = None,
-                  fpath = None,
-                  use_filter = None,
-                  matching_source_SNR = True,
-                  matching_source_SNR_limit =10,
-                  GAIN = 1,
-                  fwhm = 7,
-                  zp_sigma = 3,
-                  zp_use_fitted = True,
-                  zp_use_mean = False,
-                  zp_use_max_bin = False,
-                  zp_use_median = False,
-                  zp_use_WA = False,
+def get_zeropoint(c,image = None,headinfo = None, fpath = None, use_filter = None, 
+                   matching_source_SNR_limit =10,
+                  GAIN = 1, fwhm = 7, zp_sigma = 3, zp_use_fitted = True,
+                  zp_use_mean = False, zp_use_max_bin = False, 
+                  zp_use_median = False, zp_use_WA = False,
                   plot_ZP_image_analysis = False,
                   plot_ZP_vs_SNR = False
                   ):
+    '''
+    
+    An important step in performing transient astronomy is placing a transient
+    measurement on a standard system (e.g. Vega system or AB). This is typically
+    done with a zero point (ZP) offset,measured using calibration stars in an
+    image. The zero point can be calibrated by:
+    
+    .. math::
+    ZP = catalog\ magnitude + instrumental\ magnitude
+    
+    where :math:`instrumental\ magnitude = -2.5 \times Log_{10}(F_{i})` where
+    :math:`F_{i}` is the flux of each respective catalog source.  This ZP is then
+    applied to our transient magnitude using:
+    
+    .. math::
+    m_{transient} = -2.5 \times Log_{10}(F_{transient}) + ZP
+    
+    
+    The Zeropint is typically measured using as many bright, isolated catalog stars
+    in an image. This package can then determine the zero point for these
+    individual measurements in several ways:
+    
+    1. Fitting a vertical line and error is calculated from the covariance matrix
+    
+    2. Finding the mean and standard deviation
+    
+    3. Using the max bin from the zero point distribution
+    
+    4. Using the median and median standard deviation.
+    
+    We recommend fitting a vertical line, using the mean, or using the median,
+    to find the zeropoint.
+    
+    
+    :param c: Data Frame containing catalog magnitudes and instrumental magnitudes
+    for sources in the field. For a given filters *f* these two measurements should
+    be found under the columns headers *cat_f* and *inst_f*.
+    :type c: DataFrame
+    :param image: 2D image containing stars in the field. This is needed if plots
+    are desired., defaults to None
+    :type image: 2D array, optional
+    :param headinfo: Header for image, defaults to None
+    :type headinfo: *Fits* header object, optional
+    :param fpath: File path for *Fits* file, used for saving plots, defaults to
+    None
+    :type fpath: str, optional
+    :param use_filter: Name of filter used in image , defaults to None
+    :type use_filter: str, optional
+    :param matching_source_SNR_limit: S/N ratio cutoff, sources with a S/N lower
+    than this value are discarded, defaults to 10
+    :type matching_source_SNR_limit: float, optional
+    :param GAIN: GAIN on CCD in :math:`e^{-1} /  ADU`, defaults to 1
+    :type GAIN: float, optional
+    :param fwhm:  Full Width Half Maximum (FWHM) of an image., defaults to 7
+    :type fwhm: float, optional
+    :param zp_sigma: The number of standard deviations to use for both the lower
+    and upper clipping limit., defaults to 3
+    :type zp_sigma: float, optional
+    :param zp_use_fitted: If True, fit a vertical line to the zero point
+    measurements with an error equal to the diagonal on the covariance matrix,
+    defaults to True
+    :type zp_use_fitted: bool, optional
+    :param zp_use_mean: If True, find the zero point using the mean with the error
+    equal to the standard deviation of the distribution, defaults to False
+    :type zp_use_mean: bool, optional
+    :param zp_use_max_bin: If True, using the max bin of the distribution with an
+    error equal to the bin width, defaults to False
+    :type zp_use_max_bin: bool, optional
+    :param zp_use_median: If True, use the median value of the distribution with an
+    error equal to the median absolute deviation, defaults to False
+    :type zp_use_median: bool, optional
+    :param plot_ZP_image_analysis: If True, produce a plot of the zeropoint across
+    the image, defaults to False
+    :type plot_ZP_image_analysis: bool, optional
+    :param plot_ZP_vs_SNR: If True, produce a plot of the zeropoint  versus S/N,
+    defaults to False
+    :type plot_ZP_vs_SNR: TYPE, optional
+    :return: Returns a tuple containing the zeropoint and the error on the
+    zeropoint as well as the original dataframe with updated columns.
+    :rtype: Tuple and dataframe
+
+    '''
+    
     
     from autophot.packages.functions import SNR_err
-    from autophot.packages.functions import calc_mag
+    from autophot.packages.functions import calc_mag,border_msg
     from autophot.packages.functions import weighted_avg_and_std,set_size
 
     import os
@@ -29,6 +104,8 @@ def get_zeropoint(c,image = None,headinfo = None,
 
     import logging
     logging = logging.getLogger(__name__)
+    
+    border_msg('Finding Zeropoint value')
     
     #  prevent copy warning errors
     pd.options.mode.chained_assignment = None
@@ -46,7 +123,7 @@ def get_zeropoint(c,image = None,headinfo = None,
     # use_filter = autophot_input['image_filter']
     
     # remove sources that are low SNR
-    if matching_source_SNR :
+    if limit>0:
         print('Checking for suitable catalog sources')
         len_all_SNR = len(c)
         
@@ -69,7 +146,7 @@ def get_zeropoint(c,image = None,headinfo = None,
             c['acceptable_SNR'] = [True] * len(c)
             
                     
-        print('\nRemoved %d sources lower than SNR of %.1f' % (len_all_SNR - np.sum(~SNR_mask),limit))
+        print('Removed %d sources lower than SNR of %.1f' % (len_all_SNR - np.sum(~SNR_mask),limit))
     else:
         c['acceptable_SNR'] = np.array([True] * len(c))
         
@@ -141,7 +218,8 @@ def get_zeropoint(c,image = None,headinfo = None,
         zp_mean = (np.nanmean(zpoint_clip),np.nanstd(zpoint_clip))
 
         # https://influentialpoints.com/Training/standard_error_of_median.htm
-        zp_median = (np.nanmedian(zpoint_clip),1.253*np.nanstd(zpoint_clip)/np.sqrt(len(zpoint_clip)))
+        MAD = abs(np.nanmedian(zpoint_clip - np.nanmean(zpoint_clip)))
+        zp_median = (np.nanmedian(zpoint_clip),MAD)
 
         binwidth = 0.01
         
@@ -504,4 +582,4 @@ def get_zeropoint(c,image = None,headinfo = None,
         
         plt.close(fig)
         
-    return zp,c
+    return zp, c
