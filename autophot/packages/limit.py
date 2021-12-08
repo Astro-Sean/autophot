@@ -144,12 +144,17 @@ def limiting_magnitude_prob(image,fpath,
         write_dir = os.path.dirname(fpath)
         base = os.path.splitext(base)[0]
         
-        border_msg('Measuring probable magnitude limit')
+        
+        level = lim_SNR
+        
+        if print_progress:
+            border_msg('Measuring probable magnitude limit')
 
         # level for detection - Rule of thumb ~ 5 is a good detection level
-        level = lim_SNR
-
-        logger.info('Limiting threshold: %d sigma' % level)
+        
+        
+            logger.info('Limiting threshold: %d sigma' % level)
+            
         
         
         image_no_surface,surface,surface_media,noise = remove_background(image,
@@ -675,6 +680,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     from autophot.packages.functions import calc_mag
     from autophot.packages.functions import SNR
     from autophot.packages.functions import set_size
+    from autophot.packages.functions import get_distinct_colors
     
     from photutils.datasets import make_noise_image
     from photutils.datasets.make import apply_poisson_noise
@@ -860,7 +866,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                     injected_sources_additional_sources_position = 1/fwhm/2
                     
         elif injected_sources_additional_sources_position<=0:
-            print('Soiurce possition offset not set correctly [%1.f], setting to -1' % injected_sources_additional_sources_position)
+            print('Soirce possition offset not set correctly [%1.f], setting to -1' % injected_sources_additional_sources_position)
             injected_sources_additional_sources_position = -1
         
         from random import uniform
@@ -1003,15 +1009,18 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     
     # print(injection_df.initial_beta)
     if np.sum(~good_pos)>0:
-        print('Ignoring %d / %d sources with high SNR' % (np.sum(~good_pos),len(good_pos)))
+        
+        if print_progress:
+            print('Ignoring %d / %d sources with high SNR' % (np.sum(~good_pos),len(good_pos)))
         injection_df = injection_df[good_pos]
     # print(injection_df)
     
     if np.sum(~good_pos) == len(good_pos):
+        
         print('Could not find any suitable area to testing artifical source injection ')
         return np.nan
         
-    from autophot.packages.functions import get_distinct_colors
+
     cols = get_distinct_colors(len(injection_df))
 
     # Begin each list for each source - used in plotting

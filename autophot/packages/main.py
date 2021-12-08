@@ -2476,7 +2476,7 @@ def main(object_info,autophot_input,fpath):
                 c_nondetect["inject_lmag"] = [np.nan] * len(c_nondetect)
     
                 for index,catalog_x_pix,catalog_y_pix,catalog_magnitude in zip(c_nondetect.index,c_nondetect.x_pix.values,c_nondetect.y_pix.values,c_nondetect['cat_'+use_filter]):
-                    logging.info('\nPerforming analysis on  source %d / %d' % (counter,sample_size))
+                    print('\nPerforming analysis on  source %d / %d' % (counter,sample_size))
     
                     catalog_close_up_expand = image_copy[int(catalog_y_pix - expand_scale): int(catalog_y_pix + expand_scale),
                                                  int(catalog_x_pix - expand_scale): int(catalog_x_pix + expand_scale)]
