@@ -14,14 +14,11 @@ def remove_cosmic_rays(image_with_CRs,
     <https://ccdproc.readthedocs.io/en/latest/api/ccdproc.cosmicray_lacosmic.html>`_
     and returns an image cleaned of cosmic rays
     
-    :param image_with_CRs: File Path to *fits* image that is contaminated by cosmic
-    rays.
+    :param image_with_CRs: File Path to *fits* image that is contaminated by cosmic rays.
     :type image_with_CRs: str
-    :param gain: Gain of the image (electrons / ADU). We always need to work in
-    electrons for cosmic ray detection., defaults to 1
+    :param gain: Gain of the image (electrons / ADU). We always need to work in electrons for cosmic ray detection., defaults to 1
     :type gain: float, optional
-    :param use_lacosmic: If True, use LAComic from CCDProc rather that
-    astroscrappy, defaults to False
+    :param use_lacosmic: If True, use LAComic from CCDProc rather that astroscrappy, defaults to False
     :type use_lacosmic: boolean, optional
     :return: Returns an image that has been cleaned of cosmic rays
     :rtype: 2D array    

@@ -26,6 +26,7 @@ def sample_with_minimum_distance(n=[0,40], k=4, d=10):
 
     :return: list of tuples containing (x,y) location of points seperated by distance(d)
     :rtype: list of tuples
+    
     """
     import random
 
@@ -61,13 +62,13 @@ def PointsInCircum(r,shape,n=8):
 def flatten_dict(d):
     '''
     
-    Flatten nested dictionary
+    Flatten nested dictionary into single dictionary with keys:values
     
-    :param d: DESCRIPTION
-    :type d: TYPE
+    :param d: Nested Dictionary
+    :type d: dict
     
-    :return: DESCRIPTION
-    :rtype: TYPE
+    :return: Singular dictionary
+    :rtype: dict
 
     '''
     def expand(key, value):
@@ -81,80 +82,114 @@ def flatten_dict(d):
     return dict(items)
 
 
-def limiting_magnitude_prob(image,fpath,
-                            lim_SNR=3,
-                            bkg_level=3,
-                            fwhm = 7,
-                            ap_size=1.7,
-                            exp_time = 1, gain = 1,
-                            image_params = None,
-                            regriding_size=10,
-                            fitting_radius = 1.3,
-                            beta = 0.75,
-                            inject_source_cutoff_sources = 6,
-                            inject_source_location  = 3,
-                            inject_source_on_target = False,
-                            inject_source_random = False,
-                            inject_source_add_noise = False,
-                            use_moffat= True,
-                            unity_PSF_counts = None,
-                            model = None,r_table = None,
-                            print_progress = True ,
-                            remove_bkg_local = True,
-                            remove_bkg_surface = False,
-                            remove_bkg_poly = False,
-                            remove_bkg_poly_degree = 1,
-                            subtraction_ready = False,
-                            injected_sources_use_beta = False,
-                            plot_probable_limit = True,
-                        ):
+def limiting_magnitude_prob(image,fpath, detection_limit=3, bkg_level=3, fwhm = 7,
+                            ap_size=1.7, exp_time = 1, gain = 1, image_params = None,
+                            regriding_size=10, fitting_radius = 1.3, beta = 0.75,
+                            inject_source_sources_no = 6, inject_source_location = 3, 
+                            inject_source_on_target = False, inject_source_random = False,
+                            inject_source_add_noise = False, use_moffat= True, 
+                            unity_PSF_counts = None, model = None,r_table = None,
+                            print_progress = True , remove_bkg_local = True,
+                            remove_bkg_surface = False, remove_bkg_poly = False,
+                            remove_bkg_poly_degree = 1, subtraction_ready = False,
+                             plot_probable_limit = True):
+    '''
+        
+    Package to employ the same error technique as in the `SNOOPY
+    <https://sngroup.oapd.inaf.it/snoopy.html>`_ code. In brief, error
+    estimates from the transient measurement are obtained through artificial
+    star experiment in which a fake star of magnitude equal to that of the SN,
+    is placed in the PSF-fit residual image 
+    in a position close to, but not coincident with that of the real source.
+    The artifically injects ource is then recovered in an identical manner to
+    the original transient magnitude. This is repeated several times. The
+    dispersion of these recoevred measurements is then taken as the error on
+    the transient measurement and added in quadrature. 
+    
+    :param image: Image containing transietnf flux
+    :type image: 2D array
+    :param fwhm: Full Width Half Maximum of image. This is used to constrain the position of the injected sources
+    :type fwhm: float
+    :param PSF_model: PSF model that is used to fit transient flux, this will also be used to inject the artifical sources
+    :type PSF_model: callable function
+    :param image_params: Dictionary containing analytical model params. If a moffat is used, this dictionary should containing *alpha* and *beta* and their respective values, else if a gaussian is used, this dictionary should include *sigma* and its value.
+    :type image_params: dict
+    :param exp_time: Exposure time ins seconds of an image. This is used to calculate the S/N of a potential source.
+    :type exp_time: float
+    :param unity_PSF_counts: Number of counts under a PSF model with amplitude equal to 1, defaults to None
+    :type unity_PSF_counts: float, optional
+    :param target_error_compute_multilocation_number: Number of times the psuedo-transient PSF will be reinjected at locations radially around the original SN site, defaults to 5
+    :type target_error_compute_multilocation_number: int, optional
+    :param target_error_compute_multilocation_position: Multipl of FWHM with which to place the psuedo-transient PSF away from the original site of best fit. Set to -1 to perform sub pixel injection and recovery, defaults to 1
+    :type target_error_compute_multilocation_position: float, optional
+    :param use_moffat: If True, use a moffat function for FWHM fitting defaults to True
+    :type use_moffat: bool, optional
+    :param fitting_method: Fitting method when fitting the PSF model, defaults to 'least_square'
+    :type fitting_method: str, optional
+    :param ap_size: Multiple of FWHM to be used as standard aperture size, defaults to 1.7
+    :type ap_size: float, optional
+    :param fitting_radius: zoomed region around location of best fit to focus fitting. This allows for the fitting to be concentrated on high S/N areas and not fit the low S/N wings of the PSF, defaults to 1.3
+    :type fitting_radius: float, optional
+    :param regriding_size: When expanding to larger pseudo-resolution, what zoom factor to use, defaults to 10
+    :type regriding_size: int, optional
+    :param xfit: X pixel location of best fit for the transient psf in the image, defaults to None
+    :type xfit: float, optional
+    :param yfit: y pixel location of best fit for the transient psf in the image, defaults to None
+    :type yfit: float, optional
+    :param Hfit: PSF amplitude of best fit for the transient psf in the image, defaults to None, defaults to None
+    :type Hfit: float, optional
+    :param r_table: Resiudal table, normailised to unity that is the same shape as the base analytical function
+    :type r_table: 2D array
+    :param remove_bkg_local: If True, use the local median of the image and subtract this to produce a background free image, see above, defaults to True
+    :type remove_bkg_local: Boolean, optional
+    :param remove_bkg_surface: If True, use the background fitted surface of the image and subtract this to produce a background free image, see above, defaults to False
+    :type remove_bkg_surface: Boolean, optional
+    :type remove_bkg_poly: If True, use the background polynomial surface of the image and subtract this to produce a background free image, see above, optional
+    :param remove_bkg_poly_degree: If remove_bkg_poly is True, this is the degree of the polynomial fitted to the image, 1 = flat surface, 2 = 2nd order polynomial etc, defaults to 1
+    :param bkg_level: The number of standard deviations, below which is assumed to be due to the background noise distribution, defaults to 3
+    :type bkg_level: float, optional
+    :return: Returns the standard deviation of the recovered magnitudes of the artifically injection pseudo-transient PSFs
+    :rtype: float
+
+    '''
+                       
+    
+    import os
+    import random
+    import logging
+    import warnings
+    import numpy as np
+    
+    import matplotlib.pyplot as plt
+    from scipy.optimize import curve_fit
+    from photutils import CircularAperture
+    from matplotlib.gridspec import  GridSpec
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    from photutils import DAOStarFinder
+    from astropy.visualization import  ZScaleInterval
+    from photutils.datasets import make_noise_image
+    
+    from autophot.packages.background import remove_background
+    from autophot.packages.functions import set_size,calc_mag
+    from autophot.packages.functions import gauss_2d, moffat_2d,f_ul
+    from autophot.packages.functions import gauss_1d,border_msg
+    
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
+
+    logger = logging.getLogger(__name__)
+    
+    base = os.path.basename(fpath)
+    write_dir = os.path.dirname(fpath)
+    base = os.path.splitext(base)[0]
+    
 
     
     try:
-        import matplotlib.pyplot as plt
-        import os
-
-        from photutils import CircularAperture
-        import numpy as np
-
-        from matplotlib.gridspec import  GridSpec
-        import random
-
-        from scipy.optimize import curve_fit
-        import warnings
-
-        from photutils.datasets import make_noise_image
-        from photutils import DAOStarFinder
-        from mpl_toolkits.axes_grid1 import make_axes_locatable
-        from autophot.packages.background import remove_background
-        from autophot.packages.functions import set_size,calc_mag
-        from autophot.packages.functions import gauss_2d, moffat_2d,f_ul
-
-        from astropy.visualization import  ZScaleInterval
-        
-        from autophot.packages.functions import gauss_1d,border_msg
-
-        import logging
-        
-        dir_path = os.path.dirname(os.path.realpath(__file__))
-        plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
-
-        logger = logging.getLogger(__name__)
-        
-        base = os.path.basename(fpath)
-        write_dir = os.path.dirname(fpath)
-        base = os.path.splitext(base)[0]
-        
-        
-        level = lim_SNR
-        
         if print_progress:
-            border_msg('Measuring probable magnitude limit')
-
-        # level for detection - Rule of thumb ~ 5 is a good detection level
-        
-        
-            logger.info('Limiting threshold: %d sigma' % level)
+            border_msg('Measuring probable magnitude limit')        
+            logger.info('Limiting threshold: %d sigma' % detection_limit)
             
         
         
@@ -194,13 +229,11 @@ def limiting_magnitude_prob(image,fpath,
     
                 positions = [(image.shape[0]/2,image.shape[1]/2)]
         else:
-                # injected_sources_use_beta = True
+                
                 positions = [(image.shape[0]/2,image.shape[1]/2)]
 
         # "size" of source, set to the aperture size
-        
         source_size =  ap_size*fwhm
-        # source_size =  1.3*fwhm
         
         aperture_area = int(np.pi*source_size**2)
 
@@ -299,17 +332,10 @@ def limiting_magnitude_prob(image,fpath,
 
         mean = popt[1]
         std  = abs(popt[2])
-        # count_ul = abs(level*std)
-        
-        
-        
-        f_ul_beta = f_ul(n = lim_SNR, beta_p = beta, sigma = std)
+
+        f_ul_beta = f_ul(n = detection_limit, beta_p = beta, sigma = std)
         
         count_ul = f_ul_beta
-        
-        # =============================================================================
-        # Convert counts to magnitudes
-        # =============================================================================
 
         flux  = count_ul / exp_time
 
@@ -317,7 +343,7 @@ def limiting_magnitude_prob(image,fpath,
         
         if print_progress:
             logging.info('Mean: %s - std: %s' % (round(mean,3),round(std,3)))
-            logging.info('Detection at %s std: %.3f [counts]' % (level,count_ul))
+            logging.info('Detection at %s std: %.3f [counts]' % (detection_limit,count_ul))
         
         
 
@@ -326,6 +352,7 @@ def limiting_magnitude_prob(image,fpath,
         # =============================================================================
         
         if plot_probable_limit:
+            
             plt.ioff()
             
             limiting_mag_figure = plt.figure(figsize = set_size(250,aspect = 1.5))
@@ -347,9 +374,7 @@ def limiting_magnitude_prob(image,fpath,
             ax1 = limiting_mag_figure.add_subplot(gs[1, 0])
             ax2 = limiting_mag_figure.add_subplot(gs[1, 1])
             
-            
-    
-            
+
             ax1.scatter(exclud_x,exclud_y,
                         color ='red',
                         marker = 'x',
@@ -379,8 +404,8 @@ def limiting_magnitude_prob(image,fpath,
             ax0.text(mean + 2*std,np.max(n),r'$2\sigma_{bkg}$',
                      rotation = -90,va = 'top',ha = 'center',fontsize = 4)
     
-            ax0.axvline(mean + level*std,**line_kwargs)
-            ax0.text(mean + level*std,np.max(n),r'$'+str(level)+r'\sigma_{bkg}$',
+            ax0.axvline(mean + detection_limit*std,**line_kwargs)
+            ax0.text(mean + detection_limit*std,np.max(n),r'$'+str(detection_limit)+r'\sigma_{bkg}$',
                      rotation = -90,va = 'top',ha = 'center',fontsize = 4)
             
             
@@ -489,7 +514,7 @@ def limiting_magnitude_prob(image,fpath,
             inject_source_mag = mag2image(mag_level)
     
             # Number of sources
-            source_no =inject_source_cutoff_sources
+            source_no =inject_source_sources_no
             
             random_sources = PointsInCircum(inject_source_location*fwhm,
                                             image.shape,n=source_no)
@@ -641,26 +666,155 @@ def fractional_change(i,i_minus_1):
 
 
 
-def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
-                    zeropoint = 0, r_in_size = 2, r_out_size = 3,
-                    injected_sources_use_beta=True, beta_limit = 0.75, gain = 1, rdnoise = 0,
-                    inject_lmag_use_ap_phot = True, use_moffat = True, image_params = None,
-                    fitting_radius = 1.3, regriding_size = 10, lim_SNR = 3,bkg_level = 3,
-                    inject_source_recover_dmag = 0.5, inject_source_recover_fine_dmag = 0.05,
-                    inject_source_mag = 21, inject_source_recover_nsteps = 50,
-                    inject_source_recover_dmag_redo = 3, inject_source_cutoff_sources = 10,
-                    inject_source_cutoff_limit = 0.8, subtraction_ready = False,
-                    unity_PSF_counts = None, inject_source_add_noise = False,
-                    inject_source_location = 3, injected_sources_additional_sources = True,
-                    injected_sources_additional_sources_position = 1,
-                    injected_sources_additional_sources_number = 3,
-                    plot_injected_sources_randomly = True, injected_sources_save_output = False,
-                    model = None, r_table = None, plot_steps = False, save_cutouts = False,
-                    lmag_guess= None, print_progress = True, save_plot = True,
-                    save_plot_to_folder = False,fitting_method = 'least_sqaure',remove_bkg_local = True,
-                    remove_bkg_surface = False,
-                    remove_bkg_poly = False,
-                    remove_bkg_poly_degree = 1):
+def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25, 
+                   zeropoint = 0, r_in_size = 2, r_out_size = 3, explore = False,
+                   injected_sources_use_beta=True, beta_limit = 0.75, gain = 1,
+                   rdnoise = 0, inject_lmag_use_ap_phot = True, use_moffat = True,
+                   image_params = None, fitting_radius = 1.3, regriding_size = 10, 
+                   detection_limit = 3,bkg_level = 3, inject_source_recover_dmag = 0.5,
+                   inject_source_recover_fine_dmag = 0.05, inject_source_mag = 21, 
+                   inject_source_recover_nsteps = 50, inject_source_recover_dmag_redo = 3,
+                   inject_source_sources_no = 10, inject_source_cutoff_limit = 0.8,
+                   subtraction_ready = False, unity_PSF_counts = None, 
+                   inject_source_add_noise = False, inject_source_location = 3,
+                   injected_sources_additional_sources_position = 1,
+                   injected_sources_additional_sources_number = 3, plot_injected_sources_randomly = True,
+                   injected_sources_save_output = False, model = None, 
+                   r_table = None, plot_steps = False, save_cutouts = False,
+                   lmag_guess= None, print_progress = True, save_plot = True,
+                   save_plot_to_folder = False,fitting_method = 'least_sqaure',
+                   remove_bkg_local = True, remove_bkg_surface = False, 
+                   remove_bkg_poly = False, remove_bkg_poly_degree = 1):
+    '''
+    
+    Package to find limiting magnitude using artifical source injection. This is
+    the most rebust package available to find a meaningful limiting magnitude for a
+    location on an image. Given a image (perhaps a image with a suspected tranaient
+    in the image center), the code will the perform the following tasks to find the
+    limiting magnitude or the briggest a source can be an be confidently assumed to
+    be *not* apart of the background noise distribution:
+    
+    #. Setup locations around the transient site (i.e. the center of the image).
+    For convergence reasons these area should *fail* the detection criteria e.g.
+    have a S/N < 3 or :math:`\\beta\\prime<0.5`. If selected, these source posiiton
+    may be extended to include subpixel positions.
+    
+    #. Beginning with an initial guess (either given in the function or assumed),
+    find the detection details (e.g S/N >3 or :math:`\\beta\\prime>0.75`) for an
+    intial round of artifical sources. If Selected these sources may have random
+    noise added to them, to fully explore the probability of a certain magnitude
+    being recovered.
+    
+    #. *If the initial sources are detected*, decrease the magnitude by a large
+    step size until the sources are no longer detected. In this scenario we expect
+    to overshoot the limiting magnitude. We will then increase the magnitude by a
+    smaller amount until the sources are the recovered to a significant level.
+    
+    #. *If the initial sources are not detected*: In this scenario the initial
+    guess at the limiting magnitude is too faint. The injected magnitude is
+    increased (i.e. gets brighter) by a large step size until a significant number
+    of sources are detected. Again we expect to overshoot the limiting magnitude.
+    The injected sources are then decreased in magnitude until a significant number
+    of sources are lost. 
+    
+    #. The penultimate injected magnitude is set at the limiting magnitude.
+    
+    This can be a very robust function that can fully sample the surrounding
+    location of a suspected transient. *However* if the transient has significant
+    flux, i.e. it is severly present in the image or the location is severly
+    contaminated by background galaxy contamination, this is due to the possibility
+    of one side of the image being *more* contaminated then the other. Further work
+    will better account for this issue.
+    
+    
+    :param image: 2D image with transient location at its center
+    :type image: 2D array
+    :param fwhm: Full Wdith Half Maximum of image, this is used to space sources significantly away from the transient site
+    :type fwhm: float
+    :param fpath: Filepath of image- this is used to save any plots and name them accordingly
+    :type fpath: str
+    :param exp_time: Expsure time in seconds. Use doe Signal to noise calculations
+    :type exp_time: float
+    :param ap_size: Multiple of FWHM to be used as standard aperture size, defaults to 1.7
+    :type ap_size: float, optional
+    :param zeropoint: Zeropoint offset for image, used to convert given limiting magnitude guess to instrumental magnitude, defaults to 0
+    :type zeropoint: float, optional
+    :param r_in_size: Multiple of FWHM to be used as inner radius of background annulus, defaults to 1.9
+    :type r_in_size: float, optional
+    :param r_out_size: Multiple of FWHM to be used as outer radius of background annulus, defaults to 2.2
+    :type r_out_size: float, optional
+    :param explore: DESCRIPTION, defaults to False
+    :type explore: TYPE, optional
+    :param injected_sources_use_beta: If True, use the :math:`\beta` citeria, else use the more traditional detection limit., defaults to False
+    :type injected_sources_use_beta: bool, optional
+    :param beta_limit: Probability limit below which a source is deemed lost, defaults to 0.75
+    :type beta_limit: float, optional
+    :param gain: GAIN on CCD in :math:`e^{-} /  ADU` , defaults to 1.
+    :type gain: float, optiona
+    :param rdnoise: Read noise of CCD in :math:`e^{-} /  pixel`, defaults to 0.
+    :type rdnoise: float, optional
+    :param inject_lmag_use_ap_phot: If True, recover injected sources using aperture photometry. This is typically faster that recovering the sources using PSF photometry, defaults to True
+    :type inject_lmag_use_ap_phot: bool, optional
+    :param use_moffat: If True, use a moffat function for FWHM fitting defaults to True
+    :type use_moffat: bool, optional
+    :param fitting_radius: zoomed region around location of best fit to focus fitting. This allows for the fitting to be concentrated on high S/N areas and not fit the low S/N wings of the PSF, defaults to 1.3
+    :type fitting_radius: float, optional
+    :param regriding_size: When expanding to larger pseudo-resolution, what zoom factor to use, defaults to 10
+    :type regriding_size: int, optional
+    :param detection_limit: Detection significance level, defaults to 3
+    :type detection_limit: float, optional
+    :param bkg_level: The number of standard deviations, below which is assumed to be due to the background noise distribution, defaults to 3
+    :type bkg_level: float, optional
+    :param inject_source_recover_dmag: Large magnitude step size , defaults to 0.5
+    :type inject_source_recover_dmag: float, optional
+    :param inject_source_recover_fine_dmag: Fine magnitude step size, which needs to be smaller than *inject_source_recover_dmag*. This value defines the percision of the limiting magnitude, defaults to 0.05
+    :type inject_source_recover_fine_dmag: float, optional
+    :param inject_source_mag: if No guess is given, use this magnitude as a start point. Needs *zeropoint* to be defined, defaults to 21
+    :type inject_source_mag: float, optional
+    :param inject_source_recover_nsteps: Maximum allowed number of steps, defaults to 50
+    :type inject_source_recover_nsteps: int, optional
+    :param inject_source_recover_dmag_redo: When adding noise, how many times do you wish to add a source, each time with a different noise added onto it, defaults to 3
+    :type inject_source_recover_dmag_redo: int, optional
+    :param inject_source_sources_no: DESCRIPTION, defaults to 10
+    :type iinject_source_sources_no: no, optional
+    :param inject_source_cutoff_limit: Fraction of sources needed to be *lost* to determine the limiting magnitude, defaults to 0.8
+    :type inject_source_cutoff_limit: float, optional
+    :param subtraction_ready: If True, image is template subtracted and the noise floor is assumed to be set to zero, defaults to False
+    :type subtraction_ready: bool, optional
+    :param unity_PSF_counts: Number of counts under a PSF with amlpitude equal to 1, defaults to None
+    :type unity_PSF_counts: float, optional
+    :param inject_source_add_noise: If True add noise to any injected artifical sources, defaults to False
+    :type inject_source_add_noise: bool, optional
+    :param inject_source_location: Multiple of FWHM which defines the distance from the center of time image where to place the artifical sources, defaults to 3
+    :type inject_source_location: float, optional
+    :param injected_sources_additional_sources_position: Multiple of FWHM around predefined sites where to inject additional sources, set to -1 to perform subpiel movements, defaults to 1
+    :type injected_sources_additional_sources_position: TYPE, optional
+    :param injected_sources_additional_sources_number: Number of additional sources to inject around predefined sites, defaults to 3
+    :type injected_sources_additional_sources_number: int, optional
+    :param plot_injected_sources_randomly: If True, inject sources randomly around the image to demostrate the limiting magnitude, if False, plot sources radialy around image center, defaults to True
+    :type plot_injected_sources_randomly: bool, optional
+    :param injected_sources_save_output: If True, produce plot of limiting magnitude iterative search and save csv file containing the plotted information, defaults to False
+    :type injected_sources_save_output: bool, optional
+    :param model: PSF model to be used for artifial source inject, if None using a gaussian model, defaults to None
+    :type model: function, optional
+    :param r_table: Resiudal table, normailised to unity that is the same shape as the base analytical function
+    :type r_table: 2D array
+    :param lmag_guess: Inital guess at the limting magnitude, zeropooiunt needs to be defined , defaults to None
+    :type lmag_guess: float, optional
+    :param print_progress: If True, print the status of the limiting magnitude search to screen, defaults to True
+    :type print_progress: bool, optional
+    :param fitting_method: Fitting method when fitting the PSF model, defaults to 'least_square'
+    :type fitting_method: str, optional
+    :param remove_bkg_local: If True, use the local median of the image and subtract this to produce a background free image, see above, defaults to True
+    :type remove_bkg_local: Boolean, optional
+    :param remove_bkg_surface: If True, use the background fitted surface of the image and subtract this to produce a background free image, see above, defaults to False
+    :type remove_bkg_surface: Boolean, optional
+    :type remove_bkg_poly: If True, use the background polynomial surface of the image and subtract this to produce a background free image, see above, optional
+    :param remove_bkg_poly_degree: If remove_bkg_poly is True, this is the degree of the polynomial fitted to the image, 1 = flat surface, 2 = 2nd order polynomial etc, defaults to 1
+    :return: Returns the limiting magnitude found via artifical sour injection
+    :rtype: float
+    '''
+    
 
   
     import os
@@ -678,11 +832,11 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     from autophot.packages.functions import SNR
     from autophot.packages.functions import set_size
     from autophot.packages.functions import get_distinct_colors
-    
-    from photutils.datasets import make_noise_image
-    from photutils.datasets.make import apply_poisson_noise
+
+    from photutils.datasets.make import apply_poisson_noise,make_noise_image
     from autophot.packages.aperture import measure_aperture_photometry
     from autophot.packages.functions import beta_value,f_ul,border_msg
+    from autophot.packages.functions import gauss_2d,moffat_2d
     
     base = os.path.basename(fpath)
     write_dir = os.path.dirname(fpath)
@@ -711,6 +865,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
          
         # PSF model that matches close-up shape around target
         def input_model(x,y,H):
+            
             return model(x, y, 0, H, r_table, fwhm, image_params,use_moffat = use_moffat, 
                          fitting_radius = fitting_radius,regriding_size = regriding_size,
                          pad_shape = image.shape)        
@@ -720,7 +875,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         
         #if PSF model isn't available - use Gaussian instead
 
-        logger.info('PSF model not available [ %s ] using Gaussian function' % e)
+        logger.info('PSF model not available [ %s ]\nUsing Gaussian function' % e)
         # model_label = 'Gaussian'
     
         sigma = fwhm / 2*np.sqrt(2*np.log(2))
@@ -750,25 +905,9 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         #  Set up grid
     
         def input_model(x,y,A):
-            '''
-            
-            :param x: DESCRIPTION
-            :type x: TYPE
-            :param y: DESCRIPTION
-            :type y: TYPE
-            :param A: DESCRIPTION
-            :type A: TYPE
-            :param image: DESCRIPTION, defaults to image
-            :type image: TYPE, optional
-            :return: DESCRIPTION
-            :rtype: TYPE
 
-            '''
-    
             xx,yy= np.meshgrid(np.arange(0,image.shape[1]),np.arange(0,image.shape[0]))
-    
-            from autophot.packages.functions import gauss_2d,moffat_2d
-    
+            
             if use_moffat:
                 
                 model = moffat_2d((xx,yy),x,y,0,A,image_params)
@@ -805,9 +944,10 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     
     if (lmag_guess is None):
         # Start with this magnitude as an initiall guess
-        print('using user given value')
+        # print('using user given value')
         user_mag_level = inject_source_mag - zeropoint
     else:
+        
         user_mag_level = lmag_guess - zeropoint
             
     user_mag_level = inject_source_mag - zeropoint
@@ -830,7 +970,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     redo   = inject_source_recover_dmag_redo
     
     # Number of sources
-    source_no = inject_source_cutoff_sources
+    source_no = inject_source_sources_no
     
     # Percentage of sources needed to be 'lost' to define the limiting magnitude
     detection_cutout = inject_source_cutoff_limit
@@ -856,7 +996,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     xran = [abs(i[0]) for i in random_sources]
     yran = [abs(i[1]) for i in random_sources]
     
-    if injected_sources_additional_sources:
+    if injected_sources_additional_sources_number>0:
         
         if injected_sources_additional_sources_position == -1:
                     # Move around by one pixel
@@ -871,9 +1011,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         for k in range(len(xran)):
             
             for j in range(int(injected_sources_additional_sources_number)):
-                           
-                
-                    
+
                 dx = injected_sources_additional_sources_position * fwhm/2 * uniform(-1,1)
                 dy = injected_sources_additional_sources_position * fwhm/2 * uniform(-1,1)
                 
@@ -896,7 +1034,6 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     hold_psf_position =  False
     
     # Measure flux at each point proir than adding any fake sources - to account for an irregular SNR at a specific location
-    # autophot_input['plot_PSF_residuals'] = True
     if not inject_lmag_use_ap_phot:
         
         psf_fit  = psf.fit(image = image,
@@ -906,21 +1043,11 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                         fpath = fpath,
                         fitting_radius = fitting_radius,
                         regriding_size = regriding_size,
-                        scale = scale,
-                        # remove_sat =remove_sat,
-                        # sat_lvl = autophot_input['sat_lvl'],
                         use_moffat = use_moffat,
                         image_params = image_params,
                         fitting_method = fitting_method,
-                        # return_psf_model = autophot_input['psf']['return_psf_model'],
-                        # save_plot = autophot_input['psf']['save_plot'],
-                        # show_plot = autophot_input['show_plot'],
-                        # remove_background_val = autophot_input['remove_background_val'],
                         hold_pos = hold_psf_position,
                         return_fwhm = True,
-                        # return_subtraction_image = autophot_input['psf']['return_subtraction_image'],
-                        # no_print = autophot_input['no_print'],
-                        # return_closeup = autophot_input['return_closeup'],
                         remove_bkg_local = remove_bkg_local, 
                         remove_bkg_surface = remove_bkg_surface,
                         remove_bkg_poly   = remove_bkg_poly,
@@ -930,12 +1057,12 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         
   
         psf_params = psf.do(df = psf_fit,
-                    residual_image = r_table,
-                    ap_size = ap_size,
-                    fwhm = fwhm,
-                    unity_PSF_counts =unity_PSF_counts,
-                    use_moffat = use_moffat,
-                    image_params = image_params)
+                            residual_image = r_table,
+                            ap_size = ap_size,
+                            fwhm = fwhm,
+                            unity_PSF_counts =unity_PSF_counts,
+                            use_moffat = use_moffat,
+                            image_params = image_params)
         
         psf_flux = psf_params['psf_counts'].values/exp_time
         psf_flux_err = psf_params['psf_counts_err'].values/exp_time
@@ -946,31 +1073,37 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     else:
                    
         positions  = list(zip(injection_df.x_pix.values,injection_df.y_pix.values))
-        
-        # print(np.nanmedian(image))
     
         psf_counts,psf_counts_err, psf_heights, psf_bkg_counts, psf_bkg_std = measure_aperture_photometry(positions,
                                                       image ,
                                                       ap_size = ap_size    * fwhm,
                                                       r_in   = r_in_size  * fwhm,
                                                       r_out  = r_out_size * fwhm)
-        psf_counts_err = 0
             
         psf_flux = psf_counts/exp_time
         psf_flux_err = psf_counts_err/exp_time
         psf_bkg_flux = psf_bkg_counts/exp_time
         psf_bkg_std_flux = psf_bkg_std/exp_time
         psf_heights_flux = psf_heights/exp_time
+    
 
-
-    SNR_source = SNR(flux_star = psf_flux ,
-                     flux_sky = psf_bkg_flux,
-                     exp_t = exp_time,
-                     radius = ap_size*fwhm ,
-                     G  = gain,
-                     RN =  rdnoise,
-                     DC = 0 )
-
+    
+    SNR_source = []
+    
+    for i in range(len(psf_bkg_flux)):
+        if psf_bkg_flux[i]>0:
+            SNR_source.append(SNR(flux_star = psf_flux[i],
+                             flux_sky = psf_bkg_flux[i],
+                             exp_t = exp_time,
+                             radius = ap_size*fwhm ,
+                             G  = gain,
+                             RN =  rdnoise,
+                             DC = 0 ))
+        else:
+            
+            SNR_source.append(psf_heights_flux[i]/psf_bkg_std_flux[i])
+            
+            
     fake_sources_beta = beta_value(n=3,
                                    sigma = psf_bkg_std_flux,
                                    f_ul  = psf_heights_flux)
@@ -978,13 +1111,15 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     SNR_source = np.array([round(num, 1) for num in SNR_source])
     
     # if SNR at a position is greater than detection limit - set the SNR limit at this position to this (higher) limit.
-    SNR_source[(SNR_source < lim_SNR) | (np.isnan(SNR_source))] = lim_SNR
+    SNR_source[(SNR_source < detection_limit) | (np.isnan(SNR_source))] = detection_limit
     
     injection_df['limit_SNR'] = SNR_source
     injection_df['initial_beta'] = fake_sources_beta
     injection_df['initial_noise'] = psf_bkg_std_flux
     injection_df['initial_peak_flux'] = psf_heights_flux
     injection_df['f_ul'] = f_ul(3,beta_limit,psf_bkg_std_flux)
+    
+    injection_df.to_csv('/Users/seanbrennan/Desktop/tmp_REDUCED/test.csv')
     
 
     if not inject_lmag_use_ap_phot:
@@ -995,27 +1130,38 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         injection_df['x_pix'] = psf_params['x_pix'].values
         injection_df['y_pix'] = psf_params['y_pix'].values
     
-    # check locations with high SNR (due to random noise spikes) and ignoring them
+    # check locations with high SNR (due to random noise spikes) and ignore them
+    position_SNR_limit = 3
+    position_beta_limit = 0.5
     
-    if not subtraction_ready or not injected_sources_use_beta :
-        good_pos = injection_df.limit_SNR <= lim_SNR
+    if not injected_sources_use_beta :
+        print('Checking for suitable SNR [SNR < %.2f]' %  position_SNR_limit)
+        good_pos = injection_df.limit_SNR <= position_SNR_limit 
     else:
-        print('Checking for good beta locations')
-        good_pos = injection_df.initial_beta < 0.50
+        
+        print('Checking for suitable locations [beta < %.2f]' %  position_beta_limit)
+        good_pos = injection_df.initial_beta < position_beta_limit
     
-    
-    # print(injection_df.initial_beta)
     if np.sum(~good_pos)>0:
         
         if print_progress:
-            print('Ignoring %d / %d sources with high SNR' % (np.sum(~good_pos),len(good_pos)))
+            print('Ignoring %d / %d sources with unsuitable enviroments' % (np.sum(~good_pos),len(good_pos)))
+            
         injection_df = injection_df[good_pos]
-    # print(injection_df)
+        
     
     if np.sum(~good_pos) == len(good_pos):
+        warning_msg = """\nCould not find any suitable area to testing artifical source injection
+        Suggestions:
+        1. Increase number of sources
+        2. Increase detection threshold
+        3. Change injection position
         
-        print('Could not find any suitable area to testing artifical source injection ')
-        return np.nan
+        Returning 999
+        
+        """
+        print(warning_msg)
+        return 999
         
 
     cols = get_distinct_colors(len(injection_df))
@@ -1059,6 +1205,9 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     # dmag fine scale - inital parameters
     use_dmag_fine = False
     fine_dmag_range = None
+    discrepancy_count = 1
+    discrepancy_limit = 3
+    
     
     # Inital counter
     ith = 0 
@@ -1069,25 +1218,20 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     while True:
         try:
         
-            if use_dmag_fine:
+            if use_dmag_fine and not explore:
+                
                 # Use small magnitude step size
                 dmag_step = gradient*fine_dmag_range[ith]
                  
-                # dmag_step_minus_1 = gradient*fine_dmag_range[ith-1]
-                
             else:
                 # Use larger step size
                 dmag_step =  gradient*dmag_range[ith]
-                
-                # dmag_step_minus_1 = gradient*dmag_range[ith-1]
                 
             # step labels to keep track of everything
             step_name = round(start_mag+dmag_step+zeropoint,3)
 
             # Sources are put in one at a time to avoid contamination
             for k in range(len(injection_df)):
-                
-                # SNR_no_source = injection_df['limit_SNR'].values[k]
                 
                 inserted_magnitude[k][step_name] = []
                 recovered_magnitude[k][step_name] = []
@@ -1098,13 +1242,10 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                 location_noise[k][step_name] = []
                 injected_f_source[k][step_name] = []
                 recovered_f_source[k][step_name] = []
-                recovered_sigma_detection[k][step_name] = []
                 recovered_max_flux[k][step_name] = []
-                # recovered_sources_list[k][step_name]  = []
+                
                 recovered_SNR[k][step_name] = []
-                recovered_pos[k][step_name] = []
-                SNR_gradient_change[k][step_name] = []
-                beta_gradient_change[k][step_name] = []
+
                 beta_probability[k][step_name] = []
                 
                 for j in range(redo):
@@ -1129,12 +1270,12 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                         fake_source_on_target[nan_idx] = 0
                         fake_source_on_target[neg_idx] = 0
             
+                        # fake_source_on_target = apply_poisson_noise(fake_source_on_target)
                         fake_source_on_target = make_noise_image(fake_source_on_target.shape,
-                                                                 distribution = 'poisson',
-                                                                 mean = fake_source_on_target,
-                                                                 seed = np.random.randint(0,1e3))
-            
-                        fake_source_on_target = apply_poisson_noise(fake_source_on_target)
+                                                        distribution = 'gaussian',
+                                                        mean = fake_source_on_target,
+                                                        stddev = injection_df['initial_noise'].values[k]*exp_time,
+                                                        seed = np.random.randint(0,1e3))
                     
                     f_injected_source = np.nanmax(fake_source_on_target)/exp_time
                     
@@ -1147,23 +1288,12 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                                         fpath = fpath,
                                         fitting_radius = fitting_radius,
                                         regriding_size = regriding_size,
-                                        scale = scale,
-                                        
                                         no_print = True,
-                                        # remove_sat =remove_sat,
-                                        # sat_lvl = autophot_input['sat_lvl'],
                                         use_moffat = use_moffat,
                                         image_params = image_params,
                                         fitting_method = fitting_method,
-                                        # return_psf_model = autophot_input['psf']['return_psf_model'],
-                                        # save_plot = autophot_input['psf']['save_plot'],
-                                        # show_plot = autophot_input['show_plot'],
-                                        # remove_background_val = autophot_input['remove_background_val'],
                                         hold_pos = hold_psf_position,
                                         return_fwhm = True,
-                                        # return_subtraction_image = autophot_input['psf']['return_subtraction_image'],
-                                        # no_print = autophot_input['no_print'],
-                                        # return_closeup = autophot_input['return_closeup'],
                                         remove_bkg_local = remove_bkg_local, 
                                         remove_bkg_surface = remove_bkg_surface,
                                         remove_bkg_poly   = remove_bkg_poly,
@@ -1201,9 +1331,13 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                         
                         
                         
+                        
+                        
                     psf_flux = psf_counts/exp_time
+                    
                     psf_flux_err = psf_counts_err/exp_time
                     psf_bkg_flux = psf_bkg_counts/exp_time
+                    
                     psf_bkg_std_flux = psf_bkg_std/exp_time
                     psf_height_flux = psf_height/exp_time
                     
@@ -1214,15 +1348,20 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                 
                     
                 
-                    SNR_source_i = SNR(flux_star = psf_flux ,
-                                        flux_sky = psf_bkg_flux  ,
-                                        exp_t = exp_time,
-                                        radius = ap_size*fwhm ,
-                                        G  = gain,
-                                        RN =  rdnoise,
-                                        DC = 0 )[0]
+                    SNR_source_i = []
                     
-                    # SNR_source_i = psf_height_flux/psf_bkg_std_flux
+                    for i in range(len(psf_bkg_flux)):
+                        if psf_bkg_flux[i]>0:
+                            SNR_source_i.append(SNR(flux_star = psf_flux[i],
+                                             flux_sky = psf_bkg_flux[i],
+                                             exp_t = exp_time,
+                                             radius = ap_size*fwhm ,
+                                             G  = gain,
+                                             RN =  rdnoise,
+                                             DC = 0 ))
+                        else:
+                            
+                            SNR_source_i.append(psf_heights_flux[i]/psf_bkg_std_flux[i])
                     
                 
                     recovered_max_flux[k][step_name].append(psf_height_flux)
@@ -1243,14 +1382,17 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                    
     
             if subtraction_ready or injected_sources_use_beta:
+                
                 recovered_sources = np.concatenate([np.array(recovered_max_flux[k][step_name]) >= injection_df['f_ul'].values[k]  for k in range(len(injection_df))])
+                
             else:
+                
                 recovered_sources = np.concatenate([np.array(recovered_SNR[k][step_name]) >= injection_df['limit_SNR'].values[k] for k in range(len(injection_df))])
             
             # For the sources injects - did they pass the recovered test?
             detect_percentage = 100*np.sum(recovered_sources)/len(recovered_sources)
             
-            recover_test = np.sum(recovered_sources)/len(recovered_sources) >=  1-detection_cutout
+            recover_test = np.sum(recovered_sources)/len(recovered_sources) >=  1 - detection_cutout
 
             recovered_criteria[step_name] = recover_test
     
@@ -1309,11 +1451,15 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                 
                 if lmag_found:
                     if print_progress:
-                        print('\n\nOvershoot discrepancy, resetting...\n')
+                        print('\n\nOvershoot discrepancy[^d], resetting...\n' % discrepancy_count)
+                        discrepancy_count+=1
+                if discrepancy_count>discrepancy_limit:
+                    pass
+                else:
                 
-                # didn't meet criteria, keep going
-                lmag_found = False
-                iter_stop = 0
+                    # didn't meet criteria, keep going
+                    lmag_found = False
+                    iter_stop = 0
                 
             if iter_stop > iter_stop_limit:
                 #Done
@@ -1340,7 +1486,11 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
          
             inject_lmag = np.nan
             save_cutouts = False
-            break
+            
+            if ith>nsteps:
+                break
+            else:
+                continue
             # return np.nan
 
     injection_params = {'inject_mag': inserted_magnitude,
@@ -1361,10 +1511,13 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         for k in range(len(injection_df)):
             
             for param_key, param_values in injection_params.items():
+                
                 df_dict[param_key] = []
+                
                 for key,val in param_values.items():
 
                    val1 = list(val.values())
+                   
                    df_dict[param_key]+=[np.mean(i) if not np.isnan(np.mean(i)) else 999 for i in val1 ]
     
             df_dict['source'] += [k] * len(val.values())
@@ -1380,56 +1533,56 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     image_limited = image.copy()
     
     # save_cutouts = True
-    if save_cutouts:
+    # if save_cutouts:
         
-        cutout_size = 2 * fwhm
+    #     cutout_size = 2 * fwhm
         
-        rows = int(np.ceil(len(injection_df)/2))
+    #     rows = int(np.ceil(len(injection_df)/2))
         
-        if rows % 2 != 0:
-            rows=rows+1
+    #     if rows % 2 != 0:
+    #         rows=rows+1
 
-        plt.ioff()
-        fig = plt.figure(figsize = set_size(250,2))
+    #     plt.ioff()
+    #     fig = plt.figure(figsize = set_size(250,2))
         
-        gs = gridspec.GridSpec(rows, 2)
+    #     gs = gridspec.GridSpec(rows, 2)
         
-        gs.update(wspace=0., hspace=0.)
+    #     gs.update(wspace=0., hspace=0.)
         
-        for idx in range(len(injection_df)):
+    #     for idx in range(len(injection_df)):
             
-            ax = fig.add_subplot(gs[idx])
-            
-            
-            fake_kth_source = input_model(injection_df.x_pix.values[idx],
-                                          injection_df.y_pix.values[idx],
-                                          mag2image(inject_lmag_minus_1),
-                                          )
-            
-            image_kth = image_limited + fake_kth_source
+    #         ax = fig.add_subplot(gs[idx])
             
             
-            kth_cutout = image_kth[int(injection_df.y_pix.values[idx]-cutout_size): int(injection_df.y_pix.values[idx] + cutout_size),
-                                   int(injection_df.x_pix.values[idx]-cutout_size): int(injection_df.x_pix.values[idx] + cutout_size)]
+    #         fake_kth_source = input_model(injection_df.x_pix.values[idx],
+    #                                       injection_df.y_pix.values[idx],
+    #                                       mag2image(inject_lmag_minus_1),
+    #                                       )
             
-            ax.imshow(kth_cutout,
-                      interpolation = None,
-                       aspect = 'equal',
-                      origin = 'lower')
+    #         image_kth = image_limited + fake_kth_source
             
-            ax.xaxis.set_visible(False)
-            ax.yaxis.set_visible(False)
             
-            circle = plt.Circle((kth_cutout.shape[1]/2,kth_cutout.shape[1]/2), 1*fwhm, 
-                            color='r',
-                            lw = 0.25,
-                            fill=False)
-            ax.add_patch(circle)
+    #         kth_cutout = image_kth[int(injection_df.y_pix.values[idx]-cutout_size): int(injection_df.y_pix.values[idx] + cutout_size),
+    #                                int(injection_df.x_pix.values[idx]-cutout_size): int(injection_df.x_pix.values[idx] + cutout_size)]
             
-        fig.savefig(write_dir+'inject_lmag_cutouts_'+str(base)+'.pdf',
-                    format = 'pdf')
+    #         ax.imshow(kth_cutout,
+    #                   interpolation = None,
+    #                    aspect = 'equal',
+    #                   origin = 'lower')
             
-        plt.close(fig)
+    #         ax.xaxis.set_visible(False)
+    #         ax.yaxis.set_visible(False)
+            
+    #         circle = plt.Circle((kth_cutout.shape[1]/2,kth_cutout.shape[1]/2), 1*fwhm, 
+    #                         color='r',
+    #                         lw = 0.25,
+    #                         fill=False)
+    #         ax.add_patch(circle)
+            
+    #     fig.savefig(write_dir+'inject_lmag_cutouts_'+str(base)+'.pdf',
+    #                 format = 'pdf')
+            
+    #     plt.close(fig)
 
 
     if save_plot :
@@ -1509,7 +1662,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                 
             else:
 
-                detected_percent = np.sum(np.array(cum_detection[i]) <= lim_SNR) / len(cum_detection[i])
+                detected_percent = np.sum(np.array(cum_detection[i]) <= detection_limit) / len(cum_detection[i])
                 
             
             cum_detection[i] = detected_percent
@@ -1533,35 +1686,14 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         ax11.yaxis.set_major_locator(ticker.FixedLocator(ticks_loc))
         ax11.set_yticklabels([str(int(x*100))+'%' for x in ticks_loc])
 
-        # ax11.axhline(detection_cutout,color = 'red',ls = '--')
-        # ax11.annotate('Detection Cutoff [%d%%]' % int((detection_cutout)*100),
-        #               xy=(0.025,detection_cutout+0.025),
-        #                   va = 'center',
-        #                   ha = 'left',
-        #                   color = 'red',
-        #                   fontsize = 6,
-        #                   xycoords = ax11.get_yaxis_transform(),  
-        #                   # arrowprops=dict(arrowstyle="->", color='black',lw = 0.5),
-        #                   # bbox=dict(facecolor='white', edgecolor='none', boxstyle='round,pad=1'),
-        #                   annotation_clip=False)
+        ax11.hlines(y=detection_cutout,
+                    xmin = (inject_lmag+zeropoint),  
+                    xmax= ax11.get_xlim()[1],
+                    color = 'red',ls = '--')
         
-        
-        ax11.hlines(y=detection_cutout,xmin = (inject_lmag+zeropoint),  xmax= ax11.get_xlim()[1],color = 'red',ls = '--')
         ax11.vlines(x=(inject_lmag+zeropoint),ymin = -0.05,ymax=detection_cutout ,color = 'red',ls = '--')
 
-        # ax11.annotate('Detection Cutoff [%d%%]' % int((detection_cutout)*100),
-        #               xy=(0.05,detection_cutout+0.025),
-            
-        #                   va = 'center',
-        #                   ha = 'left',
-        #                   color = 'red',
-        #                   fontsize = 5,
-        #                   xycoords = ax11.get_yaxis_transform(),  
-        #                   # arrowprops=dict(arrowstyle="->", color='black',lw = 0.5),
-        #                   # bbox=dict(facecolor='white', edgecolor='none', boxstyle='round,pad=1'),
-        #                   annotation_clip=False)
-                
-                
+
         ax11.annotate(r"$M_{lim} \sim %.1f[mag]$" % (inject_lmag+zeropoint),
                       xy=(inject_lmag+zeropoint+0.025,0.025),
             
@@ -1727,6 +1859,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         
         
         else:
+            
             save_loc = os.path.join(write_dir,'inject_lmag_'+base+'.pdf')
             fig.savefig(save_loc,bbox_inches = 'tight',format = 'pdf')
   

@@ -172,12 +172,12 @@ def remove_background(image,fwhm = 7, xc=None, yc=None,
         _, _, noise = sigma_clipped_stats(backgroundfree_image_outside_aperture,
                                          cenfunc = np.nanmedian,
                                          stdfunc = np.nanstd,
-                                         sigma=bkg_level)
+                                         sigma = bkg_level)
         
         # Find the median value of the surface inside the target location
-        surface_inside_aperture = np.ma.array(surface,mask=abs(1-mask_array))
+        # surface_inside_aperture = np.ma.array(surface,mask=abs(1-mask_array))
         
-        _, median_surface, _= sigma_clipped_stats(surface_inside_aperture,
+        _, median_surface, _= sigma_clipped_stats(surface,
                                                   cenfunc = np.nanmedian,
                                                   stdfunc = np.nanstd,
                                                   sigma = bkg_level)

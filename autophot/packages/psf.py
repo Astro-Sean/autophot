@@ -14,11 +14,22 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
                   save_PSF_stars = False, plot_PSF_model_residual = False, 
                   save_PSF_models_fits = False
                   ):
-    '''
+    r'''
     
-    Build the PSF model from bright, well isolated sources in the field.
-    
-    
+       Build the PSF model from bright, well isolated sources in the field.  AutoPHOT
+    uses "well-behaved" sources to build the PSF model which will then be used to
+    measure the amplitude of sources in the field. These sources must be have a high S/N,
+    isolated from their neighbours and have a relatively smooth background. This is done by
+    building a compound model comprised of an analytical component (such as Gaussian or
+    Moffat) along with a numerical residual table obtained during the fitting process.  
+    Bright isolated sources are located and fitted with an analytical function . The best
+    fit location is noted and the analytic model is subtracted to leave a residual
+    image . The residual image is resampled onto a finer pixel grid and shifted . The
+    compound (analytic and residual) PSF model is then normalized to unity. This process is
+    repeated for several (typically ~10 sources) bright isolated sources, to create an
+    average residual image. The final step is to resample the average residual image back
+    to to the original pixel scale.
+
     :param base_image: 2D array  containing sources
     :type base_image: 2D array
     :param selected_sources: DataFrame object containing *xcentroid* and *ycentroid* columns given the XY pixel location of a source. Dataframe may also containing *include_fwhm* and *include_median* which should contain either *True* or *False* on whether to include a given source based in it's FWHM and/or background median respectively.
@@ -31,13 +42,13 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
     :type image_params: dict
     :param fpath: Filepath of *FITS* image used. 
     :type fpath: str
-    :param GAIN: GAIN on CCD in :math:`e^{-1} /  ADU` , defaults to 1.
+    :param GAIN: GAIN on CCD in :math:`e^{-} /  ADU` , defaults to 1.
     :type GAIN: float, optional
-    :param rdnoise: Read noise of CCD in :math:`e^{-1} /  pixel`, defaults to 0.
+    :param rdnoise: Read noise of CCD in :math:`e^{-} /  pixel`, defaults to 0.
     :type rdnoise: float, optional
     :param use_moffat: If True, use a moffat function for FWHM fitting defaults to True
     :type use_moffat: bool, optional
-    :param fitting_radius: zoomed region around location of best fit to focus fitting. This allows for the fitting to be concentrated on high S/N areas and not fit the low S/N wings of the PSF, defaults to 1.3
+    :param fitting_radius: zoomed region around location of best fit to focus fittinƒimage_params:g. This allows for the fitting to be concentrated on high S/N areas and not fit the low S/N wings of the PSF, defaults to 1.3
     :type fitting_radius: float, optional
     :param regrid_size: When expanding to larger pseudo-resolution, what zoom factor to use, defaults to 10
     :type regrid_size: int, optional
@@ -71,8 +82,8 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
     :type remove_bkg_surface: Boolean, optional
     :type remove_bkg_poly: If True, use the background polynomial surface of the image and subtract this to produce a background free image, see above, optional
     :param remove_bkg_poly_degree: If remove_bkg_poly is True, this is the degree of the polynomial fitted to the image, 1 = flat surface, 2 = 2nd order polynomial etc, defaults to 1
-    :param fitting_method: DESCRIPTION, defaults to 'least_sqaure'
-    :type fitting_method: TYPE, optional
+    :param fitting_method: Fitting method when fitting the PSF model, defaults to 'least_square'
+    :type fitting_method: str, optional
     :param save_PSF_stars: If True, save the information on the stars used to build the PSF model, defaults to False
     :type save_PSF_stars: bool, optional
     :param save_PSF_models_fits: If True, save a *FITS* image of the PSF model, normalised to unity, defaults to False
@@ -123,14 +134,14 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
     xx_sl,yy_sl= np.meshgrid(x_slice,x_slice)
 
     # for matchinf each source residual image with will regrid the image for shifting later
-    regriding_size = int(regrid_size)
+    regrid_size = int(regrid_size)
     
 
     residual_table = []
 
-    if regriding_size % 2 > 0:
+    if regrid_size % 2 > 0:
         logger.info('regrid size must be even adding 1')
-        regriding_size += 1
+        regrid_size += 1
 
     if use_moffat:
         
@@ -479,10 +490,10 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
                 
                 # residual_counts_before = np.sum(residual)
 
-                residual_regrid = np.repeat(np.repeat(residual, regriding_size, axis=0), regriding_size, axis=1)
+                residual_regrid = np.repeat(np.repeat(residual, regrid_size, axis=0), regrid_size, axis=1)
 
-                x_roll = scale_roll(fitting_radius,xc,regriding_size)
-                y_roll = scale_roll(fitting_radius,yc,regriding_size)
+                x_roll = scale_roll(fitting_radius,xc,regrid_size)
+                y_roll = scale_roll(fitting_radius,yc,regrid_size)
 
                 residual_roll = np.roll(np.roll(residual_regrid,y_roll,axis=0),x_roll,axis = 1)
 
@@ -605,40 +616,51 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
 # =============================================================================
 # Fitting of PSF
 # =============================================================================
-def PSF_MODEL(xc, yc, sky, H, r_table, fwhm,image_params,use_moffat = True, fitting_radius = 1.3,regriding_size =10 ,slice_scale = None,pad_shape = None):
-    '''
-     Point Spread Function model for use in Autophot. This function is used in psf.fit and numerous limiting magnitude packages to effectively model point sources in an image.
-     
-    :param xc: x-pixel coordinate
+def PSF_MODEL(xc, yc, sky, H, r_table, fwhm,image_params,use_moffat = True,
+              fitting_radius = 1.3,regrid_size =10 ,
+              slice_scale = None,pad_shape = None):
+    r'''
+    
+    Function that returns a "fitted-able" PSF model. The PSF model has the general format off:
+    
+    .. math::
+       PSF(x,y,A) = G/M(x,y,A) + R(x,y,A)
+       
+    
+    where *G/M* is our base analytical function of a fixed Full Width Half Maximum and *R* is the residual table, with the same shape as the analytical function 
+    
+    :param xc: Best fitted X position of the PSF model
     :type xc: float
-    :param yc: y-pixel coordinate
+    :param yc: Best fitted Y position of the PSF model
     :type yc: float
-    :param sky: sky background offset
-    :type sky: numpy array
-    :param H: height/amplitude of PSF model
+    :param sky: Sky background offset
+    :type sky: float
+    :param H: Best fitted amplitude of PSF model
     :type H: float
-    :param r_table: residual table from psf.PSF_MODEL_table
-    :type r_table: numpy array
-    :param autophot_input: AutoPhot Control dictionary, defaults to autophot_input
-    :type autophot_input: dict, optional
-    Requires autophot_input keywords:
-    
-        - **use_moffat** (*boolean*): Use a moffat function as the base analytical function for the PSf model
-        - **image_params** (*dict*): dictionary containing values of analytical function. if 'use_moffat' dictionary should contain 'alpha' and 'beta' keys and their values, else dictionary should contain 'sigma' and its value
-
-    :param slice_scale: If defined, focus on center of image of size +/- slice , defaults to None
+    :param r_table: Resiudal table, normailised to unity that is the same shape as the base analytical function
+    :type r_table: 2D array
+    :param fwhm: FWHM value used in the analytical function
+    :type fwhm: float
+    :param image_params: Dictionary containing analytical model params. If a moffat is used, this dictionary should containing *alpha* and *beta* and their respective values, else if a gaussian is used, this dictionary should include *sigma* and its value.
+    :type image_params: dict
+    :param use_moffat: If True, use a moffat fcuntion as the analytical function, else use a gaussian, defaults to True
+    :type use_moffat: bool, optional
+    :param fitting_radius: Multiple of FWHM to use a zoomed in closeup of image, defaults to 1.3
+    :type fitting_radius: float, optional
+    :param regrid_size: Zoom scale of increased pesudo-resoloution grid, defaults to 10
+    :type regrid_size: int, optional
+    :param slice_scale: If the returne PSF model is required to be of a center shape, set *slice\_scale* be half the height/width of the new shape e.g. PSF shape = (:math:`2 \\times slice\_scale`,:math:`2 \\times slice\_scale`), defaults to None
     :type slice_scale: int, optional
-    :param pad_shape: If if PSF needs to be resized to larger image, given shape of larger image via this value , defaults to None
-    :type pad_shape: tuple, optional
-    :return: PSF model
-    :rtype: numpy array
+    :param pad_shape: If the output PSF shape needs to be larger than in the input gridsize of the residual table set *pad\_shape* be half the height/width of the new shape e.g. PSF shape = (:math:`2 \\times pad\_shape[0]`,:math:`2 \\times pad\_shape[1]`). Does not have to be a sqaure shape, defaults to None
+    :type pad_shape: tuple of ints, optional
+    :return: Returns a PSF model of a desirced shape
+    :rtype: 2D array
 
     '''
-    
+
     import numpy as np
-    from autophot.packages.functions import gauss_2d,moffat_2d,moffat_fwhm,gauss_sigma2fwhm
-    from autophot.packages.functions import gauss_2d,moffat_2d,moffat_fwhm,gauss_sigma2fwhm
-    from autophot.packages.functions import scale_roll,rebin,gauss_fwhm2sigma,set_size,order_shift
+    from autophot.packages.functions import gauss_2d,moffat_2d
+    from autophot.packages.functions import scale_roll,rebin
     
     
     fitting_radius = int(np.ceil(fitting_radius* fwhm))
@@ -675,19 +697,15 @@ def PSF_MODEL(xc, yc, sky, H, r_table, fwhm,image_params,use_moffat = True, fitt
             core = gauss_2d((xx_rebin,yy_rebin),xc,yc,sky,H,image_params).reshape(psf_shape)
         
         # Blow up residual table to larger size
-        
-        residual_rebinned = np.repeat(np.repeat(r_table, regriding_size, axis=0), regriding_size, axis=1)
+        residual_rebinned = np.repeat(np.repeat(r_table, regrid_size, axis=0), regrid_size, axis=1)
 
-        
-        #TODO: Check this - may be where the fitting issue is coming from
         # scale roll = where you wana go,where you are
-        x_roll = scale_roll(xc,r_table.shape[1]/2,regriding_size)
-        y_roll = scale_roll(yc,r_table.shape[0]/2,regriding_size)
+        x_roll = scale_roll(xc,r_table.shape[1]/2,regrid_size)
+        y_roll = scale_roll(yc,r_table.shape[0]/2,regrid_size)
         
         # Roll in y direction then in x direction
         residual_roll = np.roll(np.roll(residual_rebinned,y_roll,axis=0),x_roll,axis = 1)
-        
-        # print(residual_roll)
+
         # rebin and scale to high to PSF (fitted by analytical funcrion)
         residual = H * rebin(residual_roll,psf_shape)
 
@@ -717,35 +735,65 @@ def PSF_MODEL(xc, yc, sky, H, r_table, fwhm,image_params,use_moffat = True, fitt
 # =============================================================================
 # Fit the PSF model
 # =============================================================================
-def fit(image,
-        sources,
-        residual_table,
-        fwhm,
-        fpath,
-        fitting_radius = 1.3,
-        regriding_size = 10,
-        scale = 25,
-        bkg_level = 3,
-        remove_sat = True,
-        sat_lvl = 65536,
-        use_moffat = True,
-        image_params = None,
-        fitting_method = 'least_sqaure',
-        return_psf_model = False,
-        save_plot = False,
-        show_plot = False,
-        remove_background_val = True,
-        hold_pos = False,
-        return_fwhm = False,
-        return_subtraction_image = False,
-        no_print = True,
-        return_closeup = False,
-        remove_bkg_local = True,
-        remove_bkg_surface = False,
-        remove_bkg_poly = False,
-        remove_bkg_poly_degree = 1,
-        plot_PSF_residuals = False,
+def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3, 
+        regrid_size = 10, bkg_level = 3,
+        sat_lvl = 65536, use_moffat = True, image_params = None, 
+        fitting_method = 'least_sqaure',  save_plot = False,
+        show_plot = False, remove_background_val = True, hold_pos = False,
+        return_fwhm = False, return_subtraction_image = False,
+        no_print = True, return_closeup = False, remove_bkg_local = True, 
+        remove_bkg_surface = False, remove_bkg_poly = False,
+        remove_bkg_poly_degree = 1, plot_PSF_residuals = False,
         ):
+    r'''
+        
+    Function to fit a given Point Spread Function (PSF) model to a point source located in an image.
+    
+    :param image: 2D array containing point sources
+    :type image: 2D array
+    :param sources: Dataframe containg *x_pix* and *y_pix* columns corrospsondong the the XY pixel location in an image
+    :type sources: Dataframe
+    :param residual_table: Residual image normalised to unity.
+    :type residual_table: 2D array
+    :param fwhm: Full Width Half Maximum of image
+    :type fwhm: float
+    :param fpath: Filepath of image. This is used to save plots and figures.
+    :type fpath: str
+    :param fitting_radius: Multiple of FWHM to use a zoomed in closeup of image, defaults to 1.3
+    :type fitting_radius: float, optional
+    :param regrid_size: Zoom scale of increased pesudo-resoloution grid, defaults to 10
+    :type regrid_size: int, optional
+    :param bkg_level: The number of standard deviations, below which is assumed to be due to the background noise distribution, defaults to 3
+    :type bkg_level: float, optional
+    :param sat_lvl: Counts level above which any detected source is deemed saturated and discarded, defaults to 65536
+    :type sat_lvl: float, optional
+    :param use_moffat: If True, use a moffat function for FWHM fitting, else use a Gaussian
+    :type use_moffat: bool, optional
+    :param image_params: Dictionary containing analytical model params. If a moffat is used, this dictionary should containing *alpha* and *beta* and their respective values, else if a gaussian is used, this dictionary should include *sigma* and its value.
+    :type image_params: dict
+    :param fitting_method: Fitting method when fitting the PSF model, defaults to 'least_square'
+    :type fitting_method: str, optional
+    :param save_plot: If True, save a plot showing the source, it's fitted PSF and subtraction, defaults to False
+    :type save_plot: bool, optional
+    :param hold_pos: If True, don't let the PSF model adjust its position, only it's amplitude. This is equivalent to force photometry, defaults to False
+    :type hold_pos: bool, optional
+    :param return_fwhm: If True, fit the FWHM of the source using the base analytical model and include it in the output dataframe, defaults to False
+    :type return_fwhm: bool, optional
+    :param no_print: If True, do not display the progress of the PSF fitting, defaults to True
+    :type no_print: bool, optional
+    :param return_closeup: If True, retrun the close up image used to fit the PSF model, defaults to False
+    :type return_closeup: bool, optional
+    :param remove_bkg_local: If True, use the local median of the image and subtract this to produce a background free image, see above, defaults to True
+    :type remove_bkg_local: Boolean, optional
+    :param remove_bkg_surface: If True, use the background fitted surface of the image and subtract this to produce a background free image, see above, defaults to False
+    :type remove_bkg_surface: Boolean, optional
+    :type remove_bkg_poly: If True, use the background polynomial surface of the image and subtract this to produce a background free image, see above, optional
+    :param remove_bkg_poly_degree: If remove_bkg_poly is True, this is the degree of the polynomial fitted to the image, 1 = flat surface, 2 = 2nd order polynomial etc, defaults to 1
+    :param plot_PSF_residuals: If True, plot the residual images from the PSF fitting and subtraction and save them to a directory in *file\_path* called *psf\_subtractions*, defaults to False
+    :type plot_PSF_residuals: Bool, optional
+    :return: Return a dataframe containing information in the PSF fittings
+    :rtype: Dataframe
+    '''
     
     
     
@@ -762,7 +810,7 @@ def fit(image,
     import matplotlib.pyplot as plt
 
     from autophot.packages.functions import gauss_2d,moffat_2d,moffat_fwhm,gauss_sigma2fwhm
-    from autophot.packages.functions import set_size,order_shift
+    from autophot.packages.functions import set_size,order_shift,border_msg
     from matplotlib.gridspec import  GridSpec
     
     from autophot.packages.background import remove_background
@@ -773,7 +821,7 @@ def fit(image,
     plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
     
     if not no_print:
-        print('\nFitting PSF to image')
+        border_msg('Fitting PSF to sources in the image')
     
      
     base = os.path.basename(fpath)
@@ -786,6 +834,13 @@ def fit(image,
     fitting_radius = int(fitting_radius * fwhm)
 
     psf_params = []
+    
+    scale = int(residual_table.shape[0]/2)
+    # print(scale)
+    
+    if residual_table.shape[0]%2 != 0:
+        scale+=0.5
+    # print(scale)
 
     xx,yy= np.meshgrid(np.arange(0,image.shape[1]),np.arange(0,image.shape[0]))
     
@@ -802,23 +857,26 @@ def fit(image,
 
         vmin,vmax = (ZScaleInterval(nsamples = 300)).get_limits(image)
    
-    if return_subtraction_image:
-        image_before = image.copy()
+    # if return_subtraction_image:
+    #     image_before = image.copy()
         
         
     # How is the PSF model allowed to move around
     if hold_pos:
+        
         dx_vary = False
         dy_vary = False
         
-        dx = 1
-        dy = 1
+        dx = 0.5
+        dy = 0.5
+        
     else:
+        
         dx_vary = True
         dy_vary = True
         
-        dx = 2*fwhm
-        dy = 2*fwhm
+        dx = 4*fwhm
+        dy = 4*fwhm
         
 
     
@@ -835,7 +893,7 @@ def fit(image,
                             image_params,
                             use_moffat = use_moffat,
                             fitting_radius = fitting_radius,
-                            regriding_size = regriding_size,
+                            regrid_size = regrid_size,
                             slice_scale = slice_scale,
                             pad_shape = pad_shape)
 
@@ -847,17 +905,17 @@ def fit(image,
     
     psf_residual_model.set_param_hint('x0',
                                       vary = dx_vary,
-                                      value = 0.5*residual_table.shape[1],
-                                      min   = 0.5*residual_table.shape[1]-dx,
-                                      max   = 0.5*residual_table.shape[1]+dx)
+                                      value = scale,
+                                      min   = scale - dx,
+                                      max   = scale + dx)
     
     # 0.5*residual_table.shape[1]+dx
 
     psf_residual_model.set_param_hint('y0',
-                                      vary = dx_vary,
-                                      value = 0.5*residual_table.shape[0],
-                                      min   = 0.5*residual_table.shape[0]-dy,
-                                      max   = 0.5*residual_table.shape[0]+dy)
+                                      vary = dy_vary,
+                                      value = scale,
+                                      min   = scale - dy,
+                                      max   = scale + dy)
 
     x_slice = np.arange(0,2*fitting_radius)
     
@@ -908,12 +966,11 @@ def fit(image,
                                                                                    remove_bkg_poly_degree = remove_bkg_poly_degree,
                                                                                    bkg_level = bkg_level
                                                                                    )
-
                                                                                     
                 
             except Exception as e:
                 
-                print('cannot fit background')
+                print('cannot fit background - %s' % e)
 
                 psf_params.append((idx,x_fitted,y_fitted,xc,yc,bkg_median,noise,H,H_psf_err,max_pixel,chi2,redchi2))
 
@@ -923,6 +980,8 @@ def fit(image,
                 
             # if return_fwhm:
             #     print('bkg_median: %6.f' % bkg_median)
+            
+            
 
             source = source_bkg_free[int(0.5*source_bkg_free.shape[1] - fitting_radius):int(0.5*source_bkg_free.shape[1] + fitting_radius) ,
                                      int(0.5*source_bkg_free.shape[0] - fitting_radius):int(0.5*source_bkg_free.shape[0] + fitting_radius) ]
@@ -945,11 +1004,12 @@ def fit(image,
                 psf_residual_model.set_param_hint('A',
                                                   value = 0.75 * np.nanmax(source),
                                                   min = 1e-6,
-                                                  max = 2*np.nanmax(source))
+                                                  # max = 2*np.nanmax(source)
+                                                  )
                 
             
                 psf_pars = psf_residual_model.make_params()
-                
+   
 
                 import warnings
                 with warnings.catch_warnings():
@@ -962,21 +1022,25 @@ def fit(image,
                                                     x = np.ones(source.shape),
                                                     method = fitting_method,
                                                     nan_policy = 'omit',
-                                                    # weights = np.log10(source)
+                                                    # weights = np.sqrt(abs(source))
                                                     )
                     
 
                 xc = result.params['x0'].value
 
                 yc = result.params['y0'].value
-
+                
+  
+                            
                 H_psf = result.params['A'].value
                 H_psf_err = result.params['A'].stderr
+
+                if H_psf_err is None:
+                    H_psf_err = np.nan
+                    
                 
                 max_pixel = np.nanmax(source)
-                
-                
-      
+
                 chi2 = result.chisqr
                 redchi2 = result.redchi
 
@@ -989,10 +1053,7 @@ def fit(image,
         
                 
                 if return_fwhm:
-                    # if not no_print:
-                    # logger.info('\nFitting function to source to get FWHM')
-                        
-                    # print(x_fitted_shape,y_fitted_shape,fitting_radius)
+
                         
                     pars = lmfit.Parameters()
                     pars.add('A',
@@ -1015,6 +1076,7 @@ def fit(image,
                         pars.add('alpha',value = image_params['alpha'],
                                  min = 0,
                                  vary =  False)
+                        
                         pars.add('beta',value = image_params['beta'],
                                  min = 0,
                                  vary = False )
@@ -1032,14 +1094,14 @@ def fit(image,
                         
                         def residual(p):
                             p = p.valuesdict()
-                            return abs(source  - moffat_2d((xx_sl,yy_sl),p['x0'],p['y0'],0,p['A'],dict(alpha=p['alpha'],beta=p['beta'])).reshape(source.shape)).flatten()
+                            return (source  - moffat_2d((xx_sl,yy_sl),p['x0'],p['y0'],0,p['A'],dict(alpha=p['alpha'],beta=p['beta'])).reshape(source.shape)).flatten()
                     else:
                         
                         fitting_model_fwhm = gauss_sigma2fwhm
                         
                         def residual(p):
                             p = p.valuesdict()
-                            return abs(source - gauss_2d((xx_sl,yy_sl),p['x0'],p['y0'],0,p['A'],dict(sigma=p['sigma'])).reshape(source.shape)).flatten()
+                            return (source - gauss_2d((xx_sl,yy_sl),p['x0'],p['y0'],0,p['A'],dict(sigma=p['sigma'])).reshape(source.shape)).flatten()
     
                                     
                     import warnings
@@ -1070,7 +1132,7 @@ def fit(image,
                
                 
                 
-                if remove_sat and not return_fwhm:
+                if  not return_fwhm:
 
                     if H_psf+bkg_median >= sat_lvl:
                         # print('sat')
@@ -1143,7 +1205,7 @@ def fit(image,
                                 color = 'green',
                                 s = 25)
 
-                    image_section_subtraction = image_section - PSF_MODEL(xc , yc, 0, H_psf, residual_table,image_params,use_moffat = use_moffat,fitting_radius = fitting_radius,regriding_size = regriding_size,pad_shape = pad_shape,slice_scale = image_section.shape[0]/2)
+                    image_section_subtraction = image_section - PSF_MODEL(xc , yc, 0, H_psf, residual_table,image_params,use_moffat = use_moffat,fitting_radius = fitting_radius,regrid_size = regrid_size,pad_shape = pad_shape,slice_scale = image_section.shape[0]/2)
 
                     image[int(yc_global  - lower_y_bound): int(yc_global +  upper_y_bound),
                           int(xc_global  - lower_y_bound): int(xc_global +  upper_y_bound)] =  image_section_subtraction
@@ -1182,12 +1244,12 @@ def fit(image,
                     plt.close('all')
                     pass
 
-            if plot_PSF_residuals or show_plot == True or save_plot == True:
+            if plot_PSF_residuals  or save_plot == True:
 
                 try:
                     from astropy.visualization import  ZScaleInterval
                     
-                    fitted_source = PSF_MODEL(xc , yc, 0, H_psf, residual_table,fwhm,image_params,use_moffat = use_moffat,fitting_radius = fitting_radius,regriding_size = regriding_size)
+                    fitted_source = PSF_MODEL(xc , yc, 0, H_psf, residual_table,fwhm,image_params,use_moffat = use_moffat,fitting_radius = fitting_radius,regrid_size = regrid_size)
 
                     subtracted_image = source_bkg_free - fitted_source + bkg_surface
 
@@ -1404,50 +1466,7 @@ def fit(image,
              psf_params.append((idx,x_fitted,y_fitted,xc,yc,bkg_median,noise,H_psf,H_psf_err,max_pixel,chi2,redchi2))
 
              continue
-    # print(' ... done')
 
-    # if autophot_input['plot_before_after'] and return_subtraction_image:
-
-    #     print('Saving before and after image')
-
-    #     plt.ioff()
-
-    #     fig = plt.figure(figsize = set_size(500,1))
-
-    #     ax1 = fig.add_subplot(121)
-    #     ax2 = fig.add_subplot(122)
-
-    #     ax1.imshow(image_before,
-    #                 origin = 'lower',
-    #                 # aspect="auto",
-    #                 vmin = vmin,
-    #                 vmax = vmax,
-    #                 cmap='gray',
-    #                 interpolation = 'nearest'
-    #                 )
-
-    #     ax2.imshow(image,
-    #                 origin = 'lower',
-    #                 # aspect="auto",
-    #                 vmin = vmin,
-    #                 vmax = vmax,
-    #                 cmap='gray',
-    #                 interpolation = 'nearest'
-    #                 )
-
-    #     for ax in fig.axes:
-    #         ax.set_xlim(0,image.shape[0])
-    #         ax.set_ylim(0,image.shape[1])
-    #         ax.set_xlabel('X Pixel')
-    #         ax.set_xlabel('Y Pixel')
-
-    #     ax1.set_title('Original Image')
-    #     ax2.set_title('Point source Free image [%d]' % autophot_input['do_all_phot_sigma'])
-
-    #     plt.savefig(write_dir+'PSF_BEFORE_AFTER.pdf',
-    #                 bbox_inches='tight')
-
-    #     plt.close(fig)
 
     new_df =  pd.DataFrame(psf_params,
                            columns = ('idx','x_fitted','y_fitted','x_closeup_fitted','y_closeup_fitted','bkg','noise','H_psf','H_psf_err','max_pixel','chi2','redchi2'),
@@ -1471,35 +1490,56 @@ def fit(image,
         return  PSF_sources,source_base
 
 
-
-
-
-
 # =============================================================================
 # Convert fitted heights to counts under PSF
 # =============================================================================
 
-def do(df,residual_image= None,
-       ap_size = 1.7,
-       fwhm = 7, 
-       unity_PSF_counts = None,
-       unity_residual_counts = None,
-       use_moffat = True,
-       image_params = None):
+def do(df,residual_image= None, ap_size = 1.7, fwhm = 7, unity_PSF_counts = None,
+       unity_residual_counts = None, use_moffat = True, image_params = None):
+    '''
+    
+        We exploit the fact that each point source in an image appears the same, i.e.
+    the PSF model matches each each, and the only variable that change between each
+    source is it's height. We use this function to get the counts under a PDF model
+    with ampltide equal to 1. 
+    
+    This allows use to scale these counts to any source
+    fitted with the same PSF later on.
+    
+    :param df: Dataframe containing the columns *H_PSF* and *H_PSF_err* which corrospsonds to the height of the best fitted PSF and the error associated with that value
+    :type df: Dataframe
+    :param residual_image: Residual table, normalised to unity that is the same shape as the base analytical function, defaults to None
+    :type residual_image:  2D array, optional
+    :param ap_size: Multiple of FWHM to be used as standard aperture size, defaults to 1.7
+    :type ap_size: float, optional
+    :param fwhm: Full Width Half Maximum of image
+    :type fwhm: float
+    :param unity_PSF_counts: Number of counts under a PSF model with amplitude equal to 1, if this value is left as None, and the residual table is given, this value is calculated and returned, defaults to None
+    :type unity_PSF_counts: float, optional
+    :param unity_residual_counts: Number of counts under a residual table normalised to an PSF amplitude equal to 1, defaults to None
+    :type unity_residual_counts: float, optional
+    :param use_moffat: If True, use a moffat function as the analytical function, else use a gaussian, defaults to True
+    :type use_moffat: bool, optional
+    :param image_params: Dictionary containing analytical model params. If a moffat is used, this dictionary should containing *alpha* and *beta* and their respective values, else if a gaussian is used, this dictionary should include *sigma* and its value.
+    :type image_params: dict
+    :return: If *unity_PSF_counts* is None and the residual is given, this function will calculate and return the value of *unity_PSF_counts* as well as the counts under the fitted PSF given in the initial dataframe. If *unity_PSF_counts* is defined, then the counts information is returned only
+
+    '''
 
     from photutils import CircularAperture
     from photutils import aperture_photometry
     import logging
     import numpy as np
     
-    from autophot.packages.functions import gauss_2d,moffat_2d
+    from autophot.packages.functions import gauss_2d,moffat_2d,border_msg
     
     logger = logging.getLogger(__name__)
     
     find_unity_PSF_counts = False
-    
-    # TODO: this is a waste - move it somewhere else
+
     if unity_PSF_counts is None:
+        
+        border_msg('Measuring PSF model')
     
         find_unity_PSF_counts = True
         
@@ -1534,10 +1574,7 @@ def do(df,residual_image= None,
                                              subpixels=5)
         residual_int = residual_table[0]
         
-        # core_table = aperture_photometry(core,apertures,
-        #                                  method='subpixel',
-        #                                  subpixels=5)
-        # core_int =  core_table[0]
+
         
         PSF_table = aperture_photometry(unity_PSF_model,apertures,
                                         method='subpixel',
@@ -1555,13 +1592,17 @@ def do(df,residual_image= None,
         logger.info('Unity Residual table: %.1f [counts] ' % unity_residual_counts)
     
     df['psf_counts']     = df.H_psf.values * unity_PSF_counts
+    
 
-    df['psf_counts_err'] = df.H_psf_err.values * unity_PSF_counts
+    
+    df['psf_counts_err'] = np.nan_to_num(df.H_psf_err.values) * unity_PSF_counts
 
     
     
     if find_unity_PSF_counts:
+        
         return df,unity_PSF_counts
+    
     else:
 
         return df
@@ -1573,35 +1614,75 @@ def do(df,residual_image= None,
 
 
 
-def compute_multilocation_err(image,
-                              fwhm,
-                              PSF_model,
-                              image_params,
-                              exp_time,
-                              fpath,
-                              scale,
-                              unity_PSF_counts,
+def compute_multilocation_err(image, fwhm, PSF_model, image_params, exp_time,
+                              fpath, scale, unity_PSF_counts, 
                               target_error_compute_multilocation_number = 5,
                               target_error_compute_multilocation_position = 1,
-                              use_moffat = True,
-                              fitting_method = 'least_sqaure',
-                              ap_size = 1.7,
-                              fitting_radius = 1.3,
-                              regriding_size = 10,
-                          
-         
-           
-                              
-                              xfit = None,
-                              yfit = None,
-                              Hfit = None,
-                              
-                              r_table = None,
-                              remove_bkg_local = True,
-                              remove_bkg_surface = False,
-                              remove_bkg_poly = False,
-                              remove_bkg_poly_degree = 1,
-                              bkg_level = 3):
+                              use_moffat = True, fitting_method = 'least_sqaure',
+                              ap_size = 1.7, fitting_radius = 1.3, 
+                              regrid_size = 10, xfit = None, yfit = None, 
+                              Hfit = None, r_table = None, remove_bkg_local = True,
+                              remove_bkg_surface = False, remove_bkg_poly = False,
+                              remove_bkg_poly_degree = 1, bkg_level = 3):
+    '''
+        Package to employ the same error technique as in the `SNOOPY
+    <https://sngroup.oapd.inaf.it/snoopy.html>`_ code. In brief, error
+    estimates from the transient measurement are obtained through artificial
+    star experiment in which a fake star of magnitude equal to that of the SN,
+    is placed in the PSF-fit residual image 
+    in a position close to, but not coincident with that of the real source.
+    
+    The artificially injects source is then recovered in an identical manner to
+    the original transient magnitude. This is repeated several times. The
+    dispersion of these recovered measurements is then taken as the error on
+    the transient measurement and added in quadrature. 
+
+    :param image: Image containing transietnf flux
+    :type image: 2D array
+    :param fwhm: Full Width Half Maximum of image. This is used to constrain the position of the injected sources
+    :type fwhm: float
+    :param PSF_model: PSF model that is used to fit transient flux, this will also be used to inject the artifical sources
+    :type PSF_model: callable function
+    :param image_params: Dictionary containing analytical model params. If a moffat is used, this dictionary should containing *alpha* and *beta* and their respective values, else if a gaussian is used, this dictionary should include *sigma* and its value.
+    :type image_params: dict
+    :param exp_time: Exposure time ins seconds of an image. This is used to calculate the S/N of a potential source.
+    :type exp_time: float
+    :param unity_PSF_counts: Number of counts under a PSF model with amplitude equal to 1, defaults to None
+    :type unity_PSF_counts: float, optional
+    :param target_error_compute_multilocation_number: Number of times the psuedo-transient PSF will be reinjected at locations radially around the original SN site, defaults to 5
+    :type target_error_compute_multilocation_number: int, optional
+    :param target_error_compute_multilocation_position: Multipl of FWHM with which to place the psuedo-transient PSF away from the original site of best fit. Set to -1 to perform sub pixel injection and recovery, defaults to 1
+    :type target_error_compute_multilocation_position: float, optional
+    :param use_moffat: If True, use a moffat function for FWHM fitting defaults to True
+    :type use_moffat: bool, optional
+    :param fitting_method: Fitting method when fitting the PSF model, defaults to 'least_square'
+    :type fitting_method: str, optional
+    :param ap_size: Multiple of FWHM to be used as standard aperture size, defaults to 1.7
+    :type ap_size: float, optional
+    :param fitting_radius: zoomed region around location of best fit to focus fitting. This allows for the fitting to be concentrated on high S/N areas and not fit the low S/N wings of the PSF, defaults to 1.3
+    :type fitting_radius: float, optional
+    :param regriding_size: When expanding to larger pseudo-resolution, what zoom factor to use, defaults to 10
+    :type regriding_size: int, optional
+    :param xfit: X pixel location of best fit for the transient psf in the image, defaults to None
+    :type xfit: float, optional
+    :param yfit: y pixel location of best fit for the transient psf in the image, defaults to None
+    :type yfit: float, optional
+    :param Hfit: PSF amplitude of best fit for the transient psf in the image, defaults to None, defaults to None
+    :type Hfit: float, optional
+    :param r_table: Resiudal table, normailised to unity that is the same shape as the base analytical function
+    :type r_table: 2D array
+    :param remove_bkg_local: If True, use the local median of the image and subtract this to produce a background free image, see above, defaults to True
+    :type remove_bkg_local: Boolean, optional
+    :param remove_bkg_surface: If True, use the background fitted surface of the image and subtract this to produce a background free image, see above, defaults to False
+    :type remove_bkg_surface: Boolean, optional
+    :type remove_bkg_poly: If True, use the background polynomial surface of the image and subtract this to produce a background free image, see above, optional
+    :param remove_bkg_poly_degree: If remove_bkg_poly is True, this is the degree of the polynomial fitted to the image, 1 = flat surface, 2 = 2nd order polynomial etc, defaults to 1
+    :param bkg_level: The number of standard deviations, below which is assumed to be due to the background noise distribution, defaults to 3
+    :type bkg_level: float, optional
+    :return: Returns the standard deviation of the recovered magnitudes of the artifically injection pseudo-transient PSFs
+    :rtype: float
+    '''
+
     
     import numpy as np
     import pandas as pd
@@ -1629,9 +1710,9 @@ def compute_multilocation_err(image,
                        image_params,
                        use_moffat = use_moffat,
                        fitting_radius = fitting_radius,
-                       regriding_size = regriding_size,
+                       regrid_size = regrid_size,
                        pad_shape = image.shape)
-# xc, yc, sky, H, r_table, fwhm,image_params,use_moffat = True, fitting_radius = 1.3,regriding_size =10 ,slice_scale = None,pad_shape = None
+# xc, yc, sky, H, r_table, fwhm,image_params,use_moffat = True, fitting_radius = 1.3,regrid_size =10 ,slice_scale = None,pad_shape = None
     # Remove PSF from image
     residual_image = image - Fitted_PSF
     
@@ -1651,7 +1732,7 @@ def compute_multilocation_err(image,
                          image_params,
                          use_moffat = use_moffat,
                          fitting_radius = fitting_radius,
-                         regriding_size = regriding_size,
+                         regrid_size = regrid_size,
                          pad_shape = image.shape)
 
         psf_fit  = psf.fit(image = residual_image + test_PSF,
@@ -1660,8 +1741,8 @@ def compute_multilocation_err(image,
                         fwhm = fwhm,
                         fpath = fpath,
                         fitting_radius = fitting_radius,
-                        regriding_size = regriding_size,
-                        scale = scale,
+                        regrid_size = regrid_size,
+                        # scale = scale,
                         use_moffat = use_moffat,
                         image_params = image_params,
                         fitting_method = fitting_method,

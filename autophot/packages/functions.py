@@ -8,7 +8,7 @@ def SNR(flux_star,flux_sky,exp_t,radius,G = 1,RN = 0,DC = 0 ):
         
        S/N = \\frac{ F_{ap} }{ F_{ap} + F_{sky,ap,n} + (RN ^2 + \\frac{G^2}{4} \\times n_{pix}) + (D \\times n_{pix} \\times t_exp) } ^{0.5}
    
-    where :math:`F_{ap}` is the flux under and aperture of a specific radius, and likewise :math:`F_{sky,ap,n}` is the flux due to the sky background under the same aperture. In other words :math:`F_{sky,ap,n} = \langle counts_{sky_ap}  \rangle / T_{exp} \\times n` where :math:`n = \pi r ^2`.
+    where :math:`F_{ap}` is the flux under and aperture of a specific radius, and likewise :math:`F_{sky,ap,n}` is the flux due to the sky background under the same aperture. In other words :math:`F_{sky,ap,n} = \\langle counts_{sky_ap}  \\rangle / T_{exp} \\times n` where :math:`n = \\pi r ^2`.
     
     :param flux_star: Flux in :math:`counts / second` that we assume is coming from source.
     :type flux_star: float
@@ -30,6 +30,9 @@ def SNR(flux_star,flux_sky,exp_t,radius,G = 1,RN = 0,DC = 0 ):
     '''
 
     G = float(G)
+    
+    G = 1
+    RN = 0
     
     import numpy as np
 

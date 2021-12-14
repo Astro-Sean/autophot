@@ -6,7 +6,8 @@ def ask_question(question,
                  ignore_type = False,
                  ignore_word = 'skip'):
     '''
-                     
+    :param question: DESCRIPTION
+    :type question: TYPE                
     :param default_answer: DESCRIPTION, defaults to 'n'
     :type default_answer: TYPE, optional
     :param expect_answer_type: DESCRIPTION, defaults to str

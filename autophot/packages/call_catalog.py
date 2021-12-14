@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import numpy as np
-
-def search(headinfo, 
-           target_coords,  
-           catalog_keywords, 
+#
+def search(headinfo,
+           target_coords,
+           catalog_keywords,
            image_filter,
            wdir,
            target_name = None,
@@ -12,63 +12,63 @@ def search(headinfo,
            catalog = 'apass',
            include_IR_sequence_data = False,
            catalog_custom_fpath = None):
-    
+
     '''
         Search for sequence stars for zero point calibration. This function takes in
     the target location are searches for photometric data on stars near this
     location. The available catalogs are:
-    
+
     1. `APASS: <https://www.aavso.org/apass>`_ - The AAVSO Photometric All-Sky
     Survey
-    
+
     Covers eight filters: Johnson B and V, plus Sloan u', g′, r′, i′, :math:`z_s`
     and Z. It is valid from about 7th magnitude to about 17th magnitude and covers
-    -10.15 < Dec < +87.35. 
-    
+    -10.15 < Dec < +87.35.
+
     Keyword = :math:`"apass"`
-    
+
     2. `SDSS <https://www.sdss.org/>`_ - Sloan Digital Sky Survey.
-    
+
     Cover 5 filters, SDSS r, i, u, z, and g filters and is valid down to ~22
     mag.
-    
+
     Keyword = :math:`"sdss"`
-    
+
     3. `Panstarrs <https://panstarrs.stsci.edu/>`_ - Panoramic Survey Telescope
     an.d Rapid Response System
-    
+
     Cover 5 filters, covers 5 filters, g, r, i, z, and y and is valid down to ~24
     mag. Panstarrs covers all the sky north of declination −47.5.
-    
+
     Keyword = :math:`"pan\_starrs"`
-    
-    
+
+
     4. `2MASS <https://irsa.ipac.caltech.edu/Missions/2mass.html>`_ Two Micron All
     Sky Survey.
-    
+
     Cover 3 filters, the NIR J, H, and K bands with a limiting magnitude of K~13mag
     (Vega) and covers all the sky.
-    
+
     Keyword = :math:`"2mass"`
-    
+
     5. `Custom
     <https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/add_your_catalog_example.ipynb>`_
-    
-    
+
+
     You may also pass a custom catalog to this script. This catalog must contain
     *RA* and *DEC* columns (case sensitive), as well as filters magnitudes and
     their error in the standard AutoPHOT system. If given you must include the
     *catalog_custom_fpath* keyword which gives the file path to this file. An
     example of this can be found `here
     <https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/add_your_catalog_example.ipynb>`_
-    
-    
-    
-    
+
+
+
+
     Keyword = :math:`"custom"`
-    
-    
-    
+
+
+
     :param headinfo: Headerinfo of *FITS* image that contains WCS values
     :type headinfo: Fits Header
     :param target_coords: `SkyCoord Object
@@ -87,7 +87,7 @@ def search(headinfo,
     :type wdir: Location of directory containing catalog queries. If no matching
     catalog is found, downloaded catalog is saved here under the name given by
     *target_name*, if a matching catalog is found that catalog is returned rather
-    than downloading a new one. 
+    than downloading a new one.
     :param catalog: Name of catalog to search, see keywords above, defaults to
     'apass'
     :type catalog: str, optional
@@ -111,7 +111,7 @@ def search(headinfo,
     '''
 
 
-    
+
     import os,sys
     import logging
     import requests
@@ -119,7 +119,7 @@ def search(headinfo,
     import shutil
     import os.path
     import warnings
-    
+
     import numpy as np
     import pandas as pd
     from functools import reduce
@@ -130,24 +130,24 @@ def search(headinfo,
     from astroquery.vizier import Vizier
     from astropy.io.votable import parse_single_table
     from astropy.coordinates import Angle
-    
+
     from autophot.packages.functions import border_msg
-    
+
     logger = logging.getLogger(__name__)
-    
+
     # if target or it's ra/dec - set target name
     target_ra  = target_coords.ra.degree
     target_dec  = target_coords.dec.degree
-    
+
     if target_name == None:
          if target_ra != None and target_dec != None:
              target_name = 'target_ra_'+str(round(target_ra))+'_dec_'+str(round(target_dec))
          else:
              #  if not just call target
              target_name = 'target'
-             
+
     border_msg('Searching for catalog for %s' % target_name)
-    
+
     if wdir is None:
         # TODO: fix this exception
         raise Exception('WDIR needs to be set so I can find the catalog directory')
@@ -160,7 +160,7 @@ def search(headinfo,
         # Radius around target
         radius  = float(radius)
 
-    
+
 
         # Get workdirectory location,, create directory if needed
         dirname = os.path.join(wdir,'catalog_queries')
@@ -204,7 +204,7 @@ def search(headinfo,
             logger.info('Catalog found for %s\nCatalog: %s \nFile: %s' % (target_name,str(catalog).upper(),fname))
             chosen_catalog = Table.read(os.path.join(target_dir,fname+'.csv'),format = 'csv')
             chosen_catalog = chosen_catalog.to_pandas().fillna(np.nan)
-        
+
         else:
             # If no previously catalog found - look for one
             logger.info('Searching for new catalog [%s] for %s ' % ( catalog, target_name))
@@ -214,7 +214,7 @@ def search(headinfo,
 
                 import astropy.units as u
                 from astroquery.gaia import Gaia
-                
+
                 warnings.filterwarnings('ignore')
 
                 width = u.Quantity(radius, u.deg)
@@ -236,12 +236,12 @@ def search(headinfo,
 
                 # Select first catalog from list
                 chosen_catalog = catalog_search[0].to_pandas()
-                
+
                 # Clean the chosen_catalog from sdss
                 # TODO: make sure mode 2 is correct
                 if catalog == 'sdss':
                     chosen_catalog = chosen_catalog[chosen_catalog['mode']== 2]
-                    
+
             # some catalogs need specific download path using 'requests'
             if catalog in ['pan_starrs','skymapper']:
 
@@ -281,15 +281,15 @@ def search(headinfo,
                 # invalid entries in panstarrs are -999 - change to nans
                 if catalog == 'pan_starrs':
                     chosen_catalog = chosen_catalog.replace(-999,np.nan)
-                    
-          
+
+
 
             # No sources in field - temporary fix - will add "check different catalog"
             if len(chosen_catalog) == 0:
                 logging.critical('Catalog: %s : does not cover field' %  catalog)
                 sys.exit()
-            
-            # If you have 
+
+            # If you have
             if include_IR_sequence_data and catalog != '2mass':
                 Vizier.ROW_LIMIT = -1
                 catalog_search = Vizier.query_region(target_coords,
@@ -307,9 +307,9 @@ def search(headinfo,
                                            'RAJ2000':catalog_keywords['RA'],
                                            'DEJ2000':catalog_keywords['DEC']},
                                   inplace = True)
-                
+
                 chosen_catalog = pd.concat([chosen_catalog,chosen_catalog_2mass])
-                
+
 
             # Save to csv and move to 'catalog_queries'
             chosen_catalog = chosen_catalog.fillna(np.nan)
@@ -329,8 +329,8 @@ def search(headinfo,
         logger.info('Catalog length: %d' % len(chosen_catalog))
 
         warnings.filterwarnings("default")
-        
-        
+
+
 
     except Exception as e:
         logger.info('Catalog retireval failed:\n->%s\n Returning None' %  e)
@@ -359,25 +359,25 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
     algorithm is used. If there is a source detected at approximately the right
     location this source and it's magnitude measurements are saved, if not, the
     source is removed.
-    
+
     Catalog sources can be excluded if they:
-    
+
     1. Are too close to an image boundary or are of the image entirely. If only
     concerned with sources within a certain distance from the target, sources
     outside this radius are excluded.
-    
+
     2. Are below a preselected magnitude limiting i.e. ignore all sources with a
     catalog magnitude > 21 mag.
-    
+
     3. If the source is too far away from it's catalog position.
-    
+
     4. If a source is too close to the transient position.
-    
+
     5. If there is no available data in the image filter, the source is
     excluded.
-    
-    
-    
+
+
+
     :param image: Image containing stars
     :type image: 2D array
     :param headinfo: Header info of *FITS* image containing WCS information. This
@@ -452,7 +452,7 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
     :param include_IR_sequence_data: If True, add IR data to output catalog,
     defaults to False
     :type include_IR_sequence_data: bool, optional
-    
+
     :param pix_bound: Remove sources that are too close to boundary of image.
     Distance to boundary is given by this variable in pixels, defaults to 25
     :type pix_bound: float, optional
@@ -465,13 +465,13 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
     '''
 
 
-    
+
     import lmfit
     import numpy as np
     import pandas as pd
     import logging
     import warnings
-    
+
     from photutils import DAOStarFinder
     from astropy.stats import sigma_clipped_stats
 
@@ -480,10 +480,10 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
     from autophot.packages.functions import gauss_sigma2fwhm,gauss_2d,gauss_fwhm2sigma
 
     border_msg('Matching catalog sources to image')
-        
+
 
     logger = logging.getLogger(__name__)
-    
+
     RA_list = []
     DEC_list = []
     x_new_source = []
@@ -493,49 +493,49 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
     cp_dist      = []
     dist2target_list = []
     cat_idx      = []
-    
+
     # list for (non) detected sources
     non_detections = []
     detections     = []
     fwhm_list = []
-    
+
     # Add all available filter information, not just the image filter
     image_filtermagnitude = {}
     image_filtermagnitude_err = {}
-    
+
     if default_dmag is None:
         # TODO: Set default DMAGSpass
         pass
 
     for key,val in default_dmag.items():
-        
+
         if key != image_filter:
-        
+
             image_filtermagnitude[key] = []
             image_filtermagnitude_err[key+'_err'] = []
-        
+
     image_filtermagnitude[image_filter]= []
     image_filtermagnitude_err[image_filter+'_err'] = []
-    
+
     if include_IR_sequence_data:
         for i in ['J','H','K']:
             if i in catalog_keywords:
                 continue
             catalog_keywords[i] = i
             catalog_keywords[i+'_err'] = i+'_err'
-    
+
     # Remove values that don't have matching value in selected value
     chosen_catalog = chosen_catalog[~np.isnan(chosen_catalog[catalog_keywords[image_filter]])]
 
     dist_to_target = pix_dist(target_x_pix,chosen_catalog['x_pix'],target_y_pix,chosen_catalog['y_pix'])
-    
+
     too_close_to_target = dist_to_target < 3*fwhm
-    
+
     chosen_catalog = chosen_catalog[~too_close_to_target]
-    
+
     if np.sum(too_close_to_target)!=0:
         print('Removed %d sources too close to target' % np.sum(too_close_to_target))
-        
+
     # Remove faint sources
     len_before = len(chosen_catalog)
     chosen_catalog = chosen_catalog[chosen_catalog[catalog_keywords[image_filter]] < catalog_matching_limit]
@@ -548,7 +548,7 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
     chosen_catalog = chosen_catalog[chosen_catalog['x_pix'] > pix_bound ]
     chosen_catalog = chosen_catalog[chosen_catalog['y_pix'] < image.shape[0] - pix_bound ]
     chosen_catalog = chosen_catalog[chosen_catalog['y_pix'] > pix_bound ]
-    
+
     print('Removed %d sources too close to boundary or off image' % (len_before-len(chosen_catalog)))
 
 
@@ -557,15 +557,15 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
                             ascending=True,
                             inplace = True,
                             na_position='last')
-    
+
     # Grid of close-up mathcing scale of image
     x = np.arange(0,2*scale)
     xx,yy= np.meshgrid(x,x)
 
     k = 0
 
-    dx = 2*fwhm
-    dy = 2*fwhm
+    dx = scale-1
+    dy = scale-1
 
     if use_local_stars:
 
@@ -594,7 +594,7 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
         sources_within_mask = abs(np.array(sum(remove_idx))-1)
 
         s = pd.Series(sources_within_mask.astype(bool), name='bools')
-        
+
         chosen_catalog = chosen_catalog[s.values]
 
         logger.info('Removed %d sources within masked regions' % (np.sum(sources_within_mask)))
@@ -621,13 +621,13 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
     broken_cutout = 0
     broken = 0
     too_far = 0
-    
+
     logging.info('Catalog Length: %d' % len(chosen_catalog))
-    
+
     if plot_catalog_nondetections:
         logging.info('\nIncluding non detections in catalog analysis')
-        
-    
+
+
     try:
 
         for i in range(len(chosen_catalog.index.values)):
@@ -648,7 +648,7 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
             # catalog pixel coordinates of source take as an approximate location
             x = chosen_catalog.x_pix[idx]
             y = chosen_catalog.y_pix[idx]
-            
+
             RA_list.append(chosen_catalog[catalog_keywords['RA']][idx])
             DEC_list.append(chosen_catalog[catalog_keywords['DEC']][idx])
 
@@ -659,16 +659,16 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
             image_filtermagnitude_err[image_filter+'_err'].append(chosen_catalog[catalog_keywords[image_filter+'_err']][idx])
 
             for key,val in default_dmag.items():
-                
+
                 if key != image_filter:
                     try:
                         # print(chosen_catalog[catalog_keywords[key]][idx])
                         image_filtermagnitude[key].append(chosen_catalog[catalog_keywords[key]][idx])
                         image_filtermagnitude_err[key+'_err'].append(chosen_catalog[catalog_keywords[key+'_err']][idx])
-                        
+
                         # print(image_filtermagnitude[key])
                     except:
-                        
+
                         image_filtermagnitude[key].append(np.nan)
                         image_filtermagnitude_err[key+'_err'].append(np.nan)
                         pass
@@ -716,7 +716,7 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
                                                          maxiters = 10)
 
                  try:
-             
+
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
                         daofind = DAOStarFinder(fwhm      = fwhm,
@@ -724,13 +724,13 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
                                                 sharplo   =  0.2,sharphi = 1.0,
                                                 roundlo   = -1.0,roundhi = 1.0
                                                 )
-        
+
                         sources = daofind(close_up - median)
-    
+
                     # If no source is found - skip
                     if sources is None:
                         sources = []
-    
+
                     else:
                         sources = sources.to_pandas()
 
@@ -764,13 +764,13 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
                      fwhm_list.append(np.nan)
 
                      continue
-                 
+
                  if len(sources) == 0:
-                     
+
                      xc_guess = close_up.shape[1]/2
                      yc_guess = close_up.shape[0]/2
-                     
-                 
+
+
 
                  # If more than one source detected in close up
                  # assume source closest to center is desired source
@@ -781,39 +781,39 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
                                      scale,np.array(sources['ycentroid']))
 
                    r_idx = np.argmin(r_vals)
-                   
+
                    xc_guess = np.array(sources['xcentroid'])[r_idx]
                    yc_guess = np.array(sources['ycentroid'])[r_idx]
-                   
+
                  else:
 
                      # Approximate location of source
                      xc_guess = np.array(sources['xcentroid'])[0]
                      yc_guess = np.array(sources['ycentroid'])[0]
 
-                 
+
 
                  pars = lmfit.Parameters()
                  pars.add('A',value = np.nanmax(close_up),
                          min = 1e-6)
 
                  pars.add('x0',value = close_up.shape[1]/2,
-                         min = xc_guess - dx,
-                         max = xc_guess + dx)
+                         min = 0.5*close_up.shape[1] - dx,
+                         max = 0.5*close_up.shape[1]+ dx)
 
                  pars.add('y0',value = close_up.shape[0]/2,
-                         min = yc_guess - dy,
-                         max = yc_guess + dy)
+                         min = 0.5*close_up.shape[0]- dy,
+                         max = 0.5*close_up.shape[0] + dy)
 
                  pars.add('sky',value = np.nanmedian(close_up))
 
                  if use_moffat:
 
                    pars.add('alpha',
-                            value = 3,
+                            value = 7,
                             min = 0,
                             max = 30)
-                   
+
                    pars.add('beta',
                             value = default_moff_beta,
                             min = 0,
@@ -822,7 +822,7 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
                  else:
 
                      pars.add('sigma',
-                              value = 3,
+                              value = 7,
                               min = 0,
                               max = gauss_fwhm2sigma(max_fit_fwhm) )
 
@@ -830,22 +830,24 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
 
                      def residual(p):
                          p = p.valuesdict()
-                         return (close_up - moffat_2d((xx,yy),p['x0'],p['y0'],p['sky'],p['A'],dict(alpha=p['alpha'],beta=p['beta'])).reshape(close_up.shape)).flatten()
+                         return (np.sqrt(abs(close_up))*(close_up - moffat_2d((xx,yy),p['x0'],p['y0'],p['sky'],p['A'],dict(alpha=p['alpha'],beta=p['beta'])).reshape(close_up.shape))).flatten()
                  else:
 
                      def residual(p):
                          p = p.valuesdict()
-                         return (close_up - gauss_2d((xx,yy),p['x0'],p['y0'],p['sky'],p['A'],dict(sigma=p['sigma'])).reshape(close_up.shape)).flatten()
+                         return (np.sqrt(abs(close_up))*(close_up - gauss_2d((xx,yy),p['x0'],p['y0'],p['sky'],p['A'],dict(sigma=p['sigma'])).reshape(close_up.shape))).flatten()
 
 
                  mini = lmfit.Minimizer(residual,
                                        pars,
                                        nan_policy = 'omit')
+                 
                  result = mini.minimize(method = fitting_method)
 
 
                  xcen = result.params['x0'].value
                  ycen = result.params['y0'].value
+
 
                  # S    = result.params['sky'].value
                  # H    = result.params['A'].value
@@ -925,10 +927,10 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
                       np.array(fwhm_list),
                       np.array(image_filtermagnitude[image_filter]),
                       np.array(image_filtermagnitude_err[image_filter+'_err'])]
-                      
 
-                      
-        
+
+
+
         frame_cols = ['cat_idx',
                      'ra',
                      'dec',
@@ -944,25 +946,25 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
 
         chosen_catalog_new_frame = pd.DataFrame(frame_chosen_catalog).T
         chosen_catalog_new_frame.columns = frame_cols
-        
+
         for f in image_filtermagnitude:
             if  (np.isnan(image_filtermagnitude[f]).all() ) | (f == image_filter) :
                     continue
-   
+
             chosen_catalog_new_frame['cat_'+f] = image_filtermagnitude[f]
             chosen_catalog_new_frame['cat_'+f+'_err'] = image_filtermagnitude_err[f+'_err']
-                
-        
+
+
         chosen_catalog_new_frame = chosen_catalog_new_frame.dropna(subset=['x_pix', 'y_pix'])
-        chosen_catalog_new_frame = chosen_catalog_new_frame.dropna(how='all') 
-        
+        chosen_catalog_new_frame = chosen_catalog_new_frame.dropna(how='all')
+
 
         extended_mask = abs(chosen_catalog_new_frame['fwhm'] - fwhm) < matching_source_FWHM_limit
-        
+
         if len(extended_mask)>0:
 
             print('\nExtended catalog sources removed: %d/%d' % (sum(extended_mask),len(chosen_catalog_new_frame)))
-    
+
             chosen_catalog_new_frame = chosen_catalog_new_frame[extended_mask]
 
 
