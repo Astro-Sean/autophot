@@ -4,7 +4,7 @@
 
 # Example Notebooks for using AutoPhOT
 
-We provide several Jupyter Notebooks on how to use AutoPHoT. If there is an aspect of AutoPhOT that is confusing, feel free to email me ([Seán Brennan](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT Notebooks)) or open an issue [here](https://github.com/Astro-Sean/autophot/issues).
+We provide several Jupyter Notebooks on how to use AutoPHoT. If there is an aspect of AutoPhOT that is confusing, feel free to email me ([Seán Brennan](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT_Notebooks)) or open an issue [here](https://github.com/Astro-Sean/autophot/issues).
 
 ## Basic Operations
 For a notebook example on the basic operations of AutoPHoT, click  [here](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/basic_example.ipynb)
