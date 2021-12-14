@@ -428,7 +428,11 @@ def plot_aperture(close_up,
                   background_value = None):
     '''
 
-    Package used for plotting close up of aperture photometry on point source. Package produces a cutout showing a closeup of a given target, the aperture placement and size,and the annulus used for the sky background. Additionally, projections along the X and Y plane are given to aid the User in evaluating the aperture placement
+        Package used for plotting close up of aperture photometry on point
+    source. Package produces a cutout showing a closeup of a given target, the
+    aperture placement and size,and the annulus used for the sky background.
+    Additionally, projections along the X and Y plane are given to aid the User
+    in evaluating the aperture placement
 
 
     :param close_up: 2D image containing target. Image does not need to be background subtracted
@@ -630,15 +634,30 @@ def find_optimum_aperture_size(dataframe,
                                plot_optimum_radius = False):
     '''
 
-    Find the optimum aperture radius for a given image. Although the initial guess of :math:`1.7 \\times FWHM` is a suitable guess for the aperture size of an image. Irregular / symmetric point spread functions (PSF) may require a slightly larger or smaller aperture size. This function uses several well isolated sources and finds their Signal to noise ratio (S/N) using the following equation
-
+        Find the optimum aperture radius for a given image. Although the
+    initial guess of :math:`1.7 \\times FWHM` is a suitable guess for the
+    aperture size of an image. Irregular / symmetric point spread functions
+    (PSF) may require a slightly larger or smaller aperture size. This function
+    uses several well isolated sources and finds their Signal to noise ratio
+    (S/N) using the following equation
+    
     .. math::
-        
-       S/N_{max} = \\frac{ F_{ap,optimum} }{ F_{ap,optimum} + F_{sky,ap,optimum,n} + (RN ^2 + \\frac{G^2}{4} \\times n_{pix}) + (D \\times n_{pix} \\times t_exp) } ^{0.5}
-   
+    
+       S/N_{max} = \\frac{ F_{ap,optimum} }{ F_{ap,optimum} + F_{sky,ap,optimum,n}
+    + (RN ^2 + \\frac{G^2}{4} \\times n_{pix}) + (D \\times n_{pix} \\times
+    t_exp) } ^{0.5}
+    
+    
+    where :math:`F_{ap,optimum}` is the flux under an aperture of an optimum
+    radius, and likewise :math:`F_{sky,ap,optimum,n}` is the flux due to the
+    sky background under the same aperture. By varying the size of the
+    aperture, we produce a curve of growth model for how the S/N ratio behaves
+    for different radii. This package iterations through a small radii towards
+    a very large radii and notes how the S/N changes for a sample of sources.
+    Where these sources reach a maximum (which :math:`\mathit{should}` be the
+    same for all point sources) is considered the optimum aperture size, where
+    we obtain the option ratio of source flux and background noise.
 
-     where :math:`F_{ap,optimum}` is the flux under an aperture of an optimum radius, and likewise :math:`F_{sky,ap,optimum,n}` is the flux due to the sky background under the same aperture. By varying the size of the aperture, we produce a curve of growth model for how the S/N ratio behaves for different radii. This package iterations through a small radii towards a very large radii and notes how the S/N changes for a sample of sources. Where these sources reach a maximum (which :math:`\mathit{should}` be the same for all point sources) is considered the optimum aperture size, where we obtain the option ratio of source flux and background noise.
-     
     :param dataframe: Dataframe containing :math:`\mathit{x\_pix}` and :math:`\mathit{y\_pix}` columns representing the X, Y pixel locations of a source. Dataframe source also include :math:`\mathit{include\_fwhm}`. This column source be a boolean list where :math:`\mathit{True}` dictates that a source source be included in the optimum radius investigation and :math:`\mathit{False}` meaning it is excluded.
     :type dataframe: Dataframe
     :param image: 2D image containing sources to be measured using aperture photometry
