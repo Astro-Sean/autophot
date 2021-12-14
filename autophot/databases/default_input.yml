@@ -1,46 +1,79 @@
 AutoPhOT_input:
+
   fits_dir: null # str --- Directory where files are containing images with .fits .fts  or .fit extension.
+
   fname: null #str ---  Work on single file - deprecated
+
   fpath: null # str --- str Work on directory - deprecated
+
   object_dir: null # str ---  Location of where TNS queries are saved as yaml files. This is updated by AutoPhoT.
+
   ct_dir: null   # str ---  Colour term directory. This is updated by AutoPhoT.
+
   calib_dir: null # str ---  Location of calibration files
+
   method: sp # str ---  Method for processing - serial [sp] or multi-processing [mp] (not working)
+
   ignore_no_telescop: False # bool ---  bool --- Ignore file if no telescope name given (given by TELESCOP header key)
+
   outdir_name: REDUCED # str ---  Extension of output directory. For example if parent directry is SN1987A output directory will be SN1987A_REDUCED
+
   outcsv_name: REDUCED # str --- Output csv name containing all information from reduced files
+
   ignore_no_filter: True # bool ---  Ignore an image with no filter.
+
   force_filter: r # str --- If *ignore_no_filter* is True, use this filter as the image filter.
+
   restart: False # bool --- If the code fails with some files yet to be done, turn to True. This will scan through output directory and see whats already been done and ignore it.
+
   recover: True # bool --- If True, scan through the ouput folder and search for the output files of each image i.e. target_out.csv and place information into the file given by *outcsv_name*
+
   select_filter: False # bool --- If set to True, perform photometry on specific filter or list of filters given by *do_filter*
+
   do_filter: # list --- If *select_filter* is True, only do images that have corrospoonding filters represented by this list
       -
+
   target_name: null # str --- IAU name of target for use with TNS server. Must be entered without SN or AT in IAU format e.g. 1987A. To use this feature, you must update *TNS_BOT_ID*,*TNS_BOT_API* and *TNS_BOT_NAME* with your BOT details.
+
   target_ra: null # str --- Target Right Ascension (RA) of target given in degrees
+
   target_dec: null # str --- Target Declination (Dec) of target in degrees
+
   plot_source_selection: True # bool --- If True, return a plot showing the image, source used for zeropoint and PSF model
 
   preprocessing: # This section focuses on several steps during preprocessing.
+
       trim_edges: False # bool --- If True, trim the sides of the image by the amount given in *trim_edges_pixels*.
+
       trim_edges_pixels: 50 # int --- If  *trim_edges* If True, trim the image by this amount.
+
       mask_sources: False # bool ---If True, mask sources given in the list *mask_sources_RADEC_R*.
+
       mask_sources_RADEC_R: # list --- If *mask_sources* is true, mask these sources. This is a list of tuples where each tuple contains (RA,Dex, radius in arcmins).
         -
 
-
   photometry: # Commands to control photometry
+
     do_ap_phot: False # bool --- Perform aperture photometry
+
     force_psf: False # bool --- Force to use of psf fitting
+
     use_local_stars: False # bool --- If True, use local stars within *use_source_arcmin* for sequence stars
+
     use_local_stars_for_FWHM:  False # bool --- If True, use local stars within *use_source_arcmin* for FWHM sources
+
     use_local_stars_for_PSF: False # bool --- If True, use local stars within *use_source_arcmin* for PSF model stars
+
     use_source_arcmin: 4 # float --- Distance around *target_ra*/*target_dec* to use
+
     local_radius: 1500 # float --- default distance to look for sources
+
     find_optimum_radius: False # bool --- Find and update aperature size based on curve of growth
+
     plot_optimum_radius: True # bool --- Plot distribution of curve of growths if *find_optimum_radius* is True
 
     check_nyquist: True # bool --- If True, check that FWHM of image does not fall below a limit given by *nyquist_limit*, if so, use aperture photometry
+
     nyquist_limit: 3 # float --- Pixel limit for FWHM to perform aperture photometry
 
     ap_size: 1.7 # float --- aperture radius = ap_size * fwhm
@@ -51,49 +84,56 @@ AutoPhOT_input:
 
     ap_corr_plot: False # bool --- Plot of aperature corretcions
 
-    r_in_size: 2.5 # float --- inner annulus for background estimate
-    r_out_size: 3.5 # float ---  outer annulus for background estimate
+    r_in_size: 2 # float --- inner annulus for background estimate
 
-
+    r_out_size: 3 # float ---  outer annulus for background estimate
 
   templates: # Commands to control templates
+
     use_user_template: True # bool --- Use template given by user.
 
   wcs: # Comands when finding WCS values
+
     ignore_no_wcs: False # bool ---Ignore files that don't have wcs
+
     allow_wcs_recheck: False # bool --- If source catalog fails, rerun astrometry - very buggy
+
     remove_wcs: True # bool --- Remove  wcs and use local astrometry.net
+
     force_wcs_redo: False # bool --- Force images to have their WCS redone, if an image cannot be solved, skip
+
     solve_field_exe_loc: None # str --- location of solve-field from astromety.net. This is required to solve for WCS.
+
     offset_param: 5.  # float --- mean pixel distance criteria between trusting original WCS and looking it up
+
     search_radius: 0.25 # float --- distance around source to search for in Astrometry.net
 
     downsample: 2 # int --- Downsample value to pass to astrometry
-    #solve_field_timeout: 60 # float ---  seconds - check is this needed
+
     cpulimit: 180 # float ---  timeout duration for solve-field
 
     update_wcs_scale: False # bool --- update telescope.yml pixel scale for a instrument from output of astrometry.net
 
-
     allow_recheck: False # bool --- allow recheck of wcs if pixel offset from sources is too great
 
-
     ignore_pointing: True # bool --- When solving plate - ignore pointing coordinates
-
 
     use_xylist:  False # bool --- use coordinate list from source detection in astrometry.net
 
     TNS_BOT_ID: null # str ---
+
     TNS_BOT_NAME: null # str ---
-    TNS_BOT_API: numm # str ---
 
-
+    TNS_BOT_API: null # str ---
 
   catalog: # Commands to use with when working with catalog
 
     use_catalog: null # str --- choose catalog to use - options: [pan_starrs,2mass,apass,skymapper,gaia]
+
     catalog_custom_fpath: null # str --- If using a custom catalog look in this fpath
+
     catalog_radius: 0.25 # float --- Radius [degs]  around target for catalog source detection
+
     dist_lim: 10 # float --- Ignore source/catalog matching if source location and catalog location are greater than dist_lim
 
     match_dist: 25 # float ---  if source/catalog locations greater than this value get rid of it
@@ -104,13 +144,11 @@ AutoPhOT_input:
 
     show_non_detections: False # bool --- show a plot of sources not detected
 
-    matching_source_FWHM: False # bool --- If True, matchicatalog sources that are within the image FWHM by *matching_source_FWHM_limt*
-    matching_source_FWHM_limt: 2 # flaot --- If *matching_source_FWHM* is True exlclud sources that differ by the image FWHM by this amount.
+    matching_source_FWHM_limt: 100 # flaot --- If *matching_source_FWHM* is True exlclud sources that differ by the image FWHM by this amount.
 
     remove_catalog_poorfits: False # bool --- Remove sources that are not fitted well
 
     catalog_matching_limit: 20 # float --- Remove sources fainter than this limit
-
 
     max_catalog_sources: 1000 # float --- Max amount of catalog sources to use
 
@@ -118,29 +156,33 @@ AutoPhOT_input:
 
   cosmic_rays: # Commands for cosmic ray cleaning:
 
-    remove_cmrays: False # bool --- If True, remove cosmic rays using astroscrappy
+    remove_cmrays: True # bool --- If True, remove cosmic rays using astroscrappy
 
     use_astroscrappy: True # bool --- use Astroscrappy to remove comic rays
+
     use_lacosmic: False # bool --- use LaCosmic from CCDPROC to remove comic rays
-
-
 
   fitting: # Commands describing how to perform fitting
 
-    fitting_method: least_square # str --- fitting methods for analytical function fitting and PSF fitting
+    fitting_method: least_sqaures # str --- fitting methods for analytical function fitting and PSF fitting
 
     use_moffat: False # bool --- Use moffat function
+
     default_moff_beta: 4.765 # float --- If *use_moffat* is True, set the beta term
+
     vary_moff_beta: False # bool --- If *use_moffat* is True, allow the beta term to be fitted
 
-    bkg_level: 3 # float --- Set the background level in sigma_bkg
+    bkg_level: 3  # float --- Set the background level in sigma_bkg
 
     remove_bkg_surface: True # bool --- If True, remove a background using a fitted surface
+
     remove_bkg_local: False # bool --- If True, remove the surface equal to a flat surface at the local background median value
+
     remove_bkg_poly: False # bool --- If True, remove a polynomail surface with degree set by *remove_bkg_poly_degree*
+
     remove_bkg_poly_degree: 1 # int --- If *remove_bkg_poly* is True, remove a polynomail surface with this degree
 
-    fitting_radius: 1.5 # float --- Focus on small region where SNR is highest with a radius equal to this value times the FWHM
+    fitting_radius: 1.3 # float --- Focus on small region where SNR is highest with a radius equal to this value times the FWHM
 
   extinction:
 
@@ -150,90 +192,100 @@ AutoPhOT_input:
 
     threshold_value: 25 #  float --- threshold value for source detection
 
+    lim_threshold_value: 5  #float --- If the threshold_value decreases below this value, use fine_fudge_factor
+
     fwhm_guess: 7 # float --- inital guess for the FWHM
 
     fudge_factor: 5 # float --- large step for source dection
+
     fine_fudge_factor: 0.2 #  float ---small step for source dection if required
 
     isolate_sources: True # bool --- If True, isolate sources for FWHM determination by the amount given by *isolate_sources_fwhm_sep* times the FWHM
+
     isolate_sources_fwhm_sep: 5 # float --- If *isolate_sources* is True, seperate sources by this amount times the FWHM.
+
     init_iso_scale: 25 # float --- For inital guess, seperate sources by this amount times the FWHM.
 
-    sigmaclip_FWHM: True # bool --- If True, sigma clip the FWHM values by the sigma given by *sigmaclip_FWHM_sigma*
+    use_catalog: apass # str ---
+
     sigmaclip_FWHM_sigma: 3 # float --- If *sigmaclip_FWHM* is True, sigma clip the values for the FWHM by this amount.
 
-    sigmaclip_median: True # bool --- If True, sigma clip the median background values by the sigma given by *sigmaclip_median_sigma*
     sigmaclip_median_sigma: 3 # float --- If *sigmaclip_median* is True, sigma clip the values for the median by this amount.
 
-    save_image_analysis: False # bool ---If True, save table of FWHM values for an image
-    plot_image_analysis: False # bool --- If True, plot image displaying FWHM acorss the image
+    image_analysis: False # bool ---If True, save table of FWHM values for an image
 
     remove_sat: True # bool --- Remove saturated sources
+
     remove_boundary_sources: True # bool --- If True, ignore any sources within pix_bound from edge
+
     pix_bound: 25 # float --- If *remove_boundary_sources* is True, ignore sources within this amount from the image boundary
 
     save_FWHM_plot: False # bool --- If True save plot of FWHM distribution
 
     min_source_lim: 1 # float --- minimum allowed sources when doing source detection to find fwhm.
+
     max_source_lim: 300 # float --- maximum allowed sources when doing source detection to find fwhm.
 
     source_max_iter: 30 # float --- maximum amount of iterations to perform source detection algorithim, if iters exceeded this value and error is raised.
 
-
     int_scale: 25 # float --- Initial image size in pixels to take cutout
-    scale_multipler: 4 # float --- Multiplier to set close up cutout size based on image scaling
-    max_fit_fwhm: 30 # float --- maximum value to fit
 
+    scale_multipler: 4 # float --- Multiplier to set close up cutout size based on image scaling
+
+    max_fit_fwhm: 30 # float --- maximum value to fit
 
   limiting_magnitude:
 
     force_lmag: False # bool --- Force limiting magnitude test at transient location. This may given incorrect values for bright sources
 
+    skip_lmag: False # bool --- Force limiting magnitude test at transient location. This may given incorrect values for bright sources
+
+
     beta_limit: 0.75 # float --- Beta probability value. Should not be set below 0.5
 
-    inject_lamg_use_ap_phot: True # float --- Perform the fake source recovery using aperture photometry
-
     injected_sources_additional_sources: True # bool --- If True, inject additional sources radially around the existing positions
+
     injected_sources_additional_sources_position: 1 # float --- Where to inject artifical sources with the original position in the center. This value is in units of FWHM. Set to -1 to move around the pixel only
-    injected_sources_additional_sources_number: 3 # float --- how many additional sources to inject
+
+    injected_sources_additional_sources_number: 6 # float --- how many additional sources to inject
 
     injected_sources_save_output: False # bool --- If True, save the output of the limiting magnitude test as a csv file
-    injected_sources_use_beta: True # bool --- If True, use the Beta detection criteria rather than a SNR test
+
+    injected_sources_use_beta: False # bool --- If True, use the Beta detection criteria rather than a SNR test
+
     plot_injected_sources_randomly: True # bool --- If True  include sources randomly at the limiting magnitude in the output image
 
-    inject_lmag_use_ap_phot: True # bool --- If True, use aperture photometry for magnitude recovery when determining the limiting magnitude. Set to False to use the PSF package (iv available)
+    inject_lmag_use_ap_phot: False # bool --- If True, use aperture photometry for magnitude recovery when determining the limiting magnitude. Set to False to use the PSF package (iv available)
 
     check_catalog_nondetections: False # bool --- If True, performing a limiting magnitue test on catalog sources. This was used to produce Fig. XYZ in the AutoPhoT Paper
-    include_catalog_nondetections: False # bool --- If True,
 
+    include_catalog_nondetections: False # bool --- If True,
 
     lmag_check_SNR: 5 # float --- If this target SNR falls below this value, perform a limiting magnitude check
 
-    lim_SNR: 3  # float --- Set the detection criterai for source detection as this value. If the SNR of a target is below this value, it is said to be non-detected.
+    detection_limit: 3  # float --- Set the detection criterai for source detection as this value. If the SNR of a target is below this value, it is said to be non-detected.
 
     inject_sources: True # bool --- If True, perform the limiting magnitude check using artifical source injection
 
     probable_limit: True # bool --- If True, perform the limiting magnitude check using background probablity diagnostic
 
-    inject_source_mag: 19 # float --- If not guess if given, begin the artifial source injection at this apparent magnitude
+    inject_source_mag: 20 # float --- If not guess if given, begin the artifial source injection at this apparent magnitude
 
-    inject_source_add_noise: False # bool --- If True, when injecting the artifical source, include random possion noise
+    inject_source_add_noise: True # bool --- If True, when injecting the artifical source, include random possion noise
 
-    inject_source_recover_dmag_redo: 3 # int --- If *inject_source_add_noise* is True, how maybe times is the artifial source injected at a position with it's accompaning possion noise.
+    inject_source_recover_dmag_redo: 6 # int --- If *inject_source_add_noise* is True, how maybe times is the artifial source injected at a position with it's accompaning possion noise.
 
-
-    inject_source_cutoff_sources: 8 # int --- How many artifial sources to inject radially around the target location.
-
+    inject_source_cutoff_sources: 6 # int --- How many artifial sources to inject radially around the target location.
 
     inject_source_cutoff_limit: 0.8 # float --- That fraction of sources should be lost to consider the injected magnitude to be at the magnitude limit. Should be less than 1.
 
-    inject_source_recover_nsteps: 50 # int --- Number of iterations to allow the injected magnitude to run for.
+    inject_source_recover_nsteps: 300 # int --- Number of iterations to allow the injected magnitude to run for.
 
-    inject_source_recover_dmag: 0.5 # float --- large step size for magnitude change when adjusting injected star magnitude.
+    inject_source_recover_dmag: 0.01 # float --- large step size for magnitude change when adjusting injected star magnitude.
 
-    inject_source_recover_fine_dmag: 0.05  # float --- fine step size for magnitude change when adjusting injected star magnitude. This is used once an approximate limiting magnitude is found.
+    inject_source_recover_fine_dmag: 0.01  # float --- fine step size for magnitude change when adjusting injected star magnitude. This is used once an approximate limiting magnitude is found.
 
-    inject_source_location: 3 # float --- Radially location to inject the artifical sources. This is in units of FWHM.
+    inject_source_location: 2 # float --- Radially location to inject the artifical sources. This is in units of FWHM.
 
     inject_source_random: True # bool --- If True, when plotting the limiting magnitude on the cutout image, inject sources randomly across the cutout images. This is useful to get an idea of how the limiting magnitude looks around the transient location while ignoring any possible contamination from the transient.
 
@@ -242,6 +294,7 @@ AutoPhOT_input:
   target_photometry: # These commands focus on settings when dealing with the photometry at the target position.
 
       adjust_SN_loc: True # bool --- If False, Photometry is performed at transient position i.e. forced photometry
+
       save_target_plot: True # bool --- Save a plot of the region around the target location as well as the fitting.
 
   psf: # These commands focus on settings when dealing with the Point spread fitting photometry package.
@@ -256,7 +309,7 @@ AutoPhOT_input:
 
     construction_SNR: 25 # int ---  When build the PSF, only use sources if their SNR is greater than this values.
 
-    regriding_size: 10 # int ---  When builidng the PSF, regird the reisdual image but this amount to allow to higher pseduo resolution.
+    regrid_size: 10 # int ---  When builidng the PSF, regird the reisdual image but this amount to allow to higher pseduo resolution.
 
     save_PSF_models_fits: True # bool --- If True, save the PSF model as a fits file. This is neede if template subtraction is performed with ZOGY.
 
@@ -277,11 +330,15 @@ AutoPhOT_input:
     do_subtraction: False # bool --- If True, Perform template save_subtraction_quicklook
 
     use_astroalign: False # bool --- If True, use astroalign to align image and template images.
+
     get_template: False # bool --- If True, Try to download template from the PS1 server
+
     use_user_template: True # bool --- If True, use user provided templates - depracted
+
     save_subtraction_quicklook: True # bool ---  If True, save a pdf image of subtracted image with a closeup of the target location
 
     prepare_templates: False # bool --- Set to True, search for the appropiate template file and perform preprocessing steps including FWHM, cosmic rays remove and WCS corrections.
+
     hotpants_exe_loc: None   # str --- Filepath location for HOTPANTS executable.
 
     hotpants_timeout: 300 # float --- Timeout for template subtraction in seconds
@@ -294,19 +351,32 @@ AutoPhOT_input:
 
   error: # Commands for controlling error calculations
 
-    target_error_compute_multilocation: False # bool --- Do Snoopy-style error
+    target_error_compute_multilocation: True # bool --- Do Snoopy-style error
+
     target_error_compute_multilocation_position: 0.5 # float --- Distant from location of best fit to inject transient for recovery. Units of FWHM. Set to -1 to adjust around pixel of best fit
+
     target_error_compute_multilocation_number: 10 # int --- Number of times to inject and recoved an artifical source with an initial magnitude eqaul to the measured target magnitude.
 
   zeropoint:
+
     zp_sigma: 3 # float --- Sigma clip values when cleaning up the zeropoint measurements.
+
     zp_plot: False # bool --- If True, return a plot of the zeropoint distribution
+
     plot_ZP_vs_SNR: False # bool --- If True, return a plot of the zeropoint distribution across the image
+
     plot_ZP_image_analysis: False # bool --- If True, return a plot of the zeropoint distribution across the image
+
     zp_use_mean: False # bool --- When determined the zeropoint, use the mean and standard deviation
-    zp_use_fitted: True # bool --- When determined the zeropoint, Fit a vertical line to the zeropoint distribution
-    zp_use_median: False # bool --- When determined the zeropoint, use the median and median standard deviation
+
+    zp_use_fitted: False # bool --- When determined the zeropoint, Fit a vertical line to the zeropoint distribution
+
+    zp_use_median: True # bool --- When determined the zeropoint, use the median and median standard deviation
+
     zp_use_WA: False # bool --- When determined the zeropoint, use the weighted average
+
     zp_use_max_bin: False # bool --- When determined the zeropoint, use the magnitude given by the max bin i.e the mode
+
     matching_source_SNR: True # bool --- If True, exclude sources with a SNR lower than *matching_source_SNR_limit*
+
     matching_source_SNR_limit: 10 # float --- If *matching_source_SNR* is True, exclude values with a SNR lower than this value
