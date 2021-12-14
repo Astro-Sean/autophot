@@ -13,6 +13,7 @@
 import os
 import sys
 sys.path.insert(0, os.path.abspath('../../autophot'))
+sys.path.insert(0, os.path.abspath('../..'))
 
 
 # -- Project information -----------------------------------------------------
@@ -43,7 +44,7 @@ autosummary_generate = True
 
 source_suffix = ['.rst', '.ipynb']
 
-pygments_style = 'sphinx'
+# pygments_style = 'sphinx'
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']

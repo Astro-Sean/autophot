@@ -50,4 +50,3 @@ Welcome to AutoPHoT!
 
 .. automodule:: autophot
   :members:
-  :undoc-members:
