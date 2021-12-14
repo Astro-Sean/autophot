@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import numpy as np
-#
+
+
+
 def search(headinfo,
            target_coords,
            catalog_keywords,
@@ -349,7 +350,7 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
           default_moff_beta=4.765,vary_moff_beta=False,bkg_level=3,scale=25,
           sat_lvl=65536,max_fit_fwhm=30,max_catalog_sources=300,
           fitting_method='least_squares',
-          matching_source_FWHM_limit=np.inf,catalog_matching_limit=25,
+          matching_source_FWHM_limit=999,catalog_matching_limit=25,
           include_IR_sequence_data=False,
           pix_bound=25,plot_catalog_nondetections=False):
     '''
