@@ -634,18 +634,16 @@ def find_optimum_aperture_size(dataframe,
                                plot_optimum_radius = False):
     '''
 
-        Find the optimum aperture radius for a given image. Although the
+      Find the optimum aperture radius for a given image. Although the
     initial guess of :math:`1.7 \\times FWHM` is a suitable guess for the
-    aperture size of an image. Irregular / symmetric point spread functions
+    aperture size of an image. Irregular \ symmetric point spread functions
     (PSF) may require a slightly larger or smaller aperture size. This function
     uses several well isolated sources and finds their Signal to noise ratio
-    (S/N) using the following equation
+    (S/N) using the following equation:
     
     .. math::
-    
-       S/N_{max} = \\frac{ F_{ap,optimum} }{ F_{ap,optimum} + F_{sky,ap,optimum,n}
-    + (RN ^2 + \\frac{G^2}{4} \\times n_{pix}) + (D \\times n_{pix} \\times
-    t_exp) } ^{0.5}
+        
+        S/N_{max} = \\frac{ F_{ap,optimum} }{ F_{ap,optimum} + F_{sky,ap,optimum,n} + (RN ^2 + \\frac{G^2}{4} \\times n_{pix}) + (D \\times n_{pix} \\times t_{exp}) } ^{0.5}
     
     
     where :math:`F_{ap,optimum}` is the flux under an aperture of an optimum

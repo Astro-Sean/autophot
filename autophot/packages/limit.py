@@ -84,7 +84,7 @@ def flatten_dict(d):
 
 def limiting_magnitude_prob(image,fpath, detection_limit=3, bkg_level=3, fwhm = 7,
                             ap_size=1.7, exp_time = 1, gain = 1, image_params = None,
-                            regriding_size=10, fitting_radius = 1.3, beta = 0.75,
+                            regrid_size=10, fitting_radius = 1.3, beta = 0.75,
                             inject_source_sources_no = 6, inject_source_location = 3, 
                             inject_source_on_target = False, inject_source_random = False,
                             inject_source_add_noise = False, use_moffat= True, 
@@ -130,8 +130,8 @@ def limiting_magnitude_prob(image,fpath, detection_limit=3, bkg_level=3, fwhm = 
     :type ap_size: float, optional
     :param fitting_radius: zoomed region around location of best fit to focus fitting. This allows for the fitting to be concentrated on high S/N areas and not fit the low S/N wings of the PSF, defaults to 1.3
     :type fitting_radius: float, optional
-    :param regriding_size: When expanding to larger pseudo-resolution, what zoom factor to use, defaults to 10
-    :type regriding_size: int, optional
+    :param regrid_size: When expanding to larger pseudo-resolution, what zoom factor to use, defaults to 10
+    :type regrid_size: int, optional
     :param xfit: X pixel location of best fit for the transient psf in the image, defaults to None
     :type xfit: float, optional
     :param yfit: y pixel location of best fit for the transient psf in the image, defaults to None
@@ -463,7 +463,7 @@ def limiting_magnitude_prob(image,fpath, detection_limit=3, bkg_level=3, fwhm = 
                 
                 # PSF model that matches close-up shape around target
                 def input_model(x,y,H):
-                    return model(x, y, 0, H, r_table, fwhm, image_params,use_moffat = use_moffat, fitting_radius = fitting_radius,regriding_size = regriding_size,pad_shape = image.shape)        
+                    return model(x, y, 0, H, r_table, fwhm, image_params,use_moffat = use_moffat, fitting_radius = fitting_radius,regrid_size = regrid_size,pad_shape = image.shape)        
     
             except:
     
@@ -670,7 +670,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                    zeropoint = 0, r_in_size = 2, r_out_size = 3, explore = False,
                    injected_sources_use_beta=True, beta_limit = 0.75, gain = 1,
                    rdnoise = 0, inject_lmag_use_ap_phot = True, use_moffat = True,
-                   image_params = None, fitting_radius = 1.3, regriding_size = 10, 
+                   image_params = None, fitting_radius = 1.3, regrid_size = 10, 
                    detection_limit = 3,bkg_level = 3, inject_source_recover_dmag = 0.5,
                    inject_source_recover_fine_dmag = 0.05, inject_source_mag = 21, 
                    inject_source_recover_nsteps = 50, inject_source_recover_dmag_redo = 3,
@@ -759,8 +759,8 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     :type use_moffat: bool, optional
     :param fitting_radius: zoomed region around location of best fit to focus fitting. This allows for the fitting to be concentrated on high S/N areas and not fit the low S/N wings of the PSF, defaults to 1.3
     :type fitting_radius: float, optional
-    :param regriding_size: When expanding to larger pseudo-resolution, what zoom factor to use, defaults to 10
-    :type regriding_size: int, optional
+    :param regrid_size: When expanding to larger pseudo-resolution, what zoom factor to use, defaults to 10
+    :type regrid_size: int, optional
     :param detection_limit: Detection significance level, defaults to 3
     :type detection_limit: float, optional
     :param bkg_level: The number of standard deviations, below which is assumed to be due to the background noise distribution, defaults to 3
@@ -867,7 +867,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         def input_model(x,y,H):
             
             return model(x, y, 0, H, r_table, fwhm, image_params,use_moffat = use_moffat, 
-                         fitting_radius = fitting_radius,regriding_size = regriding_size,
+                         fitting_radius = fitting_radius,regrid_size = regrid_size,
                          pad_shape = image.shape)        
 
 
@@ -1042,7 +1042,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                         fwhm = fwhm,
                         fpath = fpath,
                         fitting_radius = fitting_radius,
-                        regriding_size = regriding_size,
+                        regrid_size = regrid_size,
                         use_moffat = use_moffat,
                         image_params = image_params,
                         fitting_method = fitting_method,
@@ -1287,7 +1287,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                                         fwhm = fwhm,
                                         fpath = fpath,
                                         fitting_radius = fitting_radius,
-                                        regriding_size = regriding_size,
+                                        regrid_size = regrid_size,
                                         no_print = True,
                                         use_moffat = use_moffat,
                                         image_params = image_params,
