@@ -45,9 +45,7 @@ def run_automatic_autophot(autophot_input):
         Please provide feedback/bugs to:
         Email: sean.brennan2@ucdconnect.ie
     ---------------------------------------""")
-    
-    # AutoPHoT Specific packages
-    from autophot.packages.recover_output import recover
+
     from autophot.packages.run import run_autophot
 
     start = time.time()
@@ -57,18 +55,11 @@ def run_automatic_autophot(autophot_input):
         
         print('Directory of fits file: %s'  % autophot_input['fits_dir'] )
         
-    elif autophot_input['fname']:
-        
-        print('Working on: %s'  % autophot_input['fname'] )
     else:
         print('No files found: update fits_dir or fname')
         return False
 
     # Run complete autophot package for automatic photometric reduction
     run_autophot(autophot_input)
-
-    
-    # Go through output filepath and see what has already been done and produce a human readbale output
-    recover(autophot_input)
 
     print('\nDone - Time Taken: %.1f' %  float(time.time() - start))
