@@ -653,19 +653,6 @@ def limiting_magnitude_prob(image,fpath, detection_limit=3, bkg_level=3, fwhm = 
 
 
 
-def fractional_change(i,i_minus_1):
-    import numpy as np
-    
-    delta = abs((i-i_minus_1)/i)
-    
-    if delta > 100:
-        return np.nan
-    
-    return delta
-
-
-
-
 def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25, 
                    zeropoint = 0, r_in_size = 2, r_out_size = 3, explore = False,
                    injected_sources_use_beta=True, beta_limit = 0.75, gain = 1,
@@ -694,23 +681,23 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     limiting magnitude or the briggest a source can be an be confidently assumed to
     be *not* apart of the background noise distribution:
     
-    #. Setup locations around the transient site (i.e. the center of the image).
+    #.  Setup locations around the transient site (i.e. the center of the image).
     For convergence reasons these area should *fail* the detection criteria e.g.
     have a S/N < 3 or :math:`\\beta\\prime<0.5`. If selected, these source posiiton
     may be extended to include subpixel positions.
     
-    #. Beginning with an initial guess (either given in the function or assumed),
+    #.  Beginning with an initial guess (either given in the function or assumed),
     find the detection details (e.g S/N >3 or :math:`\\beta\\prime>0.75`) for an
     intial round of artifical sources. If Selected these sources may have random
     noise added to them, to fully explore the probability of a certain magnitude
     being recovered.
     
-    #. *If the initial sources are detected*, decrease the magnitude by a large
+    #.  *If the initial sources are detected*, decrease the magnitude by a large
     step size until the sources are no longer detected. In this scenario we expect
     to overshoot the limiting magnitude. We will then increase the magnitude by a
     smaller amount until the sources are the recovered to a significant level.
     
-    #. *If the initial sources are not detected*: In this scenario the initial
+    #.  *If the initial sources are not detected*: In this scenario the initial
     guess at the limiting magnitude is too faint. The injected magnitude is
     increased (i.e. gets brighter) by a large step size until a significant number
     of sources are detected. Again we expect to overshoot the limiting magnitude.

@@ -14,7 +14,7 @@ def search(headinfo,
            include_IR_sequence_data = False,
            catalog_custom_fpath = None):
 
-    '''
+    r'''
         Search for sequence stars for zero point calibration. This function takes in
     the target location are searches for photometric data on stars near this
     location. The available catalogs are:
@@ -62,49 +62,29 @@ def search(headinfo,
     *catalog_custom_fpath* keyword which gives the file path to this file. An
     example of this can be found `here
     <https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/add_your_catalog_example.ipynb>`_
-
-
-
-
+    
     Keyword = :math:`"custom"`
 
 
 
     :param headinfo: Headerinfo of *FITS* image that contains WCS values
     :type headinfo: Fits Header
-    :param target_coords: `SkyCoord Object
-    <https://docs.astropy.org/en/stable/api/astropy.coordinates.SkyCoord.html>`_
-    conataing Ra and Dec of transient. This is used to position the catalog search.
+    :param target_coords: `SkyCoord Object <https://docs.astropy.org/en/stable/api/astropy.coordinates.SkyCoord.html>`_ conataing Ra and Dec of transient. This is used to position the catalog search.
     :type target_coords: SkyCoord Object
-    :param catalog_keywords: Dictionary containing translation of catalog columns
-    keywords to standard AutoPHOT system.
+    :param catalog_keywords: Dictionary containing translation of catalog columns keywords to standard AutoPHOT system.
     :type catalog_keywords: Dict
     :param image_filter: Filter used in *FITS* image
     :type image_filter: str
-    :param radius: Radius in degrees around target location with which to download
-    catalog, defaults to 0.5
+    :param radius: Radius in degrees around target location with which to download catalog, defaults to 0.5
     :type radius: float, optional
     :param wdir: DESCRIPTION, defaults to None
-    :type wdir: Location of directory containing catalog queries. If no matching
-    catalog is found, downloaded catalog is saved here under the name given by
-    *target_name*, if a matching catalog is found that catalog is returned rather
-    than downloading a new one.
-    :param catalog: Name of catalog to search, see keywords above, defaults to
-    'apass'
+    :type wdir: Location of directory containing catalog queries. If no matching catalog is found, downloaded catalog is saved here under the name given by *target_name*, if a matching catalog is found that catalog is returned rather than downloading a new one.
+    :param catalog: Name of catalog to search, see keywords above, defaults to 'apass'
     :type catalog: str, optional
-    :param target_name: Name of transient. This is used to locate the correct
-    folder in *wdir* to download new catalog to, defaults to None
+    :param target_name: Name of transient. This is used to locate the correct folder in *wdir* to download new catalog to, defaults to None
     :type target_name: str, optional
-    :param include_IR_sequence_data: If True, and catalog is not 2MASS return a
-    catalog with optical observations as well as IR observations. This can be
-    useful if you have a dataset containing Optical and IR observations (e.g. from
-    GROND) and don't want to run AutoPHOT multiple times with different catalogs
-    selected., defaults to False
-    :type include_IR_sequence_data: bool, optional
-    :param catalog_custom_fpath: If the selected catalog is *custom* this is the
-    file path to the catalog, see `here
-    <https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/add_your_catalog_example.ipynb>`_
-    for an example, defaults to None
+    :param include_IR_sequence_data: If True, and catalog is not 2MASS return a catalog with optical observations as well as IR observations. This can be useful if you have a dataset containing Optical and IR observations (e.g. from GROND) and don't want to run AutoPHOT multiple times with different catalogs selected., defaults to False
+    :type include_IR_sequence_data: bool, optional <https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/add_your_catalog_example.ipynb>`_ for an example, defaults to None
     :type catalog_custom_fpath: str, optional
     :raises Exception: If no data is found, an error is raised
     :return: Returns the catalog information
@@ -353,7 +333,7 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
           matching_source_FWHM_limit=999,catalog_matching_limit=25,
           include_IR_sequence_data=False,
           pix_bound=25,plot_catalog_nondetections=False):
-    '''
+    r'''
         Match sources in an image with sources given in a catalog. Sources location
     given in RA and Dec columns in a catalog are converted to XY pixel coordinates.
     A cutout is then place on the approximate location and a source detection
@@ -377,88 +357,59 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
     5. If there is no available data in the image filter, the source is
     excluded.
 
-
-
     :param image: Image containing stars
     :type image: 2D array
-    :param headinfo: Header info of *FITS* image containing WCS information. This
-    is used to translate catalog RA/Dec coordinates to XY pixel coordinates.
+    :param headinfo: Header info of *FITS* image containing WCS information. This is used to translate catalog RA/Dec coordinates to XY pixel coordinates.
     :type headinfo: Header
     :param target_coords: SkyCoord Object containing transient location
     :type target_coords: SkyCoord Object
-    :param catalog_keywords: Dictionary containing translation of catalog
-    columns
-    keywords to standard AutoPHOT system.
+    :param catalog_keywords: Dictionary containing translation of catalog columns keywords to standard AutoPHOT system.
     :type catalog_keywords: dict
-    :param image_filter: Filter used in *FITS* image given in standard AutoPHOT
-    system
+    :param image_filter: Filter used in *FITS* image given in standard AutoPHOT system
     :type image_filter: str
-    :param chosen_catalog: DataFrame containing coordinates of stars with headers
-    *x_pix* and *y_pix*.
+    :param chosen_catalog: DataFrame containing coordinates of stars with headers *x_pix* and *y_pix*.
     :type chosen_catalog: dataFrame
     :param fwhm: Full Width Half Maximum of image
     :type fwhm: float
-    :param local_radius: Pixel radius around target to look for sources, defaults
-    to 1000
+    :param local_radius: Pixel radius around target to look for sources, defaults to 1000
     :type local_radius: float, optional
-    :param target_x_pix: Approximate X pixel location of transient, defaults to
-    None
+    :param target_x_pix: Approximate X pixel location of transient, defaults to None
     :type target_x_pix: float, optional
-    :param target_y_pix: Approximate y pixel location of transient,, defaults to
-    None
+    :param target_y_pix: Approximate y pixel location of transient,, defaults to None
     :type target_y_pix: float, optional
     :param default_dmag: Filter combinations for color correction, defaults to None
     :type default_dmag: dict, optional
-
-    :param mask_sources_XY_R: List of tuples containing sources to be masked in
-    formation [(x_pix,y_pix,radius)], defaults to None
+    :param mask_sources_XY_R: List of tuples containing sources to be masked in formation [(x_pix,y_pix,radius)], defaults to None
     :type mask_sources_XY_R: List of Tuples, optional
-    :param use_moffat: If True, use moffat function for centroiding, defaults to
-    True
+    :param use_moffat: If True, use moffat function for centroiding, defaults to True
     :type use_moffat: bool, optional
-    :param default_moff_beta: Default exponent for moffat function,  defaults to
-    4.765
+    :param default_moff_beta: Default exponent for moffat function,  defaults to 4.765
     :type default_moff_beta: float, optional
-    :param use_local_stars: If True, use local stars within a radius set by
-    *local_radius*, defaults to False
+    :param use_local_stars: If True, use local stars within a radius set by *local_radius*, defaults to False
     :type use_local_stars: bool, optional
-    :param vary_moff_beta: If True, allow the exponent of the moffat function to
-    vary. use with Caution as this may become unstable, defaults to False
+    :param vary_moff_beta: If True, allow the exponent of the moffat function to vary. use with Caution as this may become unstable, defaults to False
     :type vary_moff_beta: Bool, optional
-    :param bkg_level: The number of standard deviations to use for both the lower
-    and upper clipping limit for background determination, defaults to 3
+    :param bkg_level: The number of standard deviations to use for both the lower and upper clipping limit for background determination, defaults to 3
     :type bkg_level: float, optional
-    :param scale: Dictionary containing values for model fitting. If Gaussian is
-    used. the variable should containg *sigma* and if moffat used, this variable
-    should contain *beta* and *alpha*, defaults to 25
+    :param scale: Dictionary containing values for model fitting. If Gaussian is used. the variable should containg *sigma* and if moffat used, this variable should contain *beta* and *alpha*, defaults to 25
     :type scale: dict, optional
-    :param sat_lvl: Counts level above which a source is deemed saturation and
-    ignored, defaults to 65536
+    :param sat_lvl: Counts level above which a source is deemed saturation and ignored, defaults to 65536
     :type sat_lvl: float, optional
     :param max_fit_fwhm: Max value to fit for the FWHM, defaults to 30
     :type max_fit_fwhm: float, optional
-    :param max_catalog_sources: Maximum number of catalog sources to use, defaults
-    to 300
+    :param max_catalog_sources: Maximum number of catalog sources to use, defaults to 300
     :type max_catalog_sources: int, optional
-    :param fitting_method: Selected method to fit model for centroid. Select from
-    list given `here <https://lmfit.github.io/lmfit-py/fitting.html>`_
-    , defaults to 'least_squares'
+    :param fitting_method: Selected method to fit model for centroid. Select from list given `here <https://lmfit.github.io/lmfit-py/fitting.html>`_ , defaults to 'least_squares'
     :type fitting_method: str, optional
-    :param matching_source_FWHM_limit: Excluded sources whose FWHM is greater than
-    this value, defaults to np.inf
+    :param matching_source_FWHM_limit: Excluded sources whose FWHM is greater than this value, defaults to np.inf
     :type matching_source_FWHM_limit: float, optional
-    :param catalog_matching_limit: Exclude sources that are fainter than this limit
-    in magnitudes, defaults to 25
+    :param catalog_matching_limit: Exclude sources that are fainter than this limit in magnitudes, defaults to 25
     :type catalog_matching_limit: float, optional
-    :param include_IR_sequence_data: If True, add IR data to output catalog,
-    defaults to False
+    :param include_IR_sequence_data: If True, add IR data to output catalog, defaults to False
     :type include_IR_sequence_data: bool, optional
-
-    :param pix_bound: Remove sources that are too close to boundary of image.
-    Distance to boundary is given by this variable in pixels, defaults to 25
+    :param pix_bound: Remove sources that are too close to boundary of image. Distance to boundary is given by this variable in pixels, defaults to 25
     :type pix_bound: float, optional
-    :param plot_catalog_nondetections: If True, return a plot of catalog sources
-    that were not detected, defaults to False
+    :param plot_catalog_nondetections: If True, return a plot of catalog sources that were not detected, defaults to False
     :type plot_catalog_nondetections: bool, optional
     :return: returns a new dataframe containing useable sources in the image
     :rtype: DataFrame
