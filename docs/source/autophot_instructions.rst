@@ -36,7 +36,7 @@ To change these parameters use:
 
 
 
-**fits_dir** [ Type: *str* ]
+**fits_dir** [ Type: *str* ] 
 
 	Directory where files are containing images with .fits .fts  or .fit extension.
 
@@ -46,7 +46,7 @@ To change these parameters use:
 
 
 
-**method** [ Type: *str* ]
+**method** [ Type: *str* ] 
 
 	Method for processing - serial [sp] or multi-processing [mp] (not working).
 
@@ -56,7 +56,7 @@ To change these parameters use:
 
 
 
-**ignore_no_telescop** [ Type: *bool* ]
+**ignore_no_telescop** [ Type: *bool* ] 
 
 	bool.
 
@@ -66,7 +66,7 @@ To change these parameters use:
 
 
 
-**outdir_name** [ Type: *str* ]
+**outdir_name** [ Type: *str* ] 
 
 	Extension of output directory. For example if parent directry (which is given in *fits_dir*) is SN1987A output directory will be SN1987A_REDUCED. The ocde will not overwrite an original data. Any image found in *fits_dir* is copied over to this new directory and we perform photometry on this new image.
 
@@ -76,7 +76,7 @@ To change these parameters use:
 
 
 
-**outcsv_name** [ Type: *str* ]
+**outcsv_name** [ Type: *str* ] 
 
 	Output csv name containing all information from reduced files. During the photometric reduction of an individual image, a fle containing information on the reduction and calibration named *out.csv* is created. During the automatic scipts, these *out.csv* are collected and concatenated into one file. This new file is named this variable.
 
@@ -86,7 +86,7 @@ To change these parameters use:
 
 
 
-**ignore_no_filter** [ Type: *bool* ]
+**ignore_no_filter** [ Type: *bool* ] 
 
 	Ignore an image with no filter. If this value is set to True, any file in which the correct filter header cannot be found is ignore. This is needed in case a fits is in the given dataset that may not be a 2D image. For example a spectral image.
 
@@ -96,7 +96,7 @@ To change these parameters use:
 
 
 
-**restart** [ Type: *bool* ]
+**restart** [ Type: *bool* ] 
 
 	This function allows the automated script to pick up where it left off, in the case where the script is ended prematruely on a dataset. i.e some images have been photometred and some have not. This will scan through output directory, see what has already been done and ignores it. This is heavily relient on filepaths and may not work if the output directory is modified by the user.
 
@@ -106,7 +106,7 @@ To change these parameters use:
 
 
 
-**select_filter** [ Type: *bool* ]
+**select_filter** [ Type: *bool* ] 
 
 	If set to True, perform photometry on specific filter or list of filters given by *do_filter*. This is handy if you want to (re-) do observations in a secific filter only.
 
@@ -116,7 +116,7 @@ To change these parameters use:
 
 
 
-**do_filter** [ Type: *list* ]
+**do_filter** [ Type: *list* ] 
 
 	If *select_filter* is True, perform automated script on images that have corrospoonding filters represented by this list.
 
@@ -126,7 +126,7 @@ To change these parameters use:
 
 
 
-**target_name** [ Type: *str* ]
+**target_name** [ Type: *str* ] 
 
 	IAU name of target for use with TNS server. Must be entered without SN or AT in IAU format e.g. 1987A. To use this feature, you must update *TNS_BOT_ID*,*TNS_BOT_API* and *TNS_BOT_NAME* with your BOT details.
 
@@ -136,7 +136,7 @@ To change these parameters use:
 
 
 
-**target_ra** [ Type: *str* ]
+**target_ra** [ Type: *str* ] 
 
 	Target Right Ascension (RA) of target given in degrees. If you do not have access to a TNS bot, this is the only way to define the transients location.
 
@@ -146,7 +146,7 @@ To change these parameters use:
 
 
 
-**target_dec** [ Type: *str* ]
+**target_dec** [ Type: *str* ] 
 
 	Target Declination (Dec) of target in degrees.
 
@@ -156,9 +156,9 @@ To change these parameters use:
 
 
 
-**plot_source_selection** [ Type: *bool* ]
+**plot_source_selection** [ Type: *bool* ] 
 
-	If True, return a plot showing the image, sources used for zeropoint and PSF model, as well as the transient location. This is a useful diagnostic plot to ensure the code is working correctly. Also important is to assess wheather the WCS values are okay, and if appropiate sources are selected for the PSF model.
+	If True, return a plot showing the image, sources used for zeropoint and PSF model, as well as the transient location. This is a useful diagnostic plot to ensure the code is working correctly. Also important is to assess wheather the WCS values are okay, and if appropiate sources are selected for the PSF model. 
  If there is discrepancies in this image, this may point towards additional steps needed for correct photometry.
 
 
@@ -193,7 +193,7 @@ To change these parameters use:
 
 
 
-**trim_edges** [ Type: *bool* ]
+**trim_edges** [ Type: *bool* ] 
 
 	If True, trim the sides of the image by the amount given in *trim_edges_pixels*.
 
@@ -203,7 +203,7 @@ To change these parameters use:
 
 
 
-**trim_edges_pixels** [ Type: *int* ]
+**trim_edges_pixels** [ Type: *int* ] 
 
 	If  *trim_edges* If True, trim the image by this amount.
 
@@ -213,7 +213,7 @@ To change these parameters use:
 
 
 
-**mask_sources** [ Type: *bool* ]
+**mask_sources** [ Type: *bool* ] 
 
 	If True, mask sources given in the list *mask_sources_RADEC_R*.
 
@@ -223,7 +223,7 @@ To change these parameters use:
 
 
 
-**mask_sources_RADEC_R** [ Type: *list* ]
+**mask_sources_RADEC_R** [ Type: *list* ] 
 
 	If *mask_sources* is true, mask these sources. This is a list of tuples where each tuple contains (RA,Dex, radius in arcmins).
 
@@ -259,11 +259,13 @@ To change these parameters use:
 
 .. code-block::  python
 
+
+
    autophot_input['photometry'][**command**] = **new value**
 
 
 
-**do_ap_phot** [ Type: *bool* ]
+**do_ap_phot** [ Type: *bool* ] 
 
 	If True, perform aperture photometry on the image. In this cause there is still an attempt to create the PSF model as this may be needed for limiting magnitude checks, for use in ZOGY, etc.
 
@@ -273,9 +275,9 @@ To change these parameters use:
 
 
 
-**force_psf** [ Type: *bool* ]
+**force_psf** [ Type: *bool* ] 
 
-	If True, force the use of psf fitting over aperture photometry. This will ignore if the approximate magnitude of the transient is greater than the brightest star used in the PSF model.
+	If True, force the use of psf fitting over aperture photometry. This will ignore if the approximate magnitude of the transient is greater than the brighest star used in the PSF model.
 
 
 
@@ -283,7 +285,7 @@ To change these parameters use:
 
 
 
-**use_local_stars** [ Type: *bool* ]
+**use_local_stars** [ Type: *bool* ] 
 
 	If True, use local stars within *use_source_arcmin* for sequence stars taken from the given catalog data.
 
@@ -293,7 +295,7 @@ To change these parameters use:
 
 
 
-**use_local_stars_for_FWHM** [ Type: *bool* ]
+**use_local_stars_for_FWHM** [ Type: *bool* ] 
 
 	If True, use local stars within *use_source_arcmin* for FWHM sources.
 
@@ -303,7 +305,7 @@ To change these parameters use:
 
 
 
-**use_local_stars_for_PSF** [ Type: *bool* ]
+**use_local_stars_for_PSF** [ Type: *bool* ] 
 
 	If True, use local stars within *use_source_arcmin* for PSF model stars.
 
@@ -313,7 +315,7 @@ To change these parameters use:
 
 
 
-**use_source_arcmin** [ Type: *float* ]
+**use_source_arcmin** [ Type: *float* ] 
 
 	Distance around *target_ra*/*target_dec* to use for local sources when performing calibration steps.
 
@@ -323,7 +325,7 @@ To change these parameters use:
 
 
 
-**local_radius** [ Type: *float* ]
+**local_radius** [ Type: *float* ] 
 
 	default distance to look for sources. If *use_local_stars* is True, this value is overwritten.
 
@@ -333,7 +335,7 @@ To change these parameters use:
 
 
 
-**find_optimum_radius** [ Type: *bool* ]
+**find_optimum_radius** [ Type: *bool* ] 
 
 	If True, find and update aperature size based on curve of growth. This selects several bright isolated sources, and using a varing aperture size, finds the optimum aperture size thats gives the best signal to noise ratio.
 
@@ -343,7 +345,7 @@ To change these parameters use:
 
 
 
-**check_nyquist** [ Type: *bool* ]
+**check_nyquist** [ Type: *bool* ] 
 
 	If True, check that FWHM of image does not fall below a limit given by *nyquist_limit*, if so, use aperture photometry. PSF photometry can result in poor measurements due to suffering from undersmapling and centroiding difficulties.
 
@@ -353,7 +355,7 @@ To change these parameters use:
 
 
 
-**nyquist_limit** [ Type: *float* ]
+**nyquist_limit** [ Type: *float* ] 
 
 	Pixel limit for FWHM to perform aperture photometry. Only applicable is *check_nyquist* is True.
 
@@ -363,7 +365,7 @@ To change these parameters use:
 
 
 
-**ap_size** [ Type: *float* ]
+**ap_size** [ Type: *float* ] 
 
 	Default Aperture size. This is taken as the multiple of the image full width half maximum.
 
@@ -373,9 +375,9 @@ To change these parameters use:
 
 
 
-**inf_ap_size** [ Type: *float* ]
+**inf_ap_size** [ Type: *float* ] 
 
-	larger ap size for aperture corrections. Cannot be larger than scale_multipler.
+	Default *inifinte* aperture size used for aperture correction. Although this is not infinte in size, it is assumed large enough to capture significantly larger flux than the standard aperture size. Must be larger than *ap_size*. Cannot be larger than *scale_multipler*.
 
 
 
@@ -383,9 +385,9 @@ To change these parameters use:
 
 
 
-**ap_corr_sigma** [ Type: *float* ]
+**ap_corr_sigma** [ Type: *float* ] 
 
-	sigma clip aperture corrections.
+	Sigma clip value when returning the aperture corrections. This is used to clean data of any outliers, e.g. galaxies or saturated sources.
 
 
 
@@ -393,9 +395,9 @@ To change these parameters use:
 
 
 
-**ap_corr_plot** [ Type: *bool* ]
+**ap_corr_plot** [ Type: *bool* ] 
 
-	Plot of aperature corretcions.
+	If True return a plot of the aperature corrections. Plot will produce a histogram-like distribution with a gaussian curve fit to the data for visual illistration.
 
 
 
@@ -403,9 +405,9 @@ To change these parameters use:
 
 
 
-**r_in_size** [ Type: *float* ]
+**r_in_size** [ Type: *float* ] 
 
-	inner annulus for background estimate.
+	Inner radius of annulus for background estimate when performing aperture photometry. Should be slightly larger than the aperture size (*ap_size*).
 
 
 
@@ -413,9 +415,9 @@ To change these parameters use:
 
 
 
-**r_out_size** [ Type: *float* ]
+**r_out_size** [ Type: *float* ] 
 
-	outer annulus for background estimate.
+	Outer radius offor background estimate when performing aperture photometry. Should be slightly larger than the aperture size (*ap_size*) and r_in_size.
 
 
 
@@ -433,7 +435,7 @@ TEMPLATES
 
 .. note::
 
-   Commands to control templates
+   These are the commands to control the calibration of the template files.
 
 
 
@@ -449,9 +451,9 @@ To change these parameters use:
 
 
 
-**use_user_template** [ Type: *bool* ]
+**use_user_template** [ Type: *bool* ] 
 
-	Use template given by user.
+	If True, use the templates supplied by the user. Else attempt to download these templates from the Pan Starrs image cutout website.
 
 
 
@@ -469,7 +471,7 @@ WCS
 
 .. note::
 
-   Comands when finding WCS values
+   These commands are concerned with the World Coordinate System (WCS) of an image. These values should be a accurate as possible. While the script can account for sight offset (a few pixels). Significant offsets will result in poor calibration and photometry.
 
 
 
@@ -485,19 +487,9 @@ To change these parameters use:
 
 
 
-**ignore_no_wcs** [ Type: *bool* ]
+**allow_wcs_recheck** [ Type: *bool* ] 
 
-	Ignore files that don't have wcs.
-
-
-
-	Default: **False**
-
-
-
-**allow_wcs_recheck** [ Type: *bool* ]
-
-	If source catalog fails, rerun astrometry - very buggy.
+	If the offset between when the where the sources are detected and where the WCS values say the should be is too large, allow the script to redo these WCS values and re-attempt the matching script.
 
 
 
@@ -505,9 +497,9 @@ To change these parameters use:
 
 
 
-**remove_wcs** [ Type: *bool* ]
+**remove_wcs** [ Type: *bool* ] 
 
-	Remove  wcs and use local astrometry.net.
+	If True, remove any pre-existing WCS keywords in a header image and check the local version of Astrometry.net for new values. This is also recommended that correct WCS are vital for percision photometry.
 
 
 
@@ -515,9 +507,9 @@ To change these parameters use:
 
 
 
-**force_wcs_redo** [ Type: *bool* ]
+**force_wcs_redo** [ Type: *bool* ] 
 
-	Force images to have their WCS redone, if an image cannot be solved, skip.
+	If True, an image is discarded from the automated script if its WCS cannot be solved.
 
 
 
@@ -525,9 +517,9 @@ To change these parameters use:
 
 
 
-**solve_field_exe_loc** [ Type: *str* ]
+**solve_field_exe_loc** [ Type: *str* ] 
 
-	location of solve-field from astromety.net. This is required to solve for WCS.
+	Absolute filepath of the *solve-field* executable from Astromety.net. This is required to solve for WCS.
 
 
 
@@ -535,9 +527,9 @@ To change these parameters use:
 
 
 
-**offset_param** [ Type: *float* ]
+**offset_param** [ Type: *float* ] 
 
-	mean pixel distance criteria between trusting original WCS and looking it up.
+	Mean pixel distance criteria between trusting original WCS and looking it up. If the average offset between fitted position this, the code will recheck the WCS.
 
 
 
@@ -545,9 +537,9 @@ To change these parameters use:
 
 
 
-**search_radius** [ Type: *float* ]
+**search_radius** [ Type: *float* ] 
 
-	distance around source to search for in Astrometry.net.
+	When solving for WCS, Tell astrometry.net to search around this distance (in degrees) around the target lcoation within the index files. This can greater speed up computation times and maybe nessecary for successful completion.
 
 
 
@@ -555,9 +547,9 @@ To change these parameters use:
 
 
 
-**downsample** [ Type: *int* ]
+**downsample** [ Type: *int* ] 
 
-	Downsample value to pass to astrometry.
+	If working with verty large image arrays, when can pass this value to astrometry.net to downsample the image before runnign through astrometry.net.
 
 
 
@@ -565,9 +557,9 @@ To change these parameters use:
 
 
 
-**cpulimit** [ Type: *float* ]
+**cpulimit** [ Type: *float* ] 
 
-	timeout duration for solve-field.
+	Max time allowed to solve for WCS values. If Astrometry.net exceeds this value, and error is raised.
 
 
 
@@ -575,19 +567,9 @@ To change these parameters use:
 
 
 
-**update_wcs_scale** [ Type: *bool* ]
+**update_wcs_scale** [ Type: *bool* ] 
 
-	update telescope.yml pixel scale for a instrument from output of astrometry.net.
-
-
-
-	Default: **False**
-
-
-
-**allow_recheck** [ Type: *bool* ]
-
-	allow recheck of wcs if pixel offset from sources is too great.
+	If True, check the output of astrometry.net and update *telescope.yml* with the pixel scale value from the output.
 
 
 
@@ -595,19 +577,9 @@ To change these parameters use:
 
 
 
-**ignore_pointing** [ Type: *bool* ]
+**use_xylist** [ Type: *bool* ] 
 
-	When solving plate - ignore pointing coordinates.
-
-
-
-	Default: **True**
-
-
-
-**use_xylist** [ Type: *bool* ]
-
-	use coordinate list from source detection in astrometry.net.
+	If True, perform source detection on an image and pass a list of XY pixel values of bright sources rather than passing image to astrometry.net. This is useful if there is strong background contamination in the image (as may be common in infra-red images).
 
 
 
@@ -615,9 +587,9 @@ To change these parameters use:
 
 
 
-**TNS_BOT_ID** [ Type: *str* ]
+**TNS_BOT_ID** [ Type: *str* ] 
 
-	.
+	Bot ID of your TNS bot. This is needed to use *target_name* as an input to access the most up to date information on a transients position.
 
 
 
@@ -625,9 +597,9 @@ To change these parameters use:
 
 
 
-**TNS_BOT_NAME** [ Type: *str* ]
+**TNS_BOT_NAME** [ Type: *str* ] 
 
-	.
+	Bot Name of your TNS bot.
 
 
 
@@ -635,9 +607,9 @@ To change these parameters use:
 
 
 
-**TNS_BOT_API** [ Type: *str* ]
+**TNS_BOT_API** [ Type: *str* ] 
 
-	.
+	Bot API key of your TNS bot.
 
 
 
@@ -655,7 +627,7 @@ CATALOG
 
 .. note::
 
-   Commands to use with when working with catalog
+   These commands concern obtaining and using photometric sequence data.
 
 
 
@@ -671,19 +643,14 @@ To change these parameters use:
 
 
 
-**use_catalog** [ Type: *str* ]
+**use_catalog** [ Type: *str* ] 
 
-	choose catalog to use - options: [pan_starrs,2mass,apass,skymapper,gaia].
-
-
-
-	Default: **None**
-
-
-
-**catalog_custom_fpath** [ Type: *str* ]
-
-	If using a custom catalog look in this fpath.
+	Keywords of catalog with information covering the fielf of view of your image. To date the available catalogs are:
+	.pan_starrs
+	.2mass
+	.apass
+	.skymapper
+	.sdss.
 
 
 
@@ -691,9 +658,25 @@ To change these parameters use:
 
 
 
-**catalog_radius** [ Type: *float* ]
+**catalog_custom_fpath** [ Type: *str* ] 
 
-	Radius [degs]  around target for catalog source detection.
+	If using a custom catalog, set *use_catalog: to *custom* and this value gives the locaiton of this *csv* file
+
+	.. code:: python
+
+	   autophot_input['catalog']['use_catalog'] = 'custom'
+
+	   autophot_input['catalog']['catalog_custom_fpath'] = '/Users/seanbrennan/Desktop/my_custom_catalog.csv'.
+
+
+
+	Default: **None**
+
+
+
+**catalog_radius** [ Type: *float* ] 
+
+	When downloading new catalogs fecth data around the target lcation within this radius (in degrees).     dist_lim: 10  float.
 
 
 
@@ -701,17 +684,7 @@ To change these parameters use:
 
 
 
-**dist_lim** [ Type: *float* ]
-
-	Ignore source/catalog matching if source location and catalog location are greater than dist_lim.
-
-
-
-	Default: **10**
-
-
-
-**match_dist** [ Type: *float* ]
+**match_dist** [ Type: *float* ] 
 
 	if source/catalog locations greater than this value get rid of it.
 
@@ -721,7 +694,7 @@ To change these parameters use:
 
 
 
-**plot_catalog_nondetections** [ Type: *bool* ]
+**plot_catalog_nondetections** [ Type: *bool* ] 
 
 	plot image of non show_non_detections.
 
@@ -731,7 +704,7 @@ To change these parameters use:
 
 
 
-**include_IR_sequence_data** [ Type: *bool* ]
+**include_IR_sequence_data** [ Type: *bool* ] 
 
 	Look for IR data alongside Optical Sequence data.
 
@@ -741,7 +714,7 @@ To change these parameters use:
 
 
 
-**show_non_detections** [ Type: *bool* ]
+**show_non_detections** [ Type: *bool* ] 
 
 	show a plot of sources not detected.
 
@@ -751,7 +724,7 @@ To change these parameters use:
 
 
 
-**matching_source_FWHM_limt** [ Type: *flaot* ]
+**matching_source_FWHM_limt** [ Type: *flaot* ] 
 
 	If *matching_source_FWHM* is True exlclud sources that differ by the image FWHM by this amount.
 
@@ -761,7 +734,7 @@ To change these parameters use:
 
 
 
-**remove_catalog_poorfits** [ Type: *bool* ]
+**remove_catalog_poorfits** [ Type: *bool* ] 
 
 	Remove sources that are not fitted well.
 
@@ -771,7 +744,7 @@ To change these parameters use:
 
 
 
-**catalog_matching_limit** [ Type: *float* ]
+**catalog_matching_limit** [ Type: *float* ] 
 
 	Remove sources fainter than this limit.
 
@@ -781,7 +754,7 @@ To change these parameters use:
 
 
 
-**max_catalog_sources** [ Type: *float* ]
+**max_catalog_sources** [ Type: *float* ] 
 
 	Max amount of catalog sources to use.
 
@@ -791,7 +764,7 @@ To change these parameters use:
 
 
 
-**search_radius** [ Type: *float* ]
+**search_radius** [ Type: *float* ] 
 
 	radius in degrees for catalog.
 
@@ -827,7 +800,7 @@ To change these parameters use:
 
 
 
-**remove_cmrays** [ Type: *bool* ]
+**remove_cmrays** [ Type: *bool* ] 
 
 	If True, remove cosmic rays using astroscrappy.
 
@@ -837,7 +810,7 @@ To change these parameters use:
 
 
 
-**use_astroscrappy** [ Type: *bool* ]
+**use_astroscrappy** [ Type: *bool* ] 
 
 	use Astroscrappy to remove comic rays.
 
@@ -847,7 +820,7 @@ To change these parameters use:
 
 
 
-**use_lacosmic** [ Type: *bool* ]
+**use_lacosmic** [ Type: *bool* ] 
 
 	use LaCosmic from CCDPROC to remove comic rays.
 
@@ -883,7 +856,7 @@ To change these parameters use:
 
 
 
-**fitting_method** [ Type: *str* ]
+**fitting_method** [ Type: *str* ] 
 
 	fitting methods for analytical function fitting and PSF fitting.
 
@@ -893,7 +866,7 @@ To change these parameters use:
 
 
 
-**use_moffat** [ Type: *bool* ]
+**use_moffat** [ Type: *bool* ] 
 
 	Use moffat function.
 
@@ -903,7 +876,7 @@ To change these parameters use:
 
 
 
-**default_moff_beta** [ Type: *float* ]
+**default_moff_beta** [ Type: *float* ] 
 
 	If *use_moffat* is True, set the beta term.
 
@@ -913,7 +886,7 @@ To change these parameters use:
 
 
 
-**vary_moff_beta** [ Type: *bool* ]
+**vary_moff_beta** [ Type: *bool* ] 
 
 	If *use_moffat* is True, allow the beta term to be fitted.
 
@@ -923,7 +896,7 @@ To change these parameters use:
 
 
 
-**bkg_level** [ Type: *float* ]
+**bkg_level** [ Type: *float* ] 
 
 	Set the background level in sigma_bkg.
 
@@ -933,7 +906,7 @@ To change these parameters use:
 
 
 
-**remove_bkg_surface** [ Type: *bool* ]
+**remove_bkg_surface** [ Type: *bool* ] 
 
 	If True, remove a background using a fitted surface.
 
@@ -943,7 +916,7 @@ To change these parameters use:
 
 
 
-**remove_bkg_local** [ Type: *bool* ]
+**remove_bkg_local** [ Type: *bool* ] 
 
 	If True, remove the surface equal to a flat surface at the local background median value.
 
@@ -953,7 +926,7 @@ To change these parameters use:
 
 
 
-**remove_bkg_poly** [ Type: *bool* ]
+**remove_bkg_poly** [ Type: *bool* ] 
 
 	If True, remove a polynomail surface with degree set by *remove_bkg_poly_degree*.
 
@@ -963,7 +936,7 @@ To change these parameters use:
 
 
 
-**remove_bkg_poly_degree** [ Type: *int* ]
+**remove_bkg_poly_degree** [ Type: *int* ] 
 
 	If *remove_bkg_poly* is True, remove a polynomail surface with this degree.
 
@@ -973,7 +946,7 @@ To change these parameters use:
 
 
 
-**fitting_radius** [ Type: *float* ]
+**fitting_radius** [ Type: *float* ] 
 
 	Focus on small region where SNR is highest with a radius equal to this value times the FWHM.
 
@@ -1009,7 +982,7 @@ To change these parameters use:
 
 
 
-**apply_airmass_extinction** [ Type: *bool* ]
+**apply_airmass_extinction** [ Type: *bool* ] 
 
 	If True, retrun airmass correction.
 
@@ -1045,7 +1018,7 @@ To change these parameters use:
 
 
 
-**threshold_value** [ Type: *float* ]
+**threshold_value** [ Type: *float* ] 
 
 	threshold value for source detection.
 
@@ -1055,7 +1028,7 @@ To change these parameters use:
 
 
 
-**lim_threshold_value** [ Type: *float* ]
+**lim_threshold_value** [ Type: *float* ] 
 
 	If the threshold_value decreases below this value, use fine_fudge_factor.
 
@@ -1065,7 +1038,7 @@ To change these parameters use:
 
 
 
-**fwhm_guess** [ Type: *float* ]
+**fwhm_guess** [ Type: *float* ] 
 
 	inital guess for the FWHM.
 
@@ -1075,7 +1048,7 @@ To change these parameters use:
 
 
 
-**fudge_factor** [ Type: *float* ]
+**fudge_factor** [ Type: *float* ] 
 
 	large step for source dection.
 
@@ -1085,7 +1058,7 @@ To change these parameters use:
 
 
 
-**fine_fudge_factor** [ Type: *float* ]
+**fine_fudge_factor** [ Type: *float* ] 
 
 	small step for source dection if required.
 
@@ -1095,7 +1068,7 @@ To change these parameters use:
 
 
 
-**isolate_sources** [ Type: *bool* ]
+**isolate_sources** [ Type: *bool* ] 
 
 	If True, isolate sources for FWHM determination by the amount given by *isolate_sources_fwhm_sep* times the FWHM.
 
@@ -1105,7 +1078,7 @@ To change these parameters use:
 
 
 
-**isolate_sources_fwhm_sep** [ Type: *float* ]
+**isolate_sources_fwhm_sep** [ Type: *float* ] 
 
 	If *isolate_sources* is True, seperate sources by this amount times the FWHM.
 
@@ -1115,7 +1088,7 @@ To change these parameters use:
 
 
 
-**init_iso_scale** [ Type: *float* ]
+**init_iso_scale** [ Type: *float* ] 
 
 	For inital guess, seperate sources by this amount times the FWHM.
 
@@ -1125,7 +1098,7 @@ To change these parameters use:
 
 
 
-**use_catalog** [ Type: *str* ]
+**use_catalog** [ Type: *str* ] 
 
 	.
 
@@ -1135,7 +1108,7 @@ To change these parameters use:
 
 
 
-**sigmaclip_FWHM_sigma** [ Type: *float* ]
+**sigmaclip_FWHM_sigma** [ Type: *float* ] 
 
 	If *sigmaclip_FWHM* is True, sigma clip the values for the FWHM by this amount.
 
@@ -1145,7 +1118,7 @@ To change these parameters use:
 
 
 
-**sigmaclip_median_sigma** [ Type: *float* ]
+**sigmaclip_median_sigma** [ Type: *float* ] 
 
 	If *sigmaclip_median* is True, sigma clip the values for the median by this amount.
 
@@ -1155,7 +1128,7 @@ To change these parameters use:
 
 
 
-**image_analysis** [ Type: *bool* ]
+**image_analysis** [ Type: *bool* ] 
 
 	If True, save table of FWHM values for an image.
 
@@ -1165,7 +1138,7 @@ To change these parameters use:
 
 
 
-**remove_sat** [ Type: *bool* ]
+**remove_sat** [ Type: *bool* ] 
 
 	Remove saturated sources.
 
@@ -1175,7 +1148,7 @@ To change these parameters use:
 
 
 
-**remove_boundary_sources** [ Type: *bool* ]
+**remove_boundary_sources** [ Type: *bool* ] 
 
 	If True, ignore any sources within pix_bound from edge.
 
@@ -1185,7 +1158,7 @@ To change these parameters use:
 
 
 
-**pix_bound** [ Type: *float* ]
+**pix_bound** [ Type: *float* ] 
 
 	If *remove_boundary_sources* is True, ignore sources within this amount from the image boundary.
 
@@ -1195,7 +1168,7 @@ To change these parameters use:
 
 
 
-**save_FWHM_plot** [ Type: *bool* ]
+**save_FWHM_plot** [ Type: *bool* ] 
 
 	If True save plot of FWHM distribution.
 
@@ -1205,7 +1178,7 @@ To change these parameters use:
 
 
 
-**min_source_lim** [ Type: *float* ]
+**min_source_lim** [ Type: *float* ] 
 
 	minimum allowed sources when doing source detection to find fwhm.
 
@@ -1215,7 +1188,7 @@ To change these parameters use:
 
 
 
-**max_source_lim** [ Type: *float* ]
+**max_source_lim** [ Type: *float* ] 
 
 	maximum allowed sources when doing source detection to find fwhm.
 
@@ -1225,7 +1198,7 @@ To change these parameters use:
 
 
 
-**source_max_iter** [ Type: *float* ]
+**source_max_iter** [ Type: *float* ] 
 
 	maximum amount of iterations to perform source detection algorithim, if iters exceeded this value and error is raised.
 
@@ -1235,7 +1208,7 @@ To change these parameters use:
 
 
 
-**int_scale** [ Type: *float* ]
+**int_scale** [ Type: *float* ] 
 
 	Initial image size in pixels to take cutout.
 
@@ -1245,7 +1218,7 @@ To change these parameters use:
 
 
 
-**scale_multipler** [ Type: *float* ]
+**scale_multipler** [ Type: *float* ] 
 
 	Multiplier to set close up cutout size based on image scaling.
 
@@ -1255,7 +1228,7 @@ To change these parameters use:
 
 
 
-**max_fit_fwhm** [ Type: *float* ]
+**max_fit_fwhm** [ Type: *float* ] 
 
 	maximum value to fit.
 
@@ -1291,7 +1264,7 @@ To change these parameters use:
 
 
 
-**force_lmag** [ Type: *bool* ]
+**force_lmag** [ Type: *bool* ] 
 
 	Force limiting magnitude test at transient location. This may given incorrect values for bright sources.
 
@@ -1301,7 +1274,7 @@ To change these parameters use:
 
 
 
-**skip_lmag** [ Type: *bool* ]
+**skip_lmag** [ Type: *bool* ] 
 
 	Force limiting magnitude test at transient location. This may given incorrect values for bright sources.
 
@@ -1311,7 +1284,7 @@ To change these parameters use:
 
 
 
-**beta_limit** [ Type: *float* ]
+**beta_limit** [ Type: *float* ] 
 
 	Beta probability value. Should not be set below 0.5.
 
@@ -1321,7 +1294,7 @@ To change these parameters use:
 
 
 
-**injected_sources_additional_sources** [ Type: *bool* ]
+**injected_sources_additional_sources** [ Type: *bool* ] 
 
 	If True, inject additional sources radially around the existing positions.
 
@@ -1331,7 +1304,7 @@ To change these parameters use:
 
 
 
-**injected_sources_additional_sources_position** [ Type: *float* ]
+**injected_sources_additional_sources_position** [ Type: *float* ] 
 
 	Where to inject artifical sources with the original position in the center. This value is in units of FWHM. Set to -1 to move around the pixel only.
 
@@ -1341,7 +1314,7 @@ To change these parameters use:
 
 
 
-**injected_sources_additional_sources_number** [ Type: *float* ]
+**injected_sources_additional_sources_number** [ Type: *float* ] 
 
 	how many additional sources to inject.
 
@@ -1351,7 +1324,7 @@ To change these parameters use:
 
 
 
-**injected_sources_save_output** [ Type: *bool* ]
+**injected_sources_save_output** [ Type: *bool* ] 
 
 	If True, save the output of the limiting magnitude test as a csv file.
 
@@ -1361,7 +1334,7 @@ To change these parameters use:
 
 
 
-**injected_sources_use_beta** [ Type: *bool* ]
+**injected_sources_use_beta** [ Type: *bool* ] 
 
 	If True, use the Beta detection criteria rather than a SNR test.
 
@@ -1371,7 +1344,7 @@ To change these parameters use:
 
 
 
-**plot_injected_sources_randomly** [ Type: *bool* ]
+**plot_injected_sources_randomly** [ Type: *bool* ] 
 
 	If True  include sources randomly at the limiting magnitude in the output image.
 
@@ -1381,7 +1354,7 @@ To change these parameters use:
 
 
 
-**inject_lmag_use_ap_phot** [ Type: *bool* ]
+**inject_lmag_use_ap_phot** [ Type: *bool* ] 
 
 	If True, use aperture photometry for magnitude recovery when determining the limiting magnitude. Set to False to use the PSF package (iv available).
 
@@ -1391,7 +1364,7 @@ To change these parameters use:
 
 
 
-**check_catalog_nondetections** [ Type: *bool* ]
+**check_catalog_nondetections** [ Type: *bool* ] 
 
 	If True, performing a limiting magnitue test on catalog sources. This was used to produce Fig. XYZ in the AutoPhoT Paper.
 
@@ -1401,7 +1374,7 @@ To change these parameters use:
 
 
 
-**include_catalog_nondetections** [ Type: *bool* ]
+**include_catalog_nondetections** [ Type: *bool* ] 
 
 	If True,.
 
@@ -1411,7 +1384,7 @@ To change these parameters use:
 
 
 
-**lmag_check_SNR** [ Type: *float* ]
+**lmag_check_SNR** [ Type: *float* ] 
 
 	If this target SNR falls below this value, perform a limiting magnitude check.
 
@@ -1421,7 +1394,7 @@ To change these parameters use:
 
 
 
-**detection_limit** [ Type: *float* ]
+**detection_limit** [ Type: *float* ] 
 
 	Set the detection criterai for source detection as this value. If the SNR of a target is below this value, it is said to be non-detected.
 
@@ -1431,7 +1404,7 @@ To change these parameters use:
 
 
 
-**inject_sources** [ Type: *bool* ]
+**inject_sources** [ Type: *bool* ] 
 
 	If True, perform the limiting magnitude check using artifical source injection.
 
@@ -1441,7 +1414,7 @@ To change these parameters use:
 
 
 
-**probable_limit** [ Type: *bool* ]
+**probable_limit** [ Type: *bool* ] 
 
 	If True, perform the limiting magnitude check using background probablity diagnostic.
 
@@ -1451,47 +1424,47 @@ To change these parameters use:
 
 
 
-**inject_source_mag** [ Type: *float* ]
+**inject_source_mag** [ Type: *float* ] 
 
 	If not guess if given, begin the artifial source injection at this apparent magnitude.
 
 
 
-	Default: **20.5**
+	Default: **19.5**
 
 
 
-**inject_source_add_noise** [ Type: *bool* ]
+**inject_source_add_noise** [ Type: *bool* ] 
 
 	If True, when injecting the artifical source, include random possion noise.
 
 
 
-	Default: **False**
+	Default: **True**
 
 
 
-**inject_source_recover_dmag_redo** [ Type: *int* ]
+**inject_source_recover_dmag_redo** [ Type: *int* ] 
 
 	If *inject_source_add_noise* is True, how maybe times is the artifial source injected at a position with it's accompaning possion noise.
 
 
 
-	Default: **6**
+	Default: **3**
 
 
 
-**inject_source_sources_no** [ Type: *int* ]
+**inject_source_sources_no** [ Type: *int* ] 
 
 	How many artifial sources to inject radially around the target location.
 
 
 
-	Default: **8**
+	Default: **10**
 
 
 
-**inject_source_cutoff_limit** [ Type: *float* ]
+**inject_source_cutoff_limit** [ Type: *float* ] 
 
 	That fraction of sources should be lost to consider the injected magnitude to be at the magnitude limit. Should be less than 1.
 
@@ -1501,7 +1474,7 @@ To change these parameters use:
 
 
 
-**inject_source_recover_nsteps** [ Type: *int* ]
+**inject_source_recover_nsteps** [ Type: *int* ] 
 
 	Number of iterations to allow the injected magnitude to run for.
 
@@ -1511,7 +1484,7 @@ To change these parameters use:
 
 
 
-**inject_source_recover_dmag** [ Type: *float* ]
+**inject_source_recover_dmag** [ Type: *float* ] 
 
 	large step size for magnitude change when adjusting injected star magnitude.
 
@@ -1521,7 +1494,7 @@ To change these parameters use:
 
 
 
-**inject_source_recover_fine_dmag** [ Type: *float* ]
+**inject_source_recover_fine_dmag** [ Type: *float* ] 
 
 	fine step size for magnitude change when adjusting injected star magnitude. This is used once an approximate limiting magnitude is found.
 
@@ -1531,17 +1504,17 @@ To change these parameters use:
 
 
 
-**inject_source_location** [ Type: *float* ]
+**inject_source_location** [ Type: *float* ] 
 
 	Radially location to inject the artifical sources. This is in units of FWHM.
 
 
 
-	Default: **1**
+	Default: **3**
 
 
 
-**inject_source_random** [ Type: *bool* ]
+**inject_source_random** [ Type: *bool* ] 
 
 	If True, when plotting the limiting magnitude on the cutout image, inject sources randomly across the cutout images. This is useful to get an idea of how the limiting magnitude looks around the transient location while ignoring any possible contamination from the transient.
 
@@ -1551,7 +1524,7 @@ To change these parameters use:
 
 
 
-**inject_source_on_target** [ Type: *bool* ]
+**inject_source_on_target** [ Type: *bool* ] 
 
 	If True, when plotting the limiting magnitude on the cutout image, inserted an artifical source on the transient position.
 
@@ -1587,7 +1560,7 @@ To change these parameters use:
 
 
 
-**adjust_SN_loc** [ Type: *bool* ]
+**adjust_SN_loc** [ Type: *bool* ] 
 
 	If False, Photometry is performed at transient position i.e. forced photometry.
 
@@ -1597,7 +1570,7 @@ To change these parameters use:
 
 
 
-**save_target_plot** [ Type: *bool* ]
+**save_target_plot** [ Type: *bool* ] 
 
 	Save a plot of the region around the target location as well as the fitting.
 
@@ -1633,7 +1606,7 @@ To change these parameters use:
 
 
 
-**psf_source_no** [ Type: *int* ]
+**psf_source_no** [ Type: *int* ] 
 
 	Number of sources used  in the image to build the PSF model.
 
@@ -1643,7 +1616,7 @@ To change these parameters use:
 
 
 
-**min_psf_source_no** [ Type: *int* ]
+**min_psf_source_no** [ Type: *int* ] 
 
 	Minimum allowed number of sources to used for PSF model. If less than this amount of sources is used, aperture photometry is used.
 
@@ -1653,7 +1626,7 @@ To change these parameters use:
 
 
 
-**plot_PSF_residuals** [ Type: *bool* ]
+**plot_PSF_residuals** [ Type: *bool* ] 
 
 	If True, plot the residual from the PSF fitting.
 
@@ -1663,7 +1636,7 @@ To change these parameters use:
 
 
 
-**plot_PSF_model_residuals** [ Type: *bool* ]
+**plot_PSF_model_residuals** [ Type: *bool* ] 
 
 	If True, plot the residual from the PSF fitting when the model is being created.
 
@@ -1673,7 +1646,7 @@ To change these parameters use:
 
 
 
-**construction_SNR** [ Type: *int* ]
+**construction_SNR** [ Type: *int* ] 
 
 	When build the PSF, only use sources if their SNR is greater than this values.
 
@@ -1683,7 +1656,7 @@ To change these parameters use:
 
 
 
-**regrid_size** [ Type: *int* ]
+**regrid_size** [ Type: *int* ] 
 
 	When builidng the PSF, regird the reisdual image but this amount to allow to higher pseduo resolution.
 
@@ -1693,7 +1666,7 @@ To change these parameters use:
 
 
 
-**save_PSF_models_fits** [ Type: *bool* ]
+**save_PSF_models_fits** [ Type: *bool* ] 
 
 	If True, save the PSF model as a fits file. This is neede if template subtraction is performed with ZOGY.
 
@@ -1703,7 +1676,7 @@ To change these parameters use:
 
 
 
-**save_PSF_stars** [ Type: *bool* ]
+**save_PSF_stars** [ Type: *bool* ] 
 
 	If True, save a CSV file with information on the stars used for the PSF model.
 
@@ -1713,7 +1686,7 @@ To change these parameters use:
 
 
 
-**use_PSF_starlist** [ Type: *bool* ]
+**use_PSF_starlist** [ Type: *bool* ] 
 
 	If True, Use the models given by the user in the file given by the *PSF_starlist* filepath.
 
@@ -1723,7 +1696,7 @@ To change these parameters use:
 
 
 
-**PSF_starlist** [ Type: *str* ]
+**PSF_starlist** [ Type: *str* ] 
 
 	If *use_PSF_starlist* is True, use stars gien by this file.
 
@@ -1733,7 +1706,7 @@ To change these parameters use:
 
 
 
-**fit_PSF_FWHM** [ Type: *bool* ]
+**fit_PSF_FWHM** [ Type: *bool* ] 
 
 	If True, allow the FWHM to be freely fit when building the PSF model - depracted.
 
@@ -1743,7 +1716,7 @@ To change these parameters use:
 
 
 
-**return_subtraction_image** [ Type: *bool* ]
+**return_subtraction_image** [ Type: *bool* ] 
 
 	depracted.
 
@@ -1779,7 +1752,7 @@ To change these parameters use:
 
 
 
-**do_ap_on_sub** [ Type: *bool* ]
+**do_ap_on_sub** [ Type: *bool* ] 
 
 	If True, Perfrom aperature photometry on subtrated image rather than PSF (if available/selected).
 
@@ -1789,7 +1762,7 @@ To change these parameters use:
 
 
 
-**do_subtraction** [ Type: *bool* ]
+**do_subtraction** [ Type: *bool* ] 
 
 	If True, Perform template save_subtraction_quicklook.
 
@@ -1799,7 +1772,7 @@ To change these parameters use:
 
 
 
-**use_astroalign** [ Type: *bool* ]
+**use_astroalign** [ Type: *bool* ] 
 
 	If True, use astroalign to align image and template images.
 
@@ -1809,7 +1782,7 @@ To change these parameters use:
 
 
 
-**get_template** [ Type: *bool* ]
+**get_template** [ Type: *bool* ] 
 
 	If True, Try to download template from the PS1 server.
 
@@ -1819,7 +1792,7 @@ To change these parameters use:
 
 
 
-**use_user_template** [ Type: *bool* ]
+**use_user_template** [ Type: *bool* ] 
 
 	If True, use user provided templates - depracted.
 
@@ -1829,7 +1802,7 @@ To change these parameters use:
 
 
 
-**save_subtraction_quicklook** [ Type: *bool* ]
+**save_subtraction_quicklook** [ Type: *bool* ] 
 
 	If True, save a pdf image of subtracted image with a closeup of the target location.
 
@@ -1839,7 +1812,7 @@ To change these parameters use:
 
 
 
-**prepare_templates** [ Type: *bool* ]
+**prepare_templates** [ Type: *bool* ] 
 
 	Set to True, search for the appropiate template file and perform preprocessing steps including FWHM, cosmic rays remove and WCS corrections.
 
@@ -1849,7 +1822,7 @@ To change these parameters use:
 
 
 
-**hotpants_exe_loc** [ Type: *str* ]
+**hotpants_exe_loc** [ Type: *str* ] 
 
 	Filepath location for HOTPANTS executable.
 
@@ -1859,7 +1832,7 @@ To change these parameters use:
 
 
 
-**hotpants_timeout** [ Type: *float* ]
+**hotpants_timeout** [ Type: *float* ] 
 
 	Timeout for template subtraction in seconds.
 
@@ -1869,7 +1842,7 @@ To change these parameters use:
 
 
 
-**use_hotpants** [ Type: *bool* ]
+**use_hotpants** [ Type: *bool* ] 
 
 	If True, use hotpants.
 
@@ -1879,7 +1852,7 @@ To change these parameters use:
 
 
 
-**use_zogy** [ Type: *bool* ]
+**use_zogy** [ Type: *bool* ] 
 
 	Try to use Zogy rather than HOTPANTS. If zogy failed, it will revert to HOTPANTS.
 
@@ -1889,7 +1862,7 @@ To change these parameters use:
 
 
 
-**zogy_use_pixel** [ Type: *bool* ]
+**zogy_use_pixel** [ Type: *bool* ] 
 
 	If True, use pixels for gain matching, rather than performing source detection.
 
@@ -1925,7 +1898,7 @@ To change these parameters use:
 
 
 
-**target_error_compute_multilocation** [ Type: *bool* ]
+**target_error_compute_multilocation** [ Type: *bool* ] 
 
 	Do Snoopy-style error.
 
@@ -1935,7 +1908,7 @@ To change these parameters use:
 
 
 
-**target_error_compute_multilocation_position** [ Type: *float* ]
+**target_error_compute_multilocation_position** [ Type: *float* ] 
 
 	Distant from location of best fit to inject transient for recovery. Units of FWHM. Set to -1 to adjust around pixel of best fit.
 
@@ -1945,7 +1918,7 @@ To change these parameters use:
 
 
 
-**target_error_compute_multilocation_number** [ Type: *int* ]
+**target_error_compute_multilocation_number** [ Type: *int* ] 
 
 	Number of times to inject and recoved an artifical source with an initial magnitude eqaul to the measured target magnitude.
 
@@ -1981,7 +1954,7 @@ To change these parameters use:
 
 
 
-**zp_sigma** [ Type: *float* ]
+**zp_sigma** [ Type: *float* ] 
 
 	Sigma clip values when cleaning up the zeropoint measurements.
 
@@ -1991,7 +1964,7 @@ To change these parameters use:
 
 
 
-**zp_plot** [ Type: *bool* ]
+**zp_plot** [ Type: *bool* ] 
 
 	If True, return a plot of the zeropoint distribution.
 
@@ -2001,7 +1974,7 @@ To change these parameters use:
 
 
 
-**plot_ZP_vs_SNR** [ Type: *bool* ]
+**plot_ZP_vs_SNR** [ Type: *bool* ] 
 
 	If True, return a plot of the zeropoint distribution across the image.
 
@@ -2011,7 +1984,7 @@ To change these parameters use:
 
 
 
-**plot_ZP_image_analysis** [ Type: *bool* ]
+**plot_ZP_image_analysis** [ Type: *bool* ] 
 
 	If True, return a plot of the zeropoint distribution across the image.
 
@@ -2021,7 +1994,7 @@ To change these parameters use:
 
 
 
-**zp_use_mean** [ Type: *bool* ]
+**zp_use_mean** [ Type: *bool* ] 
 
 	When determined the zeropoint, use the mean and standard deviation.
 
@@ -2031,7 +2004,7 @@ To change these parameters use:
 
 
 
-**zp_use_fitted** [ Type: *bool* ]
+**zp_use_fitted** [ Type: *bool* ] 
 
 	When determined the zeropoint, Fit a vertical line to the zeropoint distribution.
 
@@ -2041,7 +2014,7 @@ To change these parameters use:
 
 
 
-**zp_use_median** [ Type: *bool* ]
+**zp_use_median** [ Type: *bool* ] 
 
 	When determined the zeropoint, use the median and median standard deviation.
 
@@ -2051,7 +2024,7 @@ To change these parameters use:
 
 
 
-**zp_use_WA** [ Type: *bool* ]
+**zp_use_WA** [ Type: *bool* ] 
 
 	When determined the zeropoint, use the weighted average.
 
@@ -2061,7 +2034,7 @@ To change these parameters use:
 
 
 
-**zp_use_max_bin** [ Type: *bool* ]
+**zp_use_max_bin** [ Type: *bool* ] 
 
 	When determined the zeropoint, use the magnitude given by the max bin i.e the mode.
 
@@ -2071,7 +2044,7 @@ To change these parameters use:
 
 
 
-**matching_source_SNR** [ Type: *bool* ]
+**matching_source_SNR** [ Type: *bool* ] 
 
 	If True, exclude sources with a SNR lower than *matching_source_SNR_limit*.
 
@@ -2081,10 +2054,15 @@ To change these parameters use:
 
 
 
-**matching_source_SNR_limit** [ Type: *float* ]
+**matching_source_SNR_limit** [ Type: *float* ] 
 
 	If *matching_source_SNR* is True, exclude values with a SNR lower than this value.
 
 
 
 	Default: **10**
+
+
+
+
+
