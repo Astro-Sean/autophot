@@ -14,11 +14,11 @@ Welcome to AutoPHoT!
 
 | This documentation will provide several tutorials which will allow you to execute AutoPhOT on your own images as well as create your own databases for photometric corrections.
 
-| If you encounter an issues using AutoPhOT, please open an issues `here <https://github.com/Astro-Sean/autophot/issues>`_.
+| If you encounter any issues using AutoPhOT, please open an issue `here <https://github.com/Astro-Sean/autophot/issues>`_.
 
 
 .. warning::
-   Documentation still under construction
+   Documentation still under construction!
 
 .. toctree::
    :maxdepth: 1

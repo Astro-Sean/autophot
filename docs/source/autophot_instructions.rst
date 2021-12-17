@@ -684,19 +684,9 @@ To change these parameters use:
 
 
 
-**match_dist** [ Type: *float* ] 
-
-	if source/catalog locations greater than this value get rid of it.
-
-
-
-	Default: **25**
-
-
-
 **plot_catalog_nondetections** [ Type: *bool* ] 
 
-	plot image of non show_non_detections.
+	If True, return a histogram plot of the sources (not) detected based on their signal to noise raitio.
 
 
 
@@ -706,21 +696,11 @@ To change these parameters use:
 
 **include_IR_sequence_data** [ Type: *bool* ] 
 
-	Look for IR data alongside Optical Sequence data.
+	If True, include IR sequence data from 2MASS in the catalog data. This is useful if you have a large dataset that which includes JHK data.
 
 
 
 	Default: **True**
-
-
-
-**show_non_detections** [ Type: *bool* ] 
-
-	show a plot of sources not detected.
-
-
-
-	Default: **False**
 
 
 
@@ -1480,7 +1460,7 @@ To change these parameters use:
 
 
 
-	Default: **10000**
+	Default: **100**
 
 
 
@@ -1490,7 +1470,7 @@ To change these parameters use:
 
 
 
-	Default: **0.005**
+	Default: **0.5**
 
 
 
@@ -1500,7 +1480,7 @@ To change these parameters use:
 
 
 
-	Default: **0.005**
+	Default: **0.01**
 
 
 
