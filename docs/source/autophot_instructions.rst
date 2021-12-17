@@ -647,7 +647,7 @@ To change these parameters use:
 
 	Keywords of catalog with information covering the fielf of view of your image. To date the available catalogs are:
 
-	 . pan_starrs
+	 * pan_starrs
 	 * 2mass
 	 * apass
 	 * skymapper
@@ -809,7 +809,7 @@ To change these parameters use:
 
 **fitting_method** [ Type: *str* ] 
 
-	Fitting method for analytical function fitting and PSF fitting. We can accept a limited number of methods from `here <https://lmfit.github.io/lmfit-py/fitting.html>`_. Some test methods incldue: 
+	Fitting method for analytical function fitting and PSF fitting. We can accept a limited number of methods from `here <https://lmfit.github.io/lmfit-py/fitting.html>`_. Some tested methods incldue: 
 
 	 * leastsq 
 	 * least_squares 
@@ -858,7 +858,7 @@ To change these parameters use:
 
 
 
-	Default: **False**
+	Default: **True**
 
 
 
@@ -868,7 +868,7 @@ To change these parameters use:
 
 
 
-	Default: **True**
+	Default: **False**
 
 
 
