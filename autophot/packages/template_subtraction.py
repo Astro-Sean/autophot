@@ -1,32 +1,76 @@
-def prepare_templates(fpath,
-                      wdir,
-                      write_dir,
-                      tele_autophot_input ,
-                      get_fwhm = True,
-                      build_psf = True,
-                      clean_cosmic = True,
-                      use_astroscrappy = True,
-                      solve_field_exe_loc = None,
-                      use_lacosmic = False,
-                      use_filter = None,
-                      redo_wcs = True,
-                      target_ra = None,
-                      target_dec = None,
-                      search_radius = 0.5,
-                      cpu_limit= 180,
-                      downsample = 2,
-                      threshold_value = 25,
-                      ap_size = 1.7,
-                      inf_ap_size = 2.5,
-                      r_in_size = 2,
-                      r_out_size = 3,
-                      use_moffat = True,
-                      psf_source_no = 10,
-                      fitting_method = 'least_sqaure',
-                      regriding_size  = 10,
-                      fitting_radius = 1.3
-                      
+def prepare_templates(fpath, tele_autophot_input , get_fwhm = True,redo_wcs = True,
+                      build_psf = True, clean_cosmic = True,
+                      solve_field_exe_loc = None, use_lacosmic = False, 
+                      use_filter = None,  target_ra = None,
+                      target_dec = None, search_radius = 0.5, cpu_limit= 180, 
+                      downsample = 2, threshold_value = 25, ap_size = 1.7, 
+                      inf_ap_size = 2.5, r_in_size = 2, r_out_size = 3, 
+                      use_moffat = True, psf_source_no = 10, fitting_method = 'least_sqaure',
+                      regrid_size = 10, fitting_radius = 1.3
                       ):
+    r'''
+    The purpose of this function is specifically tailored towards template 
+    images and preparing them for use in a dataset. The function deals with the following:
+    
+    #. Cosmic Rays cleaning 
+    
+    #. World Coordinate System (WCS) correction using Astrometry.net
+    
+    #. Full Width Half Maximum
+    
+    #. Building the Point Spread Function and saving the PSF model.
+    
+    The function should used before photometry is performed on a dataset
+    
+    
+    :param fpath: Filepath towards *fits* image containing 2D array with overlap with science data.
+    :type fpath: str
+    :param tele_autophot_input: Telescope infomation. This is a dictionary version of the *telescope.yml*
+    :type tele_autophot_input: dict
+    :param get_fwhm: Find the FWHM of the template image, defaults to True
+    :type get_fwhm: bool, optional
+    :param build_psf: Build the PSF function of the template image and save the PSF model, defaults to True
+    :type build_psf: bool, optional
+    :param clean_cosmic: Perform cosmic ray cleaning on the template image, defaults to True
+    :type clean_cosmic: bool, optional
+    :param redo_wcs: Redo the WCS values of the image, this is always recommended, defaults to True
+    :type redo_wcs: bool, optional
+    :param solve_field_exe_loc: Location of *solve-field* executable from astrometry.net, defaults to None
+    :type solve_field_exe_loc: str, optional
+    :param use_lacosmic: use LaCosmic rather than astroscrappy for cosmic ray cleaning, defaults to False
+    :type use_lacosmic: bool, optional
+    :param use_filter: Filter of observation of image, defaults to None
+    :type use_filter: str, optional
+    :param target_ra: Right Asscention of target in degress. This is use to help solve for astrometry, defaults to None
+    :type target_ra: float, optional
+    :param target_dec: Declination of target in degress. This is use to help solve for astrometry, defaults to None
+    :type target_dec: float, optional
+    :param search_radius: Search radius around *target_ra* and *target_dec*. This is use to help solve for astrometry defaults to 0.5
+    :type search_radius: float, optional
+    :param downsample: If working with verty large image arrays, when can pass this value to astrometry.net to downsample the image before runnign through astrometry.net, defaults to 2
+    :type downsample: int, optional
+    :param threshold_value: Inital threshold value for source detection, defaults to 25
+    :type threshold_value: float, optional
+    :param ap_size: Multiple of FWHM to be used as standard aperture size, defaults to 1.7
+    :type ap_size: float, optional
+    :param inf_ap_size: Multiple of FWHM to be used as larger, :math:`\mathit{infinite}` aperture size, defaults to 2.5
+    :type inf_ap_size: float, optional
+    :param r_in_size: Multiple of FWHM to be used as inner radius of background annulus, defaults to 1.9
+    :type r_in_size: float, optional
+    :param r_out_size: Multiple of FWHM to be used as outer radius of background annulus, defaults to 2.2
+    :type r_out_size: float, optional
+    :param use_moffat: If True, use a moffat function as the analytical function, else use a gaussian, defaults to True
+    :type use_moffat: bool, optional
+    :param psf_source_no: Number of sources used to build PSF model, defaults to 10
+    :type psf_source_no: int, optional
+    :param fitting_method: Fitting method when fitting the PSF model, defaults to 'least_square'
+    :type fitting_method: str, optional
+    :param regrid_size: When expanding to larger pseudo-resolution, what zoom factor to use, defaults to 10
+    :type regrid_size: int, optional
+    :param fitting_radius: zoomed region around location of best fit to focus fitting. This allows for the fitting to be concentrated on high S/N areas and not fit the low S/N wings of the PSF, defaults to 1.3
+    :type fitting_radius: float, optional
+    :return: This function *OVERWRITES* the given template files and cleans/calibrates this files and saves the for use on science data.
+    '''
     
     import os
     import logging
@@ -37,16 +81,15 @@ def prepare_templates(fpath,
     from autophot.packages.call_astrometry_net import AstrometryNetLOCAL
     from autophot.packages.check_wcs import updatewcs,removewcs
     from autophot.packages.find import get_fwhm
+    from autophot.packages.functions import border_msg
         
     base = os.path.basename(fpath)
     write_dir = os.path.dirname(fpath)
     base = os.path.splitext(base)[0]
-
-
+    
     logger = logging.getLogger(__name__)
 
-
-    logger.info('Preparing templates')
+    border_msg('Preparing templates files')
     logger.info('Write Directory: %s' % write_dir )
 
 
@@ -86,6 +129,7 @@ def prepare_templates(fpath,
             rdnoise = 0 
          
     else:
+        
         logging.info('Read noise key not found for template file')
         rdnoise = 0
         
@@ -113,10 +157,7 @@ def prepare_templates(fpath,
         if i in list(headinfo.keys()):
             template_exp_time = headinfo[i]
             break
-    # raise Exception()
-    # except Exception as e:
-    #     template_exp_time = 1
-        
+
     if isinstance(template_exp_time, str):
        template_exp_time_split = template_exp_time.split('/')
        if len(template_exp_time_split)>1:
@@ -127,7 +168,7 @@ def prepare_templates(fpath,
        
     logging.info('Template Exposure Time: %.1f [s]' % template_exp_time)
        
-    if telescope == 'MPI-2.2':
+    if telescope == 'MPI-2.2' and not (use_filter is None) :
         if use_filter in ['J','H','K']:
             logging.info('Detected GROND IR - setting pixel scale to 0.3')
             pixel_scale = 0.3
@@ -170,8 +211,8 @@ def prepare_templates(fpath,
             image_old = fits.PrimaryHDU(image)
             
             image = remove_cosmic_rays(image_old,
-                                     gain = GAIN,
-                                     use_lacosmic = use_lacosmic)
+                                       gain = GAIN,
+                                       use_lacosmic = use_lacosmic)
         
             # Update header and write to new file
             updated_header['CRAY_RM'] = ('T', 'Comsic rays w/astroscrappy ')
@@ -194,7 +235,7 @@ def prepare_templates(fpath,
         astro_check = AstrometryNetLOCAL(fpath,
                                         solve_field_exe_loc = solve_field_exe_loc,
                                         pixel_scale = pixel_scale,
-                                        ignore_pointing = False,
+                                        # ignore_pointing = False,
                                         target_ra = target_ra,
                                         target_dec = target_dec,
                                         search_radius = search_radius,
@@ -307,9 +348,9 @@ def prepare_templates(fpath,
                             GAIN = GAIN,
                             rdnoise = rdnoise,
                             use_moffat = use_moffat,
-                            vary_moff_beta = False,
+                            # vary_moff_beta = False,
                             fitting_radius = fitting_radius,
-                            regrid_size = regriding_size,
+                            regrid_size = regrid_size,
                             # use_PSF_starlist = autophot_input['psf']['use_PSF_starlist'],
                             use_local_stars_for_PSF = False,
                             prepare_templates = True,
@@ -340,13 +381,26 @@ def prepare_templates(fpath,
     return
 
 
+# =============================================================================
+# Get template from PS1 server
+# =============================================================================
+def get_pstars(ra, dec, size, filters="grizy"):
+    
+    '''
+    Attempt to download a templte image from the PS1 image cutout server.
+    
+    :param ra: Right Ascension of the target in degrees 
+    :type ra: float
+    :param dec: Declination of the target in degrees 
+    :type dec: float
+    :param size: Pixel size of image
+    :type size: int
+    :param filters: Name of filters we need, defaults to "grizy"
+    :type filters: str, optional
+    :return: Filepath of template file from PS1 webiste
+    :rtype: str
 
-def get_pstars(ra,
-               dec,
-               size,
-               output_size=None,
-               filters="grizy",
-               color = False):
+    '''
 
 
     import numpy as np
@@ -380,40 +434,69 @@ def get_pstars(ra,
         url = ("https://ps1images.stsci.edu/cgi-bin/fitscut.cgi?"
                "ra={ra}&dec={dec}&size={size}&format={format}").format(**locals())
 
-        if output_size:
-            url = url + "&output_size={}".format(output_size)
+
 
         # sort filters from red to blue
         flist = ["yzirg".find(x) for x in table['filter']]
 
         table = table[np.argsort(flist)]
 
-        if color:
-            if len(table) > 5:
-                # pick 3 filters
-                table = table[[0,len(table)//2,len(table)-1]]
-            for i, param in enumerate(["red","green","blue"]):
-                url = url + "&{}={}".format(param,table['filename'][i])
-        else:
-            urlbase = url + "&red="
-            url = []
-            for filename in table['filename']:
-                url.append(urlbase+filename)
+        # if color:
+        #     if len(table) > 5:
+        #         # pick 3 filters
+        #         table = table[[0,len(table)//2,len(table)-1]]
+        #     for i, param in enumerate(["red","green","blue"]):
+        #         url = url + "&{}={}".format(param,table['filename'][i])
+        # else:
+        urlbase = url + "&red="
+        url = []
+        for filename in table['filename']:
+            url.append(urlbase+filename)
 
     except Exception as e:
         exc_type, exc_obj, exc_tb = sys.exc_info()
         fname1 = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
         print(exc_type, fname1, exc_tb.tb_lineno,e)
         url = None
+        
     return url
 
 
 
-
+# =============================================================================
+# Perform image subtraction
+# =============================================================================
 def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
-             hotpants_timeout=45,
-             template_dir = None,psf = None, mask_border = False, pix_bound = None,footprint = None,
-             remove_sat  = False,zogy_use_pixel = False):
+             hotpants_timeout=45, template_dir = None,footprint = None, remove_sat = False,
+             zogy_use_pixel = False):
+    '''
+    
+    Perform image subtraction using either Hotpants or Zogy
+    
+    :param file: Filepath of science image containing suspected transient flux
+    :type file: str
+    :param template: Filepath of science image without any transient flux
+    :type template: str
+    :param image_fwhm: Full Width Half Maximum (FWHM) of science image
+    :type image_fwhm: float
+    :param use_zogy: Use Zogy rather that HOTPANTS. If zogy is not available, the code will revert to HOTPANTS, defaults to False
+    :type use_zogy: bool, optional
+    :param hotpants_exe_loc: Path to *hotpants* executable, defaults to None
+    :type hotpants_exe_loc: str, optional
+    :param hotpants_timeout: Maximum allowed time for Hotpant. If the time taken exceeds an error is raise, defaults to 45
+    :type hotpants_timeout: float, optional
+    :param template_dir: Parent Directory of template files. This should contain the PSF file which should begin with 'PSF_model'. If None, use the parent directory of the *template* filepath, defaults to None
+    :type template_dir: str, optional
+    :param footprint: DESCRIPTION, defaults to None
+    :type footprint: TYPE, optional
+    :param remove_sat: If True, set the maximum to the saturation level, rather than the image maximum, defaults to False
+    :type remove_sat: bool, optional
+    :param zogy_use_pixel: If True, use pixel values for gain matching when using zogy, else source matching is used for image matching, defaults to False
+    :type zogy_use_pixel: bool, optional
+    :return: Retruns filepath of image after template subtraction
+    :rtype: str
+
+    '''
 
     import subprocess
     import os
@@ -473,6 +556,9 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
 
         # header = getheader(file)
         template_image = getimage(template)
+        
+        if template_dir is None:
+            template_dir = os.path.dirname(template)
         # template_header = getheader(template)
 
         # Where the subtraction will be written
@@ -484,15 +570,7 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
         # footprint_template = np.zeros(template_image.shape).astype(bool)
         
         footprint[ ( np.isnan(file_image)) | np.isnan(template_image) ] = 1
-            
-        # footprint = abs(footprint)
-        if mask_border:
-            
-            if not (pix_bound is None):
-                pix_bound = pix_bound
-                
-            footprint[pix_bound: - pix_bound,
-                      pix_bound: - pix_bound] = False
+
         
         hdu = fits.PrimaryHDU(footprint.astype(int))
         hdul = fits.HDUList([hdu])
@@ -518,6 +596,10 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
             image_max = np.nanmax(check_values_image)
 
             template_max = np.nanmax(np.nanmax(check_values_template))
+            
+            
+
+            
         
         if use_zogy:
             try:

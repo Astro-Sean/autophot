@@ -820,7 +820,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     from autophot.packages.functions import set_size
     from autophot.packages.functions import get_distinct_colors
 
-    from photutils.datasets.make import apply_poisson_noise,make_noise_image
+    from photutils.datasets.make import apply_poisson_noise
     from autophot.packages.aperture import measure_aperture_photometry
     from autophot.packages.functions import beta_value,f_ul,border_msg
     from autophot.packages.functions import gauss_2d,moffat_2d
@@ -990,7 +990,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                     injected_sources_additional_sources_position = 1/fwhm/2
                     
         elif injected_sources_additional_sources_position<=0:
-            print('Soirce possition offset not set correctly [%1.f], setting to -1' % injected_sources_additional_sources_position)
+            print('Source possition offset not set correctly [%1.f], setting to -1' % injected_sources_additional_sources_position)
             injected_sources_additional_sources_position = -1
         
         from random import uniform
@@ -1047,7 +1047,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                             residual_image = r_table,
                             ap_size = ap_size,
                             fwhm = fwhm,
-                            unity_PSF_counts =unity_PSF_counts,
+                            unity_PSF_counts = unity_PSF_counts,
                             use_moffat = use_moffat,
                             image_params = image_params)
         
@@ -1080,45 +1080,44 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     for i in range(len(psf_bkg_flux)):
         if psf_bkg_flux[i]>0:
             SNR_source.append(SNR(flux_star = psf_flux[i],
-                             flux_sky = psf_bkg_flux[i],
-                             exp_t = exp_time,
-                             radius = ap_size*fwhm ,
-                             G  = gain,
-                             RN =  rdnoise,
-                             DC = 0 ))
+                                 flux_sky = psf_bkg_flux[i],
+                                 exp_t = exp_time,
+                                 radius = ap_size*fwhm ,
+                                 G  = gain,
+                                 RN =  rdnoise,
+                                 DC = 0 ))
         else:
-            
             SNR_source.append(psf_heights_flux[i]/psf_bkg_std_flux[i])
             
             
-    fake_sources_beta = beta_value(n=3,
+    fake_sources_beta = beta_value(n = detection_limit,
                                    sigma = psf_bkg_std_flux,
                                    f_ul  = psf_heights_flux)
     
     SNR_source = np.array([round(num, 1) for num in SNR_source])
     
     # if SNR at a position is greater than detection limit - set the SNR limit at this position to this (higher) limit.
-    SNR_source[(SNR_source < detection_limit) | (np.isnan(SNR_source))] = detection_limit
+    # SNR_source[(SNR_source < detection_limit) | (np.isnan(SNR_source))] = detection_limit
     
     injection_df['limit_SNR'] = SNR_source
     injection_df['initial_beta'] = fake_sources_beta
     injection_df['initial_noise'] = psf_bkg_std_flux
     injection_df['initial_peak_flux'] = psf_heights_flux
-    injection_df['f_ul'] = f_ul(3,beta_limit,psf_bkg_std_flux)
-    
-    injection_df.to_csv('/Users/seanbrennan/Desktop/tmp_REDUCED/test.csv')
+    injection_df['f_ul'] = f_ul(detection_limit,beta_limit,psf_bkg_std_flux)
     
 
+
     if not inject_lmag_use_ap_phot:
+        
         # update to new positions
         injection_df.rename(columns={"x_pix": "x_pix_OLD",
-                                      "y_pix": "y_pix_OLD"})
+                                     "y_pix": "y_pix_OLD"})
         
         injection_df['x_pix'] = psf_params['x_pix'].values
         injection_df['y_pix'] = psf_params['y_pix'].values
     
     # check locations with high SNR (due to random noise spikes) and ignore them
-    position_SNR_limit = 3
+    position_SNR_limit = 2
     position_beta_limit = 0.5
     
     if not injected_sources_use_beta :
@@ -1136,8 +1135,12 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
             
         injection_df = injection_df[good_pos]
         
+    # SNR_source[(SNR_source < detection_limit) | (np.isnan(SNR_source))] = detection_limit
+    
+    injection_df.at[injection_df['limit_SNR'].values < detection_limit, 'limit_SNR'] = detection_limit
     
     if np.sum(~good_pos) == len(good_pos):
+        
         warning_msg = """\nCould not find any suitable area to testing artifical source injection
         Suggestions:
         1. Increase number of sources
@@ -1257,13 +1260,8 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                         fake_source_on_target[nan_idx] = 0
                         fake_source_on_target[neg_idx] = 0
             
-                        # fake_source_on_target = apply_poisson_noise(fake_source_on_target)
-                        fake_source_on_target = make_noise_image(fake_source_on_target.shape,
-                                                        distribution = 'gaussian',
-                                                        mean = fake_source_on_target,
-                                                        stddev = injection_df['initial_noise'].values[k]*exp_time,
-                                                        seed = np.random.randint(0,1e3))
-                    
+                        fake_source_on_target = apply_poisson_noise(fake_source_on_target)
+
                     f_injected_source = np.nanmax(fake_source_on_target)/exp_time
                     
                     if not inject_lmag_use_ap_phot:
@@ -1329,7 +1327,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                     psf_height_flux = psf_height/exp_time
                     
              
-                    fake_target_beta = beta_value(n=3,
+                    fake_target_beta = beta_value(n=detection_limit,
                                                   sigma = psf_bkg_std_flux,
                                                   f_ul = psf_height_flux)
                 
@@ -1340,12 +1338,12 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                     for i in range(len(psf_bkg_flux)):
                         if psf_bkg_flux[i]>0:
                             SNR_source_i.append(SNR(flux_star = psf_flux[i],
-                                             flux_sky = psf_bkg_flux[i],
-                                             exp_t = exp_time,
-                                             radius = ap_size*fwhm ,
-                                             G  = gain,
-                                             RN =  rdnoise,
-                                             DC = 0 ))
+                                                     flux_sky = psf_bkg_flux[i],
+                                                     exp_t = exp_time,
+                                                     radius = ap_size*fwhm ,
+                                                     G  = gain,
+                                                     RN =  rdnoise,
+                                                     DC = 0 ))
                         else:
                             
                             SNR_source_i.append(psf_heights_flux[i]/psf_bkg_std_flux[i])
@@ -1438,7 +1436,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
                 
                 if lmag_found:
                     if print_progress:
-                        print('\n\nOvershoot discrepancy[^d], resetting...\n' % discrepancy_count)
+                        print('\n\nOvershoot discrepancy[%d], resetting...\n' % discrepancy_count)
                         discrepancy_count+=1
                 if discrepancy_count>discrepancy_limit:
                     pass
@@ -1659,7 +1657,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         idx = np.argsort(x)
         x = x[idx]
         
-        y = np.array(list(cum_detection.values()))[idx]/redo
+        y = np.array(list(cum_detection.values()))[idx]
    
         ax11.plot(x,y,
                   color = 'black',

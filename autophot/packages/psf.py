@@ -366,7 +366,7 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
 
                 pars = lmfit.Parameters()
                 pars.add('A',value = np.nanmean(psf_image_slice),
-                         min = 1e-6,
+                         min = 1e-9,
                          max = np.nanmax(psf_image_slice)*1.5 )
                 
                 pars.add('x0',value = psf_image_slice.shape[1]/2,
@@ -475,7 +475,8 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
 
                     residual = psf_image_bkg_free - moffat_2d((xx,yy),xc_correction,yc_correction,
                                                               0,H,
-                                                              dict(alpha=result.params['alpha'],beta=result.params['beta'])).reshape(psf_image_bkg_free.shape)
+                                                              dict(alpha=result.params['alpha'],
+                                                                   beta=result.params['beta'])).reshape(psf_image_bkg_free.shape)
                     PSF_FWHM = fitting_model_fwhm(dict(alpha=result.params['alpha'],beta=result.params['beta']))
                     
                 else:
@@ -499,11 +500,7 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
 
                 # residual_table += residual_roll
                 residual_table.append(np.array(residual_roll))
-                
-                # residual_counts_after = np.sum(rebin(residual_roll, (int(2*scale),int(2*scale))))
-                
-        
-                
+
                 sources_used +=1
                 
 
@@ -529,7 +526,7 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
                 sources_dict['PSF_%d'%sources_used]['y_roll'] = y_roll
 
                 logger.info('\rResidual table updated: %d / %d ' % (sources_used,max_sources_used) )
-                logger.info(' - SNR: %d :: FWHM: %.3f :: FWHM fitted %.3f' % (PSF_SNR,PSF_FWHM,psf_fwhm_fitted))
+                logger.info('\tSNR: %d :: FWHM fitted %.3f' % (PSF_SNR,psf_fwhm_fitted))
 
                 
 
@@ -550,8 +547,6 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
             return None,None,construction_sources.append([np.nan]*5)
         
         # Get the mean of the residual tavles
-        # residual_table = np.nanmean(np.dstack(residual_table),axis = -1)
-        # print(residual_table)
         residual_table = sum(residual_table)/sources_used
 
         # regrid residual table to psf size
@@ -568,12 +563,6 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
         
         if save_PSF_stars:
             construction_sources.to_csv( os.path.join(write_dir,'PSF_stars_'+base+'.csv'))
-            
-
-        # if plot_PSF_model_residual:
-        #     # Plot figure of PSF shift to make sure model is made correctly
-        #     from autophot.packages.create_plots import plot_PSF_model_steps
-        #     plot_PSF_model_steps(sources_dict,autophot_input,image)
 
         logger.info('\nPSF built using %d sources\n'  % sources_used)
 
@@ -592,6 +581,7 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
                                                                beta=image_params['beta'])).reshape(r_table.shape)
 
             else:
+                
                 PSF_model_array = r_table + gauss_2d((xx,yy),r_table.shape[1]/2,r_table.shape[0]/2,
                                                          0,1,
                                                          dict(sigma=image_params['sigma'])).reshape(r_table.shape)
@@ -601,6 +591,8 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
             psf_model_savepath = os.path.join(write_dir,'PSF_model_'+base+'.fits')
             hdul.writeto(psf_model_savepath,
                          overwrite = True)
+        
+
 
             print('PSF model saved as: %s' % psf_model_savepath)
 
@@ -617,8 +609,8 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
 # Fitting of PSF
 # =============================================================================
 def PSF_MODEL(xc, yc, sky, H, r_table, fwhm,image_params,use_moffat = True,
-              fitting_radius = 1.3,regrid_size =10 ,
-              slice_scale = None,pad_shape = None):
+              fitting_radius = 1.3,regrid_size =10 ,slice_scale = None,
+              pad_shape = None):
     r'''
     
     Function that returns a "fitted-able" PSF model. The PSF model has the general format off:
@@ -676,12 +668,8 @@ def PSF_MODEL(xc, yc, sky, H, r_table, fwhm,image_params,use_moffat = True,
             bottom = int((pad_shape[0] - r_table.shape[0])/2)
             left =   int((pad_shape[1] - r_table.shape[1])/2)
             right =  int((pad_shape[1] - r_table.shape[1])/2)
-            
-            # print(top,bottom,left,right)
 
             psf_shape = pad_shape
-            
-            # print(psf_shape)
 
             r_table = np.pad(r_table, [(top, bottom), (left, right)], mode='constant', constant_values=0)
 
@@ -710,15 +698,13 @@ def PSF_MODEL(xc, yc, sky, H, r_table, fwhm,image_params,use_moffat = True,
         residual = H * rebin(residual_roll,psf_shape)
 
         # add it all together
-        psf =  sky  + core + residual
+        psf =  sky  + (core + residual)
         
         if np.isnan(np.min(psf)):
             print('PSF model not fitted - nan in image')
             
             return np.zeros(psf_shape)
-
-        psf[np.isnan(psf)] = 0
-
+        
         if not (slice_scale is None):
             # retrun part of the PSF model given by the slive scale focused on the image center
             psf = psf[int ( 0.5 * r_table.shape[1] - slice_scale): int(0.5*r_table.shape[1] + slice_scale),
@@ -802,7 +788,9 @@ def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3,
     import pathlib
     import lmfit
     import logging
-    
+       
+
+    import warnings
     
     # Model used to fit PSF
     from lmfit import Model
@@ -844,8 +832,6 @@ def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3,
 
     xx,yy= np.meshgrid(np.arange(0,image.shape[1]),np.arange(0,image.shape[0]))
     
-    
-
     lower_x_bound = scale
     lower_y_bound = scale
     upper_x_bound = scale
@@ -875,8 +861,8 @@ def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3,
         dx_vary = True
         dy_vary = True
         
-        dx = 4*fwhm
-        dy = 4*fwhm
+        dx = 2*fwhm
+        dy = 2*fwhm
         
 
     
@@ -970,18 +956,12 @@ def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3,
                 
             except Exception as e:
                 
-                print('cannot fit background - %s' % e)
+                print('Cannot fit background - %s' % e)
 
                 psf_params.append((idx,x_fitted,y_fitted,xc,yc,bkg_median,noise,H,H_psf_err,max_pixel,chi2,redchi2))
-
-                logger.exception(e)
                 
                 continue
                 
-            # if return_fwhm:
-            #     print('bkg_median: %6.f' % bkg_median)
-            
-            
 
             source = source_bkg_free[int(0.5*source_bkg_free.shape[1] - fitting_radius):int(0.5*source_bkg_free.shape[1] + fitting_radius) ,
                                      int(0.5*source_bkg_free.shape[0] - fitting_radius):int(0.5*source_bkg_free.shape[0] + fitting_radius) ]
@@ -1003,15 +983,13 @@ def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3,
                 # Update params with amplitude in cutout
                 psf_residual_model.set_param_hint('A',
                                                   value = 0.75 * np.nanmax(source),
-                                                  min = 1e-6,
+                                                  min = 1e-9,
                                                   # max = 2*np.nanmax(source)
                                                   )
                 
             
                 psf_pars = psf_residual_model.make_params()
-   
 
-                import warnings
                 with warnings.catch_warnings():
                     
                     warnings.simplefilter("ignore")
@@ -1033,6 +1011,7 @@ def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3,
   
                             
                 H_psf = result.params['A'].value
+                
                 H_psf_err = result.params['A'].stderr
 
                 if H_psf_err is None:
@@ -1066,6 +1045,7 @@ def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3,
                              value = x_fitted_shape,
                              min   = x_fitted_shape-dx,
                              max   = x_fitted_shape+dx)
+                    
                     pars.add('y0',
                              vary = dy_vary,
                              value = y_fitted_shape,

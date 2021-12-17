@@ -79,12 +79,8 @@ def run_autophot(autophot_input):
     if autophot_input['fits_dir'].endswith('/'):
         autophot_input['fits_dir'] = autophot_input['fits_dir'][:-1]
 
-    # fit fname defined and not fits_dir add file location to fits flists
-    if autophot_input['fname'] != None:
-        flist = [autophot_input['fname']]
-        autophot_input['restart'] = False
 
-    elif not autophot_input['template_subtraction']['prepare_templates']:
+    if not autophot_input['template_subtraction']['prepare_templates']:
 
         flist = []
 
@@ -119,7 +115,7 @@ def run_autophot(autophot_input):
         for root, dirs, files in os.walk(template_loc):
             for fname in files:
                 if fname.endswith((".fits",'.fit','.fts','fits.fz')):
-                    if 'PSF_model' not in fname:
+                    if 'PSF_model' not in fname and '.wcs' not in fname:
                         flist.append(os.path.join(root, fname))
 
 

@@ -64,7 +64,7 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
              isolate_sources_fwhm_sep = 5, init_iso_scale = 25, 
              pix_bound = 25, save_FWHM_plot = False, image_analysis = False,
              use_local_stars_for_FWHM = False, prepare_templates = False, 
-             vary_moff_beta = False, default_moff_beta= 4.765,
+             default_moff_beta= 4.765,
              max_fit_fwhm = 30, fitting_method = 'least_square', 
              local_radius = 1000, mask_sources_XY_R = [], 
              remove_sat = True, use_moffat = True,
@@ -147,8 +147,6 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
     :type use_moffat: bool, optional
     :param default_moff_beta: Default value for the Moffat function exponent, defaults to 4.765
     :type default_moff_beta: float, optional
-    :param vary_moff_beta: If True, allowing the :math:`\beta` exponent in the Moffat function to vary. This may become unstable, defaults to False
-    :type vary_moff_beta: bool, optional
     :param max_fit_fwhm: Maximum FWHM allowed when fitting analytical function, defaults to 30
     :type max_fit_fwhm: float, optional
     :param target_x_pix: X pixel coordinate of target. If given, exclude the general location of the target when fitting for the FWHM defaults to None
@@ -375,7 +373,7 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
             fwhm_fitting_model.set_param_hint('beta',
                                               value = default_moff_beta,
                                               min = 0,
-                                              vary = vary_moff_beta  )
+                                              vary =False )
 
         else:
             fwhm_fitting_model.set_param_hint('sigma',
@@ -1026,12 +1024,14 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
             idx = [True]*len(isolated_sources)
             
             
-        image_fwhm = np.nanmean(isolated_sources['FWHM'].values[idx])
-        image_fwhm_err = np.nanstd(isolated_sources['FWHM'].values[idx])
+        image_fwhm = np.nanmean(isolated_sources['FWHM'].values)
+        image_fwhm_err = np.nanstd(isolated_sources['FWHM'].values)
+        
+        logging.info('\nFWHM: %.3f +/- %.3f [ pixels ]' % (image_fwhm,image_fwhm_err))
 
-        if image_fwhm_err > 2 and not prepare_templates:
+        if image_fwhm_err > 2:
             
-            logging.warning('\nLarge error on FWHM - returning plots for user diagnostic')
+            logging.info('\nLarge error on FWHM - returning plots for user diagnostic')
             save_FWHM_plot = True
             image_analysis = True
             # save_image_analysis = True

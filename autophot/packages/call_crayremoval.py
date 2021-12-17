@@ -28,6 +28,7 @@ def remove_cosmic_rays(image_with_CRs,
 
     import logging
     import astroscrappy
+    import warnings
     import numpy as np
 
     try:
@@ -41,21 +42,25 @@ def remove_cosmic_rays(image_with_CRs,
     
 
             print('Starting Astroscrappy ... ',end = '')
+            
+            # Using this catch as then is a depracted wanring with astroscrappy
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
 
-            cray_free_image = astroscrappy.detect_cosmics(image_with_CRs.data,sigclip=4.5, sigfrac=0.3,
-                                                    objlim=5.0, gain=gain,
-                                                    satlevel=65535.0, 
-                                                    pssl=0.0, 
-                                                    niter=4,
-                                                    sepmed=True, 
-                                                    cleantype='meanmask', 
-                                                    fsmode='median',
-                                                    psfmodel='gauss', 
-                                                    psffwhm=2.5, 
-                                                    psfsize=7,
-                                                    psfk=None, 
-                                                    psfbeta=4.765, 
-                                                    verbose=False)
+                cray_free_image = astroscrappy.detect_cosmics(image_with_CRs.data,sigclip=4.5, sigfrac=0.3,
+                                                        objlim=5.0, gain=gain,
+                                                        satlevel=65535.0, 
+                                                        pssl=0.0, 
+                                                        niter=4,
+                                                        sepmed=True, 
+                                                        cleantype='meanmask', 
+                                                        fsmode='median',
+                                                        psfmodel='gauss', 
+                                                        psffwhm=2.5, 
+                                                        psfsize=7,
+                                                        psfk=None, 
+                                                        psfbeta=4.765, 
+                                                        verbose=False)
                                                     
             clean_image = cray_free_image[1]
             CR_mask = cray_free_image[0]

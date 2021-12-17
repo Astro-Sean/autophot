@@ -31,8 +31,7 @@ def SNR(flux_star,flux_sky,exp_t,radius,G = 1,RN = 0,DC = 0 ):
 
     G = float(G)
     
-    G = 1
-    RN = 0
+
     
     import numpy as np
 

@@ -630,8 +630,7 @@ def find_optimum_aperture_size(dataframe,
                                r_in_size = 1.9,
                                r_out_size = 2.2,
                                GAIN = 1, 
-                               RDNOISE = 0,
-                               plot_optimum_radius = False):
+                               RDNOISE = 0):
     '''
 
       Find the optimum aperture radius for a given image. Although the
@@ -680,8 +679,6 @@ def find_optimum_aperture_size(dataframe,
     :type GAIN: float, optional
     :param RDNOISE: Read Noise of image  of image in :math:`e^{-}$ per pixel`, defaults to 0
     :type RDNOISE: float, optional
-    :param plot_optimum_radius: If true, saves of plot of the curve of growths for a sample of sources  saved to :math:`\mathit{write\_dir}` with the name ":math:`\mathit{optimum\_aperture\_}`". + :math:`\mathit{base}`, defaults to False
-    :type plot_optimum_radius: boolean, optional
     :return: Gives the optim radius in units of FWHM.
     :rtype: Float
     '''
@@ -772,84 +769,83 @@ def find_optimum_aperture_size(dataframe,
     # =============================================================================
     # Return plot of SNR distribution
     # =============================================================================
-    if plot_optimum_radius:
-        
-        dir_path = os.path.dirname(os.path.realpath(__file__))
-        plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
-        
-        fig = plt.figure(figsize = set_size(250,1))
-        
-        ax1 = fig.add_subplot(111)
-        
-        for i in range(len(SNR_val)):
-            
-            max_SNR = np.nanmax([j[1][i] for j in output])
-            
-            ax1.plot([j[0][i] for j in output],
-                     [j[1][i] for j in output] / max_SNR,
-                     # yerr = [j[2][i] for j in output] / max_SNR,
-                     # marker = 'o',
-                      ls = '-',
-                     # capsize = 1,
-                     # ecolor = 'grey',
-                     lw = 0.5,
-                     alpha  = 0.5,
-                     label = 'COG',
-                     color = 'grey',
-                     zorder = 0)
-            
 
-        ax1.plot(search_size,
-                 sum_distribution / np.nanmax(sum_distribution),
-                 # marker = 's',
-                 lw = 1,
-                 color = 'blue',
-                 label = 'Mean COG',
-                 zorder = 1)
-
-        
-        if optimum_radius>=3:
-            logger.info('\nOptimum radius seems high [%.1f x FWHM] - setting to %.1f x FWHM' % (optimum_radius,ap_size))
-            optimum_radius = ap_size
-            ax1.set_title('Optimum radius not set')
-            
-        else:
-            logger.info('Optimum Aperture: %.1f x FWHM [ pixels ]' % optimum_radius)
-            
-            ax1.arrow(optimum_radius, 0.15, 0, -0.1,
-                  head_width=0.025, head_length=0.025, 
-                  lw = 0.5,
-                  fc='blue',
-                  ec='none',
-                  # label = 'Optimum Radius'
-                  
-                  )
-        
-        ax1.scatter( [] ,[], c='blue',marker=r'$\leftarrow$',s=25, label='Optimum Radius x 1.5' )
-        # 
-        ax1.scatter( [] ,[], c='red',marker=r'$\leftarrow$',s=25,  )
-        
-            
-        ax1.set_xlabel('Aperture Size [ 1/FWHM ]')
-        
-        ax1.set_ylabel('SNR (normalised) ')
-        
-        ax1.set_ylim(-0.05,1.05)
-        ax1.set_xlim(0,search_size.max()+0.1)
-        
-        handles, labels = ax1.get_legend_handles_labels()
-        by_label = dict(zip(labels, handles))
-        ax1.legend(by_label.values(), by_label.keys(),
-                   frameon = False,
-                   loc = 'lower right')
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
     
-            
-        fig.savefig(os.path.join(write_dir,'optimum_aperture_'+base+'.pdf'),
-                        format = 'pdf',
-                        bbox_inches='tight'
-                        )
+    fig = plt.figure(figsize = set_size(250,1))
+    
+    ax1 = fig.add_subplot(111)
+    
+    for i in range(len(SNR_val)):
         
-        plt.close(fig)
+        max_SNR = np.nanmax([j[1][i] for j in output])
+        
+        ax1.plot([j[0][i] for j in output],
+                 [j[1][i] for j in output] / max_SNR,
+                 # yerr = [j[2][i] for j in output] / max_SNR,
+                 # marker = 'o',
+                  ls = '-',
+                 # capsize = 1,
+                 # ecolor = 'grey',
+                 lw = 0.5,
+                 alpha  = 0.5,
+                 label = 'COG',
+                 color = 'grey',
+                 zorder = 0)
+        
+
+    ax1.plot(search_size,
+             sum_distribution / np.nanmax(sum_distribution),
+             # marker = 's',
+             lw = 1,
+             color = 'blue',
+             label = 'Mean COG',
+             zorder = 1)
+
+    
+    if optimum_radius>=3:
+        logger.info('\nOptimum radius seems high [%.1f x FWHM] - setting to %.1f x FWHM' % (optimum_radius,ap_size))
+        optimum_radius = ap_size
+        ax1.set_title('Optimum radius not set')
+        
+    else:
+        logger.info('Optimum Aperture: %.1f x FWHM [ pixels ]' % optimum_radius)
+        
+        ax1.arrow(optimum_radius, 0.15, 0, -0.1,
+              head_width=0.025, head_length=0.025, 
+              lw = 0.5,
+              fc='blue',
+              ec='none',
+              # label = 'Optimum Radius'
+              
+              )
+    
+    ax1.scatter( [] ,[], c='blue',marker=r'$\leftarrow$',s=25, label='Optimum Radius x 1.5' )
+    # 
+    ax1.scatter( [] ,[], c='red',marker=r'$\leftarrow$',s=25,  )
+    
+        
+    ax1.set_xlabel('Aperture Size [ 1/FWHM ]')
+    
+    ax1.set_ylabel('SNR (normalised) ')
+    
+    ax1.set_ylim(-0.05,1.05)
+    ax1.set_xlim(0,search_size.max()+0.1)
+    
+    handles, labels = ax1.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax1.legend(by_label.values(), by_label.keys(),
+               frameon = False,
+               loc = 'lower right')
+
+        
+    fig.savefig(os.path.join(write_dir,'optimum_aperture_'+base+'.pdf'),
+                    format = 'pdf',
+                    bbox_inches='tight'
+                    )
+    
+    plt.close(fig)
     
     
     

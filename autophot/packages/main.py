@@ -35,9 +35,9 @@ def main(object_info,autophot_input,fpath):
     import gc
     import matplotlib.pyplot as plt
     from mpl_toolkits.axes_grid1 import make_axes_locatable
-    # from matplotlib.pyplot import Circle
     from os.path import dirname
-    # Astrpy and photutils
+    
+    # Astropy and photutils
     from astropy.io import fits
     from astropy.stats import sigma_clip
     from astropy.coordinates import SkyCoord
@@ -58,15 +58,14 @@ def main(object_info,autophot_input,fpath):
     from autophot.packages.aperture import plot_aperture
 
     # Proprietary modules developed for AUTOPHOT
-    from autophot.packages.functions import  getheader,getimage,calc_mag,calc_mag_error,set_size,pix_dist
+    from autophot.packages.functions import  getheader,getimage,calc_mag,set_size,pix_dist
     from autophot.packages.functions import gauss_2d,gauss_fwhm2sigma,gauss_sigma2fwhm
     from autophot.packages.functions import moffat_2d,moffat_fwhm,border_msg
     from autophot.packages.check_wcs import updatewcs,removewcs
     from autophot.packages.call_astrometry_net import AstrometryNetLOCAL
     from autophot.packages.template_subtraction import subtract
     from autophot.packages.call_yaml import yaml_autophot_input as cs
-    from autophot.packages.functions import SNR, SNR_err,border_msg
-    
+    from autophot.packages.functions import SNR, SNR_err
     
     from autophot.packages.limit import limiting_magnitude_prob,inject_sources
     from autophot.packages.call_crayremoval import remove_cosmic_rays
@@ -92,36 +91,35 @@ def main(object_info,autophot_input,fpath):
     
     
     warnings.simplefilter(action='ignore', category=FutureWarning)
+    
     # Start time of this image
     start_time = time.time()
     try:
         # Preparing output dictionary
         output = collections.OrderedDict({})
+        
         # paths can't end with backslash - remove if needed
         if autophot_input['fits_dir'] != None:
             if autophot_input['fits_dir'].endswith('/'):
                 autophot_input['fits_dir'] = autophot_input['fits_dir'][:-1]
+                
         if autophot_input['wdir'].endswith('/'):
             autophot_input['wdir'] = autophot_input['wdir'][:-1]
         # =============================================================================
         # Prepare new file - we will work on a copied file and not the original file
         # =============================================================================
-        # Change to new working directory set by 'outdir_name' in yaml file
-        if autophot_input['fname']:
-            wdir  = autophot_input['fname']
-            work_loc = str(pathlib.Path(dirname(wdir)))
-        else:
-            wdir = autophot_input['fits_dir']
-            new_dir = '_' + autophot_input['outdir_name']
-            base_dir = os.path.basename(wdir)
-            work_loc = base_dir + new_dir
-            new_output_dir = os.path.join(dirname(wdir),work_loc)
 
-            if not autophot_input['template_subtraction']['prepare_templates']:
+        wdir = autophot_input['fits_dir']
+        new_dir = '_' + autophot_input['outdir_name']
+        base_dir = os.path.basename(wdir)
+        work_loc = base_dir + new_dir
+        new_output_dir = os.path.join(dirname(wdir),work_loc)
 
-                # create new output directory is it doesn't exist
-                pathlib.Path(new_output_dir).mkdir(parents = True, exist_ok=True)
-                os.chdir(new_output_dir)
+        if not autophot_input['template_subtraction']['prepare_templates']:
+
+            # create new output directory is it doesn't exist
+            pathlib.Path(new_output_dir).mkdir(parents = True, exist_ok=True)
+            os.chdir(new_output_dir)
         # Take in original data, copy it to new location
         # New file will have _APT append to fname
         # Create names of directories with name=filename and account for correct sub directories locations
@@ -139,7 +137,7 @@ def main(object_info,autophot_input,fpath):
 
         base = base.replace('_ERROR','')
         # Need special criteria for working on single file and/or template files
-        if not autophot_input['fname'] and not autophot_input['template_subtraction']['prepare_templates']:
+        if not autophot_input['template_subtraction']['prepare_templates']:
             root = dirname(fpath)
             sub_dirs = root.replace(wdir,'').split('/')
             sub_dirs = [i.replace('_APT','').replace(' ','_') for i in sub_dirs]
@@ -362,8 +360,8 @@ def main(object_info,autophot_input,fpath):
         # =============================================================================
 
         #TODO: replace this with cutout2d
-
         if autophot_input['preprocessing']['trim_edges'] and 'TRIMMED' not in headinfo:
+            
             logging.info('\nTrimming edges of image by +/- %d pixels' % autophot_input['trim_edges_pixels'])
 
             image_trim = image[autophot_input['preprocessing']['trim_edges_pixels']:image.shape[0]-autophot_input['preprocessing']['trim_edges_pixels'],
@@ -388,27 +386,19 @@ def main(object_info,autophot_input,fpath):
             autophot_input['sat_lvl'] = headinfo['SATURATE']
         except:
             autophot_input['sat_lvl'] = 2**16
+            
         # =============================================================================
         # Find filter
         # =============================================================================
-        # Get correct filter keyword with the default being 'FILTER'
-        # In collaboration with 'write_yaml function' will search for 'FILTER' using filter_key_0 key
-        # if found sets 'filter_key' in autophot_input file to correct filter header
-        # if not:
-        #     file search for filter_key_1 key in telescope_autophot_input and check
-        #     if result value in headinfo.
-        #           Will continue until no more filter_key_[] are in telescope_autophot_input or
-        #           right keyword is found
-        # if fails:
-        #     returns filter_key = 'no_filter'
-        # Was implemented to allow for,  same telescope/instrument with different header name for the filter keyoward
 
+        
         # These are the keys we want to avoid
         avoid_keys = ['clear','open']
 
         open_filter = False
         found_correct_key = False
         filter_keys = [i for i in list(tele_autophot_input[telescope][inst_key][inst]) if i.startswith('filter_key_')]
+        
         for filter_header_key in filter_keys:
             if tele_autophot_input[telescope][inst_key][inst][filter_header_key] not in list(headinfo.keys()):
                 continue
@@ -418,22 +408,29 @@ def main(object_info,autophot_input,fpath):
             if headinfo[tele_autophot_input[telescope][inst_key][inst][filter_header_key]] in tele_autophot_input[telescope][inst_key][inst]:
                 found_correct_key = True
                 break
+       
         if not found_correct_key and open_filter:
+            
             logging.info('Cannot find filter key or filter key is set to OPEN')
             autophot_input['filter_key'] = 'no_filter'
             use_filter = 'no_filter'
+        
         else:
+          
             autophot_input['filter_key'] = tele_autophot_input[telescope][inst_key][inst][filter_header_key]
             use_filter =  tele_autophot_input[telescope][inst_key][inst][str(headinfo[autophot_input['filter_key']])]
 
         # Set filter keyword in yaml file
         autophot_input['image_filter'] = use_filter
+        
         try:
             headinfo[autophot_input['filter_key']]
         except:
             autophot_input['filter_key'] = 'no_filter'
+           
             logging.warning('Filter keywoard == no_filter')
         logging.info('Filter keyoward used: %s' % autophot_input['filter_key'] )
+        
         # If no filter is detected
         if use_filter.lower() == 'no_filter':
 
@@ -451,6 +448,7 @@ def main(object_info,autophot_input,fpath):
         # =============================================================================
         # Prepare templates
         # =============================================================================
+        
         if telescope == 'MPI-2.2' and use_filter in ['J','H','K']:
             IR_gain_key = '%s_GAIN' % use_filter
             logging.info('Detected GROND IR - setting GAIN key to %s_GAIN' % IR_gain_key)
@@ -470,7 +468,7 @@ def main(object_info,autophot_input,fpath):
                     autophot_input['pixel_scale'] = 0.16
             else:
 
-                autophot_input['pixel_scale']   = tele_autophot_input[telescope][inst_key][inst]['pixel_scale']
+                autophot_input['pixel_scale'] = tele_autophot_input[telescope][inst_key][inst]['pixel_scale']
 
             prepare_templates(fpath,
                               wdir,
@@ -503,7 +501,8 @@ def main(object_info,autophot_input,fpath):
             return
         # ============================================================================
         # Begin photometric reductions
-        # =============================================================================
+        # ============================================================================
+        
         start = time. time()
         logging.info('Telescope: %s' % telescope)
         logging.info('Filter: %s'% use_filter)
@@ -514,16 +513,16 @@ def main(object_info,autophot_input,fpath):
         # =============================================================================
         # File deduction - beginning of photometry reductions
         # =============================================================================
+        
         try:
             try:
-                fpath = reduce(fpath,use_filter,autophot_input)
-                image    = fits.getdata(fpath)
                 
-     
-                    
-                    
+                fpath = reduce(fpath,use_filter,autophot_input)
+                image    = fits.getdata(fpath)      
                 headinfo = getheader(fpath)
+                
             except:
+                
                 pass
             
             if fpath == None:
@@ -532,17 +531,18 @@ def main(object_info,autophot_input,fpath):
             # =============================================================================
             #        Get useful paramters from telescope.yml 
             # =============================================================================
+            
             if 'AIRMASS' in tele_autophot_input[telescope][inst_key][inst]:
                 autophot_input['AIRMASS'] = tele_autophot_input[telescope][inst_key][inst]['AIRMASS']
 
                 AIRMASS_key = autophot_input['AIRMASS']
 
-                if AIRMASS_key is None:
-                    AIRMASS = np.nan
-                elif AIRMASS_key in headinfo:
-                    AIRMASS = headinfo[AIRMASS_key]
-                else:
-                    AIRMASS = np.nan
+                # if AIRMASS_key is None:
+                #     AIRMASS = np.nan
+                # elif AIRMASS_key in headinfo:
+                #     AIRMASS = headinfo[AIRMASS_key]
+                # else:
+                #     AIRMASS = np.nan
 
             if 'RDNOISE' in tele_autophot_input[telescope][inst_key][inst]:
 
@@ -638,7 +638,7 @@ def main(object_info,autophot_input,fpath):
             if autophot_input['cosmic_rays']['remove_cmrays']:
                 try:
                 # if cosmic rays have no already been removed
-                        if 'CRAY_RM'  not in headinfo:
+                        if 'CRAY_RMD'  not in headinfo:
                             headinfo = getheader(fpath)
                             # image with cosmic rays
                             image_old = fits.PrimaryHDU(image)
@@ -648,7 +648,7 @@ def main(object_info,autophot_input,fpath):
                                                      use_lacosmic = autophot_input['cosmic_rays']['use_lacosmic'])
 
                             # Update header and write to new file
-                            headinfo['CRAY_RM'] = ('T', 'Comsic rays w/astroscrappy ')
+                            headinfo['CRAY_RMD'] = ('T', 'Comsic rays wautophot')
                             fits.writeto(fpath,
                                          image,
                                          headinfo,
@@ -695,11 +695,8 @@ def main(object_info,autophot_input,fpath):
                             'CDELT1','CDELT2','CTYPE1','CTYPE2']
             
             # if no wcs values are found in headinfo, ignore file and exit loop (raise exception)
-            if autophot_input['wcs']['ignore_no_wcs']:
-                if any(i not in headinfo for i in wcs_keywords):
-                    logging.info('No wcs found - ignoring_wcs setting == True')
-                    raise Exception('ignore files w/o WCS')
-                    
+
+                  
             if 'UPWCS'  in headinfo:
                 # if UPWCS already excecuetde and found in header continue
                 logging.info('Astrometry.net already excuted')
@@ -751,7 +748,7 @@ def main(object_info,autophot_input,fpath):
                                                            remove_sat = autophot_input['source_detection']['remove_sat'],
                                                            use_moffat = autophot_input['fitting']['use_moffat'],
                                                            default_moff_beta = autophot_input['fitting']['default_moff_beta'],
-                                                           vary_moff_beta = autophot_input['fitting']['vary_moff_beta'],
+                                                           # vary_moff_beta = autophot_input['fitting']['vary_moff_beta'],
                                                            max_fit_fwhm = autophot_input['source_detection']['max_fit_fwhm'],
                                                            fitting_method = autophot_input['fitting']['fitting_method'],
                                                            use_catalog = autophot_input['source_detection']['use_catalog'] )
@@ -980,13 +977,13 @@ def main(object_info,autophot_input,fpath):
                                                    remove_sat = autophot_input['source_detection']['remove_sat'],
                                                    use_moffat = autophot_input['fitting']['use_moffat'],
                                                    default_moff_beta = autophot_input['fitting']['default_moff_beta'],
-                                                   vary_moff_beta = autophot_input['fitting']['vary_moff_beta'],
+                                                   # vary_moff_beta = autophot_input['fitting']['vary_moff_beta'],
                                                    max_fit_fwhm = autophot_input['source_detection']['max_fit_fwhm'],
                                                    fitting_method = autophot_input['fitting']['fitting_method'])
             image_fwhm_err = np.nanstd(df['FWHM'])
             
        
-            logging.info('\nFWHM: %.3f +/- %.3f [ pixels ]' % (image_fwhm,image_fwhm_err))
+
 
             seeing = pixel2arcsec(image_fwhm,xy_pixel_scales[0])
             logging.info('\nSeeing: %.3f [ arcsec ]' % (seeing))
@@ -1033,8 +1030,7 @@ def main(object_info,autophot_input,fpath):
                                                                r_in_size = autophot_input['photometry']['r_in_size'],
                                                                r_out_size = autophot_input['photometry']['r_out_size'],
                                                                GAIN =  autophot_input['gain'],
-                                                               rdnoise =  autophot_input['rdnoise'],
-                                                               plot_optimum_radius =  autophot_input['photometry']['plot_optimum_radius'])
+                                                               rdnoise =  autophot_input['rdnoise'])
 
                 autophot_input['photometry']['ap_size'] = optimum_ap_size
                 autophot_input['photometry']['r_in_size'] = optimum_ap_size + 1
@@ -1104,7 +1100,7 @@ def main(object_info,autophot_input,fpath):
                                                         mask_sources_XY_R =autophot_input['preprocessing']['mask_sources_XY_R'],
                                                         use_moffat = autophot_input['fitting']['use_moffat'],
                                                         default_moff_beta = autophot_input['fitting']['default_moff_beta'],
-                                                        vary_moff_beta = autophot_input['fitting']['vary_moff_beta'],
+                                                        # vary_moff_beta = autophot_input['fitting']['vary_moff_beta'],
                                                         bkg_level = autophot_input['fitting']['bkg_level'],
                                                         scale = autophot_input['scale'],
                                                         max_catalog_sources = autophot_input['catalog']['max_catalog_sources'],
@@ -1132,7 +1128,7 @@ def main(object_info,autophot_input,fpath):
                 if np.nanmedian(list(sigma_dist)) <= autophot_input['wcs']['offset_param']:
                     # average offset distance within limit - conintue
                     break
-                if not autophot_input['wcs']['allow_recheck']:
+                if not autophot_input['wcs']['allow_wcs_recheck']:
                     # allow WCS to be rechecked - continue
                     break
                 if 'UPWCS' in headinfo or WCS_checked:
@@ -1307,7 +1303,7 @@ def main(object_info,autophot_input,fpath):
                                     # remove_background_val = autophot_input['remove_background_val'],
                                     # hold_pos = autophot_input['hold_pos'],
                                     return_fwhm = True,
-                                    return_subtraction_image = autophot_input['psf']['return_subtraction_image'],
+                                    return_subtraction_image = False,
                                     no_print = False,
                                     # return_closeup = autophot_input['return_closeup'],
                                     remove_bkg_local = autophot_input['fitting']['remove_bkg_local'],
@@ -1409,25 +1405,25 @@ def main(object_info,autophot_input,fpath):
                 c_temp_dict['redchi2'] = redchi2
             except:
                  logging.info('No PSF sources fitted')
-                 autophot_input['catalog']['remove_catalog_poorfits'] = False
+                 # autophot_input['catalog']['remove_catalog_poorfits'] = False
                  
             # add to exisitng dataframe [c]
             c_add = pd.DataFrame.from_dict(c_temp_dict)
             c_add = c_add.set_index(c.index)
             c = pd.concat([c,c_add],axis = 1,sort = False)
             
-            # drop any poorly fit sources:
-            if autophot_input['catalog']['remove_catalog_poorfits']:
-                redchi2_mean = np.nanmean(c['redchi2'])
-                redchi2_std = np.nanstd(c['redchi2'])
-                filtered_data = sigma_clip(c['redchi2'].values,
-                                           sigma_lower=None,sigma_upper = 3,
-                                           maxiters=None,
-                                           cenfunc='mean',
-                                           masked=True,
-                                           copy=False)
-                c = c[~filtered_data.mask]
-                c = c.drop(c[c['redchi2'] > redchi2_mean + 3 * redchi2_std].index)
+            # # drop any poorly fit sources:
+            # if autophot_input['catalog']['remove_catalog_poorfits']:
+            #     redchi2_mean = np.nanmean(c['redchi2'])
+            #     redchi2_std = np.nanstd(c['redchi2'])
+            #     filtered_data = sigma_clip(c['redchi2'].values,
+            #                                sigma_lower=None,sigma_upper = 3,
+            #                                maxiters=None,
+            #                                cenfunc='mean',
+            #                                masked=True,
+            #                                copy=False)
+            #     c = c[~filtered_data.mask]
+            #     c = c.drop(c[c['redchi2'] > redchi2_mean + 3 * redchi2_std].index)
                 
             # drop if the counts are negative - account for mismatched source or very faint source
             c = c.drop(c[c['flux_star'] <= 0.0].index)
@@ -1840,7 +1836,7 @@ def main(object_info,autophot_input,fpath):
                     expected_template_folder = os.path.join(autophot_input['fits_dir'] , 'templates')
                     expected_filter_template_folder  = os.path.join(expected_template_folder, use_filter_template + '_template')
 
-                    if autophot_input['template_subtraction']['use_user_template']:
+                    if not autophot_input['template_subtraction']['get_PS1_template']:
 
 
                         logging.info('Looking for User template in %s' % expected_template_folder)
@@ -1863,7 +1859,7 @@ def main(object_info,autophot_input,fpath):
                                 template_found = True
                                 logging.info('Template filepath: %s ' % fpath_template)
 
-                    if autophot_input['template_subtraction']['get_template'] and not template_found:
+                    if autophot_input['template_subtraction']['get_PS1_template'] and not template_found:
                         logging.info('Searching for template ...')
 
                         if autophot_input['catalog'] == '2mass':
@@ -2042,17 +2038,15 @@ def main(object_info,autophot_input,fpath):
                 except Exception as e:
                     logging.error('Error with Template aquisiton: %s ' % e)
                     logging.exception(e)
-            # Check for template image
-            # if autophot_input['get_template']:
-            #     if not os.path.isfile(fpath.replace(fname_ext,'_template')+fname_ext):
-            #         logging.info('Template file NOT found')
-            #     else:
-            #         fpath_template = fpath.replace(fname_ext,'_template')+fname_ext
-            #         subtraction_ready = True
+
             # =============================================================================
             # Image subtraction using HOTPANTS
             # =============================================================================
             autophot_input['subtraction_ready'] = subtraction_ready
+            
+            if autophot_input['template_subtraction']['do_subtraction'] and not subtraction_ready:
+                print('subatrction selected but subtraction not ready')
+            
             if autophot_input['template_subtraction']['do_subtraction'] and subtraction_ready:
 
                 hdu = fits.PrimaryHDU(footprint.astype(int))
@@ -2074,9 +2068,9 @@ def main(object_info,autophot_input,fpath):
                                      hotpants_exe_loc = autophot_input['template_subtraction']['hotpants_exe_loc'],
                                      hotpants_timeout = autophot_input['template_subtraction']['hotpants_timeout'],
                                      template_dir = autophot_input['template_dir'],
-                                     psf = PSF_MODEL,
-                                     mask_border = False,
-                                     pix_bound = autophot_input['source_detection']['pix_bound'],
+                                     # psf = PSF_MODEL,
+                                     # mask_border = False,
+                                     # pix_bound = autophot_input['source_detection']['pix_bound'],
                                      remove_sat = autophot_input['source_detection']['remove_sat'],
                                      zogy_use_pixel = autophot_input['template_subtraction']['zogy_use_pixel'])
 
@@ -2182,7 +2176,7 @@ def main(object_info,autophot_input,fpath):
                          vary = False)
                 pars.add('beta',value = autophot_input['image_params']['beta'],
                          min = 0,
-                         vary = autophot_input['fitting']['vary_moff_beta']
+                         vary = False
                         )
             else:
                 pars.add('sigma',value = autophot_input['image_params']['sigma'],
@@ -2296,7 +2290,7 @@ def main(object_info,autophot_input,fpath):
                                                         save_plot = autophot_input['target_photometry']['save_target_plot'],
                                                     
                                                         return_fwhm = True,
-                                                        return_subtraction_image = autophot_input['psf']['return_subtraction_image'],
+                                                        return_subtraction_image = False,
                                                         
                                                         return_closeup = True,
                                                         remove_bkg_local = autophot_input['fitting']['remove_bkg_local'],
@@ -2461,7 +2455,7 @@ def main(object_info,autophot_input,fpath):
                                                                     unity_PSF_counts = unity_PSF_counts,
                                                                     inject_source_add_noise = autophot_input['limiting_magnitude']['inject_source_add_noise'],
                                                                     inject_source_location = autophot_input['limiting_magnitude']['inject_source_location'],
-                                                                    injected_sources_additional_sources = autophot_input['limiting_magnitude']['injected_sources_additional_sources'],
+                                                                    # injected_sources_additional_sources = autophot_input['limiting_magnitude']['injected_sources_additional_sources'],
                                                                     injected_sources_additional_sources_position = autophot_input['limiting_magnitude']['injected_sources_additional_sources_position'],
                                                                     injected_sources_additional_sources_number = autophot_input['limiting_magnitude']['injected_sources_additional_sources_number'],
                                                                     plot_injected_sources_randomly = autophot_input['limiting_magnitude']['plot_injected_sources_randomly'],
