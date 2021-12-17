@@ -271,7 +271,7 @@ To change these parameters use:
 
 
 
-	Default: **True**
+	Default: **False**
 
 
 
@@ -549,7 +549,7 @@ To change these parameters use:
 
 **downsample** [ Type: *int* ] 
 
-	If working with verty large image arrays, when can pass this value to astrometry.net to downsample the image before runnign through astrometry.net.
+	If working with very large image arrays, when can pass this value to astrometry.net to downsample the image before runnign through astrometry.net.
 
 
 
@@ -648,10 +648,10 @@ To change these parameters use:
 	Keywords of catalog with information covering the fielf of view of your image. To date the available catalogs are:
 
 	 . pan_starrs
-	 . 2mass
-	 . apass
-	 . skymapper
-	 . sdss.
+	 * 2mass
+	 * apass
+	 * skymapper
+	 * sdss.
 
 
 
@@ -791,7 +791,7 @@ FITTING
 
 .. note::
 
-   Commands describing how to perform fitting. This is mainly perfomed using `Astroscrappy <https://github.com/astropy/astroscrappy>`_
+   Commands describing how to perform fitting. This is mainly perfomed using `LMFIT <https://lmfit.github.io/lmfit-py/fitting.html>`_ when centroiding a source or fitting the PSF model.
 
 
 
@@ -809,17 +809,22 @@ To change these parameters use:
 
 **fitting_method** [ Type: *str* ] 
 
-	fitting methods for analytical function fitting and PSF fitting.
+	Fitting method for analytical function fitting and PSF fitting. We can accept a limited number of methods from `here <https://lmfit.github.io/lmfit-py/fitting.html>`_. Some test methods incldue: 
+
+	 * leastsq 
+	 * least_squares 
+	 * powell 
+	 * nelder.
 
 
 
-	Default: **least_sqaures**
+	Default: **least_squares**
 
 
 
 **use_moffat** [ Type: *bool* ] 
 
-	Use moffat function.
+	Use moffat function when centroiding and building the PSF model. If False, a guassian function is used for the same purposes.
 
 
 
@@ -829,7 +834,7 @@ To change these parameters use:
 
 **default_moff_beta** [ Type: *float* ] 
 
-	If *use_moffat* is True, set the beta term.
+	If *use_moffat* is True, set the beta term which describes hwo the *wings* of the moffat function behave. We preset this to `4.765 <https://academic.oup.com/mnras/article/328/3/977/1247204>`_. IRAF defaults this value to 2.5. A lorenztain can be obatined by setting this value to 1.
 
 
 
@@ -837,19 +842,9 @@ To change these parameters use:
 
 
 
-**vary_moff_beta** [ Type: *bool* ] 
-
-	If *use_moffat* is True, allow the beta term to be fitted.
-
-
-
-	Default: **False**
-
-
-
 **bkg_level** [ Type: *float* ] 
 
-	Set the background level in sigma_bkg.
+	Set the background level using the number of standard deviations to use for both the lower and upper clipping limit.
 
 
 
@@ -859,7 +854,7 @@ To change these parameters use:
 
 **remove_bkg_surface** [ Type: *bool* ] 
 
-	If True, remove a background using a fitted surface.
+	Remove a background using a fitted surface using `Background2D <https://photutils.readthedocs.io/en/stable/api/photutils.background.Background2D.html>`_. In breif, while masking out any posiible sources, this funciton calculates a low-resolution background map using (sigma-clipped) statistics in each box of a grid that covers the input image to create a low-resolution background map. This is the most robust method to background measurements, however it does take the longest computation time per fitting.
 
 
 
@@ -869,7 +864,7 @@ To change these parameters use:
 
 **remove_bkg_local** [ Type: *bool* ] 
 
-	If True, remove the surface equal to a flat surface at the local background median value.
+	Remove the surface equal to a flat surface at the local background median value. This is the most trivial background determination. While masking out and possible sources, the average backgroun value is determined using (sigma-clipped) statistics. A flat surface with the amplitude equal to this value is then set as the background map. This is the fastest background measurement tool, but is the most rudimentary, and will not capture any background variation acorss the image cutout.
 
 
 
@@ -879,7 +874,7 @@ To change these parameters use:
 
 **remove_bkg_poly** [ Type: *bool* ] 
 
-	If True, remove a polynomail surface with degree set by *remove_bkg_poly_degree*.
+	Remove a polynomial surface with degree set by *remove_bkg_poly_degree*. This method is included but is out-classed by *remove_bkg_surface*.
 
 
 
@@ -889,7 +884,7 @@ To change these parameters use:
 
 **remove_bkg_poly_degree** [ Type: *int* ] 
 
-	If *remove_bkg_poly* is True, remove a polynomail surface with this degree.
+	If *remove_bkg_poly* is True, remove a polynomial surface with this degree. Setting to 1 will produce a flat surface that can tilt to best fit a slopeing background.
 
 
 
@@ -899,7 +894,7 @@ To change these parameters use:
 
 **fitting_radius** [ Type: *float* ] 
 
-	Focus on small region where SNR is highest with a radius equal to this value times the FWHM.
+	Focus on small region where SNR is highest with a radius equal to this value times the FWHM. When fitting a PSF/analytical model we produce a small cutout around the brighest part of a poaint-soure. This allows foor the fitting to focus on the approximate area that conatins the highest signal to noise, while ignoring the lower flux in the wings of the sources PSF.
 
 
 
@@ -917,7 +912,7 @@ EXTINCTION
 
 .. note::
 
-   no comment
+   These commands are concerned with the calculations concerned with atmosphereic extinction. To date this is underdeveloped.
 
 
 
@@ -953,7 +948,7 @@ SOURCE_DETECTION
 
 .. note::
 
-   Coammnds to control source detection algorithim
+   Commands to control source detection algorithim used for finding bright, isolated stars. This list of stars is used when building the PSF, finding the FWHM and solving for the WCS.
 
 
 
@@ -971,7 +966,7 @@ To change these parameters use:
 
 **threshold_value** [ Type: *float* ] 
 
-	threshold value for source detection.
+	An appropriate threshold value is needed to detection bright sources. This value is the inital threshold level for source detection. This is just an inital guess and is update incrementally until an useful number of sources is found.
 
 
 
@@ -981,21 +976,11 @@ To change these parameters use:
 
 **lim_threshold_value** [ Type: *float* ] 
 
-	If the threshold_value decreases below this value, use fine_fudge_factor.
+	This is the lower limit on the threshold value. If the threshold value decreases below this value, use *fine_fudge_factor*. This is a safety features if an image contains few stars above the background level. For example there may be no sources at *threshold_value=4* but a few are detected at *threshold_value=4.1*.
 
 
 
 	Default: **5**
-
-
-
-**fwhm_guess** [ Type: *float* ] 
-
-	inital guess for the FWHM.
-
-
-
-	Default: **7**
 
 
 
@@ -1015,23 +1000,23 @@ To change these parameters use:
 
 
 
-	Default: **0.2**
+	Default: **0.1**
 
 
 
-**isolate_sources** [ Type: *bool* ] 
+**fwhm_guess** [ Type: *float* ] 
 
-	If True, isolate sources for FWHM determination by the amount given by *isolate_sources_fwhm_sep* times the FWHM.
+	Source detection algorithms need an inital guess for the FWHM. Once any sources are found, we find an approximate value for the FWHM and update our source detection algorithm.
 
 
 
-	Default: **True**
+	Default: **7**
 
 
 
 **isolate_sources_fwhm_sep** [ Type: *float* ] 
 
-	If *isolate_sources* is True, seperate sources by this amount times the FWHM.
+	When a sample of sources is found, seperate sources by this amount times the FWHM.
 
 
 
@@ -1041,27 +1026,17 @@ To change these parameters use:
 
 **init_iso_scale** [ Type: *float* ] 
 
-	For inital guess, seperate sources by this amount times the FWHM.
+	For inital guess, sources are removed if they have a detected neighbour within this value, given in pixels.
 
 
 
-	Default: **25**
-
-
-
-**use_catalog** [ Type: *str* ] 
-
-	.
-
-
-
-	Default: **apass**
+	Default: **15**
 
 
 
 **sigmaclip_FWHM_sigma** [ Type: *float* ] 
 
-	If *sigmaclip_FWHM* is True, sigma clip the values for the FWHM by this amount.
+	When cleaning the FWHM measurements of the found sources in a image, using sigma-clipped statistics to sigma clip the values for the FWHM by this amount.
 
 
 
@@ -1071,7 +1046,7 @@ To change these parameters use:
 
 **sigmaclip_median_sigma** [ Type: *float* ] 
 
-	If *sigmaclip_median* is True, sigma clip the values for the median by this amount.
+	When cleaning the FWHM measurements of the found sources in a image, using sigma-clipped statistics to sigma clip the values for the FWHM by this amount based on their median (a.k.a their background) values.
 
 
 
@@ -1081,7 +1056,7 @@ To change these parameters use:
 
 **image_analysis** [ Type: *bool* ] 
 
-	If True, save table of FWHM values for an image.
+	Save table of FWHM values for an image and produce a plot showing how the FWHM evolves over an image. This can be useful if you suspect that the FWHM is changing alot over the image.
 
 
 
@@ -1091,17 +1066,7 @@ To change these parameters use:
 
 **remove_sat** [ Type: *bool* ] 
 
-	Remove saturated sources.
-
-
-
-	Default: **True**
-
-
-
-**remove_boundary_sources** [ Type: *bool* ] 
-
-	If True, ignore any sources within pix_bound from edge.
+	Remove saturated sources. These are sources where a closeup image contains a pixel value greater that the saturation level.
 
 
 
@@ -1111,7 +1076,7 @@ To change these parameters use:
 
 **pix_bound** [ Type: *float* ] 
 
-	If *remove_boundary_sources* is True, ignore sources within this amount from the image boundary.
+	Ignore sources within this amount from the image boundary, This is useful as the image edges can contain irregularities.
 
 
 
@@ -1121,7 +1086,7 @@ To change these parameters use:
 
 **save_FWHM_plot** [ Type: *bool* ] 
 
-	If True save plot of FWHM distribution.
+	Save  a plot of FWHM histogram distribution.
 
 
 
@@ -1131,17 +1096,17 @@ To change these parameters use:
 
 **min_source_lim** [ Type: *float* ] 
 
-	minimum allowed sources when doing source detection to find fwhm.
+	When perfomring source detection, what is the minimum allowed sources when doing source detection to find fwhm.
 
 
 
-	Default: **1**
+	Default: **2**
 
 
 
 **max_source_lim** [ Type: *float* ] 
 
-	maximum allowed sources when doing source detection to find fwhm.
+	When perfomring source detection, what is the maximum allowed sources when doing source detection to find fwhm. This value dictates how the *threshold_value* behaves.
 
 
 
@@ -1151,7 +1116,7 @@ To change these parameters use:
 
 **source_max_iter** [ Type: *float* ] 
 
-	maximum amount of iterations to perform source detection algorithim, if iters exceeded this value and error is raised.
+	Maximum amount of iterations to perform source detection algorithim, if iters exceeded this value an error is raised.
 
 
 
@@ -1161,7 +1126,7 @@ To change these parameters use:
 
 **int_scale** [ Type: *float* ] 
 
-	Initial image size in pixels to take cutout.
+	Initial image size in pixels to take cutout for fitting the FWHM. This is updated during the automated script.
 
 
 
@@ -1171,7 +1136,11 @@ To change these parameters use:
 
 **scale_multipler** [ Type: *float* ] 
 
-	Multiplier to set close up cutout size based on image scaling.
+	Multiplier to set close up cutout size based on image scaling. The standard image cutout size will have the shape :math:`image.shape = (2 \times scale, 2 \times scale)` where scale is set by:
+
+	.. code:: python
+
+	   scale = int(np.ceil(scale_multipler * image_fwhm)) + 0.5.
 
 
 
@@ -1181,7 +1150,7 @@ To change these parameters use:
 
 **max_fit_fwhm** [ Type: *float* ] 
 
-	maximum value to fit.
+	When fitting for the FWHM, constrain the fitting to allow for this maximum value to fit for the FWHM.
 
 
 
@@ -1199,7 +1168,7 @@ LIMITING_MAGNITUDE
 
 .. note::
 
-   no comment
+   These commands are concerned with determining the limiting magnitude of an image. More specifically the location around a given target location.
 
 
 
@@ -1217,7 +1186,7 @@ To change these parameters use:
 
 **force_lmag** [ Type: *bool* ] 
 
-	Force limiting magnitude test at transient location. This may given incorrect values for bright sources.
+	Force limiting magnitude test at transient location. Use at your discretion. If the source flux is still clearly present in the image (e.g. :math:`f>5\sigma`) this may give boogus results.
 
 
 
@@ -1227,57 +1196,7 @@ To change these parameters use:
 
 **skip_lmag** [ Type: *bool* ] 
 
-	Force limiting magnitude test at transient location. This may given incorrect values for bright sources.
-
-
-
-	Default: **False**
-
-
-
-**beta_limit** [ Type: *float* ] 
-
-	Beta probability value. Should not be set below 0.5.
-
-
-
-	Default: **0.75**
-
-
-
-**injected_sources_additional_sources** [ Type: *bool* ] 
-
-	If True, inject additional sources radially around the existing positions.
-
-
-
-	Default: **True**
-
-
-
-**injected_sources_additional_sources_position** [ Type: *float* ] 
-
-	Where to inject artifical sources with the original position in the center. This value is in units of FWHM. Set to -1 to move around the pixel only.
-
-
-
-	Default: **1**
-
-
-
-**injected_sources_additional_sources_number** [ Type: *float* ] 
-
-	how many additional sources to inject.
-
-
-
-	Default: **5**
-
-
-
-**injected_sources_save_output** [ Type: *bool* ] 
-
-	If True, save the output of the limiting magnitude test as a csv file.
+	Set to True if you wish to skip and limiting magnitude tests.
 
 
 
@@ -1291,53 +1210,23 @@ To change these parameters use:
 
 
 
-	Default: **False**
-
-
-
-**plot_injected_sources_randomly** [ Type: *bool* ] 
-
-	If True  include sources randomly at the limiting magnitude in the output image.
-
-
-
 	Default: **True**
 
 
 
-**inject_lmag_use_ap_phot** [ Type: *bool* ] 
+**beta_limit** [ Type: *float* ] 
 
-	If True, use aperture photometry for magnitude recovery when determining the limiting magnitude. Set to False to use the PSF package (iv available).
-
-
-
-	Default: **True**
+	Beta probability value. Should not be set below 0.5 for convergence. This value places confidence on a measurement that is most *relaistic* that setting an ultimative limit e.g. :math:`f>3\sigma`). A source recovered with a beta value greater then this limit is said to be *confidently* detected.
 
 
 
-**check_catalog_nondetections** [ Type: *bool* ] 
-
-	If True, performing a limiting magnitue test on catalog sources. This was used to produce Fig. XYZ in the AutoPhoT Paper.
-
-
-
-	Default: **False**
-
-
-
-**include_catalog_nondetections** [ Type: *bool* ] 
-
-	If True,.
-
-
-
-	Default: **False**
+	Default: **0.75**
 
 
 
 **lmag_check_SNR** [ Type: *float* ] 
 
-	If this target SNR falls below this value, perform a limiting magnitude check.
+	As a rough approiximation, it a targets signal to noise ratio falls below this value, execute the limiting magnitude checks which will include the probable tests and tests using artifical source injection.
 
 
 
@@ -1347,11 +1236,21 @@ To change these parameters use:
 
 **detection_limit** [ Type: *float* ] 
 
-	Set the detection criterai for source detection as this value. If the SNR of a target is below this value, it is said to be non-detected.
+	Set the detection criteria for source detection as this value. If the SNR of a target is below this value, it is said to be non-detected.
 
 
 
 	Default: **3**
+
+
+
+**inject_lmag_use_ap_phot** [ Type: *bool* ] 
+
+	If True, use aperture photometry for magnitude recovery when determining the limiting magnitude. Set to False to use the PSF package (if available).
+
+
+
+	Default: **True**
 
 
 
@@ -1385,19 +1284,19 @@ To change these parameters use:
 
 
 
-**inject_source_add_noise** [ Type: *bool* ] 
+**inject_source_sources_no** [ Type: *int* ] 
 
-	If True, when injecting the artifical source, include random possion noise.
-
-
-
-	Default: **True**
+	How many artifial sources to inject radially around the target location.
 
 
 
-**inject_source_recover_dmag_redo** [ Type: *int* ] 
+	Default: **6**
 
-	If *inject_source_add_noise* is True, how maybe times is the artifial source injected at a position with it's accompaning possion noise.
+
+
+**inject_source_location** [ Type: *float* ] 
+
+	Radial location to inject the artifical sources. This is in units of FWHM away from the center of the image.
 
 
 
@@ -1405,19 +1304,9 @@ To change these parameters use:
 
 
 
-**inject_source_sources_no** [ Type: *int* ] 
-
-	How many artifial sources to inject radially around the target location.
-
-
-
-	Default: **10**
-
-
-
 **inject_source_cutoff_limit** [ Type: *float* ] 
 
-	That fraction of sources should be lost to consider the injected magnitude to be at the magnitude limit. Should be less than 1.
+	That fraction of sources should be lost to consider the injected magnitude to be at the magnitude limit. Must be less than 1.
 
 
 
@@ -1427,7 +1316,7 @@ To change these parameters use:
 
 **inject_source_recover_nsteps** [ Type: *int* ] 
 
-	Number of iterations to allow the injected magnitude to run for.
+	Number of iterations to allow the injected magnitude to run for. This is used to avoid the script running on to long if something goes wrong.
 
 
 
@@ -1437,7 +1326,7 @@ To change these parameters use:
 
 **inject_source_recover_dmag** [ Type: *float* ] 
 
-	large step size for magnitude change when adjusting injected star magnitude.
+	When adjusting the injected PSF's magnitude, This is the large step size for magnitude change.
 
 
 
@@ -1447,17 +1336,57 @@ To change these parameters use:
 
 **inject_source_recover_fine_dmag** [ Type: *float* ] 
 
-	fine step size for magnitude change when adjusting injected star magnitude. This is used once an approximate limiting magnitude is found.
+	Fine step size for magnitude change when adjusting injected star magnitude. This is used once an approximate limiting magnitude is found. This value sets the percision on the limiting magnitude.
 
 
 
-	Default: **0.01**
+	Default: **0.05**
 
 
 
-**inject_source_location** [ Type: *float* ] 
+**inject_source_add_noise** [ Type: *bool* ] 
 
-	Radially location to inject the artifical sources. This is in units of FWHM.
+	If True, when injecting the artifical source, include random possion noise to the PSF prior to its addition to the image.
+
+
+
+	Default: **True**
+
+
+
+**inject_source_recover_dmag_redo** [ Type: *int* ] 
+
+	If *inject_source_add_noise* is True, how maybe times is the artifial source injected at a position with it's accompaning possion noise. The noise is changed during each step.
+
+
+
+	Default: **3**
+
+
+
+**injected_sources_additional_sources** [ Type: *bool* ] 
+
+	If True, inject additional sources radially around the existing positions given by *inject_source_sources_no*.
+
+
+
+	Default: **True**
+
+
+
+**injected_sources_additional_sources_position** [ Type: *float* ] 
+
+	Where to inject artifical sources with the original position in the center. This value is in units of FWHM. We can set this value  to -1 to move around the pixel only. This is similar to a dithering process where we can fully sampling how the PSF behave on an image.
+
+
+
+	Default: **1**
+
+
+
+**injected_sources_additional_sources_number** [ Type: *float* ] 
+
+	how many additional sources to inject using the *injected_sources_additional_sources*.
 
 
 
@@ -1477,7 +1406,37 @@ To change these parameters use:
 
 **inject_source_on_target** [ Type: *bool* ] 
 
-	If True, when plotting the limiting magnitude on the cutout image, inserted an artifical source on the transient position.
+	If True, when plotting the limiting magnitude on the cutout image, inserted an artifical source on the transient position. Use wisely as if there is some flux at the target location, this may skew results.
+
+
+
+	Default: **False**
+
+
+
+**plot_injected_sources_randomly** [ Type: *bool* ] 
+
+	If True  include sources randomly at the limiting magnitude in the output image. This is used as an illistration of how a source at the limiting magnitude may appear.
+
+
+
+	Default: **True**
+
+
+
+**injected_sources_save_output** [ Type: *bool* ] 
+
+	If True, save the output of the limiting magnitude test as a csv file. This is useful to diagnose how the injected sources are behaving as their magnitude is change.
+
+
+
+	Default: **False**
+
+
+
+**check_catalog_nondetections** [ Type: *bool* ] 
+
+	If True, performing a limiting magnitue test on catalog sources. This was used to produce Fig. XYZ in the AutoPhoT Paper.
 
 
 
@@ -1541,7 +1500,7 @@ PSF
 
 .. note::
 
-   These commands focus on settings when dealing with the Point spread fitting photometry package.
+   These commands focus on settings when dealing with the ooint spread fitting (PSF) photometry package.
 
 
 
@@ -1559,7 +1518,7 @@ To change these parameters use:
 
 **psf_source_no** [ Type: *int* ] 
 
-	Number of sources used  in the image to build the PSF model.
+	Number of sources used in the image to build the PSF model. The PSF is built from bright isolated sources found during the FWHM steps.
 
 
 
@@ -1579,7 +1538,7 @@ To change these parameters use:
 
 **plot_PSF_residuals** [ Type: *bool* ] 
 
-	If True, plot the residual from the PSF fitting.
+	If True, plot the residuals during the PSF fittings to sources.
 
 
 
@@ -1599,7 +1558,7 @@ To change these parameters use:
 
 **construction_SNR** [ Type: *int* ] 
 
-	When build the PSF, only use sources if their SNR is greater than this values.
+	When building the PSF, only use sources if their SNR is greater than this values.
 
 
 
@@ -1609,7 +1568,7 @@ To change these parameters use:
 
 **regrid_size** [ Type: *int* ] 
 
-	When builidng the PSF, regird the reisdual image but this amount to allow to higher pseduo resolution.
+	When builidng and fitting the PSF, regird the reisdual image by this amount to allow for a higher pseduo resolution and more importantly, we are abel to perform sub-pixel shifts.
 
 
 
@@ -1619,7 +1578,7 @@ To change these parameters use:
 
 **save_PSF_models_fits** [ Type: *bool* ] 
 
-	If True, save the PSF model as a fits file. This is neede if template subtraction is performed with ZOGY.
+	If True, save the PSF model as a fits file. This is needed if template subtraction is performed with ZOGY.
 
 
 
@@ -1649,31 +1608,17 @@ To change these parameters use:
 
 **PSF_starlist** [ Type: *str* ] 
 
-	If *use_PSF_starlist* is True, use stars gien by this file.
+	If *use_PSF_starlist* is True, use stars gien by this file. This file should contained the columns *RA* and *DEC* in a *csv* format. For example:
+
+	.. code:: python
+
+	   autophot_input['psf']['use_PSF_starlist'] = True
+
+	   autophot_input['psf']['PSF_starlist'] = '/Users/seanbrennan/Desktop/my_PSF_stars.csv'.
 
 
 
 	Default: **None**
-
-
-
-**fit_PSF_FWHM** [ Type: *bool* ] 
-
-	If True, allow the FWHM to be freely fit when building the PSF model - depracted.
-
-
-
-	Default: **False**
-
-
-
-**return_subtraction_image** [ Type: *bool* ] 
-
-	depracted.
-
-
-
-	Default: **False**
 
 
 
@@ -1687,7 +1632,7 @@ TEMPLATE_SUBTRACTION
 
 .. note::
 
-   no comment
+   This commands concern themselves with performing template subtraction and image alignment.
 
 
 
@@ -1703,9 +1648,9 @@ To change these parameters use:
 
 
 
-**do_ap_on_sub** [ Type: *bool* ] 
+**do_subtraction** [ Type: *bool* ] 
 
-	If True, Perfrom aperature photometry on subtrated image rather than PSF (if available/selected).
+	If True, perform template subtraction using the given templates.
 
 
 
@@ -1713,9 +1658,9 @@ To change these parameters use:
 
 
 
-**do_subtraction** [ Type: *bool* ] 
+**do_ap_on_sub** [ Type: *bool* ] 
 
-	If True, Perform template save_subtraction_quicklook.
+	Perfrom aperature photometry on subtrated image rather than PSF (if available/selected). This may be useful if the templates are not coming out cleanly and the transient PSF is warpped slightly.
 
 
 
@@ -1725,7 +1670,7 @@ To change these parameters use:
 
 **use_astroalign** [ Type: *bool* ] 
 
-	If True, use astroalign to align image and template images.
+	If True, use astroalign to align image and template images. If not align images using their repective WCS values using `reproject_interp <https://reproject.readthedocs.io/en/stable/api/reproject.reproject_interp.html>`_.
 
 
 
@@ -1733,29 +1678,19 @@ To change these parameters use:
 
 
 
-**get_template** [ Type: *bool* ] 
+**get_PS1_template** [ Type: *bool* ] 
 
-	If True, Try to download template from the PS1 server.
+	If True, attempt to download template from the PS1 server.
 
 
 
 	Default: **False**
-
-
-
-**use_user_template** [ Type: *bool* ] 
-
-	If True, use user provided templates - depracted.
-
-
-
-	Default: **True**
 
 
 
 **save_subtraction_quicklook** [ Type: *bool* ] 
 
-	If True, save a pdf image of subtracted image with a closeup of the target location.
+	If True, save a pdf image of subtracted image with a closeup of the target location. This is used as a quick way to see if the template subtraction has come out cleanly.
 
 
 
@@ -1789,17 +1724,7 @@ To change these parameters use:
 
 
 
-	Default: **300**
-
-
-
-**use_hotpants** [ Type: *bool* ] 
-
-	If True, use hotpants.
-
-
-
-	Default: **True**
+	Default: **100**
 
 
 
@@ -1851,7 +1776,7 @@ To change these parameters use:
 
 **target_error_compute_multilocation** [ Type: *bool* ] 
 
-	Do Snoopy-style error.
+	Do `SNooPy <https://sngroup.oapd.inaf.it/snoopy.html>`_-style error. In brief the transient is subtrated from an image leaving a residual image. The PSF used is then injected in onto the residual image at several posoitons near the transient location of best fit. The pseudo-transient is then measured again at this new position. The standard deviation is the the error on the transient measurement.
 
 
 
@@ -1889,7 +1814,7 @@ ZEROPOINT
 
 .. note::
 
-   no comment
+   These commands are releated to the zeropoint and how the data is cleaned and measured.
 
 
 
@@ -1907,7 +1832,7 @@ To change these parameters use:
 
 **zp_sigma** [ Type: *float* ] 
 
-	Sigma clip values when cleaning up the zeropoint measurements.
+	Zeropooint values are cleaned using sigma-clipped statitsics. This value is the sigma clip value used when cleaning up the zeropoint measurements.
 
 
 
@@ -1927,7 +1852,7 @@ To change these parameters use:
 
 **plot_ZP_vs_SNR** [ Type: *bool* ] 
 
-	If True, return a plot of the zeropoint distribution across the image.
+	If True, return a plot of the zeropoint value versus the signal to noise of a specific source.
 
 
 
@@ -1947,7 +1872,7 @@ To change these parameters use:
 
 **zp_use_mean** [ Type: *bool* ] 
 
-	When determined the zeropoint, use the mean and standard deviation.
+	When determined the zeropoint, use the mean and standard deviation when reporting the zeropoint and its' eroor.
 
 
 
@@ -1957,7 +1882,7 @@ To change these parameters use:
 
 **zp_use_fitted** [ Type: *bool* ] 
 
-	When determined the zeropoint, Fit a vertical line to the zeropoint distribution.
+	When determined the zeropoint, fit a vertical line to the zeropoint distribution. The value of best fit is the taken as the zeropoint measurement and the error is the sum of the diagonal of the covarience matrix.
 
 
 
@@ -1967,7 +1892,7 @@ To change these parameters use:
 
 **zp_use_median** [ Type: *bool* ] 
 
-	When determined the zeropoint, use the median and median standard deviation.
+	When determined the zeropoint, use the median value for the zeropoint and the median absolute deviation as the error.
 
 
 
@@ -1977,7 +1902,7 @@ To change these parameters use:
 
 **zp_use_WA** [ Type: *bool* ] 
 
-	When determined the zeropoint, use the weighted average.
+	When determined the zeropoint, use the weighted average and standard deviation as the zeropoint and its error. This is not recommended as there is too much weighting placed on error and may skew result.
 
 
 
@@ -1987,7 +1912,7 @@ To change these parameters use:
 
 **zp_use_max_bin** [ Type: *bool* ] 
 
-	When determined the zeropoint, use the magnitude given by the max bin i.e the mode.
+	When determined the zeropoint, use the magnitude given by the max bin i.e the mode. The error is set to the bin width.
 
 
 
@@ -1995,19 +1920,9 @@ To change these parameters use:
 
 
 
-**matching_source_SNR** [ Type: *bool* ] 
-
-	If True, exclude sources with a SNR lower than *matching_source_SNR_limit*.
-
-
-
-	Default: **True**
-
-
-
 **matching_source_SNR_limit** [ Type: *float* ] 
 
-	If *matching_source_SNR* is True, exclude values with a SNR lower than this value.
+	When measuring the zeropooint exclude any sources that have a signal to noise ratio less than this value.
 
 
 
