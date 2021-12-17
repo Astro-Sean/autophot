@@ -1,8 +1,8 @@
 	This page gives commands that are able to be adjusted in AutoPhoT. Most of the time there is no need to change these values. However they may be useful for diagnsotic purposes.
 
-################
+================
 General Commands
-################
+================
 
 .. note::
    General commands needed to get AutoPhoT running.
@@ -80,9 +80,9 @@ To change these parameters use:
 
 	Default: **True**
 
-#############
+=============
 PREPROCESSING
-#############
+=============
 
 .. note::
    This section focuses on several steps during pre-processing. This include trimming the edges of the image - useful if there is noise at the image edges - and masking out sources - useful if there is saturated sources in the image, which are causing issues, these sources, and the space around them can be masked out.
@@ -119,9 +119,9 @@ To change these parameters use:
 
 	Default: **None**
 
-##########
+==========
 PHOTOMETRY
-##########
+==========
 
 .. note::
    Commands to control photometry
@@ -212,9 +212,9 @@ To change these parameters use:
 
 	Default: **3**
 
-#########
+=========
 TEMPLATES
-#########
+=========
 
 .. note::
    These are the commands to control the calibration of the template files.
@@ -230,9 +230,9 @@ To change these parameters use:
 
 	Default: **True**
 
-###
+===
 WCS
-###
+===
 
 .. note::
    These commands are concerned with the World Coordinate System (WCS) of an image. These values should be a accurate as possible. While the script can account for sight offset (a few pixels). Significant offsets will result in poor calibration and photometry.
@@ -308,9 +308,9 @@ To change these parameters use:
 
 	Default: **None**
 
-#######
+=======
 CATALOG
-#######
+=======
 
 .. note::
    These commands concern obtaining and using photometric sequence data.
@@ -373,9 +373,9 @@ To change these parameters use:
 
 	Default: **300**
 
-###########
+===========
 COSMIC_RAYS
-###########
+===========
 
 .. note::
    Commands for cosmic ray cleaning. Cosmic rays should be removed as they can lead to poor fitting when using PSF photometry and increased counts when using aperture. By default we use `Astroscrappy <https://github.com/astropy/astroscrappy>`_ for cosmic ray removal.
@@ -396,9 +396,9 @@ To change these parameters use:
 
 	Default: **False**
 
-#######
+=======
 FITTING
-#######
+=======
 
 .. note::
    Commands describing how to perform fitting. This is mainly performed using `LMFIT <https://lmfit.github.io/lmfit-py/fitting.html>`_ when centroiding a source or fitting the PSF model.
@@ -459,9 +459,9 @@ To change these parameters use:
 
 	Default: **1.3**
 
-##########
+==========
 EXTINCTION
-##########
+==========
 
 .. note::
    These commands are concerned with the calculations concerned with atmospheric extinction. To date this is underdeveloped.
@@ -477,9 +477,9 @@ To change these parameters use:
 
 	Default: **False**
 
-################
+================
 SOURCE_DETECTION
-################
+================
 
 .. note::
    Commands to control source detection algorithm used for finding bright, isolated stars. This list of stars is used when building the PSF, finding the FWHM and solving for the WCS.
@@ -589,9 +589,9 @@ To change these parameters use:
 
 	Default: **30**
 
-##################
+==================
 LIMITING_MAGNITUDE
-##################
+==================
 
 .. note::
    These commands are concerned with determining the limiting magnitude of an image. More specifically the location around a given target location.
@@ -732,9 +732,9 @@ To change these parameters use:
 
 	Default: **False**
 
-#################
+=================
 TARGET_PHOTOMETRY
-#################
+=================
 
 .. note::
    These commands focus on settings when dealing with the photometry at the target position.
@@ -755,9 +755,9 @@ To change these parameters use:
 
 	Default: **True**
 
-###
+===
 PSF
-###
+===
 
 .. note::
    These commands focus on settings when dealing with the point spread fitting (PSF) photometry package.
@@ -824,9 +824,9 @@ To change these parameters use:
 
 	Default: **None**
 
-####################
+====================
 TEMPLATE_SUBTRACTION
-####################
+====================
 
 .. note::
    This commands concern themselves with performing template subtraction and image alignment.
@@ -887,9 +887,9 @@ To change these parameters use:
 
 	Default: **False**
 
-#####
+=====
 ERROR
-#####
+=====
 
 .. note::
    Commands for controlling error calculations
@@ -915,9 +915,9 @@ To change these parameters use:
 
 	Default: **10**
 
-#########
+=========
 ZEROPOINT
-#########
+=========
 
 .. note::
    These commands are related to the zero point and how the data is cleaned and measured.
