@@ -646,11 +646,12 @@ To change these parameters use:
 **use_catalog** [ Type: *str* ] 
 
 	Keywords of catalog with information covering the fielf of view of your image. To date the available catalogs are:
-	.pan_starrs
-	.2mass
-	.apass
-	.skymapper
-	.sdss.
+
+	 . pan_starrs
+	 . 2mass
+	 . apass
+	 . skymapper
+	 . sdss.
 
 
 
@@ -676,7 +677,7 @@ To change these parameters use:
 
 **catalog_radius** [ Type: *float* ] 
 
-	When downloading new catalogs fecth data around the target lcation within this radius (in degrees).     dist_lim: 10  float.
+	When downloading new catalogs fecth data around the target lcation within this radius (in degrees).
 
 
 
@@ -706,7 +707,7 @@ To change these parameters use:
 
 **matching_source_FWHM_limt** [ Type: *flaot* ] 
 
-	If *matching_source_FWHM* is True exlclud sources that differ by the image FWHM by this amount.
+	When matching cataog sources, exclude sources that differ by the image FWHM by this amount. This value is defaulted to a very large amount, to make the variable accpetable, set this value to 1-3.
 
 
 
@@ -714,19 +715,9 @@ To change these parameters use:
 
 
 
-**remove_catalog_poorfits** [ Type: *bool* ] 
-
-	Remove sources that are not fitted well.
-
-
-
-	Default: **False**
-
-
-
 **catalog_matching_limit** [ Type: *float* ] 
 
-	Remove sources fainter than this limit.
+	Ignore catalog sources that have a given magnitude (i.e. not measured) lower than this value. This is used to decrease computation time, by ignoring sources that are expected to be too faint.
 
 
 
@@ -736,21 +727,11 @@ To change these parameters use:
 
 **max_catalog_sources** [ Type: *float* ] 
 
-	Max amount of catalog sources to use.
+	Max amount of catalog sources to use. This is used to decrease computation time. When fitting sources, we fit for the brightest sources first.
 
 
 
-	Default: **1000**
-
-
-
-**search_radius** [ Type: *float* ] 
-
-	radius in degrees for catalog.
-
-
-
-	Default: **0.25**
+	Default: **300**
 
 
 
@@ -764,7 +745,7 @@ COSMIC_RAYS
 
 .. note::
 
-   Commands for cosmic ray cleaning:
+   Commands for cosmic ray cleaning. Cosmic rays should be removed as they can lead to poor fitting when using PSF photometry and increased counts when using aperture. By default we use `Astroscrappy <https://github.com/astropy/astroscrappy>`_ for comsic ray removal.
 
 
 
@@ -782,17 +763,7 @@ To change these parameters use:
 
 **remove_cmrays** [ Type: *bool* ] 
 
-	If True, remove cosmic rays using astroscrappy.
-
-
-
-	Default: **True**
-
-
-
-**use_astroscrappy** [ Type: *bool* ] 
-
-	use Astroscrappy to remove comic rays.
+	If True, remove cosmic rays. This is left as a boolean option as some reduction pipelines may remove cosmic rays during their execution. If your data is already cleaned of comsic rays. If an image has already be run through the automated script, the keyword *CRAY_RMD* is written to the file. If this keyword is found, cosmic ray removal steps are ignored.
 
 
 
@@ -802,7 +773,7 @@ To change these parameters use:
 
 **use_lacosmic** [ Type: *bool* ] 
 
-	use LaCosmic from CCDPROC to remove comic rays.
+	use LaCosmic from CCDPROC to remove comic rays instead of Astroscrappy.
 
 
 
@@ -820,7 +791,7 @@ FITTING
 
 .. note::
 
-   Commands describing how to perform fitting
+   Commands describing how to perform fitting. This is mainly perfomed using `Astroscrappy <https://github.com/astropy/astroscrappy>`_
 
 
 
