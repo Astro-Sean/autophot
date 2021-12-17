@@ -1,6 +1,6 @@
 	This page gives commands that are able to be adjusted in AutoPhoT. Most of the time there is no need to change these values. However they may be useful for diagnsotic purposes.
 
-
+################
 
 General Commands
 
@@ -159,11 +159,13 @@ To change these parameters use:
 
 
 
-
+#############
 
 PREPROCESSING
 
 #############
+
+
 
 
 
@@ -231,11 +233,13 @@ To change these parameters use:
 
 
 
-
+##########
 
 PHOTOMETRY
 
 ##########
+
+
 
 
 
@@ -417,11 +421,13 @@ To change these parameters use:
 
 
 
-
+#########
 
 TEMPLATES
 
 #########
+
+
 
 
 
@@ -453,11 +459,13 @@ To change these parameters use:
 
 
 
-
+###
 
 WCS
 
 ###
+
+
 
 
 
@@ -609,11 +617,13 @@ To change these parameters use:
 
 
 
-
+#######
 
 CATALOG
 
 #######
+
+
 
 
 
@@ -727,11 +737,13 @@ To change these parameters use:
 
 
 
-
+###########
 
 COSMIC_RAYS
 
 ###########
+
+
 
 
 
@@ -773,11 +785,13 @@ To change these parameters use:
 
 
 
-
+#######
 
 FITTING
 
 #######
+
+
 
 
 
@@ -894,11 +908,13 @@ To change these parameters use:
 
 
 
-
+##########
 
 EXTINCTION
 
 ##########
+
+
 
 
 
@@ -930,11 +946,13 @@ To change these parameters use:
 
 
 
-
+################
 
 SOURCE_DETECTION
 
 ################
+
+
 
 
 
@@ -1150,11 +1168,13 @@ To change these parameters use:
 
 
 
-
+##################
 
 LIMITING_MAGNITUDE
 
 ##################
+
+
 
 
 
@@ -1436,11 +1456,13 @@ To change these parameters use:
 
 
 
-
+#################
 
 TARGET_PHOTOMETRY
 
 #################
+
+
 
 
 
@@ -1482,11 +1504,13 @@ To change these parameters use:
 
 
 
-
+###
 
 PSF
 
 ###
+
+
 
 
 
@@ -1614,11 +1638,13 @@ To change these parameters use:
 
 
 
-
+####################
 
 TEMPLATE_SUBTRACTION
 
 ####################
+
+
 
 
 
@@ -1740,11 +1766,13 @@ To change these parameters use:
 
 
 
-
+#####
 
 ERROR
 
 #####
+
+
 
 
 
@@ -1796,11 +1824,13 @@ To change these parameters use:
 
 
 
-
+#########
 
 ZEROPOINT
 
 #########
+
+
 
 
 
