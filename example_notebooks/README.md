@@ -41,3 +41,7 @@ This notebook demonstrates:
 
 * How to update AutoPhOT to accept your own add_your_catalog_example
 * Check that the given catalog file is in the correct structure.
+
+
+## Generic Example
+If you're happy with how the code works click  [here](https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/generic_example.ipynb) for a generic example containing several useful commands.
