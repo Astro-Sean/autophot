@@ -26,7 +26,7 @@ test:
 
 about:
   home: https://github.com/Astro-Sean/autophot
-  license: ccbysa-4.0
+  license: GPL-3.0
   license_file: license
-  description: Automated Photometry of Transients Photometric Pipeline
-  summary: Preparing initial upload
+  description: The AUTOmated Photometry Of Transients (AutoPhOT) is a novel automated pipeline that is designed for rapid, publication-quality photometry of transients.
+  summary: AUTOmated Photometry Of Transients (AutoPhOT) photometric pipeline
