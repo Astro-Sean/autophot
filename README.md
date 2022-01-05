@@ -9,7 +9,9 @@
 
 ## Introduction
 
-AutoPhOT is novel automated pipeline that is designed for rapid, publication-quality photometry of transients. AutoPhOT is built from the ground up using Python 3 - with no dependencies on legacy software.Capabilities of AutoPhOT include aperture and PSF-fitting photometry, template subtraction, and calculation of limiting magnitudes through artificial source injection. AutoPhOT is also capable of calibrating photometry against either survey catalogs (e.g. SDSS, PanSTARRS), or using a custom set of local photometric standards. We demonstrate the ability of AutoPhOT to reproduce light curves found in the published literature. AutoPhOT’s ability to recovered source fluxes is consistent with commonly used software e.g. DAOPHOT, using both aperture and PSF photometry
+AutoPhOT is novel automated pipeline that is designed for rapid, publication-quality photometry of transients.
+
+The pipeline is built from the ground up using Python 3 - with no dependencies on legacy software. Capabilities of AutoPhOT include aperture and PSF-fitting photometry, template subtraction, and calculation of limiting magnitudes through artificial source injection. AutoPhOT is also capable of calibrating photometry against either survey catalogs (e.g. SDSS, PanSTARRS), or using a custom set of local photometric standards.
 
 Feedback is welcome. Email me at sean.brennan2@ucdconnect.ie
 
