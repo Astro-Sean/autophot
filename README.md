@@ -9,9 +9,9 @@
 
 ## Introduction
 
-The Automated Photometry Of Transients (AutoPhOT) pipeline allows for rapid, automatic analysis of fits images for transient events.
+The Automated Photometry Of Transients (AutoPhOT) pipeline allows for rapid photometric analysis for transient events.
 
-The novel pipeline is built from the ground up, based on Python3 and makes extensive use of Astropy and Numpy packages. No instance of IRAF or Python2 software is used. AutoPhOT is able to handle heterogeneous data from different telescopes and applies techniques such as image calibration, image subtraction, and novel PSF fitting in an automated and intelligent way.
+The novel pipeline is built from the ground up, based on Python3 and makes extensive use of Astropy and Numpy packages. No instance of IRAF or Python2 software is used. AutoPhOT is able to handle heterogeneous data from different telescopes and applies techniques such as image calibration, image subtraction, and PSF fitting in an automated and intelligent way.
 
 Feedback is welcome. Email: sean.brennan2@ucdconnect.ie
 
@@ -27,8 +27,7 @@ Feedback is welcome. Email: sean.brennan2@ucdconnect.ie
 ```bash
 conda create -n autophot_env python=3.7
 ```
-
-then to activate this environment, run:
+then to activate this e˛nvironment, run:
 
 ```bash
 conda activate autophot_env
@@ -40,24 +39,30 @@ conda activate autophot_env
 conda install -c astro-sean autophot
 ```
 
+* If you want to update AutoPhOT, you can do so using:
+
+```bash
+conda update -c astro-sean autophot
+```
 ## Additional functionality
 
 To fully utilise the AutoPhoT Code, several additional softwares may be used.
 
-<h3>Astrometry.Net</h3>
+<h4>Astrometry.Net</h4>
 
 AutoPhoT relies on [Astrometry.net](https://arxiv.org/abs/0910.2233) by Dustin Lang to solve for WCS. While the code can be downloaded/installed [here](http://astrometry.net/doc/readme.html) and [here](http://astrometry.net/doc/build.html#build.) we suggest using [Homebrew](https://brew.sh/) to install Astometry.net.
 
 ```bash
 brew install astrometry-net
 ```
+
 To make sure everything is setup correctly, we can run the following in the terminal:
 
 ```bash
 solve-field
 ```
 
-In order for Astometry.net to run successfully, it requires pre-index files for calibration. First we can create a new directory called "data".
+In order for Astometry.net to run successfully, it requires pre-indexed files for calibration. Firstly, we can create a new directory called "data".
 
 ```bash
 mkdir data
@@ -70,7 +75,7 @@ Next, while in the data directory, we can run the following to obtain these inde
 wget -r -np http://broiler.astrometry.net/~dstn/4200/
 ```
 
-This will download all the index files to the data folder. Once this download is completed, this data folder must be placed in the correct location so that Astrometry.net can find it.
+This will download all the index files to the *data/* folder. Once this download is completed, this *data* folder must be placed in the correct location so that Astrometry.net can find it.
 
 We can search for the location of the solve-field command using the following:
 
@@ -78,7 +83,7 @@ We can search for the location of the solve-field command using the following:
 which solve-field
 ```
 
-It should be something similar to /usr/local/Cellar/astrometry-net/0.85_1/solve-field (although maybe not exactly). Move our data folder to this directory using:
+It should be something similar to /usr/local/Cellar/astrometry-net/0.85_1/solve-field (although maybe not exactly). Move our *data* folder to the parent directory using:
 
 ```bash
 cd ../
@@ -91,7 +96,7 @@ To update AutoPhot on the location of Astrometry.Net,  update (if needed) 'solve
 
 <h3>HOTPANTS</h3>
 
-AutoPhOT can use  [HOTPANTS](http://www.ascl.net/1504.004) by Andy Becker which can be found [here](https://github.com/acbecker/hotpants).
+AutoPhOT can use [HOTPANTS](http://www.ascl.net/1504.004) by Andy Becker which can be found [here](https://github.com/acbecker/hotpants).
 
 We can download the HotPants code from Github using:
 
@@ -114,7 +119,7 @@ CFITSIOINCDIR=/usr/local/Cellar/cfitsio/4.0.0/include
 LIBDIR=/usr/local/Cellar/cfitsio/4.0.0/lib
 ```
 
-Finally we can compile the code by running the following in the *hotpants* directory
+Finally we can compile the code by running the following in the *hotpants/* directory
 
 ```bash
 make
@@ -125,7 +130,7 @@ Once installed, locate the *hotpants* executable and update 'hotpants_exe_loc' i
 
 **Known error with installation of HOTPANTS**
 
-There is a [known bug](https://github.com/acbecker/hotpants/issues/4) with the HOTPNATS installation on MacOS if installing on MacOS - if upon installation you get 'malloc.h' file not found, replace:
+There is a [known bug](https://github.com/acbecker/hotpants/issues/4) with the HOTPANTS installation on MacOS - if upon installation you get 'malloc.h' file not found, replace:
 
 ```c
 #include <malloc.h>
@@ -163,11 +168,11 @@ no further action is required.
 
 ## Usage
 
-Check out my Jupyter Notebooks the get started with AutoPhOT [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks)
+Check out my Jupyter Notebooks the get started with AutoPhOT [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks). If you need an example of how to use specific functions in AutoPHoT, please open an issue [here](https://github.com/Astro-Sean/autophot/issues).
 
-If you wish to use the packages within AutoPhOT outside of the examples given, Documentation on each package is given [here](https://autophot.readthedocs.io/en/latest/)
+If you wish to use the packages within AutoPhOT outside of the examples given, documentation on each package is given [here](https://autophot.readthedocs.io/en/latest/).
 
-**12-11-2021 - These are outdated, new notebooks coming soon**
+A list of keywords used in AutoPHoT can be found [here](https://autophot.readthedocs.io/en/latest/instructions.html).
 
 ## Referencing
 
