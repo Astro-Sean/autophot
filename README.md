@@ -165,7 +165,7 @@ python setup.py install
 no further action is required.
 
 
-## How to use AUTOPhOT
+## How to use AutoPhOT
 
 I've designed AUTOPhOT to be a user friendly pipeline, meaning you need very little prior knowledge on the art of photometry. Check out my *Jupyter* notebooks the get started with AutoPhOT [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks). If you need an example of how to use specific functions in AutoPHoT, please open an issue [here](https://github.com/Astro-Sean/autophot/issues).
 
