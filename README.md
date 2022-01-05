@@ -9,11 +9,9 @@
 
 ## Introduction
 
-The Automated Photometry Of Transients (AutoPhOT) pipeline allows for rapid photometric analysis for transient events.
+AutoPhOT is novel automated pipeline that is designed for rapid, publication-quality photometry of transients. AutoPhOT is built from the ground up using Python 3 - with no dependencies on legacy software.Capabilities of AutoPhOT include aperture and PSF-fitting photometry, template subtraction, and calculation of limiting magnitudes through artificial source injection. AutoPhOT is also capable of calibrating photometry against either survey catalogs (e.g. SDSS, PanSTARRS), or using a custom set of local photometric standards. We demonstrate the ability of AutoPhOT to reproduce light curves found in the published literature. AutoPhOT’s ability to recovered source fluxes is consistent with commonly used software e.g. DAOPHOT, using both aperture and PSF photometry
 
-The novel pipeline is built from the ground up, based on Python3 and makes extensive use of Astropy and Numpy packages. No instance of IRAF or Python2 software is used. AutoPhOT is able to handle heterogeneous data from different telescopes and applies techniques such as image calibration, image subtraction, and PSF fitting in an automated and intelligent way.
-
-Feedback is welcome. Email: sean.brennan2@ucdconnect.ie
+Feedback is welcome. Email me at sean.brennan2@ucdconnect.ie
 
 <p align="center">
   <a href="https://www.buymeacoffee.com/astrosean" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" style="height: 41px !important;width: 174px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
@@ -22,7 +20,7 @@ Feedback is welcome. Email: sean.brennan2@ucdconnect.ie
 
 ## Installation
 
-* We suggest creating a new environment for AutoPhOT. This can be done using [conda](https://docs.conda.io/en/latest/) by running:
+We suggest creating a new environment for AutoPhOT. This can be done using [conda](https://docs.conda.io/en/latest/) by running:
 
 ```bash
 conda create -n autophot_env python=3.7
@@ -33,13 +31,13 @@ then to activate this e˛nvironment, run:
 conda activate autophot_env
 ```
 
-* Install AutoPhOT using the conda install:
+Install AutoPhOT using the conda install:
 
 ```bash
 conda install -c astro-sean autophot
 ```
 
-* If you want to update AutoPhOT, you can do so using:
+If you want to update AutoPhOT, you can do so using:
 
 ```bash
 conda update -c astro-sean autophot
@@ -92,9 +90,9 @@ cp -R data /usr/local/Cellar/astrometry-net/0.85_1/
 
 To update AutoPhot on the location of Astrometry.Net,  update (if needed) 'solve_field_exe_loc' in the autophot_input dictionary (see [here](https://github.com/Astro-Sean/autophot/blob/master/autophot_example.ipynb) for example).
 
-**If the user trusts their WCS this step can be ignored as Astrometry.net is not used.**
+If the user trusts their WCS this step can be ignored as Astrometry.net is not used.
 
-<h3>HOTPANTS</h3>
+<h4>HOTPANTS</h4>
 
 AutoPhOT can use [HOTPANTS](http://www.ascl.net/1504.004) by Andy Becker which can be found [here](https://github.com/acbecker/hotpants).
 
@@ -146,10 +144,9 @@ with
 ```
 to every .c file. Then you can run the *make* command.
 
+If the user has no need for image subtraction or wants to use Zogy only, this step can be ignored.
 
-**If the user has no need for image subtraction or wants to use Zogy only, this step can be ignored.**
-
-<h3>ZOGY</h3>
+<h4>ZOGY</h4>
 
 AutoPhOT can also use [Zogy](https://arxiv.org/abs/1601.02655) which has a python wrapper and can be found [here](https://github.com/dguevel/PyZOGY). We can install this straight from Github. Make sure the correct environment is activated. we can clone the Github repository to the current directory:
 
@@ -166,13 +163,13 @@ python setup.py install
 no further action is required.
 
 
-## Usage
+## How to use AUTOPhOT
 
-Check out my Jupyter Notebooks the get started with AutoPhOT [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks). If you need an example of how to use specific functions in AutoPHoT, please open an issue [here](https://github.com/Astro-Sean/autophot/issues).
+I've designed AUTOPhOT to be a user friendly pipeline, meaning you need very little prior knowledge on the art of photometry. Check out my *Jupyter* notebooks the get started with AutoPhOT [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks). If you need an example of how to use specific functions in AutoPHoT, please open an issue [here](https://github.com/Astro-Sean/autophot/issues).
 
 If you wish to use the packages within AutoPhOT outside of the examples given, documentation on each package is given [here](https://autophot.readthedocs.io/en/latest/).
 
-A list of keywords used in AutoPHoT can be found [here](https://autophot.readthedocs.io/en/latest/instructions.html).
+A list of settings used in AutoPHoT can be found [here](https://autophot.readthedocs.io/en/latest/instructions.html).
 
 ## Referencing
 
