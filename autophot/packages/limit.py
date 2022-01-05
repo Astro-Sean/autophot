@@ -361,7 +361,7 @@ def limiting_magnitude_prob(image,fpath, detection_limit=3, bkg_level=3, fwhm = 
             
             plt.ioff()
             
-            limiting_mag_figure = plt.figure(figsize = set_size(250,aspect = 1.5))
+            limiting_mag_figure = plt.figure(figsize = set_size(250,aspect = 1.75))
     
             ncols = 2
             nrows = 2
@@ -404,21 +404,21 @@ def limiting_magnitude_prob(image,fpath, detection_limit=3, bkg_level=3, fwhm = 
             
             ax0.axvline(mean + 1*std,**line_kwargs)
             ax0.text(mean + 1*std,np.max(n),r'$1\sigma_{bkg}$',
-                     rotation = -90,va = 'top',ha = 'center',fontsize = 4)
+                     rotation = -90,va = 'top',ha = 'center',fontsize = 5)
             
             ax0.axvline(mean + 2*std,**line_kwargs)
             ax0.text(mean + 2*std,np.max(n),r'$2\sigma_{bkg}$',
-                     rotation = -90,va = 'top',ha = 'center',fontsize = 4)
+                     rotation = -90,va = 'top',ha = 'center',fontsize = 5)
     
             ax0.axvline(mean + detection_limit*std,**line_kwargs)
             ax0.text(mean + detection_limit*std,np.max(n),r'$'+str(detection_limit)+r'\sigma_{bkg}$',
-                     rotation = -90,va = 'top',ha = 'center',fontsize = 4)
+                     rotation = -90,va = 'top',ha = 'center',fontsize = 5)
             
             if injected_sources_use_beta:
                 ax0.axvline(mean+f_ul_beta,ymin = 0,ymax = 0.65, alpha=0.5,
                             color='black',ls = '--')
                 ax0.text(mean+f_ul_beta,np.max(n),r'$F_{UL,\beta=%.2f}$ '%beta,
-                         rotation = -90,va = 'top',ha = 'center',fontsize = 4)
+                         rotation = -90,va = 'top',ha = 'center',fontsize = 5)
             
     
     
@@ -950,6 +950,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         
         user_mag_level = lmag_guess - zeropoint
             
+    # Used for debugging
     # user_mag_level = inject_source_mag - zeropoint
     
     start_mag = user_mag_level
@@ -1529,65 +1530,14 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
 
 
     image_limited = image.copy()
-    
-    # save_cutouts = True
-    # if save_cutouts:
-        
-    #     cutout_size = 2 * fwhm
-        
-    #     rows = int(np.ceil(len(injection_df)/2))
-        
-    #     if rows % 2 != 0:
-    #         rows=rows+1
 
-    #     plt.ioff()
-    #     fig = plt.figure(figsize = set_size(250,2))
-        
-    #     gs = gridspec.GridSpec(rows, 2)
-        
-    #     gs.update(wspace=0., hspace=0.)
-        
-    #     for idx in range(len(injection_df)):
-            
-    #         ax = fig.add_subplot(gs[idx])
-            
-            
-    #         fake_kth_source = input_model(injection_df.x_pix.values[idx],
-    #                                       injection_df.y_pix.values[idx],
-    #                                       mag2image(inject_lmag_minus_1),
-    #                                       )
-            
-    #         image_kth = image_limited + fake_kth_source
-            
-            
-    #         kth_cutout = image_kth[int(injection_df.y_pix.values[idx]-cutout_size): int(injection_df.y_pix.values[idx] + cutout_size),
-    #                                int(injection_df.x_pix.values[idx]-cutout_size): int(injection_df.x_pix.values[idx] + cutout_size)]
-            
-    #         ax.imshow(kth_cutout,
-    #                   interpolation = None,
-    #                    aspect = 'equal',
-    #                   origin = 'lower')
-            
-    #         ax.xaxis.set_visible(False)
-    #         ax.yaxis.set_visible(False)
-            
-    #         circle = plt.Circle((kth_cutout.shape[1]/2,kth_cutout.shape[1]/2), 1*fwhm, 
-    #                         color='r',
-    #                         lw = 0.25,
-    #                         fill=False)
-    #         ax.add_patch(circle)
-            
-    #     fig.savefig(write_dir+'inject_lmag_cutouts_'+str(base)+'.pdf',
-    #                 format = 'pdf')
-            
-    #     plt.close(fig)
 
 
     if save_plot :
 
         plt.ioff()
         heights = [1,0.5,0.5]
-        fig = plt.figure(figsize = set_size(250,1.5))
+        fig = plt.figure(figsize = set_size(250,1.75))
         layout = gridspec.GridSpec(ncols=3, 
                                    nrows=3,
                                    figure=fig,
@@ -1670,7 +1620,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         idx = np.argsort(x)
         x = x[idx]
         
-        y = np.array(list(cum_detection.values()))[idx]
+        y = np.array(list(cum_detection.values()))[idx]/redo
    
         ax11.plot(x,y,
                   color = 'black',
@@ -1727,15 +1677,15 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         ax2.set_title(r'No fake sources',pad = -0.1,fontsize = 5)
     
         
-        red_circle = Line2D([0], [0], marker='o',
-                            label='Test locations',
-                            markerfacecolor='none',
-                            markeredgecolor='black',
-                            markersize = 3)
-        ax2.legend(handles=[red_circle],
-                   loc = 'upper right',
-                   frameon = False, 
-                   fontsize = 5)
+        # red_circle = Line2D([0], [0], marker='o',
+        #                     # label='Test locations',
+        #                     markerfacecolor='none',
+        #                     markeredgecolor='black',
+        #                     markersize = 3)
+        # ax2.legend(handles=[red_circle],
+        #            loc = 'upper right',
+        #            frameon = False, 
+        #            fontsize = 5)
         
         
         for k in range(len(injection_df)):
