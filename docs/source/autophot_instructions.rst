@@ -1,7 +1,7 @@
 	This page gives commands that are able to be adjusted in AutoPhoT. Most of the time there is no need to change these values. However they may be useful for diagnsotic purposes.
 
 ================
-General Commands
+GENERAL COMMANDS
 ================
 
 .. note::
@@ -251,7 +251,7 @@ To change these parameters use:
 **remove_wcs** [ Type: *bool* ] 
 	If True, remove any pre-existing WCS keywords in a header image and check the local version of Astrometry.net for new values. This is also recommended that correct WCS are vital for precision photometry.
 
-	Default: **True**
+	Default: **False**
 
 **force_wcs_redo** [ Type: *bool* ] 
 	If True, an image is discarded from the automated script if its WCS cannot be solved.
@@ -356,9 +356,9 @@ To change these parameters use:
 **include_IR_sequence_data** [ Type: *bool* ] 
 	If True, include IR sequence data from 2MASS in the catalog data. This is useful if you have a large dataset that which includes JHK data.
 
-	Default: **True**
+	Default: **False**
 
-**matching_source_FWHM_limt** [ Type: *flaot* ] 
+**matching_source_FWHM_limit** [ Type: *flaot* ] 
 	When matching cataog sources, exclude sources that differ by the image FWHM by this amount. This value is defaulted to a very large amount, to make the variable acceptable, set this value to 1-3.
 
 	Default: **100**
@@ -588,6 +588,11 @@ To change these parameters use:
 	When fitting for the FWHM, constrain the fitting to allow for this maximum value to fit for the FWHM.
 
 	Default: **30**
+
+**use_catalog** [ Type: *bool* ] 
+	use a catatlog of sources with columns *RA* and *DEC* for finding the FWHM.
+
+	Default: **None**
 
 ==================
 LIMITING_MAGNITUDE
@@ -951,7 +956,7 @@ To change these parameters use:
 **zp_use_mean** [ Type: *bool* ] 
 	When determined the zeropoint, use the mean and standard deviation when reporting the zero point and its' error.
 
-	Default: **False**
+	Default: **True**
 
 **zp_use_fitted** [ Type: *bool* ] 
 	When determined the zero point, fit a vertical line to the zeropoint distribution. The value of best fit is the taken as the zero point measurement and the error is the sum of the diagonal of the covariance matrix.
@@ -961,7 +966,7 @@ To change these parameters use:
 **zp_use_median** [ Type: *bool* ] 
 	When determined the zero point, use the median value for the zeropoint and the median absolute deviation as the error.
 
-	Default: **True**
+	Default: **False**
 
 **zp_use_WA** [ Type: *bool* ] 
 	When determined the zero point, use the weighted average and standard deviation as the zero point and its error. This is not recommended as there is too much weighting placed on error and may skew result.
