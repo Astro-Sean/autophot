@@ -4,7 +4,7 @@ AutoPhOT_input:
 
   method: sp # str ---  Method for processing - serial [sp] or multi-processing [mp] (not working)
 
-  ignore_no_telescop: False # bool ---  bool --- Ignore file if no telescope name given (given by TELESCOP header key)
+  ignore_no_telescop: False # bool ---  bool --- Ignore file if no telescope name given (given by TELESCOP header key). If False and an image is found without the TELESCOP header key, the use is asked for clarity.
 
   outdir_name: REDUCED # str ---  Extension of output directory. For example if parent directry (which is given in *fits_dir*) is SN1987A output directory will be SN1987A_REDUCED. The code will not overwrite an original data. Any image found in *fits_dir* is copied over to this new directory and we perform photometry on this new image.
 
@@ -79,7 +79,7 @@ AutoPhOT_input:
 
     allow_wcs_recheck: False # bool --- If the offset between when the where the sources are detected and where the WCS values say the should be is too large, allow the script to redo these WCS values and re-attempt the matching script.
 
-    remove_wcs: True # bool --- If True, remove any pre-existing WCS keywords in a header image and check the local version of Astrometry.net for new values. This is also recommended that correct WCS are vital for precision photometry.
+    remove_wcs: False # bool --- If True, remove any pre-existing WCS keywords in a header image and check the local version of Astrometry.net for new values. This is also recommended that correct WCS are vital for precision photometry.
 
     force_wcs_redo: False # bool --- If True, an image is discarded from the automated script if its WCS cannot be solved.
 
@@ -113,9 +113,9 @@ AutoPhOT_input:
 
     plot_catalog_nondetections: False # bool --- If True, return a histogram plot of the sources (not) detected based on their signal to noise ratio.
 
-    include_IR_sequence_data: True # bool --- If True, include IR sequence data from 2MASS in the catalog data. This is useful if you have a large dataset that which includes JHK data.
+    include_IR_sequence_data: False # bool --- If True, include IR sequence data from 2MASS in the catalog data. This is useful if you have a large dataset that which includes JHK data.
 
-    matching_source_FWHM_limt: 100 # flaot --- When matching cataog sources, exclude sources that differ by the image FWHM by this amount. This value is defaulted to a very large amount, to make the variable acceptable, set this value to 1-3
+    matching_source_FWHM_limit: 100 # flaot --- When matching cataog sources, exclude sources that differ by the image FWHM by this amount. This value is defaulted to a very large amount, to make the variable acceptable, set this value to 1-3
 
     catalog_matching_limit: 20 # float --- Ignore catalog sources that have a given magnitude (i.e. not measured) lower than this value. This is used to decrease computation time, by ignoring sources that are expected to be too faint.
 
@@ -190,6 +190,8 @@ AutoPhOT_input:
     scale_multipler: 4 # float --- Multiplier to set close up cutout size based on image scaling. The standard image cutout size will have the shape :math:`image.shape = (2 \\times scale, 2 \\times scale)` where scale is set by:\n\n\t.. code:: python\n\n\t   scale = int(np.ceil(scale_multipler * image_fwhm)) + 0.5
 
     max_fit_fwhm: 30 # float --- When fitting for the FWHM, constrain the fitting to allow for this maximum value to fit for the FWHM.
+
+    use_catalog: null # bool --- use a catatlog of sources with columns *RA* and *DEC* for finding the FWHM
 
   limiting_magnitude: # These commands are concerned with determining the limiting magnitude of an image. More specifically the location around a given target location.
 
@@ -314,11 +316,11 @@ AutoPhOT_input:
 
     plot_ZP_image_analysis: False # bool --- If True, return a plot of the zero point distribution across the image
 
-    zp_use_mean: False # bool --- When determined the zeropoint, use the mean and standard deviation when reporting the zero point and its' error
+    zp_use_mean: True # bool --- When determined the zeropoint, use the mean and standard deviation when reporting the zero point and its' error
 
     zp_use_fitted: False # bool --- When determined the zero point, fit a vertical line to the zeropoint distribution. The value of best fit is the taken as the zero point measurement and the error is the sum of the diagonal of the covariance matrix.
 
-    zp_use_median: True # bool --- When determined the zero point, use the median value for the zeropoint and the median absolute deviation as the error.
+    zp_use_median: False # bool --- When determined the zero point, use the median value for the zeropoint and the median absolute deviation as the error.
 
     zp_use_WA: False # bool --- When determined the zero point, use the weighted average and standard deviation as the zero point and its error. This is not recommended as there is too much weighting placed on error and may skew result.
 
