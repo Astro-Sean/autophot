@@ -34,7 +34,7 @@ Welcome to AutoPHoT!
 
 .. toctree::
    :maxdepth: 1
-   :caption: Commands
+   :caption: AutoPhOT Settings
 
    autophot_instructions
 
