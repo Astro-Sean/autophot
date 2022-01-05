@@ -1,6 +1,6 @@
 from pkg_resources import get_distribution
 
-# __version__ = get_distribution('autophot').version
-
-
-__version__ = 1.0
+try:
+    __version__ = get_distribution('autophot').version
+except:
+    __version__ = 'Test'
