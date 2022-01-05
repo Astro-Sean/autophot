@@ -13,14 +13,14 @@ AutoPhOT is novel automated pipeline that is designed for rapid, publication-qua
 
 The pipeline is built from the ground up using Python 3 - with no dependencies on legacy software. Capabilities of AutoPhOT include aperture and PSF-fitting photometry, template subtraction, and calculation of limiting magnitudes through artificial source injection. AutoPhOT is also capable of calibrating photometry against either survey catalogs (e.g. SDSS, PanSTARRS), or using a custom set of local photometric standards.
 
-Feedback is welcome. Email me at sean.brennan2@ucdconnect.ie
+Feedback is welcome. Email [me](https://github.com/Astro-Sean) at sean.brennan2@ucdconnect.ie
 
 <p align="center">
   <a href="https://www.buymeacoffee.com/astrosean" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" style="height: 41px !important;width: 174px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
 </p>
 
 
-## Installation
+## Installation˜
 
 We suggest creating a new environment for AutoPhOT. This can be done using [conda](https://docs.conda.io/en/latest/) by running:
 
