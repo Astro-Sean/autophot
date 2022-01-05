@@ -64,7 +64,7 @@ def SNR_err(SNR):
 
        \\rightarrow = -2.5 \\times log_{10} ( S )   -2.5 \\times log_{10}(1 \\pm N / S ) )
 
-       \delta m = \mp 2.5\\times log_{10} (1 + \\frac{1}{S/N}) \\approx \mp 1.0875 (N / S})
+       \delta m = \mp 2.5\\times log_{10} (1 + \\frac{1}{S/N}) \\approx \mp 1.0875 (N / S)
 
     :param SNR: Signal to noise ratio of a point-like source. 
     :type SNR: float
@@ -426,7 +426,7 @@ def beta_value(n,f_ul,sigma,noise = 0):
     
     .. math::
         
-       1 - \\beta = \\beta{\\prime} = \\frac{1}{2}(1 - \mathit{erf} \\frac{n\sigma_{bkg} - f_{source}}{\sigma_{bkg} \\sqrt{2}})
+       1 - \\beta = \\beta{\\prime} = \\frac{1}{2}(1 - \mathit{erf}(\\frac{n\sigma_{bkg} - f_{source}}{\sigma_{bkg} \\sqrt{2}}))
        
     where :math:`\\beta{\\prime}` is the confident that source is not apart of the underlying noise distribution, :math:`\mathit{erf}` is the `Error function <https://mathworld.wolfram.com/Erf.html>`_, :math:`f_{source}` is the brightest pixel that can be associated with a source, and :math:`\sigma_{bkg}` is the standard deviation of the background noise distribution.
      
