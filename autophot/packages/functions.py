@@ -53,16 +53,16 @@ def SNR(flux_star,flux_sky,exp_t,radius,G = 1,RN = 0,DC = 0 ):
 def SNR_err(SNR):
     
     '''
-    Error associated with signal to noise ratio (S/N). Equation  taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.pdf>`_. Where can associated the error on the instrumental magnitude of a source as:
+    Error associated with signal to noise ratio (S/N). Equation  taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.pdf>`_. Whe can associate the error on the instrumental magnitude of a source as:
 
 
     .. math :: 
         
        m \\pm \delta m = -2.5 \\times log_{10} ( S \\pm N) 
 
-       \\rightarrow = -2.5 \\times log_{10} ( S  (1 \\pm N / S ) )
+       m \\pm \delta m = -2.5 \\times log_{10} ( S  (1 \\pm N / S ) )
 
-       \\rightarrow = -2.5 \\times log_{10} ( S )   -2.5 \\times log_{10}(1 \\pm N / S ) )
+       m \\pm \delta m = -2.5 \\times log_{10} ( S )   - 2.5 \\times log_{10}(1 \\pm N / S ) )
 
        \delta m = \mp 2.5\\times log_{10} (1 + \\frac{1}{S/N}) \\approx \mp 1.0875 (N / S)
 
