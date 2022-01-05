@@ -92,7 +92,7 @@ def limiting_magnitude_prob(image,fpath, detection_limit=3, bkg_level=3, fwhm = 
                             print_progress = True , remove_bkg_local = True,
                             remove_bkg_surface = False, remove_bkg_poly = False,
                             remove_bkg_poly_degree = 1, subtraction_ready = False,
-                             plot_probable_limit = True):
+                            injected_sources_use_beta = True, plot_probable_limit = True):
     '''
         
     Package to employ the same error technique as in the `SNOOPY
@@ -332,10 +332,16 @@ def limiting_magnitude_prob(image,fpath, detection_limit=3, bkg_level=3, fwhm = 
 
         mean = popt[1]
         std  = abs(popt[2])
-
-        f_ul_beta = f_ul(n = detection_limit, beta_p = beta, sigma = std)
         
-        count_ul = f_ul_beta
+        if injected_sources_use_beta:
+
+            f_ul_beta = f_ul(n = detection_limit, beta_p = beta, sigma = std)
+        
+            count_ul = f_ul_beta
+        else:
+            
+            count_ul = detection_limit*std
+            
 
         flux  = count_ul / exp_time
 
@@ -408,11 +414,11 @@ def limiting_magnitude_prob(image,fpath, detection_limit=3, bkg_level=3, fwhm = 
             ax0.text(mean + detection_limit*std,np.max(n),r'$'+str(detection_limit)+r'\sigma_{bkg}$',
                      rotation = -90,va = 'top',ha = 'center',fontsize = 4)
             
-            
-            ax0.axvline(mean+f_ul_beta,ymin = 0,ymax = 0.65, alpha=0.5,
-                        color='black',ls = '--')
-            ax0.text(mean+f_ul_beta,np.max(n),r'$F_{UL,\beta=%.2f}$ '%beta,
-                     rotation = -90,va = 'top',ha = 'center',fontsize = 4)
+            if injected_sources_use_beta:
+                ax0.axvline(mean+f_ul_beta,ymin = 0,ymax = 0.65, alpha=0.5,
+                            color='black',ls = '--')
+                ax0.text(mean+f_ul_beta,np.max(n),r'$F_{UL,\beta=%.2f}$ '%beta,
+                         rotation = -90,va = 'top',ha = 'center',fontsize = 4)
             
     
     
@@ -446,10 +452,12 @@ def limiting_magnitude_prob(image,fpath, detection_limit=3, bkg_level=3, fwhm = 
     
             fake_sources = np.zeros(image.shape)
             
+            # PSF_avaiable = True
+            
             try:
                 
-                if unity_PSF_counts is None:
-                    pass
+                if unity_PSF_counts is None or r_table is None:
+                    raise Exception ('PSF model not available\n- Using Gaussian for probable limiting magnitude')
     
                 model_label = 'PSF'
     
@@ -466,12 +474,14 @@ def limiting_magnitude_prob(image,fpath, detection_limit=3, bkg_level=3, fwhm = 
                     return model(x, y, 0, H, r_table, fwhm, image_params,use_moffat = use_moffat, fitting_radius = fitting_radius,regrid_size = regrid_size,pad_shape = image.shape)        
     
             except:
+                
+                # PSF_avaiable = False
     
                 '''
                 if PSF model isn't available - use Gaussian instead
     
                 '''
-                logging.info('PSF model not available\n- Using Gaussian for probable limiting magnitude')
+                # logging.info('PSF model not available\n- Using Gaussian for probable limiting magnitude')
                 
                 model_label = 'Gaussian'
     
@@ -836,10 +846,13 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
 
     logger = logging.getLogger(__name__)
     
+    PSF_available = True
+    
     try:
         if r_table is  None or unity_PSF_counts is None:
+            PSF_available = False
             # Check if the PSF model is available
-            raise Exception('PSF MODEL not available - using Gaussian function')
+            raise Exception('PSF model not available for artifical source injection, using Gaussian function')
             
         
         def mag2image(m):
@@ -859,10 +872,10 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
 
 
     except Exception as e:
+        print(e)
         
         #if PSF model isn't available - use Gaussian instead
 
-        logger.info('PSF model not available [ %s ]\nUsing Gaussian function' % e)
         # model_label = 'Gaussian'
     
         sigma = fwhm / 2*np.sqrt(2*np.log(2))
@@ -937,7 +950,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
         
         user_mag_level = lmag_guess - zeropoint
             
-    user_mag_level = inject_source_mag - zeropoint
+    # user_mag_level = inject_source_mag - zeropoint
     
     start_mag = user_mag_level
 
@@ -1021,7 +1034,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
     hold_psf_position =  False
     
     # Measure flux at each point proir than adding any fake sources - to account for an irregular SNR at a specific location
-    if not inject_lmag_use_ap_phot:
+    if not inject_lmag_use_ap_phot and PSF_available:
         
         psf_fit  = psf.fit(image = image,
                         sources = injection_df,
@@ -1264,7 +1277,7 @@ def inject_sources(image, fwhm, fpath, exp_time, ap_size = 1.7, scale = 25,
 
                     f_injected_source = np.nanmax(fake_source_on_target)/exp_time
                     
-                    if not inject_lmag_use_ap_phot:
+                    if not inject_lmag_use_ap_phot and PSF_available:
                                            
                         psf_fit  = psf.fit(image = image + fake_source_on_target,
                                         sources = injection_df.iloc[[k]],

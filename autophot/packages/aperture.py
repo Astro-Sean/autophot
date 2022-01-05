@@ -700,8 +700,10 @@ def find_optimum_aperture_size(dataframe,
     
     search_size = np.arange(0.1,5,step_size)
     
-
-    idx = dataframe['include_fwhm']
+    if 'include_fwhm' in dataframe.columns:
+        idx = dataframe['include_fwhm']
+    else:
+        idx = [True] *len(dataframe) 
 
     dataframe = dataframe[idx].head(25)
     
@@ -756,11 +758,11 @@ def find_optimum_aperture_size(dataframe,
         
     sum_distribution = np.nanmedian(sum_distribution,axis=0)
     sum_distribution_max_idx = np.argmax(sum_distribution)
-    optimum_radius = search_size[sum_distribution_max_idx]  * 1.5
+    optimum_radius = search_size[sum_distribution_max_idx]  * 1.25
     
     # optimum_radius = np.nanmedian(optimum_radii)
     
-    if optimum_radius>3 and not plot_optimum_radius:
+    if optimum_radius>3:
         logger.info('\nOptimum radius seems high [%.1f x FWHM] - setting to %.1f x FWHM' % (optimum_radius,ap_size))
         optimum_radius = ap_size
         return optimum_radius
@@ -773,6 +775,7 @@ def find_optimum_aperture_size(dataframe,
     dir_path = os.path.dirname(os.path.realpath(__file__))
     plt.style.use(os.path.join(dir_path,'autophot.mplstyle'))
     
+    plt.ioff()
     fig = plt.figure(figsize = set_size(250,1))
     
     ax1 = fig.add_subplot(111)
@@ -821,7 +824,7 @@ def find_optimum_aperture_size(dataframe,
               
               )
     
-    ax1.scatter( [] ,[], c='blue',marker=r'$\leftarrow$',s=25, label='Optimum Radius x 1.5' )
+    ax1.scatter( [] ,[], c='blue',marker=r'$\leftarrow$',s=25, label='Optimum Radius x 1.25' )
     # 
     ax1.scatter( [] ,[], c='red',marker=r'$\leftarrow$',s=25,  )
     

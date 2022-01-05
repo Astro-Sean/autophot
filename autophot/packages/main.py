@@ -39,7 +39,7 @@ def main(object_info,autophot_input,fpath):
     
     # Astropy and photutils
     from astropy.io import fits
-    from astropy.stats import sigma_clip
+    # from astropy.stats import sigma_clip
     from astropy.coordinates import SkyCoord
     from astropy import units as u
     import astropy.wcs as wcs
@@ -471,32 +471,30 @@ def main(object_info,autophot_input,fpath):
                 autophot_input['pixel_scale'] = tele_autophot_input[telescope][inst_key][inst]['pixel_scale']
 
             prepare_templates(fpath,
-                              wdir,
-                              write_dir,
                               tele_autophot_input=tele_autophot_input ,
-                                get_fwhm = True,
-                                build_psf = True,
-                                clean_cosmic = True,
-                                use_astroscrappy = True,
-                                solve_field_exe_loc = autophot_input['wcs']['solve_field_exe_loc'],
-                                use_lacosmic = False,
-                                use_filter = use_filter,
-                                redo_wcs = True,
-                                target_ra = autophot_input['target_ra'],
-                                target_dec =  autophot_input['target_dec'],
-                                search_radius = 0.5,
-                                cpu_limit= 180,
-                                downsample = 2,
-                                threshold_value = 25,
-                                ap_size =  autophot_input['photometry']['ap_size'],
-                                inf_ap_size = autophot_input['photometry']['inf_ap_size'],
-                                r_in_size = autophot_input['photometry']['r_in_size'],
-                                r_out_size = autophot_input['photometry']['r_out_size'],
-                                use_moffat = autophot_input['fitting']['use_moffat'],
-                                psf_source_no = autophot_input['psf']['psf_source_no'],
-                                fitting_method = autophot_input['fitting']['fitting_method'],
-                                regrid_size  = autophot_input['psf']['regrid_size'],
-                                fitting_radius =autophot_input['fitting']['fitting_radius'])
+                              get_fwhm = True,
+                              build_psf = True,
+                              clean_cosmic = True,
+                      
+                              solve_field_exe_loc = autophot_input['wcs']['solve_field_exe_loc'],
+                              use_lacosmic = False,
+                              use_filter = use_filter,
+                              redo_wcs = True,
+                              target_ra = autophot_input['target_ra'],
+                              target_dec =  autophot_input['target_dec'],
+                              search_radius = 0.5,
+                              cpu_limit= 180,
+                              downsample = 2,
+                              threshold_value = 25,
+                              ap_size =  autophot_input['photometry']['ap_size'],
+                              inf_ap_size = autophot_input['photometry']['inf_ap_size'],
+                              r_in_size = autophot_input['photometry']['r_in_size'],
+                              r_out_size = autophot_input['photometry']['r_out_size'],
+                              use_moffat = autophot_input['fitting']['use_moffat'],
+                              psf_source_no = autophot_input['psf']['psf_source_no'],
+                              fitting_method = autophot_input['fitting']['fitting_method'],
+                              regrid_size  = autophot_input['psf']['regrid_size'],
+                              fitting_radius =autophot_input['fitting']['fitting_radius'])
 
             return
         # ============================================================================
@@ -710,48 +708,48 @@ def main(object_info,autophot_input,fpath):
                 logging.info('No WCS values found - attempting to solve field')
                 if autophot_input['wcs']['use_xylist']:
                     _,df,_,_ = get_fwhm(image,
-                                                           write_dir,
-                                                           base,
-                                                           threshold_value = autophot_input['source_detection']['threshold_value'],
-                                                           fwhm_guess = autophot_input['source_detection']['fwhm_guess'],
-                                                           bkg_level = autophot_input['fitting']['bkg_level'],
-                                                           max_source_lim = autophot_input['source_detection']['max_source_lim'],
-                                                           min_source_lim = autophot_input['source_detection']['min_source_lim'],
-                                                           int_scale = autophot_input['source_detection']['int_scale'],
-                                                           fudge_factor = autophot_input['source_detection']['fudge_factor'],
-                                                           fine_fudge_factor = autophot_input['source_detection']['fine_fudge_factor'],
-                                                           source_max_iter = autophot_input['source_detection']['source_max_iter'],
-                                                           sat_lvl = autophot_input['sat_lvl'],
-                                                           lim_theshold_value = autophot_input['source_detection']['lim_theshold_value'],
-                                                           scale_multipler = autophot_input['source_detection']['scale_multipler'],
-                                                           sigmaclip_FWHM = autophot_input['source_detection']['sigmaclip_FWHM'],
-                                                           sigmaclip_FWHM_sigma = autophot_input['source_detection']['sigmaclip_FWHM_sigma'],
-                                                           sigmaclip_median = autophot_input['source_detection']['sigmaclip_median'],
-                                                           isolate_sources = autophot_input['source_detection']['isolate_sources'],
-                                                           isolate_sources_fwhm_sep = autophot_input['source_detection']['isolate_sources_fwhm_sep'],
-                                                           init_iso_scale = autophot_input['source_detection']['init_iso_scale'],
-                                                           remove_boundary_sources = autophot_input['source_detection']['remove_boundary_sources'],
-                                                           pix_bound = autophot_input['source_detection']['pix_bound'],
-                                                           sigmaclip_median_sigma = autophot_input['source_detection']['sigmaclip_median_sigma'],
-                                                           save_FWHM_plot = autophot_input['source_detection']['save_FWHM_plot'],
-                                                           plot_image_analysis = autophot_input['source_detection']['plot_image_analysis'],
-                                                           save_image_analysis = autophot_input['source_detection']['save_image_analysis'],
-                                                           use_local_stars_for_FWHM = autophot_input['photometry']['use_local_stars_for_FWHM'],
-                                                           prepare_templates = autophot_input['template_subtraction']['prepare_templates'],
-                                                           image_filter = autophot_input['image_filter'],
-                                                           target_name = autophot_input['target_name'],
-                                                           target_x_pix = None,
-                                                           target_y_pix = None,
-                                                           local_radius = autophot_input['photometry']['local_radius'],
-                                                           mask_sources = autophot_input['preprocessing']['mask_sources'],
-                                                           # mask_sources_XY_R = None,
-                                                           remove_sat = autophot_input['source_detection']['remove_sat'],
-                                                           use_moffat = autophot_input['fitting']['use_moffat'],
-                                                           default_moff_beta = autophot_input['fitting']['default_moff_beta'],
-                                                           # vary_moff_beta = autophot_input['fitting']['vary_moff_beta'],
-                                                           max_fit_fwhm = autophot_input['source_detection']['max_fit_fwhm'],
-                                                           fitting_method = autophot_input['fitting']['fitting_method'],
-                                                           use_catalog = autophot_input['source_detection']['use_catalog'] )
+                                        write_dir,
+                                        base,
+                                        threshold_value = autophot_input['source_detection']['threshold_value'],
+                                        fwhm_guess = autophot_input['source_detection']['fwhm_guess'],
+                                        bkg_level = autophot_input['fitting']['bkg_level'],
+                                        max_source_lim = autophot_input['source_detection']['max_source_lim'],
+                                        min_source_lim = autophot_input['source_detection']['min_source_lim'],
+                                        int_scale = autophot_input['source_detection']['int_scale'],
+                                        fudge_factor = autophot_input['source_detection']['fudge_factor'],
+                                        fine_fudge_factor = autophot_input['source_detection']['fine_fudge_factor'],
+                                        source_max_iter = autophot_input['source_detection']['source_max_iter'],
+                                        sat_lvl = autophot_input['sat_lvl'],
+                                        lim_threshold_value = autophot_input['source_detection']['lim_threshold_value'],
+                                        scale_multipler = autophot_input['source_detection']['scale_multipler'],
+                                        # sigmaclip_FWHM = autophot_input['source_detection']['sigmaclip_FWHM'],
+                                        sigmaclip_FWHM_sigma = autophot_input['source_detection']['sigmaclip_FWHM_sigma'],
+                                        # sigmaclip_median = autophot_input['source_detection']['sigmaclip_median'],
+                                        # isolate_sources = autophot_input['source_detection']['isolate_sources'],
+                                        isolate_sources_fwhm_sep = autophot_input['source_detection']['isolate_sources_fwhm_sep'],
+                                        init_iso_scale = autophot_input['source_detection']['init_iso_scale'],
+                                        # remove_boundary_sources = autophot_input['source_detection']['remove_boundary_sources'],
+                                        pix_bound = autophot_input['source_detection']['pix_bound'],
+                                        sigmaclip_median_sigma = autophot_input['source_detection']['sigmaclip_median_sigma'],
+                                        save_FWHM_plot = False,
+                   
+                                        # save_image_analysis = False,
+                                        use_local_stars_for_FWHM = autophot_input['photometry']['use_local_stars_for_FWHM'],
+                                        prepare_templates = autophot_input['template_subtraction']['prepare_templates'],
+                                        # image_filter = autophot_input['image_filter'],
+                                        target_name = autophot_input['target_name'],
+                                        target_x_pix = None,
+                                        target_y_pix = None,
+                                        local_radius = autophot_input['photometry']['local_radius'],
+                                        # mask_sources = autophot_input['preprocessing']['mask_sources'],
+                                        # mask_sources_XY_R = None,
+                                        remove_sat = autophot_input['source_detection']['remove_sat'],
+                                        use_moffat = autophot_input['fitting']['use_moffat'],
+                                        default_moff_beta = autophot_input['fitting']['default_moff_beta'],
+                                        # vary_moff_beta = autophot_input['fitting']['vary_moff_beta'],
+                                        max_fit_fwhm = autophot_input['source_detection']['max_fit_fwhm'],
+                                        fitting_method = autophot_input['fitting']['fitting_method'],
+                                        use_catalog = autophot_input['source_detection']['use_catalog'] )
 
                     # df = df[(df['include_fwhm']) & (df['include_median'])]
                     n = np.vstack([df['x_pix'],df['y_pix']]).T
@@ -766,8 +764,8 @@ def main(object_info,autophot_input,fpath):
                     
                 # Run local instance of Astrometry.net - returns filepath of wcs file
                 astro_check = AstrometryNetLOCAL(fpath_astrometry,
-                                               # NAXIS1 = autophot_input['NAXIS1'],
-                                               # NAXIS2 = autophot_input['NAXIS2'],
+                                                NAXIS1 = autophot_input['NAXIS1'],
+                                                NAXIS2 = autophot_input['NAXIS2'],
                                                solve_field_exe_loc = autophot_input['wcs']['solve_field_exe_loc'],
                                                pixel_scale = autophot_input['pixel_scale'],
                                                # ignore_pointing = autophot_input['wcs']['ignore_pointing'],
@@ -941,6 +939,17 @@ def main(object_info,autophot_input,fpath):
             #==============================================================================
             # FWHM - Using total image source detection
             #==============================================================================
+            
+            if not (autophot_input['source_detection']['use_catalog'] is None):
+                fwhm_source_catalog = pd.read_csv(autophot_input['source_detection']['use_catalog'])
+                # if 'xcentroid' not in fwhm_source_catalog or 'xcentroid' not in fwhm_source_catalog:
+                sourcecoords = SkyCoord(fwhm_source_catalog['RA'] , fwhm_source_catalog['DEC'] ,unit = (u.deg,u.deg))
+                x_pix, y_pix = w1.all_world2pix(sourcecoords.ra.degree, sourcecoords.dec.degree, 1)
+                fwhm_source_catalog['xcentroid'] = x_pix
+                fwhm_source_catalog['ycentroid'] = y_pix
+                fwhm_source_catalog.to_csv(autophot_input['source_detection']['use_catalog'],index = True)
+                
+                
             # get approx fwhm, dataframe of sources used and updated autophot_input
             # returns fwhm from gaussian fit - and dataframe of sources used
             image_fwhm,df,scale,image_params = get_fwhm(image,
@@ -979,7 +988,8 @@ def main(object_info,autophot_input,fpath):
                                                    default_moff_beta = autophot_input['fitting']['default_moff_beta'],
                                                    # vary_moff_beta = autophot_input['fitting']['vary_moff_beta'],
                                                    max_fit_fwhm = autophot_input['source_detection']['max_fit_fwhm'],
-                                                   fitting_method = autophot_input['fitting']['fitting_method'])
+                                                   fitting_method = autophot_input['fitting']['fitting_method'],
+                                                   use_catalog = autophot_input['source_detection']['use_catalog'])
             image_fwhm_err = np.nanstd(df['FWHM'])
             
        
@@ -1026,11 +1036,12 @@ def main(object_info,autophot_input,fpath):
                                                                write_dir = autophot_input['write_dir'],
                                                                base = autophot_input['base'],
                                                                ap_size = autophot_input['photometry']['ap_size'],
-                                                               inf_ap_size = autophot_input['photometry']['inf_ap_size'],
+                                                               # inf_ap_size = autophot_input['photometry']['inf_ap_size'],
                                                                r_in_size = autophot_input['photometry']['r_in_size'],
                                                                r_out_size = autophot_input['photometry']['r_out_size'],
                                                                GAIN =  autophot_input['gain'],
-                                                               rdnoise =  autophot_input['rdnoise'])
+                                                               # rdnoise =  autophot_input['rdnoise']
+                                                               )
 
                 autophot_input['photometry']['ap_size'] = optimum_ap_size
                 autophot_input['photometry']['r_in_size'] = optimum_ap_size + 1
@@ -1108,7 +1119,7 @@ def main(object_info,autophot_input,fpath):
                                                         max_fit_fwhm = autophot_input['source_detection']['max_fit_fwhm'],
                                                         fitting_method = autophot_input['fitting']['fitting_method'],
                                     
-                                                        matching_source_FWHM_limit = autophot_input['catalog']['matching_source_FWHM_limt'],
+                                                        matching_source_FWHM_limit = autophot_input['catalog']['matching_source_FWHM_limit'],
                                                         catalog_matching_limit = autophot_input['catalog']['catalog_matching_limit'],
                                                         include_IR_sequence_data = autophot_input['catalog']['include_IR_sequence_data'],
                                                        
@@ -1268,7 +1279,15 @@ def main(object_info,autophot_input,fpath):
                                                         fwhm = autophot_input['fwhm'],
                                                         use_moffat = autophot_input['fitting']['use_moffat'],
                                                         image_params = autophot_input['image_params'])
-                    autophot_input['unity_PSF_counts'] = unity_PSF_counts
+                     
+                    
+                else:
+                    unity_PSF_counts = None
+                    
+               
+                    
+                autophot_input['unity_PSF_counts'] = unity_PSF_counts
+                    
  
                 if not do_ap and PSF_available:
 
@@ -2491,7 +2510,7 @@ def main(object_info,autophot_input,fpath):
                 sample_size = 100
                 counter = 1
     
-                c_nondetect = c[c.SNR<25].sample(sample_size)
+                c_nondetect = c[c.SNR<10].sample(sample_size)
                 c_nondetect["inject_lmag"] = [np.nan] * len(c_nondetect)
     
                 for index,catalog_x_pix,catalog_y_pix,catalog_magnitude in zip(c_nondetect.index,c_nondetect.x_pix.values,c_nondetect.y_pix.values,c_nondetect['cat_'+use_filter]):
@@ -2502,34 +2521,32 @@ def main(object_info,autophot_input,fpath):
                                                      int(catalog_x_pix - expand_scale): int(catalog_x_pix + expand_scale)]
         
                         catalog_lmag_prob_inst = limiting_magnitude_prob(image = catalog_close_up_expand,
-                                                                                model = model,
-                                                                                r_table = r_table,
-                                                                                fpath = autophot_input['fpath'],
-                                                                                detection_limit = autophot_input['limiting_magnitude']['detection_limit'],
-                                                                                bkg_level = autophot_input['fitting']['bkg_level'],
-                                                                                fwhm = autophot_input['fwhm'],
-                                                                                ap_size = autophot_input['photometry']['ap_size'],
-                                                                                exp_time = autophot_input['exp_time'],
-                                                                                gain = autophot_input['gain'],
-                                                                                image_params = autophot_input['image_params'],
-                                                                                regrid_size = autophot_input['psf']['regrid_size'],
-                                                                                fitting_radius = autophot_input['fitting']['fitting_radius'],
-                                                                                inject_source_sources_no = autophot_input['limiting_magnitude']['inject_source_sources_no'],
-                                                                                inject_source_location = autophot_input['limiting_magnitude']['inject_source_location'],
-                                                                                inject_source_on_target = autophot_input['limiting_magnitude']['inject_source_on_target'],
-                                                                                inject_source_random = autophot_input['limiting_magnitude']['inject_source_random'],
-                                                                                inject_source_add_noise = autophot_input['limiting_magnitude']['inject_source_add_noise'],
-                                                                                use_moffat = autophot_input['fitting']['use_moffat'],
-                                                                                unity_PSF_counts = autophot_input['unity_PSF_counts'],
-                                                                                print_progress = False,
-                                                                                plot_probable_limit  = False,
-                                                                                remove_bkg_local = autophot_input['fitting']['remove_bkg_local'],
-                                                                                remove_bkg_surface = autophot_input['fitting']['remove_bkg_surface'],
-                                                                                remove_bkg_poly = autophot_input['fitting']['remove_bkg_poly'],
-                                                                                remove_bkg_poly_degree = autophot_input['fitting']['remove_bkg_poly_degree'],
-                                                                                subtraction_ready = autophot_input['subtraction_ready'],
-                                                                                injected_sources_use_beta = autophot_input['limiting_magnitude']['injected_sources_use_beta'])
-                        
+                                                                         model = model,
+                                                                         r_table = r_table,
+                                                                         fpath = autophot_input['fpath'],
+                                                                         detection_limit= autophot_input['limiting_magnitude']['detection_limit'],
+                                                                         bkg_level = autophot_input['fitting']['bkg_level'],
+                                                                         fwhm = autophot_input['fwhm'],
+                                                                         ap_size = autophot_input['photometry']['ap_size'],
+                                                                         exp_time = autophot_input['exp_time'],
+                                                                         gain = autophot_input['gain'],
+                                                                         image_params = autophot_input['image_params'],
+                                                                         regrid_size = autophot_input['psf']['regrid_size'],
+                                                                         fitting_radius = autophot_input['fitting']['fitting_radius'],
+                                                                         inject_source_sources_no = autophot_input['limiting_magnitude']['inject_source_sources_no'],
+                                                                         inject_source_location = autophot_input['limiting_magnitude']['inject_source_location'],
+                                                                         inject_source_on_target = autophot_input['limiting_magnitude']['inject_source_on_target'],
+                                                                         inject_source_random = autophot_input['limiting_magnitude']['inject_source_random'],
+                                                                         inject_source_add_noise = autophot_input['limiting_magnitude']['inject_source_add_noise'],
+                                                                         use_moffat = autophot_input['fitting']['use_moffat'],
+                                                                         unity_PSF_counts = autophot_input['unity_PSF_counts'],
+                                                                         print_progress = False,
+                                                                         remove_bkg_local = autophot_input['fitting']['remove_bkg_local'],
+                                                                         remove_bkg_surface = autophot_input['fitting']['remove_bkg_surface'],
+                                                                         remove_bkg_poly = autophot_input['fitting']['remove_bkg_poly'],
+                                                                         remove_bkg_poly_degree = autophot_input['fitting']['remove_bkg_poly_degree'],
+                                                                         subtraction_ready = autophot_input['subtraction_ready'])
+                                                                        
                         catalog_lmag_prob = catalog_lmag_prob_inst + zp_measurement[0]
                         
                         
@@ -2564,7 +2581,7 @@ def main(object_info,autophot_input,fpath):
                                                         unity_PSF_counts = unity_PSF_counts,
                                                         inject_source_add_noise = autophot_input['limiting_magnitude']['inject_source_add_noise'],
                                                         inject_source_location = autophot_input['limiting_magnitude']['inject_source_location'],
-                                                        injected_sources_additional_sources = autophot_input['limiting_magnitude']['injected_sources_additional_sources'],
+                                                        # injected_sources_additional_sources = autophot_input['limiting_magnitude']['injected_sources_additional_sources'],
                                                         injected_sources_additional_sources_position = autophot_input['limiting_magnitude']['injected_sources_additional_sources_position'],
                                                         injected_sources_additional_sources_number = autophot_input['limiting_magnitude']['injected_sources_additional_sources_number'],
                                                         plot_injected_sources_randomly = autophot_input['limiting_magnitude']['plot_injected_sources_randomly'],
@@ -2591,7 +2608,8 @@ def main(object_info,autophot_input,fpath):
                         c_nondetect.at[index, "inject_lmag"] = catalog_lmag_inject
                         c_nondetect.at[index, "prob_lmag"] = catalog_lmag_prob
                         
-                    except:
+                    except Exception as e:
+                        print(e)
                         pass
                     counter+=1
                     # logging.info('')

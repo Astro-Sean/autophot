@@ -300,23 +300,7 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
         search_image = image.copy()
 
         iso_temp = []
-        
- 
 
-        # from astropy.stats import SigmaClip
-        # from photutils.background import Background2D, MedianBackground
-        
-        
-        # sigma_clip_bkg = SigmaClip(sigma=3.)
-
-        # bkg_estimator = MedianBackground()
-
-        # bkg = Background2D(image, (50, 50),
-        #                    # filter_size=(3, 3),
-        #                    sigma_clip=sigma_clip_bkg,
-        #                    bkg_estimator=bkg_estimator)
-
-        # image_median =  bkg.background
         
         update_guess = False
         
@@ -410,9 +394,10 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
                 # Use sources given in Catalog/Sequence stars
                 if using_catalog_sources:
                     
-                    sources = pd.read_csv(use_catalog,sep = ' ')
+                    sources = pd.read_csv(use_catalog)
+                    
                    
-                    sources = sources.rename(columns={'x_pix': 'xcentroid', 'y_pix': 'ycentroid'})
+                    # sources = sources.rename(columns={'x_pix': 'xcentroid', 'y_pix': 'ycentroid'})
 
                 
                     if len(sources) == 0:
@@ -930,54 +915,51 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
                         continue
 
 
-                    if not using_catalog_sources:
+                    # if not using_catalog_sources:
                         
-                        from astropy.stats import  mad_std
-                        
+                    from astropy.stats import  mad_std
+                    
 
-                        FWHM_mask = sigma_clip(isolated_sources['FWHM'].values,
-                                                sigma=sigmaclip_FWHM_sigma,
-                                                masked = True,
-                                                maxiters=10,
-                                                cenfunc = np.nanmedian,
-                                                stdfunc = mad_std)
-                        
-                        if np.sum(FWHM_mask.mask)== 0 or len(isolated_sources)<5 or  using_catalog_sources:
-                            isolated_sources['include_fwhm'] = [True] * len(isolated_sources)
-                            
-                            fwhm_array =  isolated_sources['FWHM'].values
-                            
-                        else:
-                            
-                            fwhm_array =  isolated_sources[~FWHM_mask.mask]['FWHM'].values
-                            isolated_sources['include_fwhm'] = ~FWHM_mask.mask
-                            # isolated_sources[FWHM_mask]['fwhm'] = np.nan
-                            logger.info('Removed %d FWHM outliers' % (np.sum(FWHM_mask.mask)))
-                    else:
+                    FWHM_mask = sigma_clip(isolated_sources['FWHM'].values,
+                                            sigma=sigmaclip_FWHM_sigma,
+                                            masked = True,
+                                            maxiters=10,
+                                            cenfunc = np.nanmedian,
+                                            stdfunc = mad_std)
+                    
+                    if np.sum(FWHM_mask.mask)== 0 or len(isolated_sources)<5 :
                         isolated_sources['include_fwhm'] = [True] * len(isolated_sources)
-                            
-                            
-                    if  not  using_catalog_sources:
-
-                        median_mask = sigma_clip(isolated_sources['median'].values,
-                                                  sigma=sigmaclip_median_sigma,
-                                                  masked = True,
-                                                  maxiters=10,
-                                                  cenfunc = np.nanmedian,
-                                                  stdfunc = mad_std)
                         
-                        if np.sum(median_mask) == 0 or np.sum(~median_mask.mask)<5 or using_catalog_sources:
-                            isolated_sources['include_median'] = [True] * len(isolated_sources)
-                            # fwhm_array =  isolated_sources['FWHM'].values
-                            pass
+                        fwhm_array =  isolated_sources['FWHM'].values
                         
-                        else:
-                            # fwhm_array =  isolated_sources[~FWHM_mask.mask]['FWHM'].values
-                            isolated_sources['include_median'] = ~median_mask.mask
-                            # isolated_sources[FWHM_mask]['fwhm'] = np.nan
-                            logger.info('Removed %d median outliers' % (np.sum(median_mask.mask)))
                     else:
+                        
+                        fwhm_array =  isolated_sources[~FWHM_mask.mask]['FWHM'].values
+                        isolated_sources['include_fwhm'] = ~FWHM_mask.mask
+                        # isolated_sources[FWHM_mask]['fwhm'] = np.nan
+                        logger.info('Removed %d FWHM outliers' % (np.sum(FWHM_mask.mask)))
+                   
+                            
+                   
+
+                    median_mask = sigma_clip(isolated_sources['median'].values,
+                                              sigma=sigmaclip_median_sigma,
+                                              masked = True,
+                                              maxiters=10,
+                                              cenfunc = np.nanmedian,
+                                              stdfunc = mad_std)
+                    
+                    if np.sum(median_mask) == 0 or np.sum(~median_mask.mask)<5 :
                         isolated_sources['include_median'] = [True] * len(isolated_sources)
+                        # fwhm_array =  isolated_sources['FWHM'].values
+                        pass
+                    
+                    else:
+                        # fwhm_array =  isolated_sources[~FWHM_mask.mask]['FWHM'].values
+                        isolated_sources['include_median'] = ~median_mask.mask
+                        # isolated_sources[FWHM_mask]['fwhm'] = np.nan
+                        logger.info('Removed %d median outliers' % (np.sum(median_mask.mask)))
+                    
                             
                             
                     logger.info('Useable sources found [ %d sigma ]: %d' % (threshold_value,len(isolated_sources)))
@@ -1027,7 +1009,7 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
         image_fwhm = np.nanmean(isolated_sources['FWHM'].values)
         image_fwhm_err = np.nanstd(isolated_sources['FWHM'].values)
         
-        logging.info('\nFWHM: %.3f +/- %.3f [ pixels ]' % (image_fwhm,image_fwhm_err))
+
 
         if image_fwhm_err > 2:
             
@@ -1164,7 +1146,8 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
                          norm = norm,
                          marker = "o",
                          alpha = 0.5,
-                         # s = 25,
+                         facecolor = 'none',
+                          s = 25,
                          c = isolated_sources['FWHM'].values)
             
             ax1.set_xticklabels([])
@@ -1232,7 +1215,8 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
             # Save FWHM analayis to file
 
             isolated_sources.round(3).to_csv(os.path.join(wdir,'image_analysis_'+base+'.csv'))
-
+            
+        logging.info('\nFWHM: %.3f +/- %.3f [ pixels ]' % (image_fwhm,image_fwhm_err))
 
         return image_fwhm,isolated_sources,scale,image_params_out
 

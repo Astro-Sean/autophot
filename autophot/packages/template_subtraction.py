@@ -1,4 +1,5 @@
-def prepare_templates(fpath, tele_autophot_input , get_fwhm = True,redo_wcs = True,
+def prepare_templates(fpath, tele_autophot_input , 
+                      get_fwhm = True,redo_wcs = True,
                       build_psf = True, clean_cosmic = True,
                       solve_field_exe_loc = None, use_lacosmic = False, 
                       use_filter = None,  target_ra = None,

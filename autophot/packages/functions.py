@@ -285,6 +285,7 @@ def getheader(fpath):
         except:
             # try to find 'sci' extension
             headinfo = getheader(fpath,'sci')
+            raise Exception
     except:
         with fits.open(fpath) as hdul:
             hdul.verify('silentfix+ignore')
@@ -297,7 +298,8 @@ def getheader(fpath):
             if len(headinfo)>1:
                 headinfo_list = headinfo[0].header
                 for i in range(1,len(headinfo)):
-                    headinfo_list += headinfo[i].header
+                    headinfo_list.update(headinfo[i].header)
+                    
                 headinfo = headinfo_list
             else:
                 # is length of list choose this a header

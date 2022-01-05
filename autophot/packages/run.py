@@ -225,7 +225,7 @@ def run_autophot(autophot_input):
     #  If catalog set to cutsom
     if autophot_input['catalog']['use_catalog'] == 'custom':
         target = autophot_input['target_name']
-        fname = str(target) + '_RAD_' + str(float(autophot_input['catalog']['search_radius']))
+        fname = str(target) + '_RAD_' + str(float(autophot_input['catalog']['catalog_radius']))
 
         if not autophot_input['catalog']['catalog_custom_fpath']:
             logger.critical('Custom catalog selected but "catalog_custom_fpath" not defined')

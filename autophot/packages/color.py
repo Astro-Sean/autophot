@@ -1,60 +1,35 @@
-# import os 
-# import pickle
-# load pickle file to dictionary
-# def load_obj(fpath):
-#     '''
-    
-#     :param fpath: DESCRIPTION
-#     :type fpath: TYPE
-#     :return: DESCRIPTION
-#     :rtype: TYPE
 
-#     '''
 
-#     if not fpath.endswith('.pkl'):
-#         fpath+= '.pkl'
-
-#     with open(fpath, 'rb') as f:
-#         return pickle.load(f)
-
-# # save object as pickle files
-# def save_obj(obj,fpath):
-#     '''
-    
-#     :param obj: DESCRIPTION
-#     :type obj: TYPE
-#     :param fpath: DESCRIPTION
-#     :type fpath: TYPE
-#     :return: DESCRIPTION
-#     :rtype: TYPE
-
-#     '''
-
-#     if not fpath.endswith('.pkl'):
-#         fpath+= '.pkl'
-
-#     dirname = os.path.dirname(fpath)
-#     os.makedirs(dirname, exist_ok=True)
-
-#     with open(fpath + '.pkl', 'wb') as f:
-#         pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)
-
-# plus minus funciton
+# plus minus function
 pm = lambda i: ("+" if float(i) >= 0 else "") + '%.3f' % float(i)
+  
 
 
-
-def find_available_colors(wdir,
-                          fits_dir,
-                          outdir_name = 'REDUCED',
-                          tele_autophot_input_yml = 'telescope.yml',
-                          use_REBIN = True,
-                          tol = 1e-3,
-                          save_convergent_plots = True,
-                          print_output = False):
+def find_available_colors(wdir,fits_dir,outdir_name = 'REDUCED',tele_autophot_input_yml = 'telescope.yml',
+                          use_REBIN = True,tol = 1e-3,save_convergent_plots = True,print_output = False):
+    '''
     
-    
+    :param wdir: DESCRIPTION
+    :type wdir: TYPE
+    :param fits_dir: DESCRIPTION
+    :type fits_dir: TYPE
+    :param outdir_name: DESCRIPTION, defaults to 'REDUCED'
+    :type outdir_name: TYPE, optional
+    :param tele_autophot_input_yml: DESCRIPTION, defaults to 'telescope.yml'
+    :type tele_autophot_input_yml: TYPE, optional
+    :param use_REBIN: DESCRIPTION, defaults to True
+    :type use_REBIN: TYPE, optional
+    :param tol: DESCRIPTION, defaults to 1e-3
+    :type tol: TYPE, optional
+    :param save_convergent_plots: DESCRIPTION, defaults to True
+    :type save_convergent_plots: TYPE, optional
+    :param print_output: DESCRIPTION, defaults to False
+    :type print_output: TYPE, optional
+    :return: DESCRIPTION
+    :rtype: TYPE
 
+    '''
+    
 
 
     import itertools
@@ -63,7 +38,6 @@ def find_available_colors(wdir,
     import numpy as np
     
     from autophot.packages.functions import border_msg
-
     from autophot.packages.call_yaml import yaml_autophot_input as cs
     
     if fits_dir.endswith('/'):
@@ -78,28 +52,33 @@ def find_available_colors(wdir,
 
     calib_files = {}
 
-    # go and get calibration files
+    # Go and get calibration files
     i = 0
     for root, dirs, files in os.walk(default_output_loc):
          for fname in files:
-             if fname.startswith(('image_calib')):
+             if fname.startswith('image_calib'):
 
                  calib_loc = os.path.join(root,fname)
                  out_loc = os.path.join(root,'out.csv')
                  calib_files[i] = (out_loc,calib_loc)
                  i+=1
 
+    #Get Filter information
     base_filepath ='/'.join(os.path.os.path.dirname(os.path.abspath(__file__)).split('/')[0:-1])
     filters_yml = 'filters.yml'
     filters_input = cs(os.path.join(base_filepath+'/databases',filters_yml )).load_vars()
     
+    # List of filter combinations
     default_dmag = filters_input['default_dmag']
     
+    # Create a master list out output files
     OutFile  = pd.concat([pd.read_csv(i[0]) for i in calib_files.values()],ignore_index = True)
     OutFile.set_index = list(calib_files.keys())
     
+    # Availble nights
     mjd_span  = list(set(np.floor(OutFile.mjd.values)))
     
+    # What colour terms are needed for the entire dataset
     required_color_terms = {}
 
     for epoch in mjd_span:
@@ -114,7 +93,8 @@ def find_available_colors(wdir,
         inst_list = list(set(epoch_OutFile_all['instrument']))
 
         combine_list = [tele_list,inst_key_list,inst_list]
-
+        
+        # Create all combinations of telescope and instruments
         tele_inst_master = list(itertools.product(*combine_list))
 
         for i in tele_inst_master:
@@ -124,8 +104,7 @@ def find_available_colors(wdir,
             inst = i[2]
             
             if tele not in required_color_terms:
-                required_color_terms[tele] = {}
-                
+                required_color_terms[tele] = {}    
                 
             if inst_key not in required_color_terms[tele]:
                 required_color_terms[tele][inst_key] = {}
@@ -133,7 +112,11 @@ def find_available_colors(wdir,
             if inst not in required_color_terms[tele][inst_key]:
                 required_color_terms[tele][inst_key][inst]={}
 
-            correct_tele_inst_idx = (epoch_OutFile_all['TELESCOP'].values == tele) & (epoch_OutFile_all['INSTRUME'].values == inst_key) & (epoch_OutFile_all['instrument'].values == inst)
+            correct_tele_inst_idx = (epoch_OutFile_all['TELESCOP'].values == tele) & \
+                                        (epoch_OutFile_all['INSTRUME'].values == inst_key) & \
+                                            (epoch_OutFile_all['instrument'].values == inst)
+                                            
+            # Find all images that match this combination                             
             epoch_OutFile = epoch_OutFile_all[correct_tele_inst_idx]
 
             Filter_loc = {}

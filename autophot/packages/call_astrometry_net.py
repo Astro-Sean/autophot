@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 def AstrometryNetLOCAL(file,solve_field_exe_loc = None,pixel_scale = None,
-                       target_ra = None,target_dec = None,
+                       target_ra = None,target_dec = None,NAXIS1 = None,NAXIS2 = None,
                        search_radius = 1,
                        downsample = 2,
                        cpulimit = 180
@@ -95,14 +95,14 @@ def AstrometryNetLOCAL(file,solve_field_exe_loc = None,pixel_scale = None,
             except:
                 pass
 
-
-        if 'NAXIS1' in headinfo and 'NAXIS' in headinfo:
-            NAXIS1 = headinfo['NAXIS1']
-            NAXIS2 = headinfo['NAXIS2']
-        else:
-            image = getimage(file)
-            NAXIS1 = image.shape[0]
-            NAXIS2 = image.shape[1]
+        if NAXIS1 is None or NAXIS2 is None:
+            if 'NAXIS1' in headinfo and 'NAXIS' in headinfo:
+                NAXIS1 = headinfo['NAXIS1']
+                NAXIS2 = headinfo['NAXIS2']
+            else:
+                image = getimage(file)
+                NAXIS1 = image.shape[0]
+                NAXIS2 = image.shape[1]
 
 
 

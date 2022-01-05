@@ -306,7 +306,6 @@ def search(headinfo,
         chosen_catalog.insert(loc = 5, column = 'x_pix', value = x_pix)
         chosen_catalog.insert(loc = 6, column = 'y_pix', value = y_pix)
 
-
         logger.info('Catalog length: %d' % len(chosen_catalog))
 
         warnings.filterwarnings("default")
@@ -911,9 +910,9 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
         chosen_catalog_new_frame = chosen_catalog_new_frame.dropna(how='all')
 
 
-        extended_mask = abs(chosen_catalog_new_frame['fwhm'] - fwhm) < matching_source_FWHM_limit
+        extended_mask = abs(chosen_catalog_new_frame['fwhm'] - fwhm) > matching_source_FWHM_limit
 
-        if len(extended_mask)>0:
+        if sum(extended_mask)>0:
 
             print('\nExtended catalog sources removed: %d/%d' % (sum(extended_mask),len(chosen_catalog_new_frame)))
 
