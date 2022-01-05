@@ -28,12 +28,15 @@ Welcome to AutoPHoT!
 
 .. toctree::
    :maxdepth: 1
-   :caption: Tutorials
+   :caption: Examples
 
-   instructions
    tutorials
-   autophot_instructions
 
+.. toctree::
+   :maxdepth: 1
+   :caption: Commands
+
+   autophot_instructions
 
 .. toctree::
    :maxdepth: 1
