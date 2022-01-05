@@ -4,6 +4,7 @@ Installation
 
 Conda Install
 #############
+
 AutoPhOT is built for use with Python3. We recommend that you use a fresh conda enviroment when using autophot. This can be done by using:
 
 .. code-block:: bash
