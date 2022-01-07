@@ -169,7 +169,7 @@ no further action is required.
 
 I've designed AutoPhOT to be a user friendly pipeline, meaning you need very little prior knowledge on the art of photometry.
 
-&#8594; I've put together some*Jupyter* notebooks the get you started with AutoPhOT, click [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks).
+&#8594; I've put together some *Jupyter* notebooks the get you started with AutoPhOT, click [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks).
 
 &#8594; If you wish to use the packages within AutoPhOT outside of the examples given, documentation on each package is given [here](https://autophot.readthedocs.io/en/latest/).
 
