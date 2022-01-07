@@ -167,16 +167,19 @@ no further action is required.
 
 ## How to use AutoPhOT
 
-I've designed AutoPhOT to be a user friendly pipeline, meaning you need very little prior knowledge on the art of photometry. Check out my *Jupyter* notebooks the get started with AutoPhOT [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks). If you need an example of how to use specific functions in AutoPhOT, please open an issue [here](https://github.com/Astro-Sean/autophot/issues).
+I've designed AutoPhOT to be a user friendly pipeline, meaning you need very little prior knowledge on the art of photometry.
 
-If you wish to use the packages within AutoPhOT outside of the examples given, documentation on each package is given [here](https://autophot.readthedocs.io/en/latest/).
+&#8594; I've put together some*Jupyter* notebooks the get you started with AutoPhOT, click [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks).
 
-A list of settings used in AutoPhOT can be found [here](https://autophot.readthedocs.io/en/latest/instructions.html).
+&#8594; If you wish to use the packages within AutoPhOT outside of the examples given, documentation on each package is given [here](https://autophot.readthedocs.io/en/latest/).
+
+&#8594; A list of settings used in AutoPhOT can be found [here](https://autophot.readthedocs.io/en/latest/instructions.html).
+
+&#8594; If you need an example of how to use specific functions in AutoPhOT, please open an issue [here](https://github.com/Astro-Sean/autophot/issues).
 
 ## Referencing & Attribution
 
 If you use results from AutoPhOT in a publication, please cite [Brennan & Fraser (2022)](https://arxiv.org). The AutoPhOT code is released under a GPL3 licence and you are free to reuse the code as you wish. If you modify AutoPhOT or use it in a strange fashion (or even if you use it normally), we make no guarantee that your photometry will be valid.
-
 
 ## Testing and Debugging
 
