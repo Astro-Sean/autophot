@@ -309,13 +309,13 @@ def get_zeropoint(c,image = None,headinfo = None, fpath = None, use_filter = Non
 
     plt.ioff()
 
-    fig_zeropoint = plt.figure(figsize = set_size(500,aspect = 1))
+    fig_zeropoint = plt.figure(figsize = set_size(250,aspect = 1.5))
     
     ncols = 2
     nrows = 2
     widths = [0.5,0.5]
     
-    gs = GridSpec(nrows, ncols ,wspace=0.2, hspace=0.2 ,
+    gs = GridSpec(nrows, ncols ,wspace=0.3, hspace=0.3 ,
                   width_ratios = widths)
                    
 
