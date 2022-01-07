@@ -3,7 +3,7 @@
 </p>
 <div align="center">
 
-[![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/version.svg)](https://anaconda.org/astro-sean/autophot) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/latest_release_date.svg)](https://anaconda.org/astro-sean/autophot) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/license.svg)](https://anaconda.org/astro-sean/autophot) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/downloads.svg)](https://anaconda.org/astro-sean/autophot ) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/installer/conda.svg)](https://conda.anaconda.org/astro-sean)
+[![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/version.svg)](https://anaconda.org/astro-sean/autophot) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/latest_release_date.svg)](https://anaconda.org/astro-sean/autophot) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/license.svg)](https://anaconda.org/astro-sean/autophot) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/downloads.svg)](https://anaconda.org/astro-sean/AutoPhOT ) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/installer/conda.svg)](https://conda.anaconda.org/astro-sean)
 
 </div>
 
@@ -20,37 +20,37 @@ Feedback is welcome. Email [me](https://github.com/Astro-Sean) at sean.brennan2@
 </p>
 
 
-## Installation˜
+## Installation
 
 We suggest creating a new environment for AutoPhOT. This can be done using [conda](https://docs.conda.io/en/latest/) by running:
 
 ```bash
-conda create -n autophot_env python=3.7
+conda create -n AutoPhOT_env python=3.7
 ```
-then to activate this e˛nvironment, run:
+then to activate this environment, run:
 
 ```bash
-conda activate autophot_env
+conda activate AutoPhOT_env
 ```
 
 Install AutoPhOT using the conda install:
 
 ```bash
-conda install -c astro-sean autophot
+conda install -c astro-sean AutoPhOT
 ```
 
 If you want to update AutoPhOT, you can do so using:
 
 ```bash
-conda update -c astro-sean autophot
+conda update -c astro-sean AutoPhOT
 ```
 ## Additional functionality
 
-To fully utilise the AutoPhoT Code, several additional softwares may be used.
+To fully utilise the AutoPhOT Code, several additional softwares may be used.
 
 <h4>Astrometry.Net</h4>
 
-AutoPhoT relies on [Astrometry.net](https://arxiv.org/abs/0910.2233) by Dustin Lang to solve for WCS. While the code can be downloaded/installed [here](http://astrometry.net/doc/readme.html) and [here](http://astrometry.net/doc/build.html#build.) we suggest using [Homebrew](https://brew.sh/) to install Astometry.net.
+AutoPhOT relies on [Astrometry.net](https://arxiv.org/abs/0910.2233) by Dustin Lang to solve for WCS. While the code can be downloaded/installed [here](http://astrometry.net/doc/readme.html) and [here](http://astrometry.net/doc/build.html#build.) we suggest using [Homebrew](https://brew.sh/) to install Astometry.net.
 
 ```bash
 brew install astrometry-net
@@ -90,7 +90,7 @@ cd ../
 cp -R data /usr/local/Cellar/astrometry-net/0.85_1/
 ```
 
-To update AutoPhot on the location of Astrometry.Net,  update (if needed) 'solve_field_exe_loc' in the autophot_input dictionary (see [here](https://github.com/Astro-Sean/autophot/blob/master/autophot_example.ipynb) for example).
+To update AutoPhOT on the location of Astrometry.Net,  update (if needed) 'solve_field_exe_loc' in the autophot_input dictionary (see [here](https://github.com/Astro-Sean/autophot/blob/master/autophot_example.ipynb) for example).
 
 If the user trusts their WCS this step can be ignored as Astrometry.net is not used.
 
@@ -167,16 +167,19 @@ no further action is required.
 
 ## How to use AutoPhOT
 
-I've designed AUTOPhOT to be a user friendly pipeline, meaning you need very little prior knowledge on the art of photometry. Check out my *Jupyter* notebooks the get started with AutoPhOT [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks). If you need an example of how to use specific functions in AutoPHoT, please open an issue [here](https://github.com/Astro-Sean/autophot/issues).
+I've designed AutoPhOT to be a user friendly pipeline, meaning you need very little prior knowledge on the art of photometry. Check out my *Jupyter* notebooks the get started with AutoPhOT [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks). If you need an example of how to use specific functions in AutoPhOT, please open an issue [here](https://github.com/Astro-Sean/autophot/issues).
 
 If you wish to use the packages within AutoPhOT outside of the examples given, documentation on each package is given [here](https://autophot.readthedocs.io/en/latest/).
 
-A list of settings used in AutoPHoT can be found [here](https://autophot.readthedocs.io/en/latest/instructions.html).
+A list of settings used in AutoPhOT can be found [here](https://autophot.readthedocs.io/en/latest/instructions.html).
 
-## Referencing
+## Referencing & Attribution
 
-The AutoPhOT paper is currently being written, for the time being please cite this [paper](https://arxiv.org/abs/2102.09572).
+If you use results from AutoPhOT in a publication, please cite [Brennan & Fraser (2022)](https://arxiv.org). The AutoPhOT code is released under a GPL3 licence and you are free to reuse the code as you wish. If you modify AutoPhOT or use it in a strange fashion (or even if you use it normally), we make no guarantee that your photometry will be valid.
+
 
 ## Testing and Debugging
 
-If you experience errors with a particular file, the most effective means of debugging is to share the file with me ([Seán Brennan](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT)) for diagnostic. Once bugs have been addressed all files will be deleted. **All shared data will be kept confidential**.
+If you experience errors with a particular file, the most effective means of debugging is to share the file with me ([Seán Brennan](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT)) for diagnostic. Once bugs have been addressed all files will be deleted.
+
+**All shared data will be kept confidential**.
