@@ -179,7 +179,7 @@ I've designed AutoPhOT to be a user friendly pipeline, meaning you need very lit
 
 ## Referencing & Attribution
 
-If you use results from AutoPhOT in a publication, please cite [Brennan & Fraser (2022)](https://arxiv.org). The AutoPhOT code is released under a GPL3 licence and you are free to reuse the code as you wish. If you modify AutoPhOT or use it in a strange fashion (or even if you use it normally), we make no guarantee that your photometry will be valid.
+If you use results from AutoPhOT in a publication, please cite [Brennan & Fraser (2022)](https://arxiv.org/abs/2201.02635). The AutoPhOT code is released under a GPL3 licence and you are free to reuse the code as you wish. If you modify AutoPhOT or use it in a strange fashion (or even if you use it normally), we make no guarantee that your photometry will be valid.
 
 ## Testing and Debugging
 
