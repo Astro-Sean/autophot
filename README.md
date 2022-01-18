@@ -15,7 +15,7 @@ The pipeline is built from the ground up using Python 3 - with no dependencies o
 
 You can find the AutoPhOT paper [here](https://arxiv.org/abs/2201.02635)
 
-Feedback is welcome. Email [me](https://github.com/Astro-Sean) at [sean.brennan2@ucdconnect.ie](mailto:sean.brennan2@ucdconnect.ie?subject=[AutoPhOT])
+Feedback is welcome. Email [me](https://github.com/Astro-Sean) at [sean.brennan2@ucdconnect.ie](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT)
 
 <p align="center">
   <a href="https://www.buymeacoffee.com/astrosean" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" style="height: 41px !important;width: 174px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
@@ -27,24 +27,24 @@ Feedback is welcome. Email [me](https://github.com/Astro-Sean) at [sean.brennan2
 We suggest creating a new environment for AutoPhOT. This can be done using [conda](https://docs.conda.io/en/latest/) by running:
 
 ```bash
-conda create -n AutoPhOT_env python=3.7
+conda create -n autophot_env python=3.7
 ```
 then to activate this environment, run:
 
 ```bash
-conda activate AutoPhOT_env
+conda activate autophot_env
 ```
 
 Install AutoPhOT using the conda install:
 
 ```bash
-conda install -c astro-sean AutoPhOT
+conda install -c astro-sean autophot
 ```
 
 If you want to update AutoPhOT, you can do so using:
 
 ```bash
-conda update -c astro-sean AutoPhOT
+conda update -c astro-sean autophot
 ```
 ## Additional functionality
 
