@@ -62,7 +62,7 @@ def search(headinfo,
     *catalog_custom_fpath* keyword which gives the file path to this file. An
     example of this can be found `here
     <https://github.com/Astro-Sean/autophot/blob/master/example_notebooks/add_your_catalog_example.ipynb>`_
-    
+
     Keyword = :math:`"custom"`
 
 
@@ -181,7 +181,7 @@ def search(headinfo,
             # return chosen_catalog
 
         # if catalog is found via it's filename - use this and return chosen_catalog
-        if os.path.isfile(os.path.join(target_dir,fname+'.csv')):
+        elif os.path.isfile(os.path.join(target_dir,fname+'.csv')):
             logger.info('Catalog found for %s\nCatalog: %s \nFile: %s' % (target_name,str(catalog).upper(),fname))
             chosen_catalog = Table.read(os.path.join(target_dir,fname+'.csv'),format = 'csv')
             chosen_catalog = chosen_catalog.to_pandas().fillna(np.nan)
@@ -303,8 +303,8 @@ def search(headinfo,
         # Add in x and y pixel locatins under wcs given by file
         x_pix,y_pix = w1.wcs_world2pix(chosen_catalog[catalog_keywords['RA']], chosen_catalog[catalog_keywords['DEC']],1)
 
-        chosen_catalog.insert(loc = 5, column = 'x_pix', value = x_pix)
-        chosen_catalog.insert(loc = 6, column = 'y_pix', value = y_pix)
+        chosen_catalog['x_pix']=  x_pix
+        chosen_catalog['y_pix']=  y_pix
 
         logger.info('Catalog length: %d' % len(chosen_catalog))
 
@@ -313,7 +313,7 @@ def search(headinfo,
 
 
     except Exception as e:
-        logger.info('Catalog retireval failed:\n->%s\n Returning None' %  e)
+        logger.info('Catalog retireval failed!\nERROR: %s\n Returning None' %  e)
         chosen_catalog = None
 
     return chosen_catalog
@@ -792,7 +792,7 @@ def match(image,headinfo,target_coords,catalog_keywords,image_filter,
                  mini = lmfit.Minimizer(residual,
                                        pars,
                                        nan_policy = 'omit')
-                 
+
                  result = mini.minimize(method = fitting_method)
 
 
