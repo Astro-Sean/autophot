@@ -35,6 +35,8 @@ then to activate this environment, run:
 conda activate autophot_env
 ```
 
+Before installing autophot, you'll need conda-forge and astropy in your conda channels. See [here](https://github.com/Astro-Sean/autophot/issues/1) for help.
+
 Install AutoPhOT using the conda install:
 
 ```bash
