@@ -1,29 +1,29 @@
-def prepare_templates(fpath, tele_autophot_input , 
+def prepare_templates(fpath, tele_autophot_input ,
                       get_fwhm = True,redo_wcs = True,
                       build_psf = True, clean_cosmic = True,
-                      solve_field_exe_loc = None, use_lacosmic = False, 
+                      solve_field_exe_loc = None, use_lacosmic = False,
                       use_filter = None,  target_ra = None,
-                      target_dec = None, search_radius = 0.5, cpu_limit= 180, 
-                      downsample = 2, threshold_value = 25, ap_size = 1.7, 
-                      inf_ap_size = 2.5, r_in_size = 2, r_out_size = 3, 
+                      target_dec = None, search_radius = 0.5, cpu_limit= 180,
+                      downsample = 2, threshold_value = 25, ap_size = 1.7,
+                      inf_ap_size = 2.5, r_in_size = 2, r_out_size = 3,
                       use_moffat = True, psf_source_no = 10, fitting_method = 'least_sqaure',
                       regrid_size = 10, fitting_radius = 1.3
                       ):
     r'''
-    The purpose of this function is specifically tailored towards template 
+    The purpose of this function is specifically tailored towards template
     images and preparing them for use in a dataset. The function deals with the following:
-    
-    #. Cosmic Rays cleaning 
-    
+
+    #. Cosmic Rays cleaning
+
     #. World Coordinate System (WCS) correction using Astrometry.net
-    
+
     #. Full Width Half Maximum
-    
+
     #. Building the Point Spread Function and saving the PSF model.
-    
+
     The function should used before photometry is performed on a dataset
-    
-    
+
+
     :param fpath: Filepath towards *fits* image containing 2D array with overlap with science data.
     :type fpath: str
     :param tele_autophot_input: Telescope infomation. This is a dictionary version of the *telescope.yml*
@@ -72,7 +72,7 @@ def prepare_templates(fpath, tele_autophot_input ,
     :type fitting_radius: float, optional
     :return: This function *OVERWRITES* the given template files and cleans/calibrates this files and saves the for use on science data.
     '''
-    
+
     import os
     import logging
     from astropy.io import fits
@@ -83,11 +83,11 @@ def prepare_templates(fpath, tele_autophot_input ,
     from autophot.packages.check_wcs import updatewcs,removewcs
     from autophot.packages.find import get_fwhm
     from autophot.packages.functions import border_msg
-        
+
     base = os.path.basename(fpath)
     write_dir = os.path.dirname(fpath)
     base = os.path.splitext(base)[0]
-    
+
     logger = logging.getLogger(__name__)
 
     border_msg('Preparing templates files')
@@ -99,10 +99,10 @@ def prepare_templates(fpath, tele_autophot_input ,
         return
 
     dirpath = os.path.dirname(fpath)
-    
+
     image = getimage(fpath)
     headinfo = getheader(fpath)
-    
+
     try:
         telescope = headinfo['TELESCOP']
     except:
@@ -123,17 +123,17 @@ def prepare_templates(fpath, tele_autophot_input ,
         rdnoise_key = tele_autophot_input[telescope][inst_key][inst]['rdnoise']
 
         if rdnoise_key is None:
-            rdnoise = 0 
+            rdnoise = 0
         elif rdnoise_key in headinfo:
             rdnoise = headinfo[rdnoise_key]
         else:
-            rdnoise = 0 
-         
+            rdnoise = 0
+
     else:
-        
+
         logging.info('Read noise key not found for template file')
         rdnoise = 0
-        
+
     logging.info('Read Noise: %.1f [e^- /pixel]' % rdnoise)
 
 
@@ -147,11 +147,11 @@ def prepare_templates(fpath, tele_autophot_input ,
             GAIN = headinfo[GAIN_key]
         else:
             GAIN=1
-        
-  
+
+
     logging.info('Template GAIN: %.1f [e^- /count]' % GAIN)
-        
-    
+
+
     # print(list(headinfo.keys()))
     # try:
     for i in ['EXPTIME','EXP_TIME','TIME-INT']:
@@ -165,10 +165,10 @@ def prepare_templates(fpath, tele_autophot_input ,
            template_exp_time = float(template_exp_time_split[0])
        else:
            template_exp_time = float(template_exp_time)
-           
-       
+
+
     logging.info('Template Exposure Time: %.1f [s]' % template_exp_time)
-       
+
     if telescope == 'MPI-2.2' and not (use_filter is None) :
         if use_filter in ['J','H','K']:
             logging.info('Detected GROND IR - setting pixel scale to 0.3')
@@ -181,15 +181,15 @@ def prepare_templates(fpath, tele_autophot_input ,
         pixel_scale   = tele_autophot_input[telescope][inst_key][inst]['pixel_scale']
 
 
-    
+
     # Write new header
     updated_header = getheader(fpath)
     updated_header['GAIN'] = GAIN
-    
+
     updated_header['exp_time'] = template_exp_time
     updated_header['GAIN'] = GAIN
     updated_header['RDNOISE'] = rdnoise
-    
+
     fits.writeto(fpath,
                  image,
                  updated_header,
@@ -198,23 +198,23 @@ def prepare_templates(fpath, tele_autophot_input ,
 
 
 
-    
+
 
     if clean_cosmic:
 
         # if 'CRAY_RM'  not in header:
 
         from autophot.packages.call_crayremoval import remove_cosmic_rays
-        
+
         if 'CRAY_RM'  not in updated_header:
             headinfo = getheader(fpath)
             # image with cosmic rays
             image_old = fits.PrimaryHDU(image)
-            
+
             image = remove_cosmic_rays(image_old,
                                        gain = GAIN,
                                        use_lacosmic = use_lacosmic)
-        
+
             # Update header and write to new file
             updated_header['CRAY_RM'] = ('T', 'Comsic rays w/astroscrappy ')
             fits.writeto(fpath,
@@ -223,15 +223,15 @@ def prepare_templates(fpath, tele_autophot_input ,
                          overwrite = True,
                          output_verify = 'silentfix+ignore')
             logging.info('Cosmic rays removed - image updated')
-        
+
         else:
-        
+
             logging.info('Cosmic sources pre-cleaned - skipping!')
-        
-        
+
+
     if redo_wcs:
 
-        
+
         # Run local instance of Astrometry.net - returns filepath of wcs file
         astro_check = AstrometryNetLOCAL(fpath,
                                         solve_field_exe_loc = solve_field_exe_loc,
@@ -242,38 +242,40 @@ def prepare_templates(fpath, tele_autophot_input ,
                                         search_radius = search_radius,
                                         downsample = downsample,
                                         cpulimit = cpu_limit)
-    
+
         old_header = getheader(fpath)
-    
+
         try:
             old_header = removewcs(headinfo,delete_keys = True)
-    
+
             # Open wcs fits file with wcs values
             new_wcs  = fits.open(astro_check,ignore_missing_end = True)[0].header
-    
+
             # script used to update per-existing header file with new wcs values
             header_updated = updatewcs(old_header,new_wcs)
-    
+
             # update header to show wcs has been checked
             header_updated['UPWCS'] = ('T', 'WCS by APT')
-    
-            
+
+
             os.remove(astro_check)
-    
+
+            # Write new header
+            fits.writeto(fpath,image,
+                         header_updated,
+                         overwrite = True,
+                         output_verify = 'silentfix+ignore')
+
         except Exception as e:
-            
+
             logger.info('Error with template WCS: %s' % e)
-    
-        # Write new header
-        fits.writeto(fpath,image,
-                     header_updated,
-                     overwrite = True,
-                     output_verify = 'silentfix+ignore')
+
+
 
 
 
     if get_fwhm or build_psf:
- 
+
 
 
         template_fwhm,df,scale,image_params = get_fwhm(image,
@@ -323,8 +325,8 @@ def prepare_templates(fpath, tele_autophot_input ,
         # autophot_input['scale'] = scale
         # autophot_input['image_params'] = image_params
         # header['FWHM'] = image_fwhm
-        
-        
+
+
 
         df.to_csv(os.path.join(dirpath,'calib_template.csv'),index = False)
 
@@ -386,13 +388,13 @@ def prepare_templates(fpath, tele_autophot_input ,
 # Get template from PS1 server
 # =============================================================================
 def get_pstars(ra, dec, size, filters="grizy"):
-    
+
     '''
     Attempt to download a templte image from the PS1 image cutout server.
-    
-    :param ra: Right Ascension of the target in degrees 
+
+    :param ra: Right Ascension of the target in degrees
     :type ra: float
-    :param dec: Declination of the target in degrees 
+    :param dec: Declination of the target in degrees
     :type dec: float
     :param size: Pixel size of image
     :type size: int
@@ -459,7 +461,7 @@ def get_pstars(ra, dec, size, filters="grizy"):
         fname1 = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
         print(exc_type, fname1, exc_tb.tb_lineno,e)
         url = None
-        
+
     return url
 
 
@@ -471,9 +473,9 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
              hotpants_timeout=45, template_dir = None,footprint = None, remove_sat = False,
              zogy_use_pixel = False):
     '''
-    
+
     Perform image subtraction using either Hotpants or Zogy
-    
+
     :param file: Filepath of science image containing suspected transient flux
     :type file: str
     :param template: Filepath of science image without any transient flux
@@ -513,71 +515,71 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
     from astropy.wcs import WCS
 
     logger = logging.getLogger(__name__)
-    
+
     base = os.path.basename(file)
     write_dir = os.path.dirname(file)
     base = os.path.splitext(base)[0]
 
-    
+
     logger.info('\nImage subtracion')
     if hotpants_exe_loc is None and not use_zogy:
         use_zogy = True
 
         logger.info('HOTPANTS selected but exe file location not found, trying PyZogy')
         hotpants_exe_loc = True
-        
-    if use_zogy: # Check if zogy is available 
-    
+
+    if use_zogy: # Check if zogy is available
+
         try:
-            from PyZOGY.subtract import run_subtraction 
+            from PyZOGY.subtract import run_subtraction
             use_zogy = True
         except ImportError as e:
             logger.info('PyZogy selected but not installed: %s' % e)
             use_zogy = False
-            
+
     if use_zogy and not hotpants_exe_loc:
         warnings.warn('No suitable template subtraction package found/nPlease check installation instructions!,/n returning original image')
         return np.nan
-        
-    
+
+
     try:
 
         # convolve_image = False
         # smooth_template = False
-        
+
         # Get file extension and template data
         fname_ext = Path(file).suffix
 
         # Open image and template
         file_image     = getimage(file)
-        
+
         image_header = getheader(file)
-        
+
         original_wcs = WCS(image_header)
 
         # header = getheader(file)
         template_image = getimage(template)
-        
+
         if template_dir is None:
             template_dir = os.path.dirname(template)
         # template_header = getheader(template)
 
         # Where the subtraction will be written
         output_fpath = str(file.replace(fname_ext,'_subtraction'+fname_ext))
-        
+
         # Create footprint
         footprint = np.zeros(file_image.shape).astype(bool)
-        
+
         # footprint_template = np.zeros(template_image.shape).astype(bool)
-        
+
         footprint[ ( np.isnan(file_image)) | np.isnan(template_image) ] = 1
 
-        
+
         hdu = fits.PrimaryHDU(footprint.astype(int))
         hdul = fits.HDUList([hdu])
 
         footprint_loc = os.path.join(write_dir,'footprint_'+base+fname_ext)
-        
+
         hdul.writeto(footprint_loc,
                       overwrite=True,
                       output_verify = 'silentfix+ignore')
@@ -591,43 +593,43 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
             image_max = [np.nanmax(check_values_image) if np.nanmax(check_values_image) < 2**16 else  + 2**16][0]
 
             template_max = [np.nanmax(check_values_template) if np.nanmax(check_values_template) < 2**16 else  2**16][0]
-            
+
         else:
-            
+
             image_max = np.nanmax(check_values_image)
 
             template_max = np.nanmax(np.nanmax(check_values_template))
-            
-            
 
-            
-        
+
+
+
+
         if use_zogy:
             try:
 
                 # Get filename for saving
                 base = os.path.splitext(os.path.basename(file))[0]
-                
+
                 logger.info('Performing image subtraction using PyZOGY')
-                
+
                 # PyZOGY_log = write_dir + base + '_ZOGY.txt'
                 # original_stdout = sys.stdout # Save a reference to the original standard output
-    
-                   
+
+
                 image_psf = os.path.join(write_dir,'PSF_model_'+base.replace('_image_cutout','')+'.fits')
-    
+
                 from glob import glob
                 template_psf = glob(os.path.join(template_dir,'PSF_model_*'))[0]
-                
+
                 logger.info('Using Image : %s' % file)
                 logger.info('Using Image PSF: %s' % image_psf)
                 logger.info('Using Template : %s' % template)
                 logger.info('Using Template PSF: %s' % template_psf)
-                
+
                 logger.info('\nRunning Zogy...\n')
-                
+
                 # logger.info(image_max,template_max)
-                
+
                 diff = run_subtraction(science_image = file,
                                        reference_image = template,
                                        science_psf = image_psf,
@@ -644,7 +646,7 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
                                        use_pixels  = zogy_use_pixel
                                         # size_cut = True
                                         )
-             
+
                 hdu = fits.PrimaryHDU(diff[0])
                 hdul = fits.HDUList([hdu])
                 hdul.writeto(str(file.replace(fname_ext,'_subtraction'+fname_ext)),
@@ -653,11 +655,11 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
             except Exception as e:
                 logger.info('Pyzogy Failed [%s] - trying HOTPANTS' % e)
                 use_zogy = False
-                
-                
+
+
 
         if not use_zogy :
-            
+
             logger.info('Performing image subtraction using HOTPANTS')
 
             # Get filename for saving
@@ -671,7 +673,7 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
             # =============================================================================
 
             # Arguments to pass to HOTPANTS
-            
+
             include_args = [
                     # Input image
                             ('-inim',   str(file)),
@@ -697,14 +699,14 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
                             # ('-tg',     str(t_header['gain'])),
                     # Normalise to image[i]
                             ('-n',  'i'),
-                    # spatial order of kernel variation within region  
+                    # spatial order of kernel variation within region
                             ('-ko', '1'),
                     # Verbosity - set to as output is sent to file
                             ('-v' , ' 0') ,
                     # number of each region's stamps in x dimension
                             ('-nsx' , '11') ,
                     # number of each re5ion's stamps in y dimension
-                            ('-nsy' , '11'), 
+                            ('-nsy' , '11'),
                     # number of each region's stamps in x dimension
                     # RMS threshold forgood centroid in kernel fit
                             ('-ft' , '20') ,
@@ -714,9 +716,9 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
                             ('-ks' , '3.0'),
                     # convolution kernel half width
                             # ('-r' , str(1.5*image_FWHM)) ,
-                    # number of centroids to use for each stamp 
+                    # number of centroids to use for each stamp
                             # ('-nss' , str(5))
-        
+
                             ]
 
             args= [str(exe)]
@@ -728,14 +730,14 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
             # =============================================================================
 
             start = time.time()
-            
+
             HOTPANTS_log = write_dir + base + '_HOTterPANTS.txt'
-            
+
             # logger.info(args, file=open(HOTPANTS_log, 'w'))
 
-    
+
             with  open(HOTPANTS_log, 'w')  as FNULL:
-                
+
                 pro = subprocess.Popen(args,shell=True, stdout=FNULL, stderr=FNULL)
                 print('ARGUMENTS:', args, file=FNULL)
 
@@ -751,7 +753,7 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
                     pass
 
             logger.info('HOTPANTS finished: %ss' % round(time.time() - start) )
-            
+
         # =============================================================================
         # Check that subtraction file has been created
         # =============================================================================
@@ -760,34 +762,34 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
             file_size = os.path.getsize(str(file.replace(fname_ext,'_subtraction'+fname_ext)))
 
             if file_size == 0:
-                
+
                 logger.info('File was created but nothing written')
 
                 return np.nan
-            
+
             else:
-                
+
                 logger.info('Subtraction saved as %s' % os.path.splitext(os.path.basename(file.replace(fname_ext,'_subtraction'+fname_ext)))[0])
-                
+
                 original_wcs
-                
+
                 template_header = getheader(output_fpath)
                 template_image = getimage(output_fpath)
                 template_header.update(original_wcs.to_header())
-                
+
                 fits.writeto(output_fpath,
                             template_image,
                             template_header,
                             overwrite = True,
                              output_verify = 'silentfix+ignore')
-                
-                
+
+
                 return output_fpath
-            
+
         if not os.path.isfile(output_fpath):
-            
+
             logger.info('File was not created')
-            
+
             return np.nan
 
     except Exception as e:
@@ -795,7 +797,7 @@ def subtract(file,template,image_fwhm,use_zogy = False,hotpants_exe_loc = None,
         exc_type, exc_obj, exc_tb = sys.exc_info()
         fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
         logger.info(exc_type, fname, exc_tb.tb_lineno,e)
-        
+
         try:
                 # Try to kill process to avoid memory errors / hanging process
             os.killpg(os.getpgid(pro.pid), signal.SIGTERM)

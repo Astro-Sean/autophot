@@ -135,7 +135,7 @@ AutoPhOT_input:
 
     default_moff_beta: 4.765 # float --- If *use_moffat* is True, set the beta term which describes hwo the *wings* of the moffat function behave. We pre-set this to `4.765 <https://academic.oup.com/mnras/article/328/3/977/1247204>`_. IRAF defaults this value to 2.5. A Lorentzian can be obtained by setting this value to 1.
 
-    bkg_level: 3  # float --- Set the background level using the number of standard deviations to use for both the lower and upper clipping limit.
+    bkg_level: 5  # float --- Set the background level using the number of standard deviations to use for both the lower and upper clipping limit.
 
     remove_bkg_surface: True # bool --- Remove a background using a fitted surface using `Background2D <https://photutils.readthedocs.io/en/stable/api/photutils.background.Background2D.html>`_. In brief, while masking out any possible sources, this function calculates a low-resolution background map using (sigma-clipped) statistics in each box of a grid that covers the input image to create a low-resolution background map. This is the most robust method to background measurements, however it does take the longest computation time per fitting.
 
@@ -145,7 +145,7 @@ AutoPhOT_input:
 
     remove_bkg_poly_degree: 1 # int --- If *remove_bkg_poly* is True, remove a polynomial surface with this degree. Setting to 1 will produce a flat surface that can tilt to best fit a slopeing background.
 
-    fitting_radius: 1.3 # float --- Focus on small region where SNR is highest with a radius equal to this value times the FWHM. When fitting a PSF/analytical model we produce a small cutout around the brightest part of a point-soure. This allows for the fitting to focus on the approximate area that contains the highest signal to noise, while ignoring the lower flux in the wings of the sources PSF.
+    fitting_radius: 1.5 # float --- Focus on small region where SNR is highest with a radius equal to this value times the FWHM. When fitting a PSF/analytical model we produce a small cutout around the brightest part of a point-soure. This allows for the fitting to focus on the approximate area that contains the highest signal to noise, while ignoring the lower flux in the wings of the sources PSF.
 
   extinction: # These commands are concerned with the calculations concerned with atmospheric extinction. To date this is underdeveloped.
 
@@ -326,4 +326,4 @@ AutoPhOT_input:
 
     zp_use_max_bin: False # bool --- When determined the zero point, use the magnitude given by the max bin i.e the mode. The error is set to the bin width.
 
-    matching_source_SNR_limit: 10 # float --- When measuring the zero point exclude any sources that have a signal to noise ratio less than this value
+    matching_source_SNR_limit: 25 # float --- When measuring the zero point exclude any sources that have a signal to noise ratio less than this value

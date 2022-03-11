@@ -295,7 +295,8 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
 
                 pars = lmfit.Parameters()
                 pars.add('A',value = 0.75*np.nanmax(psf_image_bkg_free),
-                         min=0)
+                         min=0,
+                         max = 1.5 * np.nanmax(psf_image_bkg_free))
                 
                 pars.add('x0',value = psf_image_bkg_free.shape[1]/2,
                          min = 0,
@@ -367,15 +368,16 @@ def build_r_table(base_image, selected_sources, fwhm, exp_time, image_params,
                 pars = lmfit.Parameters()
                 pars.add('A',value = np.nanmean(psf_image_slice),
                          min = 1e-9,
-                         max = np.nanmax(psf_image_slice)*1.5 )
+                         max = 1.5*np.nanmax(psf_image_bkg_free)
+                         )
                 
                 pars.add('x0',value = psf_image_slice.shape[1]/2,
-                         min = 1,
-                         max = psf_image_slice.shape[1])
+                         min = -1 * abs(psf_image_slice.shape[1]/2 - psf_image_bkg_free.shape[1]/2),
+                         max = +1 * abs(psf_image_slice.shape[1]/2 - psf_image_bkg_free.shape[1]/2) )
                 
                 pars.add('y0',value = psf_image_slice.shape[0]/2,
-                         min = 1,
-                         max = psf_image_slice.shape[0] )
+                         min = -1 * abs(psf_image_slice.shape[0]/2 - psf_image_bkg_free.shape[0]/2),
+                         max = +1 * abs(psf_image_slice.shape[0]/2 - psf_image_bkg_free.shape[0]/2) )
 
                 if use_moffat:
 
@@ -861,8 +863,8 @@ def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3,
         dx_vary = True
         dy_vary = True
         
-        dx = 2*fwhm
-        dy = 2*fwhm
+        dx = 3*fwhm
+        dy = 3*fwhm
         
 
     
@@ -894,9 +896,6 @@ def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3,
                                       value = scale,
                                       min   = scale - dx,
                                       max   = scale + dx)
-    
-    # 0.5*residual_table.shape[1]+dx
-
     psf_residual_model.set_param_hint('y0',
                                       vary = dy_vary,
                                       value = scale,
@@ -984,7 +983,7 @@ def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3,
                 psf_residual_model.set_param_hint('A',
                                                   value = 0.75 * np.nanmax(source),
                                                   min = 1e-9,
-                                                  # max = 2*np.nanmax(source)
+                                                  max = 1.5*np.nanmax(source_bkg_free)
                                                   )
                 
             
@@ -1229,7 +1228,10 @@ def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3,
                 try:
                     from astropy.visualization import  ZScaleInterval
                     
-                    fitted_source = PSF_MODEL(xc , yc, 0, H_psf, residual_table,fwhm,image_params,use_moffat = use_moffat,fitting_radius = fitting_radius,regrid_size = regrid_size)
+                    fitted_source = PSF_MODEL(xc , yc, 0, H_psf, residual_table,fwhm,image_params,
+                                              use_moffat = use_moffat,
+                                              fitting_radius = fitting_radius,
+                                              regrid_size = regrid_size)
 
                     subtracted_image = source_bkg_free - fitted_source + bkg_surface
 
@@ -1384,7 +1386,19 @@ def fit(image, sources, residual_table, fwhm, fpath, fitting_radius = 1.3,
                                                     color = 'red',
                                                     alpha = 0.5,
                                                     lw = 0.5,
-                                                    label = 'Fitting area',
+                                                    # label = 'Fitting area',
+                                                    fill = False)
+ 
+                        ax.add_artist( search_circle )
+                        
+                        
+                        search_circle = plt.Circle(( 0.5*residual_table.shape[1] , 0.5*residual_table.shape[0] ),
+                                                    radius =  fitting_radius,
+                                                    ls = '-',
+                                                    color = 'red',
+                                                    alpha = 0.5,
+                                                    lw = 0.5,
+                                                    # label = 'Fitting area',
                                                     fill = False)
  
                         ax.add_artist( search_circle )

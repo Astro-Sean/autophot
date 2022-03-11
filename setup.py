@@ -15,7 +15,7 @@ if os.path.isfile(requirementPath):
 
 setuptools.setup(
     name="autophot",
-    version="1.0.3",
+    version="1.0.8",
     author="Sean Brennan",
     author_email="sean.brennan2@ucdconnect.ie",
     description="Automated Photometry of Transients",

@@ -705,6 +705,10 @@ def get_fwhm(image, wdir, base, threshold_value = 25, fwhm_guess = 5,
 
                         saturation_lvl = 2**16
                         sat_lvl = saturation_lvl
+                        
+                else:
+                    sat_lvl = np.inf
+                    
 
                 for i in range(len(isolated_sources.index)):
                     print('\rFitting source for FWHM: %d/%d'%(i+1,len(isolated_sources.index)),end = ' ',flush=True)
