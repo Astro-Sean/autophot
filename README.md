@@ -8,6 +8,8 @@
 </div>
 
 ## Introduction
+:warning: **Project on hold**: I am currently on hiatus writing my PhD thesis - for queries with AutoPhOT please open an issues and I will address them as soon as possible -
+Seán
 
 AutoPhOT is novel automated pipeline that is designed for rapid, publication-quality photometry of transients.
 
