@@ -7,7 +7,7 @@
 
 </div>
 
-:warning: **Project on hold**: I am currently on hiatus writing my PhD thesis - for queries with AutoPhOT please open an issues and I will address them as soon as possible -
+:warning: **Project under new development**: The code is currently being rewritten to improve performance, reliability, accuracy and usability. Please be patient and inform [me](mailto:sean.brennan@astro.su.se?subject=New feature in AutoPhOT) of any new features you would like to see availale in the code.
 Seán
 
 
@@ -18,9 +18,7 @@ AutoPhOT is novel automated pipeline that is designed for rapid, publication-qua
 
 The pipeline is built from the ground up using Python 3 - with no dependencies on legacy software. Capabilities of AutoPhOT include aperture and PSF-fitting photometry, template subtraction, and calculation of limiting magnitudes through artificial source injection. AutoPhOT is also capable of calibrating photometry against either survey catalogs (e.g. SDSS, PanSTARRS), or using a custom set of local photometric standards.
 
-You can find the AutoPhOT paper [here](https://arxiv.org/abs/2201.02635)
-
-Feedback is welcome. Email [me](https://github.com/Astro-Sean) at [sean.brennan2@ucdconnect.ie](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT)
+You can find the AutoPhOT paper [here](https://arxiv.org/abs/2201.02635). Feedback is welcome. Email [me](https://github.com/Astro-Sean) at [sean.brennan2@ucdconnect.ie](mailto:sean.brennan@astro.su.se?subject=AutoPhOT)
 
 <p align="center">
   <a href="https://www.buymeacoffee.com/astrosean" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" style="height: 41px !important;width: 174px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
