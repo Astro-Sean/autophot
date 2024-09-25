@@ -6,31 +6,17 @@
 [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/version.svg)](https://anaconda.org/astro-sean/autophot) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/latest_release_date.svg)](https://anaconda.org/astro-sean/autophot) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/license.svg)](https://anaconda.org/astro-sean/autophot) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/downloads.svg)](https://anaconda.org/astro-sean/AutoPhOT ) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/installer/conda.svg)](https://conda.anaconda.org/astro-sean)
 
 </div>
-
-<<<<<<< HEAD
-:warning: **Project under new development**: The code is currently being rewritten to improve performance, reliability, accuracy and usability. Please be patient and inform [me](mailto:sean.brennan@astro.su.se?subject=New_feature_in_AutoPhOT) of any new features you would like to see availale in the code.
-Seán
-=======
 :warning: **New version available**: I have taken some time to update the code, integrating new functions from Photutils and Astropy, as well as spending some time on template subtraction. This branch contains the updated code, with limited documentation for now. If you encounter any issues, please contact [me](mailto:sean.brennan@astro.su.se?subject=New_feature_in_AutoPhOT) or open an issue.
 
 I am currently the sole developer and maintainer of the AutoPhOT code. If you would like to collaborate, please get in touch.
 
 —Seán
 
->>>>>>> db88613 (Initial upload)
+
 
 
 ## Introduction
 
-<<<<<<< HEAD
-
-AutoPhOT is novel automated pipeline that is designed for rapid, publication-quality photometry of transients.
-
-The pipeline is built from the ground up using Python 3 - with no dependencies on legacy software. Capabilities of AutoPhOT include aperture and PSF-fitting photometry, template subtraction, and calculation of limiting magnitudes through artificial source injection. AutoPhOT is also capable of calibrating photometry against either survey catalogs (e.g. SDSS, PanSTARRS), or using a custom set of local photometric standards.
-
-You can find the AutoPhOT paper [here](https://arxiv.org/abs/2201.02635). Feedback is welcome. Email [me](mailto:sean.brennan@astro.su.se?subject=AutoPhOT)
-
-=======
 AutoPhOT is a novel, automated pipeline designed for rapid, publication-quality photometry of transients.The pipeline is built from the ground up using Python 3, with no dependencies on legacy software.
 
 You can find the AutoPhOT paper [here](https://arxiv.org/abs/2201.02635). Feedback is welcome. Email [me](mailto:sean.brennan@astro.su.se?subject=AutoPhOT)
@@ -42,48 +28,26 @@ You can find the AutoPhOT paper [here](https://arxiv.org/abs/2201.02635). Feedba
 - Limiting magnitude measurement
 - Integrated with SDSS, PanSTARRS, 2MASS, Skymapper, APASS, or REFCAT2 catalogs
 - 'One-click' operations
->>>>>>> db88613 (Initial upload)
 
 
 ## Installation
 
-<<<<<<< HEAD
-=======
-
->>>>>>> db88613 (Initial upload)
 We suggest creating a new environment for AutoPhOT. This can be done using [conda](https://docs.conda.io/en/latest/) by running:
 
 ```bash
 conda create -n autophot_env python=3.7
 ```
-<<<<<<< HEAD
-=======
 
->>>>>>> db88613 (Initial upload)
 then to activate this environment, run:
 
 ```bash
 conda activate autophot_env
 ```
 
-<<<<<<< HEAD
+
 Before installing autophot, you'll need conda-forge and astropy in your conda channels. See [here](https://github.com/Astro-Sean/autophot/issues/1) for help.
 
-Install AutoPhOT using the conda install:
-
-```bash
-conda install -c astro-sean autophot
-```
-
-If you want to update AutoPhOT, you can do so using:
-
-```bash
-conda update -c astro-sean autophot
-```
-=======
 There was issues installing the code due to conflict packages from various independant software packages. With this updated version, please follow the script given below.
-
-
 
 ## How to use AutoPhOT
 
@@ -203,19 +167,16 @@ To provide your own, you will need to have the correct directory structure as fo
 
 **Note:** You need the templates folder within the directory set by *fits_dir*, and each subfolder needs to be named X_template, where X can be *up, rp, gp, ip, or zp* for Sloan filters, or *U, B, R, I, or Z* for Johnson-Cousins filters.
 
->>>>>>> db88613 (Initial upload)
+
 ## Additional functionality
 
-To fully utilise the AutoPhOT Code, several additional softwares may be used.
 
 <h4>Astrometry.Net</h4>
 
-<<<<<<< HEAD
-AutoPhOT relies on [Astrometry.net](https://arxiv.org/abs/0910.2233) by Dustin Lang to solve for WCS. While the code can be downloaded/installed [here](http://astrometry.net/doc/readme.html) and [here](http://astrometry.net/doc/build.html#build.) we suggest using [Homebrew](https://brew.sh/) to install Astometry.net.
-=======
+
 AutoPhOT relies on [Astrometry.net](https://arxiv.org/abs/0910.2233) by Dustin Lang to solve for WCS. While the code can be downloaded/installed [here](http://astrometry.net/doc/readme.html) and [here](http://astrometry.net/doc/build.html#build), we suggest using [Homebrew](https://brew.sh/) to install Astrometry.net.
 
->>>>>>> db88613 (Initial upload)
+
 
 ```bash
 brew install astrometry-net
@@ -259,9 +220,6 @@ To update AutoPhOT on the location of Astrometry.Net,  update (if needed) 'solve
 
 If the user trusts their WCS this step can be ignored as Astrometry.net is not used.
 
-<<<<<<< HEAD
-=======
-
 <h4>SFFT</h4>
 
 AutoPhOT is now integrated with  the [saccadic fast Fourier transform [SFFT](https://iopscience.iop.org/article/10.3847/1538-4357/ac7394/meta) code. This is a novel template subtraction code that (in testing) is quite reliable
@@ -284,7 +242,7 @@ python setup.py install
 
 no further action is required.
 
->>>>>>> db88613 (Initial upload)
+
 <h4>HOTPANTS</h4>
 
 AutoPhOT can use [HOTPANTS](http://www.ascl.net/1504.004) by Andy Becker which can be found [here](https://github.com/acbecker/hotpants).
@@ -316,7 +274,6 @@ Finally we can compile the code by running the following in the *hotpants/* dire
 make
 ```
 
-
 Once installed, locate the *hotpants* executable and update 'hotpants_exe_loc' in autophot_input (see [here](https://github.com/Astro-Sean/autophot/blob/master/autophot_example.ipynb) for example) .
 
 **Known error with installation of HOTPANTS**
@@ -339,7 +296,7 @@ to every .c file. Then you can run the *make* command.
 
 If the user has no need for image subtraction or wants to use Zogy only, this step can be ignored.
 
-<<<<<<< HEAD
+
 <h4>ZOGY</h4>
 
 AutoPhOT can also use [Zogy](https://arxiv.org/abs/1601.02655) which has a python wrapper and can be found [here](https://github.com/dguevel/PyZOGY). We can install this straight from Github. Make sure the correct environment is activated. we can clone the Github repository to the current directory:
@@ -357,40 +314,15 @@ python setup.py install
 no further action is required.
 
 
-## How to use AutoPhOT
-
-I've designed AutoPhOT to be a user friendly pipeline, meaning you need very little prior knowledge on the art of photometry.
-
-&#8594; I've put together some *Jupyter* notebooks the get you started with AutoPhOT, click [here](https://github.com/Astro-Sean/autophot/tree/master/example_notebooks).
-
-&#8594; If you wish to use the packages within AutoPhOT outside of the examples given, documentation on each package is given [here](https://autophot.readthedocs.io/en/latest/).
-
-&#8594; A list of settings used in AutoPhOT can be found [here](https://autophot.readthedocs.io/en/latest/instructions.html).
-
-&#8594; If you need an example of how to use specific functions in AutoPhOT, please open an issue [here](https://github.com/Astro-Sean/autophot/issues).
-
-## Referencing & Attribution
-
-If you use results from AutoPhOT in a publication, please cite [Brennan & Fraser (2022)](https://arxiv.org/abs/2201.02635). The AutoPhOT code is released under a GPL3 licence and you are free to reuse the code as you wish. If you modify AutoPhOT or use it in a strange fashion (or even if you use it normally), we make no guarantee that your photometry will be valid.
-
-## Testing and Debugging
-
-If you experience errors with a particular file, the most effective means of debugging is to share the file with me ([Seán Brennan](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT)) for diagnostic. Once bugs have been addressed all files will be deleted.
-=======
-
-
-
-
 ## Referencing & Attribution
 
 If you use results from AutoPhOT in a publication, please cite [Brennan & Fraser (2022)](https://arxiv.org/abs/2201.02635) as well as the  [ASCL code](https://ascl.net/2406.030). The AutoPhOT code is released under a GPL3 licence and you are free to reuse the code as you wish. If you modify AutoPhOT or use it in a strange fashion (or even if you use it normally), we make no guarantee that your photometry will be valid.
-
 
 
 ## Testing and Debugging
 
 If you experience errors with a particular file, the most effective means of debugging is to share the file with me ([Seán Brennan](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT)) for diagnostic.
 
->>>>>>> db88613 (Initial upload)
+
 
 **All shared data will be kept confidential**.
