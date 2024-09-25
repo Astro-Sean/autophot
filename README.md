@@ -17,17 +17,13 @@ Your pateince is appreciated will I address bugs and implement changes. If you w
 
 ## Introduction
 
-AutoPhOT is a novel, automated pipeline designed for rapid, publication-quality photometry of transients.The pipeline is built from the ground up using Python 3, with no dependencies on legacy software.
-
-You can find the AutoPhOT paper [here](https://arxiv.org/abs/2201.02635). Feedback is welcome. Email [me](mailto:sean.brennan@astro.su.se?subject=AutoPhOT)
-
-## Features
+[AutoPhOT](https://arxiv.org/abs/2201.02635) is a novel, automated pipeline designed for rapid, publication-quality photometry of transients.The pipeline is built from the ground up using Python 3, with no dependencies on legacy software. Some features of the code include
 
 - Automatic aperture and Point Spread Function (PSF) photometry (using ePSF modeling from Photutils)
 - Template subtraction using HotPants, ZOGY, or SFFT
 - Limiting magnitude measurement
 - Integrated with SDSS, PanSTARRS, 2MASS, Skymapper, APASS, or REFCAT2 catalogs
-- 'One-click' operations
+- 'One-click' operation
 
 
 ## Installation
