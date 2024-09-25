@@ -7,8 +7,7 @@
 
 </div>
 
-:warning: **Project under new development**: The code is currently being rewritten to improve performance, reliability, accuracy and usability. Please be patient and inform [me](mailto:sean.brennan@astro.su.se?subject=New_feature_in_AutoPhOT) of any new features you would like to see availale in the code.
-Seán
+:warning: **NEW CODE AVAILABLE**: An improved version of the AutoPhOT with new and improved features is available on the development branch of this repository.
 
 
 ## Introduction
