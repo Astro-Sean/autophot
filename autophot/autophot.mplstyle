@@ -1,0 +1,64 @@
+# Font options
+
+font.size: 8
+
+
+
+
+# LaTeX options
+text.usetex: False
+
+axes.titlesize : 6
+axes.labelsize : 6
+axes.linewidth : 0.5
+
+# Subplots
+figure.subplot.wspace : 0.01
+figure.subplot.hspace : 0.01
+
+# LINES
+lines.linewidth : 0.5
+lines.markeredgewidth : 0.5
+lines.markersize : 2
+lines.solid_joinstyle : round
+lines.solid_capstyle : round
+
+# DASHES
+lines.dash_capstyle : round
+lines.dash_joinstyle : round
+
+# Ticks
+xtick.top            : True   # draw ticks on the top side
+xtick.bottom         : True   # draw ticks on the bottom side
+xtick.major.size     : 5      # major tick size in points
+xtick.minor.size     : 2      # minor tick size in points
+xtick.major.width    : 0.5    # major tick width in points
+xtick.minor.width    : 0.35    # minor tick width in points
+xtick.direction      : in    # direction: in, out, or inout
+xtick.minor.visible  : True  # visibility of minor ticks on x-axis
+
+ytick.left           : True   # draw ticks on the left side
+ytick.right          : True  # draw ticks on the right side
+ytick.major.size     : 5      # major tick size in points
+ytick.minor.size     : 2      # minor tick size in points
+ytick.major.width    : 0.5    # major tick width in points
+ytick.minor.width    : 0.35    # minor tick width in points
+ytick.direction      : in    # direction: in, out, or inout
+ytick.minor.visible  : True  # visibility of minor ticks on y-axis
+
+
+# Legend
+legend.markerscale   : 1
+legend.handletextpad : 0.25
+legend.columnspacing : 0.25
+legend.labelspacing  : 0.25
+legend.fontsize      : 6
+
+scatter.marker : o
+savefig.dpi : 72
+savefig.transparent : False
+savefig.format : pdf
+savefig.bbox        : tight
+
+# Always plot ticks on top of data
+axes.axisbelow: False

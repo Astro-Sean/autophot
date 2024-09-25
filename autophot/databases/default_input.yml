@@ -1,0 +1,340 @@
+default_input:
+
+  fits_dir: null # str --- Directory where files are containing images with .fits .fts  or .fit extension.
+
+  method: sp # str ---  Method for processing - serial [sp] or multi-processing [mp] (not working)
+
+  ignore_no_telescop: False # bool ---  bool --- Ignore file if no telescope name given (given by TELESCOP header key). If False and an image is found without the TELESCOP header key, the use is asked for clarity.
+
+  skip_file_check: False # bool --- set to True if you do not want Autophot to check though all fits files and ensure it has the correct information.
+  
+  outdir_name: REDUCED # str ---  Extension of output directory. For example if parent directry (which is given in *fits_dir*) is SN1987A output directory will be SN1987A_REDUCED. The code will not overwrite an original data. Any image found in *fits_dir* is copied over to this new directory and we perform photometry on this new image.
+
+  outcsv_name: REDUCED # str --- Output csv name containing all information from reduced files. During the photometric reduction of an individual image, a file containing information on the reduction and calibration named *out.csv* is created. During the automatic scripts, these *out.csv* are collected and concatenated into one file. This new file is named this variable.
+
+  ignore_no_filter: False # bool ---  Ignore an image with no filter. If this value is set to True, any file in which the correct filter header cannot be found is ignore. This is needed in case a fits is in the given dataset that may not be a 2D image. For example a spectral image
+
+  force_filter: r # bool ---
+  restart: False # bool --- This function allows the automated script to pick up where it left off, in the case where the script is ended prematurely on a dataset. i.e some images have been photometred and some have not. This will scan through output directory, see what has already been done and ignores it. This is heavily reliant on file paths and may not work if the output directory is modified by the user.
+
+  select_filter: False # bool ---
+
+  selected_filters: # list --- If *select_filter* is True, perform automated script on images that have corresponding filters represented by this list.
+      -
+  HST_mode: False # bool --- If True
+
+  target_name: null # str --- IAU name of target for use with TNS server. Must be entered without SN or AT in IAU format e.g. 1987A. To use this feature, you must update *TNS_BOT_ID*,*TNS_BOT_API* and *TNS_BOT_NAME* with your BOT details.
+
+  target_ra: null # str --- Target Right Ascension (RA) of target givxen in degrees. If you do not have access to a TNS bot, this is the only way to define the transients location.
+
+  target_dec: null # str --- Target Declination (Dec) of target in degrees.
+
+  plot_source_selection: True # bool --- If True, return a plot showing the image, sources used for zero point and PSF model, as well as the transient location. This is a useful diagnostic plot to ensure the code is working correctly. Also important is to assess whether the WCS values are okay, and if appropriate sources are selected for the PSF model. \n If there is discrepancies in this image, this may point towards additional steps needed for correct photometry.
+
+  preprocessing: # This section focuses on several steps during pre-processing. This include trimming the edges of the image - useful if there is noise at the image edges - and masking out sources - useful if there is saturated sources in the image, which are causing issues, these sources, and the space around them can be masked out.
+
+      trim_image: null # int --- New trimmed shape for image in degress. If given, image will have a shape (cutout_shape,cutout_shape) centered on the target position (if WCS is written to the input file, else center on original image center), defaults to None.
+
+      mask_sources: False # bool ---If True, mask sources given in the list *mask_sources_RADEC_R*.
+
+      mask_sources_RADEC_R: # list --- If *mask_sources* is true, mask these sources. This is a list of tuples where each tuple contains (RA,Dex, radius in arcmins).\n\n\t.. code:: python\n\n\t   autophot_input['preprocessing']['mask_sources'] = True\n\n\t   autophot_input['preprocessing']['mask_sources_RADEC_R'] = [(243.9853312,22.2852770,0.25),(244.0473326,22.3007016.0.5)]
+
+  photometry: # Commands to control photometry
+
+    do_ap_phot: False # bool --- If True, perform aperture photometry on the image. In this cause there is still an attempt to create the PSF model as this may be needed for limiting magnitude checks, for use in ZOGY, etc.
+
+    force_psf: False # bool --- If True, force the use of psf fitting over aperture photometry. This will ignore if the approximate magnitude of the transient is greater than the brightest star used in the PSF model.
+
+    use_local_stars: False # bool --- If True, use local stars within *use_source_arcmin* for sequence stars taken from the given catalog data.
+
+    use_local_stars_for_FWHM:  False # bool --- If True, use local stars within *use_source_arcmin* for FWHM sources.
+
+    use_local_stars_for_PSF: False # bool --- If True, use local stars within *use_source_arcmin* for PSF model stars.
+
+    use_source_arcmin: 4 # float --- Distance around *target_ra*/*target_dec* to use for local sources when performing calibration steps.
+
+    local_radius: 1500 # float --- default distance to look for sources. If *use_local_stars* is True, this value is overwritten
+
+    find_optimum_radius: False # bool --- If True, find and update aperture size based on curve of growth. This selects several bright isolated sources, and using a varying aperture size, finds the optimum aperture size that’s gives the best signal to noise ratio.
+
+    check_nyquist: True # bool --- If True, check that FWHM of image does not fall below a limit given by *nyquist_limit*, if so, use aperture photometry. PSF photometry can result in poor measurements due to suffering from under sampling and centroiding difficulties.
+
+    nyquist_limit: 3.5 # float --- Pixel limit for FWHM to perform aperture photometry. Only applicable is *check_nyquist* is True.
+
+    ap_size: 1.7 # float --- Default Aperture size. This is taken as the multiple of the image full width half maximum.
+
+
+    ap_corr_sigma: 3 # float --- Sigma clip value when returning the aperture corrections. This is used to clean data of any outliers, e.g. galaxies or saturated sources.
+
+    ap_corr_plot: False  # bool --- If True return a plot of the aperture corrections. Plot will produce a histogram-like distribution with a gaussian curve fit to the data for visual illistration.
+
+  templates: # These are the commands to control the calibration of the template files.
+
+    use_user_template: True # bool --- If True, use the templates supplied by the user. Else attempt to download these templates from the Pan Starrs image cutout website.
+
+  wcs: # These commands are concerned with the World Coordinate System (WCS) of an image. These values should be a accurate as possible. While the script can account for sight offset (a few pixels). Significant offsets will result in poor calibration and photometry.
+
+    allow_wcs_recheck: False # bool --- If the offset between when the where the sources are detected and where the WCS values say the should be is too large, allow the script to redo these WCS values and re-attempt the matching script.
+
+    guess_pixel_scale: True # bool --- If True,
+
+    remove_wcs: False # bool --- If True, remove any pre-existing WCS keywords in a header image and check the local version of Astrometry.net for new values. This is also recommended that correct WCS are vital for precision photometry.
+
+    redo_wcs: False # bool --- If True,
+
+    force_wcs_redo: False # bool --- If True, an image is discarded from the automated script if its WCS cannot be solved.
+
+    solve_field_exe_loc: None # str --- Absolute file path of the *solve-field* executable from Astromety.net. This is required to solve for WCS.
+
+    offset_param: 5.  # float --- Mean pixel distance criteria between trusting original WCS and looking it up. If the average offset between fitted position this, the code will recheck the WCS.
+
+    search_radius: 0.1 # float --- When solving for WCS, Tell astrometry.net to search around this distance (in degrees) around the target location within the index files. This can greater speed up computation times and maybe necessary for successful completion.
+
+    downsample: 2 # int --- If working with very large image arrays, when can pass this value to astrometry.net to downsample the image before running through astrometry.net
+
+    cpulimit: 45 # float --- Max time allowed to solve for WCS values. If Astrometry.net exceeds this value, and error is raised.
+
+    update_wcs_scale: False # bool --- If True, check the output of astrometry.net and update *telescope.yml* with the pixel scale value from the output.
+
+    use_xylist:  False # bool --- If True, perform source detection on an image and pass a list of XY pixel values of bright sources rather than passing image to astrometry.net. This is useful if there is strong background contamination in the image (as may be common in infra-red images).
+
+    TNS_BOT_ID: null # str --- Bot ID of your TNS bot. This is needed to use *target_name* as an input to access the most up to date information on a transients position
+
+    TNS_BOT_NAME: null # str --- Bot Name of your TNS bot.
+
+    TNS_BOT_API: null # str --- Bot API key of your TNS bot.
+
+  catalog: # These commands concern obtaining and using photometric sequence data.
+
+    use_catalog: null # str --- Keywords of catalog with information covering the fielf of view of your image. To date the available catalogs are:\n\n\t * pan_starrs\n\t * 2mass\n\t * apass\n\t * skymapper\n\t * sdss
+
+    catalog_custom_fpath: null # str --- If using a custom catalog, set *use_catalog: to *custom* and this value gives the location of this *csv* file\n\n\t.. code:: python\n\n\t   autophot_input['catalog']['use_catalog'] = 'custom'\n\n\t   autophot_input['catalog']['catalog_custom_fpath'] = '/Users/seanbrennan/Desktop/my_custom_catalog.csv'
+
+    catalog_radius: 0.25 # float --- When downloading new catalogs, fetch data around the target lcation within this radius (in degrees).
+
+    plot_catalog_nondetections: False # bool --- If True, return a histogram plot of the sources (not) detected based on their signal to noise ratio.
+
+    include_IR_sequence_data: False # bool --- If True, include IR sequence data from 2MASS in the catalog data. This is useful if you have a large dataset that which includes JHK data.
+
+    matching_source_FWHM_limit: 10 # flaot --- When matching cataog sources, exclude sources that differ by the image FWHM by this amount. This value is defaulted to a very large amount, to make the variable acceptable, set this value to 1-3
+
+    catalog_matching_limit: 21 # float --- Ignore catalog sources that have a given magnitude (i.e. not measured) lower than this value. This is used to decrease computation time, by ignoring sources that are expected to be too faint.
+
+    max_catalog_sources: 500 # float --- Max amount of catalog sources to use. This is used to decrease computation time. When fitting sources, we fit for the brightest sources first
+
+  cosmic_rays: # Commands for cosmic ray cleaning. Cosmic rays should be removed as they can lead to poor fitting when using PSF photometry and increased counts when using aperture. By default we use `Astroscrappy <https://github.com/astropy/astroscrappy>`_ for cosmic ray removal.
+
+    remove_cmrays: True # bool --- If True, remove cosmic rays. This is left as a boolean option as some reduction pipelines may remove cosmic rays during their execution. If your data is already cleaned of cosmic rays. If an image has already be run through the automated script, the keyword *CRAY_RMD* is written to the file. If this keyword is found, cosmic ray removal steps are ignored.
+
+    use_lacosmic: False # bool --- use LaCosmic from CCDPROC to remove cosmic rays instead of Astroscrappy.
+
+  fitting: # Commands describing how to perform fitting. This is mainly performed using `LMFIT <https://lmfit.github.io/lmfit-py/fitting.html>`_ when centroiding a source or fitting the PSF model.
+
+    fitting_method: least_squares # str --- Fitting method for analytical function fitting and PSF fitting. We can accept a limited number of methods from `here <https://lmfit.github.io/lmfit-py/fitting.html>`_. Some tested methods including: \n\n\t * leastsq \n\t * least_squares \n\t * powell \n\t * nelder
+
+    use_moffat: False # bool --- Use moffat function when centroiding and building the PSF model. If False, a gaussian function is used for the same purposes.
+
+    default_moff_beta: 4.765 # float --- If *use_moffat* is True, set the beta term which describes hwo the *wings* of the moffat function behave. We pre-set this to `4.765 <https://academic.oup.com/mnras/article/328/3/977/1247204>`_. IRAF defaults this value to 2.5. A Lorentzian can be obtained by setting this value to 1.
+
+    bkg_level: 3  # float --- Set the background level using the number of standard deviations to use for both the lower and upper clipping limit.
+
+    remove_bkg_surface: True # bool --- Remove a background using a fitted surface using `Background2D <https://photutils.readthedocs.io/en/stable/api/photutils.background.Background2D.html>`_. In brief, while masking out any possible sources, this function calculates a low-resolution background map using (sigma-clipped) statistics in each box of a grid that covers the input image to create a low-resolution background map. This is the most robust method to background measurements, however it does take the longest computation time per fitting.
+
+    remove_bkg_local: False # bool --- Remove the surface equal to a flat surface at the local background median value. This is the most trivial background determination. While masking out and possible sources, the average background value is determined using (sigma-clipped) statistics. A flat surface with the amplitude equal to this value is then set as the background map. This is the fastest background measurement tool, but is the most rudimentary, and will not capture any background variation across the image cutout.
+
+    remove_bkg_poly: False # bool --- Remove a polynomial surface with degree set by *remove_bkg_poly_degree*. This method is included but is out-classed by *remove_bkg_surface*.
+
+    remove_bkg_poly_degree: 1 # int --- If *remove_bkg_poly* is True, remove a polynomial surface with this degree. Setting to 1 will produce a flat surface that can tilt to best fit a slopeing background.
+
+    fitting_radius: 0.5 # float --- Focus on small region where SNR is highest with a radius equal to this value times the FWHM. When fitting a PSF/analytical model we produce a small cutout around the brightest part of a point-soure. This allows for the fitting to focus on the approximate area that contains the highest signal to noise, while ignoring the lower flux in the wings of the sources PSF.
+
+  extinction: # These commands are concerned with the calculations concerned with atmospheric extinction. To date this is underdeveloped.
+
+    apply_airmass_extinction : False # bool --- If True, retrun airmass correction
+
+  source_detection: # Commands to control source detection algorithm used for finding bright, isolated stars. This list of stars is used when building the PSF, finding the FWHM and solving for the WCS.
+
+    threshold_value: 5 #  float --- An appropriate threshold value is needed to detection bright sources. This value is the initial threshold level for source detection. This is just an inital guess and is update incrementally until an useful number of sources is found.
+
+    lim_threshold_value: 3.5  #float --- This is the lower limit on the threshold value. If the threshold value decreases below this value, use *fine_actor*. This is a safety features if an image contains few stars above the background level. For example there may be no sources at *threshold_value=4* but a few are detected at *threshold_value=4.1*.
+
+    fudge_factor: 5 # float --- large step for source detection
+
+    fine_fudge_factor: 0.1 #  float ---small step for source detection if required
+
+    fwhm_guess: 7 # float --- Source detection algorithms need an initial guess for the FWHM. Once any sources are found, we find an approximate value for the FWHM and update our source detection algorithm.
+
+    isolate_sources_fwhm_sep: 5 # float --- When a sample of sources is found, separate sources by this amount times the FWHM.
+
+    init_iso_scale: 25 # float --- For initial guess, sources are removed if they have a detected neighbour within this value, given in pixels.
+
+    sigmaclip_FWHM_sigma: 3 # float --- When cleaning the FWHM measurements of the found sources in a image, using sigma-clipped statistics to sigma clip the values for the FWHM by this amount.
+
+    sigmaclip_median_sigma: 3 # float --- When cleaning the FWHM measurements of the found sources in a image, using sigma-clipped statistics to sigma clip the values for the FWHM by this amount based on their median (a.k.a their background) values.
+
+    image_analysis: False # bool --- Save table of FWHM values for an image and produce a plot showing how the FWHM evolves over an image. This can be useful if you suspect that the FWHM is changing alot over the image.
+
+    remove_sat: False # bool --- Remove saturated sources. These are sources where a closeup image contains a pixel value greater that the saturation level.
+
+    pix_bound: 15 # float --- Ignore sources within this amount from the image boundary, This is useful as the image edges can contain irregularities.
+
+    save_FWHM_plot: False # bool --- Save  a plot of FWHM histogram distribution
+
+    min_source_lim: 2 # float --- When performing source detection, what is the minimum allowed sources when doing source detection to find fwhm.
+
+    max_source_lim: 300 # float --- When performing source detection, what is the maximum allowed sources when doing source detection to find fwhm. This value dictates how the *threshold_value* behaves.
+
+    source_max_iter: 30 # float --- Maximum amount of iterations to perform source detection algorithim, if iters exceeded this value an error is raised.
+
+    int_scale: 25 # float --- Initial image size in pixels to take cutout for fitting the FWHM. This is updated during the automated script.
+
+    scale_multipler:  4 # float --- Multiplier to set close up cutout size based on image scaling. The standard image cutout 1ize will have the shape :math:`image.shape = (2 \\times scale, 2 \\times scale)` where scale is set by:\n\n\t.. code:: python\n\n\t   scale = int(np.ceil(scale_multipler * image_fwhm)) + 0.5
+
+    max_fit_fwhm: 30 # float --- When fitting for the FWHM, constrain the fitting to allow for this maximum value to fit for the FWHM.
+
+    use_catalog: null # bool --- use a catatlog of sources with columns *RA* and *DEC* for finding the FWHM
+
+  limiting_magnitude: # These commands are concerned with determining the limiting magnitude of an image. More specifically the location around a given target location.
+
+    force_lmag: False # bool --- Force limiting magnitude test at transient location. Use at your discretion. If the source flux is still clearly present in the image (e.g. :math:`f>5\sigma`) this may give boogus results.
+
+    skip_lmag: False # bool --- Set to True if you wish to skip and limiting magnitude tests.
+
+    injected_sources_use_beta: True # bool --- If True, use the Beta detection criteria rather than a SNR test
+
+    beta_limit: 0.75 # float --- Beta probability value. Should not be set below 0.5 for convergence. This value places confidence on a measurement that is more *realistic* than setting an ultimate limit e.g. :math:`f>3\sigma`). A source recovered with a beta value greater then this limit is said to be *confidently* detected.
+
+    lmag_check_SNR: 5 # float --- As a rough approximation, it a targets signal to noise ratio falls below this value, execute the limiting magnitude checks which will include the probable tests and tests using artificial source injection
+
+    detection_limit: 3  # float --- Set the detection criteria for source detection as this value. If the SNR of a target is below this value, it is said to be non-detected.
+
+    fwhm_limit_check: 3 # float --- put this in
+
+    check_global_limit: False # bool --- If True,
+
+    inject_lmag_use_ap_phot: False # bool --- If True, use aperture photometry for magnitude recovery when determining the limiting magnitude. Set to False to use the PSF package (if available)
+
+    inject_sources: True # bool --- If True, perform the limiting magnitude check using artificial source injection.
+
+    probable_limit: True # bool --- If True, perform the limiting magnitude check using background probablity diagnostic.
+
+    inject_source_mag: 17.5 # float --- If not guess if given, begin the artificial source injection at this apparent magnitude.
+
+    inject_source_sources_no: 6 # int --- How many artificial sources to inject radially around the target location.
+
+    inject_source_location: 3 # float --- Radial location to inject the artificial sources. This is in units of FWHM away from the centre of the image.
+
+    inject_source_cutoff_limit: 0.8 # float --- That fraction of sources should be lost to consider the injected magnitude to be at the magnitude limit. Must be less than 1.
+
+    inject_source_recover_nsteps: 100 # int --- Number of iterations to allow the injected magnitude to run for. This is used to avoid the script running on to long if something goes wrong.
+
+    inject_source_recover_dmag: 0.5 # float --- When adjusting the injected PSF's magnitude, This is the large step size for magnitude change.
+
+    inject_source_recover_fine_dmag: 0.05  # float --- Fine step size for magnitude change when adjusting injected star magnitude. This is used once an approximate limiting magnitude is found. This value sets the precision on the limiting magnitude.
+
+    inject_source_add_noise: False # bool --- If True, when injecting the artificial source, include random possion noise to the PSF prior to its addition to the image.
+
+    inject_source_recover_dmag_redo: 3 # int --- If *inject_source_add_noise* is True, how maybe times is the artificial source injected at a position with its accompanying possion noise. The noise is changed during each step.
+
+    injected_sources_additional_sources: True # bool --- If True, inject additional sources radially around the existing positions given by *inject_source_sources_no*.
+
+    injected_sources_additional_sources_position: 1 # float --- Where to inject artificial sources with the original position in the center. This value is in units of FWHM. We can set this value  to -1 to move around the pixel only. This is similar to a dithering process where we can fully sampling how the PSF behave on an image.
+
+    injected_sources_additional_sources_number: 1 # float --- how many additional sources to inject using the *injected_sources_additional_sources*
+
+    inject_source_random: True # bool --- If True, when plotting the limiting magnitude on the cutout image, inject sources randomly across the cutout images. This is useful to get an idea of how the limiting magnitude looks around the transient location while ignoring any possible contamination from the transient.
+
+    inject_source_on_target: False # bool --- If True, when plotting the limiting magnitude on the cutout image, inserted an artificial source on the transient position. Use wisely as if there is some flux at the target location, this may skew results.
+
+    plot_injected_sources_randomly: True # bool --- If True  include sources randomly at the limiting magnitude in the output image. This is used as an illustration of how a source at the limiting magnitude may appear.
+
+    injected_sources_save_output: False # bool --- If True, save the output of the limiting magnitude test as a csv file. This is useful to diagnose how the injected sources are behaving as their magnitude is change.
+
+    check_catalog_nondetections: False # bool --- If True, performing a limiting magnitude test on catalog sources. This was used to produce Fig. XYZ in the AutoPhoT Paper.
+
+    limiting_magnitude : False #bool --- check_global_limit
+
+  target_photometry: # These commands focus on settings when dealing with the photometry at the target position.
+
+      adjust_SN_loc: True # bool --- If False, Photometry is performed at transient position i.e. forced photometry
+
+      save_target_plot: True # bool --- Save a plot of the region around the target location as well as the fitting.
+
+  psf: # These commands focus on settings when dealing with the point spread fitting (PSF) photometry package.
+
+    psf_source_no: 25 # int --- Number of sources used in the image to build the PSF model. The PSF is built from bright isolated sources found during the FWHM steps.
+
+    min_psf_source_no: 3 # int --- Minimum allowed number of sources to used for PSF model. If less than this amount of sources is used, aperture photometry is used.
+
+    plot_PSF_residuals: False # bool --- If True, plot the residuals during the PSF fittings to sources.
+
+    plot_PSF_model_residuals: False # bool --- If True, plot the residual from the PSF fitting when the model is being created
+
+    construction_SNR: 25 # int ---  When building the PSF, only use sources if their SNR is greater than this values.
+
+    regrid_size: 10 # int ---  When building and fitting the PSF, regird the residual image by this amount to allow for a higher pseudo resolution and more importantly, we are able to perform sub-pixel shifts.
+
+    save_PSF_models_fits: True # bool --- If True, save the PSF model as a fits file. This is needed if template subtraction is performed with ZOGY.
+
+    save_PSF_stars: False # bool --- If True, save a CSV file with information on the stars used for the PSF model.
+
+    use_PSF_starlist: False # bool --- If True, Use the models given by the user in the file given by the *PSF_starlist* filepath.
+
+    PSF_starlist: null # str --- If *use_PSF_starlist* is True, use stars given by this file. This file should contained the columns *RA* and *DEC* in a *csv* format. For example:\n\n\t.. code:: python\n\n\t   autophot_input['psf']['use_PSF_starlist'] = True\n\n\t   autophot_input['psf']['PSF_starlist'] = '/Users/seanbrennan/Desktop/my_PSF_stars.csv'
+
+
+  template_subtraction: # This commands concern themselves with performing template subtraction and image alignment.
+
+    do_subtraction: False # bool --- If True, perform template subtraction using the given templates.
+
+    do_ap_on_sub: False # bool --- Preform aperture photometry on subtracted image rather than PSF (if available/selected). This may be useful if the templates are not coming out cleanly and the transient PSF is wrapped slightly.
+
+    use_astroalign: True # bool --- If True, use astroalign to align image and template images. If not align images using their repective WCS values using `reproject_interp <https://reproject.readthedocs.io/en/stable/api/reproject.reproject_interp.html>`_.
+
+    get_PS1_template: False # bool --- If True, attempt to download template from the PS1 server.
+
+    save_subtraction_quicklook: True # bool ---  If True, save a pdf image of subtracted image with a closeup of the target location. This is used as a quick way to see if the template subtraction has come out cleanly.
+
+    prepare_templates: False # bool --- Set to True, search for the appropriate template file and perform preprocessing steps including FWHM, cosmic rays remove and WCS corrections.
+
+    hotpants_exe_loc: None   # str --- File path location for HOTPANTS executable.
+
+    hotpants_timeout: 100 # float --- Timeout for template subtraction in seconds.
+
+    image_shape: Null # int --- Before Image subtraction, cutout the input image to this shape and pass to selected template subtraction method
+
+    use_zogy: False # bool --- Try to use Zogy rather than HOTPANTS. If zogy failed, it will revert to HOTPANTS
+
+    zogy_use_pixel: False # bool --- If True, use pixels for gain matching, rather than performing source detection
+
+    image_shape_arcmins: null # float ---
+  error: # Commands for controlling error calculations
+
+    target_error_compute_multilocation: False # bool --- Do `SNooPy <https://sngroup.oapd.inaf.it/snoopy.html>`_-style error. In brief the transient is subtracted from an image leaving a residual image. The PSF used is then injected in onto the residual image at several posoitons near the transient location of best fit. The pseudo-transient is then measured again at this new position. The standard deviation is the the error on the transient measurement.
+
+    target_error_compute_multilocation_position: 0.5 # float --- Distant from location of best fit to inject transient for recovery. Units of FWHM. Set to -1 to adjust around pixel of best fit
+
+    target_error_compute_multilocation_number: 10 # int --- Number of times to inject and recoved an artifical source with an initial magnitude equal to the measured target magnitude.
+
+    use_SN_CCD: False # bool ---
+  zeropoint: # These commands are related to the zero point and how the data is cleaned and measured.
+
+    zp_sigma: 3 # float --- Zero point values are cleaned using sigma-clipped statistics. This value is the sigma clip value used when cleaning up the zero point measurements.
+
+    zp_plot: False # bool --- If True, return a plot of the zero point distribution.
+
+    plot_ZP_vs_SNR: False # bool --- If True, return a plot of the zero  point value versus the signal to noise of a specific source
+
+    plot_ZP_image_analysis: False # bool --- If True, return a plot of the zero point distribution across the image
+
+    zp_use_fitted: False # bool --- When determined the zero point, fit a vertical line to the zeropoint distribution. The value of best fit is the taken as the zero point measurement and the error is the sum of the diagonal of the covariance matrix.
+
+    zp_use_median: False # bool --- When determined the zero point, use the median value for the zeropoint and the median absolute deviation as the error.
+
+    zp_use_mean: True # bool --- When determined the zero point, use the mean value for the zeropoint and the standard deviation deviation as the error.
+
+    zp_use_WA: False # bool --- When determined the zero point, use the weighted average and standard deviation as the zero point and its error. This is not recommended as there is too much weighting placed on error and may skew result.
+
+    zp_use_max_bin: False # bool --- When determined the zero point, use the magnitude given by the max bin i.e the mode. The error is set to the bin width.
+
+    matching_source_SNR_limit:  8 # float --- When measuring the zero point exclude any sources that have a signal to noise ratio less than this value
