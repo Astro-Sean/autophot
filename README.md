@@ -1,17 +1,17 @@
 <p align="center">
   <img src=https://github.com/Astro-Sean/autophot/blob/master/logo.png>
 </p>
-<div align="center">
 
-[![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/version.svg)](https://anaconda.org/astro-sean/autophot) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/latest_release_date.svg)](https://anaconda.org/astro-sean/autophot) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/license.svg)](https://anaconda.org/astro-sean/autophot) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/downloads.svg)](https://anaconda.org/astro-sean/AutoPhOT ) [![Anaconda-Server Badge](https://anaconda.org/astro-sean/autophot/badges/installer/conda.svg)](https://conda.anaconda.org/astro-sean)
 
-</div>
+
 :warning: **New version available**: I have taken some time to update the code, integrating new functions from Photutils and Astropy, as well as spending some time on template subtraction. This branch contains the updated code, with limited documentation for now. If you encounter any issues, please contact [me](mailto:sean.brennan@astro.su.se?subject=New_feature_in_AutoPhOT) or open an issue.
 
-I am currently the sole developer and maintainer of the AutoPhOT code. If you would like to collaborate, please get in touch.
 
-—Seán
+<div align="center">
+I am currently the sole developer and maintainer of the AutoPhOT code.
 
+Your pateince is appreciated will I address bugs and implement changes. If you would like to collaborate, do get in touch — Seán
+</div>
 
 
 
@@ -316,13 +316,26 @@ no further action is required.
 
 ## Referencing & Attribution
 
-If you use results from AutoPhOT in a publication, please cite [Brennan & Fraser (2022)](https://arxiv.org/abs/2201.02635) as well as the  [ASCL code](https://ascl.net/2406.030). The AutoPhOT code is released under a GPL3 licence and you are free to reuse the code as you wish. If you modify AutoPhOT or use it in a strange fashion (or even if you use it normally), we make no guarantee that your photometry will be valid.
+If you use results from AutoPhOT in a publication, please cite the follows
 
-
-## Testing and Debugging
-
-If you experience errors with a particular file, the most effective means of debugging is to share the file with me ([Seán Brennan](mailto:sean.brennan2@ucdconnect.ie?subject=AutoPhOT)) for diagnostic.
-
-
+```
+@ARTICLE{Brennan2022,
+       author = {{Brennan}, S.~J. and {Fraser}, M.},
+        title = "{The Automated Photometry of Transients pipeline (AUTOPHOT)}",
+      journal = {\aap},
+     keywords = {techniques: photometric, techniques: image processing, methods: data analysis, Astrophysics - Instrumentation and Methods for Astrophysics, Astrophysics - High Energy Astrophysical Phenomena},
+         year = 2022,
+        month = nov,
+       volume = {667},
+          eid = {A62},
+        pages = {A62},
+          doi = {10.1051/0004-6361/202243067},
+archivePrefix = {arXiv},
+       eprint = {2201.02635},
+ primaryClass = {astro-ph.IM},
+       adsurl = {https://ui.adsabs.harvard.edu/abs/2022A&A...667A..62B},
+      adsnote = {Provided by the SAO/NASA Astrophysics Data System}
+}
+```
 
 **All shared data will be kept confidential**.
