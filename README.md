@@ -1,5 +1,4 @@
 <p align="center">
-  ```markdown
   <img src="https://github.com/Astro-Sean/autophot/blob/master/logo.png">
 
   :warning: **New version available**: I have taken some time to update the code, integrating new functions from Photutils and Astropy, as well as spending some time on template subtraction. This branch contains the updated code, with limited documentation for now. If you encounter any issues, please contact [me](mailto:sean.brennan@astro.su.se?subject=New_feature_in_AutoPhOT) or open an issue.
@@ -282,6 +281,7 @@
   ## Known Issues
 
   - `telescope.yml` can get corrupted. In this case, open this file and manually correct the errors (typically incomplete write attempts).
+  - I have removed color corrections from the code - solving these iteratively is too unstable. I am working on returning this feature as a post-processing step.
 
   ## Referencing & Attribution
 
@@ -305,7 +305,3 @@
        adsurl = {https://ui.adsabs.harvard.edu/abs/2022A&A...667A..62B},
       adsnote = {Provided by the SAO/NASA Astrophysics Data System}
   }
-  ```
-
-  **All shared data will be kept confidential**.
-  ```
