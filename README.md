@@ -92,6 +92,7 @@ solve-field --help
 
 - **Index files (required)**:
   - `solve-field` needs astrometry index files (can be tens of GB depending on which sets you download).
+  - Index files are listed at [`https://data.astrometry.net/`](https://data.astrometry.net/).
   - Set the index location via environment variables (common) or by installing them into the default search path used by your build.
 
 One common approach is to download a specific index series into a directory, then point astrometry.net at it:
@@ -99,6 +100,9 @@ One common approach is to download a specific index series into a directory, the
 ```bash
 mkdir -p /path/to/astrometry_index
 # download appropriate index files for your image scale/FOV into that directory
+# (example: 4100-series, adjust the range to the scales you need)
+cd /path/to/astrometry_index
+wget -c "https://data.astrometry.net/4100/index-4100-{00..11}.fits"
 export ASTROMETRY_NET_DATA_DIR="/path/to/astrometry_index"
 ```
 
