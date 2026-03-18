@@ -43,12 +43,7 @@ autophot-driver = "autophot:main"
 
 [tool.setuptools]
 include-package-data = true
-
-[tool.setuptools.packages.find]
-include = ["utils*", "databases*"]
-
-[tool.setuptools.py-modules]
-modules = [
+py-modules = [
   "aperture",
   "autophot",
   "autophot_tokens",
@@ -75,6 +70,9 @@ modules = [
   "wcs",
   "zeropoint",
 ]
+
+[tool.setuptools.packages.find]
+include = ["utils*", "databases*"]
 
 [tool.setuptools.package-data]
 databases = ["*.yml"]
