@@ -1,0 +1,202 @@
+MPI-2.2:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    GROND:
+      Name: MPI-2.2+GROND
+      pixel_scale: 0.2
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: not_given_by_user
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      g: g
+      h: H
+      i: i
+      r: r
+      k: K
+      j: J
+      z: z
+      H: H
+      K: K
+      J: J
+ESO-VISTA:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    VIRCAM:
+      Name: ESO-VISTA+VIRCAM
+      pixel_scale: 0.4
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: not_given_by_user
+      saturate: not_given_by_user
+      airmass: AIRMASS
+      mjd: MJD-MID
+      date: DATE-OBS
+      exptime: EXPTIME
+      ks: K
+      Ks: K
+Palomar Observatory:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    ? ''
+    : Name: Palomar Observatory+
+      pixel_scale: 0.2
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: READNOI
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: OBSMJD
+      date: DEC_RATE
+      exptime: EXPTIME
+      ztf_r: r
+      ztf_g: g
+      ztf_i: i
+ZTF:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    REF:
+      Name: ZTF+REF
+      pixel_scale: 0.2
+      filter_key_0: FILTER
+      gain: not_given_by_user
+      readnoise: not_given_by_user
+      saturate: SATURATE
+      airmass: not_given_by_user
+      mjd: not_given_by_user
+      date: not_given_by_user
+      exptime: EXTEND
+      g: g
+      i: i
+      r: r
+PanSTARRs:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    default:
+      Name: PanSTARRs+default
+      pixel_scale: 0.4
+      filter_key_0: FILTER
+      gain: not_given_by_user
+      readnoise: not_given_by_user
+      saturate: not_given_by_user
+      airmass: not_given_by_user
+      mjd: not_given_by_user
+      date: not_given_by_user
+      exptime: EXPTIME
+      i: i
+Pan-STARRS1:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    GPC1:
+      Name: Pan-STARRS1+GPC1
+      pixel_scale: 0.25
+      filter_key_0: FILTER
+      gain: not_given_by_user
+      readnoise: not_given_by_user
+      saturate: not_given_by_user
+      airmass: not_given_by_user
+      mjd: not_given_by_user
+      date: not_given_by_user
+      exptime: EXPTIME
+      r: r
+      i.00000: i
+Palomar 48-inch:
+  INSTRUME:
+    ZTF/MOSAIC:
+      Name: Palomar 48-inch+ZTF/MOSAIC
+      filter_key_0: FILTER
+      mjd: MJD-OBS
+      date: DATE-OBS
+      gain: GAIN
+      saturate: SATURATE
+      readnoise: RDNOISE
+      airmass: AIRMASS
+      exptime: EXPTIME
+      pixel_scale: 1.013
+      ZTF_g: g
+      ZTF_r: r
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+
+1m0-11:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    UNKNOWN:
+      Name: 1m0-11+UNKNOWN
+      pixel_scale: 0.2
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      gp: g
+      b: B
+      ip: i
+      rp: r
+      v: V
+
+VLT:
+  location:
+    name: null
+    lon: null
+    lat: null
+    alt: null
+  INSTRUME:
+    FORS2:
+      Name: VLT+FORS2
+      pixel_scale: 0.2
+      filter_key_0: FILTER
+      gain: GAIN
+      readnoise: RDNOISE
+      saturate: SATURATE
+      airmass: AIRMASS
+      mjd: MJD-OBS
+      date: DATE-OBS
+      exptime: EXPTIME
+      z_special: z
+      z: z
+      b_high: B
+      B: B
+      r_special: r
+      R: r
+      v_high: V
+      V: V
+      i_bess: i
+      I: i

@@ -1,0 +1,20 @@
+"""
+Local credentials file (EXAMPLE).
+
+Copy to `autophot_tokens_local.py` (which is gitignored) and fill in values,
+or prefer environment variables:
+
+  export TNS_BOT_ID="..."
+  export TNS_BOT_NAME="..."
+  export TNS_BOT_API="..."
+  export MASTCASJOBS_WSID="..."
+  export MASTCASJOBS_PWD="..."
+"""
+
+TNS_BOT_ID = None
+TNS_BOT_NAME = None
+TNS_BOT_API = None
+
+MASTcasjobs_wsid = None
+MASTcasjobs_pwd = None
+

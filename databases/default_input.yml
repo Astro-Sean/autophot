@@ -1,0 +1,181 @@
+default_input:
+
+  fits_dir: null # str --- Directory where files are containing images with .fits .fts  or .fit extension.
+
+  ignore_no_telescop: False # bool --- Ignore file if no telescope name given (given by TELESCOP header key).
+
+  skip_file_check: False # bool --- Skip FITS header consistency checks.
+
+  outdir_name: REDUCED # str --- Output directory suffix.
+
+  select_filter: False # bool --- If True, only run on selected_filters.
+
+  selected_filters: # list[str]
+      -
+
+  HST_mode: False # bool
+
+  target_name: null # str --- IAU name of target for use with TNS server.
+  target_ra: null # float --- degrees
+  target_dec: null # float --- degrees
+
+  nCPU: 1 # int --- Number of CPU workers.
+
+  photometry:
+    ap_size: 1.7
+    apply_aperture_correction: False
+
+    # PSF star selection: FFT-based outlier rejection (blends, cosmic rays).
+    psf_fft_rejection: True
+    psf_fft_n_sigma: 4.0
+    psf_fft_min_frac_keep: 0.25
+    psf_fft_min_stars: 10
+    psf_fft_use_mad: True
+    psf_fft_use_median_deviation: True
+
+    psf_background_order: 1
+
+    # MCMC (emcee) tuning for PSF fits.
+    perform_emcee_fitting_s2n: 0
+    emcee_nwalkers: 20
+    emcee_nsteps: 5000
+    emcee_delta: null
+    emcee_burnin_frac: 0.3
+    emcee_thin: 10
+    emcee_adaptive_tau_target: 50
+    emcee_min_autocorr_N: 100
+    emcee_batch_steps: 100
+    emcee_jitter_scale: 0.01
+
+  templates:
+    use_user_template: True
+
+  wcs:
+    solver: astrometry
+    profile: default
+    crowded_auto: True
+    crowded_auto_n_sources_min: 1500
+    crowded_auto_sources_per_arcmin2_min: 200.0
+    crowded_auto_background_rms_min: null
+
+    redo_wcs: True
+    apply_solved_to_fits: True
+    solve_field_exe_loc: solve-field
+
+    scamp_exe_loc: null
+    sextractor_exe_loc: null
+    scamp_astref_catalog: GAIA-DR3
+
+    search_radius: 0.5
+    downsample: 4
+    code_tolerance: 0.01
+    objs: null
+
+    sextractor_detect_thresh: 1.5
+    sextractor_detect_minarea: 5
+    sextractor_analysis_thresh: 1.2
+    sextractor_deblend_nthresh: 32
+    sextractor_deblend_mincont: 0.005
+
+    crowded:
+      objs: 300
+      sextractor_detect_thresh: 2.5
+      sextractor_detect_minarea: 8
+      sextractor_analysis_thresh: 2.0
+      sextractor_deblend_nthresh: 64
+      sextractor_deblend_mincont: 0.001
+      cpulimit: 90
+      search_radius: 0.5
+
+    crpix_offset: 0.0
+    cpulimit: 45
+
+    TNS_BOT_ID: null
+    TNS_BOT_NAME: null
+    TNS_BOT_API: null
+
+  catalog:
+    use_catalog: null
+    catalog_custom_fpath: null
+    catalog_radius: 0.25
+    gaia_xp_radius_deg: 0.1667
+    include_IR_sequence_data: False
+
+  cosmic_rays:
+    remove_cmrays: False
+    use_lacosmic: False
+
+  fitting:
+    bkg_level: 3
+
+  source_detection:
+    scale_multipler: 3
+    use_catalog: null
+
+  limiting_magnitude:
+    beta_limit: 0.75
+    detection_limit: 3
+    inject_source_location: 3
+
+  alignment:
+    reproject_method: adaptive
+    reproject_roundtrip_coords: False
+    reproject_interp_order: bicubic
+    reproject_parallel: False
+    reproject_subpixel_refine: False
+
+  template_subtraction:
+    do_subtraction: False
+    alignment_method: reproject
+    method: hotpants
+    get_PS1_template: False
+    templates_size: 10
+    prepare_templates: False
+
+    hotpants_exe_loc: hotpants
+    hotpants_timeout: 100
+
+    scale_template_to_science: True
+    subtraction_max_masked_fraction: 0.90
+    image_shape: null
+
+    sfft_crowded_auto: False
+    sfft_crowded_min_sources: 500
+    sfft_crowded_min_density: 100
+    sfft_back_size: 128
+    sfft_back_filtersize: 6
+
+    crowded_field: False
+    sextractor_crowded: False
+    sfft_crowded_method: False
+
+    inpaint_template_cores: False
+    inpaint_method: biharmonic
+    inpaint_saturate_frac: 0.90
+    inpaint_dilate_radius: 6
+    inpaint_max_mask_fraction: 0.01
+
+  background:
+    crowded_bright_frac_min: 0.40
+    fast_mode: False
+    mesh_scale_min: 4.0
+    mesh_scale_max: 10.0
+    mesh_filter_size_mesh_units: 3
+
+    local_mesh_scale: 0.8
+    local_min_box: 6
+    local_region_fraction_limit: 0.15
+    local_box_size: 21
+    local_filter_size: 1
+    local_filter_size_max: 1
+    local_interpolator: zoom
+    local_interp_order: 1
+    local_source_mask_nsigma: 5.0
+    local_source_mask_npixels: 7
+    local_source_mask_iterations: 2
+    local_exclude_percentile: 95.0
+    local_sigma_clip: 3.0
+    local_sigma_clip_maxiters: 10
+
+  zeropoint:
+    zp_plot: False

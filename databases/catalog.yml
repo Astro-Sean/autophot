@@ -1,0 +1,209 @@
+custom:
+  name: !!str    name
+  RA: !!str      ra
+  DEC: !!str     dec
+  RA_err: !!str  ra_err
+  DEC_err: !!str dec_err
+  B: !!str       B
+  B_err: !!str   B_err
+  V: !!str       V
+  V_err: !!str   V_err
+  U: !!str       U
+  U_err: !!str   U_err
+  R: !!str       R
+  R_err: !!str   R_err
+  I: !!str       I
+  I_err: !!str   I_err
+  J: !!str       J
+  J_err: !!str   J_err
+  H: !!str       H
+  H_err: !!str   H_err
+  K: !!str       K
+  K_err: !!str   K_err
+  Y: !!str       Y
+  Y_err: !!str   Y_err
+  u: !!str       u
+  u_err: !!str   u_err
+  g: !!str       g
+  g_err: !!str   g_err
+  r: !!str       r
+  r_err: !!str   r_err
+  i: !!str       i
+  i_err: !!str   i_err
+  z: !!str       z
+  z_err: !!str   z_err
+  c: !!str       c
+  c_err: !!str   c_err
+  o: !!str       o
+  o_err: !!str   o_err
+
+
+legacy:
+  RA: !!str     ra
+  DEC: !!str     dec
+  g: !!str       mag_g
+  g_err: !!str   mag_g_e
+  r: !!str       mag_r
+  r_err: !!str   mag_r_e
+  i: !!str       mag_i
+  i_err: !!str   mag_i_e
+  z: !!str       mag_z
+  z_err: !!str   mag_z_e
+
+
+apass:
+  name: !!str   recno
+  RA: !!str      RAJ2000
+  DEC: !!str     DEJ2000
+  RA_err: !!str  e_RAJ2000
+  DEC_err: !!str e_DEJ2000
+  V: !!str       Vmag
+  V_err: !!str   e_Vmag
+  B: !!str       Bmag
+  B_err: !!str   e_Bmag
+  g: !!str       g'mag
+  g_err: !!str   e_g'mag
+  r: !!str       r'mag
+  r_err: !!str   e_r'mag
+  i: !!str       i'mag
+  i_err: !!str   e_i'mag
+
+pan_starrs:
+  name: !!str   objName
+  RA: !!str        raMean
+  DEC: !!str       decMean
+  RA_err: !!str    raMeanErr
+  DEC_err: !!str   decMeanErr
+  g: !!str     gMeanPSFMag
+  g_err: !!str gMeanPSFMagErr
+  r: !!str     rMeanPSFMag
+  r_err: !!str rMeanPSFMagErr
+  i: !!str     iMeanPSFMag
+  i_err: !!str iMeanPSFMagErr
+  z: !!str     zMeanPSFMag
+  z_err: !!str zMeanPSFMagErr
+  Y: !!str     yMeanPSFMag
+  Y_err: !!str yMeanPSFMagErr
+  w: !!str     rMeanPSFMag
+  w_err: !!str rMeanPSFMagErr
+
+
+
+
+refcat:
+  RA: !!str RA
+  DEC: !!str Dec
+  g: !!str g
+  g_err: !!str dg
+  r: !!str r
+  r_err: !!str dr
+  i: !!str i
+  i_err: !!str di
+  z: !!str z
+  z_err: !!str dz
+  J: !!str J
+  J_err: !!str dJ
+  H: !!str H
+  H_err: !!str dH
+  K: !!str K
+  K_err: !!str dK
+  w: !!str r
+  w_err: !!str dr
+
+
+tic:
+  RA: !!str ra
+  DEC: !!str dec
+  g: !!str gmag
+  g_err: !!str e_gmag
+  r: !!str rmag
+  r_err: !!str e_rmag
+  i: !!str imag
+  i_err: !!str e_imag
+  z: !!str zmag
+  z_err: !!str e_zmag
+  u: !!str umag
+  u_err: !!str e_umag
+  B: !!str Bmag
+  B_err: !!str e_Bmag
+  V: !!str Vmag
+  V_err: !!str e_Vmag
+  J: !!str Jmag
+  J_err: !!str e_Jmag
+  H: !!str Hmag
+  H_err: !!str e_Hmag
+  K: !!str Kmag
+  K_err: !!str e_Kmag
+  G: !!str GAIAmag
+  G_err: !!str e_GAIAmag
+  T: !!str Tmag
+  T_err: !!str e_Tmag
+
+
+gaia:
+  RA: !!str ra
+  DEC: !!str dec
+  g: !!str SdssStd_mag_g
+  g_err: !!str SdssStd_mag_error_g
+  r: !!str SdssStd_mag_r
+  r_err: !!str SdssStd_mag_error_r
+  i: !!str SdssStd_mag_i
+  i_err: !!str SdssStd_mag_error_i
+  z: !!str SdssStd_mag_z
+  z_err: !!str SdssStd_mag_error_z
+  u: !!str SdssStd_mag_u
+  u_err: !!str SdssStd_mag_error_u
+  B: !!str JkcStd_mag_B
+  B_err: !!str JkcStd_mag_error_B
+  V: !!str JkcStd_mag_V
+  V_err: !!str JkcStd_mag_error_V
+  R: !!str JkcStd_mag_R
+  R_err: !!str JkcStd_mag_error_R
+  I: !!str JkcStd_mag_I
+  I_err: !!str JkcStd_mag_error_I
+
+
+
+# For skymapper, v and u filters are weird! https://www.cambridge.org/core/services/aop-cambridge-core/content/view/S132335801800005X
+skymapper:
+  name: !!str   object_id
+  RA: !!str        raj2000
+  DEC: !!str       dej2000
+  RA_err: !!str    e_raj2000
+  DEC_err: !!str   e_dej2000
+  usky: !!str     u_psf
+  usky_err: !!str e_u_psf
+  vsky: !!str     v_psf
+  vsky_err: !!str e_v_psf
+  g: !!str     g_psf
+  g_err: !!str e_g_psf
+  r: !!str     r_psf
+  r_err: !!str e_r_psf
+  i: !!str     i_psf
+  i_err: !!str e_i_psf
+  z: !!str     z_psf
+  z_err: !!str e_z_psf
+
+2mass:
+  RA: !!str RAJ2000
+  DEC: !!str DEJ2000
+  J: !!str  Jmag
+  J_err: !!str e_Jmag
+  H: !!str Hmag
+  H_err: !!str e_Hmag
+  K: !!str Kmag
+  K_err: !!str e_Kmag
+
+sdss:
+    RA: !!str RA_ICRS
+    DEC: !!str DE_ICRS
+    u: !!str umag
+    u_err: !!str e_umag
+    g: !!str gmag
+    g_err: !!str e_gmag
+    r: !!str rmag
+    r_err: !!str e_rmag
+    i: !!str imag
+    i_err: !!str e_imag
+    z: !!str zmag
+    z_err: !!str e_zmag
