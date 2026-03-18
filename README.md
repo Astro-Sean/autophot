@@ -1,41 +1,9 @@
 AutoPHOT Object Photometry Pipeline
 ===================================
 
-AutoPHOT is a Python pipeline for performing calibrated aperture and PSF photometry on CCD/NIR imaging data. It is designed for time-domain astronomy workflows (e.g. supernovae, transients) and supports end-to-end processing from raw science frames to calibrated light curves and diagnostic plots.
-
-## Features
-
-- **Image preparation**: trimming, background modeling and subtraction, optional north-up reprojection, cosmic-ray removal.
-- **WCS handling**: validation, (re)solution, and refinement of WCS headers.
-- **Source handling**: reference catalog querying, FWHM estimation, optimal aperture selection.
-- **Photometry**:
-  - Aperture photometry with aperture corrections.
-  - ePSF / PSF photometry with diagnostic plots for PSF quality.
-- **Calibration**:
-  - Zeropoint fitting with robust clipping and optional colour terms.
-  - Header updates with calibrated zeropoints and metadata.
-- **Template subtraction**: science–template alignment and subtraction, with subtraction quality plots.
-- **Diagnostics and plots**: consistently styled plots for PSF, background, zeropoints, subtraction checks, and more.
-
-## Repository layout (key files)
-
-- `main.py` – command-line entry point; orchestrates the full photometry pipeline.
-- `prepare.py` – prepares and validates input FITS files and directory layout.
-- `check.py` – inspects FITS headers and helps build telescope/instrument databases.
-- `background.py` – background estimation and diagnostic plots.
-- `aperture.py` – aperture photometry and aperture-correction handling.
-- `psf.py` – PSF/ePSF construction, fitting, and PSF-photometry diagnostics.
-- `zeropoint.py` – zeropoint and colour-term fitting from reference catalogs.
-- `plot.py` – subtraction and source-diagnostics plotting helpers.
-- `lightcurve.py` – light-curve assembly utilities.
-- `autophot.mplstyle` – shared Matplotlib style used by all plots.
-- `requirements.txt` – Python dependencies.
-
-Most modules have module-level docstrings and per-function / per-class docstrings that explain intent and non-obvious logic. Inline comments are used sparingly to clarify tricky parts of the algorithms without repeating the code.
+AutoPHOT is a Python pipeline for calibrated **aperture** and **PSF** photometry on CCD/NIR imaging. It’s designed for time‑domain workflows (e.g. transients) and can run with or without **template subtraction**.
 
 ## Installation
-
-### Option A: pip install (recommended)
 
 Install into an existing environment (venv/conda):
 
@@ -43,38 +11,14 @@ Install into an existing environment (venv/conda):
 pip install -e .
 ```
 
-If installing directly from a GitHub clone without editable mode:
-
-```bash
-pip install .
-```
-
-### Option B: conda (local build)
-
-This repository includes a minimal conda recipe in `conda/recipe/`.
-To build and install locally:
+Local conda build (optional):
 
 ```bash
 conda install -c conda-forge conda-build
 conda build conda/recipe
 ```
 
-Then install the resulting package from your local conda-bld directory (printed by conda-build), or upload it to your own channel.
-
-### Option C: create a fresh conda environment
-
-```bash
-conda env create -f environment.yml
-conda activate autophot-object
-```
-
-### Notes
-
-- If you use the system Python on Debian/Ubuntu, prefer conda or ensure `python3-venv` is installed before using `python -m venv`.
-
-## External dependencies (optional but common)
-
-AutoPHOT can run without some external tools, but the following are commonly used:
+## External tools (optional but common)
 
 ### Astrometry.net (`solve-field`) for WCS solving
 
@@ -128,46 +72,15 @@ make
 
 AutoPHOT defaults to running the `hotpants` command from your `PATH`, and prints a warning if it cannot be found.
 
-## Legacy installation (venv)
+## Quickstart
 
-1. **Create and activate a virtual environment**:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate  # on macOS/Linux
-# .venv\Scripts\activate   # on Windows
-```
-
-2. **Install dependencies**:
-
-```bash
-pip install -r requirements.txt
-```
-
-AutoPHOT targets a recent Python 3 version (3.9+ is recommended).
-
-## Basic usage
-
-The main entry point is `run_photometry()` in `main.py`, which is wired to a simple CLI:
+AutoPHOT has a simple CLI:
 
 ```bash
 python main.py -f /path/to/image.fits -c /path/to/config.yml
 ```
 
-- `-f` – path to the science FITS image.
-- `-c` – path to the YAML configuration file describing the observation, instrument, and pipeline options.
-- `-temp` – optional flag to prepare a template rather than a science image.
-
-The configuration YAML controls details such as:
-
-- Working directory and output directory naming.
-- WCS solving and refinement options.
-- Background modelling choices.
-- Aperture vs PSF photometry settings.
-- Zeropoint and colour-term fitting options.
-- Template subtraction settings.
-
-See the existing configuration examples under `databases/` (e.g. `default_input.yml`) for typical values.
+For most runs you’ll use a small Python driver script (recommended) so you can override only the dataset‑specific fields.
 
 ## Recommended usage (Python driver script)
 
@@ -205,7 +118,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Load defaults from databases/default_input.yml
+    # Load defaults from databases/default_input.yml.
     autophot_input = AutomatedPhotometry.load()
 
     # ---------------------------------------------------------------------
@@ -237,14 +150,8 @@ def main() -> int:
     autophot_input["target_ra"] = 152.207497
     autophot_input["target_dec"] = -67.047493
 
-    # ---------------------------------------------------------------------
-    # Catalog
-    # ---------------------------------------------------------------------
-    # catalog.use_catalog: which reference catalog to calibrate against.
-    # `refcat` uses MAST CasJobs credentials; others are survey-query based.
-    autophot_input["catalog"]["use_catalog"] = "refcat"
-    # Other options: 'sdss', 'gaia', 'tic', 'pan_starrs', 'apass', 'skymapper', 'custom'
-    # autophot_input["catalog"]["catalog_custom_fpath"] = "/path/to/custom.csv"
+    # Catalog (required): choose a reference catalog for calibration.
+    autophot_input["catalog"]["use_catalog"] = "gaia"  # or "pan_starrs", "sdss", "legacy", "apass", "2mass", "refcat", "custom"
 
     # If you need Refcat via MAST CasJobs, prefer env vars (recommended):
     #   export MASTCASJOBS_WSID="..."
@@ -265,33 +172,22 @@ def main() -> int:
     # Use 0 to disable trimming.
     autophot_input["preprocessing"]["trim_image"] = 5
 
-    # ---------------------------------------------------------------------
-    # WCS
-    # ---------------------------------------------------------------------
-    # wcs.redo_wcs: if True, attempt to (re)solve WCS (recommended when WCS is unreliable).
+    # WCS: re-solve if needed.
     autophot_input["wcs"]["redo_wcs"] = True
-
-    # wcs.solve_field_exe_loc: path/name of astrometry.net `solve-field`.
-    # Leave as `solve-field` if it is on PATH.
-    autophot_input["wcs"]["solve_field_exe_loc"] = "solve-field"
 
     # TNS credentials (recommended: env vars)
     #   export TNS_BOT_ID="..."
     #   export TNS_BOT_NAME="..."
     #   export TNS_BOT_API="..."
 
-    # ---------------------------------------------------------------------
-    # Template subtraction
-    # ---------------------------------------------------------------------
-    # template_subtraction.do_subtraction: enable/disable template subtraction.
+    # Template subtraction (optional).
     autophot_input["template_subtraction"]["do_subtraction"] = True
 
     # template_subtraction.alignment_method: how to align template -> science grid.
     # `reproject` uses WCS; other options include `swarp` and `astroalign`.
     autophot_input["template_subtraction"]["alignment_method"] = "reproject"
 
-    # template_subtraction.method: subtraction backend.
-    # `sfft` is pure-Python; `hotpants` requires the external HOTPANTS executable.
+    # Subtraction backend.
     autophot_input["template_subtraction"]["method"] = "sfft"
 
     # ---------------------------------------------------------------------
@@ -336,21 +232,11 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-### Notes on driver scripts
-
-- If you installed the package (`pip install -e .`), **do not** use `sys.path.append(...)` in your driver script.
-- `nCPU>1` parallelises over images (processes). If you run on HPC, keep BLAS/OpenMP threads low (the code sets common env vars to `1` at startup).
-- If you use template subtraction, make sure your template exists under `fits_dir/templates/<filter>p_template/` (see the “Minimal example” section below).
-
-### Minimal example: reference-subtracted (template) photometry
-
-To run **reference-subtracted photometry** (science image minus a reference/template, then photometry on the difference), use the following minimal setup.
-
-### Template setup (detailed)
+## Template subtraction setup
 
 AutoPHOT expects templates to live under a `templates/` directory inside your `fits_dir`. At runtime it chooses the template based on the **science image filter** and the folder naming conventions below.
 
-#### 1) Directory structure and naming rules
+### Directory structure and naming rules
 
 Templates must be organised into per-filter subfolders. The folder name depends on the filter:
 
@@ -377,13 +263,13 @@ my_field/                         # fits_dir
         └── K_template.fits
 ```
 
-#### 2) Template filename requirements
+### Template file rules
 
 - The template can be **any `*.fits` file** in the appropriate `{filter}_template/` folder (the filename does **not** need to contain `_template`).
 - Files containing `PSF_model` or ending in `.weight` are ignored as templates.
 - Keep exactly **one** usable template per filter folder to avoid ambiguity.
 
-#### 3) Using a user-provided template vs downloading one
+### User-provided vs downloaded templates
 
 - **User-provided template**:
   - Place the template FITS into the correct folder under `templates/` (as above)
@@ -403,11 +289,7 @@ autophot_input["template_subtraction"]["download_templates"] = "panstarrs"  # or
 autophot_input["template_subtraction"]["templates_size"] = 10               # arcmin cutout size
 ```
 
-#### 4) Template preparation
-
-When template folders are present/used, AutoPHOT will automatically apply the required preparation steps for template subtraction (e.g. WCS checks, preprocessing steps required by the selected alignment/subtraction backend).
-
-#### 5) Alignment method (science–template registration)
+### Alignment method (science–template registration)
 
 Alignment is controlled by:
 
@@ -421,7 +303,7 @@ default_input:
 - **`swarp`**: external SWarp-based registration (useful in some survey-like workflows)
 - **`astroalign`**: feature-matching registration (can help when WCS is poor)
 
-#### 6) Subtraction backend
+### Subtraction backend
 
 Choose the subtraction backend with:
 
@@ -439,45 +321,7 @@ If you use the SFFT backend, please cite the SFFT method and see upstream docume
 - Repo: `https://github.com/thomasvrussell/sfft`
 - ADS (Hu et al. 2022, ApJ 936, 157): `https://ui.adsabs.harvard.edu/abs/2022ApJ...936..157H/abstract`
 
-**1. Directory layout**
-
-Place your science FITS files in a directory and put the reference image in a filter-matched subfolder under `templates/`:
-
-```
-my_field/                          # fits_dir in config
-├── science_2024_01_15_r.fits      # science images (any name)
-├── science_2024_01_20_r.fits
-└── templates/
-    └── rp_template/               # for r-band (use gp_template, ip_template, etc. for g, i, …)
-        └── my_reference_template.fits   # any *.fits is OK; files containing "PSF_model" are ignored
-```
-
-For filters `g`, `r`, `i`, `z`, `u` the code expects a subfolder named `{filter}p_template` (e.g. `rp_template` for r). Other filters (including **UBVRI** and NIR like `JHK`) use `{filter}_template` (e.g. `V_template`, `J_template`).
-
-**2. Minimal config YAML**
-
-Start from `databases/default_input.yml` and set at least:
-
-```yaml
-default_input:
-  fits_dir: /path/to/my_field
-  outdir_name: REDUCED
-  target_ra: 123.456        # degrees (target position)
-  target_dec: -45.678       # degrees
-
-  template_subtraction:
-    do_subtraction: True
-    alignment_method: reproject   # or swarp, astroalign
-    method: sfft                  # or zogy, hotpants
-```
-
-**3. Run**
-
-```bash
-python main.py -f /path/to/my_field/science_2024_01_15_r.fits -c /path/to/config.yml
-```
-
-The pipeline will find the template under `my_field/templates/rp_template/`, align it to the science image, perform the subtraction (SFFT by default), and then run photometry on the difference image. Subtraction quicklook PDFs are saved when `template_subtraction.save_subtraction_quicklook` is `True`. If you use ZOGY, set `photometry.save_PSF_models_fits: True` in the config so PSF models are available for the subtraction.
+When template folders are present/used, AutoPHOT will automatically apply the required preparation steps for subtraction (e.g. WCS checks and preprocessing required by the chosen backend).
 
 ## Citing AutoPHOT
 
