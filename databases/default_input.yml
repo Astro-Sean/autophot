@@ -50,9 +50,6 @@ default_input:
     emcee_batch_steps: 100 # int --- Steps per batch when running emcee in batches.
     emcee_jitter_scale: 0.01 # float --- Small jitter applied to initial walker positions (relative scale).
 
-  templates:
-    use_user_template: True # bool --- If True, use templates in `templates/` folders; if False, attempt download (if configured).
-
   wcs:
     solver: astrometry # str --- WCS solver backend (e.g. astrometry, scamp).
     profile: default # str --- Named WCS-solver profile/tuning preset.

@@ -387,27 +387,20 @@ my_field/                         # fits_dir
 
 - **User-provided template**:
   - Place the template FITS into the correct folder under `templates/` (as above)
-  - Set:
+  - No special config is required beyond enabling subtraction (AutoPHOT will discover templates in `fits_dir/templates/...` automatically):
 
-```yaml
-default_input:
-  templates:
-    use_user_template: True
+```python
+autophot_input["template_subtraction"]["do_subtraction"] = True
 ```
 
 - **Downloaded template**:
   - AutoPHOT can download templates into `fits_dir/templates/` before running subtraction.
-  - Set `templates.use_user_template: False` and select the download source via `template_subtraction.download_templates`:
+  - Select the download source via `template_subtraction.download_templates`:
 
-```yaml
-default_input:
-  templates:
-    use_user_template: False
-
-  template_subtraction:
-    do_subtraction: True
-    download_templates: panstarrs  # or legacy, sdss
-    templates_size: 10             # arcmin cutout size
+```python
+autophot_input["template_subtraction"]["do_subtraction"] = True
+autophot_input["template_subtraction"]["download_templates"] = "panstarrs"  # or "legacy", "sdss"
+autophot_input["template_subtraction"]["templates_size"] = 10               # arcmin cutout size
 ```
 
 #### 4) Template preparation
@@ -456,7 +449,7 @@ my_field/                          # fits_dir in config
 ├── science_2024_01_20_r.fits
 └── templates/
     └── rp_template/               # for r-band (use gp_template, ip_template, etc. for g, i, …)
-        └── my_reference_template.fits   # name must contain "_template", not "PSF_model" or ".weight"
+        └── my_reference_template.fits   # any *.fits is OK; files containing "PSF_model" are ignored
 ```
 
 For filters `g`, `r`, `i`, `z`, `u` the code expects a subfolder named `{filter}p_template` (e.g. `rp_template` for r). Other filters (including **UBVRI** and NIR like `JHK`) use `{filter}_template` (e.g. `V_template`, `J_template`).
@@ -471,9 +464,6 @@ default_input:
   outdir_name: REDUCED
   target_ra: 123.456        # degrees (target position)
   target_dec: -45.678       # degrees
-
-  templates:
-    use_user_template: True
 
   template_subtraction:
     do_subtraction: True
