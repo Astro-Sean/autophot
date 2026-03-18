@@ -220,9 +220,17 @@ def main() -> int:
     # ---------------------------------------------------------------------
     # Paths / output
     # ---------------------------------------------------------------------
+    # outdir_name: the output folder suffix. If fits_dir is `/data/field`, outputs
+    # go to `/data/field_REDUCED` when outdir_name is `REDUCED`.
     autophot_input["outdir_name"] = "REDUCED"
-    autophot_input["wdir"] = "/path/to/autophot_db"     # working directory
-    autophot_input["fits_dir"] = "/path/to/images/"     # folder containing science FITS files
+
+    # wdir: working directory used for pipeline scratch/products (catalog caches,
+    # intermediate files). Set this to a persistent location you can write to.
+    autophot_input["wdir"] = "/path/to/autophot_db"
+
+    # fits_dir: directory containing the science FITS images to process.
+    # The pipeline writes results into a sibling directory: `{fits_dir}_{outdir_name}`.
+    autophot_input["fits_dir"] = "/path/to/images/"
 
     # Optional: set to True/False to restart operations from scratch
     # autophot_input["restart"] = False
@@ -230,13 +238,19 @@ def main() -> int:
     # ---------------------------------------------------------------------
     # Target
     # ---------------------------------------------------------------------
+    # target_name: optional label used in filenames/plots (and for TNS lookups if configured).
     autophot_input["target_name"] = "SN2024xuo"
+
+    # target_ra / target_dec: target sky position in *degrees* (J2000).
+    # If these are wrong, forced photometry/trim boxes will be wrong.
     autophot_input["target_ra"] = 152.207497
     autophot_input["target_dec"] = -67.047493
 
     # ---------------------------------------------------------------------
     # Catalog
     # ---------------------------------------------------------------------
+    # catalog.use_catalog: which reference catalog to calibrate against.
+    # `refcat` uses MAST CasJobs credentials; others are survey-query based.
     autophot_input["catalog"]["use_catalog"] = "refcat"
     # Other options: 'sdss', 'gaia', 'tic', 'pan_starrs', 'apass', 'skymapper', 'custom'
     # autophot_input["catalog"]["catalog_custom_fpath"] = "/path/to/custom.csv"
@@ -252,13 +266,22 @@ def main() -> int:
     # ---------------------------------------------------------------------
     # Preprocessing / cosmic rays
     # ---------------------------------------------------------------------
+    # cosmic_rays.remove_cmrays: enable/disable cosmic-ray cleaning.
     autophot_input["cosmic_rays"]["remove_cmrays"] = True
-    autophot_input["preprocessing"]["trim_image"] = 5  # arcmin box (if enabled in your config)
+
+    # preprocessing.trim_image (arcmin): if >0, trim the image to a square box
+    # of size (2*trim_image) arcmin on a side, centred on the target.
+    # Use 0 to disable trimming.
+    autophot_input["preprocessing"]["trim_image"] = 5
 
     # ---------------------------------------------------------------------
     # WCS
     # ---------------------------------------------------------------------
+    # wcs.redo_wcs: if True, attempt to (re)solve WCS (recommended when WCS is unreliable).
     autophot_input["wcs"]["redo_wcs"] = True
+
+    # wcs.solve_field_exe_loc: path/name of astrometry.net `solve-field`.
+    # Leave as `solve-field` if it is on PATH.
     autophot_input["wcs"]["solve_field_exe_loc"] = "solve-field"
 
     # TNS credentials (recommended: env vars)
@@ -269,13 +292,22 @@ def main() -> int:
     # ---------------------------------------------------------------------
     # Template subtraction
     # ---------------------------------------------------------------------
+    # template_subtraction.do_subtraction: enable/disable template subtraction.
     autophot_input["template_subtraction"]["do_subtraction"] = True
+
+    # template_subtraction.alignment_method: how to align template -> science grid.
+    # `reproject` uses WCS; other options include `swarp` and `astroalign`.
     autophot_input["template_subtraction"]["alignment_method"] = "reproject"
-    autophot_input["template_subtraction"]["method"] = "sfft"  # or "hotpants"
+
+    # template_subtraction.method: subtraction backend.
+    # `sfft` is pure-Python; `hotpants` requires the external HOTPANTS executable.
+    autophot_input["template_subtraction"]["method"] = "sfft"
 
     # ---------------------------------------------------------------------
     # Parallelism control (image-level)
     # ---------------------------------------------------------------------
+    # nCPU: image-level parallelism (number of images processed in parallel).
+    # Use 1 for debugging; increase for large datasets if memory allows.
     autophot_input["nCPU"] = max(1, int(args.ncpu))
 
     # ---------------------------------------------------------------------
