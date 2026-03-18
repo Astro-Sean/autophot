@@ -11,6 +11,12 @@ Install into an existing environment (venv/conda):
 pip install -e .
 ```
 
+If you want to use **Legacy Survey templates** (via `download_legacy_template`), also install:
+
+```bash
+pip install legacystamps
+```
+
 Optional pip-only dependencies (needed only for specific features):
 
 ```bash
