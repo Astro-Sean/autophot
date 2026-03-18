@@ -510,6 +510,18 @@ class prepare:
         )
         self.logger.info("")
 
+        # Fail fast: the pipeline requires an explicit catalog choice to map
+        # instrument filter names onto supported catalog bands.
+        use_catalog = (self.input_yaml.get("catalog") or {}).get("use_catalog", None)
+        if use_catalog is None or str(use_catalog).strip() == "" or str(use_catalog).lower() == "none":
+            msg = (
+                "catalog.use_catalog is not set (null/None). "
+                "AutoPHOT requires a catalog to map filters and perform calibration. "
+                "Set `default_input.catalog.use_catalog` (e.g. gaia, pan_starrs, sdss, legacy, apass, 2mass, refcat, custom)."
+            )
+            self.logger.warning(msg)
+            raise ValueError(msg)
+
         # If no files were passed in, return immediately to avoid zero-division
         # in the progress-bar helper and keep template-only runs robust.
         if not flist:
