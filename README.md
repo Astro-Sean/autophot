@@ -486,20 +486,6 @@ python main.py -f /path/to/my_field/science_2024_01_15_r.fits -c /path/to/config
 
 The pipeline will find the template under `my_field/templates/rp_template/`, align it to the science image, perform the subtraction (SFFT by default), and then run photometry on the difference image. Subtraction quicklook PDFs are saved when `template_subtraction.save_subtraction_quicklook` is `True`. If you use ZOGY, set `photometry.save_PSF_models_fits: True` in the config so PSF models are available for the subtraction.
 
-## Comments and documentation style
-
-- Each major module (`main.py`, `prepare.py`, `check.py`, `psf.py`, etc.) starts with a high-level docstring describing its role in the pipeline.
-- Public classes and key functions have docstrings that explain:
-  - The purpose of the function or class.
-  - The most important arguments and return values.
-  - Any non-obvious assumptions or algorithmic choices.
-- Inline comments are reserved for **non-obvious logic**, e.g.:
-  - Why a particular clipping threshold or scaling choice is used.
-  - How restart behaviour or directory mirroring is implemented.
-  - Corner cases in PSF building or background estimation.
-
-This style keeps the code readable and maintainable without cluttering it with comments that simply restate what each line of code does.
-
 ## Citing AutoPHOT
 
 If you use AutoPHOT in a publication, please cite:
