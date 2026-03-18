@@ -126,7 +126,7 @@ cd hotpants
 make
 ```
 
-AutoPHOT will attempt to locate `hotpants` via `PATH` and prints a warning if it cannot be found.
+AutoPHOT defaults to running the `hotpants` command from your `PATH`, and prints a warning if it cannot be found.
 
 ## Legacy installation (venv)
 
