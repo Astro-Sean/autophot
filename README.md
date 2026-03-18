@@ -427,6 +427,11 @@ default_input:
 - **`hotpants`**: requires the external HOTPANTS executable (see install section above)
 - **`sfft`**: uses the Python SFFT backend
 
+If you use the SFFT backend, please cite the SFFT method and see upstream documentation/source:
+
+- Repo: `https://github.com/thomasvrussell/sfft`
+- ADS (Hu et al. 2022, ApJ 936, 157): `https://ui.adsabs.harvard.edu/abs/2022ApJ...936..157H/abstract`
+
 **1. Directory layout**
 
 Place your science FITS files in a directory and put the reference image in a filter-matched subfolder under `templates/`:
