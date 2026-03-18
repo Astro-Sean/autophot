@@ -507,38 +507,6 @@ The pipeline will find the template under `my_field/templates/rp_template/`, ali
 
 This style keeps the code readable and maintainable without cluttering it with comments that simply restate what each line of code does.
 
-## Preparing for publication on GitHub
-
-Before pushing this repository to GitHub, you should:
-
-- **Review configuration and token files**:
-  - Do not commit secrets such as API keys or authentication tokens (e.g. `autophot_tokens.py` or similar).
-  - If such files are needed at runtime, document them in the README and ignore them via `.gitignore`.
-
-### Credentials (recommended: environment variables)
-
-AutoPHOT can read credentials from environment variables (preferred) or from a local override file.
-
-- **Environment variables**:
-  - `TNS_BOT_ID`, `TNS_BOT_NAME`, `TNS_BOT_API` (or `TNS_BOT_API_KEY`)
-  - `MASTCASJOBS_WSID`, `MASTCASJOBS_PWD`
-- **Local override file**:
-  - Copy `autophot_tokens_local.py.example` → `autophot_tokens_local.py` and fill it in.
-  - `autophot_tokens_local.py` is ignored by git via `.gitignore`.
-- **Check example data**:
-  - Large or proprietary FITS files should normally be excluded from version control.
-  - If you want to ship small example data, keep it minimal and well documented.
-- **Add a LICENSE**:
-  - Choose an appropriate open-source license (e.g. MIT, BSD-3-Clause, GPL) and add a `LICENSE` file so others know how they may use the code.
-
-## Contributing
-
-Contributions and issue reports are welcome. When opening a pull request:
-
-- Keep functions small and focused.
-- Add / update docstrings when you touch non-trivial logic.
-- Maintain the consistent plotting style (via `autophot.mplstyle` and the shared `set_size` helper).
-
 ## Citing AutoPHOT
 
 If you use AutoPHOT in a publication, please cite:
