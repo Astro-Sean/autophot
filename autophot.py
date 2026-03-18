@@ -308,6 +308,33 @@ class AutomatedPhotometry:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         default_input_path = os.path.join(script_dir, "databases", "default_input.yml")
         default_input = autophot_yaml(default_input_path, "default_input").load()
+
+        # Ensure expected nested sections exist so driver scripts can safely override
+        # settings without needing repetitive setdefault() calls.
+        for _k in (
+            "preprocessing",
+            "photometry",
+            "templates",
+            "wcs",
+            "catalog",
+            "cosmic_rays",
+            "fitting",
+            "source_detection",
+            "limiting_magnitude",
+            "alignment",
+            "template_subtraction",
+            "background",
+            "zeropoint",
+            "error",
+            "psf",
+            "target_photometry",
+        ):
+            if default_input.get(_k) is None:
+                default_input[_k] = {}
+
+        # Common preprocessing defaults used by main.py
+        default_input["preprocessing"].setdefault("trim_image", 0)
+
         _log(border_msg(f"Default input loaded from: {default_input_path}", body="-", corner="+"))
         _log(f"Configuration loaded in {time.perf_counter() - t0:.3f} seconds.")
         return default_input

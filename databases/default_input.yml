@@ -21,6 +21,9 @@ default_input:
 
   nCPU: 1 # int --- Number of CPU workers.
 
+  preprocessing:
+    trim_image: 0 # float --- If >0, trim to a (2*trim_image) arcmin box centred on the target.
+
   photometry:
     ap_size: 1.7
     apply_aperture_correction: False
