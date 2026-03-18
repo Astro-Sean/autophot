@@ -72,6 +72,71 @@ conda activate autophot-object
 
 - If you use the system Python on Debian/Ubuntu, prefer conda or ensure `python3-venv` is installed before using `python -m venv`.
 
+## External dependencies (optional but common)
+
+AutoPHOT can run without some external tools, but the following are commonly used:
+
+### Astrometry.net (`solve-field`) for WCS solving
+
+- **Install (conda-forge, recommended on Linux/HPC)**:
+
+```bash
+conda install -c conda-forge astrometry-net
+```
+
+- **Verify**:
+
+```bash
+solve-field --help
+```
+
+- **Index files (required)**:
+  - `solve-field` needs astrometry index files (can be tens of GB depending on which sets you download).
+  - Set the index location via environment variables (common) or by installing them into the default search path used by your build.
+
+One common approach is to download a specific index series into a directory, then point astrometry.net at it:
+
+```bash
+mkdir -p /path/to/astrometry_index
+# download appropriate index files for your image scale/FOV into that directory
+export ASTROMETRY_NET_DATA_DIR="/path/to/astrometry_index"
+```
+
+In AutoPHOT, set:
+
+- `default_input.wcs.solve_field_exe_loc: solve-field`
+
+If `solve-field` is missing, AutoPHOT will warn and skip WCS solving (unless you force it).
+
+### HOTPANTS for template subtraction
+
+AutoPHOT can call HOTPANTS for image subtraction when `template_subtraction.method: hotpants`.
+
+- **Install dependencies** (CFITSIO is required):
+
+```bash
+conda install -c conda-forge cfitsio make gcc
+```
+
+- **Build HOTPANTS from source**:
+
+```bash
+git clone https://github.com/acbecker/hotpants
+cd hotpants
+make
+```
+
+- **Configure AutoPHOT**:
+  - Either put the resulting `hotpants` executable on your `PATH`, or set it explicitly:
+
+```yaml
+default_input:
+  template_subtraction:
+    hotpants_exe_loc: /full/path/to/hotpants
+```
+
+AutoPHOT will attempt to locate `hotpants` via `PATH` and prints a warning if it cannot be found.
+
 ## Legacy installation (venv)
 
 1. **Create and activate a virtual environment**:
