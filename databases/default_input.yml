@@ -20,6 +20,38 @@ default_input:
   target_dec: null # float --- degrees
 
   nCPU: 1 # int --- Number of CPU workers.
+  ncpu: null # int|null --- Alias for `nCPU` (legacy; prefer `nCPU`).
+  nCpu: null # int|null --- Alias for `nCPU` (legacy; prefer `nCPU`).
+
+  restart: True # bool --- If True, reprocess all files (ignore existing outputs where applicable).
+
+  wdir: . # str --- Working directory for scratch files and caches (e.g. catalog queries, telescope DB).
+
+  rng_seed: null # int|null --- Random seed for injection/recovery experiments (null = non-deterministic).
+
+  use_header_radec: False # bool --- If True, prefer RA/Dec from FITS headers when available.
+
+  apply_aperture_correction: False # bool --- Legacy alias for `photometry.apply_aperture_correction` (prefer the nested key).
+
+  save_cutout_plot: True # bool --- Save diagnostic cutout plots where supported (e.g. star-shape checks).
+
+  # The following are typically populated per-image from FITS headers during processing.
+  # They are included here because some code paths use `.get(...)` fallbacks.
+  fpath: '' # str --- Runtime: current FITS file path (set internally).
+  write_dir: null # str|null --- Runtime: output directory for current image (set internally).
+  imageFilter: '' # str --- Runtime: band name for current image after mapping (set internally).
+  exposure_time: 30.0 # float --- Runtime fallback exposure time (seconds) if header key is missing.
+  gain: 1.0 # float --- Runtime fallback detector gain (e-/ADU) if header key is missing.
+  read_noise: 0.0 # float --- Runtime fallback read noise (e-) if header key is missing.
+  readnoise: 0.0 # float --- Alias fallback for read noise (e-) for legacy code paths.
+  pixel_scale: null # float|null --- Runtime fallback pixel scale (arcsec/pixel) if not in telescope DB/header.
+  fwhm: 3.0 # float --- Runtime fallback seeing FWHM (pixels) if not measured/available.
+  science_fwhm: null # float|null --- Runtime: measured science-image FWHM (pixels) (set internally).
+  scale: 0 # float|int --- Runtime: plotting/cutout scale selector (set internally; pipeline-specific).
+  saturate: .inf # float --- Runtime fallback saturation level (ADU) if header key is missing.
+
+  aperture_correction: 0.0 # float --- Runtime: measured aperture correction (mag) for calibration (set internally).
+  aperture_correction_err: 0.0 # float --- Runtime: aperture correction uncertainty (mag) (set internally).
 
   preprocessing:
     trim_image: 0 # float --- If >0, trim to a (2*trim_image) arcmin box centred on the target.
@@ -27,6 +59,8 @@ default_input:
   photometry:
     ap_size: 1.7 # float --- Aperture radius in units of FWHM (used for aperture photometry / checks).
     apply_aperture_correction: False # bool --- If True, apply aperture correction from PSF stars to aperture mags.
+    aperture_radius: null # float|null --- Explicit aperture radius (pixels). If null, computed from FWHM (typically max(1.5*FWHM, 2.0)).
+    crowded_field: False # bool --- Photometry crowded-field toggle (affects source selection/cleaning heuristics where implemented).
 
     # PSF star selection: FFT-based outlier rejection (blends, cosmic rays).
     psf_fft_rejection: True # bool --- Enable FFT-based rejection during PSF star selection.
@@ -61,6 +95,7 @@ default_input:
     redo_wcs: True # bool --- If True, solve/refresh WCS even if a WCS exists in the header.
     apply_solved_to_fits: True # bool --- If True, write solved WCS back into the FITS header on disk.
     solve_field_exe_loc: solve-field # str --- `solve-field` executable name/path (defaults to `solve-field` on PATH).
+    refine_after_solve: False # bool --- If True, run an additional WCS refinement pass after a successful solve.
 
     scamp_exe_loc: null # str|null --- Optional explicit path to `scamp` executable.
     sextractor_exe_loc: null # str|null --- Optional explicit path to SExtractor executable.
@@ -139,6 +174,7 @@ default_input:
     scale_template_to_science: True # bool --- If True, scale template to better match science image photometric level before subtraction.
     subtraction_max_masked_fraction: 0.90 # float --- Abort subtraction if masked fraction exceeds this value.
     image_shape: null # list[int]|null --- Optional expected image shape (ny, nx) for validation; null disables check.
+    use_catalog_for_matching: True # bool --- If True, use catalog sources (when available) for matching/registration heuristics.
 
     sfft_crowded_auto: False # bool --- Auto-enable SFFT crowded-field tuning based on source density heuristics.
     sfft_crowded_min_sources: 500 # int --- Crowded-field trigger: minimum number of detected sources for SFFT tuning.
