@@ -100,9 +100,9 @@ One common approach is to download a specific index series into a directory, the
 ```bash
 mkdir -p /path/to/astrometry_index
 # download appropriate index files for your image scale/FOV into that directory
-# (example: 4100-series, adjust the range to the scales you need)
+# (example: 4200-series; downloads all .fits in that directory)
 cd /path/to/astrometry_index
-wget -c "https://data.astrometry.net/4100/index-4100-{00..11}.fits"
+wget -c -nd -r -np -A "*.fits" "https://data.astrometry.net/4200/"
 export ASTROMETRY_NET_DATA_DIR="/path/to/astrometry_index"
 ```
 
