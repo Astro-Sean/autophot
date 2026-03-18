@@ -25,160 +25,161 @@ default_input:
     trim_image: 0 # float --- If >0, trim to a (2*trim_image) arcmin box centred on the target.
 
   photometry:
-    ap_size: 1.7
-    apply_aperture_correction: False
+    ap_size: 1.7 # float --- Aperture radius in units of FWHM (used for aperture photometry / checks).
+    apply_aperture_correction: False # bool --- If True, apply aperture correction from PSF stars to aperture mags.
 
     # PSF star selection: FFT-based outlier rejection (blends, cosmic rays).
-    psf_fft_rejection: True
-    psf_fft_n_sigma: 4.0
-    psf_fft_min_frac_keep: 0.25
-    psf_fft_min_stars: 10
-    psf_fft_use_mad: True
-    psf_fft_use_median_deviation: True
+    psf_fft_rejection: True # bool --- Enable FFT-based rejection during PSF star selection.
+    psf_fft_n_sigma: 4.0 # float --- Rejection threshold (sigma units) for FFT outlier metric.
+    psf_fft_min_frac_keep: 0.25 # float --- Minimum fraction of PSF stars to retain after rejection.
+    psf_fft_min_stars: 10 # int --- Minimum PSF stars required to run FFT rejection; otherwise skip.
+    psf_fft_use_mad: True # bool --- Use MAD-based scale estimate for FFT rejection statistics.
+    psf_fft_use_median_deviation: True # bool --- Use median absolute deviation around the median (robust).
 
-    psf_background_order: 1
+    psf_background_order: 1 # int --- Background model order during PSF fitting (0 constant, 1 planar).
 
     # MCMC (emcee) tuning for PSF fits.
-    perform_emcee_fitting_s2n: 0
-    emcee_nwalkers: 20
-    emcee_nsteps: 5000
-    emcee_delta: null
-    emcee_burnin_frac: 0.3
-    emcee_thin: 10
-    emcee_adaptive_tau_target: 50
-    emcee_min_autocorr_N: 100
-    emcee_batch_steps: 100
-    emcee_jitter_scale: 0.01
+    perform_emcee_fitting_s2n: 0 # float --- If >0, run emcee PSF/MAG fitting when source S/N exceeds this value.
+    emcee_nwalkers: 20 # int --- Number of emcee walkers.
+    emcee_nsteps: 5000 # int --- Total emcee steps (per walker).
+    emcee_delta: null # float|null --- Proposal scale / step size override (implementation-specific).
+    emcee_burnin_frac: 0.3 # float --- Fraction of samples to discard as burn-in.
+    emcee_thin: 10 # int --- Thinning factor for saved chain samples.
+    emcee_adaptive_tau_target: 50 # int --- Target integrated autocorrelation time for adaptive stopping (if enabled).
+    emcee_min_autocorr_N: 100 # int --- Minimum chain length (in steps) before autocorr is estimated.
+    emcee_batch_steps: 100 # int --- Steps per batch when running emcee in batches.
+    emcee_jitter_scale: 0.01 # float --- Small jitter applied to initial walker positions (relative scale).
 
   templates:
-    use_user_template: True
+    use_user_template: True # bool --- If True, use templates in `templates/` folders; if False, attempt download (if configured).
 
   wcs:
-    solver: astrometry
-    profile: default
-    crowded_auto: True
-    crowded_auto_n_sources_min: 1500
-    crowded_auto_sources_per_arcmin2_min: 200.0
-    crowded_auto_background_rms_min: null
+    solver: astrometry # str --- WCS solver backend (e.g. astrometry, scamp).
+    profile: default # str --- Named WCS-solver profile/tuning preset.
+    crowded_auto: True # bool --- Auto-switch to crowded-field WCS settings when heuristics trigger.
+    crowded_auto_n_sources_min: 1500 # int --- Crowded-field trigger: minimum detected sources.
+    crowded_auto_sources_per_arcmin2_min: 200.0 # float --- Crowded-field trigger: sources per arcmin^2 threshold.
+    crowded_auto_background_rms_min: null # float|null --- Crowded-field trigger: minimum background RMS (optional).
 
-    redo_wcs: True
-    apply_solved_to_fits: True
-    solve_field_exe_loc: solve-field
+    redo_wcs: True # bool --- If True, solve/refresh WCS even if a WCS exists in the header.
+    apply_solved_to_fits: True # bool --- If True, write solved WCS back into the FITS header on disk.
+    solve_field_exe_loc: solve-field # str --- `solve-field` executable name/path (defaults to `solve-field` on PATH).
 
-    scamp_exe_loc: null
-    sextractor_exe_loc: null
-    scamp_astref_catalog: GAIA-DR3
+    scamp_exe_loc: null # str|null --- Optional explicit path to `scamp` executable.
+    sextractor_exe_loc: null # str|null --- Optional explicit path to SExtractor executable.
+    scamp_astref_catalog: GAIA-DR3 # str --- Reference catalog name for SCAMP (if used).
 
-    search_radius: 0.5
-    downsample: 4
-    code_tolerance: 0.01
-    objs: null
+    search_radius: 0.5 # float --- Search radius (degrees) for blind/assisted WCS solving.
+    downsample: 4 # int --- Downsampling factor used for source detection/solving speed-up.
+    code_tolerance: 0.01 # float --- Tolerance for WCS solution acceptance (backend-dependent).
+    objs: null # int|null --- Optional target number of objects to use in solving (backend-dependent).
 
-    sextractor_detect_thresh: 1.5
-    sextractor_detect_minarea: 5
-    sextractor_analysis_thresh: 1.2
-    sextractor_deblend_nthresh: 32
-    sextractor_deblend_mincont: 0.005
+    sextractor_detect_thresh: 1.5 # float --- SExtractor DETECT_THRESH for WCS source detection.
+    sextractor_detect_minarea: 5 # int --- SExtractor DETECT_MINAREA for WCS source detection.
+    sextractor_analysis_thresh: 1.2 # float --- SExtractor ANALYSIS_THRESH for WCS source detection.
+    sextractor_deblend_nthresh: 32 # int --- SExtractor DEBLEND_NTHRESH for WCS source detection.
+    sextractor_deblend_mincont: 0.005 # float --- SExtractor DEBLEND_MINCONT for WCS source detection.
 
     crowded:
-      objs: 300
-      sextractor_detect_thresh: 2.5
-      sextractor_detect_minarea: 8
-      sextractor_analysis_thresh: 2.0
-      sextractor_deblend_nthresh: 64
-      sextractor_deblend_mincont: 0.001
-      cpulimit: 90
-      search_radius: 0.5
+      objs: 300 # int --- Target number of objects in crowded-field solving mode.
+      sextractor_detect_thresh: 2.5 # float --- Crowded-field SExtractor DETECT_THRESH.
+      sextractor_detect_minarea: 8 # int --- Crowded-field SExtractor DETECT_MINAREA.
+      sextractor_analysis_thresh: 2.0 # float --- Crowded-field SExtractor ANALYSIS_THRESH.
+      sextractor_deblend_nthresh: 64 # int --- Crowded-field SExtractor DEBLEND_NTHRESH.
+      sextractor_deblend_mincont: 0.001 # float --- Crowded-field SExtractor DEBLEND_MINCONT.
+      cpulimit: 90 # int --- CPU time limit (seconds) for crowded-field solve attempts.
+      search_radius: 0.5 # float --- Search radius (degrees) for crowded-field solving.
 
-    crpix_offset: 0.0
-    cpulimit: 45
+    crpix_offset: 0.0 # float --- Pixel offset applied to CRPIX when writing WCS (instrument-specific workaround).
+    cpulimit: 45 # int --- CPU time limit (seconds) for solve attempts.
 
-    TNS_BOT_ID: null
-    TNS_BOT_NAME: null
-    TNS_BOT_API: null
+    TNS_BOT_ID: null # str|null --- Optional TNS bot ID (if querying TNS).
+    TNS_BOT_NAME: null # str|null --- Optional TNS bot name (if querying TNS).
+    TNS_BOT_API: null # str|null --- Optional TNS API key/token (if querying TNS).
 
   catalog:
-    use_catalog: null
-    catalog_custom_fpath: null
-    catalog_radius: 0.25
-    gaia_xp_radius_deg: 0.1667
-    include_IR_sequence_data: False
+    use_catalog: null # str|null --- Catalog backend to use for calibration (e.g. APASS, PS1, GAIA); null to auto/disable.
+    catalog_custom_fpath: null # str|null --- Optional path to a user-supplied catalog file.
+    catalog_radius: 0.25 # float --- Search radius (degrees) around target for catalog query.
+    gaia_xp_radius_deg: 0.1667 # float --- Search radius (degrees) for Gaia XP query (if used).
+    include_IR_sequence_data: False # bool --- If True, augment catalog with IR sequence data (when available).
 
   cosmic_rays:
-    remove_cmrays: False
-    use_lacosmic: False
+    remove_cmrays: False # bool --- Enable cosmic-ray removal in preprocessing.
+    use_lacosmic: False # bool --- Use L.A.Cosmic-style algorithm (if available/configured).
 
   fitting:
-    bkg_level: 3
+    bkg_level: 3 # int --- Background handling mode/level (pipeline-specific; higher typically more aggressive).
 
   source_detection:
-    scale_multipler: 3
-    use_catalog: null
+    scale_multipler: 3 # float --- Scale factor applied to detection thresholds (pipeline-specific).
+    use_catalog: null # str|null --- Optional catalog to seed/guide source detection (if supported).
 
   limiting_magnitude:
-    beta_limit: 0.75
-    detection_limit: 3
-    inject_source_location: 3
+    beta_limit: 0.75 # float --- Target recovery fraction (beta) for limiting magnitude estimation.
+    detection_limit: 3 # float --- Detection S/N threshold used for limiting magnitude definition.
+    inject_source_location: 3 # int --- Injection position strategy for limiting-mag trials (pipeline-specific).
 
   alignment:
-    reproject_method: adaptive
-    reproject_roundtrip_coords: False
-    reproject_interp_order: bicubic
-    reproject_parallel: False
-    reproject_subpixel_refine: False
+    reproject_method: adaptive # str --- Reprojection strategy/method selector for WCS alignment (pipeline-specific).
+    reproject_roundtrip_coords: False # bool --- If True, perform a coordinate round-trip sanity check during reproject.
+    reproject_interp_order: bicubic # str|int --- Interpolation order/mode for reprojection (e.g. nearest, bilinear, bicubic).
+    reproject_parallel: False # bool --- Enable parallel reprojection where supported.
+    reproject_subpixel_refine: False # bool --- If True, apply subpixel refinement after WCS alignment (where implemented).
 
   template_subtraction:
-    do_subtraction: False
-    alignment_method: reproject
-    method: hotpants
-    get_PS1_template: False
-    templates_size: 10
-    prepare_templates: False
+    do_subtraction: False # bool --- Enable template subtraction step.
+    alignment_method: reproject # str --- Science–template registration method (reproject, swarp, astroalign).
+    method: hotpants # str --- Subtraction backend (hotpants, sfft, zogy where available).
+    download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).
+    get_PS1_template: False # bool --- Deprecated legacy flag (use `download_templates: panstarrs` instead).
+    templates_size: 10 # float --- Template cutout size (arcmin) around target when building/using templates.
+    prepare_templates: False # bool --- Template-prep pass switch (kept for legacy; most workflows auto-prepare as needed).
 
-    hotpants_exe_loc: hotpants
-    hotpants_timeout: 100
+    hotpants_exe_loc: hotpants # str --- HOTPANTS executable name/path (defaults to `hotpants` on PATH).
+    hotpants_timeout: 100 # int --- Timeout (seconds) for HOTPANTS subtraction call.
 
-    scale_template_to_science: True
-    subtraction_max_masked_fraction: 0.90
-    image_shape: null
+    scale_template_to_science: True # bool --- If True, scale template to better match science image photometric level before subtraction.
+    subtraction_max_masked_fraction: 0.90 # float --- Abort subtraction if masked fraction exceeds this value.
+    image_shape: null # list[int]|null --- Optional expected image shape (ny, nx) for validation; null disables check.
 
-    sfft_crowded_auto: False
-    sfft_crowded_min_sources: 500
-    sfft_crowded_min_density: 100
-    sfft_back_size: 128
-    sfft_back_filtersize: 6
+    sfft_crowded_auto: False # bool --- Auto-enable SFFT crowded-field tuning based on source density heuristics.
+    sfft_crowded_min_sources: 500 # int --- Crowded-field trigger: minimum number of detected sources for SFFT tuning.
+    sfft_crowded_min_density: 100 # float --- Crowded-field trigger: minimum sources per area (pipeline-specific units).
+    sfft_back_size: 128 # int --- SExtractor BACK_SIZE used by SFFT source selection/background estimation.
+    sfft_back_filtersize: 6 # int --- SExtractor BACK_FILTERSIZE used by SFFT background smoothing.
 
-    crowded_field: False
-    sextractor_crowded: False
-    sfft_crowded_method: False
+    crowded_field: False # bool --- Global crowded-field flag for subtraction/source selection heuristics.
+    sextractor_crowded: False # bool --- Use crowded-field SExtractor settings for subtraction/source selection (if supported).
+    sfft_crowded_method: False # bool --- Force SFFT crowded-field configuration (overrides auto logic).
 
-    inpaint_template_cores: False
-    inpaint_method: biharmonic
-    inpaint_saturate_frac: 0.90
-    inpaint_dilate_radius: 6
-    inpaint_max_mask_fraction: 0.01
+    inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).
+    inpaint_method: biharmonic # str --- Inpainting algorithm name (e.g. biharmonic).
+    inpaint_saturate_frac: 0.90 # float --- Saturation threshold as fraction of max/bit-depth for core mask creation.
+    inpaint_dilate_radius: 6 # int --- Mask dilation radius (pixels) around saturated cores before inpainting.
+    inpaint_max_mask_fraction: 0.01 # float --- Safety limit: skip inpainting if mask covers more than this fraction of the image.
 
   background:
-    crowded_bright_frac_min: 0.40
-    fast_mode: False
-    mesh_scale_min: 4.0
-    mesh_scale_max: 10.0
-    mesh_filter_size_mesh_units: 3
+    crowded_bright_frac_min: 0.40 # float --- Crowded-field trigger based on bright-source fraction (pipeline-specific metric).
+    fast_mode: False # bool --- If True, use faster/less robust background estimation settings.
+    mesh_scale_min: 4.0 # float --- Minimum background mesh scale (in FWHM units unless otherwise specified).
+    mesh_scale_max: 10.0 # float --- Maximum background mesh scale (in FWHM units unless otherwise specified).
+    mesh_filter_size_mesh_units: 3 # int --- Background smoothing filter size expressed in mesh-cell units.
 
-    local_mesh_scale: 0.8
-    local_min_box: 6
-    local_region_fraction_limit: 0.15
-    local_box_size: 21
-    local_filter_size: 1
-    local_filter_size_max: 1
-    local_interpolator: zoom
-    local_interp_order: 1
-    local_source_mask_nsigma: 5.0
-    local_source_mask_npixels: 7
-    local_source_mask_iterations: 2
-    local_exclude_percentile: 95.0
-    local_sigma_clip: 3.0
-    local_sigma_clip_maxiters: 10
+    local_mesh_scale: 0.8 # float --- Background2D box-size scale factor relative to FWHM (local background).
+    local_min_box: 6 # int --- Minimum Background2D box size (pixels).
+    local_region_fraction_limit: 0.15 # float --- Max fraction of image covered by local region before falling back (pipeline-specific).
+    local_box_size: 21 # int --- Explicit local background box size (pixels); overrides adaptive sizing when set.
+    local_filter_size: 1 # int --- Background2D filter size (pixels) for local background.
+    local_filter_size_max: 1 # int --- Maximum allowed filter size when adaptively increasing filter size.
+    local_interpolator: zoom # str --- Background2D interpolator method (e.g. zoom).
+    local_interp_order: 1 # int --- Interpolator order (e.g. 0 nearest, 1 linear).
+    local_source_mask_nsigma: 5.0 # float --- Sigma threshold for masking sources during local background estimation.
+    local_source_mask_npixels: 7 # int --- Minimum connected pixels for source mask creation.
+    local_source_mask_iterations: 2 # int --- Number of mask/estimate iterations for local background.
+    local_exclude_percentile: 95.0 # float --- Percentile threshold to exclude brightest pixels from background fit.
+    local_sigma_clip: 3.0 # float --- Sigma clipping threshold for background statistics.
+    local_sigma_clip_maxiters: 10 # int --- Maximum sigma-clipping iterations.
 
   zeropoint:
-    zp_plot: False
+    zp_plot: False # bool --- If True, generate zeropoint diagnostic plots.

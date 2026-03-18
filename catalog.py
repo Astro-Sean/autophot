@@ -154,6 +154,48 @@ class catalog:
         """
         self.input_yaml = input_yaml
 
+    def _require_catalog_selected(self, catalogName: Optional[str]) -> str:
+        """
+        Ensure a catalog backend is selected.
+
+        The pipeline historically allowed `catalog.use_catalog` to be null for
+        workflows that do not require catalog calibration, but when a catalog
+        query is requested we must fail fast with a clear message.
+        """
+        if catalogName is None or str(catalogName).strip() == "" or str(catalogName).lower() == "none":
+            raise ValueError(
+                "No catalog selected. Set `default_input.catalog.use_catalog` in your YAML "
+                "(e.g. 'gaia', 'pan_starrs', 'sdss', 'apass', '2mass', 'legacy', 'refcat', or 'custom')."
+            )
+        return str(catalogName).strip()
+
+    @staticmethod
+    def _catalog_len(obj) -> int:
+        """Best-effort length for DataFrame/Table/list-like results."""
+        if obj is None:
+            return 0
+        try:
+            return int(len(obj))
+        except Exception:
+            return 0
+
+    def _require_nonempty_catalog(self, selectedCatalog, catalogName: str, target_coords, radius_arcmin: float) -> None:
+        """
+        Stop the pipeline if the catalog query returns zero sources.
+
+        This is treated as "catalog does not cover that part of the sky" (or a
+        service/query failure) and continuing would produce misleading results.
+        """
+        n = self._catalog_len(selectedCatalog)
+        if n == 0:
+            ra = float(target_coords.ra.degree)
+            dec = float(target_coords.dec.degree)
+            raise RuntimeError(
+                f"{catalogName.upper()} catalog query returned 0 sources for "
+                f"RA={ra:.6f} deg, Dec={dec:.6f} deg within r={radius_arcmin:.2f} arcmin. "
+                "Assuming this catalog does not cover the field (or the query failed); stopping."
+            )
+
 # =============================================================================
 # =============================================================================
 # # 
@@ -428,6 +470,8 @@ class catalog:
         logger.info(border_msg('Collecting Sequence sources in field'))
 
         try:
+            catalogName = self._require_catalog_selected(catalogName)
+
             # If target or its RA/DEC is set, set target name
             target_ra = target_coords.ra.degree
             target_dec = target_coords.dec.degree
@@ -486,8 +530,8 @@ class catalog:
                     coord = SkyCoord(ra=target_coords.ra.degree, dec=target_coords.dec.degree, unit="deg")
                     result = Catalogs.query_region(coord, radius=5*u.arcmin, catalog="TIC")
                     if len(result) == 0:
-                        logger.info("No TIC entries found.")
-                        return Table()
+                        selectedCatalog = pd.DataFrame()
+                        self._require_nonempty_catalog(selectedCatalog, catalogName, target_coords, radius)
 
                     # Columns to extract (RA/DEC, r-band + error, others optional)
                     selected_cols = [
@@ -530,13 +574,19 @@ class catalog:
                 elif catalogName == 'refcat':
                     
                     logger.info(f'Downloading reference sources from {catalogName.upper()}')
+                    logger.warning(
+                        "REFCAT requires MAST CasJobs credentials. Set `default_input.catalog.MASTcasjobs_wsid` "
+                        "and `default_input.catalog.MASTcasjobs_pwd` (or provide them via environment/local overrides)."
+                    )
                     credentials = {
                         'userid': self.input_yaml['catalog'].get('MASTcasjobs_wsid'),
                         'password': self.input_yaml['catalog'].get('MASTcasjobs_pwd')
                     }
                     if not credentials['userid'] or not credentials['password']:
-                        logger.critical('Refcat catalog selected but credentials are missing.')
-                        return None
+                        raise RuntimeError(
+                            "Refcat selected but MAST CasJobs credentials are missing. "
+                            "Set `default_input.catalog.MASTcasjobs_wsid` and `default_input.catalog.MASTcasjobs_pwd`."
+                        )
 
                     selectedCatalog = self.fetch_refcat2_field(
                         ra=target_coords.ra.degree,
@@ -545,6 +595,7 @@ class catalog:
                         nsources=500,
                         sr=radius_deg
                     )
+                    self._require_nonempty_catalog(selectedCatalog, catalogName, target_coords, radius)
                     selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
                     shutil.move(os.path.join(os.getcwd(), f"{fname}.csv"), os.path.join(target_dir, f"{fname}.csv"))
 
@@ -556,6 +607,7 @@ class catalog:
                         dec=target_coords.dec.degree,
                         radius=radius_deg
                     )
+                    self._require_nonempty_catalog(selectedCatalog, catalogName, target_coords, radius)
                     selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
                     shutil.move(os.path.join(os.getcwd(), f"{fname}.csv"), os.path.join(target_dir, f"{fname}.csv"))
 
@@ -564,7 +616,7 @@ class catalog:
                     logger.info(f'Downloading Sequence Stars from {catalogName.upper()}')
                     catalog_search = Vizier.query_region(target_coords, radius=Angle(radius_deg, 'deg'), catalog=catalogName)
                     if len(catalog_search) < 1:
-                        selectedCatalog = None
+                        selectedCatalog = pd.DataFrame()
                     else:
                         selectedCatalog = catalog_search[0].to_pandas()
                         if catalogName == 'sdss':
@@ -572,6 +624,7 @@ class catalog:
                             selectedCatalog = selectedCatalog[selectedCatalog['cl'] == 6]
                         selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
                         shutil.move(os.path.join(os.getcwd(), f"{fname}.csv"), os.path.join(target_dir, f"{fname}.csv"))
+                    self._require_nonempty_catalog(selectedCatalog, catalogName, target_coords, radius)
 
                 elif catalogName == 'skymapper':
                     logger.info(f'Downloading reference sources from {catalogName.upper()}')
@@ -585,6 +638,7 @@ class catalog:
                     selectedCatalog = selectedCatalog[selectedCatalog['class_star'] > 0.8]
                     selectedCatalog = selectedCatalog[selectedCatalog['flags'] <= 1]
                     os.remove('temp.vot')
+                    self._require_nonempty_catalog(selectedCatalog, catalogName, target_coords, radius)
                     selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
                     shutil.move(os.path.join(os.getcwd(), f"{fname}.csv"), os.path.join(target_dir, f"{fname}.csv"))
 
@@ -601,6 +655,7 @@ class catalog:
                     coords = SkyCoord(ra=selectedCatalog['raMean'].values * u.deg, dec=selectedCatalog['decMean'].values * u.deg)
                     distances = target_coords.separation(coords)
                     selectedCatalog['distance'] = distances.arcsecond
+                    self._require_nonempty_catalog(selectedCatalog, catalogName, target_coords, radius)
                     selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
                     shutil.move(os.path.join(os.getcwd(), f"{fname}.csv"), os.path.join(target_dir, f"{fname}.csv"))
 
@@ -615,7 +670,9 @@ class catalog:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
             logger.info('%s %s %d %s', exc_type, fname, exc_tb.tb_lineno, e)
-            selectedCatalog = None
+            # Propagate catalog failures as hard stops: downstream calibration
+            # should not proceed without a valid catalog.
+            raise
 
         return selectedCatalog
 

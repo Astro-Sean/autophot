@@ -508,9 +508,15 @@ class AutomatedPhotometry:
                 # Template handling and optional downloads
                 template_folder = os.path.join(default_input["fits_dir"], "templates")
                 ts_cfg = default_input.get("template_subtraction", {})
+                # Backward compatibility: older configs used `get_PS1_template: True`.
+                # Prefer the newer `download_templates: <kind>` selector.
+                if not ts_cfg.get("download_templates", False) and ts_cfg.get("get_PS1_template", False):
+                    ts_cfg["download_templates"] = "panstarrs"
                 if ts_cfg.get("download_templates", False) and ts_cfg.get("do_subtraction", False):
                     download_kind = ts_cfg["download_templates"]
                     size_default = ts_cfg.get("templates_size", 10)
+                    if download_kind is True:
+                        download_kind = "panstarrs"
 
                     if download_kind == "panstarrs":
                         _log(border_msg("Downloading template images from Pan-STARRS"))
