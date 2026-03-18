@@ -355,6 +355,97 @@ if __name__ == "__main__":
 
 To run **reference-subtracted photometry** (science image minus a reference/template, then photometry on the difference), use the following minimal setup.
 
+### Template setup (detailed)
+
+AutoPHOT expects templates to live under a `templates/` directory inside your `fits_dir`. At runtime it chooses the template based on the **science image filter** and the folder naming conventions below.
+
+#### 1) Directory structure and naming rules
+
+Templates must be organised into per-filter subfolders. The folder name depends on the filter:
+
+- For common optical filters **`g r i z u`**:
+  - Folder name: **`{filter}p_template/`**
+  - Examples: `gp_template/`, `rp_template/`, `ip_template/`, `zp_template/`, `up_template/`
+- For other filters (e.g. NIR **`J H K`**, custom filters, instrument-specific names):
+  - Folder name: **`{filter}_template/`**
+  - Examples: `J_template/`, `H_template/`, `K_template/`
+
+Example layout:
+
+```
+my_field/                         # fits_dir
+├── science_2024_01_15_r.fits
+├── science_2024_01_20_r.fits
+└── templates/
+    ├── rp_template/
+    │   └── r_template.fits
+    └── K_template/
+        └── K_template.fits
+```
+
+#### 2) Template filename requirements
+
+- The template FITS filename should contain **`_template`** somewhere in the name.
+- Files containing `PSF_model` or ending in `.weight` are ignored as templates.
+- Keep exactly **one** usable template per filter folder to avoid ambiguity.
+
+#### 3) Using a user-provided template vs downloading one
+
+- **User-provided template**:
+  - Place the template FITS into the correct folder under `templates/` (as above)
+  - Set:
+
+```yaml
+default_input:
+  templates:
+    use_user_template: True
+```
+
+- **Downloaded template**:
+  - AutoPHOT can download templates depending on your configuration (e.g. Pan-STARRS/Legacy, etc. where implemented).
+  - Set `templates.use_user_template: False` and configure the download options under `template_subtraction` (see your `databases/default_input.yml`).
+
+#### 4) Preparing templates (`prepare_templates`)
+
+If your templates need the same calibration steps as the science frames (WCS solve, trimming, cosmic rays, FWHM estimation, header fixes), you can run a “template preparation” pass.
+
+- Set:
+
+```yaml
+default_input:
+  template_subtraction:
+    prepare_templates: True
+```
+
+Run once so templates are processed and written into the template folder, then set `prepare_templates: False` for normal science processing.
+
+#### 5) Alignment method (science–template registration)
+
+Alignment is controlled by:
+
+```yaml
+default_input:
+  template_subtraction:
+    alignment_method: reproject  # or swarp, astroalign
+```
+
+- **`reproject`**: WCS-based registration (recommended when WCS is good; robust and deterministic)
+- **`swarp`**: external SWarp-based registration (useful in some survey-like workflows)
+- **`astroalign`**: feature-matching registration (can help when WCS is poor)
+
+#### 6) Subtraction backend
+
+Choose the subtraction backend with:
+
+```yaml
+default_input:
+  template_subtraction:
+    method: hotpants  # or sfft, zogy (if configured)
+```
+
+- **`hotpants`**: requires the external HOTPANTS executable (see install section above)
+- **`sfft`**: uses the Python SFFT backend
+
 **1. Directory layout**
 
 Place your science FITS files in a directory and put the reference image in a filter-matched subfolder under `templates/`:
