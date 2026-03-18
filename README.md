@@ -405,19 +405,9 @@ default_input:
   - AutoPHOT can download templates depending on your configuration (e.g. Pan-STARRS/Legacy, etc. where implemented).
   - Set `templates.use_user_template: False` and configure the download options under `template_subtraction` (see your `databases/default_input.yml`).
 
-#### 4) Preparing templates (`prepare_templates`)
+#### 4) Template preparation
 
-If your templates need the same calibration steps as the science frames (WCS solve, trimming, cosmic rays, FWHM estimation, header fixes), you can run a “template preparation” pass.
-
-- Set:
-
-```yaml
-default_input:
-  template_subtraction:
-    prepare_templates: True
-```
-
-Run once so templates are processed and written into the template folder, then set `prepare_templates: False` for normal science processing.
+When template folders are present/used, AutoPHOT will automatically apply the required preparation steps for template subtraction (e.g. WCS checks, preprocessing steps required by the selected alignment/subtraction backend).
 
 #### 5) Alignment method (science–template registration)
 
@@ -481,11 +471,7 @@ default_input:
     method: sfft                  # or zogy, hotpants
 ```
 
-**3. Optional: preprocess templates**
-
-If your reference images need the same preprocessing as science (WCS, FWHM, cosmic-ray removal), run once with `prepare_templates: True` and point the pipeline at the template directory so it builds WCS and writes preprocessed templates; then set `prepare_templates: False` for normal science runs.
-
-**4. Run**
+**3. Run**
 
 ```bash
 python main.py -f /path/to/my_field/science_2024_01_15_r.fits -c /path/to/config.yml
