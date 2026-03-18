@@ -106,10 +106,6 @@ wget -c -nd -r -np -A "*.fits" "https://data.astrometry.net/4200/"
 export ASTROMETRY_NET_DATA_DIR="/path/to/astrometry_index"
 ```
 
-In AutoPHOT, set:
-
-- `default_input.wcs.solve_field_exe_loc: solve-field`
-
 If `solve-field` is missing, AutoPHOT will warn and skip WCS solving (unless you force it).
 
 ### HOTPANTS for template subtraction
@@ -128,15 +124,6 @@ conda install -c conda-forge cfitsio make gcc
 git clone https://github.com/acbecker/hotpants
 cd hotpants
 make
-```
-
-- **Configure AutoPHOT**:
-  - Either put the resulting `hotpants` executable on your `PATH`, or set it explicitly:
-
-```yaml
-default_input:
-  template_subtraction:
-    hotpants_exe_loc: /full/path/to/hotpants
 ```
 
 AutoPHOT will attempt to locate `hotpants` via `PATH` and prints a warning if it cannot be found.
