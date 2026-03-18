@@ -379,7 +379,7 @@ my_field/                         # fits_dir
 
 #### 2) Template filename requirements
 
-- The template FITS filename should contain **`_template`** somewhere in the name.
+- The template can be **any `*.fits` file** in the appropriate `{filter}_template/` folder (the filename does **not** need to contain `_template`).
 - Files containing `PSF_model` or ending in `.weight` are ignored as templates.
 - Keep exactly **one** usable template per filter folder to avoid ambiguity.
 
