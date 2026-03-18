@@ -357,6 +357,9 @@ Templates must be organised into per-filter subfolders. The folder name depends 
 - For common optical filters **`g r i z u`**:
   - Folder name: **`{filter}p_template/`**
   - Examples: `gp_template/`, `rp_template/`, `ip_template/`, `zp_template/`, `up_template/`
+- For **Johnson–Cousins UBVRI** (use uppercase band letters **`U B V R I`**):
+  - Folder name: **`{filter}_template/`**
+  - Examples: `U_template/`, `B_template/`, `V_template/`, `R_template/`, `I_template/`
 - For other filters (e.g. NIR **`J H K`**, custom filters, instrument-specific names):
   - Folder name: **`{filter}_template/`**
   - Examples: `J_template/`, `H_template/`, `K_template/`
@@ -456,7 +459,7 @@ my_field/                          # fits_dir in config
         └── my_reference_template.fits   # name must contain "_template", not "PSF_model" or ".weight"
 ```
 
-For filters `g`, `r`, `i`, `z`, `u` the code expects a subfolder named `{filter}p_template` (e.g. `rp_template` for r). Other filters use `{filter}_template` (e.g. `J_template` for 2MASS J).
+For filters `g`, `r`, `i`, `z`, `u` the code expects a subfolder named `{filter}p_template` (e.g. `rp_template` for r). Other filters (including **UBVRI** and NIR like `JHK`) use `{filter}_template` (e.g. `V_template`, `J_template`).
 
 **2. Minimal config YAML**
 
