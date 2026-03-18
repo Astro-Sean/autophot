@@ -393,8 +393,19 @@ default_input:
 ```
 
 - **Downloaded template**:
-  - AutoPHOT can download templates depending on your configuration (e.g. Pan-STARRS/Legacy, etc. where implemented).
-  - Set `templates.use_user_template: False` and configure the download options under `template_subtraction` (see your `databases/default_input.yml`).
+  - AutoPHOT can download templates into `fits_dir/templates/` before running subtraction.
+  - Set `templates.use_user_template: False` and select the download source via `template_subtraction.download_templates`:
+
+```yaml
+default_input:
+  templates:
+    use_user_template: False
+
+  template_subtraction:
+    do_subtraction: True
+    download_templates: panstarrs  # or legacy, sdss
+    templates_size: 10             # arcmin cutout size
+```
 
 #### 4) Template preparation
 
