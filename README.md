@@ -11,6 +11,22 @@ Install into an existing environment (venv/conda):
 pip install -e .
 ```
 
+Optional pip-only dependencies (needed only for specific features):
+
+```bash
+# Refcat (MAST CasJobs)
+pip install -e ".[refcat]"
+
+# SFFT subtraction backend helper script / runtime
+pip install -e ".[sfft]"
+
+# AAfitrans (optional alignment path)
+pip install -e ".[aafitrans]"
+
+# Or install all of the above
+pip install -e ".[all]"
+```
+
 Local conda build (optional):
 
 ```bash
