@@ -448,3 +448,31 @@ Contributions and issue reports are welcome. When opening a pull request:
 - Add / update docstrings when you touch non-trivial logic.
 - Maintain the consistent plotting style (via `autophot.mplstyle` and the shared `set_size` helper).
 
+## Citing AutoPHOT
+
+If you use AutoPHOT in a publication, please cite:
+
+- ADS: `https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B/abstract`
+
+BibTeX:
+
+```bibtex
+@ARTICLE{2022A&A...667A..62B,
+       author = {{Brennan}, S.~J. and {Fraser}, M.},
+        title = "{The Automated Photometry of Transients pipeline (AUTOPHOT)}",
+      journal = {\\aap},
+     keywords = {techniques: photometric, techniques: image processing, methods: data analysis, Astrophysics - Instrumentation and Methods for Astrophysics, Astrophysics - High Energy Astrophysical Phenomena},
+         year = 2022,
+        month = nov,
+       volume = {667},
+          eid = {A62},
+        pages = {A62},
+          doi = {10.1051/0004-6361/202243067},
+archivePrefix = {arXiv},
+       eprint = {2201.02635},
+ primaryClass = {astro-ph.IM},
+       adsurl = {https://ui.adsabs.harvard.edu/abs/2022A&A...667A..62B},
+      adsnote = {Provided by the SAO/NASA Astrophysics Data System}
+}
+```
+
