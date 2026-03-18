@@ -1879,6 +1879,27 @@ class psf:
             data2d[ys, xs] = data2d[ys, xs] - plane
             return True
 
+        def _subtract_plane_full_image(
+            data2d: np.ndarray,
+            coef: tuple[float, float, float],
+        ) -> bool:
+            """
+            Subtract fitted plane from the full image.
+
+            This is primarily used for the target PSF fit so the same planar
+            background model is removed from the surrounding environment/stamp
+            (not just the small PSF fit box).
+            """
+            if coef is None:
+                return False
+            a, bx, by = coef
+            if not (np.isfinite(a) and np.isfinite(bx) and np.isfinite(by)):
+                return False
+            ny, nx = data2d.shape
+            yy, xx = np.mgrid[0:ny, 0:nx]
+            data2d[:] = data2d - (a + bx * xx + by * yy)
+            return True
+
         # ---- Fit helper ----------------------------------------------------
         # Background: photutils subtracts per-source local background (annulus inner_r..outer_r)
         # from each fit-shape cutout before fitting the PSF, so the model is fit to
@@ -1897,13 +1918,31 @@ class psf:
                     sub_init_tmp = init_params[mask].to_pandas()
                     n_ok = 0
                     slopes = []
-                    for _x, _y in zip(sub_init_tmp["x"].to_numpy(), sub_init_tmp["y"].to_numpy()):
-                        coef = _fit_plane_from_annulus(work, float(_x), float(_y), inner_r, outer_r)
-                        if coef is None:
-                            continue
-                        if _subtract_plane_in_fit_box(work, coef, float(_x), float(_y), fit_shape):
-                            n_ok += 1
+                    # For the target fit, remove the plane from the full working image
+                    # so the surrounding environment/stamp is on the same background model.
+                    if is_target_fit and int(np.count_nonzero(mask)) == 1:
+                        _x = float(sub_init_tmp["x"].to_numpy()[0])
+                        _y = float(sub_init_tmp["y"].to_numpy()[0])
+                        coef = _fit_plane_from_annulus(work, _x, _y, inner_r, outer_r)
+                        if coef is not None and _subtract_plane_full_image(work, coef):
+                            n_ok = 1
                             slopes.append((coef[1], coef[2]))
+                            log.info(
+                                "Planar background subtraction applied to full image for target fit "
+                                "(inner=%.1f px, outer=%.1f px): bx=%.3g, by=%.3g ADU/pix.",
+                                float(inner_r),
+                                float(outer_r),
+                                float(coef[1]),
+                                float(coef[2]),
+                            )
+                    else:
+                        for _x, _y in zip(sub_init_tmp["x"].to_numpy(), sub_init_tmp["y"].to_numpy()):
+                            coef = _fit_plane_from_annulus(work, float(_x), float(_y), inner_r, outer_r)
+                            if coef is None:
+                                continue
+                            if _subtract_plane_in_fit_box(work, coef, float(_x), float(_y), fit_shape):
+                                n_ok += 1
+                                slopes.append((coef[1], coef[2]))
                     nd_for_fit = _nddata_clone(ndimage, data=work)
                     if n_ok > 0:
                         bx_med = float(np.nanmedian([s[0] for s in slopes])) if slopes else 0.0
