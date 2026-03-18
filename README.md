@@ -256,14 +256,6 @@ def main() -> int:
     autophot_input["preprocessing"]["trim_image"] = 5  # arcmin box (if enabled in your config)
 
     # ---------------------------------------------------------------------
-    # Photometry
-    # ---------------------------------------------------------------------
-    autophot_input["photometry"]["psf_oversample"] = 1
-    autophot_input["photometry"]["perform_emcee_fitting_s2n"] = 50
-    autophot_input["photometry"]["redo_sources"] = False
-    autophot_input["photometry"]["fitting_xy_bounds"] = 1
-
-    # ---------------------------------------------------------------------
     # WCS
     # ---------------------------------------------------------------------
     autophot_input["wcs"]["redo_wcs"] = True
@@ -280,8 +272,6 @@ def main() -> int:
     autophot_input["template_subtraction"]["do_subtraction"] = True
     autophot_input["template_subtraction"]["alignment_method"] = "reproject"
     autophot_input["template_subtraction"]["method"] = "sfft"  # or "hotpants"
-    autophot_input["template_subtraction"]["hotpants_exe_loc"] = "hotpants"
-    autophot_input["template_subtraction"]["inpaint_template_cores"] = True
 
     # ---------------------------------------------------------------------
     # Parallelism control (image-level)
