@@ -120,7 +120,12 @@ from utils import run_IDC
 # =============================================================================
 # External Tool Imports
 # =============================================================================
-import legacystamps
+try:
+    import legacystamps  # Optional: only required for Legacy Survey templates
+    _HAS_LEGACYSTAMPS = True
+except ImportError:
+    legacystamps = None  # type: ignore[assignment]
+    _HAS_LEGACYSTAMPS = False
 from PyZOGY.subtract import run_subtraction
 
 # =============================================================================
@@ -947,6 +952,13 @@ def download_legacy_template(
     str or None
         Path to the downloaded FITS file for the requested band, or None on failure.
     """
+    if not _HAS_LEGACYSTAMPS:
+        raise RuntimeError(
+            "Legacy Survey template download requested but the 'legacystamps' package is not installed.\n"
+            "Install it in your environment, e.g. with:\n\n"
+            "    pip install legacystamps\n"
+        )
+
     band = str(band).strip().lower()
     if band not in LEGACY_FILTERS:
         logger.info("Band '%s' not available in Legacy Survey [gri]; skipping.", band)
