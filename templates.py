@@ -126,7 +126,17 @@ try:
 except ImportError:
     legacystamps = None  # type: ignore[assignment]
     _HAS_LEGACYSTAMPS = False
-from PyZOGY.subtract import run_subtraction
+try:
+    # PyZOGY is only needed for ZOGY image subtraction.
+    # Support both historical module naming styles used in different builds.
+    try:
+        from PyZOGY.subtract import run_subtraction
+    except ImportError:
+        from pyzogy.subtract import run_subtraction  # type: ignore[no-redef]
+    _HAS_PYZOGY = True
+except ImportError:
+    run_subtraction = None  # type: ignore[assignment]
+    _HAS_PYZOGY = False
 
 # =============================================================================
 # Logging Configuration
@@ -3258,6 +3268,12 @@ class templates:
         """Attempt ZOGY subtraction; return next method to try on failure."""
         logger.info("Starting ZOGY subtraction...")
         try:
+            if not _HAS_PYZOGY or run_subtraction is None:
+                raise RuntimeError(
+                    "ZOGY subtraction requested but PyZOGY is not installed. "
+                    "Install the optional dependency that provides PyZOGY, or switch "
+                    "template_subtraction.method to 'sfft' or 'hotpants'."
+                )
             if not science_psf or not template_psf:
                 raise ValueError("PSF models required for ZOGY are missing")
             science_data = np.asarray(fits.getdata(scienceFpath), dtype=float)

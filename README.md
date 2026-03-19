@@ -5,32 +5,31 @@ AutoPHOT is a Python pipeline for calibrated **aperture** and **PSF** photometry
 
 ## Installation
 
-Install into an existing environment (venv/conda):
+Create and use a dedicated conda environment (recommended):
 
 ```bash
-pip install -e .
+conda create -n autophot python=3.11 -y
+conda activate autophot
+```
+
+Install AutoPHOT and core dependencies with conda:
+
+```bash
+conda install -c conda-forge autophot
+```
+
+> Note: The conda installation may run package build/test checks depending on your platform and solver state, so installation can take several minutes.
+
+Install `pyzogy` (for ZOGY subtraction workflows):
+
+```bash
+conda install -c conda-forge pyzogy
 ```
 
 If you want to use **Legacy Survey templates** (via `download_legacy_template`), also install:
 
 ```bash
-pip install legacystamps
-```
-
-Optional pip-only dependencies (needed only for specific features):
-
-```bash
-# Refcat (MAST CasJobs)
-pip install -e ".[refcat]"
-
-# SFFT subtraction backend helper script / runtime
-pip install -e ".[sfft]"
-
-# AAfitrans (optional alignment path)
-pip install -e ".[aafitrans]"
-
-# Or install all of the above
-pip install -e ".[all]"
+conda install -c conda-forge legacystamps
 ```
 
 Local conda build (optional):

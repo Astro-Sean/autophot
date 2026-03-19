@@ -1800,39 +1800,73 @@ class psf:
             outer_r: float,
         ) -> Optional[tuple[float, float, float]]:
             """
-            Fit z = a + bx*x + by*y to pixels in an annulus around (x0, y0).
-            Returns (a, bx, by) in the *full-image pixel coordinate system*.
+            Fit z = a + bx*x + by*y to pixels in an annulus around (x0, y0),
+            using a *robust* fit that:
+
+            - Ensures the annulus contains enough pixels by expanding the outer
+              radius if necessary (up to the image size).
+            - Down-weights/ignores outliers from noise spikes and bright
+              point-like sources via sigma-clipping on both values and residuals.
             """
             ny, nx = data2d.shape
             if not (np.isfinite(x0) and np.isfinite(y0)):
                 return None
-            rmax = float(outer_r)
-            if rmax <= 0:
-                return None
+
             xcen = float(x0)
             ycen = float(y0)
-            xmin = max(0, int(np.floor(xcen - rmax - 1)))
-            xmax = min(nx, int(np.ceil(xcen + rmax + 2)))
-            ymin = max(0, int(np.floor(ycen - rmax - 1)))
-            ymax = min(ny, int(np.ceil(ycen + rmax + 2)))
-            if xmax <= xmin or ymax <= ymin:
+            inner_r = float(inner_r)
+            # Start from requested outer radius, but allow it to grow if too few pixels.
+            rmax = float(outer_r)
+            if rmax <= inner_r or rmax <= 0:
+                rmax = max(inner_r + 2.0, 3.0)
+
+            max_r = 0.5 * float(min(nx, ny))
+            rmax = min(rmax, max_r)
+
+            target_min_npixels = 80
+            max_tries = 3
+
+            ann = None
+            sub = None
+            xx = yy = None
+
+            for _ in range(max_tries):
+                xmin = max(0, int(np.floor(xcen - rmax - 1)))
+                xmax = min(nx, int(np.ceil(xcen + rmax + 2)))
+                ymin = max(0, int(np.floor(ycen - rmax - 1)))
+                ymax = min(ny, int(np.ceil(ycen + rmax + 2)))
+                if xmax <= xmin or ymax <= ymin:
+                    return None
+
+                sub = data2d[ymin:ymax, xmin:xmax]
+                if sub.size == 0:
+                    return None
+
+                yy, xx = np.mgrid[ymin:ymax, xmin:xmax]
+                rr = np.hypot(xx - xcen, yy - ycen)
+
+                ann = (rr >= inner_r) & (rr <= rmax)
+                ann &= np.isfinite(sub)
+
+                n_ann = int(np.count_nonzero(ann))
+                if n_ann >= target_min_npixels or np.isclose(rmax, max_r):
+                    break
+
+                # Not enough pixels: expand the annulus and try again.
+                rmax = min(max_r, rmax * 1.5)
+
+            if ann is None or sub is None or xx is None or yy is None:
                 return None
 
-            sub = data2d[ymin:ymax, xmin:xmax]
-            if sub.size == 0:
-                return None
-            yy, xx = np.mgrid[ymin:ymax, xmin:xmax]
-            rr = np.hypot(xx - xcen, yy - ycen)
-            ann = (rr >= float(inner_r)) & (rr <= float(outer_r))
-            ann &= np.isfinite(sub)
-            if np.count_nonzero(ann) < 25:
+            n_ann = int(np.count_nonzero(ann))
+            if n_ann < 25:
                 return None
 
             z = sub[ann].astype(float, copy=False)
             x = xx[ann].astype(float, copy=False)
             y = yy[ann].astype(float, copy=False)
 
-            # Robustify: sigma-clip residuals around the median before fitting.
+            # First-pass robustification: clip obvious outliers in value space.
             med = float(np.nanmedian(z))
             sig = float(mad_std(z, ignore_nan=True))
             if not np.isfinite(sig) or sig <= 0:
@@ -1842,12 +1876,51 @@ class psf:
                 if np.count_nonzero(good) >= 25:
                     z, x, y = z[good], x[good], y[good]
 
+            if z.size < 3:
+                return None
+
             A = np.vstack([np.ones_like(x), x, y]).T
             try:
                 coef, *_ = np.linalg.lstsq(A, z, rcond=None)
             except Exception:
                 return None
-            a, bx, by = (float(coef[0]), float(coef[1]), float(coef[2]))
+
+            # Second-pass robustification: sigma-clip on residuals of the plane
+            # fit to de-weight bright stars / spikes, then refit.
+            try:
+                a0, bx0, by0 = (float(coef[0]), float(coef[1]), float(coef[2]))
+            except Exception:
+                return None
+
+            if not (np.isfinite(a0) and np.isfinite(bx0) and np.isfinite(by0)):
+                return None
+
+            model0 = a0 + bx0 * x + by0 * y
+            resid = z - model0
+            rsig = float(mad_std(resid, ignore_nan=True))
+            if not np.isfinite(rsig) or rsig <= 0:
+                rsig = float(np.nanstd(resid))
+
+            if np.isfinite(rsig) and rsig > 0:
+                good_resid = np.abs(resid) <= 3.0 * rsig
+                if np.count_nonzero(good_resid) >= 25:
+                    z, x, y = z[good_resid], x[good_resid], y[good_resid]
+                    if z.size >= 3:
+                        A = np.vstack([np.ones_like(x), x, y]).T
+                        try:
+                            coef, *_ = np.linalg.lstsq(A, z, rcond=None)
+                        except Exception:
+                            # Fall back to first-pass coefficients.
+                            coef = np.array([a0, bx0, by0], dtype=float)
+                else:
+                    # Too few residual-clipped points; keep the first-pass fit.
+                    coef = np.array([a0, bx0, by0], dtype=float)
+
+            try:
+                a, bx, by = (float(coef[0]), float(coef[1]), float(coef[2]))
+            except Exception:
+                return None
+
             if not (np.isfinite(a) and np.isfinite(bx) and np.isfinite(by)):
                 return None
             return a, bx, by
@@ -1879,27 +1952,6 @@ class psf:
             data2d[ys, xs] = data2d[ys, xs] - plane
             return True
 
-        def _subtract_plane_full_image(
-            data2d: np.ndarray,
-            coef: tuple[float, float, float],
-        ) -> bool:
-            """
-            Subtract fitted plane from the full image.
-
-            This is primarily used for the target PSF fit so the same planar
-            background model is removed from the surrounding environment/stamp
-            (not just the small PSF fit box).
-            """
-            if coef is None:
-                return False
-            a, bx, by = coef
-            if not (np.isfinite(a) and np.isfinite(bx) and np.isfinite(by)):
-                return False
-            ny, nx = data2d.shape
-            yy, xx = np.mgrid[0:ny, 0:nx]
-            data2d[:] = data2d - (a + bx * xx + by * yy)
-            return True
-
         # ---- Fit helper ----------------------------------------------------
         # Background: photutils subtracts per-source local background (annulus inner_r..outer_r)
         # from each fit-shape cutout before fitting the PSF, so the model is fit to
@@ -1918,23 +1970,33 @@ class psf:
                     sub_init_tmp = init_params[mask].to_pandas()
                     n_ok = 0
                     slopes = []
-                    # For the target fit, remove the plane from the full working image
-                    # so the surrounding environment/stamp is on the same background model.
+                    # For the target fit (single source), subtract the fitted plane
+                    # over a larger local stamp around the target (comparable to the
+                    # local background region), instead of just the tiny PSF fit box.
                     if is_target_fit and int(np.count_nonzero(mask)) == 1:
                         _x = float(sub_init_tmp["x"].to_numpy()[0])
                         _y = float(sub_init_tmp["y"].to_numpy()[0])
                         coef = _fit_plane_from_annulus(work, _x, _y, inner_r, outer_r)
-                        if coef is not None and _subtract_plane_full_image(work, coef):
-                            n_ok = 1
-                            slopes.append((coef[1], coef[2]))
-                            log.info(
-                                "Planar background subtraction applied to full image for target fit "
-                                "(inner=%.1f px, outer=%.1f px): bx=%.3g, by=%.3g ADU/pix.",
-                                float(inner_r),
-                                float(outer_r),
-                                float(coef[1]),
-                                float(coef[2]),
-                            )
+                        if coef is not None:
+                            # Use a box ~2*outer_r on a side around the target to
+                            # capture the same local environment as the annulus-based
+                            # background estimate, but without touching the full frame.
+                            side = max(3, int(2.0 * float(outer_r)))
+                            side = _odd(side)
+                            if _subtract_plane_in_fit_box(work, coef, _x, _y, (side, side)):
+                                n_ok = 1
+                                slopes.append((coef[1], coef[2]))
+                                log.info(
+                                    "Planar background subtraction applied in a local stamp for target fit "
+                                    "(inner=%.1f px, outer=%.1f px, box=%dx%d). "
+                                    "Slopes: bx=%.3g, by=%.3g ADU/pix.",
+                                    float(inner_r),
+                                    float(outer_r),
+                                    side,
+                                    side,
+                                    float(coef[1]),
+                                    float(coef[2]),
+                                )
                     else:
                         for _x, _y in zip(sub_init_tmp["x"].to_numpy(), sub_init_tmp["y"].to_numpy()):
                             coef = _fit_plane_from_annulus(work, float(_x), float(_y), inner_r, outer_r)

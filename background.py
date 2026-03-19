@@ -353,7 +353,7 @@ class BackgroundSubtractor:
         nsigma: float = 2.5,
         npixels: int = 3,
         fwhm_pixels: float = 3.0,
-        dilate_factor: float = 2.0,
+        dilate_factor: float = 1.2,
         n_iterations: int = 3,          # NEW: iterative masking
     ) -> np.ndarray:
         """
@@ -1390,8 +1390,8 @@ class BackgroundSubtractor:
 
         # ---- Full-image RMS for downstream use ----
         full_mask = self._make_source_mask(
-            image, nsigma=2.5, npixels=5, fwhm_pixels=fwhm_pixels,
-            dilate_factor=2.0, n_iterations=2,
+            image, nsigma=3, npixels=5, fwhm_pixels=fwhm_pixels,
+            dilate_factor=1.5, n_iterations=2,
         )
         box_size_full, filter_size_full, _ = self._compute_box_sizes(
             image, full_mask, fwhm_pixels

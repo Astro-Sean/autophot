@@ -57,6 +57,8 @@ env/
 .vscode/
 .idea/
 *.code-workspace
+*.workspace
+workspace
 
 # OS metadata
 .DS_Store
