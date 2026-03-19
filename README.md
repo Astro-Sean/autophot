@@ -36,7 +36,7 @@ python -c "from autophot import AutomatedPhotometry; print('AutoPHOT import OK')
 autophot-main -h
 ```
 
-### Install PyZOGY (optional, for ZOGY subtraction)
+### Optional: PyZOGY (for ZOGY subtraction)
 
 With the `autophot` environment active:
 
@@ -120,16 +120,6 @@ make
 ```
 
 AutoPHOT defaults to running the `hotpants` command from your `PATH`, and prints a warning if it cannot be found.
-
-## Quickstart
-
-AutoPHOT has a simple CLI:
-
-```bash
-autophot-main -f /path/to/image.fits -c /path/to/config.yml
-```
-
-For most runs you’ll use a small Python driver script (recommended) so you can override only the dataset‑specific fields.
 
 ## Recommended usage (Python driver script)
 
@@ -320,7 +310,7 @@ my_field/                         # fits_dir
 
 ### User-provided vs downloaded templates
 
-- **User-provided template**:
+- **User-provided template:**
   - Place the template FITS into the correct folder under `templates/` (as above)
   - No special config is required beyond enabling subtraction (AutoPHOT will discover templates in `fits_dir/templates/...` automatically):
 
@@ -328,7 +318,7 @@ my_field/                         # fits_dir
 autophot_input["template_subtraction"]["do_subtraction"] = True
 ```
 
-- **Downloaded template**:
+- **Downloaded template:**
   - AutoPHOT can download templates into `fits_dir/templates/` before running subtraction.
   - Select the download source via `template_subtraction.download_templates`:
 
@@ -338,7 +328,7 @@ autophot_input["template_subtraction"]["download_templates"] = "panstarrs"  # or
 autophot_input["template_subtraction"]["templates_size"] = 10               # arcmin cutout size
 ```
 
-### Alignment method (science–template registration)
+### Alignment method (science-template registration)
 
 Alignment is controlled by:
 
@@ -348,9 +338,9 @@ default_input:
     alignment_method: reproject  # or swarp, astroalign
 ```
 
-- **`reproject`**: WCS-based registration (recommended when WCS is good; robust and deterministic)
-- **`swarp`**: external SWarp-based registration (useful in some survey-like workflows)
-- **`astroalign`**: feature-matching registration (can help when WCS is poor)
+- **`reproject`:** WCS-based registration (recommended when WCS is good; robust and deterministic)
+- **`swarp`:** external SWarp-based registration (useful in some survey-like workflows)
+- **`astroalign`:** feature-matching registration (can help when WCS is poor)
 
 ### Subtraction backend
 
@@ -362,8 +352,9 @@ default_input:
     method: hotpants  # or sfft, zogy (if configured)
 ```
 
-- **`hotpants`**: requires the external HOTPANTS executable (see install section above)
-- **`sfft`**: uses the Python SFFT backend
+- **`hotpants`:** requires the external HOTPANTS executable (see install section above)
+- **`sfft`:** uses the Python SFFT backend
+- **`zogy`:** requires PyZOGY to be installed (optional dependency).
 
 If you use the SFFT backend, please cite the SFFT method and see upstream documentation/source:
 
