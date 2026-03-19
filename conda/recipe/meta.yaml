@@ -69,7 +69,10 @@ test:
     - corner
 
 about:
-  summary: AutoPHOT object photometry pipeline (CCD/NIR; calibrated photometry; template subtraction).
+  home: https://github.com/Astro-Sean/autophot
+  dev_url: https://github.com/Astro-Sean/autophot
+  doc_url: https://ui.adsabs.harvard.edu/abs/2022A&A...667A..62B
+  summary: Automated photometry pipeline for transient astronomy, including calibrated aperture/PSF photometry, template subtraction, and light-curve-ready outputs for CCD/NIR imaging.
   license: MIT
   license_file: LICENSE
 
