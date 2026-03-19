@@ -3,83 +3,26 @@ AutoPHOT Object Photometry Pipeline
 
 AutoPHOT is a Python pipeline for calibrated **aperture** and **PSF** photometry on CCD/NIR imaging. It’s designed for time‑domain workflows (e.g. transients) and can run with or without **template subtraction**.
 
-## Installation (Conda-first)
+## Installation (Conda)
 
-AutoPHOT is **not published on conda-forge**. Use one of these conda workflows:
-
-1. **Build locally from source** (best for development/testing).
-2. **Install from Anaconda.org channel** (best for users).
-
-### 1. Clone the repository
+AutoPHOT is not on conda-forge. Install from the `astro-sean` channel:
 
 ```bash
-git clone https://github.com/Astro-Sean/autophot.git
-cd autophot
+conda install astro-sean::autophot
 ```
 
-### 2. Create and activate a new conda environment
+Recommended in a fresh environment:
 
 ```bash
 conda create -n autophot python=3.11 -y
 conda activate autophot
+conda install astro-sean::autophot
 ```
 
-### 3. Install conda-build (to build the local package)
+To update:
 
 ```bash
-conda install -c conda-forge conda-build
-```
-
-### 4. Build the AutoPHOT conda package from source
-
-From the cloned `autophot` directory:
-
-```bash
-conda build conda/recipe
-```
-
-This creates a local conda package `autophot-<version>-py_*.conda` and runs basic import/CLI tests in an isolated test environment.
-
-### 5. Install `autophot` (and all Python dependencies) into the `autophot` environment
-
-With `autophot` still activated:
-
-```bash
-# Preferred: install the exact built artifact path printed by conda-build
-conda install "/path/to/conda-bld/noarch/autophot-<version>-py_*.conda"
-
-# Optional (if your local channel points to the same conda-bld directory):
-# conda install -c local autophot
-# or
-# conda install --use-local autophot
-```
-
-This pulls in all required Python packages (NumPy, SciPy, Astropy, Astroquery, Photutils, pandas, scikit-image, matplotlib, emcee, lmfit, etc.) into the `autophot` environment.
-
-### Alternative: Install directly from Anaconda.org
-
-If a package is already published to your channel (default `astro-sean`), install with:
-
-```bash
-conda install -c astro-sean autophot
-```
-
-To install a pre-release/dev label:
-
-```bash
-conda install -c astro-sean/label/dev autophot
-```
-
-### Updating an existing AutoPHOT install
-
-In an environment where `autophot` is already installed:
-
-```bash
-# update to the latest package on your channel
-conda update -c astro-sean autophot
-
-# optional: pin channel priority to avoid cross-channel mixing
-conda config --set channel_priority strict
+conda update astro-sean::autophot
 ```
 
 You can sanity‑check the install with:
