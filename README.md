@@ -36,6 +36,8 @@ python -c "from autophot import AutomatedPhotometry; print('AutoPHOT import OK')
 autophot-main -h
 ```
 
+## External tools (optional but common)
+
 ### Optional: PyZOGY (for ZOGY subtraction)
 
 With the `autophot` environment active:
@@ -46,16 +48,6 @@ cd PyZOGY
 python setup.py install
 cd ..
 ```
-
-### Optional: Legacy Survey templates helper
-
-If you want to use **Legacy Survey templates** (via `download_legacy_template`), also install:
-
-```bash
-conda install -c conda-forge legacystamps
-```
-
-## External tools (optional but common)
 
 ### Astrometry.net (`solve-field`) for WCS solving
 
@@ -330,12 +322,10 @@ autophot_input["template_subtraction"]["templates_size"] = 10               # ar
 
 ### Alignment method (science-template registration)
 
-Alignment is controlled by:
+Set alignment with:
 
-```yaml
-default_input:
-  template_subtraction:
-    alignment_method: reproject  # or swarp, astroalign
+```python
+autophot_input["template_subtraction"]["alignment_method"] = "reproject"  # or "swarp", "astroalign"
 ```
 
 - **`reproject`:** WCS-based registration (recommended when WCS is good; robust and deterministic)
@@ -344,12 +334,10 @@ default_input:
 
 ### Subtraction backend
 
-Choose the subtraction backend with:
+Set subtraction backend with:
 
-```yaml
-default_input:
-  template_subtraction:
-    method: hotpants  # or sfft, zogy (if configured)
+```python
+autophot_input["template_subtraction"]["method"] = "hotpants"  # or "sfft", "zogy"
 ```
 
 - **`hotpants`:** requires the external HOTPANTS executable (see install section above)
