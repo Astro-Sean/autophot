@@ -5,38 +5,81 @@ AutoPHOT is a Python pipeline for calibrated **aperture** and **PSF** photometry
 
 ## Installation
 
-Create and use a dedicated conda environment (recommended):
+AutoPHOT is **not published on conda-forge**. The recommended installation is:
+
+1. Clone the GitHub repository.
+2. Create a fresh conda environment.
+3. Build the conda package locally.
+4. Install that package into the new environment (which also installs all required Python dependencies).
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/Astro-Sean/autophot.git
+cd autophot
+```
+
+### 2. Create and activate a new conda environment
 
 ```bash
 conda create -n autophot python=3.11 -y
 conda activate autophot
 ```
 
-Install AutoPHOT and core dependencies with conda:
+### 3. Install conda-build (to build the local package)
 
 ```bash
-conda install -c conda-forge autophot
+conda install -c conda-forge conda-build
 ```
 
-> Note: The conda installation may run package build/test checks depending on your platform and solver state, so installation can take several minutes.
+### 4. Build the AutoPHOT conda package from source
 
-Install `pyzogy` (for ZOGY subtraction workflows):
+From the cloned `autophot` directory:
 
 ```bash
-conda install -c conda-forge pyzogy
+conda build conda/recipe
 ```
+
+This creates a local conda package `autophot-object-<version>-py_*.conda` and runs basic import/CLI tests in an isolated test environment.
+
+### 5. Install AutoPHOT (and all Python dependencies) into the `autophot` environment
+
+With `autophot` still activated:
+
+```bash
+# Newer conda (channel "local" is created automatically by conda-build)
+conda install -c local autophot-object
+
+# If your conda does not support the "local" channel, use:
+# conda install --use-local autophot-object
+```
+
+This pulls in all required Python packages (NumPy, SciPy, Astropy, Astroquery, Photutils, pandas, scikit-image, matplotlib, emcee, lmfit, etc.) into the `autophot` environment.
+
+You can sanity‑check the install with:
+
+```bash
+python -c "from autophot import AutomatedPhotometry; print('AutoPHOT import OK')"
+autophot-main -h
+```
+
+### 6. Install PyZOGY (optional, for ZOGY subtraction)
+
+With the `autophot` environment active:
+
+```bash
+git clone https://github.com/dguevel/PyZOGY
+cd PyZOGY
+python setup.py install
+cd ..
+```
+
+### 7. Optional: Legacy Survey templates helper
 
 If you want to use **Legacy Survey templates** (via `download_legacy_template`), also install:
 
 ```bash
 conda install -c conda-forge legacystamps
-```
-
-Local conda build (optional):
-
-```bash
-conda install -c conda-forge conda-build
-conda build conda/recipe
 ```
 
 ## External tools (optional but common)
@@ -72,6 +115,18 @@ export ASTROMETRY_NET_DATA_DIR="/path/to/astrometry_index"
 ```
 
 If `solve-field` is missing, AutoPHOT will warn and skip WCS solving (unless you force it).
+
+### Astromatic tools (SExtractor/SCAMP/SWarp)
+
+These are common external tools for source catalogs, astrometric calibration, and resampling/mosaicking.
+
+- **Install (conda-forge)**:
+
+```bash
+conda install -c conda-forge astromatic-source-extractor
+conda install -c conda-forge astromatic-scamp
+conda install -c conda-forge astromatic-swarp
+```
 
 ### HOTPANTS for template subtraction
 
