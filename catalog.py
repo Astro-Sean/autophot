@@ -578,14 +578,24 @@ class catalog:
                         "REFCAT requires MAST CasJobs credentials. Set `default_input.catalog.MASTcasjobs_wsid` "
                         "and `default_input.catalog.MASTcasjobs_pwd` (or provide them via environment/local overrides)."
                     )
-                    credentials = {
-                        'userid': self.input_yaml['catalog'].get('MASTcasjobs_wsid'),
-                        'password': self.input_yaml['catalog'].get('MASTcasjobs_pwd')
-                    }
-                    if not credentials['userid'] or not credentials['password']:
+                    # Normalise types: many auth backends are strict about
+                    # receiving strings, so cast to str (and strip) here.
+                    userid = self.input_yaml["catalog"].get("MASTcasjobs_wsid")
+                    password = self.input_yaml["catalog"].get("MASTcasjobs_pwd")
+                    if userid is not None:
+                        userid = str(userid).strip()
+                    if password is not None:
+                        password = str(password).strip()
+
+                    credentials = {"userid": userid, "password": password}
+                    userid_ok = credentials["userid"] is not None and str(credentials["userid"]).strip() != ""
+                    pwd_ok = credentials["password"] is not None and str(credentials["password"]).strip() != ""
+                    if not userid_ok or not pwd_ok:
                         raise RuntimeError(
-                            "Refcat selected but MAST CasJobs credentials are missing. "
-                            "Set `default_input.catalog.MASTcasjobs_wsid` and `default_input.catalog.MASTcasjobs_pwd`."
+                            "Refcat selected but MAST CasJobs credentials are missing/empty. "
+                            f"MASTcasjobs_wsid set: {userid_ok}, MASTcasjobs_pwd set: {pwd_ok}. "
+                            "Set `default_input.catalog.MASTcasjobs_wsid` and `default_input.catalog.MASTcasjobs_pwd` "
+                            "(or export MASTCASJOBS_WSID/MASTCASJOBS_PWD)."
                         )
 
                     selectedCatalog = self.fetch_refcat2_field(

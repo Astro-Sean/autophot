@@ -3001,7 +3001,20 @@ class templates:
                     logger.info("Template inpainting skipped/failed (non-fatal): %s", _e)
             science_readnoise = float(scienceHeader.get("READNOISE", 1))
             template_readnoise = float(templateHeader.get("READNOISE", 1))
-            scale = self.input_yaml.get("scale", 0)
+
+            # NOTE: `scale` in default_input.yml is a plotting/cutout helper and
+            # is not the same as SFFT's kernel half-width.
+            # Oversubtraction artefacts can occur if we pass an uninitialized
+            # (often 0) kernel size into SFFT.
+            #
+            # Instead, derive SFFT kernel half-width from the measured FWHMs,
+            # mirroring SFFT's internal KerHWRatio-based default behaviour.
+            KER_HW_MIN = 3
+            KER_HW_MAX = 50
+            fwhm_ref = float(template_fwhm)
+            fwhm_sci = float(science_fwhm)
+            ker_hw = int(max(KER_HW_MIN, min(KER_HW_MAX, round(2.0 * max(fwhm_ref, fwhm_sci)))))
+            scale = ker_hw
             target_location = [(self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"])]
 
             scienceDir = Path(scienceFpath).parent
@@ -3201,6 +3214,7 @@ class templates:
                     mask_loc, scienceDir, base_name,
                     masked_sources, masked_centers, matching_sources,
                     kernel_order, scale, method,
+                    science_fwhm, template_fwhm,
                     science_gain, template_gain, science_saturate, template_saturate,
                 )
 
@@ -3311,6 +3325,7 @@ class templates:
         mask_loc, scienceDir, base_name,
         masked_sources, masked_centers, matching_sources,
         kernel_order, scale, method,
+        science_fwhm, template_fwhm,
         science_gain, template_gain, science_saturate, template_saturate,
     ) -> str:
         """Attempt SFFT subtraction; return next method to try on failure."""
@@ -3341,6 +3356,17 @@ class templates:
 
             ts_sub = self.input_yaml["template_subtraction"]
             phot_cfg = self.input_yaml.get("photometry", {})
+
+            # SFFT ForceConv: choose which image to convolve so we only "blur"
+            # (avoid effectively sharpening the narrower PSF, which can create
+            # point-source over/under-subtraction artefacts).
+            try:
+                fwhm_ref = float(template_fwhm)
+                fwhm_sci = float(science_fwhm)
+            except Exception:
+                fwhm_ref = float(template_fwhm) if template_fwhm is not None else 0.0
+                fwhm_sci = float(science_fwhm) if science_fwhm is not None else 0.0
+            forceconv = "REF" if fwhm_ref <= fwhm_sci else "SCI"
 
             # Background polynomial order: default to 0 unless the user explicitly overrides
             bg_order = ts_sub.get("sfft_bg_order", 0)
@@ -3385,6 +3411,7 @@ class templates:
                 "-bg_order", str(bg_order),
                 "-matching_sources", match_str,
                 "-kernel_half_width", str(scale),
+                "-forceconv", forceconv,
                 "-gain_sci", str(float(science_gain)),
                 "-gain_ref", str(float(template_gain)),
                 "-saturate_sci", str(sat_sci),

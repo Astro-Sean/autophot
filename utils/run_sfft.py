@@ -96,6 +96,12 @@ def run_sfft() -> Optional[int]:
     parser.add_argument('-matching_sources', type=str, default='[]',
                         help='List of [x, y] pairs to preselect, same format as above.')
     parser.add_argument('-plot', action='store_true', help='Generate diagnostic plots.')
+    parser.add_argument(
+        "-forceconv",
+        type=str,
+        default="REF",
+        help="Which image to convolve to match the other PSF for SFFT (REF or SCI).",
+    )
 
     # Pass gain/saturate values so SFFT does not depend on headers (avoids KeyError when SATURATE missing).
     parser.add_argument('-gain_sci', type=float, default=None, help='Science image gain (e/ADU). If set, written to FITS before SFFT.')
@@ -280,7 +286,9 @@ def run_sfft() -> Optional[int]:
     # Convolve REF to match SCI so DIFF = SCI - conv(REF). Transient (science-only) then
     # keeps the science PSF. AUTO can convolve science when it has worse seeing, which
     # makes the transient look wrong (e.g. broader).
-    ForceConv = 'REF'
+    ForceConv = str(getattr(args, "forceconv", "REF")).upper().strip()
+    if ForceConv not in ("REF", "SCI"):
+        raise ValueError(f"Invalid -forceconv='{ForceConv}'; expected 'REF' or 'SCI'.")
     GAIN_KEY = 'GAIN'
     SATUR_KEY = 'SATURATE'
 
@@ -337,6 +345,20 @@ def run_sfft() -> Optional[int]:
         except Exception as e:
             log_info(f"Warning: Could not load mask '{args.mask}': {e}")
 
+    # Estimate constant background offset from unmasked pixels (after mask is loaded).
+    # If upstream left a residual DC offset, BACK_VALUE=0 can bias difference images.
+    BACK_VALUE = 0.0
+    if prior_ban_mask is not None:
+        try:
+            if prior_ban_mask.shape == data_sci.shape:
+                vals = data_sci[~prior_ban_mask]
+                vals = vals[np.isfinite(vals)]
+                if vals.size > 0:
+                    BACK_VALUE = float(np.median(vals))
+                    log_info(f"SFFT BACK_VALUE (median of unmasked science pixels): {BACK_VALUE:.6g}")
+        except Exception as e:
+            log_info(f"Warning: Could not estimate background offset: {e}")
+
     # --- Run SFFT ---
     t0_sfft = time.time()
     try:
@@ -361,7 +383,7 @@ def run_sfft() -> Optional[int]:
                 GAIN_KEY=GAIN_KEY,
                 SATUR_KEY=SATUR_KEY,
                 BACK_TYPE='MANUAL',
-                BACK_VALUE=0.0,
+                BACK_VALUE=BACK_VALUE,
                 BACK_SIZE=BACK_SIZE,
                 BACK_FILTERSIZE=BACK_FILTERSIZE,
                 DETECT_THRESH=DETECT_THRESH,
@@ -429,7 +451,7 @@ def run_sfft() -> Optional[int]:
                     KerPolyOrder=kernel_poly_order,
                     ForceConv=ForceConv,
                     BACK_TYPE='MANUAL',
-                    BACK_VALUE=0.0,
+                    BACK_VALUE=BACK_VALUE,
                     BACK_SIZE=BACK_SIZE,
                     BACK_FILTERSIZE=BACK_FILTERSIZE,
                     BACKPHOTO_TYPE=BACKPHOTO_TYPE,
@@ -483,7 +505,7 @@ def run_sfft() -> Optional[int]:
                     KerPolyOrder=kernel_poly_order,
                     ForceConv=ForceConv,
                     BACK_TYPE='MANUAL',
-                    BACK_VALUE=0.0,
+                    BACK_VALUE=BACK_VALUE,
                     BACK_SIZE=BACK_SIZE,
                     BACK_FILTERSIZE=BACK_FILTERSIZE,
                     BACKPHOTO_TYPE=BACKPHOTO_TYPE,

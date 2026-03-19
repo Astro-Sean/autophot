@@ -284,7 +284,8 @@ class prepare:
             return tns_response
 
         # Fetch new TNS data
-        if self.input_yaml["wcs"]["TNS_BOT_ID"] is None:
+        tns_bot_id = self.input_yaml["wcs"].get("TNS_BOT_ID")
+        if tns_bot_id is None or (isinstance(tns_bot_id, str) and tns_bot_id.strip() == ""):
             self.logger.warning(
                 "No TNS Bot ID configured for target '%s'. Falling back to manual coordinates.",
                 target_name,

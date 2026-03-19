@@ -428,23 +428,71 @@ class AutomatedPhotometry:
             wcs_cfg = default_input.get("wcs") or {}
             cat_cfg = default_input.get("catalog") or {}
 
+            def _env_first(*names):
+                for n in names:
+                    v = os.getenv(n)
+                    if v is not None and str(v).strip() != "":
+                        return str(v).strip()
+                return None
+
+            def _env_int_first(*names):
+                v = _env_first(*names)
+                if v is None:
+                    return None
+                try:
+                    return int(v)
+                except Exception:
+                    return None
+
             # TNS credentials
+            # Treat empty-string values as "missing" so user overrides don't
+            # accidentally block token resolution.
             for k in ("TNS_BOT_ID", "TNS_BOT_NAME", "TNS_BOT_API"):
-                if wcs_cfg.get(k) is None:
+                cur = wcs_cfg.get(k)
+                is_missing = (
+                    cur is None
+                    or (isinstance(cur, str) and cur.strip() == "")
+                )
+                if is_missing:
                     v = getattr(autophot_tokens, k, None)
+                    if v is None:
+                        # Fallback to environment variables directly in case
+                        # autophot_tokens module values are stale/cached.
+                        if k == "TNS_BOT_ID":
+                            v = _env_int_first("TNS_BOT_ID")
+                        elif k == "TNS_BOT_NAME":
+                            v = _env_first("TNS_BOT_NAME")
+                        elif k == "TNS_BOT_API":
+                            v = _env_first("TNS_BOT_API", "TNS_BOT_API_KEY")
                     if v is not None:
-                        wcs_cfg[k] = v
+                        if isinstance(v, str):
+                            v = v.strip()
+                        if not (isinstance(v, str) and v == ""):
+                            wcs_cfg[k] = v
             default_input["wcs"] = wcs_cfg
 
             # MAST CasJobs credentials (Refcat)
-            if cat_cfg.get("MASTcasjobs_wsid") is None:
+            # Treat empty-string values as "missing" and normalize types so
+            # downstream libraries always receive clean strings.
+            wsid_cur = cat_cfg.get("MASTcasjobs_wsid")
+            if wsid_cur is None or (isinstance(wsid_cur, str) and wsid_cur.strip() == ""):
                 v = getattr(autophot_tokens, "MASTcasjobs_wsid", None)
+                if v is None:
+                    v = _env_int_first("MASTCASJOBS_WSID")
                 if v is not None:
-                    cat_cfg["MASTcasjobs_wsid"] = v
-            if cat_cfg.get("MASTcasjobs_pwd") is None:
+                    v = str(v).strip()
+                    if v != "":
+                        cat_cfg["MASTcasjobs_wsid"] = v
+
+            pwd_cur = cat_cfg.get("MASTcasjobs_pwd")
+            if pwd_cur is None or (isinstance(pwd_cur, str) and pwd_cur.strip() == ""):
                 v = getattr(autophot_tokens, "MASTcasjobs_pwd", None)
+                if v is None:
+                    v = _env_first("MASTCASJOBS_PWD")
                 if v is not None:
-                    cat_cfg["MASTcasjobs_pwd"] = v
+                    v = str(v).strip()
+                    if v != "":
+                        cat_cfg["MASTcasjobs_pwd"] = v
             default_input["catalog"] = cat_cfg
         except Exception:
             # Tokens module is optional; leave config as-is.
