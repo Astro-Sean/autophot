@@ -111,8 +111,20 @@ def run_sfft() -> Optional[int]:
 
     # SExtractor background mesh: smaller BACK_SIZE => finer mesh (better for gradients/hosts),
     # but can overfit noise if too small. Typical values: 32, 64, 128.
-    parser.add_argument('-back_size', type=int, default=128, help='SExtractor BACK_SIZE (mesh cell size, px).')
-    parser.add_argument('-back_filtersize', type=int, default=6, help='SExtractor BACK_FILTERSIZE (median filter size, mesh cells).')
+    parser.add_argument('-back_size', type=int, default=64, help='SExtractor BACK_SIZE (mesh cell size, px).')
+    parser.add_argument('-back_filtersize', type=int, default=3, help='SExtractor BACK_FILTERSIZE (median filter size, mesh cells).')
+    parser.add_argument(
+        '-backphototype',
+        type=str,
+        default='LOCAL',
+        help='SExtractor BACKPHOTO_TYPE for source photometry background: LOCAL or GLOBAL.',
+    )
+    parser.add_argument(
+        '-constphotratio',
+        type=str,
+        default='true',
+        help="SFFT ConstPhotRatio: 'true' restricts kernel sum (default SFFT behaviour), 'false' fits flux scaling polynomial.",
+    )
     args = parser.parse_args()
 
     # --- Parse Coordinate Lists ---
@@ -236,7 +248,9 @@ def run_sfft() -> Optional[int]:
     FWHM = max(np.ceil(template_fwhm), np.ceil(science_fwhm))
 
     psf_area_min = np.pi * (fwhm_min) ** 2
-    detect_minarea = min(3, int(np.ceil(psf_area_min * 0.5)))
+    # SFFT defaults use DETECT_MINAREA=5; keep at least that to avoid spurious
+    # source selection that can bias the scale/background fit.
+    detect_minarea = max(5, int(np.ceil(psf_area_min * 0.5)))
     detect_maxarea = 0
 
     # Kernel half-width: user override, or auto. Use 2*FWHM so kernel is large enough
@@ -294,32 +308,44 @@ def run_sfft() -> Optional[int]:
 
     kernel_poly_order = args.kernel_order
     bg_poly_order = max(0, int(args.bg_order))
+    if args.crowded and bg_poly_order == 0:
+        # MultiEasyCrowdedPacket default favours a non-trivial BGPolyOrder.
+        # Pipelines often pass 0 as "no explicit background model", but in crowded
+        # (non-sky-subtracted) cases this can destabilize scaling.
+        bg_poly_order = 2
+        log_info("Crowded SFFT: bg_order=0 overridden to 2 for stability.")
     log_info(f"Background polynomial order: {bg_poly_order}")
 
     # --- SExtractor parameters (both sparse and crowded) ---
-    # BACKPHOTO_TYPE: GLOBAL so SExtractor does not estimate local background at star positions.
-    # LOCAL can bias local backgrounds and drive oversubtraction.
-    # DETECT_THRESH: higher = fewer spurious sources (stabilizes matching/solution).
+    # BACKPHOTO_TYPE controls the background model used for source-level photometry.
+    # LOCAL uses a background evaluated around each source; GLOBAL uses the global background.
     is_crowded = args.crowded
 
-    DETECT_THRESH = 2.8 if is_crowded else 2.5
-    DEBLEND_MINCON = 0.0003 if is_crowded else 0.0005
-    # Let SFFT solve the photometric scale ratio between REF and SCI.
-    # Forcing a constant ratio can drive systematic over/under-subtraction when
-    # throughput/zeropoint differs between images.
-    constant_phot_ratio = False
-    StarExt_iter = 4
-    BACKPHOTO_TYPE = "GLOBAL"
-    if is_crowded:
-        log_info(
-            f"Crowded-field SFFT: BACKPHOTO_TYPE={BACKPHOTO_TYPE}, "
-            f"DETECT_THRESH={DETECT_THRESH:.1f}, DEBLEND_MINCONT={DEBLEND_MINCON:.4f}"
-        )
+    # Align with sfft defaults to reduce systematic scaling bias.
+    DETECT_THRESH = 5.0 if is_crowded else 2.0
+    DEBLEND_MINCON = 0.005
+
+    _cpr = str(getattr(args, "constphotratio", "true")).strip().lower()
+    if _cpr in ("true", "1", "yes", "y"):
+        constant_phot_ratio = True
+    elif _cpr in ("false", "0", "no", "n"):
+        constant_phot_ratio = False
     else:
-        log_info(
-            f"Sparse-field SFFT: BACKPHOTO_TYPE={BACKPHOTO_TYPE}, "
-            f"DETECT_THRESH={DETECT_THRESH:.1f}, DEBLEND_MINCONT={DEBLEND_MINCON:.4f}"
+        raise ValueError(f"Invalid -constphotratio='{args.constphotratio}'; expected true/false.")
+
+    # sfft defaults: StarExt_iter=2 for crowded; 4 for sparse.
+    StarExt_iter = 2 if is_crowded else 4
+
+    BACKPHOTO_TYPE = str(getattr(args, "backphototype", "LOCAL")).upper().strip()
+    if BACKPHOTO_TYPE not in ("LOCAL", "GLOBAL"):
+        raise ValueError(
+            f"Invalid -backphototype='{BACKPHOTO_TYPE}'; expected 'LOCAL' or 'GLOBAL'."
         )
+    mode_label = "Crowded-field" if is_crowded else "Sparse-field"
+    log_info(
+        f"{mode_label} SFFT: BACKPHOTO_TYPE={BACKPHOTO_TYPE}, ConstPhotRatio={constant_phot_ratio}, "
+        f"StarExt_iter={StarExt_iter}, DETECT_THRESH={DETECT_THRESH:.1f}, DEBLEND_MINCONT={DEBLEND_MINCON:.4f}"
+    )
 
     BACK_SIZE = int(max(16, args.back_size))
     BACK_FILTERSIZE = int(max(1, args.back_filtersize))
@@ -339,14 +365,56 @@ def run_sfft() -> Optional[int]:
     prior_ban_mask = None
     if args.mask:
         try:
-            prior_ban_mask = fits.getdata(args.mask).T
-            if prior_ban_mask.dtype != bool:
-                prior_ban_mask = prior_ban_mask.astype(bool)
+            mask_raw = fits.getdata(args.mask)
+            if mask_raw.dtype != bool:
+                mask_raw = mask_raw.astype(bool)
+
+            # Some FITS-writing steps may store (x,y) vs (y,x) differently.
+            # Try raw + transpose (when shapes match) and select the orientation
+            # that yields a residual background median closest to 0.
+            candidates = []
+            if mask_raw.shape == data_sci.shape:
+                candidates.append(("raw", mask_raw))
+            if mask_raw.T.shape == data_sci.shape:
+                candidates.append(("T", mask_raw.T))
+
+            if not candidates:
+                raise ValueError(
+                    f"Mask shape {mask_raw.shape} does not match science shape {data_sci.shape}"
+                )
+
+            if len(candidates) == 1:
+                prior_ban_mask = candidates[0][1]
+            else:
+                best_name = None
+                best_abs_median = float("inf")
+                best_mask = None
+
+                for name, m in candidates:
+                    vals = data_sci[~m]
+                    vals = vals[np.isfinite(vals)]
+                    if vals.size == 0:
+                        continue
+                    med = float(np.median(vals))
+                    abs_med = abs(med)
+                    if abs_med < best_abs_median:
+                        best_abs_median = abs_med
+                        best_name = name
+                        best_mask = m
+
+                prior_ban_mask = best_mask if best_mask is not None else candidates[0][1]
+                if best_name is not None:
+                    log_info(
+                        f"SFFT chose mask orientation '{best_name}' "
+                        f"(abs(median unmasked science)={best_abs_median:.6g})."
+                    )
         except Exception as e:
             log_info(f"Warning: Could not load mask '{args.mask}': {e}")
 
-    # Estimate constant background offset from unmasked pixels (after mask is loaded).
-    # If upstream left a residual DC offset, BACK_VALUE=0 can bias difference images.
+    # Estimate a constant background offset for SExtractor when BACK_TYPE='MANUAL'.
+    # SFFT's own guidance typically uses BACK_VALUE=0.0, but if there is a strong
+    # residual DC offset we can compensate. We only apply the estimate when it is
+    # clearly above noise to avoid driving systematic oversubtraction.
     BACK_VALUE = 0.0
     if prior_ban_mask is not None:
         try:
@@ -354,8 +422,21 @@ def run_sfft() -> Optional[int]:
                 vals = data_sci[~prior_ban_mask]
                 vals = vals[np.isfinite(vals)]
                 if vals.size > 0:
-                    BACK_VALUE = float(np.median(vals))
-                    log_info(f"SFFT BACK_VALUE (median of unmasked science pixels): {BACK_VALUE:.6g}")
+                    med = float(np.median(vals))
+                    mad = float(np.median(np.abs(vals - med)))
+                    robust_sigma = 1.4826 * mad if mad > 0 else 0.0
+                    if abs(med) > max(1e-3, 0.25 * robust_sigma):
+                        BACK_VALUE = med
+                        log_info(
+                            f"SFFT BACK_VALUE (robust median of unmasked pixels): {BACK_VALUE:.6g} "
+                            f"(robust_sigma={robust_sigma:.3g})"
+                        )
+                    else:
+                        BACK_VALUE = 0.0
+                        log_info(
+                            f"SFFT BACK_VALUE suppressed (residual consistent with 0): "
+                            f"med={med:.6g}, robust_sigma={robust_sigma:.3g}"
+                        )
         except Exception as e:
             log_info(f"Warning: Could not estimate background offset: {e}")
 

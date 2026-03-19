@@ -534,14 +534,14 @@ class SExtractorWrapper:
         back_type: str = "AUTO",
         back_value: float = 0.0,
         back_size: int = 64,
-        back_filtersize: int = 7,
+        back_filtersize: int = 3,
         back_pearson: float = 3.5,
         backphoto_type: str = "LOCAL",
         backphoto_thick: int = 24,
         back_filtthresh: float = 0.0,
         use_filt: bool = True,
-        detect_thresh: float = 1.5,
-        analysis_thresh: float = 1.2,
+        detect_thresh: float = 2.0,
+        analysis_thresh: float = 2.0,
         detect_minarea: int = 5,
         detect_maxarea: int = 0,
         deblend_nthresh: int = 64,
@@ -579,15 +579,15 @@ class SExtractorWrapper:
             seeing_fwhm (float, optional): Estimated seeing FWHM in arcsec. Defaults to 2.0.
             back_type (str, optional): Background type (AUTO or MANUAL). Defaults to "AUTO".
             back_value (float, optional): Background value. Defaults to 0.0.
-            back_size (int, optional): Background mesh size. Defaults to 32.
-            back_filtersize (int, optional): Background filter size. Defaults to 7.
+            back_size (int, optional): Background mesh size. Defaults to 64.
+            back_filtersize (int, optional): Background filter size. Defaults to 3.
             back_pearson (float, optional): Pearson's factor for background estimation. Defaults to 3.5.
             backphoto_type (str, optional): Background photo type (GLOBAL or LOCAL). Defaults to "LOCAL".
             backphoto_thick (int, optional): Thickness of the background LOCAL annulus. Defaults to 24.
             back_filtthresh (float, optional): Threshold above which the background-map filter operates. Defaults to 0.0.
             use_filt (bool, optional): Use convolution filter. Defaults to True.
-            detect_thresh (float, optional): Detection threshold. Defaults to 1.5.
-            analysis_thresh (float, optional): Analysis threshold. Defaults to 1.5.
+            detect_thresh (float, optional): Detection threshold. Defaults to 2.0.
+            analysis_thresh (float, optional): Analysis threshold. Defaults to 2.0.
             detect_minarea (int, optional): Minimum detection area. Defaults to 5.
             detect_maxarea (int, optional): Maximum detection area. Defaults to 0.
             deblend_nthresh (int, optional): Deblending threshold. Defaults to 32.
@@ -606,8 +606,8 @@ class SExtractorWrapper:
             masked_sources (Table, optional): Sources to mask. Defaults to None.
             weight_path (str, optional): Path to the weight map file. Defaults to None.
             use_FWHM (float, optional): FWHM in pixels to use for convolution kernel optimization. Defaults to 0.0.
-            crowded (bool, optional): If True, use parameters tuned for crowded fields: BACKPHOTO_TYPE=GLOBAL
-                (avoids oversubtraction), tighter deblending, smaller back mesh, lower detection threshold.
+            crowded (bool, optional): If True, use parameters tuned for crowded fields: tighter deblending,
+                smaller back mesh, lower detection threshold, and force `BACKPHOTO_TYPE=GLOBAL`.
                 If None, taken from config["photometry"]["crowded_field"] or config["template_subtraction"]["sextractor_crowded"].
             use_for_matching (bool, optional): If True, retain more sources (no NMAX, lower SNR, relaxed FWHM) for matching.
 
@@ -623,7 +623,7 @@ class SExtractorWrapper:
             )
         if crowded:
             logger.info(
-                "Using SExtractor crowded-field parameters (BACKPHOTO_TYPE=GLOBAL to avoid oversubtraction, "
+                "Using SExtractor crowded-field parameters (forcing BACKPHOTO_TYPE=GLOBAL, "
                 "tighter deblending, smaller back mesh)."
             )
         fits_path = Path(fits_path)
@@ -717,16 +717,17 @@ class SExtractorWrapper:
                 "MAG_ZEROPOINT": "0.0",
             }
             if crowded:
-                # Align with SFFT crowded: GLOBAL background avoids local inflation at sources -> less oversubtraction.
+                # Crowded-field tune: force GLOBAL background photos type (per your requirement)
+                # and align thresholds/deblending with SFFT defaults to reduce biased detections.
                 config_dict.update({
                     "BACKPHOTO_TYPE": "GLOBAL",
-                    "BACK_SIZE": "16",
+                    "BACK_SIZE": "64",
                     "BACK_FILTERSIZE": "3",
-                    "DETECT_THRESH": "1.2",
-                    "ANALYSIS_THRESH": "1.0",
-                    "DETECT_MINAREA": "2",
+                    "DETECT_THRESH": "5.0",
+                    "ANALYSIS_THRESH": "5.0",
+                    "DETECT_MINAREA": "5",
                     "DEBLEND_NTHRESH": "64",
-                    "DEBLEND_MINCONT": "0.0003",
+                    "DEBLEND_MINCONT": "0.005",
                 })
 
             # Add weight map configuration if provided
