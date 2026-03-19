@@ -3,9 +3,13 @@ AutoPHOT Object Photometry Pipeline
 
 AutoPHOT is a Python pipeline for calibrated **aperture** and **PSF** photometry on CCD/NIR imaging. It’s designed for time‑domain workflows (e.g. transients) and can run with or without **template subtraction**.
 
+Project links:
+- GitHub: https://github.com/Astro-Sean/autophot
+- Paper: https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B
+
 ## Installation (Conda)
 
-AutoPHOT is not on conda-forge. Install from the `astro-sean` channel:
+Install from the `astro-sean` channel:
 
 ```bash
 conda install astro-sean::autophot
@@ -32,7 +36,7 @@ python -c "from autophot import AutomatedPhotometry; print('AutoPHOT import OK')
 autophot-main -h
 ```
 
-### 6. Install PyZOGY (optional, for ZOGY subtraction)
+### Install PyZOGY (optional, for ZOGY subtraction)
 
 With the `autophot` environment active:
 
@@ -43,52 +47,13 @@ python setup.py install
 cd ..
 ```
 
-### 7. Optional: Legacy Survey templates helper
+### Optional: Legacy Survey templates helper
 
 If you want to use **Legacy Survey templates** (via `download_legacy_template`), also install:
 
 ```bash
 conda install -c conda-forge legacystamps
 ```
-
-## Build and upload to Anaconda.org
-
-If you maintain a conda channel and want to publish `autophot`, use the helper script:
-
-```bash
-./scripts/build_and_upload_conda.sh
-```
-
-This script:
-
-- enforces a semantic version bump (`X.Y.Z`) before upload
-- updates versions in `pyproject.toml` and `conda/recipe/meta.yaml`
-- runs `conda build conda/recipe`
-- resolves the produced package path
-- uploads with `anaconda upload`
-
-Optional flags:
-
-```bash
-# Use a specific conda env that has conda-build + anaconda-client
-./scripts/build_and_upload_conda.sh --env autophot
-
-# Upload to a label (e.g. dev)
-./scripts/build_and_upload_conda.sh --label dev
-
-# Override channel username if needed (default is astro-sean)
-./scripts/build_and_upload_conda.sh --channel-username other-user
-
-# Set explicit version non-interactively
-./scripts/build_and_upload_conda.sh --new-version 0.1.1
-
-# Note: upload without a version bump is intentionally blocked.
-```
-
-Prerequisites:
-
-- `conda-build` and `anaconda-client` installed
-- authenticated with `anaconda login` (or `ANACONDA_API_TOKEN` set)
 
 ## External tools (optional but common)
 
@@ -161,7 +126,7 @@ AutoPHOT defaults to running the `hotpants` command from your `PATH`, and prints
 AutoPHOT has a simple CLI:
 
 ```bash
-python main.py -f /path/to/image.fits -c /path/to/config.yml
+autophot-main -f /path/to/image.fits -c /path/to/config.yml
 ```
 
 For most runs you’ll use a small Python driver script (recommended) so you can override only the dataset‑specific fields.
@@ -175,7 +140,7 @@ For most real datasets you’ll want a small “driver” script that:
 - Runs the pipeline (optionally with image-level parallelism via `nCPU`)
 - Optionally generates lightcurves/tables after the run
 
-Below is a cleaned, copy‑pasteable template based on the script you shared (replace paths/coordinates as needed).
+Below is a copy-pasteable template you can adapt for your target, paths, and catalog settings.
 
 ```python
 #!/usr/bin/env python3

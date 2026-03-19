@@ -1044,7 +1044,7 @@ def gauss_1d(x,A,x0,sigma):
     
     where *G* is the 1D gaussian function, *A* is the amplitude, *x* is the linear
     range of the function, :math:`x_0` is the center of the function, and
-    :math:`\sigma` is the standard deviation.
+    :math:`\\sigma` is the standard deviation.
     
     
     :param x: Linear range of gaussian function
@@ -1311,7 +1311,7 @@ def Gaussian(gridx,gridy, x0, y0, sky , A, sigma):
      
     where *G* is the 2D gaussian function, *A* is the amplitude, *x* and *y* are the linear
     range of the function, :math:`x_0` and :math:`y_0` are the centers of the function,
-    :math:`\sigma` is the standard deviation, and *sky* is the amplitude offset of the function
+    :math:`\\sigma` is the standard deviation, and *sky* is the amplitude offset of the function
     
     :param image: 2 dimensional grid to map Gaussian onto 
     :type image: 2D array
