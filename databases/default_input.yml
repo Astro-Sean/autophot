@@ -162,7 +162,7 @@ default_input:
   template_subtraction:
     do_subtraction: False # bool --- Enable template subtraction step.
     alignment_method: reproject # str --- Science–template registration method (reproject, swarp, astroalign).
-    method: hotpants # str --- Subtraction backend (hotpants, sfft, zogy where available).
+    method: sfft # str --- Subtraction backend (sfft default; hotpants or zogy optional where available).
     download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).
     get_PS1_template: False # bool --- Deprecated legacy flag (use `download_templates: panstarrs` instead).
     templates_size: 10 # float --- Template cutout size (arcmin) around target when building/using templates.

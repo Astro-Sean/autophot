@@ -1,7 +1,7 @@
 AutoPHOT Object Photometry Pipeline
 ===================================
 
-AutoPHOT is a Python pipeline for calibrated **aperture** and **PSF** photometry on CCD/NIR imaging. It’s designed for time‑domain workflows (e.g. transients) and can run with or without **template subtraction**.
+AutoPHOT is a Python pipeline for publication-quality photometry of transients and variable sources. It reduces CCD/NIR FITS images through WCS solving, cosmic-ray removal, and background subtraction; builds or uses reference catalogs (e.g. Gaia, Pan-STARRS); measures **aperture** and **PSF** (ePSF) photometry; and calibrates zeropoints with robust fitting and optional colour terms. Optional **template subtraction** (SFFT by default, or HOTPANTS/ZOGY) produces difference images for transient detection. The pipeline reports target magnitudes, errors, limiting magnitudes (via injection/recovery), and can output light curves and detection-limit plots.
 
 Project links:
 - GitHub: https://github.com/Astro-Sean/autophot
@@ -95,7 +95,7 @@ conda install -c conda-forge astromatic-swarp
 
 ### HOTPANTS for template subtraction
 
-AutoPHOT can call HOTPANTS for image subtraction when `template_subtraction.method: hotpants`.
+AutoPHOT can call HOTPANTS for image subtraction when `template_subtraction.method` is set to `hotpants` (default is `sfft`).
 
 - **Install dependencies** (CFITSIO is required):
 
@@ -111,7 +111,7 @@ cd hotpants
 make
 ```
 
-AutoPHOT defaults to running the `hotpants` command from your `PATH`, and prints a warning if it cannot be found.
+When using the HOTPANTS backend, AutoPHOT runs the `hotpants` command from your `PATH` and prints a warning if it cannot be found.
 
 ## Recommended usage (Python driver script)
 
@@ -337,7 +337,7 @@ autophot_input["template_subtraction"]["alignment_method"] = "reproject"  # or "
 Set subtraction backend with:
 
 ```python
-autophot_input["template_subtraction"]["method"] = "hotpants"  # or "sfft", "zogy"
+autophot_input["template_subtraction"]["method"] = "sfft"  # default; or "hotpants", "zogy"
 ```
 
 - **`hotpants`:** requires the external HOTPANTS executable (see install section above)

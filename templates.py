@@ -213,7 +213,7 @@ class MaskParams:
 class SubtractionParams:
     """Parameters controlling image subtraction."""
 
-    method: str = "hotpants"
+    method: str = "sfft"
     """Algorithm: 'hotpants', 'sfft', or 'zogy'."""
 
     kernel_order: int = 0
@@ -2781,7 +2781,7 @@ class templates:
         self,
         scienceFpath: str,
         templateFpath: str,
-        method: str = "hotpants",
+        method: str = "sfft",
         kernel_order: int = 0,
         matching_sources: Optional[List[Tuple[float, float]]] = None,
         masked_sources: Optional[List[Tuple[float, float]]] = None,
@@ -2811,7 +2811,7 @@ class templates:
         scienceFpath, templateFpath : str
             Input FITS file paths.
         method : str
-            Initial backend choice ('hotpants', 'sfft', 'zogy').
+            Initial backend choice ('sfft', 'hotpants', 'zogy').
         kernel_order : int
             Spatial-variation polynomial order.
         matching_sources : list of (x, y) or None

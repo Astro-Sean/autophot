@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autophot"
-version = "0.1.4"
+version = "0.1.7"
 description = "AutoPHOT object photometry pipeline (CCD/NIR; calibrated aperture/PSF photometry; template subtraction)."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -77,5 +77,5 @@ databases = ["*.yml"]
 utils = ["*.py"]
 
 [tool.setuptools.data-files]
-"." = ["autophot.mplstyle", "gauss_3.0_7x7.conv", "gaussian_7x7.conv"]
+"." = ["autophot.mplstyle", "gaussian_7x7.conv"]
 
