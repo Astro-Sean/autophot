@@ -3,14 +3,12 @@ AutoPHOT Object Photometry Pipeline
 
 AutoPHOT is a Python pipeline for calibrated **aperture** and **PSF** photometry on CCD/NIR imaging. It’s designed for time‑domain workflows (e.g. transients) and can run with or without **template subtraction**.
 
-## Installation
+## Installation (Conda-first)
 
-AutoPHOT is **not published on conda-forge**. The recommended installation is:
+AutoPHOT is **not published on conda-forge**. Use one of these conda workflows:
 
-1. Clone the GitHub repository.
-2. Create a fresh conda environment.
-3. Build the conda package locally.
-4. Install that package into the new environment (which also installs all required Python dependencies).
+1. **Build locally from source** (best for development/testing).
+2. **Install from Anaconda.org channel** (best for users).
 
 ### 1. Clone the repository
 
@@ -40,21 +38,49 @@ From the cloned `autophot` directory:
 conda build conda/recipe
 ```
 
-This creates a local conda package `autophot-object-<version>-py_*.conda` and runs basic import/CLI tests in an isolated test environment.
+This creates a local conda package `autophot-<version>-py_*.conda` and runs basic import/CLI tests in an isolated test environment.
 
-### 5. Install AutoPHOT (and all Python dependencies) into the `autophot` environment
+### 5. Install `autophot` (and all Python dependencies) into the `autophot` environment
 
 With `autophot` still activated:
 
 ```bash
-# Newer conda (channel "local" is created automatically by conda-build)
-conda install -c local autophot-object
+# Preferred: install the exact built artifact path printed by conda-build
+conda install "/path/to/conda-bld/noarch/autophot-<version>-py_*.conda"
 
-# If your conda does not support the "local" channel, use:
-# conda install --use-local autophot-object
+# Optional (if your local channel points to the same conda-bld directory):
+# conda install -c local autophot
+# or
+# conda install --use-local autophot
 ```
 
 This pulls in all required Python packages (NumPy, SciPy, Astropy, Astroquery, Photutils, pandas, scikit-image, matplotlib, emcee, lmfit, etc.) into the `autophot` environment.
+
+### Alternative: Install directly from Anaconda.org
+
+If a package is already published to your channel (default `astro-sean`), install with:
+
+```bash
+conda install -c astro-sean autophot
+```
+
+To install a pre-release/dev label:
+
+```bash
+conda install -c astro-sean/label/dev autophot
+```
+
+### Updating an existing AutoPHOT install
+
+In an environment where `autophot` is already installed:
+
+```bash
+# update to the latest package on your channel
+conda update -c astro-sean autophot
+
+# optional: pin channel priority to avoid cross-channel mixing
+conda config --set channel_priority strict
+```
 
 You can sanity‑check the install with:
 
@@ -81,6 +107,45 @@ If you want to use **Legacy Survey templates** (via `download_legacy_template`),
 ```bash
 conda install -c conda-forge legacystamps
 ```
+
+## Build and upload to Anaconda.org
+
+If you maintain a conda channel and want to publish `autophot`, use the helper script:
+
+```bash
+./scripts/build_and_upload_conda.sh
+```
+
+This script:
+
+- enforces a semantic version bump (`X.Y.Z`) before upload
+- updates versions in `pyproject.toml` and `conda/recipe/meta.yaml`
+- runs `conda build conda/recipe`
+- resolves the produced package path
+- uploads with `anaconda upload`
+
+Optional flags:
+
+```bash
+# Use a specific conda env that has conda-build + anaconda-client
+./scripts/build_and_upload_conda.sh --env autophot
+
+# Upload to a label (e.g. dev)
+./scripts/build_and_upload_conda.sh --label dev
+
+# Override channel username if needed (default is astro-sean)
+./scripts/build_and_upload_conda.sh --channel-username other-user
+
+# Set explicit version non-interactively
+./scripts/build_and_upload_conda.sh --new-version 0.1.1
+
+# Note: upload without a version bump is intentionally blocked.
+```
+
+Prerequisites:
+
+- `conda-build` and `anaconda-client` installed
+- authenticated with `anaconda login` (or `ANACONDA_API_TOKEN` set)
 
 ## External tools (optional but common)
 

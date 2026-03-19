@@ -85,3 +85,6 @@ Thumbs.db
 # Token / secret files
 autophot_tokens.py
 
+# Local helper scripts
+scripts/
+
