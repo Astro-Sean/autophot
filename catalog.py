@@ -1801,7 +1801,7 @@ class Catalog:
                     yerr=catalog_mag_err_linear[outlier_mask],
                     xerr=inst_mag_err_linear[outlier_mask],
                     fmt="o",
-                    color="red",
+                    color="#D55E00",
                     markersize=2.2,
                     capsize=0,
                     elinewidth=0.4,
@@ -1838,12 +1838,17 @@ class Catalog:
                     max_inst_mag = -2.5 * np.log10(min_flux)
                     ax1.axvline(
                         x=min_inst_mag,
-                        color="green",
+                        color="#009E73",
                         linestyle=":",
                         alpha=0.7,
                         label=f"Linearity range: {min_flux:.1f}-{max_flux:.1f} flux",
                     )
-                    ax1.axvline(x=max_inst_mag, color="green", linestyle=":", alpha=0.7)
+                    ax1.axvline(
+                        x=max_inst_mag,
+                        color="#009E73",
+                        linestyle=":",
+                        alpha=0.7,
+                    )
 
             ax1.set_xlabel("Instrumental Magnitude [mag]")
             ax1.set_ylabel(f"Catalog {use_filter} Band [mag]")
@@ -2317,7 +2322,7 @@ class Catalog:
             ax_right.step(
                 radii,
                 median_profile,
-                color="red",
+                color="#D55E00",
                 linewidth=0.5,
                 label="Median\nRadial\nProfile",
             )

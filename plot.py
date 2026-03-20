@@ -126,11 +126,12 @@ class Plot:
                     img_data,
                     origin="lower",
                     aspect="auto",
-                    cmap="bone",
+                    cmap="Greys_r",
                     vmin=vmins[title],
                     vmax=vmaxs[title],
                 )
-                ax.set_title(title)
+                # Panel titles for readability; no legends are drawn in these axes.
+                ax.set_title(title, fontsize=8, pad=2)
                 ax.set_xlabel("X [Pixel]")
                 ax.set_ylabel("Y [Pixel]")
                 axes.append(ax)
@@ -171,7 +172,7 @@ class Plot:
                         circle = mpatches.Circle(
                             (x, y),
                             cross_len * 2,
-                            edgecolor="red",
+                            edgecolor="#D55E00",
                             facecolor="none",
                             zorder=4,
                             lw=0.5,
@@ -183,14 +184,14 @@ class Plot:
                         axes[0].plot(
                             [x - cross_len, x + cross_len],
                             [y - cross_len, y + cross_len],
-                            color="red",
+                            color="#D55E00",
                             lw=0.5,
                             zorder=2,
                         )
                         axes[0].plot(
                             [x - cross_len, x + cross_len],
                             [y + cross_len, y - cross_len],
-                            color="red",
+                            color="#D55E00",
                             lw=0.5,
                             zorder=2,
                         )
@@ -201,7 +202,7 @@ class Plot:
                         ha="center",
                         va="bottom",
                         fontsize=3,
-                        color="red",
+                        color="#D55E00",
                         zorder=3,
                     )
 
@@ -228,7 +229,7 @@ class Plot:
                         img_data,
                         origin="lower",
                         aspect="auto",
-                        cmap="bone",
+                        cmap="Greys_r",
                         vmin=vmins[title],
                         vmax=vmaxs[title],
                     )
@@ -237,7 +238,7 @@ class Plot:
                     ax_inset.set_xticks([])
                     ax_inset.set_yticks([])
                     for spine in ax_inset.spines.values():
-                        spine.set_color("red")
+                        spine.set_color("#D55E00")
                         spine.set_linewidth(0.5)
                     inset_axes_list.append(ax_inset)
 
@@ -247,7 +248,7 @@ class Plot:
                         2 * inset_size,
                         2 * inset_size,
                         linewidth=0.5,
-                        edgecolor="red",
+                        edgecolor="#D55E00",
                         facecolor="none",
                     )
                     ax.add_patch(rect)
@@ -283,14 +284,14 @@ class Plot:
                                 coordsB=ax_inset.transAxes,
                                 axesA=ax,
                                 axesB=ax_inset,
-                                color="red",
+                                color="#D55E00",
                                 linewidth=0.5,
                             )
                         )
 
             # Optional mask overlay
             if mask is not None:
-                red_overlay = colors.ListedColormap(["none", "red"])
+                red_overlay = colors.ListedColormap(["none", "#D55E00"])
                 for ax in fig.axes:
                     if ax not in inset_axes_list:
                         ax.imshow(mask, cmap=red_overlay, alpha=0.5, origin="lower")
@@ -304,7 +305,7 @@ class Plot:
                     circle = mpatches.Circle(
                         fitted_location,
                         radius=radius,
-                        edgecolor="red",
+                        edgecolor="#D55E00",
                         facecolor="none",
                         linewidth=0.5,
                         transform=ax.transData,
@@ -318,14 +319,14 @@ class Plot:
                     hline = mlines.Line2D(
                         [x - cross_len, x + cross_len],
                         [y, y],
-                        color="green",
+                        color="#0072B2",
                         linewidth=0.5,
                         transform=ax.transData,
                     )
                     vline = mlines.Line2D(
                         [x, x],
                         [y - cross_len, y + cross_len],
-                        color="green",
+                        color="#0072B2",
                         linewidth=0.5,
                         transform=ax.transData,
                     )
@@ -442,7 +443,7 @@ class Plot:
 
         titles = ["Target cutout", "Segmentation", "Neighbor mask"]
         for ax, t in zip(axes, titles):
-            ax.set_title(t)
+            ax.set_title(t, fontsize=7, pad=2)
             ax.set_xlabel("X [Pixel]")
             ax.set_ylabel("Y [Pixel]")
 
@@ -450,9 +451,11 @@ class Plot:
         ty = cy - y0
 
         # Panel 1
-        axes[0].imshow(cut, origin="lower", cmap="bone", vmin=vmin, vmax=vmax)
-        axes[0].axvline(tx, color="cyan", lw=0.6, alpha=0.9)
-        axes[0].axhline(ty, color="cyan", lw=0.6, alpha=0.9)
+        axes[0].imshow(
+            cut, origin="lower", cmap="Greys_r", vmin=vmin, vmax=vmax
+        )
+        axes[0].axvline(tx, color="#0072B2", lw=0.6, alpha=0.9)
+        axes[0].axhline(ty, color="#0072B2", lw=0.6, alpha=0.9)
         if (
             aperture_radius is not None
             and np.isfinite(aperture_radius)
@@ -462,31 +465,37 @@ class Plot:
                 mpatches.Circle(
                     (tx, ty),
                     float(aperture_radius),
-                    edgecolor="cyan",
+                    edgecolor="#0072B2",
                     facecolor="none",
                     lw=0.8,
                 )
             )
 
         # Panel 2
-        axes[1].imshow(cut, origin="lower", cmap="bone", vmin=vmin, vmax=vmax)
+        axes[1].imshow(
+            cut, origin="lower", cmap="Greys_r", vmin=vmin, vmax=vmax
+        )
         levels = np.unique(seg)
         levels = levels[levels > 0]
         if levels.size:
             axes[1].contour(
-                seg, levels=levels, colors="lime", linewidths=0.4, alpha=0.9
+                seg,
+                levels=levels,
+                colors="#009E73",
+                linewidths=0.4,
+                alpha=0.9,
             )
-        axes[1].axvline(tx, color="cyan", lw=0.6, alpha=0.9)
-        axes[1].axhline(ty, color="cyan", lw=0.6, alpha=0.9)
+        axes[1].axvline(tx, color="#0072B2", lw=0.6, alpha=0.9)
+        axes[1].axhline(ty, color="#0072B2", lw=0.6, alpha=0.9)
 
         # Panel 3
-        axes[2].imshow(cut, origin="lower", cmap="bone", vmin=vmin, vmax=vmax)
-        overlay = colors.ListedColormap(["none", "red"])
+        axes[2].imshow(
+            cut, origin="lower", cmap="Greys_r", vmin=vmin, vmax=vmax
+        )
+        overlay = colors.ListedColormap(["none", "#D55E00"])
         axes[2].imshow(nmask.astype(int), origin="lower", cmap=overlay, alpha=0.35)
-        axes[2].axvline(tx, color="cyan", lw=0.6, alpha=0.9)
-        axes[2].axhline(ty, color="cyan", lw=0.6, alpha=0.9)
-
-        fig.suptitle(f"Crowding diagnostic {title_extra}".strip())
+        axes[2].axvline(tx, color="#0072B2", lw=0.6, alpha=0.9)
+        axes[2].axhline(ty, color="#0072B2", lw=0.6, alpha=0.9)
         fig.savefig(save_path, dpi=300)
         plt.close(fig)
 
@@ -558,16 +567,10 @@ class Plot:
                 image,
                 origin="lower",
                 aspect="auto",
-                cmap="grey_r",
+                cmap="Greys_r",
                 interpolation=None,
                 norm=norm,
             )
-
-            # Title summarising what is shown
-            title_main = "SourceCheck: target, PSF, FWHM, catalog"
-            if subtracted:
-                title_main += " (subtracted image)"
-            ax1.set_title(title_main, fontsize=6)
 
             # Plot the target source as a circle
             circle = Circle(

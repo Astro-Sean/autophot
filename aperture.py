@@ -780,12 +780,14 @@ class Aperture:
         )
 
         norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
-        ax_main.imshow(image, origin="lower", norm=norm, cmap="viridis", aspect="auto")
+        ax_main.imshow(
+            image, origin="lower", norm=norm, cmap="Greys_r", aspect="auto"
+        )
 
         for radius, color, style in [
-            (ap_size, "lime", "-"),
-            (annulusIN, "red", "--"),
-            (annulusOUT, "red", "--"),
+            (ap_size, "#009E73", "-"),
+            (annulusIN, "#D55E00", "--"),
+            (annulusOUT, "#D55E00", "--"),
         ]:
             ax_main.add_patch(
                 Circle((cx, cy), radius, ec=color, fc="none", lw=0.5, ls=style)

@@ -1582,7 +1582,7 @@ class PSF:
             cx, cy = nx // 2, ny // 2
             ax.axvline(cx, color="white", lw=0.5, alpha=0.8, ls="--")
             ax.axhline(cy, color="white", lw=0.5, alpha=0.8, ls="--")
-            ax.set_title(f"Oversample={oversample}x")
+            ax.set_title(f"Oversample={oversample}x", fontsize=8, pad=2)
             ax.set_xlabel("Pixels")
             ax.set_ylabel("Pixels")
             ax.set_xticks([])
@@ -1691,7 +1691,14 @@ class PSF:
             )
             ctr = [stars[i].shape[1] / 2, stars[i].shape[0] / 2]
             ax.add_patch(
-                Circle(ctr, aperture_radius, color="red", ls="-", fill=False, lw=0.5)
+                Circle(
+                    ctr,
+                    aperture_radius,
+                    color="#D55E00",
+                    ls="-",
+                    fill=False,
+                    lw=0.5,
+                )
             )
             ax.text(
                 0.98,
@@ -1714,12 +1721,19 @@ class PSF:
         im = ax_right.imshow(
             psf_model, origin="lower", cmap="viridis", norm=norm_p, interpolation="none"
         )
-        ax_right.set_title("2d ePSF")
+        ax_right.set_title("2d ePSF", fontsize=8, pad=2)
         ax_right.set_xticks([])
         ax_right.set_yticks([])
         ctr = [psf_model.shape[1] / 2, psf_model.shape[0] / 2]
         ax_right.add_patch(
-            Circle(ctr, aperture_radius, color="red", ls="-", fill=False, lw=0.5)
+            Circle(
+                ctr,
+                aperture_radius,
+                color="#D55E00",
+                ls="-",
+                fill=False,
+                lw=0.5,
+            )
         )
 
         cbar = fig.colorbar(im, ax=ax_right, fraction=0.046, pad=0.04)
@@ -1748,7 +1762,7 @@ class PSF:
             color=colors,
             shade=True,
         )
-        ax_right_3d.set_title("ePSF 3D")
+        ax_right_3d.set_title("ePSF 3D", fontsize=8, pad=2)
         ax_right_3d.set_xlabel("")
         ax_right_3d.set_ylabel("")
         ax_right_3d.set_zlabel("")
@@ -2672,7 +2686,7 @@ class PSF:
                                 2 * xe,
                                 2 * ye,
                                 angle=0,
-                                edgecolor="red",
+                                edgecolor="#D55E00",
                                 facecolor="none",
                                 lw=0.5,
                                 alpha=1,
@@ -2805,7 +2819,7 @@ class PSF:
                 )
                 ax2_R.set_xlim(_lo_r - _margin_r, _hi_r + _margin_r)
 
-                _proj(ax1, ax1_R, ax1_B, fitted_model, color="red")
+                _proj(ax1, ax1_R, ax1_B, fitted_model, color="#D55E00")
                 idx += 1
 
             # ---- Panel 3: ePSF ---------------------------------------------
@@ -2821,7 +2835,9 @@ class PSF:
                     norm=norm3,
                     interpolation=None,
                 )
-                ax3.set_title(f"Oversampled ePSF (x{epsf.oversampling})")
+                ax3.set_title(
+                    f"Oversampled ePSF (x{epsf.oversampling})", fontsize=7, pad=2
+                )
 
             # ---- Colorbars -------------------------------------------------
             cbar1 = fig.colorbar(im1, cax=cax_list[0], orientation="horizontal")

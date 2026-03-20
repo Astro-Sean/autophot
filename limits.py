@@ -634,7 +634,9 @@ class Limits:
                     ),
                     axis=1,
                 )
-                injection_df = df[p_det < 0.5].copy()
+                # "Quiet" sites: choose positions with detection probability below
+                # the same cutoff used later to define what counts as a detection.
+                injection_df = df[p_det < DETECTION_PROB_THRESH].copy()
 
                 if len(injection_df) > 0:
                     break
@@ -747,7 +749,7 @@ class Limits:
                         bkg_level=3.0,
                         detection_limit=detection_limit,
                         useBeta=True,
-                        beta=0.5,
+                        beta=detection_cutoff,
                         plot=False,
                         n_jobs=1,
                     )
@@ -868,7 +870,7 @@ class Limits:
         zeropoint,
     ) -> None:
         """
-        Save a completeness-curve PDF next to the FITS file.
+        Save a completeness curve PNG next to the FITS file.
 
         Extracted from getInjectedLimit to keep that method focused on the
         search logic and to make the plot code independently testable.

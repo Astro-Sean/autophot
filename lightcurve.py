@@ -530,7 +530,7 @@ def plot_lightcurve(
         for ax in curve_axes:
             ax.axvline(
                 x=today_rel,
-                color="red",
+                color="#D55E00",
                 linestyle="--",
                 alpha=0.7,
                 linewidth=1.2,
@@ -606,8 +606,7 @@ def plot_lightcurve(
         ncol=ncol,
     )
 
-    if target_name:
-        curve_axes[0].set_title(target_name + 1)
+    # No plot titles; keep the legend/axis labels only.
 
     curve_axes[0].invert_yaxis()
 
@@ -856,7 +855,7 @@ def plot_lightcurve(
 def generate_photometry_table(
     output_file,
     snr_limit=3,
-    beta_limit=0.75,
+    beta_limit=0.5,
     method="PSF",
     reference_epoch=0,
     use_SNR_limit=False,
@@ -914,7 +913,14 @@ def generate_photometry_table(
             data = data[f.str.lower() == str(band).lower()].copy()
             if data.empty:
                 continue
-        data["lmag"] = data["lmag"] + data[zp_col]
+        # Robust numeric coercion: CSV concatenation can yield strings like "nan".
+        if "beta" in data.columns:
+            data["beta"] = pd.to_numeric(data["beta"], errors="coerce")
+        if "lmag" not in data.columns:
+            data["lmag"] = np.nan
+        data["lmag"] = pd.to_numeric(data["lmag"], errors="coerce") + data[
+            zp_col
+        ]
         if use_SNR_limit:
             if method == "PSF" and "snr_psf" in data.columns:
                 snr = np.asarray(data["snr_psf"], dtype=float)

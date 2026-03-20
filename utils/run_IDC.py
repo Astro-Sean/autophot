@@ -325,7 +325,7 @@ NNW
                         (x_0based, y_0based),
                         fwhm,
                         facecolor="none",
-                        edgecolor="red",
+                        edgecolor="#D55E00",
                         linewidth=0.5,
                         alpha=0.7,
                     )
@@ -334,7 +334,7 @@ NNW
                         x_0based,
                         y_0based - fwhm - 2,
                         str(i),
-                        color="red",
+                        color="#D55E00",
                         fontsize=8,
                         ha="center",
                         va="top",
@@ -890,11 +890,11 @@ NNW
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
                     output_plot_path=output_dir / "matched_sources.png",
-                    label_color="red",
+                    label_color="#D55E00",
                     label_fontsize=10,
                     circle_radius_sci=fwhm_sci_pix,
                     circle_radius_ref=fwhm_ref_pix,
-                    matched_circle_color="red",
+                    matched_circle_color="#D55E00",
                     unmatched_circle_color="blue",
                 )
             except Exception as e:
@@ -1459,7 +1459,7 @@ NNW
                 sci_cat_path=sci_sex["catalog_path"],
                 ref_cat_path=ref_sex["catalog_path"],
                 output_plot_path=science_dir / "matched_sources.png",
-                label_color="red",
+                label_color="#D55E00",
                 label_fontsize=10,
                 circle_radius_sci=fwhm_sci_pix,
                 circle_radius_ref=fwhm_ref_pix,
@@ -2060,17 +2060,17 @@ NNW
         sci_cat_path: str,
         ref_cat_path: str,
         output_plot_path: str = "matched_sources_side_by_side.png",
-        label_color: str = "red",
+        label_color: str = "#D55E00",
         label_fontsize: int = 8,
         figsize: tuple = (12, 6),
         cmap: str = "Greys_r",
         draw_lines: bool = True,
-        line_color: str = "red",
+        line_color: str = "#D55E00",
         line_alpha: float = 0.5,
         line_width: float = 0.5,
         circle_radius_sci: float = 5.0,
         circle_radius_ref: float = 5.0,
-        matched_circle_color: str = "red",
+        matched_circle_color: str = "#D55E00",
         unmatched_circle_color: str = "blue",
         circle_alpha: float = 0.7,
         circle_edge_color: str = "none",
@@ -2458,7 +2458,6 @@ NNW
                             plt.gca().invert_yaxis()
                             plt.xlabel("Reference MAG_APER")
                             plt.ylabel("Science MAG_APER")
-                            plt.title("Photometric RANSAC Fit")
                             plt.legend()
                             plt.grid(True)
                             plt.savefig(

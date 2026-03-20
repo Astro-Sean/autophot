@@ -153,7 +153,8 @@ class RemoveCosmicRays:
     ):
         """
         Plot a side-by-side comparison of the original and cleaned images.
-        Cosmic ray regions are marked in red (original) and green (cleaned).
+        Cosmic ray regions are marked in Okabe–Ito blue (original) and
+        Okabe–Ito orange (cleaned).
 
         Args:
             original: Original image (before cosmic ray removal).
@@ -181,26 +182,32 @@ class RemoveCosmicRays:
         # --- Plot the original image ---
         im0 = axes[0].imshow(
             original,
-            cmap="gray",
+            cmap="Greys_r",
             origin="lower",
             vmin=vmin_original,
             vmax=vmax_original,
         )
-        axes[0].contour(cr_mask, colors="red", alpha=0.5, linewidths=0.5)
-        axes[0].set_title("Before Cosmic Ray Removal\n(Red: Cosmic Ray Regions)")
+        # Okabe–Ito palette:
+        #   Blue   = #0072B2
+        #   Orange = #E69F00
+        axes[0].contour(cr_mask, colors="#0072B2", alpha=0.5, linewidths=0.5)
         fig.colorbar(im0, ax=axes[0], orientation="vertical", fraction=0.046, pad=0.04)
 
         # --- Plot the cleaned image ---
         im1 = axes[1].imshow(
-            cleaned, cmap="gray", origin="lower", vmin=vmin_cleaned, vmax=vmax_cleaned
+            cleaned,
+            cmap="Greys_r",
+            origin="lower",
+            vmin=vmin_cleaned,
+            vmax=vmax_cleaned
         )
-        axes[1].contour(cr_mask, colors="green", alpha=0.5, linewidths=0.5)
-        axes[1].set_title("After Cosmic Ray Removal\n(Green: Cosmic Ray Regions)")
+        axes[1].contour(cr_mask, colors="#E69F00", alpha=0.5, linewidths=0.5)
         fig.colorbar(im1, ax=axes[1], orientation="vertical", fraction=0.046, pad=0.04)
 
-        # --- Finalize the plot ---
-        fig.suptitle(title)
-        plt.tight_layout()
+        # --- Finalize the plot (title allowed; no legends overlap here) ---
+        fig.suptitle(title, fontsize=10)
+        # Leave room for the suptitle so it doesn't collide with axes/colorbars.
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
 
         png_path = os.path.join(write_dir, f"Cosmic_Rays_{base}.png")
         fig.savefig(png_path, bbox_inches="tight")

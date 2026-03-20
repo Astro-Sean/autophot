@@ -1448,6 +1448,10 @@ class Zeropoint:
                 plt.style.use(_style)
             fig, ax = plt.subplots(figsize=set_size(340, 1))
 
+            # Okabe–Ito palette for consistent, colorblind-friendly plots.
+            okabe_blue = "#0072B2"
+            okabe_orange = "#E69F00"
+
             ax.errorbar(
                 xi,
                 yi,
@@ -1455,7 +1459,7 @@ class Zeropoint:
                 yerr=ye,
                 fmt="o",
                 ms=4,
-                color="black",
+                color=okabe_blue,
                 ecolor="lightgrey",
                 alpha=0.8,
                 capsize=2,
@@ -1471,7 +1475,7 @@ class Zeropoint:
                     s=30,
                     marker="x",
                     alpha=0.4,
-                    color="red",
+                    color=okabe_orange,
                     label="Outliers",
                 )
 
@@ -1487,12 +1491,17 @@ class Zeropoint:
                     cov[1, 1] + x_plot**2 * cov[0, 0] + 2 * x_plot * cov[0, 1]
                 )
                 ax.fill_between(
-                    x_plot, y_plot - sig_y, y_plot + sig_y, color="red", alpha=0.15
+                    x_plot,
+                    y_plot - sig_y,
+                    y_plot + sig_y,
+                    color=okabe_orange,
+                    alpha=0.15,
                 )
             ax.plot(
                 x_plot,
                 y_plot,
-                "r--",
+                color=okabe_orange,
+                linestyle="--",
                 lw=0.5,
                 label=f"Slope={color_term:.3f} +/- {color_term_error:.3f}",
             )

@@ -3152,12 +3152,20 @@ def run_photometry():
                         ["x_pix", "y_pix"]
                     ].values.tolist()
 
-                    stamp_loc = os.path.join(write_dir, "stamps_positions.txt")
-                    # Write coordinates to a stamp positions text file for HOTPANTS or related use.
-                    # HOTPANTS expects 1-based FITS-style pixel coordinates, so add +1 here once.
-                    with open(stamp_loc, "w") as f:
-                        for x, y in ConsistentSources:
-                            f.write(f"{x+1} {y+1}\n")
+                    sub_method = str(
+                        input_yaml["template_subtraction"]["method"]
+                    ).lower()
+                    stamp_loc = (
+                        os.path.join(write_dir, "stamps_positions.txt")
+                        if sub_method == "hotpants"
+                        else None
+                    )
+                    # Write coordinates to a stamp positions text file for HOTPANTS.
+                    # HOTPANTS expects 1-based FITS-style pixel coordinates, so add +1.
+                    if stamp_loc is not None:
+                        with open(stamp_loc, "w") as f:
+                            for x, y in ConsistentSources:
+                                f.write(f"{x+1} {y+1}\n")
 
                 else:
                     ConsistentSources = []
@@ -3873,6 +3881,28 @@ def run_photometry():
                                 plot=True,
                                 n_jobs=n_jobs,
                             )
+                            # The injected limiting magnitude search uses
+                            # aperture-based recovery (beta_aperture), so for
+                            # consistency we also store aperture-based beta for
+                            # this target when an injected limit was computed.
+                            if np.isfinite(InjectedLimit):
+                                try:
+                                    target_beta = float(
+                                        beta_aperture(
+                                            n=detection_limit,
+                                            flux_aperture=float(
+                                                TargetPosition["flux_AP"].iloc[0]
+                                            ),
+                                            sigma=float(
+                                                TargetPosition["noiseSky"].iloc[0]
+                                            ),
+                                            npix=float(
+                                                TargetPosition["area"].iloc[0]
+                                            ),
+                                        )
+                                    )
+                                except Exception:
+                                    pass
                         else:
                             TargetPosition["flux_PSF"] = [np.nan]
                             TargetPosition["flux_PSF_err"] = [np.nan]
