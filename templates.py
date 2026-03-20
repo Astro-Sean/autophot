@@ -2764,7 +2764,9 @@ class Templates:
         ax.invert_yaxis()
 
         base = Path(self.input_yaml["fpath"]).stem
-        out = Path(self.input_yaml["fpath"]).parent / f"flux_comparison_{base}.pdf"
+        out = (
+            Path(self.input_yaml["fpath"]).parent / f"flux_comparison_{base}.png"
+        )
         fig.savefig(str(out), bbox_inches="tight", dpi=300)
         plt.close(fig)
 

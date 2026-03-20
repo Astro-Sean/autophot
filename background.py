@@ -1018,15 +1018,9 @@ class BackgroundSubtractor:
             os.makedirs(outdir, exist_ok=True)
 
         base = os.path.splitext(os.path.basename(fpath))[0]
-        # Keep existing PDF naming, but also write a standardized PNG variant
-        # with TitleCase prefix for consistent downstream ingestion.
-        save_path_pdf = os.path.join(outdir, f"{prefix}_{base}.pdf")
         prefix_title = "_".join([p[:1].upper() + p[1:] for p in prefix.split("_")])
         save_path_png = os.path.join(outdir, f"{prefix_title}_{base}.png")
 
-        fig.savefig(
-            save_path_pdf, dpi=150, bbox_inches="tight", facecolor="white"
-        )
         fig.savefig(
             save_path_png, dpi=150, bbox_inches="tight", facecolor="white"
         )

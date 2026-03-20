@@ -1851,7 +1851,9 @@ class Catalog:
             ax1.invert_xaxis()
             ax1.legend(frameon=False)
             ax1.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
-            save_path = os.path.join(write_dir, f"saturation_{base_name}.pdf")
+            save_path = os.path.join(
+                write_dir, f"Saturation_{base_name}.png"
+            )
             fig.savefig(save_path, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
 
@@ -2326,7 +2328,9 @@ class Catalog:
             ax_right.ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))
             pos = ax_right.get_position()
             ax_right.set_position([pos.x0 + 0.05, pos.y0, pos.width, pos.height])
-            output_path = os.path.join(write_dir, f"zeropoint_sources_{base}.pdf")
+            output_path = os.path.join(
+                write_dir, f"Zeropoint_Sources_{base}.png"
+            )
             fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close()
 

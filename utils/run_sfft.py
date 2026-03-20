@@ -895,9 +895,7 @@ def run_sfft() -> Optional[int]:
                     ax.set_ylabel("MAG_REF (SCI) - MAG_REF (REF)")
                     ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
                     ax.legend(fontsize=9, framealpha=1)
-                    pdf_path = os.path.join(out_dir, f"Varcheck_{out_base}.pdf")
                     png_path = os.path.join(out_dir, f"Varcheck_{out_base}.png")
-                    plt.savefig(pdf_path, bbox_inches="tight")
                     try:
                         plt.savefig(png_path, bbox_inches="tight")
                     except Exception:

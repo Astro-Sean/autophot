@@ -826,17 +826,8 @@ class Aperture:
         ax_right.set_ylim(ax_main.get_ylim())
 
         label = base if saveTarget else index
-        save_name = os.path.join(write_dir, f"aperture_{label}.pdf")
+        save_name = os.path.join(write_dir, f"aperture_{label}.png")
         fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
-        try:
-            fig.savefig(
-                save_name.replace(".pdf", ".png"),
-                bbox_inches="tight",
-                dpi=150,
-                facecolor="white",
-            )
-        except Exception:
-            pass
         plt.close(fig)
 
     # -----------------------------------------------------------------------
@@ -1207,7 +1198,7 @@ class Aperture:
 
             save_loc = os.path.join(
                 self.input_yaml["write_dir"],
-                f'optimum_aperture_{self.input_yaml["base"]}.pdf',
+                f'optimum_aperture_{self.input_yaml["base"]}.png',
             )
             fig = plt.figure(figsize=set_size(340, 1.5))
             gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
@@ -1285,15 +1276,6 @@ class Aperture:
             ax1.set_xlim(-0.05, max_radius + 0.05)
 
             fig.savefig(save_loc, bbox_inches="tight", dpi=150, facecolor="white")
-            try:
-                fig.savefig(
-                    save_loc.replace(".pdf", ".png"),
-                    bbox_inches="tight",
-                    dpi=150,
-                    facecolor="white",
-                )
-            except Exception:
-                pass
             plt.close(fig)
 
         logger.info(
@@ -1402,26 +1384,15 @@ class Aperture:
             ax.set_ylabel("Frequency")
             ax.legend(frameon=False)
             fig.tight_layout()
-            pdf_path = os.path.join(write_dir, f"aperture_correction_{base_name}.pdf")
             png_path = os.path.join(
                 write_dir, f"aperture_correction_{base_name}.png"
             )
             fig.savefig(
-                pdf_path,
-                format="pdf",
+                png_path,
                 bbox_inches="tight",
                 dpi=150,
                 facecolor="white",
             )
-            try:
-                fig.savefig(
-                    png_path,
-                    bbox_inches="tight",
-                    dpi=150,
-                    facecolor="white",
-                )
-            except Exception:
-                pass
             plt.close(fig)
 
         return correction, correction_err

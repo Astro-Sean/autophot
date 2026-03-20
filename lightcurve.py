@@ -1266,8 +1266,7 @@ def check_detection_plots(output_file, method="PSF"):
                 candidates.extend(glob.glob(search))
 
             pngs = [f for f in candidates if f.lower().endswith(".png")]
-            pdfs = [f for f in candidates if f.lower().endswith(".pdf")]
-            files = sorted(pngs) if pngs else sorted(pdfs)
+            files = sorted(pngs)
             if not files:
                 continue
 

@@ -893,21 +893,11 @@ class Zeropoint:
             ax.legend(ncol=2, loc="upper left", frameon=False)
 
             fig.savefig(
-                os.path.join(write_dir, f"zeropoint_{base_name}.pdf"),
+                os.path.join(write_dir, f"Zeropoint_{base_name}.png"),
                 bbox_inches="tight",
                 dpi=150,
                 facecolor="white",
             )
-            # Standardized PNG copy for consistent naming.
-            try:
-                fig.savefig(
-                    os.path.join(write_dir, f"Zeropoint_{base_name}.png"),
-                    bbox_inches="tight",
-                    dpi=150,
-                    facecolor="white",
-                )
-            except Exception:
-                pass
             plt.close(fig)
 
             # Build joint inlier mask only from flux types that actually
@@ -1212,24 +1202,13 @@ class Zeropoint:
                 fig_hist.tight_layout()
                 os.makedirs(write_dir, exist_ok=True)
                 fig_hist.savefig(
-                    os.path.join(write_dir, f"zeropoint_hist_combined_{base_name}.pdf"),
+                    os.path.join(
+                        write_dir, f"Zeropoint_Hist_Combined_{base_name}.png"
+                    ),
                     bbox_inches="tight",
                     dpi=150,
                     facecolor="white",
                 )
-                # Standardized PNG copy for consistent naming.
-                try:
-                    fig_hist.savefig(
-                        os.path.join(
-                            write_dir,
-                            f"Zeropoint_Hist_Combined_{base_name}.png",
-                        ),
-                        bbox_inches="tight",
-                        dpi=150,
-                        facecolor="white",
-                    )
-                except Exception:
-                    pass
                 plt.close(fig_hist)
 
                 # Combine inliers only over flux types that actually had
@@ -1540,21 +1519,11 @@ class Zeropoint:
             base_name = os.path.splitext(os.path.basename(fpath))[0] or "color_term"
             write_dir = os.path.dirname(fpath) or "."
             fig.savefig(
-                os.path.join(write_dir, f"color_term_{base_name}.pdf"),
+                os.path.join(write_dir, f"Color_Term_{base_name}.png"),
                 bbox_inches="tight",
                 dpi=150,
                 facecolor="white",
             )
-            # Standardized PNG copy for consistent naming.
-            try:
-                fig.savefig(
-                    os.path.join(write_dir, f"Color_Term_{base_name}.png"),
-                    bbox_inches="tight",
-                    dpi=150,
-                    facecolor="white",
-                )
-            except Exception:
-                pass
             plt.close(fig)
 
             logger.info(f"Color term: {color_term:.3f} +/- {color_term_error:.3f}")

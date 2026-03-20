@@ -74,7 +74,9 @@ class Plot:
 
             base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
-            save_path = os.path.join(write_dir, f"subtraction_check_{base}.pdf")
+            save_path = os.path.join(
+                write_dir, f"Subtraction_Check_{base}.png"
+            )
 
             # Create zscale interval object
             zscale = ZScaleInterval()
@@ -330,19 +332,10 @@ class Plot:
                     ax.add_line(hline)
                     ax.add_line(vline)
 
-            # Save figure (PDF + standardized PNG copy)
+            # Save figure (PNG only)
             fig.savefig(
                 save_path, dpi=150, bbox_inches="tight", facecolor="white"
             )
-            try:
-                fig.savefig(
-                    save_path.replace(".pdf", ".png"),
-                    dpi=150,
-                    bbox_inches="tight",
-                    facecolor="white",
-                )
-            except Exception:
-                pass
             plt.close(fig)
             return 1
 
@@ -433,7 +426,7 @@ class Plot:
 
         base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
         write_dir = os.path.dirname(self.input_yaml["fpath"])
-        save_path = os.path.join(write_dir, f"crowding_target_{base}.pdf")
+        save_path = os.path.join(write_dir, f"Crowding_Target_{base}.png")
 
         zscale = ZScaleInterval()
         finite = cut[np.isfinite(cut)]
@@ -495,10 +488,6 @@ class Plot:
 
         fig.suptitle(f"Crowding diagnostic {title_extra}".strip())
         fig.savefig(save_path, dpi=300)
-        try:
-            fig.savefig(save_path.replace(".pdf", ".png"), dpi=300)
-        except Exception:
-            pass
         plt.close(fig)
 
     def source_check(
@@ -753,24 +742,17 @@ class Plot:
 
             # Save figure
             if not subtracted:
-                save_loc = os.path.join(write_dir, "sourcecheck_" + base + ".pdf")
+                save_loc = os.path.join(
+                    write_dir, "Sourcecheck_" + base + ".png"
+                )
             else:
                 save_loc = os.path.join(
-                    write_dir, "subtracted_sourcecheck_" + base + ".pdf"
+                    write_dir, "Subtracted_Sourcecheck_" + base + ".png"
                 )
 
             fig.savefig(
                 save_loc, dpi=150, bbox_extra_artists=[leg], facecolor="white"
             )
-            try:
-                fig.savefig(
-                    save_loc.replace(".pdf", ".png"),
-                    dpi=150,
-                    bbox_extra_artists=[leg],
-                    facecolor="white",
-                )
-            except Exception:
-                pass
             plt.close()
 
         except Exception as exc:

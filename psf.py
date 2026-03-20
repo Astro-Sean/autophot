@@ -1757,16 +1757,8 @@ class PSF:
         ax_right_3d.set_zticks([])
         ax_right_3d.view_init(elev=35, azim=135)
 
-        # Backward-compatible plot outputs (existing PDF names) plus standardized
-        # PNG outputs for easier downstream ingestion.
-        psf_sources_pdf = os.path.join(write_dir, f"PSF_sources_{base}.pdf")
+        # Standardized PNG output.
         psf_sources_png = os.path.join(write_dir, f"PSF_Sources_{base}.png")
-        fig.savefig(
-            psf_sources_pdf,
-            bbox_inches="tight",
-            dpi=150,
-            facecolor="white",
-        )
         fig.savefig(
             psf_sources_png,
             bbox_inches="tight",
@@ -2853,20 +2845,8 @@ class PSF:
                 _ax_B.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
                 _ax_R.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
             ax1.legend(loc="upper right", frameon=False, labelcolor="w")
-            save_name_pdf = (
-                f"targetPSF_{base}.pdf"
-                if plotTarget
-                else f"psfSubtractions_{base}.pdf"
-            )
             save_name_png = (
                 f"PSF_Target_{base}.png" if plotTarget else f"PSF_Subtractions_{base}.png"
-            )
-            # Write both formats.
-            plt.savefig(
-                os.path.join(write_dir, save_name_pdf),
-                bbox_inches="tight",
-                dpi=150,
-                facecolor="white",
             )
             plt.savefig(
                 os.path.join(write_dir, save_name_png),
@@ -2997,7 +2977,6 @@ class PSF:
         writedir = writedir or cfg.get("write_dir", ".")
         os.makedirs(writedir, exist_ok=True)
         stem = os.path.splitext(os.path.basename(fpath))[0]
-        outpath_pdf = os.path.join(writedir, f"corner_{stem}.pdf")
         outpath_png = os.path.join(writedir, f"PSF_MCMC_Corner_{stem}.png")
 
         fig = corner.corner(
@@ -3059,10 +3038,11 @@ class PSF:
                     ax2d.axhline(orig_arr[i], color="C1", lw=0.5, ls=":", alpha=0.85)
 
         try:
-            fig.savefig(outpath_pdf, dpi=150, bbox_inches="tight", facecolor="white")
-            fig.savefig(outpath_png, dpi=150, bbox_inches="tight", facecolor="white")
+            fig.savefig(
+                outpath_png, dpi=150, bbox_inches="tight", facecolor="white"
+            )
             plt.close(fig)
-            return outpath_pdf
+            return outpath_png
         except Exception as exc:
             log.error(f"Corner plot save failed: {exc}")
             plt.close(fig)
