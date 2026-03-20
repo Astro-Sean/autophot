@@ -13,9 +13,13 @@ Features:
 # Force BLAS/OpenMP to 1 thread before any scientific imports (avoids exhausting
 # process/thread limits on HPC when using multiprocessing; OpenBLAS defaults to 128).
 import os
+
 for _env in (
-    "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS",
-    "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
 ):
     os.environ[_env] = "1"
 
@@ -44,15 +48,17 @@ QUIET_MODE = False
 # Project-specific helpers (assumed to be in your codebase)
 from functions import (
     border_msg,
-    autophot_yaml,
+    AutophotYaml,
     concatenate_csv_files,
     print_progress_bar,
-    log_exception
+    log_exception,
 )
-from prepare import prepare
+from prepare import Prepare
+
+
 # =============================================================================
 # =============================================================================
-# # 
+# #
 # =============================================================================
 # =============================================================================
 # --- Logging / subprocess helpers ---
@@ -94,6 +100,7 @@ def _run_main_subprocess(
     # child-process stdout/stderr so that nothing reaches the terminal. Logs
     # can still be written to per-process files if configured inside main.py.
     from subprocess import DEVNULL
+
     global QUIET_MODE
     kwargs = {"check": False, "text": True}
     if bool(QUIET_MODE):
@@ -105,171 +112,224 @@ def _run_main_subprocess(
     except Exception:
         return filename, 1
 
+
 # =============================================================================
 # =============================================================================
-# # 
+# #
 # =============================================================================
 # =============================================================================
-def find_variable_sources(ra_deg: float, dec_deg: float, radius_arcmin: int = 10) -> pd.DataFrame:
+def find_variable_sources(
+    ra_deg: float, dec_deg: float, radius_arcmin: int = 10
+) -> pd.DataFrame:
     """
     Query SIMBAD for variable/interesting sources in sky region.
-    
+
     Args:
         ra_deg (float): Right ascension (J2000 degrees)
-        dec_deg (float): Declination (J2000 degrees)  
+        dec_deg (float): Declination (J2000 degrees)
         radius_arcmin (int): Search radius (arcminutes)
-    
+
     Returns:
         pd.DataFrame: Sources with RA, DEC, OTYPE, separation, size info
     """
     t0 = time.perf_counter()
-    
+
     # SIMBAD CONFIGURATION - TIMEOUT PROTECTION
     Simbad.reset_votable_fields()
-    Simbad.add_votable_fields("otype", "ra", "dec", "main_id", 
-                            "galdim_majaxis", "galdim_minaxis", "galdim_angle")
-    
+    Simbad.add_votable_fields(
+        "otype",
+        "ra",
+        "dec",
+        "main_id",
+        "galdim_majaxis",
+        "galdim_minaxis",
+        "galdim_angle",
+    )
+
     # Store and override settings
-    original_timeout = getattr(Simbad, 'TIMEOUT', 10)
-    original_row_limit = getattr(Simbad, 'ROW_LIMIT', 1000)
-    
+    original_timeout = getattr(Simbad, "TIMEOUT", 10)
+    original_row_limit = getattr(Simbad, "ROW_LIMIT", 1000)
+
     Simbad.TIMEOUT = 30
     Simbad.ROW_LIMIT = 500
-    
-    centre_coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="fk5", equinox="J2000")
+
+    centre_coord = SkyCoord(
+        ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="fk5", equinox="J2000"
+    )
     _log(
         f"Querying SIMBAD within {radius_arcmin}' of "
         f"{centre_coord.to_string('hmsdms')}."
     )
-    
+
     # SOURCE TYPE DEFINITIONS
     object_types = {
-        "V*": "Variable Star", "Pu*": "Pulsating", "Er*": "Eruptive", 
-        "Ir*": "Irregular", "BY*": "BY Dra", "RS*": "RS CVn", "Fl*": "Flare",
-        "Ro*": "Rotating", "Ce*": "Cepheid", "RR*": "RR Lyr", "dS*": "δ Sct",
-        "LP*": "Long Period", "Mi*": "Mira", "TT*": "T Tauri", "Or*": "Orion Var",
-        "CV*": "Cataclysmic", "DN*": "Dwarf Nova", "NL*": "Nova-like", 
-        "No*": "Nova", "SN*": "Supernova", "AM*": "Polar", "DQ*": "Int Polar",
-        "G": "Galaxy", "GiG": "Int Galaxy", "SBG": "Starburst", 
-        "AGN": "AGN", "SyG": "Seyfert", "LIN": "LINER", "QSO": "Quasar", "BLL": "BL Lac",
-        "Em*": "Emission*", "Be*": "Be Star", "XB*": "X-ray Bin", "X": "X-ray",
-        "PN": "P Nebula", "HII": "HII Region"
+        "V*": "Variable Star",
+        "Pu*": "Pulsating",
+        "Er*": "Eruptive",
+        "Ir*": "Irregular",
+        "BY*": "BY Dra",
+        "RS*": "RS CVn",
+        "Fl*": "Flare",
+        "Ro*": "Rotating",
+        "Ce*": "Cepheid",
+        "RR*": "RR Lyr",
+        "dS*": "δ Sct",
+        "LP*": "Long Period",
+        "Mi*": "Mira",
+        "TT*": "T Tauri",
+        "Or*": "Orion Var",
+        "CV*": "Cataclysmic",
+        "DN*": "Dwarf Nova",
+        "NL*": "Nova-like",
+        "No*": "Nova",
+        "SN*": "Supernova",
+        "AM*": "Polar",
+        "DQ*": "Int Polar",
+        "G": "Galaxy",
+        "GiG": "Int Galaxy",
+        "SBG": "Starburst",
+        "AGN": "AGN",
+        "SyG": "Seyfert",
+        "LIN": "LINER",
+        "QSO": "Quasar",
+        "BLL": "BL Lac",
+        "Em*": "Emission*",
+        "Be*": "Be Star",
+        "XB*": "X-ray Bin",
+        "X": "X-ray",
+        "PN": "P Nebula",
+        "HII": "HII Region",
     }
-    
+
     # TIMED SIMBAD QUERY WITH FAILSAFE
     query_start = time.perf_counter()
     result = None
-    
+
     try:
         result = Simbad.query_region(centre_coord, radius=radius_arcmin * u.arcmin)
         query_time = time.perf_counter() - query_start
-        
+
         if query_time > 25:
             _log(
                 f"SIMBAD query completed in {query_time:.1f}s; "
                 "consider a smaller search radius for faster performance."
             )
-            
+
     except Exception as exc:
         _log(
             f"SIMBAD query failed after {time.perf_counter() - query_start:.1f}s: {exc}"
         )
         result = None
-    
+
     # Restore SIMBAD settings
     Simbad.TIMEOUT = original_timeout
     Simbad.ROW_LIMIT = original_row_limit
-    
+
     if result is None or len(result) == 0:
         total_time = time.perf_counter() - t0
         _log(f"No SIMBAD sources found in search region ({total_time:.1f}s).")
-        return pd.DataFrame(columns=[
-            "RA", "DEC", "OTYPE", "MAIN_ID", "OTYPE_LABEL", "OTYPE_opt", 
-            "separation_arcmin", "size_arcmin"
-        ])
-    
+        return pd.DataFrame(
+            columns=[
+                "RA",
+                "DEC",
+                "OTYPE",
+                "MAIN_ID",
+                "OTYPE_LABEL",
+                "OTYPE_opt",
+                "separation_arcmin",
+                "size_arcmin",
+            ]
+        )
+
     # DATA PROCESSING AND CLEANUP
     df = result.to_pandas()
-    
+
     # Standardize coordinate columns
     ra_col = next((col for col in ["RA_d", "ra"] if col in df.columns), None)
     dec_col = next((col for col in ["DEC_d", "dec"] if col in df.columns), None)
-    
+
     if ra_col and dec_col:
         df = df.rename(columns={ra_col: "RA", dec_col: "DEC"})
     else:
         _log("SIMBAD result does not contain usable RA/DEC columns; aborting.")
         return pd.DataFrame()
-    
+
     # Numeric conversion with error handling
-    df["RA"] = pd.to_numeric(df["RA"], errors='coerce')
-    df["DEC"] = pd.to_numeric(df["DEC"], errors='coerce')
+    df["RA"] = pd.to_numeric(df["RA"], errors="coerce")
+    df["DEC"] = pd.to_numeric(df["DEC"], errors="coerce")
     df = df.dropna(subset=["RA", "DEC"])
-    
+
     if df.empty:
         return pd.DataFrame()
-    
+
     # Standardize OTYPE column
     otype_col = next((col for col in ["otype", "OTYPE"] if col in df.columns), None)
     if otype_col:
         df["OTYPE"] = df[otype_col]
     else:
         df["OTYPE"] = np.nan
-    
+
     # Filter to interesting object types
     df["OTYPE_opt"] = df["OTYPE"]
     df = df[df["OTYPE_opt"].isin(object_types)].copy()
-    
+
     if df.empty:
         _log(
             f"No SIMBAD sources matched the configured object types "
             f"({time.perf_counter() - t0:.1f}s)."
         )
         return pd.DataFrame()
-    
+
     # ENRICHMENT: SEPARATION, SIZE, LABELS
     df["OTYPE_LABEL"] = df["OTYPE_opt"].map(object_types)
-    
+
     # FIX: Create Quantity arrays explicitly for SkyCoord
     ra_qty = df["RA"].astype(float) * u.deg
     dec_qty = df["DEC"].astype(float) * u.deg
-    
+
     # source_coords = SkyCoord(ra=ra_qty, dec=dec_qty, frame="fk5", equinox="J2000")
     # separations = centre_coord.separation(source_coords).to(u.arcmin).value
     # df["separation_arcmin"] = separations
-    
-    
-        
-        
+
     # Parse angular size (major axis in arcmin)
     def parse_size(dim):
         if pd.isna(dim) or not dim:
             return np.nan
         try:
-            return float(re.search(r'[\d.]+', str(dim)).group())
-        except:
+            return float(re.search(r"[\d.]+", str(dim)).group())
+        except Exception:
             return np.nan
-    
-    size_col = next((col for col in ["galdim_majaxis", "dim"] if col in df.columns), None)
+
+    size_col = next(
+        (col for col in ["galdim_majaxis", "dim"] if col in df.columns), None
+    )
     if size_col:
         df["size_arcmin"] = df[size_col].apply(parse_size)
     else:
         df["size_arcmin"] = np.nan
-    
+
     # FINAL CLEANUP AND SORTING
-    out_cols = ["RA", "DEC", "OTYPE", "MAIN_ID", "OTYPE_LABEL", "OTYPE_opt", 
-               "separation_arcmin", "size_arcmin"]
+    out_cols = [
+        "RA",
+        "DEC",
+        "OTYPE",
+        "MAIN_ID",
+        "OTYPE_LABEL",
+        "OTYPE_opt",
+        "separation_arcmin",
+        "size_arcmin",
+    ]
     available_cols = [col for col in out_cols if col in df.columns]
-    
+
     if "MAIN_ID" not in df.columns and "main_id" in df.columns:
         df["MAIN_ID"] = df["main_id"]
     elif "MAIN_ID" not in df.columns:
         df["MAIN_ID"] = ""
-    
+
     # result_df = df[available_cols].sort_values("separation_arcmin").reset_index(drop=True)
-    
+
     result_df = df[available_cols].reset_index(drop=True)
-    
+
     # SUMMARY STATISTICS
     total_time = time.perf_counter() - t0
     _log(
@@ -281,12 +341,13 @@ def find_variable_sources(ra_deg: float, dec_deg: float, radius_arcmin: int = 10
         top_types = result_df["OTYPE_LABEL"].value_counts().head()
         summary = ", ".join(f"{otype} ({count})" for otype, count in top_types.items())
         _log(f"Most common SIMBAD object types in field: {summary}")
-    
+
     return result_df
+
 
 # =============================================================================
 # =============================================================================
-# # 
+# #
 # =============================================================================
 # =============================================================================
 # --- Automated Photometry Pipeline ---
@@ -307,7 +368,7 @@ class AutomatedPhotometry:
         t0 = time.perf_counter()
         script_dir = os.path.dirname(os.path.abspath(__file__))
         default_input_path = os.path.join(script_dir, "databases", "default_input.yml")
-        default_input = autophot_yaml(default_input_path, "default_input").load()
+        default_input = AutophotYaml(default_input_path, "default_input").load()
 
         # Ensure expected nested sections exist so driver scripts can safely override
         # settings without needing repetitive setdefault() calls.
@@ -335,7 +396,11 @@ class AutomatedPhotometry:
         # Common preprocessing defaults used by main.py
         default_input["preprocessing"].setdefault("trim_image", 0)
 
-        _log(border_msg(f"Default input loaded from: {default_input_path}", body="-", corner="+"))
+        _log(
+            border_msg(
+                f"Default input loaded from: {default_input_path}", body="-", corner="+"
+            )
+        )
         _log(f"Configuration loaded in {time.perf_counter() - t0:.3f} seconds.")
         return default_input
 
@@ -357,9 +422,17 @@ class AutomatedPhotometry:
         # Determine how many CPU workers to use for *image-level* parallelism.
         # Priority: explicit config key, then environment override, then 1.
         env_ncpu = os.environ.get("AUTOPHOT_NCPU")
-        cfg_ncpu = default_input.get("nCPU") or default_input.get("nCpu") or default_input.get("ncpu")
+        cfg_ncpu = (
+            default_input.get("nCPU")
+            or default_input.get("nCpu")
+            or default_input.get("ncpu")
+        )
         try:
-            n_cpu = int(env_ncpu) if env_ncpu is not None else int(cfg_ncpu) if cfg_ncpu is not None else 1
+            n_cpu = (
+                int(env_ncpu)
+                if env_ncpu is not None
+                else int(cfg_ncpu) if cfg_ncpu is not None else 1
+            )
         except (TypeError, ValueError):
             n_cpu = 1
         if n_cpu < 1:
@@ -403,12 +476,11 @@ class AutomatedPhotometry:
         if fits_dir.endswith("/"):
             fits_dir = fits_dir[:-1]
             default_input["fits_dir"] = fits_dir
-            
-            
+
         plt.close("all")
 
         # Initialise preparation helper and validate catalog configuration
-        prepare_db = prepare(default_input=default_input)
+        prepare_db = Prepare(default_input=default_input)
         available_filters = prepare_db.check_catalog()
 
         # ------------------------------------------------------------------
@@ -449,10 +521,7 @@ class AutomatedPhotometry:
             # accidentally block token resolution.
             for k in ("TNS_BOT_ID", "TNS_BOT_NAME", "TNS_BOT_API"):
                 cur = wcs_cfg.get(k)
-                is_missing = (
-                    cur is None
-                    or (isinstance(cur, str) and cur.strip() == "")
-                )
+                is_missing = cur is None or (isinstance(cur, str) and cur.strip() == "")
                 if is_missing:
                     v = getattr(autophot_tokens, k, None)
                     if v is None:
@@ -475,7 +544,9 @@ class AutomatedPhotometry:
             # Treat empty-string values as "missing" and normalize types so
             # downstream libraries always receive clean strings.
             wsid_cur = cat_cfg.get("MASTcasjobs_wsid")
-            if wsid_cur is None or (isinstance(wsid_cur, str) and wsid_cur.strip() == ""):
+            if wsid_cur is None or (
+                isinstance(wsid_cur, str) and wsid_cur.strip() == ""
+            ):
                 v = getattr(autophot_tokens, "MASTcasjobs_wsid", None)
                 if v is None:
                     v = _env_int_first("MASTCASJOBS_WSID")
@@ -507,13 +578,17 @@ class AutomatedPhotometry:
             _log(border_msg("Performing photometry with AutoPhOT"))
 
             # List of available filters (excluding error columns)
-            filt_list = [f for f in available_filters if "_err" not in f and f not in ["RA", "DEC"]]
+            filt_list = [
+                f
+                for f in available_filters
+                if "_err" not in f and f not in ["RA", "DEC"]
+            ]
             _log(f"Available filters: {filt_list}")
 
             # Optional: Enrich target metadata from TNS
             try:
                 _log(border_msg("Checking TNS for transient information"))
-                tns_coords = prepare_db.check_TNS()
+                tns_coords = prepare_db.check_tns()
                 default_input.update(
                     {
                         "target_ra": tns_coords["radeg"],
@@ -525,7 +600,10 @@ class AutomatedPhotometry:
             except Exception:
                 # Provide a clean, user-friendly message instead of exposing
                 # low-level exceptions (e.g. missing 'radeg', network errors).
-                if default_input.get("target_ra") is not None and default_input.get("target_dec") is not None:
+                if (
+                    default_input.get("target_ra") is not None
+                    and default_input.get("target_dec") is not None
+                ):
                     _log(
                         "[WARNING] TNS lookup skipped; using target_ra/target_dec "
                         "values from the configuration."
@@ -542,11 +620,16 @@ class AutomatedPhotometry:
                 file_list = prepare_db.check_files(flist=file_list)
 
                 if len(file_list) == 0:
-                    _log(border_msg("No images left after validation.",body = '!',corner = '!'))
+                    _log(
+                        border_msg(
+                            "No images left after validation.", body="!", corner="!"
+                        )
+                    )
                     do_photometry = False
                 else:
                     file_list, required_filters = prepare_db.check_filters(
-                        flist=file_list, available_filters=available_filters)
+                        flist=file_list, available_filters=available_filters
+                    )
             else:
                 required_filters = available_filters
 
@@ -558,9 +641,13 @@ class AutomatedPhotometry:
                 ts_cfg = default_input.get("template_subtraction", {})
                 # Backward compatibility: older configs used `get_PS1_template: True`.
                 # Prefer the newer `download_templates: <kind>` selector.
-                if not ts_cfg.get("download_templates", False) and ts_cfg.get("get_PS1_template", False):
+                if not ts_cfg.get("download_templates", False) and ts_cfg.get(
+                    "get_PS1_template", False
+                ):
                     ts_cfg["download_templates"] = "panstarrs"
-                if ts_cfg.get("download_templates", False) and ts_cfg.get("do_subtraction", False):
+                if ts_cfg.get("download_templates", False) and ts_cfg.get(
+                    "do_subtraction", False
+                ):
                     download_kind = ts_cfg["download_templates"]
                     size_default = ts_cfg.get("templates_size", 10)
                     if download_kind is True:
@@ -615,7 +702,9 @@ class AutomatedPhotometry:
                 # Discover and validate template files if subtraction is enabled
                 template_file_list = []
                 if ts_cfg.get("do_subtraction", False):
-                    template_file_list = prepare_db.find_templates(required_filters=required_filters)
+                    template_file_list = prepare_db.find_templates(
+                        required_filters=required_filters
+                    )
                     template_file_list = prepare_db.check_files(
                         flist=template_file_list, template_files=True
                     )
@@ -624,14 +713,25 @@ class AutomatedPhotometry:
                     )
                     # Re-run telescope header check on science + templates so template images
                     # with TELESCOP/INSTRUME are included in the telescope database
-                    if template_file_list and not default_input.get("skip_file_check", False):
+                    if template_file_list and not default_input.get(
+                        "skip_file_check", False
+                    ):
                         combined = list(file_list) + list(template_file_list)
                         combined_checked = prepare_db.check_files(
                             flist=combined, template_files=True
                         )
                         template_folder_norm = os.path.normpath(template_folder)
-                        file_list = [f for f in combined_checked if os.path.normpath(f).startswith(template_folder_norm) is False]
-                        template_file_list = [f for f in combined_checked if os.path.normpath(f).startswith(template_folder_norm)]
+                        file_list = [
+                            f
+                            for f in combined_checked
+                            if os.path.normpath(f).startswith(template_folder_norm)
+                            is False
+                        ]
+                        template_file_list = [
+                            f
+                            for f in combined_checked
+                            if os.path.normpath(f).startswith(template_folder_norm)
+                        ]
 
                 # Prepare output directory and save input snapshot
                 backup_yaml = copy.deepcopy(default_input)
@@ -643,7 +743,9 @@ class AutomatedPhotometry:
                         "but no template files were found or passed checks. "
                         "Proceeding with non-template photometry only."
                     )
-                    backup_yaml.setdefault("template_subtraction", {})["do_subtraction"] = False
+                    backup_yaml.setdefault("template_subtraction", {})[
+                        "do_subtraction"
+                    ] = False
                 work_dir = backup_yaml["fits_dir"]
                 new_dir = "_" + backup_yaml["outdir_name"]
                 base_dir = os.path.basename(work_dir)
@@ -656,18 +758,19 @@ class AutomatedPhotometry:
                 # own logic will re-use that file without further network access.
 
                 # SIMBAD variable sources near target for context
-                
+
                 if ts_cfg.get("get_simbad_sources", True):
                     try:
                         vars_df = find_variable_sources(
-                            ra_deg=default_input["target_ra"], dec_deg=default_input["target_dec"]
+                            ra_deg=default_input["target_ra"],
+                            dec_deg=default_input["target_dec"],
                         )
                         variable_sources = [r.to_dict() for _, r in vars_df.iterrows()]
-    
+
                         backup_yaml["variable_sources"] = variable_sources
                     except Exception as e:
                         _log(f"[WARNING] SIMBAD variable-source enrichment skipped:")
-            
+
                 else:
                     backup_yaml["variable_sources"] = {}
 
@@ -675,7 +778,7 @@ class AutomatedPhotometry:
                 input_file = os.path.join(new_output_dir, "input.yaml")
                 with open(input_file, "w") as fh:
                     yaml.dump(backup_yaml, fh, default_flow_style=False)
-                
+
                 # Reduce templates first
                 if template_file_list:
                     if parallel_files and len(template_file_list) > 1:
@@ -700,7 +803,9 @@ class AutomatedPhotometry:
                         gc.collect()
                     else:
                         _log(border_msg("Reducing and calibrating template files"))
-                        for template in print_progress_bar(template_file_list, title="Template files calibrated"):
+                        for template in print_progress_bar(
+                            template_file_list, title="Template files calibrated"
+                        ):
                             _run_main_subprocess(
                                 python_executable,
                                 autophot_exe,
@@ -712,14 +817,18 @@ class AutomatedPhotometry:
 
                 # Reduce science frames
                 _log(border_msg("Reducing and calibrating science files"))
-            
+
                 counter = 0
                 if file_list:
-                    file_list = np.sort(file_list)[::-1]  # Sort newest first if filenames encode time
+                    file_list = np.sort(file_list)[
+                        ::-1
+                    ]  # Sort newest first if filenames encode time
 
                     if parallel_files and len(file_list) > 1:
                         # Parallel image-level execution: each worker runs main.py on one file.
-                        _log(f"Running {len(file_list)} science files with nCPU={n_cpu} (parallel).")
+                        _log(
+                            f"Running {len(file_list)} science files with nCPU={n_cpu} (parallel)."
+                        )
                         with ProcessPoolExecutor(max_workers=n_cpu) as executor:
                             futures = {
                                 executor.submit(
@@ -741,7 +850,9 @@ class AutomatedPhotometry:
                                 counter += 1
                         gc.collect()
                     else:
-                        for file in print_progress_bar(file_list, title="Science files calibrated\n"):
+                        for file in print_progress_bar(
+                            file_list, title="Science files calibrated\n"
+                        ):
                             try:
                                 _log(f"\n{counter} / {len(file_list)}")
                                 _run_main_subprocess(
@@ -766,8 +877,11 @@ class AutomatedPhotometry:
         concatenate_csv_files(
             folder_path=reduced_loc, output_filename=output_loc, loc_file="output.csv"
         )
-        _log(f"Photometry pipeline completed in {time.perf_counter() - t0:.3f} seconds.")
+        _log(
+            f"Photometry pipeline completed in {time.perf_counter() - t0:.3f} seconds."
+        )
         return output_loc
+
 
 def main(argv: Optional[List[str]] = None) -> int:
     """

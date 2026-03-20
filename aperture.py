@@ -1,41 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Aperture photometry, optimum-radius estimation, and aperture correction.
+Aperture photometry and aperture correction.
 
-Optimisations vs. original
---------------------------
-1.  All duplicate imports removed - the file imported warnings, logging,
-    numpy, pandas, and photutils twice (once near the top, once after the
-    class definition).
-2.  Module-level worker functions replace instance-method workers.
-    Instance methods cannot be pickled by multiprocessing on macOS / Windows
-    (spawn start method).  The original code silently fell back to serial
-    execution on those platforms.
-3.  Re-imports inside worker bodies removed (import numpy, import logging
-    inside _fake_aperture_worker etc. - these run in every spawned process on
-    every call).
-4.  Batch DataFrame update replaces row-by-row .at[i, col] assignments.
-    Building a plain dict of lists and doing a single pd.DataFrame update is
-    ~10-100x faster for large source tables.
-5.  partial(self.measure_worker) in the original measure() did nothing useful
-    for pickling because it still held a reference to self.  Removed.
-6.  enhanced_background_estimation was passed as an argument to measure_worker
-    but never called inside it (the worker used inline MAD instead).  The dead
-    argument removed from the args tuple.
-7.  Second Pool in measure_optimum_radius for CoG plotting reused the profiles
-    already computed in the analysis pass - the original launched an entirely
-    separate Pool just to re-run CurveOfGrowth for the plot.
-8.  interpolate_nans: `len(nan_indices) == 0` is always False for a boolean
-    ndarray (len returns the array size, not the count of True values).  Fixed
-    to `not nan_indices.any()`.
-9.  Pool import inside if-blocks removed (already imported at module level).
-10. compute_aperture_correction: imports moved to module level; the loop now
-    collects corrections into a list and converts once at the end (unchanged
-    logic, cleaner style).
-11. optimal_background_std_estimation and enhanced_background_estimation kept
-    as instance methods (they are called externally) but their verbose
-    print() calls replaced with logger.debug() for consistency.
+This module measures fluxes using circular apertures, estimates an
+optimum-radius (curve-of-growth style) when requested, and computes
+aperture-correction factors used to calibrate the photometry.
 """
 
 # ---------------------------------------------------------------------------
@@ -48,8 +18,11 @@ import warnings
 # Safeguard: force BLAS/OpenMP to 1 thread before importing numpy (avoids exhausting
 # process/thread limits when using multiprocessing on HPC; OpenBLAS often defaults to 128).
 for _env in (
-    "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS",
-    "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
 ):
     os.environ[_env] = "1"
 
@@ -86,28 +59,35 @@ from astropy.visualization import ImageNormalize, ZScaleInterval
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import mag, SNR_err, set_size, border_msg, log_exception
-
+from functions import mag, snr_err, set_size, border_msg, log_exception
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-NSOURCES = 10   # minimum source count to justify spawning worker processes
-MAX_WORKERS_DEFAULT = 16   # cap on default n_jobs to avoid exhausting HPC process/thread limits
+NSOURCES = 10  # minimum source count to justify spawning worker processes
+MAX_WORKERS_DEFAULT = (
+    16  # cap on default n_jobs to avoid exhausting HPC process/thread limits
+)
 
 
 def _resolve_n_jobs(n_jobs, half_cpus=False):
     """Resolve and cap worker count for multiprocessing (safeguards HPC process/thread limits)."""
     from multiprocessing import cpu_count
+
     n = cpu_count()
     default = (n // 2) if half_cpus else n
-    raw = (min(MAX_WORKERS_DEFAULT, max(1, default)) if n_jobs is None else max(1, int(n_jobs)))
+    raw = (
+        min(MAX_WORKERS_DEFAULT, max(1, default))
+        if n_jobs is None
+        else max(1, int(n_jobs))
+    )
     return min(MAX_WORKERS_DEFAULT, raw)
 
 
 # ===========================================================================
 # Module-level worker functions  (MUST be at module scope for pickle)
 # ===========================================================================
+
 
 def _measure_worker(args):
     """
@@ -123,14 +103,25 @@ def _measure_worker(args):
     -------
     dict  - result keyed by 'idx'; contains 'fail_reason' on failure.
     """
-    (i, aperture_masks, annulus_masks, image_e, error,
-     read_noise_sq, inv_exposure_time, area, phot, gain, verbose) = args
+    (
+        i,
+        aperture_masks,
+        annulus_masks,
+        image_e,
+        error,
+        read_noise_sq,
+        inv_exposure_time,
+        area,
+        phot,
+        gain,
+        verbose,
+    ) = args
 
     try:
         ap_mask = aperture_masks[i]
         an_mask = annulus_masks[i]
 
-        ap_pix  = ap_mask.get_values(image_e)
+        ap_pix = ap_mask.get_values(image_e)
         bkg_pix = an_mask.get_values(image_e)
 
         # Optional per-pixel uncertainty (e.g. from Background2D / calc_total_error).
@@ -139,23 +130,23 @@ def _measure_worker(args):
             ap_err_pix = ap_mask.get_values(error)
 
         # Remove NaNs and exact zeros (flagged bad pixels).
-        ap_pix  = ap_pix[ np.isfinite(ap_pix)  & (ap_pix  != 0.0)]
+        ap_pix = ap_pix[np.isfinite(ap_pix) & (ap_pix != 0.0)]
         bkg_pix = bkg_pix[np.isfinite(bkg_pix) & (bkg_pix != 0.0)]
 
         if ap_pix.size == 0 or bkg_pix.size == 0:
-            return {'idx': i, 'fail_reason': 'empty_pixels'}
+            return {"idx": i, "fail_reason": "empty_pixels"}
 
         # Robust background via MAD (handles negatives cleanly).
-        bkg_value     = np.median(bkg_pix)
+        bkg_value = np.median(bkg_pix)
         empirical_std = 1.4826 * np.median(np.abs(bkg_pix - bkg_value))
 
         if empirical_std <= 0 or not np.isfinite(empirical_std):
-            return {'idx': i, 'fail_reason': 'bkg_invalid'}
+            return {"idx": i, "fail_reason": "bkg_invalid"}
 
         row = phot.iloc[i]
         raw_aperture_sum = row.aperture_sum
         if not np.isfinite(raw_aperture_sum):
-            return {'idx': i, 'fail_reason': 'aperture_sum_invalid'}
+            return {"idx": i, "fail_reason": "aperture_sum_invalid"}
 
         # Use effective aperture area from mask when available (subpixel consistency).
         try:
@@ -182,7 +173,9 @@ def _measure_worker(args):
 
         if not np.isfinite(sqrt_var):
             # Fallback variance: |source| + area * (sigma_sky^2 + RN^2)
-            total_var = np.abs(aperture_sum) + effective_area * (empirical_std ** 2 + read_noise_sq)
+            total_var = np.abs(aperture_sum) + effective_area * (
+                empirical_std**2 + read_noise_sq
+            )
             if total_var > 0 and np.isfinite(total_var):
                 sqrt_var = np.sqrt(total_var)
 
@@ -190,7 +183,7 @@ def _measure_worker(args):
             snr = aperture_sum / sqrt_var
         else:
             sqrt_var = np.nan
-            snr      = 0.0
+            snr = 0.0
 
         # Flux in e/s (counts per second) for consistency with PSF; mag = -2.5*log10(flux).
         # This is aperture-only flux (light within the aperture); for total flux use aperture correction.
@@ -202,29 +195,31 @@ def _measure_worker(args):
             mag_val = np.nan
 
         try:
-            mag_err_val = SNR_err(snr)
+            mag_err_val = snr_err(snr)
         except Exception:
             mag_err_val = np.nan
 
-        rn_term      = empirical_std ** 2 + read_noise_sq
+        rn_term = empirical_std**2 + read_noise_sq
         max_flux_err = np.sqrt(np.abs(raw_max) + rn_term) * inv_exposure_time
 
         return {
-            'idx':                  i,
-            'maxPixel':             max_val * inv_exposure_time,
-            'maxPixel_err':         max_flux_err,
-            'area':                 effective_area,
-            'counts_AP':            aperture_sum,
-            'flux_AP':              flux_ap,
-            'flux_AP_err':          sqrt_var * inv_exposure_time if np.isfinite(sqrt_var) else np.nan,
-            'sky_bkg_total':        aperture_bkg,
-            'sky_bkg_total_flux':   aperture_bkg * inv_exposure_time,
-            'noiseSky':             empirical_std * inv_exposure_time,
-            'threshold':            max_val / empirical_std,
-            'SNR':                  snr,
-            'bkg_std_method':       'MAD',
-            'mag':                  mag_val,
-            'mag_err':              mag_err_val,
+            "idx": i,
+            "maxPixel": max_val * inv_exposure_time,
+            "maxPixel_err": max_flux_err,
+            "area": effective_area,
+            "counts_AP": aperture_sum,
+            "flux_AP": flux_ap,
+            "flux_AP_err": (
+                sqrt_var * inv_exposure_time if np.isfinite(sqrt_var) else np.nan
+            ),
+            "sky_bkg_total": aperture_bkg,
+            "sky_bkg_total_flux": aperture_bkg * inv_exposure_time,
+            "noiseSky": empirical_std * inv_exposure_time,
+            "threshold": max_val / empirical_std,
+            "SNR": snr,
+            "bkg_std_method": "MAD",
+            "mag": mag_val,
+            "mag_err": mag_err_val,
         }
 
     except Exception as exc:
@@ -232,7 +227,7 @@ def _measure_worker(args):
             logging.getLogger(__name__).error(
                 f"Error processing source {i}: {exc}", exc_info=True
             )
-        return {'idx': i, 'fail_reason': str(exc)}
+        return {"idx": i, "fail_reason": str(exc)}
 
 
 def _cog_profile_worker(args):
@@ -251,9 +246,11 @@ def _cog_profile_worker(args):
     idx, x_pix, y_pix, fwhm, radii, image, error = args
     try:
         xycen = np.array([x_pix, y_pix])
-        cog   = CurveOfGrowth(image, xycen, radii, error=error, mask=None, method='subpixel')
+        cog = CurveOfGrowth(
+            image, xycen, radii, error=error, mask=None, method="subpixel"
+        )
         cog.normalize()
-        return {'idx': idx, 'radii': cog.radii, 'profile': cog.profile}
+        return {"idx": idx, "radii": cog.radii, "profile": cog.profile}
     except Exception:
         return None
 
@@ -273,15 +270,18 @@ def _optimum_radius_worker(args):
     -------
     dict or None
     """
-    (idx, x_pix, y_pix, fwhm, radii,
-     image, error, norm_factor, stability_threshold) = args
+    idx, x_pix, y_pix, fwhm, radii, image, error, norm_factor, stability_threshold = (
+        args
+    )
 
     try:
         xycen = np.array([x_pix, y_pix])
-        cog   = CurveOfGrowth(image, xycen, radii, error=error, mask=None, method='subpixel')
+        cog = CurveOfGrowth(
+            image, xycen, radii, error=error, mask=None, method="subpixel"
+        )
         cog.normalize()
 
-        norm_profile     = cog.profile
+        norm_profile = cog.profile
         norm_profile_err = cog.profile_error
 
         r_at_norm = cog.calc_radius_at_ee(norm_factor)
@@ -291,9 +291,9 @@ def _optimum_radius_worker(args):
         opt_r_fwhm = float(r_at_norm / fwhm)
 
         # SNR guard at the chosen radius.
-        r_pix   = opt_r_fwhm * fwhm
-        idx_r   = int(np.argmin(np.abs(cog.radii - r_pix)))
-        enc_f   = norm_profile[idx_r]
+        r_pix = opt_r_fwhm * fwhm
+        idx_r = int(np.argmin(np.abs(cog.radii - r_pix)))
+        enc_f = norm_profile[idx_r]
         enc_err = norm_profile_err[idx_r] if norm_profile_err is not None else None
         if enc_err is not None and enc_err > 0 and (enc_f / enc_err) < 3:
             return None
@@ -305,29 +305,31 @@ def _optimum_radius_worker(args):
                 np.nanmean(np.gradient(norm_profile[within_opt], cog.radii[within_opt]))
             )
         else:
-            mean_slope = float('nan')
+            mean_slope = float("nan")
 
         # Local tail deviation and excess above 1 (neighbour contamination).
-        beyond_local  = (cog.radii / fwhm) > opt_r_fwhm
+        beyond_local = (cog.radii / fwhm) > opt_r_fwhm
         tail_max_dist = (
             float(np.nanmax(np.abs(norm_profile[beyond_local] - 1.0)))
-            if np.any(beyond_local) else float('nan')
+            if np.any(beyond_local)
+            else float("nan")
         )
         # Excess above 1 at large radius: CoG increasing there indicates a neighbouring source.
         tail_excess = (
             float(max(0.0, np.nanmax(norm_profile[beyond_local]) - 1.0))
-            if np.any(beyond_local) else 0.0
+            if np.any(beyond_local)
+            else 0.0
         )
 
         # Surrounding environment: robust scatter in an annulus just outside the star.
         # Prefer low local std (clean background, no bright neighbour or gradient).
-        local_env_std = float('nan')
+        local_env_std = float("nan")
         try:
             inner_r = max(r_at_norm * 1.2, 2.0 * fwhm)
             outer_r = 4.0 * fwhm
             if outer_r > inner_r + fwhm * 0.5:
                 annulus = CircularAnnulus(xycen, inner_r, outer_r)
-                amask = annulus.to_mask(method='center')
+                amask = annulus.to_mask(method="center")
                 apix = amask.get_values(image)
                 apix = apix[np.isfinite(apix)]
                 if len(apix) >= 10:
@@ -336,13 +338,13 @@ def _optimum_radius_worker(args):
             pass
 
         return {
-            'idx':                 idx,
-            'optimum_radius':      opt_r_fwhm,
-            'mean_slope':          mean_slope,
-            'tail_max_dist_local': tail_max_dist,
-            'tail_excess':         tail_excess,
-            'local_env_std':       local_env_std,
-            'profile':             norm_profile,
+            "idx": idx,
+            "optimum_radius": opt_r_fwhm,
+            "mean_slope": mean_slope,
+            "tail_max_dist_local": tail_max_dist,
+            "tail_excess": tail_excess,
+            "local_env_std": local_env_std,
+            "profile": norm_profile,
         }
 
     except Exception:
@@ -350,10 +352,11 @@ def _optimum_radius_worker(args):
 
 
 # ===========================================================================
-# aperture class
+# Aperture class
 # ===========================================================================
 
-class aperture:
+
+class Aperture:
     """
     Circular aperture photometry with background annulus subtraction.
 
@@ -372,8 +375,8 @@ class aperture:
         verbose    : int      0 = quiet, 1 = normal, 2 = debug
         """
         self.input_yaml = input_yaml
-        self.image      = image
-        self.verbose    = verbose
+        self.image = image
+        self.verbose = verbose
 
     # -----------------------------------------------------------------------
     # Background statistics helpers
@@ -405,25 +408,27 @@ class aperture:
             return float(np.sqrt(mstats.winsorize(data, limits=(0.05, 0.05)).var()))
 
         methods = [
-            ('MAD',        lambda d: mad_std(d, ignore_nan=True)),
-            ('Biweight',   lambda d: np.sqrt(biweight_midvariance(d, c=6.0))),
-            ('Percentile', _percentile_std),
-            ('Winsorized', _winsorized_std),
-            ('SigmaClip',  lambda d: sigma_clipped_stats(d, sigma=3, maxiters=5)[2]),
+            ("MAD", lambda d: mad_std(d, ignore_nan=True)),
+            ("Biweight", lambda d: np.sqrt(biweight_midvariance(d, c=6.0))),
+            ("Percentile", _percentile_std),
+            ("Winsorized", _winsorized_std),
+            ("SigmaClip", lambda d: sigma_clipped_stats(d, sigma=3, maxiters=5)[2]),
         ]
 
         for name, fn in methods:
             try:
-                val = fn(bkg_pixels)
-                if val > 0 and np.isfinite(val):
+                std_value = fn(bkg_pixels)
+                if std_value > 0 and np.isfinite(std_value):
                     if verbose:
-                        logger.debug(f"Background std [{name}]: sigma = {val:.3f}")
-                    return val, name
+                        logger.debug(
+                            f"Background std [{name}]: sigma = {std_value:.3f}"
+                        )
+                    return std_value, name
             except Exception as exc:
                 if verbose:
                     logger.debug(f"{name} failed: {exc}")
 
-        return np.nan, 'None'
+        return np.nan, "None"
 
     def enhanced_background_estimation(
         self, bkg_pixels: np.ndarray, image_gain: float = 1.0, verbose: bool = False
@@ -435,13 +440,13 @@ class aperture:
         -------
         (bkg_level, std, method_name) or (nan, nan, 'InsufficientData')
         """
-        logger  = logging.getLogger(__name__)
-        finite  = np.isfinite(bkg_pixels)
+        logger = logging.getLogger(__name__)
+        finite = np.isfinite(bkg_pixels)
         if finite.sum() < 10:
-            return np.nan, np.nan, 'InsufficientData'
+            return np.nan, np.nan, "InsufficientData"
 
-        clean    = bkg_pixels[finite]
-        bkg_lvl  = biweight_location(clean, c=6.0)
+        clean = bkg_pixels[finite]
+        bkg_lvl = biweight_location(clean, c=6.0)
 
         # Biweight midvariance with Poisson sanity check.
         try:
@@ -452,7 +457,7 @@ class aperture:
                     poisson_std = np.sqrt(bkg_lvl / image_gain)
                     ratio = emp_std / poisson_std
                     if 0.5 < ratio < 5.0:
-                        return bkg_lvl, emp_std, 'Biweight'
+                        return bkg_lvl, emp_std, "Biweight"
                     if verbose:
                         logger.debug(f"Biweight ratio outside range: {ratio:.2f}")
         except Exception:
@@ -462,7 +467,7 @@ class aperture:
         try:
             ms = mad_std(clean)
             if ms > 0 and np.isfinite(ms):
-                return bkg_lvl, ms, 'MAD'
+                return bkg_lvl, ms, "MAD"
         except Exception:
             pass
 
@@ -471,11 +476,11 @@ class aperture:
             p16, p84 = np.percentile(clean, [16, 84])
             ps = 0.5 * (p84 - p16)
             if ps > 0:
-                return bkg_lvl, ps, 'Percentile'
+                return bkg_lvl, ps, "Percentile"
         except Exception:
             pass
 
-        return bkg_lvl, np.nan, 'Failed'
+        return bkg_lvl, np.nan, "Failed"
 
     # -----------------------------------------------------------------------
     # Aperture photometry
@@ -514,92 +519,118 @@ class aperture:
         -------
         sources : DataFrame (in-place columns added / updated)
         """
-        warnings.filterwarnings('ignore', category=RuntimeWarning)
-        warnings.filterwarnings('ignore', category=FutureWarning)
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        warnings.filterwarnings("ignore", category=FutureWarning)
         pd.options.mode.chained_assignment = None
 
         logger = logging.getLogger(__name__)
 
         # ---- Configuration -------------------------------------------------
-        fwhm          = self.input_yaml['fwhm']
-        gain          = gain          or self.input_yaml.get('gain', 1.0)
-        exposure_time = exposure_time or self.input_yaml.get('exposure_time', 30.0)
-        read_noise    = read_noise    or self.input_yaml.get('readnoise', 0.0)
-        ap_size       = ap_size       or self.input_yaml['photometry']['aperture_radius']
+        fwhm = self.input_yaml["fwhm"]
+        gain = gain or self.input_yaml.get("gain", 1.0)
+        exposure_time = exposure_time or self.input_yaml.get("exposure_time", 30.0)
+        read_noise = read_noise or self.input_yaml.get("readnoise", 0.0)
+        ap_size = ap_size or self.input_yaml["photometry"]["aperture_radius"]
 
-        crowded = self.input_yaml.get('photometry', {}).get('crowded_field', False)
+        crowded = self.input_yaml.get("photometry", {}).get("crowded_field", False)
         if crowded:
             # Tighter annulus for crowded fields: smaller gap and width to avoid neighboring sources.
-            annulusIN  = float(np.ceil(ap_size + 0.35 * fwhm))
+            annulusIN = float(np.ceil(ap_size + 0.35 * fwhm))
             annulusOUT = float(np.ceil(annulusIN + 0.65 * fwhm))
         else:
-            annulusIN  = float(np.ceil(ap_size + 0.5 * fwhm))
+            annulusIN = float(np.ceil(ap_size + 0.5 * fwhm))
             annulusOUT = float(np.ceil(annulusIN + 1.0 * fwhm))
-        area       = np.pi * ap_size ** 2
+        area = np.pi * ap_size**2
 
         image_e = self.image * gain
         image_e[image_e == 0.0] = np.nan
 
         inv_exp_time = 1.0 / exposure_time
-        read_noise_sq = read_noise ** 2
+        read_noise_sq = read_noise**2
 
-        filt    = self.input_yaml['imageFilter']
-        mag_col = f'inst_{filt}_AP'
-        err_col = f'inst_{filt}_AP_err'
+        filt = self.input_yaml["imageFilter"]
+        mag_col = f"inst_{filt}_AP"
+        err_col = f"inst_{filt}_AP_err"
 
         # ---- Ensure output columns exist -----------------------------------
         float_cols = [
-            'maxPixel', 'maxPixel_err', 'counts_AP',
-            'flux_AP', 'flux_AP_err', 'sky_bkg_total',
-            'sky_bkg_total_flux', 'noiseSky', 'SNR', 'SNR_err',
-            mag_col, err_col, 'threshold', 'area',
+            "maxPixel",
+            "maxPixel_err",
+            "counts_AP",
+            "flux_AP",
+            "flux_AP_err",
+            "sky_bkg_total",
+            "sky_bkg_total_flux",
+            "noiseSky",
+            "SNR",
+            "SNR_err",
+            mag_col,
+            err_col,
+            "threshold",
+            "area",
         ]
-        str_cols = ['bkg_std_method', 'fail_reason']
+        str_cols = ["bkg_std_method", "fail_reason"]
         for col in float_cols:
             if col not in sources.columns:
                 sources[col] = np.nan
         for col in str_cols:
             if col not in sources.columns:
-                sources[col] = ''
+                sources[col] = ""
 
         # ---- Error model ---------------------------------------------------
         if background_rms is not None:
             # Poisson term must be non-negative. Slightly negative backgrounds
             # (common after background subtraction / difference imaging) can
             # produce NaNs in calc_total_error and degrade injection/recovery.
-            image_e_pois = np.where(np.isfinite(image_e), np.maximum(image_e, 0.0), np.nan)
-            error = calc_total_error(image_e_pois, background_rms * gain, effective_gain=1)
+            image_e_pois = np.where(
+                np.isfinite(image_e), np.maximum(image_e, 0.0), np.nan
+            )
+            error = calc_total_error(
+                image_e_pois, background_rms * gain, effective_gain=1
+            )
         else:
             error = None
 
         # ---- Validate source positions -------------------------------------
-        x, y       = sources['x_pix'].values, sources['y_pix'].values
+        x, y = sources["x_pix"].values, sources["y_pix"].values
         valid_mask = (
-            (x >= 0) & (x < self.image.shape[1]) &
-            (y >= 0) & (y < self.image.shape[0])
+            (x >= 0) & (x < self.image.shape[1]) & (y >= 0) & (y < self.image.shape[0])
         )
         sources = sources[valid_mask].reset_index(drop=True)
         if sources.empty:
             if verbose:
-                logger.warning('No valid sources within image bounds.')
+                logger.warning("No valid sources within image bounds.")
             return sources
 
-        positions = list(zip(sources['x_pix'], sources['y_pix']))
+        positions = list(zip(sources["x_pix"], sources["y_pix"]))
 
         # ---- Aperture objects & photutils photometry -----------------------
         apertures_obj = CircularAperture(positions, r=ap_size)
-        annuli_obj    = CircularAnnulus(positions, r_in=annulusIN, r_out=annulusOUT)
+        annuli_obj = CircularAnnulus(positions, r_in=annulusIN, r_out=annulusOUT)
 
-        phot           = aperture_photometry(image_e, apertures_obj, error=error).to_pandas()
-        aperture_masks = [ap.to_mask(method='exact', subpixels=15) for ap in apertures_obj]
-        annulus_masks  = [an.to_mask(method='exact', subpixels=15) for an in annuli_obj]
+        phot = aperture_photometry(image_e, apertures_obj, error=error).to_pandas()
+        aperture_masks = [
+            ap.to_mask(method="exact", subpixels=15) for ap in apertures_obj
+        ]
+        annulus_masks = [an.to_mask(method="exact", subpixels=15) for an in annuli_obj]
 
         n_jobs = _resolve_n_jobs(n_jobs, half_cpus=True)
 
         # ---- Build argument list -------------------------------------------
         args_list = [
-            (i, aperture_masks, annulus_masks, image_e, error,
-             read_noise_sq, inv_exp_time, area, phot, gain, verbose)
+            (
+                i,
+                aperture_masks,
+                annulus_masks,
+                image_e,
+                error,
+                read_noise_sq,
+                inv_exp_time,
+                area,
+                phot,
+                gain,
+                verbose,
+            )
             for i in range(len(sources))
         ]
 
@@ -614,30 +645,30 @@ class aperture:
         # Collect all successful results into column-keyed lists, then assign.
         updates: dict[str, list] = {c: [np.nan] * len(sources) for c in float_cols}
         for c in str_cols:
-            updates[c] = [''] * len(sources)
+            updates[c] = [""] * len(sources)
 
         fail_count = 0
         for res in results:
-            i = res.pop('idx')
-            if 'fail_reason' in res:
-                updates['fail_reason'][i] = res['fail_reason']
+            i = res.pop("idx")
+            if "fail_reason" in res:
+                updates["fail_reason"][i] = res["fail_reason"]
                 fail_count += 1
                 continue
 
-            updates['maxPixel'][i]           = res['maxPixel']
-            updates['maxPixel_err'][i]       = res['maxPixel_err']
-            updates['area'][i]               = res['area']
-            updates['counts_AP'][i]          = res['counts_AP']
-            updates['flux_AP'][i]            = res['flux_AP']
-            updates['flux_AP_err'][i]        = res['flux_AP_err']
-            updates['sky_bkg_total'][i]      = res['sky_bkg_total']
-            updates['sky_bkg_total_flux'][i] = res['sky_bkg_total_flux']
-            updates['noiseSky'][i]           = res['noiseSky']
-            updates['threshold'][i]          = res['threshold']
-            updates['SNR'][i]                = res['SNR']
-            updates['bkg_std_method'][i]     = res['bkg_std_method']
-            updates[mag_col][i]              = res['mag']
-            updates[err_col][i]              = res['mag_err']
+            updates["maxPixel"][i] = res["maxPixel"]
+            updates["maxPixel_err"][i] = res["maxPixel_err"]
+            updates["area"][i] = res["area"]
+            updates["counts_AP"][i] = res["counts_AP"]
+            updates["flux_AP"][i] = res["flux_AP"]
+            updates["flux_AP_err"][i] = res["flux_AP_err"]
+            updates["sky_bkg_total"][i] = res["sky_bkg_total"]
+            updates["sky_bkg_total_flux"][i] = res["sky_bkg_total_flux"]
+            updates["noiseSky"][i] = res["noiseSky"]
+            updates["threshold"][i] = res["threshold"]
+            updates["SNR"][i] = res["SNR"]
+            updates["bkg_std_method"][i] = res["bkg_std_method"]
+            updates[mag_col][i] = res["mag"]
+            updates[err_col][i] = res["mag_err"]
 
         # Single DataFrame assignment per column - avoids .at[] overhead.
         for col, vals in updates.items():
@@ -652,14 +683,14 @@ class aperture:
         # ---- Per-source diagnostic plots -----------------------------------
         if plot:
             for i in range(len(sources)):
-                if sources.at[i, 'fail_reason']:
+                if sources.at[i, "fail_reason"]:
                     continue
                 try:
                     self._generate_plot(
                         image=image_e,
                         cutout_center=(
-                            float(sources.at[i, 'x_pix']),
-                            float(sources.at[i, 'y_pix']),
+                            float(sources.at[i, "x_pix"]),
+                            float(sources.at[i, "y_pix"]),
                         ),
                         ap_size=ap_size,
                         annulusIN=annulusIN,
@@ -679,38 +710,51 @@ class aperture:
     # -----------------------------------------------------------------------
 
     def _generate_plot(
-        self, image, cutout_center, ap_size, annulusIN, annulusOUT,
-        fwhm, saveTarget, index, error=None
+        self,
+        image,
+        cutout_center,
+        ap_size,
+        annulusIN,
+        annulusOUT,
+        fwhm,
+        saveTarget,
+        index,
+        error=None,
     ):
         """
         Three-panel diagnostic: main image + right / bottom flux profiles.
         """
         plt.ioff()
         dir_path = os.path.dirname(os.path.realpath(__file__))
-        style    = os.path.join(dir_path, 'autophot.mplstyle')
+        style = os.path.join(dir_path, "autophot.mplstyle")
         if os.path.exists(style):
             plt.style.use(style)
 
-        fpath     = self.input_yaml['fpath']
+        fpath = self.input_yaml["fpath"]
         write_dir = os.path.dirname(fpath)
-        base      = os.path.splitext(os.path.basename(fpath))[0]
+        base = os.path.splitext(os.path.basename(fpath))[0]
 
-        fig  = plt.figure(figsize=set_size(340, 1))
-        grid = GridSpec(2, 2,
-                        width_ratios=[1, 0.25], height_ratios=[1, 0.25],
-                        wspace=0.01, hspace=0.01)
+        fig = plt.figure(figsize=set_size(340, 1))
+        grid = GridSpec(
+            2,
+            2,
+            width_ratios=[1, 0.25],
+            height_ratios=[1, 0.25],
+            wspace=0.01,
+            hspace=0.01,
+        )
 
-        ax_main   = fig.add_subplot(grid[0, 0])
-        ax_right  = fig.add_subplot(grid[0, 1], sharey=ax_main)
+        ax_main = fig.add_subplot(grid[0, 0])
+        ax_right = fig.add_subplot(grid[0, 1], sharey=ax_main)
         ax_bottom = fig.add_subplot(grid[1, 0], sharex=ax_main)
 
         ax_right.yaxis.tick_right()
         ax_right.xaxis.tick_top()
         ax_main.xaxis.tick_top()
 
-        cx, cy       = cutout_center
+        cx, cy = cutout_center
         aperture_scale = int(annulusOUT + fwhm)
-        zoom_size    = 1.25 * aperture_scale
+        zoom_size = 1.25 * aperture_scale
         ax_main.set_xlim(cx - zoom_size, cx + zoom_size)
         ax_main.set_ylim(cy - zoom_size, cy + zoom_size)
 
@@ -727,52 +771,54 @@ class aperture:
         )
 
         norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
-        ax_main.imshow(image, origin='lower', norm=norm, cmap='viridis', aspect='auto')
+        ax_main.imshow(image, origin="lower", norm=norm, cmap="viridis", aspect="auto")
 
         for radius, color, style in [
-            (ap_size,    'lime', '-'),
-            (annulusIN,  'red',  '--'),
-            (annulusOUT, 'red',  '--'),
+            (ap_size, "lime", "-"),
+            (annulusIN, "red", "--"),
+            (annulusOUT, "red", "--"),
         ]:
             ax_main.add_patch(
-                Circle((cx, cy), radius, ec=color, fc='none', lw=0.5, ls=style)
+                Circle((cx, cy), radius, ec=color, fc="none", lw=0.5, ls=style)
             )
 
-        kw = dict(ls=':', color='white', lw=0.5, alpha=0.7)
+        kw = dict(ls=":", color="white", lw=0.5, alpha=0.7)
         ax_main.axvline(cx, **kw)
         ax_main.axhline(cy, **kw)
         ax_bottom.axvline(cx, **kw)
         ax_right.axhline(cy, **kw)
 
-        hx      = zoom_image.mean(axis=0)
-        hy      = zoom_image.mean(axis=1)
+        hx = zoom_image.mean(axis=0)
+        hy = zoom_image.mean(axis=1)
         # SE of mean = sqrt(sum(sigma^2))/N (not mean(sigma))
         n_rows, n_cols = zoom_error.shape[0], zoom_error.shape[1]
-        hx_err  = np.sqrt(np.nansum(zoom_error**2, axis=0)) / max(n_rows, 1)
-        hy_err  = np.sqrt(np.nansum(zoom_error**2, axis=1)) / max(n_cols, 1)
+        hx_err = np.sqrt(np.nansum(zoom_error**2, axis=0)) / max(n_rows, 1)
+        hy_err = np.sqrt(np.nansum(zoom_error**2, axis=1)) / max(n_cols, 1)
         x_range = np.arange(x_min, x_max)
         y_range = np.arange(y_min, y_max)
 
-        kw_step = dict(color='dodgerblue', where='mid', lw=0.5)
+        kw_step = dict(color="dodgerblue", where="mid", lw=0.5)
         ax_bottom.step(x_range, hx, **kw_step)
-        ax_bottom.fill_between(x_range, hx - hx_err, hx + hx_err,
-                               color='dodgerblue', alpha=0.3, step='mid')
+        ax_bottom.fill_between(
+            x_range, hx - hx_err, hx + hx_err, color="dodgerblue", alpha=0.3, step="mid"
+        )
 
         ax_right.step(hy, y_range, **kw_step)
-        ax_right.fill_betweenx(y_range, hy - hy_err, hy + hy_err,
-                                color='dodgerblue', alpha=0.3, step='mid')
+        ax_right.fill_betweenx(
+            y_range, hy - hy_err, hy + hy_err, color="dodgerblue", alpha=0.3, step="mid"
+        )
 
-        ax_bottom.set_xlabel('X position (pixels)')
-        ax_bottom.set_ylabel(r'Counts [$e^-$]')
-        ax_right.set_xlabel(r'Counts [$e^-$]')
-        ax_right.yaxis.set_label_position('right')
+        ax_bottom.set_xlabel("X position (pixels)")
+        ax_bottom.set_ylabel(r"Counts [$e^-$]")
+        ax_right.set_xlabel(r"Counts [$e^-$]")
+        ax_right.yaxis.set_label_position("right")
         ax_right.yaxis.tick_right()
         ax_bottom.set_xlim(ax_main.get_xlim())
         ax_right.set_ylim(ax_main.get_ylim())
 
-        label     = base if saveTarget else index
-        save_name = os.path.join(write_dir, f'aperture_{label}.pdf')
-        fig.savefig(save_name, bbox_inches='tight', dpi=150, facecolor='white')
+        label = base if saveTarget else index
+        save_name = os.path.join(write_dir, f"aperture_{label}.pdf")
+        fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
         plt.close(fig)
 
     # -----------------------------------------------------------------------
@@ -801,9 +847,10 @@ class aperture:
         if not nan_mask.any():
             return y
 
-        interp = interp1d(x[~nan_mask], y[~nan_mask],
-                          kind='linear', fill_value='extrapolate')
-        y_out          = y.copy()
+        interp = interp1d(
+            x[~nan_mask], y[~nan_mask], kind="linear", fill_value="extrapolate"
+        )
+        y_out = y.copy()
         y_out[nan_mask] = interp(x[nan_mask])
         return y_out
 
@@ -872,7 +919,9 @@ class aperture:
         # larger default fallback radius.
         fallback_radius = 1.7
         optimum_radius = fallback_radius
-        optimum_scale = max(7, int(np.ceil(fallback_radius * self.input_yaml["fwhm"]))) + 0.5
+        optimum_scale = (
+            max(7, int(np.ceil(fallback_radius * self.input_yaml["fwhm"]))) + 0.5
+        )
 
         # Relaxed stability/tail criteria for crowded fields (more neighbour contamination)
         if crowded:
@@ -882,40 +931,50 @@ class aperture:
 
         # ---- SNR pre-filter (slightly relaxed for crowded) ------------------------------------------------
         snr_min = 3.0 if crowded else 5.0
-        sources = sources[(sources['SNR'] > snr_min) & (sources['SNR'] < 10000)].copy()
+        sources = sources[(sources["SNR"] > snr_min) & (sources["SNR"] < 10000)].copy()
         sources.reset_index(inplace=True)
         n_sources = len(sources)
 
         if n_sources == 0:
-            logger.warning('No sources passed SNR cut. Using default radius/scale.')
+            logger.warning("No sources passed SNR cut. Using default radius/scale.")
             return sources, optimum_radius, optimum_scale
 
-        fwhm        = self.input_yaml['fwhm']
-        radii_fwhm  = np.arange(0.05, max_radius + 1e-9, 0.1)
-        radii       = radii_fwhm * fwhm
-        logger.info(border_msg(
-            f'Finding optimum aperture using {n_sources} sources'
-        ))
+        fwhm = self.input_yaml["fwhm"]
+        radii_fwhm = np.arange(0.05, max_radius + 1e-9, 0.1)
+        radii = radii_fwhm * fwhm
+        logger.info(border_msg(f"Finding optimum aperture using {n_sources} sources"))
 
-        sources['optimum_radius']      = np.nan
-        sources['mean_slope']          = np.nan
-        sources['tail_max_dist_local'] = np.nan
-        sources['tail_max_dist_global'] = np.nan
-        sources['tail_excess_global']   = np.nan
-        sources['stable_beyond_global'] = False
-        sources['local_env_std']        = np.nan
+        sources["optimum_radius"] = np.nan
+        sources["mean_slope"] = np.nan
+        sources["tail_max_dist_local"] = np.nan
+        sources["tail_max_dist_global"] = np.nan
+        sources["tail_excess_global"] = np.nan
+        sources["stable_beyond_global"] = False
+        sources["local_env_std"] = np.nan
 
-        gain = self.input_yaml.get('gain', 1.0)
+        gain = self.input_yaml.get("gain", 1.0)
         error = (
-            None if background_rms is None
-            else calc_total_error(self.image, background_rms, effective_gain=float(gain))
+            None
+            if background_rms is None
+            else calc_total_error(
+                self.image, background_rms, effective_gain=float(gain)
+            )
         )
         n_jobs = _resolve_n_jobs(n_jobs, half_cpus=False)
 
         # ---- Parallel CoG analysis -----------------------------------------
         args_list = [
-            (idx, row['x_pix'], row['y_pix'], fwhm, radii,
-             self.image, error, norm_factor, stability_threshold)
+            (
+                idx,
+                row["x_pix"],
+                row["y_pix"],
+                fwhm,
+                radii,
+                self.image,
+                error,
+                norm_factor,
+                stability_threshold,
+            )
             for idx, row in sources.iterrows()
         ]
 
@@ -932,24 +991,23 @@ class aperture:
         for res in results:
             if res is None:
                 continue
-            idx = res['idx']
-            sources.at[idx, 'optimum_radius']      = res['optimum_radius']
-            sources.at[idx, 'mean_slope']          = res['mean_slope']
-            sources.at[idx, 'tail_max_dist_local'] = res['tail_max_dist_local']
-            sources.at[idx, 'local_env_std']       = res.get('local_env_std', np.nan)
-            profiles_map[idx]                       = res['profile']
+            idx = res["idx"]
+            sources.at[idx, "optimum_radius"] = res["optimum_radius"]
+            sources.at[idx, "mean_slope"] = res["mean_slope"]
+            sources.at[idx, "tail_max_dist_local"] = res["tail_max_dist_local"]
+            sources.at[idx, "local_env_std"] = res.get("local_env_std", np.nan)
+            profiles_map[idx] = res["profile"]
 
         # ---- Preliminary global radius (no stability cut yet) --------------
-        prelim_mask = (
-            np.isfinite(sources['optimum_radius'].values)
-            & np.isfinite(sources['mean_slope'].values)
+        prelim_mask = np.isfinite(sources["optimum_radius"].values) & np.isfinite(
+            sources["mean_slope"].values
         )
         if not prelim_mask.any():
-            logger.warning('No valid sources for global radius. Using default.')
+            logger.warning("No valid sources for global radius. Using default.")
             return sources.iloc[[]], optimum_radius, optimum_scale
 
-        prelim_r = sources.loc[prelim_mask, 'optimum_radius'].to_numpy(float)
-        prelim_s = sources.loc[prelim_mask, 'mean_slope'].to_numpy(float)
+        prelim_r = sources.loc[prelim_mask, "optimum_radius"].to_numpy(float)
+        prelim_s = sources.loc[prelim_mask, "mean_slope"].to_numpy(float)
 
         try:
             cr = sigma_clip(prelim_r, sigma=sigma, stdfunc=mad_std)
@@ -959,7 +1017,9 @@ class aperture:
             prelim_keep = np.ones(len(prelim_r), dtype=bool)
 
         if not prelim_keep.any():
-            logger.warning('Preliminary sigma-clip rejected all sources. Using default.')
+            logger.warning(
+                "Preliminary sigma-clip rejected all sources. Using default."
+            )
             return sources.iloc[[]], fallback_radius, optimum_scale
 
         global_optimum_pre = float(np.nanmedian(prelim_r[prelim_keep]))
@@ -973,16 +1033,19 @@ class aperture:
             tail_region = prof[beyond_global]
             tmd = float(np.nanmax(np.abs(tail_region - 1.0)))
             tail_excess_global = float(max(0.0, np.nanmax(tail_region) - 1.0))
-            sources.at[idx, 'tail_max_dist_global'] = tmd
-            sources.at[idx, 'tail_excess_global']   = tail_excess_global
-            if (np.isfinite(tmd) and tmd < stability_threshold
-                    and np.isfinite(tail_excess_global) and tail_excess_global < max_tail_excess
-                    and np.isfinite(sources.at[idx, 'mean_slope'])):
-                sources.at[idx, 'stable_beyond_global'] = True
+            sources.at[idx, "tail_max_dist_global"] = tmd
+            sources.at[idx, "tail_excess_global"] = tail_excess_global
+            if (
+                np.isfinite(tmd)
+                and tmd < stability_threshold
+                and np.isfinite(tail_excess_global)
+                and tail_excess_global < max_tail_excess
+                and np.isfinite(sources.at[idx, "mean_slope"])
+            ):
+                sources.at[idx, "stable_beyond_global"] = True
 
-        stable_mask = (
-            sources['stable_beyond_global'].values
-            & np.isfinite(sources['optimum_radius'].values)
+        stable_mask = sources["stable_beyond_global"].values & np.isfinite(
+            sources["optimum_radius"].values
         )
         if not stable_mask.any():
             # Crowded fallback: use median of all preliminary radii (clipped) instead of failing
@@ -991,20 +1054,26 @@ class aperture:
                 fallback_from_data = float(np.nanmedian(r_clip))
                 if np.isfinite(fallback_from_data):
                     logger.warning(
-                        'No globally stable sources; using median of preliminary radii (crowded): %.2f FWHM',
+                        "No globally stable sources; using median of preliminary radii (crowded): %.2f FWHM",
                         fallback_from_data,
                     )
-                    optimum_scale = max(12, int(np.ceil(fallback_from_data * self.input_yaml['fwhm']))) + 0.5
+                    optimum_scale = (
+                        max(
+                            12,
+                            int(np.ceil(fallback_from_data * self.input_yaml["fwhm"])),
+                        )
+                        + 0.5
+                    )
                     return sources.iloc[[]], fallback_from_data, optimum_scale
-            logger.warning('No globally stable sources. Using default.')
+            logger.warning("No globally stable sources. Using default.")
             return sources.iloc[[]], fallback_radius, optimum_scale
 
         # Use all globally stable sources (as many as possible) with a mild
         # sanity cut on radius; no additional behaviour-score culling.
-        opt_r_arr    = sources.loc[stable_mask, 'optimum_radius'].to_numpy(float)
-        slopes_arr   = sources.loc[stable_mask, 'mean_slope'].to_numpy(float)
+        opt_r_arr = sources.loc[stable_mask, "optimum_radius"].to_numpy(float)
+        slopes_arr = sources.loc[stable_mask, "mean_slope"].to_numpy(float)
         kept_indices = np.where(stable_mask)[0]
-        profiles     = np.array(
+        profiles = np.array(
             [profiles_map[i] for i in kept_indices if i in profiles_map], dtype=float
         )
 
@@ -1021,25 +1090,27 @@ class aperture:
                     profiles = profiles[radius_ok]
 
         logger.info(
-            f'Using {len(kept_indices)} sources with stable profiles '
-            f'for optimum-radius and PSF selection.'
+            f"Using {len(kept_indices)} sources with stable profiles "
+            f"for optimum-radius and PSF selection."
         )
 
         # ---- Final sigma-clipping ------------------------------------------
         # Gentle clip: only drop extreme radius outliers, keep almost all stable profiles.
         sigma_radius = max(sigma, 10.0)
         try:
-            cr_f        = sigma_clip(opt_r_arr, sigma=sigma_radius, stdfunc=mad_std)
-            final_mask  = ~np.asanyarray(cr_f.mask)
+            cr_f = sigma_clip(opt_r_arr, sigma=sigma_radius, stdfunc=mad_std)
+            final_mask = ~np.asanyarray(cr_f.mask)
         except Exception:
-            final_mask  = np.ones(len(opt_r_arr), dtype=bool)
+            final_mask = np.ones(len(opt_r_arr), dtype=bool)
 
         if final_mask.any():
-            final_indices    = kept_indices[final_mask]
+            final_indices = kept_indices[final_mask]
             filtered_sources = sources.iloc[final_indices].copy()
-            optimum_radius   = float(np.nanmedian(opt_r_arr[final_mask]))
+            optimum_radius = float(np.nanmedian(opt_r_arr[final_mask]))
         else:
-            logger.warning('Final sigma-clip rejected all stable sources. Using default.')
+            logger.warning(
+                "Final sigma-clip rejected all stable sources. Using default."
+            )
             return sources.iloc[[]], fallback_radius, optimum_scale
 
         # ---- Tail check w.r.t. final optimum radius -----------------------
@@ -1056,13 +1127,22 @@ class aperture:
                 tail = prof[beyond_final]
                 t_min = float(np.nanmin(tail))
                 t_excess = float(max(0.0, np.nanmax(tail) - 1.0))
-                if np.isfinite(t_min) and t_min >= min_tail_flux and np.isfinite(t_excess) and t_excess < max_tail_excess:
+                if (
+                    np.isfinite(t_min)
+                    and t_min >= min_tail_flux
+                    and np.isfinite(t_excess)
+                    and t_excess < max_tail_excess
+                ):
                     still_ok.append(i)
             if len(still_ok) < len(final_indices):
                 final_indices = np.array(still_ok, dtype=int)
                 filtered_sources = sources.iloc[final_indices].copy()
                 if len(final_indices) > 0:
-                    optimum_radius = float(np.nanmedian(sources.loc[final_indices, 'optimum_radius'].values))
+                    optimum_radius = float(
+                        np.nanmedian(
+                            sources.loc[final_indices, "optimum_radius"].values
+                        )
+                    )
 
         # ---- Optional EE model refinement ----------------------------------
         fine_r, fine_profile = None, None
@@ -1078,16 +1158,20 @@ class aperture:
                         return 1.0 - np.exp(-((r / radii[-1] / alpha) ** beta))
 
                     popt, _ = curve_fit(
-                        ee_model, radii, mean_profile,
-                        p0=[0.3, 2.0], bounds=(0, np.inf), maxfev=10000,
+                        ee_model,
+                        radii,
+                        mean_profile,
+                        p0=[0.3, 2.0],
+                        bounds=(0, np.inf),
+                        maxfev=10000,
                     )
-                    fine_r       = np.linspace(0, radii[-1], 500)
+                    fine_r = np.linspace(0, radii[-1], 500)
                     fine_profile = ee_model(fine_r, *popt)
                     r_target_pix = np.interp(aperture_norm_factor, fine_profile, fine_r)
                     if np.isfinite(r_target_pix) and r_target_pix > 0:
                         optimum_radius = float(r_target_pix / fwhm)
             except Exception as exc:
-                logger.warning(f'EE model fit failed: {exc}')
+                logger.warning(f"EE model fit failed: {exc}")
 
         # ---- Optimum scale -------------------------------------------------
         optimum_scale = max(12, int(np.ceil(optimum_radius + 2 * fwhm))) + 0.5
@@ -1099,16 +1183,16 @@ class aperture:
             # No second Pool - profiles were computed in the analysis pass.
             dir_path = os.path.dirname(os.path.realpath(__file__))
             try:
-                plt.style.use(os.path.join(dir_path, 'autophot.mplstyle'))
+                plt.style.use(os.path.join(dir_path, "autophot.mplstyle"))
             except Exception:
                 pass
 
             save_loc = os.path.join(
-                self.input_yaml['write_dir'],
+                self.input_yaml["write_dir"],
                 f'optimum_aperture_{self.input_yaml["base"]}.pdf',
             )
             fig = plt.figure(figsize=set_size(340, 1.5))
-            gs  = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
+            gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
             ax1 = fig.add_subplot(gs[0])
             ax2 = fig.add_subplot(gs[1], sharex=ax1)
 
@@ -1117,52 +1201,78 @@ class aperture:
             for idx, prof in profiles_map.items():
                 in_kept = idx in kept_set
                 ax1.plot(
-                    radii / fwhm, prof,
-                    color=None if in_kept else 'grey',
+                    radii / fwhm,
+                    prof,
+                    color=None if in_kept else "grey",
                     alpha=1.0 if in_kept else 0.3,
                 )
 
             if fine_r is not None:
-                ax1.plot(fine_r / fwhm, fine_profile, ls='--', color='black')
+                ax1.plot(fine_r / fwhm, fine_profile, ls="--", color="black")
 
-            ax1.axvline(global_optimum_pre, color='grey', ls=':', label='Initial global')
-            ax1.axvline(optimum_radius,     color='black', ls='--', label='Final optimum')
-            ax1.set_ylabel('Normalized Flux')
+            ax1.axvline(
+                global_optimum_pre, color="grey", ls=":", label="Initial global"
+            )
+            ax1.axvline(optimum_radius, color="black", ls="--", label="Final optimum")
+            ax1.set_ylabel("Normalized Flux")
             plt.setp(ax1.get_xticklabels(), visible=False)
-            ax1.legend(loc='lower right', fontsize=8)
+            ax1.legend(loc="lower right", fontsize=8)
 
-            per_source = sources.loc[list(kept_set),  'optimum_radius'].values if kept_set else np.array([])
-            other      = sources.loc[
-                [i for i in range(len(sources)) if i not in kept_set],
-                'optimum_radius'
+            per_source = (
+                sources.loc[list(kept_set), "optimum_radius"].values
+                if kept_set
+                else np.array([])
+            )
+            other = sources.loc[
+                [i for i in range(len(sources)) if i not in kept_set], "optimum_radius"
             ].values
-            all_radii  = np.concatenate([np.atleast_1d(per_source), np.atleast_1d(other)])
-            all_radii  = all_radii[np.isfinite(all_radii)]
+            all_radii = np.concatenate(
+                [np.atleast_1d(per_source), np.atleast_1d(other)]
+            )
+            all_radii = all_radii[np.isfinite(all_radii)]
 
             if len(all_radii) > 0:
                 r_min, r_max = float(np.nanmin(all_radii)), float(np.nanmax(all_radii))
                 r_range = max(r_max - r_min, 0.1)
-                n_bins  = min(25, max(8, int(np.ceil(len(all_radii) / 4))))
-                bins    = np.linspace(max(0, r_min - 0.02 * r_range), min(max_radius, r_max + 0.02 * r_range), n_bins + 1)
+                n_bins = min(25, max(8, int(np.ceil(len(all_radii) / 4))))
+                bins = np.linspace(
+                    max(0, r_min - 0.02 * r_range),
+                    min(max_radius, r_max + 0.02 * r_range),
+                    n_bins + 1,
+                )
                 if len(per_source) > 0:
-                    ax2.hist(per_source, bins=bins, facecolor='tab:blue', alpha=0.85, label='Selected', zorder=1)
+                    ax2.hist(
+                        per_source,
+                        bins=bins,
+                        facecolor="tab:blue",
+                        alpha=0.85,
+                        label="Selected",
+                        zorder=1,
+                    )
                 if len(other) > 0:
-                    ax2.hist(other, bins=bins, facecolor='tab:red', alpha=0.4, label='Rejected', zorder=0)
-                ax2.legend(loc='upper right', fontsize=7)
+                    ax2.hist(
+                        other,
+                        bins=bins,
+                        facecolor="tab:red",
+                        alpha=0.4,
+                        label="Rejected",
+                        zorder=0,
+                    )
+                ax2.legend(loc="upper right", fontsize=7)
 
-            ax2.axvline(optimum_radius, color='black', ls='--', label='Final')
-            ax2.set_xlabel('Aperture Radius [FWHM]')
-            ax2.set_ylabel('Count')
+            ax2.axvline(optimum_radius, color="black", ls="--", label="Final")
+            ax2.set_xlabel("Aperture Radius [FWHM]")
+            ax2.set_ylabel("Count")
             ax1.set_ylim(-0.05, 1.05)
             ax1.set_xlim(-0.05, max_radius + 0.05)
 
-            fig.savefig(save_loc, bbox_inches='tight', dpi=150, facecolor='white')
+            fig.savefig(save_loc, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
 
         logger.info(
-            f'Returning {len(filtered_sources)} sources, '
-            f'optimum radius: {optimum_radius:.2f} * FWHM, '
-            f'scale: {optimum_scale}'
+            f"Returning {len(filtered_sources)} sources, "
+            f"optimum radius: {optimum_radius:.2f} * FWHM, "
+            f"scale: {optimum_scale}"
         )
         return filtered_sources, optimum_radius, optimum_scale
 
@@ -1199,70 +1309,78 @@ class aperture:
         -------
         (correction, correction_err) : (float, float)  [mag]
         """
-        logger    = logging.getLogger(__name__)
-        write_dir = self.input_yaml['write_dir']
-        base_name = self.input_yaml['base']
+        logger = logging.getLogger(__name__)
+        write_dir = self.input_yaml["write_dir"]
+        base_name = self.input_yaml["base"]
 
         if len(sources) < 5:
-            logger.warning(f'Too few sources [{len(sources)}] for aperture correction.')
+            logger.warning(f"Too few sources [{len(sources)}] for aperture correction.")
             return np.nan, np.nan
 
         if fwhm is None or ap_size is None:
-            raise ValueError('fwhm and ap_size are required.')
+            raise ValueError("fwhm and ap_size are required.")
 
         radii = np.arange(0.05, max_radius, 0.1) * fwhm
         error = (
             calc_total_error(image, background_rms, effective_gain=1)
-            if background_rms is not None else None
+            if background_rms is not None
+            else None
         )
 
-        selected = (
-            sources.sort_values('flux_AP', ascending=False)
-            .head(n_samples)
-        )
+        selected = sources.sort_values("flux_AP", ascending=False).head(n_samples)
 
         corrections = []
         for _, row in selected.iterrows():
             try:
-                xycen = np.array([row['x_pix'], row['y_pix']])
-                cog   = CurveOfGrowth(image, xycen, radii, error=error,
-                                      mask=None, method='subpixel')
+                xycen = np.array([row["x_pix"], row["y_pix"]])
+                cog = CurveOfGrowth(
+                    image, xycen, radii, error=error, mask=None, method="subpixel"
+                )
                 cog.normalize()
                 frac = np.interp(ap_size, cog.radii, cog.profile)
                 if 0 < frac <= 1:
                     corrections.append(-2.5 * np.log10(1.0 / frac))
             except Exception as exc:
-                logger.warning(f'Skipping star: {exc}')
+                logger.warning(f"Skipping star: {exc}")
 
         if not corrections:
-            logger.warning('No valid aperture corrections computed.')
+            logger.warning("No valid aperture corrections computed.")
             return np.nan, np.nan
 
         corrections = np.asarray(corrections, dtype=float)
 
         # Sigma-clip outliers.
         clipped = sigma_clip(
-            corrections, sigma=3, masked=True,
-            cenfunc=np.nanmedian, stdfunc=mad_std,
+            corrections,
+            sigma=3,
+            masked=True,
+            cenfunc=np.nanmedian,
+            stdfunc=mad_std,
         )
-        corrections    = corrections[~clipped.mask]
-        correction     = float(np.nanmedian(corrections))
+        corrections = corrections[~clipped.mask]
+        correction = float(np.nanmedian(corrections))
         correction_err = float(np.nanstd(corrections))
-        logger.info(f'Aperture correction: {correction:.3f} +/- {correction_err:.3f}')
+        logger.info(f"Aperture correction: {correction:.3f} +/- {correction_err:.3f}")
 
         if plot:
             plt.ioff()
             fig, ax = plt.subplots(figsize=(8, 6))
-            ax.hist(corrections, bins=15, alpha=0.7, color='steelblue', edgecolor='black')
-            ax.axvline(correction, color='r', ls='--',
-                       label=f'Median: {correction:.3f}')
-            ax.set_xlabel('Aperture Correction [mag]')
-            ax.set_ylabel('Frequency')
+            ax.hist(
+                corrections, bins=15, alpha=0.7, color="steelblue", edgecolor="black"
+            )
+            ax.axvline(
+                correction, color="r", ls="--", label=f"Median: {correction:.3f}"
+            )
+            ax.set_xlabel("Aperture Correction [mag]")
+            ax.set_ylabel("Frequency")
             ax.legend(frameon=False)
             fig.tight_layout()
             fig.savefig(
-                os.path.join(write_dir, f'aperture_correction_{base_name}.pdf'),
-                format='pdf', bbox_inches='tight', dpi=150, facecolor='white',
+                os.path.join(write_dir, f"aperture_correction_{base_name}.pdf"),
+                format="pdf",
+                bbox_inches="tight",
+                dpi=150,
+                facecolor="white",
             )
             plt.close(fig)
 

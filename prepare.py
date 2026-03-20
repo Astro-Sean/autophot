@@ -27,18 +27,20 @@ import astropy.wcs as WCS
 
 # Project-specific helpers (assumed to be in your codebase)
 from functions import (
-    autophot_yaml,
+    AutophotYaml,
     border_msg,
     get_header,
     get_instrument_config,
     load_telescope_config,
+    ColoredLevelFormatter,
     print_progress_bar,
 )
 from check import FitsInfo
 from tns import get_coords
 from wcs import get_wcs
 
-class prepare:
+
+class Prepare:
     """
     Prepares and validates input data for the AutoPHOT pipeline.
     Handles configuration, file cleaning, catalog checks, TNS lookups, filter validation, and template discovery.
@@ -52,7 +54,20 @@ class prepare:
             default_input (Dict): Configuration dictionary for the AutoPHOT pipeline.
         """
         self.input_yaml = default_input
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+        )
+        # Ensure console messages have unique color highlights.
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers:
+            handler.setFormatter(
+                ColoredLevelFormatter(
+                    fmt="%(asctime)s - %(levelname)s - %(message)s",
+                    datefmt="%H:%M:%S",
+                    use_color=True,
+                )
+            )
         self.logger = logging.getLogger(__name__)
 
     # --- Load Configuration ---
@@ -69,8 +84,12 @@ class prepare:
         # Construct the path to the default input YAML
         default_input_path = os.path.join(script_dir, "databases", "default_input.yml")
         # Load and return the YAML configuration
-        default_input_yaml = autophot_yaml(default_input_path, "default_input").load()
-        logging.info(border_msg(f"Default input loaded from: {default_input_path}", body="-", corner="+"))
+        default_input_yaml = AutophotYaml(default_input_path, "default_input").load()
+        logging.info(
+            border_msg(
+                f"Default input loaded from: {default_input_path}", body="-", corner="+"
+            )
+        )
         return default_input_yaml
 
     def clean(self) -> List[str]:
@@ -108,9 +127,16 @@ class prepare:
         work_root = os.path.join(os.path.dirname(fits_dir), work_loc)
         pathlib.Path(work_root).mkdir(parents=True, exist_ok=True)
         # Define forbidden substrings and valid extensions
-        forbidden_substrings = ["subtraction", "template", ".wcs", "PSF_model", "footprint", "sources_"]
+        forbidden_substrings = [
+            "subtraction",
+            "template",
+            ".wcs",
+            "PSF_model",
+            "footprint",
+            "sources_",
+        ]
         valid_extensions = (".fits", ".fit", ".fts", "fits.fz")
-    
+
         def _is_valid_file(filename: str, root: str) -> bool:
             """
             Checks if a file is valid for processing.
@@ -125,14 +151,14 @@ class prepare:
                 and not any(substring in filename for substring in forbidden_substrings)
                 and not any(substring in root for substring in forbidden_substrings)
             )
-    
+
         # Determine the root directory to search (templates or main FITS directory)
         search_root = (
             os.path.join(self.input_yaml["fits_dir"], "templates")
             if self.input_yaml["template_subtraction"]["prepare_templates"]
             else self.input_yaml["fits_dir"]
         )
-    
+
         # Populate the list of valid files
         for root, _, files in os.walk(search_root):
             for filename in files:
@@ -174,7 +200,9 @@ class prepare:
                     # Honour the restart flag (default True = redo all):
                     # - restart=True  -> include file (reprocess even if output exists)
                     # - restart=False -> skip files that already have output.csv
-                    if os.path.exists(output_csv_path) and not self.input_yaml.get("restart", True):
+                    if os.path.exists(output_csv_path) and not self.input_yaml.get(
+                        "restart", True
+                    ):
                         files_removed += 1
                         continue
 
@@ -183,7 +211,11 @@ class prepare:
         self.logger.info(
             "Restart = %s -> %s",
             restart,
-            "reprocess all files (ignore existing output.csv)" if restart else "skip files that already have output.csv (only process new/unprocessed)",
+            (
+                "reprocess all files (ignore existing output.csv)"
+                if restart
+                else "skip files that already have output.csv (only process new/unprocessed)"
+            ),
         )
         self.logger.info(
             "Scanned %d FITS file(s): %d completed (output.csv present), %d pending.",
@@ -193,7 +225,6 @@ class prepare:
         )
 
         return valid_files
-
 
     # --- Check Files ---
     def check_files(self, flist: List[str], template_files: bool = False) -> List[str]:
@@ -223,13 +254,15 @@ class prepare:
         selected_catalog = self.input_yaml["catalog"]["use_catalog"]
         script_dir = os.path.dirname(os.path.abspath(__file__))
         catalog_yml_path = os.path.join(script_dir, "databases", "catalog.yml")
-        catalog_input = autophot_yaml(catalog_yml_path, selected_catalog).load()
+        catalog_input = AutophotYaml(catalog_yml_path, selected_catalog).load()
 
         if self.input_yaml["catalog"].get("build_catalog", False):
             available_filters = list(catalog_input.keys())
         elif selected_catalog == "custom":
             target = self.input_yaml["target_name"]
-            fname = f"{target}_RAD_{float(self.input_yaml['catalog']['catalog_radius'])}"
+            fname = (
+                f"{target}_RAD_{float(self.input_yaml['catalog']['catalog_radius'])}"
+            )
             if not self.input_yaml["catalog"]["catalog_custom_fpath"]:
                 self.logger.error(
                     "Custom catalog selected but 'catalog_custom_fpath' is not defined in the configuration."
@@ -245,14 +278,14 @@ class prepare:
             available_filters = list(catalog_input.keys())
 
         # Include IR sequence data if specified
-        if self.input_yaml["catalog"].get("include_IR_sequence_data",False):
+        if self.input_yaml["catalog"].get("include_IR_sequence_data", False):
             available_filters += ["J", "H", "K"]
             available_filters = list(set(available_filters))
 
         return available_filters
 
     # --- Check TNS ---
-    def check_TNS(self) -> Dict:
+    def check_tns(self) -> Dict:
         """
         Retrieves or caches transient object information from the TNS API.
         Falls back to user-provided coordinates if TNS is unavailable.
@@ -267,31 +300,53 @@ class prepare:
 
         # Early return for user-provided coordinates
         if target_name is None:
-            if self.input_yaml["target_ra"] is not None and self.input_yaml["target_dec"] is not None:
-                return {"ra": self.input_yaml["target_ra"], "dec": self.input_yaml["target_dec"]}
-            response = input(
-                "\nNo target_name and no RA/Dec provided in the configuration.\n"
-                "Continue without target information? [y/N]: "
-            ).strip().lower()
+            if (
+                self.input_yaml["target_ra"] is not None
+                and self.input_yaml["target_dec"] is not None
+            ):
+                return {
+                    "ra": self.input_yaml["target_ra"],
+                    "dec": self.input_yaml["target_dec"],
+                }
+            response = (
+                input(
+                    "\nNo target_name and no RA/Dec provided in the configuration.\n"
+                    "Continue without target information? [y/N]: "
+                )
+                .strip()
+                .lower()
+            )
             if response not in ("y", "yes"):
-                raise Exception("No target information provided and user declined to continue.")
+                raise Exception(
+                    "No target information provided and user declined to continue."
+                )
             return {}
 
         # Check for cached TNS data
         if transient_path.is_file():
-            tns_response = autophot_yaml(str(transient_path), target_name).load()
-            self.logger.info("Using cached TNS information for %s.", tns_response['objname'])
+            tns_response = AutophotYaml(str(transient_path), target_name).load()
+            self.logger.info(
+                "Using cached TNS information for %s.", tns_response["objname"]
+            )
             return tns_response
 
         # Fetch new TNS data
         tns_bot_id = self.input_yaml["wcs"].get("TNS_BOT_ID")
-        if tns_bot_id is None or (isinstance(tns_bot_id, str) and tns_bot_id.strip() == ""):
+        if tns_bot_id is None or (
+            isinstance(tns_bot_id, str) and tns_bot_id.strip() == ""
+        ):
             self.logger.warning(
                 "No TNS Bot ID configured for target '%s'. Falling back to manual coordinates.",
                 target_name,
             )
-            if self.input_yaml["target_ra"] is not None and self.input_yaml["target_dec"] is not None:
-                return {"ra": self.input_yaml["target_ra"], "dec": self.input_yaml["target_dec"]}
+            if (
+                self.input_yaml["target_ra"] is not None
+                and self.input_yaml["target_dec"] is not None
+            ):
+                return {
+                    "ra": self.input_yaml["target_ra"],
+                    "dec": self.input_yaml["target_dec"],
+                }
             raise Exception("No TNS Bot ID and no manual RA/DEC coordinates provided.")
 
         try:
@@ -302,13 +357,17 @@ class prepare:
                 TNS_BOT_NAME=self.input_yaml["wcs"]["TNS_BOT_NAME"],
                 TNS_BOT_API=self.input_yaml["wcs"]["TNS_BOT_API"],
             )
-            autophot_yaml.create(str(transient_path), tns_response)
+            AutophotYaml.create(str(transient_path), tns_response)
             obj_name = tns_response.get("name_prefix", "") + tns_response["objname"]
             self.logger.info("Retrieved TNS information for %s.", obj_name)
             return tns_response
         except Exception as exc:
             exc_type, _, exc_tb = sys.exc_info()
-            fname = os.path.basename(exc_tb.tb_frame.f_code.co_filename) if exc_tb else "unknown"
+            fname = (
+                os.path.basename(exc_tb.tb_frame.f_code.co_filename)
+                if exc_tb
+                else "unknown"
+            )
             line = exc_tb.tb_lineno if exc_tb else -1
             self.logger.error(
                 "TNS API error: %s in %s:%d - %s",
@@ -317,7 +376,9 @@ class prepare:
                 line,
                 exc,
             )
-            sys.exit("Cannot reach TNS server - check internet connection and API credentials.")
+            sys.exit(
+                "Cannot reach TNS server - check internet connection and API credentials."
+            )
 
     def _update_telescope_yml(
         self,
@@ -337,7 +398,7 @@ class prepare:
         try:
             if os.path.isfile(path):
                 with open(path, "r") as f:
-                    data = yaml.load(f, Loader=yaml.FullLoader) or {}
+                    data = yaml.safe_load(f) or {}
             else:
                 data = {}
         except Exception as e:
@@ -350,12 +411,21 @@ class prepare:
         if instrument not in data[telescope][block_key]:
             data[telescope][block_key][instrument] = {"filter_key_0": "FILTER"}
         inst_block = data[telescope][block_key][instrument]
-        if str(header_filter_value) not in inst_block or inst_block[str(header_filter_value)] != catalog_band:
+        if (
+            str(header_filter_value) not in inst_block
+            or inst_block[str(header_filter_value)] != catalog_band
+        ):
             inst_block[str(header_filter_value)] = catalog_band
             try:
                 os.makedirs(wdir, exist_ok=True)
                 with open(path, "w") as f:
-                    yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+                    yaml.dump(
+                        data,
+                        f,
+                        default_flow_style=False,
+                        sort_keys=False,
+                        allow_unicode=True,
+                    )
                 self.logger.info(
                     "Updated telescope.yml: %s / %s filter %s -> %s",
                     telescope,
@@ -413,11 +483,13 @@ class prepare:
         try:
             if os.path.isfile(path):
                 with open(path, "r") as f:
-                    data = yaml.load(f, Loader=yaml.FullLoader) or {}
+                    data = yaml.safe_load(f) or {}
             else:
                 data = {}
         except Exception as e:
-            self.logger.warning("Could not load telescope.yml for pixel_scale update: %s", e)
+            self.logger.warning(
+                "Could not load telescope.yml for pixel_scale update: %s", e
+            )
             return
 
         # Ensure nested structure exists
@@ -443,7 +515,13 @@ class prepare:
         try:
             os.makedirs(wdir, exist_ok=True)
             with open(path, "w") as f:
-                yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+                yaml.dump(
+                    data,
+                    f,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    allow_unicode=True,
+                )
             self.logger.info(
                 "Updated telescope.yml pixel_scale: %s / %s -> %.3f arcsec/pixel",
                 telescope,
@@ -451,10 +529,14 @@ class prepare:
                 pixel_scale_candidate,
             )
         except Exception as e:
-            self.logger.warning("Could not write telescope.yml for pixel_scale update: %s", e)
+            self.logger.warning(
+                "Could not write telescope.yml for pixel_scale update: %s", e
+            )
 
     # --- Check Filters ---
-    def check_filters(self, flist: List[str], available_filters: List[str]) -> Tuple[List[str], List[str]]:
+    def check_filters(
+        self, flist: List[str], available_filters: List[str]
+    ) -> Tuple[List[str], List[str]]:
         """
         Validates the list of image files based on their filter information.
 
@@ -514,7 +596,11 @@ class prepare:
         # Fail fast: the pipeline requires an explicit catalog choice to map
         # instrument filter names onto supported catalog bands.
         use_catalog = (self.input_yaml.get("catalog") or {}).get("use_catalog", None)
-        if use_catalog is None or str(use_catalog).strip() == "" or str(use_catalog).lower() == "none":
+        if (
+            use_catalog is None
+            or str(use_catalog).strip() == ""
+            or str(use_catalog).lower() == "none"
+        ):
             msg = (
                 "catalog.use_catalog is not set (null/None). "
                 "AutoPHOT requires a catalog to map filters and perform calibration. "
@@ -530,7 +616,10 @@ class prepare:
 
         for name in print_progress_bar(flist):
             is_template = "templates" in os.path.normpath(name)
-            if self.input_yaml["template_subtraction"]["prepare_templates"] and "PSF_model" in name:
+            if (
+                self.input_yaml["template_subtraction"]["prepare_templates"]
+                and "PSF_model" in name
+            ):
                 # Skip pre-computed PSF model products when validating templates
                 continue
 
@@ -541,7 +630,9 @@ class prepare:
             mapping = None
             block_key = None
             if tele in tele_autophot_input:
-                block_key, mapping = get_instrument_config(tele_autophot_input, tele, inst)
+                block_key, mapping = get_instrument_config(
+                    tele_autophot_input, tele, inst
+                )
                 if mapping is None and not is_template:
                     self.logger.warning(
                         "Instrument '%s' for telescope '%s' not found in telescope.yml; "
@@ -614,13 +705,24 @@ class prepare:
             if filter_name == "no_filter" and "templates" in os.path.normpath(name):
                 norm = os.path.normpath(name)
                 template_patterns = (
-                    "gp_template", "rp_template", "ip_template", "up_template", "zp_template",
-                    "J_template", "H_template", "K_template",
-                    "B_template", "V_template", "R_template", "I_template",
+                    "gp_template",
+                    "rp_template",
+                    "ip_template",
+                    "up_template",
+                    "zp_template",
+                    "J_template",
+                    "H_template",
+                    "K_template",
+                    "B_template",
+                    "V_template",
+                    "R_template",
+                    "I_template",
                 )
                 for folder_band in template_patterns:
                     if folder_band in norm:
-                        band = folder_band.split("_")[0].replace("p", "")  # gp -> g, zp -> z, B -> B, etc.
+                        band = folder_band.split("_")[0].replace(
+                            "p", ""
+                        )  # gp -> g, zp -> z, B -> B, etc.
                         if band in available_filters:
                             filter_name = band
                             fits_filter = band
@@ -631,7 +733,10 @@ class prepare:
                 normalized = filter_name.strip().lower()
                 # NIR aliases (e.g. ESO/VISTA use "Ks"; catalog uses "K") so templates pass and get calibrated
                 nir_alias_to_catalog = {"ks": "K", "k": "K", "j": "J", "h": "H"}
-                if normalized in nir_alias_to_catalog and nir_alias_to_catalog[normalized] in available_filters:
+                if (
+                    normalized in nir_alias_to_catalog
+                    and nir_alias_to_catalog[normalized] in available_filters
+                ):
                     filter_name = nir_alias_to_catalog[normalized]
                 else:
                     # Try suffix after last underscore or hyphen (e.g. ZTF_i -> i, EFOSC_r784 -> r784)
@@ -641,17 +746,26 @@ class prepare:
                             if suffix in available_filters:
                                 filter_name = suffix
                                 break
-                    if filter_name not in available_filters and normalized in available_filters:
+                    if (
+                        filter_name not in available_filters
+                        and normalized in available_filters
+                    ):
                         filter_name = normalized
 
             # Apply catalog and user filter constraints
-            if filter_name not in available_filters and not self.input_yaml["template_subtraction"]["prepare_templates"]:
+            if (
+                filter_name not in available_filters
+                and not self.input_yaml["template_subtraction"]["prepare_templates"]
+            ):
                 files_removed += 1
                 filters_removed += 1
                 filter_unavailable.append(filter_name)
                 continue
 
-            if self.input_yaml["select_filter"] and not self.input_yaml["template_subtraction"]["prepare_templates"]:
+            if (
+                self.input_yaml["select_filter"]
+                and not self.input_yaml["template_subtraction"]["prepare_templates"]
+            ):
                 # When using select_filter, require the raw header value to be in do_filter
                 if str(fits_filter) not in self.input_yaml["do_filter"]:
                     files_removed += 1
@@ -736,7 +850,11 @@ class prepare:
             base_filepath = os.path.dirname(os.path.abspath(__file__))
             base_database = os.path.join(base_filepath, "databases")
             filters_yml = "filters.yml"
-            required_filters = autophot_yaml(os.path.join(base_database, filters_yml)).load()["default_dmag"].keys()
+            required_filters = (
+                AutophotYaml(os.path.join(base_database, filters_yml))
+                .load()["default_dmag"]
+                .keys()
+            )
 
         if not os.path.isdir(template_dir):
             self.logger.warning(
@@ -761,14 +879,22 @@ class prepare:
                 continue
 
             template_files = glob.glob(os.path.join(expected_template_dir, "*.fits"))
-            psf_model_files = glob.glob(os.path.join(expected_template_dir, "PSF_model_*"))
+            psf_model_files = glob.glob(
+                os.path.join(expected_template_dir, "PSF_model_*")
+            )
             template_files = list(set(template_files) - set(psf_model_files))
-            original_files = glob.glob(os.path.join(expected_template_dir, "*.fits.original"))
+            original_files = glob.glob(
+                os.path.join(expected_template_dir, "*.fits.original")
+            )
 
             if len(original_files) == 1:
                 template_status[filter_x]["status"] = "found"
-                shutil.copyfile(original_files[0], original_files[0].replace(".original", ""))
-                template_status[filter_x]["fpath"] = original_files[0].replace(".original", "")
+                shutil.copyfile(
+                    original_files[0], original_files[0].replace(".original", "")
+                )
+                template_status[filter_x]["fpath"] = original_files[0].replace(
+                    ".original", ""
+                )
             elif len(template_files) == 0:
                 template_status[filter_x]["status"] = "not found"
                 template_status[filter_x]["fpath"] = None
@@ -808,12 +934,19 @@ class prepare:
 
         # Prompt user if issues detected
         if incorrect_setup:
-            quit_answer = input(
-                "\nTemplate directory appears incomplete or ambiguous (missing and/or multiple templates).\n"
-                "Continue anyway and skip problematic filters? [y/N]: "
-            ).strip().lower() or "n"
+            quit_answer = (
+                input(
+                    "\nTemplate directory appears incomplete or ambiguous (missing and/or multiple templates).\n"
+                    "Continue anyway and skip problematic filters? [y/N]: "
+                )
+                .strip()
+                .lower()
+                or "n"
+            )
             if quit_answer not in ("y", "yes"):
-                raise Exception("Please check template directory and subdirectories and try again.")
+                raise Exception(
+                    "Please check template directory and subdirectories and try again."
+                )
 
         template_list = [
             template_status[f]["fpath"]

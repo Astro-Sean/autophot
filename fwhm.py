@@ -39,8 +39,18 @@ from astropy.visualization import ZScaleInterval, ImageNormalize
 from photutils.detection import StarFinder, IRAFStarFinder, DAOStarFinder, find_peaks
 from photutils.background import Background2D, MedianBackground
 from photutils.utils import circular_footprint
-from photutils.segmentation import detect_threshold, detect_sources, deblend_sources, SourceCatalog
-from photutils.centroids import centroid_1dg, centroid_2dg, centroid_com, centroid_quadratic
+from photutils.segmentation import (
+    detect_threshold,
+    detect_sources,
+    deblend_sources,
+    SourceCatalog,
+)
+from photutils.centroids import (
+    centroid_1dg,
+    centroid_2dg,
+    centroid_com,
+    centroid_quadratic,
+)
 from skimage import feature, transform, exposure, morphology, draw
 from lmfit import Model
 from lmfit.models import Gaussian2dModel
@@ -57,6 +67,7 @@ logger = logging.getLogger(__name__)
 
 # --- Constants ---
 SQRT2LOG2 = 2 * np.sqrt(2 * np.log(2))  # 2.354820045
+
 
 class Find_FWHM:
     """
@@ -131,7 +142,9 @@ class Find_FWHM:
         tree = cKDTree(coords)
         distances, _ = tree.query(coords, k=2)
         nearest_distances = distances[:, 1]
-        cleaned_sources = fwhm_table[nearest_distances > min_distance].reset_index(drop=True)
+        cleaned_sources = fwhm_table[nearest_distances > min_distance].reset_index(
+            drop=True
+        )
         self.logger.info(
             f"Cleaned {len(fwhm_table)} sources to {len(cleaned_sources)} with isolation distance [{min_distance}]"
         )
@@ -173,14 +186,25 @@ class Find_FWHM:
         threshold = detect_threshold(image, nsigma=3)
         segment_map = detect_sources(image, threshold, npixels=npixels)
         deblended_map = deblend_sources(
-            image, segment_map, npixels=npixels, contrast=contrast, mode="exponential", progress_bar=False
+            image,
+            segment_map,
+            npixels=npixels,
+            contrast=contrast,
+            mode="exponential",
+            progress_bar=False,
         )
         catalog = SourceCatalog(image, deblended_map)
         coms = np.column_stack((catalog.xcentroid, catalog.ycentroid))
         segment_ids = catalog.label
 
-        source_coords = np.column_stack((coordinates_df["x_pix"], coordinates_df["y_pix"]))
-        all_dists = np.sqrt(((source_coords[:, np.newaxis, :] - coms[np.newaxis, :, :]) ** 2).sum(axis=-1))
+        source_coords = np.column_stack(
+            (coordinates_df["x_pix"], coordinates_df["y_pix"])
+        )
+        all_dists = np.sqrt(
+            ((source_coords[:, np.newaxis, :] - coms[np.newaxis, :, :]) ** 2).sum(
+                axis=-1
+            )
+        )
         coordinates_df["is_isolated"] = True
 
         for i, src_coord in enumerate(source_coords):
@@ -199,9 +223,27 @@ class Find_FWHM:
             norm = ImageNormalize(image, interval=zscale)
             fig, ax = plt.subplots(figsize=(10, 8))
             ax.imshow(image, cmap="gray", origin="lower", norm=norm)
-            ax.contour(deblended_map.data, levels=np.unique(deblended_map.data[deblended_map.data > 0]), colors="red", linewidths=0.5)
-            ax.scatter(cleaned_df["x_pix"], cleaned_df["y_pix"], color="blue", label="Isolated Sources", s=30)
-            ax.scatter(coms[:, 0], coms[:, 1], color="green", marker="x", label="Segment COMs", s=50)
+            ax.contour(
+                deblended_map.data,
+                levels=np.unique(deblended_map.data[deblended_map.data > 0]),
+                colors="red",
+                linewidths=0.5,
+            )
+            ax.scatter(
+                cleaned_df["x_pix"],
+                cleaned_df["y_pix"],
+                color="blue",
+                label="Isolated Sources",
+                s=30,
+            )
+            ax.scatter(
+                coms[:, 0],
+                coms[:, 1],
+                color="green",
+                marker="x",
+                label="Segment COMs",
+                s=50,
+            )
             ax.legend()
             fpath = self.input_yaml["fpath"]
             write_dir = self.input_yaml["write_dir"]
@@ -238,6 +280,7 @@ class Find_FWHM:
         Returns:
             tuple: (linear_sources, fit_params, saturation_range)
         """
+
         def _mad(x: np.ndarray) -> float:
             """Compute robust median absolute deviation (MAD) estimator of scatter."""
             x = np.asarray(x)
@@ -245,7 +288,12 @@ class Find_FWHM:
             return 1.4826 * np.nanmedian(np.abs(x - med))
 
         class ConstrainedSlopeRegressor(BaseEstimator, RegressorMixin):
-            def __init__(self, slope_constraint: float = 0.0, slope_tolerance: float = 0.0, penalty_weight: float = 100.0):
+            def __init__(
+                self,
+                slope_constraint: float = 0.0,
+                slope_tolerance: float = 0.0,
+                penalty_weight: float = 100.0,
+            ):
                 self.slope_constraint = slope_constraint
                 self.slope_tolerance = slope_tolerance
                 self.penalty_weight = penalty_weight
@@ -258,7 +306,9 @@ class Find_FWHM:
                     pred = slope * X.flatten() + intercept
                     mse = np.mean((y - pred) ** 2)
                     slope_diff = abs(slope - self.slope_constraint)
-                    penalty = self.penalty_weight * max(0, slope_diff - self.slope_tolerance)
+                    penalty = self.penalty_weight * max(
+                        0, slope_diff - self.slope_tolerance
+                    )
                     return mse + penalty
 
                 slope_init = 0.0
@@ -300,7 +350,9 @@ class Find_FWHM:
             m0 = np.isfinite(df["flux_AP"].values) & (df["flux_AP"].values > 0)
             m0 &= np.isfinite(df["maxPixel"].values) & (df["maxPixel"].values > 0)
             if "threshold" in df.columns:
-                m0 &= np.isfinite(df["threshold"].values) & (df["threshold"].values >= float(threshold))
+                m0 &= np.isfinite(df["threshold"].values) & (
+                    df["threshold"].values >= float(threshold)
+                )
             if "flags" in df.columns:
                 m0 &= np.isfinite(df["flags"].values) & (df["flags"].values == 0)
             if "ellipticity" in df.columns:
@@ -308,9 +360,17 @@ class Find_FWHM:
                 m0 &= np.isfinite(ell) & (ell <= 0.25)
             if "fwhm" in df.columns:
                 fwhm = df["fwhm"].values
-                med_fwhm = np.nanmedian(fwhm[np.isfinite(fwhm)]) if np.any(np.isfinite(fwhm)) else np.nan
+                med_fwhm = (
+                    np.nanmedian(fwhm[np.isfinite(fwhm)])
+                    if np.any(np.isfinite(fwhm))
+                    else np.nan
+                )
                 if np.isfinite(med_fwhm) and med_fwhm > 0:
-                    m0 &= np.isfinite(fwhm) & (fwhm > 0.6 * med_fwhm) & (fwhm < 1.4 * med_fwhm)
+                    m0 &= (
+                        np.isfinite(fwhm)
+                        & (fwhm > 0.6 * med_fwhm)
+                        & (fwhm < 1.4 * med_fwhm)
+                    )
 
             excluded_sources = df.loc[~m0]
             logger.info(
@@ -339,7 +399,9 @@ class Find_FWHM:
                 df["m_peak_err"] = np.nan
 
             # --- Per-source weights ---
-            var = np.square(df["m_inst_err"].values) + np.square(df["m_peak_err"].values)
+            var = np.square(df["m_inst_err"].values) + np.square(
+                df["m_peak_err"].values
+            )
             with np.errstate(divide="ignore", invalid="ignore"):
                 w = 1.0 / var
             w[~np.isfinite(w)] = 1.0
@@ -356,7 +418,9 @@ class Find_FWHM:
                 return catalog, fit_params, saturation_range
 
             ransac = RANSACRegressor(
-                estimator=ConstrainedSlopeRegressor(slope_constraint=0.0, slope_tolerance=0.0),
+                estimator=ConstrainedSlopeRegressor(
+                    slope_constraint=0.0, slope_tolerance=0.0
+                ),
                 residual_threshold=residual_threshold,
                 max_trials=1000,
                 min_samples=min_samples,
@@ -374,8 +438,14 @@ class Find_FWHM:
             if inlier_mask.sum() >= 10:
                 try:
                     bin_width = 0.5
-                    mag_min, mag_max = float(np.nanmin(m_inst)), float(np.nanmax(m_inst))
-                    if np.isfinite(mag_min) and np.isfinite(mag_max) and mag_max > mag_min:
+                    mag_min, mag_max = float(np.nanmin(m_inst)), float(
+                        np.nanmax(m_inst)
+                    )
+                    if (
+                        np.isfinite(mag_min)
+                        and np.isfinite(mag_max)
+                        and mag_max > mag_min
+                    ):
                         edges = np.arange(mag_min, mag_max + bin_width, bin_width)
                         min_bin_count = 5
                         for i in range(len(edges) - 1):
@@ -389,13 +459,17 @@ class Find_FWHM:
                         # No continuity constraint for linearity: allow inliers in non-contiguous
                         # magnitude bins so the detector linearity fit is not over-restricted.
                 except Exception:
-                    logger.debug("Linearity bin-wise refinement skipped.", exc_info=True)
+                    logger.debug(
+                        "Linearity bin-wise refinement skipped.", exc_info=True
+                    )
 
             df_lin = df.loc[inlier_mask].copy()
             df_out = df.loc[~inlier_mask].copy()
 
             if len(df_lin) < 3:
-                logger.warning("Too few linear inliers after RANSAC and bin-wise filter.")
+                logger.warning(
+                    "Too few linear inliers after RANSAC and bin-wise filter."
+                )
                 return df_lin, fit_params, saturation_range
 
             # Recompute intercept and scatter from final selected inliers
@@ -469,8 +543,12 @@ class Find_FWHM:
                 )
                 xx = np.linspace(np.nanmin(df["m_inst"]), np.nanmax(df["m_inst"]), 200)
                 ax.plot(xx, xx + b, "k--", lw=1.0, label=f"m_peak = m_inst + {b:.3f}")
-                ax.set_xlabel(r"Instrumental magnitude [$-2.5 \log_{10}(\mathrm{Flux})$]")
-                ax.set_ylabel(r"Peak magnitude [$-2.5 \log_{10}(\mathrm{Flux}_{\max})$]")
+                ax.set_xlabel(
+                    r"Instrumental magnitude [$-2.5 \log_{10}(\mathrm{Flux})$]"
+                )
+                ax.set_ylabel(
+                    r"Peak magnitude [$-2.5 \log_{10}(\mathrm{Flux}_{\max})$]"
+                )
                 ax.invert_xaxis()
                 ax.invert_yaxis()
                 ax.grid(alpha=0.3, ls="--", lw=0.6)
@@ -529,7 +607,9 @@ class Find_FWHM:
 
         n_valid = np.isfinite(data).sum()
         if n_valid < 5:
-            logger.debug(f"fit_gaussian: too few valid pixels ({n_valid}), skipping fit.")
+            logger.debug(
+                f"fit_gaussian: too few valid pixels ({n_valid}), skipping fit."
+            )
             return {
                 "fwhmx": np.nan,
                 "fwhmy": np.nan,
@@ -547,16 +627,24 @@ class Find_FWHM:
                 data_min = np.nanmin(data)
                 model = Gaussian2dModel()
                 params = model.make_params()
-                params["centerx"].set(value=x, min=max(1, x - dx), max=(min(width - 1, x + dx)))
-                params["centery"].set(value=y, min=max(1, y - dy), max=(min(height - 1, y + dy)))
-                params["amplitude"].set(value=data_max * 0.25, min=data_min * 1e-6, max=data_max * 1e6)
+                params["centerx"].set(
+                    value=x, min=max(1, x - dx), max=(min(width - 1, x + dx))
+                )
+                params["centery"].set(
+                    value=y, min=max(1, y - dy), max=(min(height - 1, y + dy))
+                )
+                params["amplitude"].set(
+                    value=data_max * 0.25, min=data_min * 1e-6, max=data_max * 1e6
+                )
                 if sigma is not None:
                     min_sigma = 0.5 / SQRT2LOG2
                     max_sigma = 30 / SQRT2LOG2
                     params["sigmax"].set(value=sigma, min=min_sigma, max=max_sigma)
                     params["sigmay"].set(value=sigma, min=min_sigma, max=max_sigma)
                     params["sigmay"].set(expr="sigmax")
-                result = model.fit(data, x=xgrid, y=ygrid, params=params, nan_policy="omit")
+                result = model.fit(
+                    data, x=xgrid, y=ygrid, params=params, nan_policy="omit"
+                )
                 return {
                     "fwhmx": result.params["fwhmx"].value,
                     "fwhmy": result.params["fwhmy"].value,
@@ -567,7 +655,11 @@ class Find_FWHM:
                 }
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1] if exc_tb else "unknown"
+            fname = (
+                os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                if exc_tb
+                else "unknown"
+            )
             lineno = exc_tb.tb_lineno if exc_tb else -1
             logger.error(
                 f"Error in fit_gaussian: {exc_type} in {fname} at line {lineno}: {str(e)}"
@@ -599,10 +691,19 @@ class Find_FWHM:
             logger.warning("Input DataFrame is empty; nothing to clean.")
             return source
         data = np.vstack([source["fwhmx"].values, source["fwhmy"].values])
-        clipped = sigma_clip(data, sigma=sigma, maxiters=maxiters, cenfunc=np.nanmedian, stdfunc=mad_std, axis=1)
+        clipped = sigma_clip(
+            data,
+            sigma=sigma,
+            maxiters=maxiters,
+            cenfunc=np.nanmedian,
+            stdfunc=mad_std,
+            axis=1,
+        )
         combined_mask = np.any(clipped.mask, axis=0)
         num_outliers = np.count_nonzero(combined_mask)
-        self.logger.info(f"Removed {num_outliers} outliers out of {len(source)} sources")
+        self.logger.info(
+            f"Removed {num_outliers} outliers out of {len(source)} sources"
+        )
         self.logger.info(f"Remaining sources: {len(source) - num_outliers}")
         return source.loc[~combined_mask].reset_index(drop=True)
 
@@ -652,7 +753,9 @@ class Find_FWHM:
             # --- Configuration ---
             cfg = getattr(self, "input_yaml", {}) or {}
             src_cfg = cfg.get("source_detection", {}) or {}
-            scale_multiplier = float(src_cfg.get("scale_multiplier", src_cfg.get("scale_multipler", 5.0)))
+            scale_multiplier = float(
+                src_cfg.get("scale_multiplier", src_cfg.get("scale_multipler", 5.0))
+            )
             saturate = float(cfg.get("saturate", 65000.0))
 
             ny, nx = image.shape
@@ -663,17 +766,27 @@ class Find_FWHM:
             if mask_sources_XY_R:
                 yy, xx = np.indices(image.shape)
                 for x0, y0, r in mask_sources_XY_R:
-                    circle = (xx - x0) ** 2 + (yy - y0) ** 2 <= r ** 2
+                    circle = (xx - x0) ** 2 + (yy - y0) ** 2 <= r**2
                     mask = np.logical_or(mask, circle)
 
             # --- Background and noise ---
             use_bkg2d = (nx >= 64) and (ny >= 64)
             if use_bkg2d:
                 box = max(32, int(min(nx, ny) // 20))
-                bkg2d = Background2D(image, box_size=box, filter_size=3, bkg_estimator=MedianBackground(), mask=mask)
+                bkg2d = Background2D(
+                    image,
+                    box_size=box,
+                    filter_size=3,
+                    bkg_estimator=MedianBackground(),
+                    mask=mask,
+                )
                 bkg = bkg2d.background
                 bkg_rms = bkg2d.background_rms
-                mean, med, std = np.nanmean(bkg), np.nanmedian(bkg), np.nanmedian(bkg_rms)
+                mean, med, std = (
+                    np.nanmean(bkg),
+                    np.nanmedian(bkg),
+                    np.nanmedian(bkg_rms),
+                )
             else:
                 mean, med, std = sigma_clipped_stats(image[~mask], sigma=3.0)
                 bkg = np.full_like(image, med)
@@ -681,18 +794,26 @@ class Find_FWHM:
 
             # --- Pre-smoothing ---
             sigma_smooth = max(0.8, 0.42466 * fwhm_initial)
-            kernel = Gaussian2DKernel(sigma_smooth, x_size=7, y_size=7, mode="oversample")
+            kernel = Gaussian2DKernel(
+                sigma_smooth, x_size=7, y_size=7, mode="oversample"
+            )
             smooth = convolve(image - bkg, kernel, normalize_kernel=True)
 
             # --- Direct run with provided fwhm and sigma ---
             if (fwhm is not None) and (sigma is not None):
                 thr = sigma * std
                 finder = IRAFStarFinder(
-                    fwhm=fwhm, threshold=thr, minsep_fwhm=1.0, exclude_border=True, peakmax=0.98 * saturate
+                    fwhm=fwhm,
+                    threshold=thr,
+                    minsep_fwhm=1.0,
+                    exclude_border=True,
+                    peakmax=0.98 * saturate,
                 )
                 tbl = finder(image - med, mask=mask)
                 if tbl is None or len(tbl) == 0:
-                    self.logger.info("No sources found with provided parameters", "warning")
+                    self.logger.info(
+                        "No sources found with provided parameters", "warning"
+                    )
                     return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
                 df = tbl.to_pandas()
@@ -702,14 +823,28 @@ class Find_FWHM:
                 fwhm_list = []
                 half = int(max(default_scale, np.ceil(scale_multiplier * fwhm / 2)))
                 for _, r in df.iterrows():
-                    cut = Cutout2D(image, (float(r.x_pix), float(r.y_pix)), 2 * half, mode="partial", fill_value=np.nan).data
+                    cut = Cutout2D(
+                        image,
+                        (float(r.x_pix), float(r.y_pix)),
+                        2 * half,
+                        mode="partial",
+                        fill_value=np.nan,
+                    ).data
                     fit = self._fit_gaussian_2d(cut)
                     fwhm_list.append(np.nanmean(fit) if fit else np.nan)
                 df["fwhm"] = np.array(fwhm_list, dtype=float)
 
-                fwhm_global = np.nanmedian(df["fwhm"]) if np.isfinite(df["fwhm"]).any() else float(fwhm)
-                scale_out = float(max(default_scale, np.ceil(scale_multiplier * fwhm_global)))
-                self.logger.info(f"Detected {len(df)} sources, FWHM ~ {fwhm_global:.3f} px")
+                fwhm_global = (
+                    np.nanmedian(df["fwhm"])
+                    if np.isfinite(df["fwhm"]).any()
+                    else float(fwhm)
+                )
+                scale_out = float(
+                    max(default_scale, np.ceil(scale_multiplier * fwhm_global))
+                )
+                self.logger.info(
+                    f"Detected {len(df)} sources, FWHM ~ {fwhm_global:.3f} px"
+                )
                 self.logger.info(f"Cutout scale = {scale_out:.1f} px")
                 self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
                 return float(fwhm_global), df.reset_index(drop=True), scale_out
@@ -771,7 +906,9 @@ class Find_FWHM:
             fwhm_meas, s2n_list = [], []
             for _, r in df.iterrows():
                 x0, y0 = float(r["xcentroid"]), float(r["ycentroid"])
-                cut = Cutout2D(image, (x0, y0), 2 * half, mode="partial", fill_value=np.nan).data
+                cut = Cutout2D(
+                    image, (x0, y0), 2 * half, mode="partial", fill_value=np.nan
+                ).data
                 mean_c, med_c, std_c = sigma_clipped_stats(cut, sigma=3.0)
                 fit = self._fit_gaussian_2d(cut)
                 fwhm_meas.append(np.nanmean(fit) if fit else np.nan)
@@ -797,7 +934,9 @@ class Find_FWHM:
 
             # --- Global FWHM and final cutout scale ---
             fwhm_global = float(np.nanmedian(df["fwhm"]))
-            scale_out = float(max(default_scale, np.ceil(scale_multiplier * fwhm_global)))
+            scale_out = float(
+                max(default_scale, np.ceil(scale_multiplier * fwhm_global))
+            )
 
             self.logger.info(f"Accepted sources: {len(df)}")
             self.logger.info(f"Image FWHM ~ {fwhm_global:.3f} px")
@@ -845,7 +984,9 @@ class Find_FWHM:
         Returns:
             tuple: (mask_broadened, bkg, sigma)
         """
-        self.logger.info(border_msg("Searching for streaks using robust Hough Transform"))
+        self.logger.info(
+            border_msg("Searching for streaks using robust Hough Transform")
+        )
         try:
             ny, nx = data.shape
             data_finite = data[np.isfinite(data)]
@@ -875,7 +1016,12 @@ class Find_FWHM:
             # --- Hough transform ---
             hspace, angles, dists = transform.hough_line(edges)
             accum, angles_peaks, dists_peaks = transform.hough_line_peaks(
-                hspace, angles, dists, threshold=hough_threshold * hspace.max(), min_distance=20, min_angle=10
+                hspace,
+                angles,
+                dists,
+                threshold=hough_threshold * hspace.max(),
+                min_distance=20,
+                min_angle=10,
             )
             mask = np.zeros_like(data, dtype=bool)
             streak_count = 0
@@ -885,14 +1031,19 @@ class Find_FWHM:
             for angle, dist in zip(angles_peaks, dists_peaks):
                 x0, y0 = dist * np.array([np.cos(angle), np.sin(angle)])
                 dx, dy = nx * -np.sin(angle), ny * np.cos(angle)
-                x1, y1 = np.clip(int(x0 + dx), 0, nx - 1), np.clip(int(y0 + dy), 0, ny - 1)
-                x2, y2 = np.clip(int(x0 - dx), 0, nx - 1), np.clip(int(y0 - dy), 0, ny - 1)
+                x1, y1 = np.clip(int(x0 + dx), 0, nx - 1), np.clip(
+                    int(y0 + dy), 0, ny - 1
+                )
+                x2, y2 = np.clip(int(x0 - dx), 0, nx - 1), np.clip(
+                    int(y0 - dy), 0, ny - 1
+                )
                 rr, cc = draw.line(y1, x1, y2, x2)
                 if rr.size == 0:
                     continue
                 line_vals = data[rr, cc]
                 if (
-                    np.count_nonzero(line_vals > threshold) / len(line_vals) < min_line_frac
+                    np.count_nonzero(line_vals > threshold) / len(line_vals)
+                    < min_line_frac
                     or np.median(line_vals) < bkg + 3 * sigma
                     or np.hypot(x2 - x1, y2 - y1) < min_len
                 ):
@@ -907,11 +1058,13 @@ class Find_FWHM:
 
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1] if exc_tb else "unknown"
-            lineno = exc_tb.tb_lineno if exc_tb else -1
-            logger.exception(
-                f"Exception {exc_type} in {fname} at line {lineno}: {e}"
+            fname = (
+                os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+                if exc_tb
+                else "unknown"
             )
+            lineno = exc_tb.tb_lineno if exc_tb else -1
+            logger.exception(f"Exception {exc_type} in {fname} at line {lineno}: {e}")
             return np.zeros_like(data, dtype=bool), np.nan, np.nan
 
     def remove_sources_near_spikes(
@@ -939,7 +1092,9 @@ class Find_FWHM:
             self.logger.info("No sources provided. Returning None.")
             return sources, None
 
-        self.logger.info(border_msg(f"Excluding sources within {radius} pixels of spikes"))
+        self.logger.info(
+            border_msg(f"Excluding sources within {radius} pixels of spikes")
+        )
         self.logger.info(f"Total sources before filtering: {len(sources)}")
 
         yy, xx = sources[y_col], sources[x_col]
@@ -948,7 +1103,9 @@ class Find_FWHM:
         y_idx = np.clip(y_idx, 0, spike_mask.shape[0] - 1)
         x_idx = np.clip(x_idx, 0, spike_mask.shape[1] - 1)
         radius = int(radius)
-        dilated_mask = binary_dilation(spike_mask, structure=np.ones((2 * radius + 1, 2 * radius + 1), dtype=bool))
+        dilated_mask = binary_dilation(
+            spike_mask, structure=np.ones((2 * radius + 1, 2 * radius + 1), dtype=bool)
+        )
         keep_mask = ~dilated_mask[y_idx, x_idx]
         sources_clean = sources[keep_mask]
         sources_rejected = sources[~keep_mask]
@@ -960,7 +1117,9 @@ class Find_FWHM:
     #  Internal Helper Functions
     # =============================================================================
 
-    def _pix_dist(self, x0: float, xs: np.ndarray, y0: float, ys: np.ndarray) -> np.ndarray:
+    def _pix_dist(
+        self, x0: float, xs: np.ndarray, y0: float, ys: np.ndarray
+    ) -> np.ndarray:
         """Vectorized pixel distance from one point to arrays of points."""
         return np.hypot(xs - x0, ys - y0)
 
@@ -983,7 +1142,14 @@ class Find_FWHM:
         y0 = (y * np.abs(data)).sum() / total
         amp0 = np.nanmax(data)
         sig0 = max(1.0, 0.5 * min(nx, ny) / 6.0)
-        g0 = models.Gaussian2D(amplitude=amp0, x_mean=x0, y_mean=y0, x_stddev=sig0, y_stddev=sig0, theta=0.0)
+        g0 = models.Gaussian2D(
+            amplitude=amp0,
+            x_mean=x0,
+            y_mean=y0,
+            x_stddev=sig0,
+            y_stddev=sig0,
+            theta=0.0,
+        )
         fitter = fitting.LevMarLSQFitter()
         try:
             with np.errstate(invalid="ignore", divide="ignore"):
@@ -1010,7 +1176,9 @@ class Find_FWHM:
         keep = nn >= min_sep_pix
         return df.loc[keep].copy()
 
-    def _clip_column(self, df: pd.DataFrame, col: str, sigma: float = 3.0, maxiters: int = 5) -> pd.DataFrame:
+    def _clip_column(
+        self, df: pd.DataFrame, col: str, sigma: float = 3.0, maxiters: int = 5
+    ) -> pd.DataFrame:
         """
         Sigma-clip a numeric column and return a filtered DataFrame.
         Uses robust MAD-based std for stability.

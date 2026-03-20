@@ -6,7 +6,6 @@ Created on Wed Sep 28 09:58:29 2022
 @author: seanbrennan
 """
 
-
 # Import all required modules at the top
 import numpy as np
 
@@ -40,6 +39,72 @@ from photutils.segmentation import detect_sources, SourceCatalog, make_2dgaussia
 from photutils.aperture import RectangularAperture
 
 
+class ColoredLevelFormatter(logging.Formatter):
+    """
+    Logging formatter with ANSI color highlights based on log level.
+
+    Uses colors only when stdout is a TTY; otherwise it behaves like a normal
+    logging.Formatter (no ANSI escape sequences).
+    """
+
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    CYAN = "\033[36m"
+    YELLOW = "\033[33m"
+    RED = "\033[31m"
+    GREY = "\033[90m"
+
+    def __init__(self, *args, use_color: bool = True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._use_color = use_color
+
+    def format(self, record: logging.LogRecord) -> str:
+        base = super().format(record)
+        if not self._use_color:
+            return base
+
+        try:
+            use_color = sys.stdout.isatty()
+        except Exception:
+            use_color = False
+        if not use_color:
+            return base
+
+        if record.levelno >= logging.CRITICAL:
+            return f"{self.BOLD}{self.RED}{base}{self.RESET}"
+        if record.levelno >= logging.ERROR:
+            return f"{self.BOLD}{self.RED}{base}{self.RESET}"
+        if record.levelno >= logging.WARNING:
+            return f"{self.BOLD}{self.YELLOW}{base}{self.RESET}"
+        if record.levelno >= logging.DEBUG:
+            # Debug can get lost; keep it readable but subdued.
+            return f"{self.CYAN}{base}{self.RESET}"
+
+        # INFO and below: no special color
+        return base
+
+
+def configure_console_logging(
+    *,
+    level: int = logging.INFO,
+    use_color: bool = True,
+    formatter: logging.Formatter | None = None,
+) -> logging.Handler:
+    """
+    Create a StreamHandler for stdout with optional ANSI color formatting.
+    Caller is responsible for attaching the handler to the root logger.
+    """
+
+    handler = logging.StreamHandler()
+    handler.setLevel(level)
+    if formatter is None:
+        formatter = ColoredLevelFormatter(
+            fmt="%(asctime)s - %(levelname)s - %(message)s",
+            datefmt="%H:%M:%S",
+            use_color=use_color,
+        )
+    handler.setFormatter(formatter)
+    return handler
 
 
 def odd(n: int) -> int:
@@ -48,11 +113,10 @@ def odd(n: int) -> int:
     return n + (n % 2 == 0)
 
 
-
 def log_exception(e: Exception, msg: str = None):
     """
     Logs detailed exception information.
-    
+
     Parameters
     ----------
     e : Exception
@@ -61,33 +125,32 @@ def log_exception(e: Exception, msg: str = None):
         An optional message to display at the top of the log.
     """
     logger = logging.getLogger(__name__)
-    
+
     exc_type, exc_obj, exc_tb = sys.exc_info()
-    fname = os.path.basename(exc_tb.tb_frame.f_code.co_filename) if exc_tb else "unknown"
+    fname = (
+        os.path.basename(exc_tb.tb_frame.f_code.co_filename) if exc_tb else "unknown"
+    )
     lineno = exc_tb.tb_lineno if exc_tb else -1
-    
+
     log_message = ""
     if msg:
         log_message += f"{msg}\n\n"
-        
+
     log_message += (
         f"Type     : {exc_type.__name__ if exc_type else type(e).__name__}\n"
         f"File     : {fname}\n"
         f"Line     : {lineno}\n"
         f"Message  : {str(e)}\n"
-        f"\n"
-        + traceback.format_exc()
+        f"\n" + traceback.format_exc()
     )
-    
-    logger.info(log_message)
 
-    
+    logger.error(log_message)
+
+
 def pad_ones(mask, padding):
-
-
     """
     Expands regions of 1s in a 2D mask to their nearest neighbors by a given amount.
-    
+
     Parameters:
     mask (np.ndarray): A 2D binary array where 1s represent masked pixels.
     padding (int): The number of pixels to expand the regions by.
@@ -100,18 +163,19 @@ def pad_ones(mask, padding):
 
     # Compute the distance transform from the zero regions
     distance = distance_transform_edt(1 - mask)
-    
+
     # Expand the mask where the distance is within the padding radius
     expanded_mask = (distance <= padding).astype(np.uint8)
-    
+
     return expanded_mask
 
-def set_size(width,aspect=1,fraction = 1):
-    '''
+
+def set_size(width, aspect=1, fraction=1):
+    """
      Function to generate size of figures produced by AutoPhot. To specify the dimensions of a figure in matplotlib we use the figsize argument. However, the figsize argument takes inputs in inches and we have the width of our document in pts. To set the figure size we construct a function to convert from pts to inches and to determine an aesthetic figure height using the golden ratio. The golden ratio is given by:
 
      .. math ::
-         
+
         \\phi = (5^{0.5} + 1) / 2 \\approx 1.618
 
     The ratio of the given width and height is set to the golden ratio
@@ -126,8 +190,7 @@ def set_size(width,aspect=1,fraction = 1):
     :return: Returns tuple of width, height in inches ready for use.
     :rtype: Tuple
 
-    '''
-
+    """
 
     # Width of figure
     fig_width_pt = width * fraction
@@ -136,7 +199,7 @@ def set_size(width,aspect=1,fraction = 1):
     inches_per_pt = 1 / 72.27
 
     # Golden ratio to set aesthetic figure height
-    golden_ratio = (5**.5 + 1) / 2
+    golden_ratio = (5**0.5 + 1) / 2
 
     # Figure width in inches
     fig_width_in = fig_width_pt * inches_per_pt
@@ -147,14 +210,15 @@ def set_size(width,aspect=1,fraction = 1):
 
     return fig_dim
 
+
 def convert_to_mjd_astropy(date_string):
 
     try:
         # Try parsing with 'T' separator
-        t = Time(date_string, format='isot', scale='utc')
+        t = Time(date_string, format="isot", scale="utc")
     except ValueError:
         # If parsing fails, try without 'T' separator
-        t = Time(date_string, format='fits', scale='utc')
+        t = Time(date_string, format="fits", scale="utc")
 
     # Access the Modified Julian Date (MJD)
     mjd = t.mjd
@@ -162,29 +226,27 @@ def convert_to_mjd_astropy(date_string):
     return mjd
 
 
-
 def get_image_stats(image, sigma=3, maxiters=None):
-    
+
     # Perform sigma clipping and calculate mean, median, and MAD in one step
     mean_value, median_value, std_value = sigma_clipped_stats(
-                                            image,
-                                            sigma=sigma,
-                                            maxiters=maxiters,
-                                            # background=sigma,
-                                            cenfunc=np.nanmedian,  # Use nanmedian for the center function
-                                            stdfunc=mad_std  # Use mad_std for the standard deviation function
-                                        )
-
-        
+        image,
+        sigma=sigma,
+        maxiters=maxiters,
+        # background=sigma,
+        cenfunc=np.nanmedian,  # Use nanmedian for the center function
+        stdfunc=mad_std,  # Use mad_std for the standard deviation function
+    )
 
     return mean_value, median_value, std_value
 
-def calculate_bins(x,percentiles =  [25, 75]):
-    
+
+def calculate_bins(x, percentiles=[25, 75]):
+
     try:
- 
+
         if not np.any(np.isfinite(x)):
-            return 'auto'  # Return default bins if no finite data
+            return "auto"  # Return default bins if no finite data
         # Your normal bin calculation here
         """
         Calculate the number of bins for a histogram using the Freedman-Diaconis rule.
@@ -199,40 +261,44 @@ def calculate_bins(x,percentiles =  [25, 75]):
         by considering the interquartile range (IQR) and the number of data points.
         """
         # Compute the 25th and 75th percentiles of the data
-        q25, q75 = np.nanpercentile(x,percentiles)
-        
+        q25, q75 = np.nanpercentile(x, percentiles)
+
         # Calculate the interquartile range (IQR)
         iqr = q75 - q25
-        
+
         # Calculate the bin width using the Freedman-Diaconis rule
-        bin_width = 2 * iqr * len(x) ** (-1/3)
-        
+        bin_width = 2 * iqr * len(x) ** (-1 / 3)
+
         # Determine the number of bins
         data_range = np.nanmax(x) - np.nanmin(x)
         bins = round(data_range / bin_width)
-        
+
         return bins
 
-    except: 
-        return 'auto'
+    except Exception:
+        return "auto"
 
 
 def save_to_fits(data, output_filename):
     try:
         # Create a PrimaryHDU object with the data
         hdu = fits.PrimaryHDU(data)
-    
+
         # Create an HDU list and append the PrimaryHDU
         hdulist = fits.HDUList([hdu])
-    
+
         # Write the HDU list to a FITS file
-        hdulist.writeto(output_filename,
-                     overwrite = True,
-                     output_verify = 'silentfix+ignore')
+        hdulist.writeto(
+            output_filename, overwrite=True, output_verify="silentfix+ignore"
+        )
     except Exception as exc:
         logger = logging.getLogger(__name__)
         exc_type, _, exc_tb = sys.exc_info()
-        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1] if exc_tb else "unknown"
+        fname = (
+            os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+            if exc_tb
+            else "unknown"
+        )
         line = exc_tb.tb_lineno if exc_tb else -1
         logger.error(
             "Failed to write FITS file '%s': %s in %s:%d",
@@ -243,13 +309,11 @@ def save_to_fits(data, output_filename):
             exc_info=True,
         )
         return 0, 0
-            
-        
-    
+
     return None
 
 
-def get_distance_modulus(redshift,H0 = 70, omega = 0.3):
+def get_distance_modulus(redshift, H0=70, omega=0.3):
 
     cosmo = FlatLambdaCDM(H0=H0, Om0=omega)
     d = cosmo.luminosity_distance(redshift).value * 1e6
@@ -257,12 +321,14 @@ def get_distance_modulus(redshift,H0 = 70, omega = 0.3):
 
     return dm
 
-class suppress_stdout:
-    
+
+class SuppressStdout:
+
     def __enter__(self):
-        import sys,os
+        import sys, os
+
         self._original_stdout = sys.stdout
-        sys.stdout = open(os.devnull, 'w')
+        sys.stdout = open(os.devnull, "w")
 
     def __exit__(self, exc_type, exc_val, exc_tb):
 
@@ -344,6 +410,7 @@ def beta_psf(n, flux_psf, flux_psf_err):
     beta = np.clip(0.5 * (1 - erf(z)), 0.0, 1.0)
     return beta
 
+
 def border_msg(msg: str, body: str = "-", corner: str = "+") -> str:
     """
     Generate a simple, readable banner string for logging.
@@ -369,10 +436,10 @@ def border_msg(msg: str, body: str = "-", corner: str = "+") -> str:
 # Top level: TELESCOP value (e.g. "1m0-01", "ESO-NTT", "Palomar 48-inch"). Under each:
 #   INSTRUME: instrument name -> instrument config dict.
 #   location (optional): {name, lon, lat, alt} for the site.
-# 
+#
 # Instrument config entry structure (build telescope.yml entries from this):
 INSTRUMENT_ENTRY_STRUCTURE = {
-    "Name": "",           # Human-readable label, e.g. "TELESCOP+INSTRUME"
+    "Name": "",  # Human-readable label, e.g. "TELESCOP+INSTRUME"
     "filter_key_0": "FILTER",
     "mjd": "MJD-OBS",
     "date": "DATE-OBS",
@@ -381,7 +448,7 @@ INSTRUMENT_ENTRY_STRUCTURE = {
     "readnoise": "RDNOISE",
     "airmass": "AIRMASS",
     "exptime": "EXPTIME",
-    "pixel_scale": 0.4,   # float, arcsec/pixel
+    "pixel_scale": 0.4,  # float, arcsec/pixel
     # Filter mappings: header value -> catalog band (e.g. "gp": "g", "rp": "r", "ip": "i")
 }
 
@@ -392,8 +459,12 @@ BUILTIN_TELESCOPE_DEFAULTS = {
             "ZTF/MOSAIC": {
                 "Name": "Palomar 48-inch+ZTF/MOSAIC",
                 "filter_key_0": "FILTER",
-                "ZTF_g": "g", "ZTF_r": "r", "ZTF_i": "i",
-                "ztf_g": "g", "ztf_r": "r", "ztf_i": "i",
+                "ZTF_g": "g",
+                "ZTF_r": "r",
+                "ZTF_i": "i",
+                "ztf_g": "g",
+                "ztf_r": "r",
+                "ztf_i": "i",
                 "mjd": "OBSMJD",
                 "date": "DEC_RATE",
                 "gain": "GAIN",
@@ -406,8 +477,12 @@ BUILTIN_TELESCOPE_DEFAULTS = {
             "ZTF": {
                 "Name": "Palomar 48-inch+ZTF",
                 "filter_key_0": "FILTER",
-                "ZTF_g": "g", "ZTF_r": "r", "ZTF_i": "i",
-                "ztf_g": "g", "ztf_r": "r", "ztf_i": "i",
+                "ZTF_g": "g",
+                "ZTF_r": "r",
+                "ZTF_i": "i",
+                "ztf_g": "g",
+                "ztf_r": "r",
+                "ztf_i": "i",
                 "mjd": "OBSMJD",
                 "date": "DEC_RATE",
                 "gain": "GAIN",
@@ -425,7 +500,11 @@ BUILTIN_TELESCOPE_DEFAULTS = {
             "SDSS": {
                 "Name": "SDSS",
                 "filter_key_0": "FILTER",
-                "g": "g", "r": "r", "i": "i", "z": "z", "u": "u",
+                "g": "g",
+                "r": "r",
+                "i": "i",
+                "z": "z",
+                "u": "u",
                 "mjd": "MJD-OBS",
                 "date": "DATE-OBS",
                 "gain": "GAIN",
@@ -440,7 +519,11 @@ BUILTIN_TELESCOPE_DEFAULTS = {
             "2MASS": {
                 "Name": "2MASS",
                 "filter_key_0": "FILTER",
-                "J": "J", "H": "H", "K": "K", "Ks": "K", "K": "K",
+                "J": "J",
+                "H": "H",
+                "K": "K",
+                "Ks": "K",
+                "K": "K",
                 "mjd": "MJD-OBS",
                 "date": "DATE-OBS",
                 "gain": "GAIN",
@@ -455,8 +538,15 @@ BUILTIN_TELESCOPE_DEFAULTS = {
             "OMEGACAM": {
                 "Name": "ESO-VST/OMEGACAM",
                 "filter_key_0": "FILTER",
-                "g": "g", "r": "r", "i": "i", "z": "z", "u": "u",
-                "g_SDSS": "g", "r_SDSS": "r", "i_SDSS": "i", "u_SDSS": "u",
+                "g": "g",
+                "r": "r",
+                "i": "i",
+                "z": "z",
+                "u": "u",
+                "g_SDSS": "g",
+                "r_SDSS": "r",
+                "i_SDSS": "i",
+                "u_SDSS": "u",
                 "mjd": "MJD-OBS",
                 "date": "DATE-OBS",
                 "gain": "GAIN",
@@ -471,7 +561,10 @@ BUILTIN_TELESCOPE_DEFAULTS = {
             "VIRCAM": {
                 "Name": "ESO-VISTA/VIRCAM",
                 "filter_key_0": "FILTER",
-                "J": "J", "H": "H", "K": "K", "Ks": "K",
+                "J": "J",
+                "H": "H",
+                "K": "K",
+                "Ks": "K",
                 "mjd": "MJD-OBS",
                 "date": "DATE-OBS",
                 "gain": "GAIN",
@@ -514,7 +607,9 @@ def load_telescope_config(wdir):
     # 1) BUILTIN_TELESCOPE_DEFAULTS (code)
     # 2) repo-shipped autophot_db/telescope.yml (if present)
     # 3) user wdir/telescope.yml (if present)
-    repo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "autophot_db", "telescope.yml")
+    repo_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "autophot_db", "telescope.yml"
+    )
     user_path = os.path.join(wdir, "telescope.yml")
     loaded_sources = []
 
@@ -522,7 +617,7 @@ def load_telescope_config(wdir):
         try:
             if path and os.path.isfile(path):
                 with open(path, "r") as stream:
-                    data = yaml.load(stream, Loader=yaml.FullLoader) or {}
+                    data = yaml.safe_load(stream) or {}
                 if data:
                     loaded_sources.append(os.path.abspath(path))
                 return data
@@ -564,7 +659,11 @@ def load_telescope_config(wdir):
     if loaded_sources:
         logger.info("telescope.yml loaded from: %s", " (merged) ".join(loaded_sources))
     else:
-        logger.info("telescope.yml: using built-in defaults only (no file found at %r or %r)", repo_path, user_path)
+        logger.info(
+            "telescope.yml: using built-in defaults only (no file found at %r or %r)",
+            repo_path,
+            user_path,
+        )
     return out
 
 
@@ -696,7 +795,9 @@ def compute_target_crowding(
         for idx in order[: max_neighbors + 1]:
             if not np.isfinite(sep[idx]):
                 continue
-            label = int(idx + 1)  # SourceCatalog order corresponds to labels for simple cases
+            label = int(
+                idx + 1
+            )  # SourceCatalog order corresponds to labels for simple cases
             # Prefer excluding by target_label if possible; otherwise exclude by sep ~ 0.
             if target_label > 0 and label == target_label:
                 continue
@@ -727,7 +828,9 @@ def compute_target_crowding(
         try:
             from scipy.ndimage import binary_dilation
 
-            neighbor_mask = binary_dilation(neighbor_mask, iterations=int(mask_dilate_pix))
+            neighbor_mask = binary_dilation(
+                neighbor_mask, iterations=int(mask_dilate_pix)
+            )
         except Exception:
             pass
 
@@ -751,25 +854,23 @@ def compute_target_crowding(
     }
 
 
-class autophot_yaml():
+class AutophotYaml:
 
-    def __init__(self,filepath = None,dict_name = None,wdir = None):
+    def __init__(self, filepath=None, dict_name=None, wdir=None):
 
-         self.filepath  = filepath
-         self.dict_name = dict_name
-         self.wdir = wdir
+        self.filepath = filepath
+        self.dict_name = dict_name
+        self.wdir = wdir
 
     def load(self):
 
-
         if self.wdir != None:
-            file_path = os.path.join(self.wdir, self.filepath )
+            file_path = os.path.join(self.wdir, self.filepath)
         else:
             file_path = self.filepath
 
-
-        with open(file_path, 'r') as stream:
-            var = yaml.load(stream, Loader=yaml.FullLoader)
+        with open(file_path, "r") as stream:
+            var = yaml.safe_load(stream)
 
         if self.dict_name != None:
             data = var[self.dict_name]
@@ -778,13 +879,11 @@ class autophot_yaml():
 
         return data
 
-    def update(self,tele,inst_key,inst,key,new_val):
+    def update(self, tele, inst_key, inst, key, new_val):
 
+        doc = {key: new_val}
 
-        doc = {key:new_val}
-
-        with open(self.filepath,'r') as yamlfile:
-
+        with open(self.filepath, "r") as yamlfile:
 
             cur_yaml = yaml.safe_load(yamlfile)
             cur_yaml_backup = copy.deepcopy(cur_yaml)
@@ -792,37 +891,32 @@ class autophot_yaml():
             try:
 
                 cur_yaml[tele][inst_key][inst].update(doc)
-            except:
+            except Exception:
                 cur_yaml = cur_yaml_backup
 
+        with open(self.filepath, "w+") as yamlfile:
 
-        with open(self.filepath,'w+') as yamlfile:
+            yaml.safe_dump(cur_yaml, yamlfile, default_flow_style=False)
 
-            yaml.safe_dump(cur_yaml, yamlfile,default_flow_style=False)
+    def create(fname, data):
 
-
-
-    def create(fname,data):
-        
         import yaml
         import os
 
         target_name = fname
-        
-        if '.yml' not in fname:
-            fname+='.yml'
 
-        data_new  = {os.path.basename(target_name.replace('.yml','')):data}
-        with open(fname, 'w') as outfile:
+        if ".yml" not in fname:
+            fname += ".yml"
+
+        data_new = {os.path.basename(target_name.replace(".yml", "")): data}
+        with open(fname, "w") as outfile:
             yaml.dump(data_new, outfile, default_flow_style=False)
-
-
-
 
 
 def get_header(fpath):
     from astropy.io.fits import getheader
     from astropy.io import fits
+
     """
     Robust function to get header from a FITS image for use in AutoPHOT. This function aims to find the correct
     telescope header information based on the "Telescop" header key. FITS images may contain multiple headers, 
@@ -836,10 +930,12 @@ def get_header(fpath):
     try:
         # Attempt to open FITS file with 'ignore_missing_end' to handle incomplete files
         with fits.open(fpath, ignore_missing_end=True) as hdul:
-            hdul.verify('silentfix+ignore')  # Try to fix any issues with the file
+            hdul.verify("silentfix+ignore")  # Try to fix any issues with the file
+
             # FITS keywords are typically uppercase; check case-insensitively for TELESCOP
             def has_telescop(header):
                 return any(k.upper() == "TELESCOP" for k in header.keys())
+
             if has_telescop(hdul[0].header):
                 headinfo = hdul[0].header.copy()
             else:
@@ -861,10 +957,10 @@ def get_header(fpath):
     # If the header is a list (indicating multiple HDUs), combine them
     if isinstance(headinfo, list):
         combined_header = headinfo[0].header
-        
+
         for ext in headinfo[1:]:
             combined_header.update(ext.header)
-            
+
         headinfo = combined_header
 
     return headinfo
@@ -880,6 +976,7 @@ def get_image_and_header(fpath):
     """
     import os
     from astropy.io import fits
+
     try:
         with fits.open(fpath, ignore_missing_end=True) as hdul:
             hdul.verify("silentfix+ignore")
@@ -891,9 +988,11 @@ def get_image_and_header(fpath):
             if len(image.shape) != 2:
                 base = os.path.basename(fpath)
                 raise Exception(f"Warning: {base} is not a 2D array.")
+
             # Header: first HDU with TELESCOP, else primary (match get_header).
             def has_telescop(header):
                 return any(k.upper() == "TELESCOP" for k in header.keys())
+
             if has_telescop(hdul[0].header):
                 headinfo = hdul[0].header.copy()
             else:
@@ -912,7 +1011,7 @@ def get_image_and_header(fpath):
 
 
 def get_image(fpath):
-        
+
     import os
     from astropy.io import fits
 
@@ -928,7 +1027,7 @@ def get_image(fpath):
     """
     try:
         # Try to get 2D image from 'sci' extension
-        image = fits.getdata(fpath, extname='sci')
+        image = fits.getdata(fpath, extname="sci")
 
     except Exception:
         # If 'sci' extension fails, try getting image from the primary HDU
@@ -942,12 +1041,10 @@ def get_image(fpath):
     return image
 
 
-
-
-def concatenate_csv_files(folder_path, output_filename, loc_file='output.csv'):
+def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
     """
     Concatenate multiple CSV files into a single output file, ensuring empty cells are treated as NaN.
-    
+
     Parameters:
     -----------
     folder_path : str
@@ -971,12 +1068,14 @@ def concatenate_csv_files(folder_path, output_filename, loc_file='output.csv'):
                 df = pd.read_csv(
                     file_path,
                     keep_default_na=True,
-                    na_values=['', ' ', 'NA', 'N/A', 'NaN', 'null'],
-                    dtype=str  # Read all columns as string to preserve blanks before NaN replacement
+                    na_values=["", " ", "NA", "N/A", "NaN", "null"],
+                    dtype=str,  # Read all columns as string to preserve blanks before NaN replacement
                 )
-                
+
                 # Replace all empty strings or whitespace-only strings with np.nan
-                df = df.map(lambda x: np.nan if isinstance(x, str) and x.strip() == '' else x)
+                df = df.map(
+                    lambda x: np.nan if isinstance(x, str) and x.strip() == "" else x
+                )
 
                 concatenated_data.append(df)
 
@@ -990,7 +1089,9 @@ def concatenate_csv_files(folder_path, output_filename, loc_file='output.csv'):
     concatenated_data = pd.concat(concatenated_data, ignore_index=True)
 
     # Write the concatenated data to the output file
-    concatenated_data.to_csv(output_filename, index=False, na_rep='NaN')  # Explicit NaN representation
+    concatenated_data.to_csv(
+        output_filename, index=False, na_rep="NaN"
+    )  # Explicit NaN representation
 
     logging.getLogger(__name__).info(
         "Concatenated %d rows of tabular data into '%s'.",
@@ -1000,16 +1101,16 @@ def concatenate_csv_files(folder_path, output_filename, loc_file='output.csv'):
 
     return output_filename
 
-def pix_dist(x1,x2,y1,y2):
 
-    '''
-    Find the linear distance between two sets of points (x1,y1) -> (x2,y2) 
+def pix_dist(x1, x2, y1, y2):
+    """
+    Find the linear distance between two sets of points (x1,y1) -> (x2,y2)
     given by:
-    
+
     .. math ::
-        
+
        d = \\sqrt{(x_1 - x_2)^2 + (y_1 - y_2)^2}
-    
+
     :param x1: x position of point 1
     :type x1: float
     :param x2: x position of point 2
@@ -1021,150 +1122,145 @@ def pix_dist(x1,x2,y1,y2):
     :return: Distance between to points
     :rtype: float
 
-    '''
+    """
 
-    
+    z1 = (x1 - x2) ** 2
+    z2 = (y1 - y2) ** 2
 
-    z1 = (x1-x2)**2
-    z2 = (y1-y2)**2
-
-    r = np.sqrt(z1+z2)
+    r = np.sqrt(z1 + z2)
 
     return r
 
 
-def gauss_1d(x,A,x0,sigma):
+def gauss_1d(x, A, x0, sigma):
+    """
+     1D gaussian function given by:
 
-    '''
-    1D gaussian function given by:
-    
-   .. math::
-        
-   G = A \\times e^{-\\frac{x-x_o}{2\\times \\sigma^2}}
-    
-    where *G* is the 1D gaussian function, *A* is the amplitude, *x* is the linear
-    range of the function, :math:`x_0` is the center of the function, and
-    :math:`\\sigma` is the standard deviation.
-    
-    
-    :param x: Linear range of gaussian function
-    :type x: 1D array
-    :param A: Amplitude of gaussian function
-    :type A: float
-    :param x0: Center/maximum of gaussian function
-    :type x0: float
-    :param sigma: sigma/width of gaussian function
-    :type sigma: float
-    :return: Returns 1 dimensional function with length equal to length of input x
-    array
-    :rtype: 1D array
+    .. math::
 
-    '''
+    G = A \\times e^{-\\frac{x-x_o}{2\\times \\sigma^2}}
 
-    
+     where *G* is the 1D gaussian function, *A* is the amplitude, *x* is the linear
+     range of the function, :math:`x_0` is the center of the function, and
+     :math:`\\sigma` is the standard deviation.
 
-    G = A*np.exp(-(x-x0)**2/(2*sigma**2))
+
+     :param x: Linear range of gaussian function
+     :type x: 1D array
+     :param A: Amplitude of gaussian function
+     :type A: float
+     :param x0: Center/maximum of gaussian function
+     :type x0: float
+     :param sigma: sigma/width of gaussian function
+     :type sigma: float
+     :return: Returns 1 dimensional function with length equal to length of input x
+     array
+     :rtype: 1D array
+
+    """
+
+    G = A * np.exp(-((x - x0) ** 2) / (2 * sigma**2))
 
     return G
 
-def SNR(maxPixel,noiseBkg):
+
+def snr(maxPixel, noiseBkg):
 
     with warnings.catch_warnings():
-    
-        SNR = maxPixel/noiseBkg
-    
-    return SNR
+
+        snr_value = maxPixel / noiseBkg
+
+    return snr_value
 
 
-
-def SNR_err(SNR):
-
-    
-    '''
-    Error associated with signal to noise ratio (S/N). Equation  taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.pdf>`_. Whe can associate the error on the instrumental magnitude of a source as:
+def snr_err(snr_value):
+    """
+     Error associated with signal to noise ratio (S/N). Equation  taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.pdf>`_. Whe can associate the error on the instrumental magnitude of a source as:
 
 
-   .. math :: 
-        
-       m \\pm \\delta m = -2.5 \\times \\log_{10} ( S \\pm N) 
+    .. math ::
 
-       m \\pm \\delta m = -2.5 \\times \\log_{10} ( S  (1 \\pm N / S ) )
+        m \\pm \\delta m = -2.5 \\times \\log_{10} ( S \\pm N)
 
-       m \\pm \\delta m = -2.5 \\times \\log_{10} ( S )   - 2.5 \\times \\log_{10}(1 \\pm N / S ) )
+        m \\pm \\delta m = -2.5 \\times \\log_{10} ( S  (1 \\pm N / S ) )
 
-       \\delta m = \\mp 2.5\\times \\log_{10} (1 + \\frac{1}{S/N}) \\approx \\mp 1.0875 (N / S)
+        m \\pm \\delta m = -2.5 \\times \\log_{10} ( S )   - 2.5 \\times \\log_{10}(1 \\pm N / S ) )
 
-    :param SNR: Signal to noise ratio of a point-like source. 
-    :type SNR: float
-    :return: Error associated with that source's S / N
-    :rtype: float
+        \\delta m = \\mp 2.5\\times \\log_{10} (1 + \\frac{1}{S/N}) \\approx \\mp 1.0875 (N / S)
 
-    '''
-    
-    from numpy import log10,errstate
+     :param snr_value: Signal-to-noise ratio of a point-like source.
+     :type snr_value: float
+     :return: Error associated with that source's S / N
+     :rtype: float
 
-    with errstate(divide='ignore', invalid='ignore'):
-        SNR_err = 2.5 * log10(1 + (1/SNR))
+    """
 
-    return SNR_err
+    from numpy import log10, errstate
 
-def quadratureAdd(values):
+    with errstate(divide="ignore", invalid="ignore"):
+        snr_err_value = 2.5 * log10(1 + (1 / snr_value))
+
+    return snr_err_value
+
+
+def quadrature_add(values):
     from numpy import sqrt
+
     return sqrt(sum([i**2 for i in values]))
 
-def moffat_2d(image, x0,y0, sky , A, image_params):
 
-    '''
-    Returns 2D moffat function which is given by:
-    
-    
-   .. math::
-   
-   M = A\\times (1+\\frac{(x-x_o)^2 + (y-y_0)^2}{\\sigma^2})^{-\\beta} +
-   sky
-    
-    
-    `Credit: ltam
-    <https://www.ltam.lu/physique/astronomy/projects/star_prof/star_prof.html>`_
-    
-    
-    :param image: 2 dimensions grid to map Moffat on
-    :type image: 2D  array
-    :param x0: x-center of Moffat function
-    :type x0: float
-    :param y0: y-center of Moffat function
-    :type y0: float
-    :param sky: sky/offset of Moffat function
-    :type sky: float
-    :param A: Amplitude of Moffat function
-    :type A: float
-    :param image_params: Dictionary containing the keys "alpha" and "beta" with
-    their corresponding values
-    :type image_params: dict
-    :return: 2D Moffat function with the same shape as image input
-    :rtype: 2D  array
+def moffat_2d(image, x0, y0, sky, A, image_params):
+    """
+     Returns 2D moffat function which is given by:
 
-    '''
-    (x,y) = image
 
-    alpha = image_params['alpha']
-    beta = image_params['beta']
+    .. math::
 
-    a = (x-x0)**2
+    M = A\\times (1+\\frac{(x-x_o)^2 + (y-y_0)^2}{\\sigma^2})^{-\\beta} +
+    sky
 
-    b = (y-y0)**2
 
-    c = (a+b)/(alpha**2)
+     `Credit: ltam
+     <https://www.ltam.lu/physique/astronomy/projects/star_prof/star_prof.html>`_
 
-    d = (1+c) ** -beta
 
-    e = (A*d)+sky
+     :param image: 2 dimensions grid to map Moffat on
+     :type image: 2D  array
+     :param x0: x-center of Moffat function
+     :type x0: float
+     :param y0: y-center of Moffat function
+     :type y0: float
+     :param sky: sky/offset of Moffat function
+     :type sky: float
+     :param A: Amplitude of Moffat function
+     :type A: float
+     :param image_params: Dictionary containing the keys "alpha" and "beta" with
+     their corresponding values
+     :type image_params: dict
+     :return: 2D Moffat function with the same shape as image input
+     :rtype: 2D  array
+
+    """
+    x, y = image
+
+    alpha = image_params["alpha"]
+    beta = image_params["beta"]
+
+    a = (x - x0) ** 2
+
+    b = (y - y0) ** 2
+
+    c = (a + b) / (alpha**2)
+
+    d = (1 + c) ** -beta
+
+    e = (A * d) + sky
 
     return e.flatten()
 
 
 def mag(flux):
-    '''
+    """
     Calculate magnitude of a point source (instrumental: -2.5 * log10(flux)).
 
     Does not mutate the input. Non-positive flux values yield NaN in the output.
@@ -1173,7 +1269,7 @@ def mag(flux):
     :type flux: float or array
     :return: Instrumental magnitude; NaN where flux <= 0
     :rtype: float or array
-    '''
+    """
     import pandas as pd
 
     if isinstance(flux, (int, float)):
@@ -1187,11 +1283,11 @@ def mag(flux):
         return -2.5 * np.log10(flux_safe)
     return np.nan
 
+
 def rebin(arr, new_shape):
-    
-    '''
+    """
      Rebin an array into a specific 2D shape
-     
+
     :param arr: Array of values
     :type arr: array
     :param new_shape: New shape with which to rebin array into
@@ -1199,18 +1295,22 @@ def rebin(arr, new_shape):
     :return: rebinned array
     :rtype: array
 
-    '''
-    shape = (new_shape[0], arr.shape[0] // new_shape[0],
-             new_shape[1], arr.shape[1] // new_shape[1])
+    """
+    shape = (
+        new_shape[0],
+        arr.shape[0] // new_shape[0],
+        new_shape[1],
+        arr.shape[1] // new_shape[1],
+    )
     return arr.reshape(shape).mean(-1).mean(1)
 
-def scale_roll(x,xc,m):
-    
-    '''
+
+def scale_roll(x, xc, m):
+    """
     Used in building PSF function. When shiting and aligning residual tables this
     functions translates pixel shifts between different images cutouts.
-    
-    
+
+
     :param x: pixel position
     :type x: gloat
     :param xc: pixel position to which we want to move to
@@ -1220,22 +1320,19 @@ def scale_roll(x,xc,m):
     :return: DESCRIPTION
     :rtype: TYPE
 
-    '''
+    """
 
-    dx = (x - xc)
-    
-    if m !=1:
-        
+    dx = x - xc
+
+    if m != 1:
+
         shift = int(round(dx * m))
-        
+
     else:
-        
+
         shift = int(dx * m)
-        
-        
+
     return shift
-
-
 
 
 def remove_wcs_from_header(header):
@@ -1255,18 +1352,37 @@ def remove_wcs_from_header(header):
     """
     # Prefixes: remove any key that starts with one of these
     wcs_prefixes = [
-        'CRPIX', 'CRVAL', 'CTYPE', 'CD', 'PC', 'CDELT', 'CROTA',
-        'PV', 'LONPOLE', 'LATPOLE', 'EQUINOX', 'WCSNAME', 'CUNIT', 'WCSAXES',
-        'PROJP', 'LTV', 'LTM', 'RADECSYS', 'RADESYS', 'RADYSYS',  # RADYSYS typo in some headers
-        'LONGPOLE', 'TNX', 'SIP_',
+        "CRPIX",
+        "CRVAL",
+        "CTYPE",
+        "CD",
+        "PC",
+        "CDELT",
+        "CROTA",
+        "PV",
+        "LONPOLE",
+        "LATPOLE",
+        "EQUINOX",
+        "WCSNAME",
+        "CUNIT",
+        "WCSAXES",
+        "PROJP",
+        "LTV",
+        "LTM",
+        "RADECSYS",
+        "RADESYS",
+        "RADYSYS",  # RADYSYS typo in some headers
+        "LONGPOLE",
+        "TNX",
+        "SIP_",
     ]
     # For SIP / polynomial distortion: key starts with this stem and contains '_'
     # (e.g. A_ORDER, A_0_0, B_1_2, AP_0_0, BP_2_1, D_*, DP_*)
-    wcs_stem_underscore = ['A_', 'B_', 'AP_', 'BP_', 'D_', 'DP_','PV']
+    wcs_stem_underscore = ["A_", "B_", "AP_", "BP_", "D_", "DP_", "PV"]
 
     keys = list(header.keys())
     for key in keys:
-        if key in ('NAXIS', 'NAXIS1', 'NAXIS2', 'COMMENT', 'HISTORY'):
+        if key in ("NAXIS", "NAXIS1", "NAXIS2", "COMMENT", "HISTORY"):
             continue
         remove = False
         for prefix in wcs_prefixes:
@@ -1274,8 +1390,8 @@ def remove_wcs_from_header(header):
                 remove = True
                 break
         if not remove:
-            stem = key.split('_')[0] + '_' if '_' in key else ''
-            if stem in wcs_stem_underscore and key.startswith(stem.rstrip('_')):
+            stem = key.split("_")[0] + "_" if "_" in key else ""
+            if stem in wcs_stem_underscore and key.startswith(stem.rstrip("_")):
                 remove = True
         if remove:
             try:
@@ -1284,226 +1400,218 @@ def remove_wcs_from_header(header):
                 pass
 
     # Add a comment to indicate WCS was removed
-    header['COMMENT'] = "WCS information removed from this header"
+    header["COMMENT"] = "WCS information removed from this header"
     return header
 
 
 def convert_ra_dec_to_hms_dms(ra_deg, dec_deg):
 
     # Create a SkyCoord object using RA and DEC in degrees
-    coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame='icrs')
-    
+    coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
+
     # Convert to the required format
-    ra_str = coord.ra.to_string(unit=u.hour, sep=':', precision=1)
-    dec_str = coord.dec.to_string(sep=':', precision=1, alwayssign=True)
-    
+    ra_str = coord.ra.to_string(unit=u.hour, sep=":", precision=1)
+    dec_str = coord.dec.to_string(sep=":", precision=1, alwayssign=True)
+
     return f"{ra_str}, {dec_str}"
-    
-    
-def Gaussian(gridx,gridy, x0, y0, sky , A, sigma):
 
-    '''
-    2D gaussian function given by:
-    
-   .. math::
-       
-   G = A \\times e^{-\\frac{(x-x_o)^2 - (y-y_0)^2}{2\\times \\sigma^2}} + sky
-     
-    where *G* is the 2D gaussian function, *A* is the amplitude, *x* and *y* are the linear
-    range of the function, :math:`x_0` and :math:`y_0` are the centers of the function,
-    :math:`\\sigma` is the standard deviation, and *sky* is the amplitude offset of the function
-    
-    :param image: 2 dimensional grid to map Gaussian onto 
-    :type image: 2D array
-    :param x0: x-center of gaussian function
-    :type x0: float
-    :param y0: y-center of gaussian function
-    :type y0: float
-    :param sky: sky/offset of gaussian function
-    :type sky: float
-    :param A: Amplitude of gaussian function
-    :type A: float
-    :param image_params: Dictionary containing the key *sigma* with corresponding value
-    :type image_params: dict
-    :return: 2D gaussian function with the same shape as image input
-    :rtype: 2D array
 
-    '''
+def gaussian(gridx, gridy, x0, y0, sky, A, sigma):
+    """
+     2D gaussian function given by:
 
-    from numpy import exp,array
+    .. math::
+
+    G = A \\times e^{-\\frac{(x-x_o)^2 - (y-y_0)^2}{2\\times \\sigma^2}} + sky
+
+     where *G* is the 2D gaussian function, *A* is the amplitude, *x* and *y* are the linear
+     range of the function, :math:`x_0` and :math:`y_0` are the centers of the function,
+     :math:`\\sigma` is the standard deviation, and *sky* is the amplitude offset of the function
+
+     :param image: 2 dimensional grid to map Gaussian onto
+     :type image: 2D array
+     :param x0: x-center of gaussian function
+     :type x0: float
+     :param y0: y-center of gaussian function
+     :type y0: float
+     :param sky: sky/offset of gaussian function
+     :type sky: float
+     :param A: Amplitude of gaussian function
+     :type A: float
+     :param image_params: Dictionary containing the key *sigma* with corresponding value
+     :type image_params: dict
+     :return: 2D gaussian function with the same shape as image input
+     :rtype: 2D array
+
+    """
+
+    from numpy import exp, array
 
     x = gridx
     y = gridy
-    
 
-    a = array(x-x0)**2
+    a = array(x - x0) ** 2
 
-    b = array(y-y0)**2
+    b = array(y - y0) ** 2
 
-    c = 2*sigma**2
+    c = 2 * sigma**2
 
-    d =  A *  exp( -1*(a+b)/c )
+    d = A * exp(-1 * (a + b) / c)
 
-    e =  d + sky
-    
-    return  e
-
-
-def Moffat(gridx,gridy, x0,y0, sky , A, alpha,beta = 4.675):
-
-    '''
-    Returns 2D moffat function which is given by:
-    
-    
-   .. math::
-    
-   M = A\\times (1+\\frac{(x-x_o)^2 + (y-y_0)^2}{\\sigma^2})^{-\\beta} +
-   sky
-    
-    
-    `Credit: ltam
-    <https://www.ltam.lu/physique/astronomy/projects/star_prof/star_prof.html>`_
-    
-    
-    :param image: 2 dimensions grid to map Moffat on
-    :type image: 2D  array
-    :param x0: x-center of Moffat function
-    :type x0: float
-    :param y0: y-center of Moffat function
-    :type y0: float
-    :param sky: sky/offset of Moffat function
-    :type sky: float
-    :param A: Amplitude of Moffat function
-    :type A: float
-    :param image_params: Dictionary containing the keys "alpha" and "beta" with
-    their corresponding values
-    :type image_params: dict
-    :return: 2D Moffat function with the same shape as image input
-    :rtype: 2D  array
-
-    '''
-    x = gridx
-    y = gridy
-
-    a = (x-x0)**2
-
-    b = (y-y0)**2
-
-    c = (a+b)/(alpha**2)
-
-    d = (1+c) ** -beta
-
-    e = (A*d)+sky
+    e = d + sky
 
     return e
 
 
-def fwhmMoffat(alpha,beta):
-    
-    '''
+def moffat(gridx, gridy, x0, y0, sky, A, alpha, beta=4.675):
+    """
+     Returns 2D moffat function which is given by:
 
-    Calculate FWHM from Moffat function using: 
-    
+
     .. math::
-        
+
+    M = A\\times (1+\\frac{(x-x_o)^2 + (y-y_0)^2}{\\sigma^2})^{-\\beta} +
+    sky
+
+
+     `Credit: ltam
+     <https://www.ltam.lu/physique/astronomy/projects/star_prof/star_prof.html>`_
+
+
+     :param image: 2 dimensions grid to map Moffat on
+     :type image: 2D  array
+     :param x0: x-center of Moffat function
+     :type x0: float
+     :param y0: y-center of Moffat function
+     :type y0: float
+     :param sky: sky/offset of Moffat function
+     :type sky: float
+     :param A: Amplitude of Moffat function
+     :type A: float
+     :param image_params: Dictionary containing the keys "alpha" and "beta" with
+     their corresponding values
+     :type image_params: dict
+     :return: 2D Moffat function with the same shape as image input
+     :rtype: 2D  array
+
+    """
+    x = gridx
+    y = gridy
+
+    a = (x - x0) ** 2
+
+    b = (y - y0) ** 2
+
+    c = (a + b) / (alpha**2)
+
+    d = (1 + c) ** -beta
+
+    e = (A * d) + sky
+
+    return e
+
+
+def fwhm_moffat(alpha, beta):
+    """
+
+    Calculate FWHM from Moffat function using:
+
+    .. math::
+
        FWHM = 2 \\times \alpha \\times \\sqrt{2^{\\frac{1}{\\beta}}-1}
-    
+
     where :math:`\alpha` corresponds to the width of moffat function and :math:`\\beta` describes the wings
-    
+
     :param image_params: Dictionary containing 2 keys: *alpha* corresponding to the fitted width of the moffat function and *beta* describing the wings.
     :type image_params: dict
     :return: Full width half maximum of moffat function
     :rtype: float
 
-    '''
-    
+    """
+
     from numpy import sqrt
 
-    fwhm  = 2 * alpha *  sqrt((2**(1/beta))-1)
-
-    return fwhm
-
-def fwhmGaussian(sigma):
-
-    from numpy import sqrt,log
-    
-    fwhm = 2*sqrt(2*log(2)) * sigma
+    fwhm = 2 * alpha * sqrt((2 ** (1 / beta)) - 1)
 
     return fwhm
 
 
+def fwhm_gaussian(sigma):
 
-def sigmaGaussian(fwhm):
+    from numpy import sqrt, log
 
-    from numpy import sqrt,log
-    
-    sigma= fwhm / (2*sqrt(2*log(2)))
+    fwhm = 2 * sqrt(2 * log(2)) * sigma
+
+    return fwhm
+
+
+def sigma_gaussian(fwhm):
+
+    from numpy import sqrt, log
+
+    sigma = fwhm / (2 * sqrt(2 * log(2)))
 
     return sigma
 
-def alphaMoffat(fwhm,beta = 4.675):
-    
-    '''
 
-    Calculate FWHM from Moffat function using: 
-    
+def alpha_moffat(fwhm, beta=4.675):
+    """
+
+    Calculate FWHM from Moffat function using:
+
     .. math::
-        
+
        FWHM = 2 \\times \alpha \\times \\sqrt{2^{\\frac{1}{\\beta}}-1}
-    
+
     where :math:`\alpha` corresponds to the width of moffat function and :math:`\\beta` describes the wings
-    
+
     :param image_params: Dictionary containing 2 keys: *alpha* corresponding to the fitted width of the moffat function and *beta* describing the wings.
     :type image_params: dict
     :return: Full width half maximum of moffat function
     :rtype: float
 
-    '''
-    
+    """
+
     from numpy import sqrt
 
-
-
-    alpha = 0.5 *fwhm * 1/(sqrt(2**(1/beta) -1))
+    alpha = 0.5 * fwhm * 1 / (sqrt(2 ** (1 / beta) - 1))
 
     return alpha
 
+
 def trim_zeros_slices(arr):
-    
-    '''
+    """
 
     TriM a 2D array of horizontal or vertical rows completely filled with zeroes. This is useful when aligning two images When  doing so if there isn't significant overlap between the two images, the resultant images may have vertical and horizontal lines completely filled with zeroes. This function will accept an image with said zeroed columns/row and return a smaller image with those arrays removed. This function will not exclude partially filled columns or rows.
-    
+
     Credit: `Stackoverflow <https://stackoverflow.com/questions/55917328/numpy-trim-zeros-in-2d-or-3d>`_
 
-    
+
     :param arr: 2D array with horizontal or vertical rows/columns filled with zeroes.
     :type arr: 2D array.
     :return: 2D array which has been cleaned of zero columns and index map for original array.
     :rtype: tuple
 
-    '''
+    """
 
     boolean_array = np.zeros(arr.shape).astype(bool)
-    
+
     slices = tuple(slice(idx.min(), idx.max() + 1) for idx in np.nonzero(arr))
 
     boolean_array[slices] = True
 
-    return arr[slices],boolean_array
-
+    return arr[slices], boolean_array
 
 
 def distance_to_uniform_row_col(image, x, y):
-    
-    
+
     # Ensure the input is a numpy array for easier manipulation
     image = np.array(image)
     rows, cols = image.shape
-    
+
     # Find rows with all same values
     uniform_rows = [i for i in range(rows) if np.all(image[i] == image[i, 0])]
-    
+
     # Find columns with all same values
     uniform_cols = [j for j in range(cols) if np.all(image[:, j] == image[0, j])]
 
@@ -1512,25 +1620,25 @@ def distance_to_uniform_row_col(image, x, y):
         row_distances = [abs(x - row) for row in uniform_rows]
         min_row_distance = min(row_distances)
     else:
-        min_row_distance = float('inf')  # If no uniform rows are found
+        min_row_distance = float("inf")  # If no uniform rows are found
 
     # Calculate the Manhattan distance to the nearest uniform column
     if uniform_cols:
         col_distances = [abs(y - col) for col in uniform_cols]
         min_col_distance = min(col_distances)
     else:
-        min_col_distance = float('inf')  # If no uniform columns are found
+        min_col_distance = float("inf")  # If no uniform columns are found
 
     # Return the minimum distance to a uniform row or column
     return min(min_row_distance, min_col_distance)
 
 
-def PointsInCircum(r, center, n=8):
-    '''
+def points_in_circum(r, center, n=8):
+    """
     Generate series of x,y coordinates a distance r from the specified center,
     rounded to the nearest pixel.
 
-    :param r: Distance from center 
+    :param r: Distance from center
     :type r: float
 
     :param center: (x_center, y_center) pixel coordinates
@@ -1542,26 +1650,35 @@ def PointsInCircum(r, center, n=8):
     :return: List of x,y coordinates placed around the center at angles 2*pi/n * i
              and rounded to nearest pixel
     :rtype: List[Tuple[int, int]]
-    '''
+    """
 
     x_center, y_center = center
-    return [(round(np.cos(2*np.pi/n*i)*r + x_center),
-             round(np.sin(2*np.pi/n*i)*r + y_center)) for i in range(n)]
+    return [
+        (
+            round(np.cos(2 * np.pi / n * i) * r + x_center),
+            round(np.sin(2 * np.pi / n * i) * r + y_center),
+        )
+        for i in range(n)
+    ]
 
 
-def fluxUpperlimit(n,sigma,beta_p = 0.75 ):
-    
-    peak_flux = (n + (np.sqrt(2) * erfinv( (2*beta_p) - 1))) * sigma
+def flux_upper_limit(n, sigma, beta_p=0.75):
+
+    peak_flux = (n + (np.sqrt(2) * erfinv((2 * beta_p) - 1))) * sigma
 
     return peak_flux
 
 
-def create_ds9_region_file(x_list, y_list, radius, 
-                           filename="ds9_region.reg",
-                           color = 'green',
-                           text = '', 
-                           overwrite = False,
-                           correct_position = True):
+def create_ds9_region_file(
+    x_list,
+    y_list,
+    radius,
+    filename="ds9_region.reg",
+    color="green",
+    text="",
+    overwrite=False,
+    correct_position=True,
+):
     """
     Create a DS9 region file containing circular regions for multiple points.
 
@@ -1574,7 +1691,7 @@ def create_ds9_region_file(x_list, y_list, radius,
     Returns:
     - None
     """
-    
+
     cor = 0
     if correct_position:
         cor = 1
@@ -1583,7 +1700,9 @@ def create_ds9_region_file(x_list, y_list, radius,
 
     region_content = ""
     for x, y in zip(x_list, y_list):
-        region_content += f"circle({x+cor}, {y+cor}, {radius}) # color={color} text={text}\n"
+        region_content += (
+            f"circle({x+cor}, {y+cor}, {radius}) # color={color} text={text}\n"
+        )
 
     if overwrite:
         n = "w"
@@ -1595,8 +1714,8 @@ def create_ds9_region_file(x_list, y_list, radius,
         file.write(region_content)
     return 1
 
+
 def write_position_2_ascii(dataframe, output_file):
-    
     """
     Write x_pix and y_pix columns from a Pandas DataFrame to an ASCII file.
 
@@ -1609,21 +1728,26 @@ def write_position_2_ascii(dataframe, output_file):
     """
 
     # Extract x_pix and y_pix columns
-    if 'x_pix' not in dataframe.columns or 'y_pix' not in dataframe.columns:
+    if "x_pix" not in dataframe.columns or "y_pix" not in dataframe.columns:
         raise ValueError("DataFrame must have 'x_pix' and 'y_pix' columns.")
 
-    x_pix_column = dataframe['x_pix'].values
-    y_pix_column = dataframe['y_pix'].values
+    x_pix_column = dataframe["x_pix"].values
+    y_pix_column = dataframe["y_pix"].values
 
     # Combine columns into a new DataFrame
-    output_dataframe = pd.DataFrame({'x_pix': x_pix_column, 'y_pix': y_pix_column})
+    output_dataframe = pd.DataFrame({"x_pix": x_pix_column, "y_pix": y_pix_column})
 
     # Write DataFrame to ASCII file with "X Y" header
-    with open(output_file, 'w') as file:
+    with open(output_file, "w") as file:
         file.write("x y\n")  # Header line
-        output_dataframe.to_csv(file, sep=' ', header=None, index=False,float_format = '%.3f')
+        output_dataframe.to_csv(
+            file, sep=" ", header=None, index=False, float_format="%.3f"
+        )
 
-def print_progress_bar(iterable, total=None, prefix='', length=30, fill='#', title=None):
+
+def print_progress_bar(
+    iterable, total=None, prefix="", length=30, fill="#", title=None
+):
     """
     Print a progress bar in the terminal for a loop.
     Parameters:
@@ -1645,7 +1769,7 @@ def print_progress_bar(iterable, total=None, prefix='', length=30, fill='#', tit
     def format_bar(iteration):
         percent = 100 * (iteration / float(total))
         filled_length = int(length * iteration // total)
-        bar = fill * filled_length + '-' * (length - filled_length)
+        bar = fill * filled_length + "-" * (length - filled_length)
         return f"{prefix} [{bar}] {percent:5.1f}%"
 
     if title:
@@ -1676,11 +1800,11 @@ def print_progress_bar(iterable, total=None, prefix='', length=30, fill='#', tit
         logger.info("%s completed: %d/%d item(s).", loop_label, int(total), int(total))
 
 
-def get_normalized_histogram(data, bins='auto'):
-    
+def get_normalized_histogram(data, bins="auto"):
+
     # Create the histogram
     data = data[~np.isnan(data)]
-    if bins =='auto':
+    if bins == "auto":
         bins = calculate_bins(data)
     hist, bin_edges = np.histogram(data, bins=bins, density=True)
 
@@ -1690,18 +1814,18 @@ def get_normalized_histogram(data, bins='auto'):
     # Normalize the histogram
     normalized_hist = hist / normalization_factor
 
-    return  normalized_hist,bin_edges
+    return normalized_hist, bin_edges
 
 
-def dict_to_string_with_hashtag(dictionary,float_format = '%.3f'):
+def dict_to_string_with_hashtag(dictionary, float_format="%.3f"):
     result = ""
     for key, value in dictionary.items():
-        
-        if isinstance(value,list):
-            if len(value)==1:value = value[0]
-            
+
+        if isinstance(value, list):
+            if len(value) == 1:
+                value = value[0]
+
         if isinstance(value, float):
             value = float_format % value
         result += f"#{key}: {value}\n"
     return result
-

@@ -10,6 +10,7 @@ the SFFT/numpy/NumExpr stack (internal use of multiprocessing primitives). This
 script does not use multiprocessing; run with OMP_NUM_THREADS=1 and the caller
 should use nCPU=1 when SFFT is enabled to minimise leaks and thread exhaustion.
 """
+
 import argparse
 import os
 import ast
@@ -18,10 +19,17 @@ import sys
 import time
 import warnings
 
+from functions import ColoredLevelFormatter
+
 # Limit BLAS/OpenMP threads before any scientific imports (avoids libgomp
 # "Resource temporarily unavailable" when this script is run as a subprocess
 # or alongside other parallel jobs).
-for _env in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+for _env in (
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
     os.environ.setdefault(_env, "1")
 # Optional: pin this process to a single CPU (Linux) so SFFT uses one process, one core.
 try:
@@ -49,7 +57,6 @@ def _odd(n: int) -> int:
     return n + (n % 2 == 0)
 
 
-
 def run_sfft() -> Optional[int]:
     """
     SFFT (Sparse Field Flux Transport) image subtraction pipeline.
@@ -62,8 +69,17 @@ def run_sfft() -> Optional[int]:
     if not logging.getLogger().handlers:
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s'
+            format="%(asctime)s - %(levelname)s - %(message)s",
         )
+        # Add ANSI highlighting for WARN/ERROR/DEBUG in the console.
+        root_logger = logging.getLogger()
+        for h in root_logger.handlers:
+            h.setFormatter(
+                ColoredLevelFormatter(
+                    fmt="%(asctime)s - %(levelname)s - %(message)s",
+                    use_color=True,
+                )
+            )
     logger = logging.getLogger(__name__)
     warnings.filterwarnings("ignore")
     t0_total = time.time()
@@ -78,24 +94,49 @@ def run_sfft() -> Optional[int]:
     log_info(f"Using SFFT version: {sfft.__version__}")
 
     # --- CLI Argument Parsing ---
-    parser = argparse.ArgumentParser(description='SFFT image subtraction.')
-    parser.add_argument('-sci', type=str, required=True, help='Science FITS file path.')
-    parser.add_argument('-ref', type=str, required=True, help='Reference FITS file path.')
-    parser.add_argument('-diff', type=str, default=None, help='Output difference FITS path.')
-    parser.add_argument('-mask', type=str, default=None, help='Boolean mask FITS path.')
-    parser.add_argument('-crowded', action='store_true', help='Use crowded-field solver.')
+    parser = argparse.ArgumentParser(description="SFFT image subtraction.")
+    parser.add_argument("-sci", type=str, required=True, help="Science FITS file path.")
+    parser.add_argument(
+        "-ref", type=str, required=True, help="Reference FITS file path."
+    )
+    parser.add_argument(
+        "-diff", type=str, default=None, help="Output difference FITS path."
+    )
+    parser.add_argument("-mask", type=str, default=None, help="Boolean mask FITS path.")
+    parser.add_argument(
+        "-crowded", action="store_true", help="Use crowded-field solver."
+    )
 
     # Match HOTPANTS: default 0 (constant kernel). Pipeline passes this from config.
-    parser.add_argument('-kernel_order', type=int, default=0, help='Kernel polynomial order (0 = constant, like HOTPANTS -ko).')
-    parser.add_argument('-bg_order', type=int, default=0,
-                        help='Background spatial polynomial order (0=constant). Science and reference are assumed background-subtracted (pipeline subtracts both).')
+    parser.add_argument(
+        "-kernel_order",
+        type=int,
+        default=0,
+        help="Kernel polynomial order (0 = constant, like HOTPANTS -ko).",
+    )
+    parser.add_argument(
+        "-bg_order",
+        type=int,
+        default=0,
+        help="Background spatial polynomial order (0=constant). Science and reference are assumed background-subtracted (pipeline subtracts both).",
+    )
 
-    parser.add_argument('-kernel_half_width', type=float, default=0, help='Kernel half width.')
-    parser.add_argument('-masked_sources', type=str, default='[]',
-                        help='List of [x, y] pairs to ban, e.g., "[[12.3, 45.6], [78.9, 10.2]]".')
-    parser.add_argument('-matching_sources', type=str, default='[]',
-                        help='List of [x, y] pairs to preselect, same format as above.')
-    parser.add_argument('-plot', action='store_true', help='Generate diagnostic plots.')
+    parser.add_argument(
+        "-kernel_half_width", type=float, default=0, help="Kernel half width."
+    )
+    parser.add_argument(
+        "-masked_sources",
+        type=str,
+        default="[]",
+        help='List of [x, y] pairs to ban, e.g., "[[12.3, 45.6], [78.9, 10.2]]".',
+    )
+    parser.add_argument(
+        "-matching_sources",
+        type=str,
+        default="[]",
+        help="List of [x, y] pairs to preselect, same format as above.",
+    )
+    parser.add_argument("-plot", action="store_true", help="Generate diagnostic plots.")
     parser.add_argument(
         "-forceconv",
         type=str,
@@ -104,25 +145,49 @@ def run_sfft() -> Optional[int]:
     )
 
     # Pass gain/saturate values so SFFT does not depend on headers (avoids KeyError when SATURATE missing).
-    parser.add_argument('-gain_sci', type=float, default=None, help='Science image gain (e/ADU). If set, written to FITS before SFFT.')
-    parser.add_argument('-gain_ref', type=float, default=None, help='Reference image gain (e/ADU).')
-    parser.add_argument('-saturate_sci', type=float, default=None, help='Science saturation (ADU). Use a large value (e.g. 1e30) for no limit.')
-    parser.add_argument('-saturate_ref', type=float, default=None, help='Reference saturation (ADU).')
+    parser.add_argument(
+        "-gain_sci",
+        type=float,
+        default=None,
+        help="Science image gain (e/ADU). If set, written to FITS before SFFT.",
+    )
+    parser.add_argument(
+        "-gain_ref", type=float, default=None, help="Reference image gain (e/ADU)."
+    )
+    parser.add_argument(
+        "-saturate_sci",
+        type=float,
+        default=None,
+        help="Science saturation (ADU). Use a large value (e.g. 1e30) for no limit.",
+    )
+    parser.add_argument(
+        "-saturate_ref", type=float, default=None, help="Reference saturation (ADU)."
+    )
 
     # SExtractor background mesh: smaller BACK_SIZE => finer mesh (better for gradients/hosts),
     # but can overfit noise if too small. Typical values: 32, 64, 128.
-    parser.add_argument('-back_size', type=int, default=64, help='SExtractor BACK_SIZE (mesh cell size, px).')
-    parser.add_argument('-back_filtersize', type=int, default=3, help='SExtractor BACK_FILTERSIZE (median filter size, mesh cells).')
     parser.add_argument(
-        '-backphototype',
-        type=str,
-        default='LOCAL',
-        help='SExtractor BACKPHOTO_TYPE for source photometry background: LOCAL or GLOBAL.',
+        "-back_size",
+        type=int,
+        default=64,
+        help="SExtractor BACK_SIZE (mesh cell size, px).",
     )
     parser.add_argument(
-        '-constphotratio',
+        "-back_filtersize",
+        type=int,
+        default=3,
+        help="SExtractor BACK_FILTERSIZE (median filter size, mesh cells).",
+    )
+    parser.add_argument(
+        "-backphototype",
         type=str,
-        default='true',
+        default="LOCAL",
+        help="SExtractor BACKPHOTO_TYPE for source photometry background: LOCAL or GLOBAL.",
+    )
+    parser.add_argument(
+        "-constphotratio",
+        type=str,
+        default="true",
         help="SFFT ConstPhotRatio: 'true' restricts kernel sum (default SFFT behaviour), 'false' fits flux scaling polynomial.",
     )
     args = parser.parse_args()
@@ -137,22 +202,24 @@ def run_sfft() -> Optional[int]:
           - "[x1, y1]" (single pair)
           - "[x1, y1, x2, y2]" (flat list, reshaped to N×2)
         """
-        s = (s or '').strip()
-        if s in ('', '[]', 'None'):
+        s = (s or "").strip()
+        if s in ("", "[]", "None"):
             return None
         try:
             obj = ast.literal_eval(s)
-            arr = np.array(obj, dtype=float)
-            if arr.ndim == 1:
-                if arr.size == 2:
-                    arr = arr.reshape(1, 2)
-                elif arr.size % 2 == 0:
-                    arr = arr.reshape(-1, 2)
+            coords_array = np.array(obj, dtype=float)
+            if coords_array.ndim == 1:
+                if coords_array.size == 2:
+                    coords_array = coords_array.reshape(1, 2)
+                elif coords_array.size % 2 == 0:
+                    coords_array = coords_array.reshape(-1, 2)
                 else:
-                    raise ValueError("Must contain an even number of values to form [x, y] pairs.")
-            if arr.ndim != 2 or arr.shape[1] != 2:
+                    raise ValueError(
+                        "Must contain an even number of values to form [x, y] pairs."
+                    )
+            if coords_array.ndim != 2 or coords_array.shape[1] != 2:
                 raise ValueError("Must be a list of [x, y] pairs.")
-            return arr
+            return coords_array
         except Exception as e:
             log_info(f"Warning: Could not parse list '{s}': {e}. Ignoring.")
             return None
@@ -162,8 +229,7 @@ def run_sfft() -> Optional[int]:
 
     if masked_sources is not None:
         log_info(f"Masked sources: {masked_sources.shape[0]}")
-        
-        
+
     if matching_sources is not None and matching_sources.shape[0] > 0:
         log_info(f"Matching sources (prior): {matching_sources.shape[0]}")
     else:
@@ -185,7 +251,7 @@ def run_sfft() -> Optional[int]:
             raise ValueError(f"Invalid {name} FITS: {e}")
 
     # --- Output Paths ---
-    out_dir = os.path.dirname(os.path.abspath(FITS_SCI)) or '.'
+    out_dir = os.path.dirname(os.path.abspath(FITS_SCI)) or "."
     FITS_DIFF = args.diff or os.path.join(out_dir, f"diff_{os.path.basename(FITS_SCI)}")
 
     # --- Load Headers (Once) ---
@@ -200,7 +266,9 @@ def run_sfft() -> Optional[int]:
     # Write values into headers so SFFT/MeLOn find the keywords (avoids KeyError when SATURATE missing).
     SATURATE_FALLBACK = 1e30  # finite value for "no saturation" (FITS cannot store inf)
 
-    def _ensure_gain_saturate(fits_path: str, gain: Optional[float], saturate: Optional[float], label: str) -> None:
+    def _ensure_gain_saturate(
+        fits_path: str, gain: Optional[float], saturate: Optional[float], label: str
+    ) -> None:
         if gain is None and saturate is None:
             return
         with fits.open(fits_path, mode="update") as hdul:
@@ -218,19 +286,35 @@ def run_sfft() -> Optional[int]:
                 )
                 log_info(f"{label}: set SATURATE = {sval}")
 
-    def _float_or_default(val, default: float) -> float:
-        if val is None:
+    def _float_or_default(input_value, default: float) -> float:
+        if input_value is None:
             return default
         try:
-            v = float(val)
+            v = float(input_value)
             return v if np.isfinite(v) else default
         except (TypeError, ValueError):
             return default
 
-    gain_sci = args.gain_sci if args.gain_sci is not None else _float_or_default(hdr_sci.get("GAIN", hdr_sci.get("gain")), 1.0)
-    gain_ref = args.gain_ref if args.gain_ref is not None else _float_or_default(hdr_ref.get("GAIN", hdr_ref.get("gain")), 1.0)
-    sat_sci_raw = args.saturate_sci if args.saturate_sci is not None else hdr_sci.get("SATURATE", hdr_sci.get("saturate"))
-    sat_ref_raw = args.saturate_ref if args.saturate_ref is not None else hdr_ref.get("SATURATE", hdr_ref.get("saturate"))
+    gain_sci = (
+        args.gain_sci
+        if args.gain_sci is not None
+        else _float_or_default(hdr_sci.get("GAIN", hdr_sci.get("gain")), 1.0)
+    )
+    gain_ref = (
+        args.gain_ref
+        if args.gain_ref is not None
+        else _float_or_default(hdr_ref.get("GAIN", hdr_ref.get("gain")), 1.0)
+    )
+    sat_sci_raw = (
+        args.saturate_sci
+        if args.saturate_sci is not None
+        else hdr_sci.get("SATURATE", hdr_sci.get("saturate"))
+    )
+    sat_ref_raw = (
+        args.saturate_ref
+        if args.saturate_ref is not None
+        else hdr_ref.get("SATURATE", hdr_ref.get("saturate"))
+    )
     sat_sci = _float_or_default(sat_sci_raw, SATURATE_FALLBACK)
     sat_ref = _float_or_default(sat_ref_raw, SATURATE_FALLBACK)
 
@@ -238,9 +322,11 @@ def run_sfft() -> Optional[int]:
     _ensure_gain_saturate(FITS_REF, gain_ref, sat_ref, "Reference")
 
     # --- FWHM and Gain ---
-    template_fwhm = float(hdr_ref.get('FWHM', 3.0))
-    science_fwhm = float(hdr_sci.get('FWHM', 3.0))
-    log_info(f"Science FWHM: {science_fwhm:.1f} pixels | Template FWHM: {template_fwhm:.1f} pixels")
+    template_fwhm = float(hdr_ref.get("FWHM", 3.0))
+    science_fwhm = float(hdr_sci.get("FWHM", 3.0))
+    log_info(
+        f"Science FWHM: {science_fwhm:.1f} pixels | Template FWHM: {template_fwhm:.1f} pixels"
+    )
 
     # --- Kernel and Detection Parameters ---
     fwhm_min = min(template_fwhm, science_fwhm)
@@ -258,15 +344,15 @@ def run_sfft() -> Optional[int]:
     # slightly larger kernel here can improve SFFT stability.
     if float(args.kernel_half_width) == 0:
         kernel_half_width = int(_odd(max(5, np.ceil(FWHM * 2))))
-        log_info(f'Auto kernel half-width: 2 * FWHM = {kernel_half_width} px')
+        log_info(f"Auto kernel half-width: 2 * FWHM = {kernel_half_width} px")
     else:
         kernel_half_width = float(args.kernel_half_width)
 
     if kernel_half_width % 2 == 0:
         kernel_half_width += 1
-        log_info(f'Adjusted kernel half width to odd: {kernel_half_width:.1f} px')
+        log_info(f"Adjusted kernel half width to odd: {kernel_half_width:.1f} px")
     else:
-        log_info(f'Using kernel half width: {kernel_half_width:.1f} px')
+        log_info(f"Using kernel half width: {kernel_half_width:.1f} px")
 
     # Boundary: strip where convolution is invalid. Use kernel half-width (minimal)
     # so the output diff image is as large as possible; was 3*fwhm_max which made output narrow.
@@ -289,9 +375,9 @@ def run_sfft() -> Optional[int]:
     #     import cupy  # noqa: F401
     #     BACKEND_4SUBTRACT = 'Cupy'
     # except Exception:
-    BACKEND_4SUBTRACT = 'Numpy'
+    BACKEND_4SUBTRACT = "Numpy"
 
-    CUDA_DEVICE_4SUBTRACT = '0'
+    CUDA_DEVICE_4SUBTRACT = "0"
 
     # Use 1 thread for SFFT internals to avoid libgomp/process limits when run
     # as a subprocess or on HPC (avoids "Thread creation failed" and semaphore leaks).
@@ -303,8 +389,8 @@ def run_sfft() -> Optional[int]:
     ForceConv = str(getattr(args, "forceconv", "REF")).upper().strip()
     if ForceConv not in ("REF", "SCI"):
         raise ValueError(f"Invalid -forceconv='{ForceConv}'; expected 'REF' or 'SCI'.")
-    GAIN_KEY = 'GAIN'
-    SATUR_KEY = 'SATURATE'
+    GAIN_KEY = "GAIN"
+    SATUR_KEY = "SATURATE"
 
     kernel_poly_order = args.kernel_order
     bg_poly_order = max(0, int(args.bg_order))
@@ -331,7 +417,9 @@ def run_sfft() -> Optional[int]:
     elif _cpr in ("false", "0", "no", "n"):
         constant_phot_ratio = False
     else:
-        raise ValueError(f"Invalid -constphotratio='{args.constphotratio}'; expected true/false.")
+        raise ValueError(
+            f"Invalid -constphotratio='{args.constphotratio}'; expected true/false."
+        )
 
     # sfft defaults: StarExt_iter=2 for crowded; 4 for sparse.
     StarExt_iter = 2 if is_crowded else 4
@@ -349,7 +437,9 @@ def run_sfft() -> Optional[int]:
 
     BACK_SIZE = int(max(16, args.back_size))
     BACK_FILTERSIZE = int(max(1, args.back_filtersize))
-    log_info(f"SExtractor background mesh: BACK_SIZE={BACK_SIZE} px, BACK_FILTERSIZE={BACK_FILTERSIZE}")
+    log_info(
+        f"SExtractor background mesh: BACK_SIZE={BACK_SIZE} px, BACK_FILTERSIZE={BACK_FILTERSIZE}"
+    )
 
     COARSE_VAR_REJECTION = True
     # UPDATED: tighter photometric dev threshold
@@ -402,7 +492,9 @@ def run_sfft() -> Optional[int]:
                         best_name = name
                         best_mask = m
 
-                prior_ban_mask = best_mask if best_mask is not None else candidates[0][1]
+                prior_ban_mask = (
+                    best_mask if best_mask is not None else candidates[0][1]
+                )
                 if best_name is not None:
                     log_info(
                         f"SFFT chose mask orientation '{best_name}' "
@@ -446,7 +538,9 @@ def run_sfft() -> Optional[int]:
         if args.crowded:
             # Crowded-field subtraction (ECP): no prior source list; uses SExtractor + masking.
             log_info("Running crowded-field subtraction (ECP).")
-            fits_solution = os.path.join(out_dir, "sfft_solution.fits") if FITS_DIFF else None
+            fits_solution = (
+                os.path.join(out_dir, "sfft_solution.fits") if FITS_DIFF else None
+            )
             # GAIN and SATURATE have been written to both FITS headers above.
             result = Easy_CrowdedPacket.ECP(
                 FITS_REF=FITS_REF,
@@ -463,7 +557,7 @@ def run_sfft() -> Optional[int]:
                 MaskSatContam=True,
                 GAIN_KEY=GAIN_KEY,
                 SATUR_KEY=SATUR_KEY,
-                BACK_TYPE='MANUAL',
+                BACK_TYPE="MANUAL",
                 BACK_VALUE=BACK_VALUE,
                 BACK_SIZE=BACK_SIZE,
                 BACK_FILTERSIZE=BACK_FILTERSIZE,
@@ -489,30 +583,57 @@ def run_sfft() -> Optional[int]:
             # ECP may write FITS_DIFF itself; if we have diff_image and file missing, write it
             if diff_image is not None and FITS_DIFF and not os.path.isfile(FITS_DIFF):
                 try:
-                    with fits.open(FITS_SCI, mode='readonly') as hdl:
+                    with fits.open(FITS_SCI, mode="readonly") as hdl:
                         hdu = hdl[0].copy()
                         # SFFT uses (ny, nx) row-major; FITS is (nx, ny) in header
-                        hdu.data = diff_image.T if diff_image.shape[0] != hdu.data.T.shape[0] else diff_image
+                        hdu.data = (
+                            diff_image.T
+                            if diff_image.shape[0] != hdu.data.T.shape[0]
+                            else diff_image
+                        )
                         hdu.writeto(FITS_DIFF, overwrite=True)
                 except Exception as e:
                     log_info(f"Warning: Could not write ECP diff to {FITS_DIFF}: {e}")
             # Optional: write a minimal matching-sources CSV from ECP catalog if present
-            cat_key = 'SExCatalog-SubSource'
+            cat_key = "SExCatalog-SubSource"
             if cat_key in prep_data:
                 catalog = prep_data[cat_key]
-                matched_sources = catalog.to_pandas() if hasattr(catalog, 'to_pandas') else pd.DataFrame(catalog)
-                log_info(f'Number of sources used in crowded-field matching: {len(matched_sources)}')
-                xcol = 'X_IMAGE_REF_SCI_MEAN' if 'X_IMAGE_REF_SCI_MEAN' in matched_sources.columns else None
-                ycol = 'Y_IMAGE_REF_SCI_MEAN' if 'Y_IMAGE_REF_SCI_MEAN' in matched_sources.columns else None
+                matched_sources = (
+                    catalog.to_pandas()
+                    if hasattr(catalog, "to_pandas")
+                    else pd.DataFrame(catalog)
+                )
+                log_info(
+                    f"Number of sources used in crowded-field matching: {len(matched_sources)}"
+                )
+                xcol = (
+                    "X_IMAGE_REF_SCI_MEAN"
+                    if "X_IMAGE_REF_SCI_MEAN" in matched_sources.columns
+                    else None
+                )
+                ycol = (
+                    "Y_IMAGE_REF_SCI_MEAN"
+                    if "Y_IMAGE_REF_SCI_MEAN" in matched_sources.columns
+                    else None
+                )
                 if xcol is None:
-                    for a, b in [('x_center', 'y_center'), ('X_IMAGE_REF_SCI_MEAN', 'Y_IMAGE_REF_SCI_MEAN')]:
-                        if a in matched_sources.columns and b in matched_sources.columns:
+                    for a, b in [
+                        ("x_center", "y_center"),
+                        ("X_IMAGE_REF_SCI_MEAN", "Y_IMAGE_REF_SCI_MEAN"),
+                    ]:
+                        if (
+                            a in matched_sources.columns
+                            and b in matched_sources.columns
+                        ):
                             xcol, ycol = a, b
                             break
-                out_csv = os.path.join(out_dir, 'sfft_matching_sources.csv')
+                out_csv = os.path.join(out_dir, "sfft_matching_sources.csv")
                 if xcol and ycol:
                     df_out = matched_sources[[xcol, ycol]].rename(
-                        columns={xcol: 'X_IMAGE_REF_SCI_MEAN', ycol: 'Y_IMAGE_REF_SCI_MEAN'}
+                        columns={
+                            xcol: "X_IMAGE_REF_SCI_MEAN",
+                            ycol: "Y_IMAGE_REF_SCI_MEAN",
+                        }
                     )
                     df_out.to_csv(out_csv, index=False)
                 else:
@@ -531,7 +652,7 @@ def run_sfft() -> Optional[int]:
                     KerHWLimit=KerHWLimit,
                     KerPolyOrder=kernel_poly_order,
                     ForceConv=ForceConv,
-                    BACK_TYPE='MANUAL',
+                    BACK_TYPE="MANUAL",
                     BACK_VALUE=BACK_VALUE,
                     BACK_SIZE=BACK_SIZE,
                     BACK_FILTERSIZE=BACK_FILTERSIZE,
@@ -566,7 +687,7 @@ def run_sfft() -> Optional[int]:
                     ONLY_FLAGS=None,
                     BACKEND_4SUBTRACT=BACKEND_4SUBTRACT,
                     CUDA_DEVICE_4SUBTRACT=CUDA_DEVICE_4SUBTRACT,
-                    NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT
+                    NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
                 )
             except np.linalg.LinAlgError as e:
                 # Degenerate kernel design matrix (e.g. too few / collinear sources
@@ -585,7 +706,7 @@ def run_sfft() -> Optional[int]:
                     KerHWLimit=KerHWLimit,
                     KerPolyOrder=kernel_poly_order,
                     ForceConv=ForceConv,
-                    BACK_TYPE='MANUAL',
+                    BACK_TYPE="MANUAL",
                     BACK_VALUE=BACK_VALUE,
                     BACK_SIZE=BACK_SIZE,
                     BACK_FILTERSIZE=BACK_FILTERSIZE,
@@ -618,39 +739,58 @@ def run_sfft() -> Optional[int]:
                     ONLY_FLAGS=[0, 1],
                     BACKEND_4SUBTRACT=BACKEND_4SUBTRACT,
                     CUDA_DEVICE_4SUBTRACT=CUDA_DEVICE_4SUBTRACT,
-                    NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT
+                    NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
                 )
             # ESP returns (diff_image, prep_data, ...); support tuple or list.
             if len(result) < 2:
-                raise ValueError(f"SFFT ESP returned {len(result)} value(s), expected at least 2")
+                raise ValueError(
+                    f"SFFT ESP returned {len(result)} value(s), expected at least 2"
+                )
             diff_image, prep_data = result[0], result[1]
-            cat_key = 'SExCatalog-SubSource'
+            cat_key = "SExCatalog-SubSource"
             if cat_key not in prep_data:
-                raise KeyError(f"SFFT prep_data missing '{cat_key}'; incompatible SFFT version?")
+                raise KeyError(
+                    f"SFFT prep_data missing '{cat_key}'; incompatible SFFT version?"
+                )
             catalog = prep_data[cat_key]
-            matched_sources = catalog.to_pandas() if hasattr(catalog, 'to_pandas') else pd.DataFrame(catalog)
+            matched_sources = (
+                catalog.to_pandas()
+                if hasattr(catalog, "to_pandas")
+                else pd.DataFrame(catalog)
+            )
 
-            log_info(f'Number of sources used in matching: {len(matched_sources)}')
+            log_info(f"Number of sources used in matching: {len(matched_sources)}")
 
             # main.py expects columns X_IMAGE_REF_SCI_MEAN, Y_IMAGE_REF_SCI_MEAN
-            xcol = 'X_IMAGE_REF_SCI_MEAN' if 'X_IMAGE_REF_SCI_MEAN' in matched_sources.columns else None
-            ycol = 'Y_IMAGE_REF_SCI_MEAN' if 'Y_IMAGE_REF_SCI_MEAN' in matched_sources.columns else None
+            xcol = (
+                "X_IMAGE_REF_SCI_MEAN"
+                if "X_IMAGE_REF_SCI_MEAN" in matched_sources.columns
+                else None
+            )
+            ycol = (
+                "Y_IMAGE_REF_SCI_MEAN"
+                if "Y_IMAGE_REF_SCI_MEAN" in matched_sources.columns
+                else None
+            )
             if xcol is None or ycol is None:
-                for a, b in [('x_center', 'y_center'), ('X_IMAGE_REF_SCI_MEAN', 'Y_IMAGE_REF_SCI_MEAN')]:
+                for a, b in [
+                    ("x_center", "y_center"),
+                    ("X_IMAGE_REF_SCI_MEAN", "Y_IMAGE_REF_SCI_MEAN"),
+                ]:
                     if a in matched_sources.columns and b in matched_sources.columns:
                         xcol, ycol = a, b
                         break
-            out_csv = os.path.join(out_dir, 'sfft_matching_sources.csv')
+            out_csv = os.path.join(out_dir, "sfft_matching_sources.csv")
             if xcol and ycol:
                 df_out = matched_sources[[xcol, ycol]].rename(
-                    columns={xcol: 'X_IMAGE_REF_SCI_MEAN', ycol: 'Y_IMAGE_REF_SCI_MEAN'}
+                    columns={xcol: "X_IMAGE_REF_SCI_MEAN", ycol: "Y_IMAGE_REF_SCI_MEAN"}
                 )
                 df_out.to_csv(out_csv, index=False)
             else:
                 matched_sources.to_csv(out_csv, index=False)
 
         try:
-            convd = fits.getheader(FITS_DIFF).get('CONVD', 'UNKNOWN')
+            convd = fits.getheader(FITS_DIFF).get("CONVD", "UNKNOWN")
             log_info(f"[{convd}] is convolved in subtraction.")
         except Exception:
             pass
@@ -660,10 +800,11 @@ def run_sfft() -> Optional[int]:
 
         # --- Save Fitted-Pixel Visuals (sequential to avoid extra processes / semaphore leaks) ---
         if args.plot:
+
             def save_fitted_pix(label: str, fits_path: str) -> None:
                 try:
-                    pix_a = prep_data.get(f'PixA_{label}')
-                    active_mask = prep_data.get('Active-Mask')
+                    pix_a = prep_data.get(f"PixA_{label}")
+                    active_mask = prep_data.get("Active-Mask")
                     if pix_a is None or active_mask is None:
                         return
                     sky, sky_sig = SkyLevel_Estimator.SLE(PixA_obj=pix_a)
@@ -672,48 +813,70 @@ def run_sfft() -> Optional[int]:
                     pix_a_vis[~active_mask] = noise[~active_mask]
                     out_path = os.path.join(
                         out_dir,
-                        f"{os.path.basename(fits_path).replace('.fits', '')}.fittedPix.fits"
+                        f"{os.path.basename(fits_path).replace('.fits', '')}.fittedPix.fits",
                     )
-                    with fits.open(fits_path, mode='readonly') as hdl:
+                    with fits.open(fits_path, mode="readonly") as hdl:
                         hdl[0].data = pix_a_vis.T
                         hdl.writeto(out_path, overwrite=True)
                 except Exception as e:
                     log_info(f"Warning: Failed to save fitted-pixel for {label}: {e}")
 
-            for _label, _path in [('SCI', FITS_SCI), ('REF', FITS_REF)]:
+            for _label, _path in [("SCI", FITS_SCI), ("REF", FITS_REF)]:
                 save_fitted_pix(_label, _path)
 
         # --- Diagnostic Plot (Parallel) ---
         if args.plot:
+
             def generate_plot() -> None:
                 try:
                     import matplotlib
-                    matplotlib.use('agg')
+
+                    matplotlib.use("agg")
                     import matplotlib.pyplot as plt
-                    ast_ss = prep_data.get('SExCatalog-SubSource')
+
+                    ast_ss = prep_data.get("SExCatalog-SubSource")
                     if ast_ss is None or len(ast_ss) == 0:
                         return
-                    x_data = ast_ss['MAG_REF_REF']
-                    ex_data = ast_ss['MAGERR_REF_REF']
-                    y_data = ast_ss['MAG_REF_SCI'] - ast_ss['MAG_REF_REF']
-                    ey_data = ast_ss['MAGERR_REF_SCI']
+                    x_data = ast_ss["MAG_REF_REF"]
+                    ex_data = ast_ss["MAGERR_REF_REF"]
+                    y_data = ast_ss["MAG_REF_SCI"] - ast_ss["MAG_REF_REF"]
+                    ey_data = ast_ss["MAGERR_REF_SCI"]
                     median = np.median(y_data)
-                    lower, upper = median - CVREJ_MAGD_THRESH, median + CVREJ_MAGD_THRESH
+                    lower, upper = (
+                        median - CVREJ_MAGD_THRESH,
+                        median + CVREJ_MAGD_THRESH,
+                    )
                     fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
                     ax.errorbar(
-                        x_data, y_data, xerr=ex_data, yerr=ey_data,
-                        fmt='o', markersize=3.5, mfc='none', capsize=2.5,
-                        elinewidth=0.9, markeredgewidth=0.9, alpha=0.85,
-                        label='MAG(SCI) - MAG(REF)'
+                        x_data,
+                        y_data,
+                        xerr=ex_data,
+                        yerr=ey_data,
+                        fmt="o",
+                        markersize=3.5,
+                        mfc="none",
+                        capsize=2.5,
+                        elinewidth=0.9,
+                        markeredgewidth=0.9,
+                        alpha=0.85,
+                        label="MAG(SCI) - MAG(REF)",
                     )
-                    ax.hlines([median, lower, upper], xmin=np.nanmin(x_data), xmax=np.nanmax(x_data),
-                              linestyles=(0, (5, 2)), linewidth=1.2, colors='C1',
-                              label='median / thresholds')
-                    ax.set_xlabel('MAG_REF (REF)')
-                    ax.set_ylabel('MAG_REF (SCI) - MAG_REF (REF)')
-                    ax.grid(True, which='both', linestyle=':', linewidth=0.5, alpha=0.7)
+                    ax.hlines(
+                        [median, lower, upper],
+                        xmin=np.nanmin(x_data),
+                        xmax=np.nanmax(x_data),
+                        linestyles=(0, (5, 2)),
+                        linewidth=1.2,
+                        colors="C1",
+                        label="median / thresholds",
+                    )
+                    ax.set_xlabel("MAG_REF (REF)")
+                    ax.set_ylabel("MAG_REF (SCI) - MAG_REF (REF)")
+                    ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
                     ax.legend(fontsize=9, framealpha=1)
-                    plt.savefig(os.path.join(out_dir, 'varcheck.pdf'), bbox_inches='tight')
+                    plt.savefig(
+                        os.path.join(out_dir, "varcheck.pdf"), bbox_inches="tight"
+                    )
                     plt.close(fig)
                 except Exception as e:
                     log_info(f"Warning: Failed to generate diagnostic plot: {e}")
@@ -722,7 +885,11 @@ def run_sfft() -> Optional[int]:
 
     except Exception as e:
         exc_type, _, exc_tb = sys.exc_info()
-        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1] if exc_tb else 'unknown'
+        fname = (
+            os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+            if exc_tb
+            else "unknown"
+        )
         line = exc_tb.tb_lineno if exc_tb else -1
         log_info(f"Fatal Error: {exc_type} in {fname} at line {line}: {e}")
         return None

@@ -1,34 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Limiting magnitude estimation via probabilistic background sampling and
-PSF-injection / recovery experiments.
+Limiting-magnitude estimation utilities.
 
-Optimisations vs. original
---------------------------
-1.  All imports moved to module level - no more re-importing numpy/logging/etc.
-    inside method bodies on every call.
-2.  Redundant local re-definition of gauss_1d removed - uses the one already
-    imported from `functions`.
-3.  ProcessPoolExecutor created ONCE per getInjectedLimit call and reused for
-    every run_trials_at_mag invocation (bracket + bisect + plot).  The original
-    code opened and closed a new Pool on every magnitude trial - easily 40-60
-    pool creations per image.
-4.  _fake_aperture_worker no longer re-imports numpy inside the worker body.
-5.  Mask accumulation in getProbableLimit vectorised with np.any over a pre-built
-    stack instead of a Python list comprehension over full-image arrays.
-6.  bracket_steps / bisect_steps stored as instance-level flags rather than
-    checked with locals() (fragile and PEP-20 unfriendly).
-7.  Oversampled PSF grid computed exactly once; the duplicate meshgrid block
-    in getInjectedLimit has been removed.
-8.  flux_for_mag memoised with functools.lru_cache inside getInjectedLimit so
-    repeated bracket/bisect calls at the same magnitude don't redo the pow().
-9.  getCutout called once for both science and RMS maps before the main loop
-    rather than twice separately.
-10. _downsample_psf_improved uses reshape+mean (already good); unnecessary
-    scipy import removed (uniform_filter was imported but never used there).
-11. Minor: np.ceil(...) results cast to int immediately to avoid downstream
-    type errors; all f-strings use consistent precision.
+This module supports both background-based limiting estimates and injection/
+recovery experiments by simulating PSF sources into science cutouts and
+measuring the detection threshold required for robust photometry.
 """
 
 # ---------------------------------------------------------------------------
@@ -52,6 +29,7 @@ def _pool_or_serial(n_jobs: int):
     with ProcessPoolExecutor(max_workers=n_jobs) as pool:
         yield pool
 
+
 # ---------------------------------------------------------------------------
 # Third-party
 # ---------------------------------------------------------------------------
@@ -70,21 +48,21 @@ from photutils.aperture import CircularAperture
 # ---------------------------------------------------------------------------
 from functions import (
     set_size,
-    gauss_1d,          # used directly - NOT redefined inside methods
-    fluxUpperlimit,
+    gauss_1d,  # used directly - NOT redefined inside methods
+    flux_upper_limit,
     mag,
-    PointsInCircum,
+    points_in_circum,
     beta_aperture,
     border_msg,
 )
-from aperture import aperture
-
+from aperture import Aperture
 
 # ===========================================================================
 # Module-level worker functions
 # ===========================================================================
 # Workers must live at module scope so pickle (used by multiprocessing) can
 # find them by name.  Instance methods cannot be pickled on all platforms.
+
 
 def _fake_aperture_worker(args):
     """
@@ -104,7 +82,9 @@ def _fake_aperture_worker(args):
     cutout_e, includ_zip, aperture_area, n_trials, seed = args
     rng = np.random.default_rng(seed)
     # Sample pixel indices with replacement so every trial is independent.
-    idx = rng.integers(0, len(includ_zip), size=(n_trials, aperture_area), endpoint=False)
+    idx = rng.integers(
+        0, len(includ_zip), size=(n_trials, aperture_area), endpoint=False
+    )
     return np.nansum(cutout_e[includ_zip[idx, 0], includ_zip[idx, 1]], axis=1)
 
 
@@ -123,9 +103,19 @@ def _injection_worker(args):
     -------
     (detection_flag, beta_p) : (bool, float)
     """
-    (x_inj, y_inj, F_amp, gridx, gridy, cutout,
-     epsf_model, input_yaml, background_rms,
-     detection_limit, DETECTION_PROB_THRESH) = args
+    (
+        x_inj,
+        y_inj,
+        F_amp,
+        gridx,
+        gridy,
+        cutout,
+        epsf_model,
+        input_yaml,
+        background_rms,
+        detection_limit,
+        DETECTION_PROB_THRESH,
+    ) = args
 
     try:
         psf_img = epsf_model.evaluate(
@@ -133,18 +123,17 @@ def _injection_worker(args):
         )
         new_img = cutout + psf_img
 
-        ap = aperture(input_yaml=input_yaml, image=new_img)
-        trial_df = pd.DataFrame({'x_pix': [x_inj], 'y_pix': [y_inj]})
+        ap = Aperture(input_yaml=input_yaml, image=new_img)
+        trial_df = pd.DataFrame({"x_pix": [x_inj], "y_pix": [y_inj]})
         mres = ap.measure(
-            sources=trial_df, plot=False,
-            background_rms=background_rms, verbose=0
+            sources=trial_df, plot=False, background_rms=background_rms, verbose=0
         )
 
         beta_p = beta_aperture(
             n=detection_limit,
-            flux_aperture=float(mres['flux_AP'].iloc[0]),
-            sigma=float(mres['noiseSky'].iloc[0]),
-            npix=float(mres['area'].iloc[0])
+            flux_aperture=float(mres["flux_AP"].iloc[0]),
+            sigma=float(mres["noiseSky"].iloc[0]),
+            npix=float(mres["area"].iloc[0]),
         )
         return beta_p >= DETECTION_PROB_THRESH, beta_p
 
@@ -156,7 +145,8 @@ def _injection_worker(args):
 # limits class
 # ===========================================================================
 
-class limits:
+
+class Limits:
     """
     Compute limiting magnitudes for a single astronomical image frame using:
 
@@ -177,14 +167,16 @@ class limits:
         self.input_yaml = input_yaml
 
         # Optional RNG seed for reproducible limiting-magnitude experiments.
-        seed = self.input_yaml.get('rng_seed', None)
-        self._rng = np.random.default_rng(seed) if seed is not None else np.random.default_rng()
+        seed = self.input_yaml.get("rng_seed", None)
+        self._rng = (
+            np.random.default_rng(seed) if seed is not None else np.random.default_rng()
+        )
 
     # -----------------------------------------------------------------------
     # Cutout helper
     # -----------------------------------------------------------------------
 
-    def getCutout(self, image: np.ndarray, position=None) -> np.ndarray | None:
+    def get_cutout(self, image: np.ndarray, position=None) -> np.ndarray | None:
         """
         Extract a square cutout centred on the target (or supplied) position.
 
@@ -204,17 +196,21 @@ class limits:
         logger = logging.getLogger(__name__)
         try:
             if position is None:
-                tx = self.input_yaml['target_x_pix']
-                ty = self.input_yaml['target_y_pix']
+                tx = self.input_yaml["target_x_pix"]
+                ty = self.input_yaml["target_y_pix"]
             else:
                 tx, ty = position
             if not (np.isfinite(tx) and np.isfinite(ty)):
-                logger.warning("getCutout: target position (%.2f, %.2f) is not finite; skipping cutout.", tx, ty)
+                logger.warning(
+                    "getCutout: target position (%.2f, %.2f) is not finite; skipping cutout.",
+                    tx,
+                    ty,
+                )
                 return None
 
-            fwhm       = self.input_yaml['fwhm']
-            scale      = self.input_yaml['scale']
-            mag_factor = self.input_yaml['limiting_magnitude']['inject_source_location']
+            fwhm = self.input_yaml["fwhm"]
+            scale = self.input_yaml["scale"]
+            mag_factor = self.input_yaml["limiting_magnitude"]["inject_source_location"]
 
             half = int(np.ceil(mag_factor * fwhm + scale))
             cutout = Cutout2D(image, position=(tx, ty), size=(2 * half, 2 * half))
@@ -282,7 +278,7 @@ class limits:
     # Probabilistic limiting magnitude
     # -----------------------------------------------------------------------
 
-    def getProbableLimit(
+    def get_probable_limit(
         self,
         cutout: np.ndarray,
         bkg_level: float = 3.0,
@@ -320,38 +316,46 @@ class limits:
 
         try:
             # ---- Gain scaling ------------------------------------------------
-            cutout_e = cutout * self.input_yaml['gain']
+            cutout_e = cutout * self.input_yaml["gain"]
 
             # ---- Background statistics ---------------------------------------
             _, _, bkg_std = sigma_clipped_stats(
-                cutout_e, sigma=3.0,
+                cutout_e,
+                sigma=3.0,
                 cenfunc=np.nanmedian,
-                stdfunc='mad_std',
+                stdfunc="mad_std",
             )
 
             # ---- Source detection --------------------------------------------
             daofind = DAOStarFinder(
-                fwhm=self.input_yaml['fwhm'],
+                fwhm=self.input_yaml["fwhm"],
                 threshold=bkg_level * bkg_std,
-                sharplo=0.2, sharphi=1.0,
-                roundlo=-1.0, roundhi=1.0,
+                sharplo=0.2,
+                sharphi=1.0,
+                roundlo=-1.0,
+                roundhi=1.0,
             )
             sources = daofind(cutout_e)
 
             positions = (
-                list(zip(sources['xcentroid'], sources['ycentroid']))
-                if sources is not None else []
+                list(zip(sources["xcentroid"], sources["ycentroid"]))
+                if sources is not None
+                else []
             )
             # Always exclude the image centre (target location).
             positions.append((cutout_e.shape[1] / 2.0, cutout_e.shape[0] / 2.0))
 
             # ---- Exclusion mask ----------------------------------------------
-            source_r     = self.input_yaml['photometry']['aperture_radius']
-            aperture_area = int(np.pi * source_r ** 2)
+            source_r = self.input_yaml["photometry"]["aperture_radius"]
+            aperture_area = int(np.pi * source_r**2)
             # Crowded fields: exclude a full aperture radius around each source
             # so fake apertures do not overlap source wings (crowd-safe).
-            exclusion_r = source_r if self.input_yaml.get("photometry", {}).get("crowded_field", False) else source_r / 2
-            masks = CircularAperture(positions, r=exclusion_r).to_mask(method='center')
+            exclusion_r = (
+                source_r
+                if self.input_yaml.get("photometry", {}).get("crowded_field", False)
+                else source_r / 2
+            )
+            masks = CircularAperture(positions, r=exclusion_r).to_mask(method="center")
 
             # Vectorised: build a (n_masks, H, W) boolean stack then collapse.
             # Much faster than a Python loop over full-image arrays.
@@ -361,7 +365,7 @@ class limits:
             mask_sumed = mask_stack.any(axis=0).astype(np.uint8)
 
             # Pixels that are unmasked AND finite are eligible background pixels.
-            bg_image  = cutout_e * (1 - mask_sumed)
+            bg_image = cutout_e * (1 - mask_sumed)
             row_idx, col_idx = np.where(bg_image != 0)
             includ_zip = np.column_stack([row_idx, col_idx])  # shape (N, 2)
 
@@ -400,8 +404,8 @@ class limits:
                     )
                 )
             else:
-                base_trials  = number_of_points // n_jobs
-                remainder    = number_of_points  % n_jobs
+                base_trials = number_of_points // n_jobs
+                remainder = number_of_points % n_jobs
                 seeds = self._rng.integers(0, 2**32 - 1, size=n_jobs, dtype=np.uint64)
                 args_list = [
                     (
@@ -414,7 +418,7 @@ class limits:
                     for j in range(n_jobs)
                 ]
                 with ProcessPoolExecutor(max_workers=n_jobs) as exe:
-                    results   = list(exe.map(_fake_aperture_worker, args_list))
+                    results = list(exe.map(_fake_aperture_worker, args_list))
                 fake_sums = np.concatenate(results)
 
             # ---- Gaussian fit to flux distribution --------------------------
@@ -423,7 +427,9 @@ class limits:
 
             try:
                 popt, _ = curve_fit(
-                    gauss_1d, centres, hist,
+                    gauss_1d,
+                    centres,
+                    hist,
                     p0=[np.nanmax(hist), np.nanmean(fake_sums), np.nanstd(fake_sums)],
                     absolute_sigma=True,
                     maxfev=5000,
@@ -435,16 +441,18 @@ class limits:
                 if not np.isfinite(std) or std <= 0:
                     std = float(mad_std(fake_sums, ignore_nan=True))
             if not np.isfinite(std) or std <= 0:
-                logger.warning("Background flux dispersion invalid; cannot compute limiting mag")
+                logger.warning(
+                    "Background flux dispersion invalid; cannot compute limiting mag"
+                )
                 return np.nan
 
             # ---- Upper-limit counts -> flux -> magnitude ----------------------
             counts_upper = (
-                fluxUpperlimit(n=detection_limit, beta_p=beta, sigma=std)
+                flux_upper_limit(n=detection_limit, beta_p=beta, sigma=std)
                 if useBeta
                 else detection_limit * std
             )
-            flux_upper = counts_upper / self.input_yaml['exposure_time']
+            flux_upper = counts_upper / self.input_yaml["exposure_time"]
             if not np.isfinite(flux_upper) or flux_upper <= 0:
                 logger.warning("Upper-limit flux invalid; limiting mag set to NaN")
                 magUpperlimit = np.nan
@@ -461,7 +469,7 @@ class limits:
     # PSF injection / recovery limiting magnitude
     # -----------------------------------------------------------------------
 
-    def getInjectedLimit(
+    def get_injected_limit(
         self,
         cutout: np.ndarray,
         position,
@@ -501,7 +509,7 @@ class limits:
         -------
         float - limiting instrumental magnitude, or np.nan on failure
         """
-        logger     = logging.getLogger(__name__)
+        logger = logging.getLogger(__name__)
         start_time = time.time()
 
         try:
@@ -509,7 +517,7 @@ class limits:
             # Validation
             # =================================================================
             if epsf_model is None:
-                logger.info('No PSF model - skipping limiting magnitude')
+                logger.info("No PSF model - skipping limiting magnitude")
                 return np.nan
 
             if np.isnan(initialGuess):
@@ -518,16 +526,18 @@ class limits:
             # =================================================================
             # Extract cutouts (ONCE for both science and RMS maps)
             # =================================================================
-            cutout = self.getCutout(image=cutout, position=position)
+            cutout = self.get_cutout(image=cutout, position=position)
             if cutout is None:
-                logger.warning('getCutout returned None; aborting')
+                logger.warning("getCutout returned None; aborting")
                 return np.nan
 
             if background_rms is not None:
-                background_rms = self.getCutout(image=background_rms, position=position)
+                background_rms = self.get_cutout(
+                    image=background_rms, position=position
+                )
 
             # Re-centre position to the middle of the extracted cutout.
-            H, W   = cutout.shape
+            H, W = cutout.shape
             position = [W / 2.0, H / 2.0]
 
             # Pixel grids for PSF evaluation (integer pixels, no oversampling yet).
@@ -536,7 +546,7 @@ class limits:
             # =================================================================
             # Oversampling - compute grids ONCE
             # =================================================================
-            raw_os = getattr(epsf_model, 'oversampling', 1)
+            raw_os = getattr(epsf_model, "oversampling", 1)
             if isinstance(raw_os, (list, tuple, np.ndarray)):
                 oversampling = int(raw_os[0])
             elif np.isscalar(raw_os) and raw_os > 1:
@@ -562,19 +572,23 @@ class limits:
                 x=gridx_os, y=gridy_os, flux=1.0, x_0=cx, y_0=cy
             )
             logger.info(
-                f"Oversampled PSF shape={psf_os.shape}, "
-                f"sum={np.nansum(psf_os):.4f}"
+                f"Oversampled PSF shape={psf_os.shape}, " f"sum={np.nansum(psf_os):.4f}"
             )
 
-            psf_unit = self._downsample_psf(psf_os, oversampling) if oversampling > 1 else psf_os
-            psf_unit = psf_unit / np.nansum(psf_unit)   # exact unit normalisation
+            psf_unit = (
+                self._downsample_psf(psf_os, oversampling)
+                if oversampling > 1
+                else psf_os
+            )
+            psf_unit = psf_unit / np.nansum(psf_unit)  # exact unit normalisation
 
-            psf_ap   = aperture(input_yaml=self.input_yaml, image=psf_unit)
+            psf_ap = Aperture(input_yaml=self.input_yaml, image=psf_unit)
             psf_meas = psf_ap.measure(
-                pd.DataFrame({'x_pix': [W / 2.0], 'y_pix': [H / 2.0]}),
-                plot=False, verbose=0,
+                pd.DataFrame({"x_pix": [W / 2.0], "y_pix": [H / 2.0]}),
+                plot=False,
+                verbose=0,
             )
-            F_ref = float(psf_meas['flux_AP'].iloc[0])
+            F_ref = float(psf_meas["flux_AP"].iloc[0])
             m_ref = mag(F_ref)
             logger.info(f"PSF calibration: flux={F_ref:.4e} -> m_ref={m_ref:.3f}")
 
@@ -587,34 +601,36 @@ class limits:
             # Choose quiet injection sites
             # =================================================================
             DETECTION_PROB_THRESH = detection_cutoff
-            sourceNum             = 10
-            distance_factor       = 1.0
-            injection_df          = pd.DataFrame()
+            sourceNum = 10
+            distance_factor = 1.0
+            injection_df = pd.DataFrame()
 
             for attempt in range(2):
                 inj_dist = (
-                    self.input_yaml['limiting_magnitude'].get(
-                        'inject_source_location', 3
+                    self.input_yaml["limiting_magnitude"].get(
+                        "inject_source_location", 3
                     )
-                    * self.input_yaml['fwhm']
+                    * self.input_yaml["fwhm"]
                     * distance_factor
                 )
-                pts   = PointsInCircum(inj_dist, center=position, n=sourceNum)
-                xran  = [p[0] for p in pts]
-                yran  = [p[1] for p in pts]
-                df    = pd.DataFrame({'x_pix': xran, 'y_pix': yran})
+                pts = points_in_circum(inj_dist, center=position, n=sourceNum)
+                xran = [p[0] for p in pts]
+                yran = [p[1] for p in pts]
+                df = pd.DataFrame({"x_pix": xran, "y_pix": yran})
 
-                ini_ap = aperture(input_yaml=self.input_yaml, image=cutout)
-                df     = ini_ap.measure(
-                    sources=df, plot=False,
-                    background_rms=background_rms, verbose=0,
+                ini_ap = Aperture(input_yaml=self.input_yaml, image=cutout)
+                df = ini_ap.measure(
+                    sources=df,
+                    plot=False,
+                    background_rms=background_rms,
+                    verbose=0,
                 )
                 p_det = df.apply(
                     lambda row: beta_aperture(
                         n=detection_limit,
-                        flux_aperture=row['flux_AP'],
-                        sigma=row['noiseSky'],
-                        npix=row['area'],
+                        flux_aperture=row["flux_AP"],
+                        sigma=row["noiseSky"],
+                        npix=row["area"],
                     ),
                     axis=1,
                 )
@@ -627,15 +643,17 @@ class limits:
 
             if len(injection_df) == 0:
                 # Fallback: use cutout centre only so we still get a limit in crowded/empty fields
-                logger.info('No quiet positions; using cutout centre only')
-                injection_df = pd.DataFrame({'x_pix': [position[0]], 'y_pix': [position[1]]})
+                logger.info("No quiet positions; using cutout centre only")
+                injection_df = pd.DataFrame(
+                    {"x_pix": [position[0]], "y_pix": [position[1]]}
+                )
 
             if len(injection_df) > sourceNum:
                 injection_df = injection_df.sample(sourceNum).reset_index(drop=True)
 
-            x_pix_arr = injection_df['x_pix'].to_numpy()
-            y_pix_arr = injection_df['y_pix'].to_numpy()
-            n_sites   = len(injection_df)
+            x_pix_arr = injection_df["x_pix"].to_numpy()
+            y_pix_arr = injection_df["y_pix"].to_numpy()
+            n_sites = len(injection_df)
 
             n_jobs = n_jobs or os.cpu_count()
             # Cap workers to avoid HPC fork/resource limits (serial when 1).
@@ -657,15 +675,21 @@ class limits:
                 """
                 dx = rng.random((n_sites, redo)) - 0.5
                 dy = rng.random((n_sites, redo)) - 0.5
-                F  = flux_for_mag(m)
+                F = flux_for_mag(m)
 
                 tasks = [
                     (
                         x_pix_arr[k] + dx[k, j],
                         y_pix_arr[k] + dy[k, j],
-                        F, gridx, gridy, cutout,
-                        epsf_model, self.input_yaml, background_rms,
-                        detection_limit, DETECTION_PROB_THRESH,
+                        F,
+                        gridx,
+                        gridy,
+                        cutout,
+                        epsf_model,
+                        self.input_yaml,
+                        background_rms,
+                        detection_limit,
+                        DETECTION_PROB_THRESH,
                     )
                     for k in range(n_sites)
                     for j in range(redo)
@@ -677,31 +701,31 @@ class limits:
                     results = [_injection_worker(t) for t in tasks]
 
                 det_flags = np.array([r[0] for r in results], dtype=bool)
-                betas     = np.array([r[1] for r in results], dtype=float)
+                betas = np.array([r[1] for r in results], dtype=float)
                 return float(det_flags.mean()), betas
 
             # =================================================================
             # Single ProcessPoolExecutor for the ENTIRE search (or serial if n_jobs==1)
             # =================================================================
-            inject_lmag  = np.nan
+            inject_lmag = np.nan
             bracket_steps: list[tuple] = []
-            bisect_steps:  list[tuple] = []
+            bisect_steps: list[tuple] = []
 
             with _pool_or_serial(n_jobs) as pool:
 
                 # ---- Bracket phase ------------------------------------------
-                step      = 0.5
+                step = 0.5
                 max_steps = 30
-                m_bright  = float(initialGuess)
+                m_bright = float(initialGuess)
                 c_bright, _ = run_trials_at_mag(m_bright, pool=pool)
-                going_faint  = (c_bright >= detection_cutoff)
+                going_faint = c_bright >= detection_cutoff
                 m_faint, c_faint = m_bright, c_bright
 
                 bracket_steps.append((m_bright, c_bright))
 
                 for _ in range(max_steps):
-                    m_test       = m_faint + step if going_faint else m_bright - step
-                    c_test, _    = run_trials_at_mag(m_test, pool=pool)
+                    m_test = m_faint + step if going_faint else m_bright - step
+                    c_test, _ = run_trials_at_mag(m_test, pool=pool)
                     bracket_steps.append((m_test, c_test))
 
                     if going_faint:
@@ -713,18 +737,27 @@ class limits:
                         if c_bright >= detection_cutoff:
                             break
 
-                bracketed = (c_bright >= detection_cutoff) and (c_faint < detection_cutoff)
+                bracketed = (c_bright >= detection_cutoff) and (
+                    c_faint < detection_cutoff
+                )
                 if not bracketed:
                     # Retry once with initial guess from probabilistic limit (serial to avoid nested pools)
-                    probable = self.getProbableLimit(
-                        cutout, bkg_level=3.0, detection_limit=detection_limit,
-                        useBeta=True, beta=0.5, plot=False, n_jobs=1,
+                    probable = self.get_probable_limit(
+                        cutout,
+                        bkg_level=3.0,
+                        detection_limit=detection_limit,
+                        useBeta=True,
+                        beta=0.5,
+                        plot=False,
+                        n_jobs=1,
                     )
                     if np.isfinite(probable):
-                        logger.info(f'Bracket failed; retrying with initialGuess={probable - 0.5:.2f} from probable limit')
+                        logger.info(
+                            f"Bracket failed; retrying with initialGuess={probable - 0.5:.2f} from probable limit"
+                        )
                         m_bright = float(probable - 0.5)
                         c_bright, _ = run_trials_at_mag(m_bright, pool=pool)
-                        going_faint = (c_bright >= detection_cutoff)
+                        going_faint = c_bright >= detection_cutoff
                         m_faint, c_faint = m_bright, c_bright
                         bracket_steps.append((m_bright, c_bright))
                         for _ in range(35):
@@ -739,22 +772,26 @@ class limits:
                                 m_bright, c_bright = m_test, c_test
                                 if c_bright >= detection_cutoff:
                                     break
-                        bracketed = (c_bright >= detection_cutoff) and (c_faint < detection_cutoff)
+                        bracketed = (c_bright >= detection_cutoff) and (
+                            c_faint < detection_cutoff
+                        )
 
                 if not bracketed:
                     # Conservative estimate: faintest mag tried when stepping faint, else brightest when stepping bright
                     inject_lmag = float(m_faint if going_faint else m_bright)
-                    logger.info(f'Could not bracket cutoff; using conservative limit {inject_lmag:.3f}')
+                    logger.info(
+                        f"Could not bracket cutoff; using conservative limit {inject_lmag:.3f}"
+                    )
 
                 else:
                     # ---- Bisect phase ----------------------------------------
                     lo_m, lo_c = m_bright, c_bright
-                    hi_m, hi_c = m_faint,  c_faint
+                    hi_m, hi_c = m_faint, c_faint
                     bisect_steps = [(lo_m, lo_c), (hi_m, hi_c)]
 
                     for _ in range(30):
-                        mid_m       = 0.5 * (lo_m + hi_m)
-                        mid_c, _    = run_trials_at_mag(mid_m, pool=pool)
+                        mid_m = 0.5 * (lo_m + hi_m)
+                        mid_c, _ = run_trials_at_mag(mid_m, pool=pool)
                         bisect_steps.append((mid_m, mid_c))
 
                         if mid_c >= detection_cutoff:
@@ -770,7 +807,7 @@ class limits:
                 # ---- Plot completeness curve (still inside pool context) -----
                 if plot:
                     m_lo = (m_bright if np.isfinite(m_bright) else initialGuess) - 1.0
-                    m_hi = (m_faint  if np.isfinite(m_faint)  else initialGuess) + 1.0
+                    m_hi = (m_faint if np.isfinite(m_faint) else initialGuess) + 1.0
                     sample_mags = np.linspace(m_lo, m_hi, 11)
 
                     completeness_groups, medians = [], []
@@ -780,10 +817,15 @@ class limits:
                         medians.append(np.mean(betas >= DETECTION_PROB_THRESH))
 
                     self._plot_completeness(
-                        sample_mags, completeness_groups, medians,
-                        bracket_steps, bisect_steps,
-                        inject_lmag, detection_cutoff,
-                        DETECTION_PROB_THRESH, zeropoint,
+                        sample_mags,
+                        completeness_groups,
+                        medians,
+                        bracket_steps,
+                        bisect_steps,
+                        inject_lmag,
+                        detection_cutoff,
+                        DETECTION_PROB_THRESH,
+                        zeropoint,
                     )
 
             # =================================================================
@@ -791,9 +833,7 @@ class limits:
             # =================================================================
             elapsed = time.time() - start_time
             if np.isfinite(inject_lmag):
-                app_str = (
-                    f" ({zeropoint + inject_lmag:.3f} app)" if zeropoint else ""
-                )
+                app_str = f" ({zeropoint + inject_lmag:.3f} app)" if zeropoint else ""
                 logger.info(
                     f"Limiting mag ~ {inject_lmag:.3f}{app_str}  [{elapsed:.1f}s]"
                 )
@@ -817,10 +857,15 @@ class limits:
 
     def _plot_completeness(
         self,
-        sample_mags, completeness_groups, medians,
-        bracket_steps, bisect_steps,
-        inject_lmag, detection_cutoff,
-        DETECTION_PROB_THRESH, zeropoint,
+        sample_mags,
+        completeness_groups,
+        medians,
+        bracket_steps,
+        bisect_steps,
+        inject_lmag,
+        detection_cutoff,
+        DETECTION_PROB_THRESH,
+        zeropoint,
     ) -> None:
         """
         Save a completeness-curve PDF next to the FITS file.
@@ -828,13 +873,13 @@ class limits:
         Extracted from getInjectedLimit to keep that method focused on the
         search logic and to make the plot code independently testable.
         """
-        order          = np.argsort(sample_mags)
-        mags_sorted    = sample_mags[order]
-        groups_sorted  = [completeness_groups[i] for i in order]
+        order = np.argsort(sample_mags)
+        mags_sorted = sample_mags[order]
+        groups_sorted = [completeness_groups[i] for i in order]
         medians_sorted = np.asarray([medians[i] for i in order], float)
 
-        fpath     = self.input_yaml['fpath']
-        base      = os.path.splitext(os.path.basename(fpath))[0]
+        fpath = self.input_yaml["fpath"]
+        base = os.path.splitext(os.path.basename(fpath))[0]
         write_dir = os.path.dirname(fpath)
 
         # Use the project-wide plotting style for consistency.

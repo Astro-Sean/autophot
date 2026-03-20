@@ -5,6 +5,7 @@ Optimized cosmic ray removal using astroscrappy or ccdproc.cosmicray_lacosmic wi
 side-by-side visualization, and improved mask dilation logic with hole filling.
 Author: Sean Brennan
 """
+
 # --- Standard Library Imports ---
 import logging
 import os
@@ -21,12 +22,14 @@ import matplotlib.pyplot as plt
 from astropy.visualization import ZScaleInterval
 from skimage.morphology import disk
 
+
 # --- Main Class ---
 class RemoveCosmicRays:
     """
     A class to handle cosmic ray removal from astronomical images using astroscrappy or ccdproc.cosmicray_lacosmic.
     Includes background estimation, masking, visualization, and improved mask dilation with hole filling.
     """
+
     def __init__(
         self,
         input_yaml: str,
@@ -73,7 +76,9 @@ class RemoveCosmicRays:
             Background image as a numpy array.
         """
         bkg_estimator = MedianBackground()
-        bkg = Background2D(image, box_size, filter_size=(3, 3), bkg_estimator=bkg_estimator)
+        bkg = Background2D(
+            image, box_size, filter_size=(3, 3), bkg_estimator=bkg_estimator
+        )
         return bkg.background
 
     # --- Mask Creation ---
@@ -119,11 +124,13 @@ class RemoveCosmicRays:
             r = max(1, int(dilate_factor * fwhm_pixels))
 
             # Create a circular structuring element
-            y, x = np.ogrid[-r:r + 1, -r:r + 1]
+            y, x = np.ogrid[-r : r + 1, -r : r + 1]
             selem = (x * x + y * y) <= r * r
 
             # Dilate the mask
-            dilated_mask = binary_dilation(cr_mask, structure=selem, iterations=iterations)
+            dilated_mask = binary_dilation(
+                cr_mask, structure=selem, iterations=iterations
+            )
 
             # Fill enclosed holes if requested
             if fill_holes:
@@ -155,8 +162,8 @@ class RemoveCosmicRays:
             title: Title for the plot (default: "Cosmic Ray Removal").
             dilation_size: Size of dilation for marking cosmic ray regions (default: 2).
         """
-        fpath = self.input_yaml.get('fpath', '')
-        image_filter = self.input_yaml.get('imageFilter', '')
+        fpath = self.input_yaml.get("fpath", "")
+        image_filter = self.input_yaml.get("imageFilter", "")
         if not fpath or not image_filter:
             raise ValueError("Missing 'fpath' or 'imageFilter' in input_yaml.")
         base = os.path.splitext(os.path.basename(fpath))[0]
@@ -172,23 +179,33 @@ class RemoveCosmicRays:
         vmin_cleaned, vmax_cleaned = zscale_cleaned.get_limits(cleaned)
 
         # --- Plot the original image ---
-        im0 = axes[0].imshow(original, cmap="gray", origin="lower", vmin=vmin_original, vmax=vmax_original)
+        im0 = axes[0].imshow(
+            original,
+            cmap="gray",
+            origin="lower",
+            vmin=vmin_original,
+            vmax=vmax_original,
+        )
         axes[0].contour(cr_mask, colors="red", alpha=0.5, linewidths=0.5)
         axes[0].set_title("Before Cosmic Ray Removal\n(Red: Cosmic Ray Regions)")
-        fig.colorbar(im0, ax=axes[0], orientation='vertical', fraction=0.046, pad=0.04)
+        fig.colorbar(im0, ax=axes[0], orientation="vertical", fraction=0.046, pad=0.04)
 
         # --- Plot the cleaned image ---
-        im1 = axes[1].imshow(cleaned, cmap="gray", origin="lower", vmin=vmin_cleaned, vmax=vmax_cleaned)
+        im1 = axes[1].imshow(
+            cleaned, cmap="gray", origin="lower", vmin=vmin_cleaned, vmax=vmax_cleaned
+        )
         axes[1].contour(cr_mask, colors="green", alpha=0.5, linewidths=0.5)
         axes[1].set_title("After Cosmic Ray Removal\n(Green: Cosmic Ray Regions)")
-        fig.colorbar(im1, ax=axes[1], orientation='vertical', fraction=0.046, pad=0.04)
+        fig.colorbar(im1, ax=axes[1], orientation="vertical", fraction=0.046, pad=0.04)
 
         # --- Finalize the plot ---
         fig.suptitle(title)
         plt.tight_layout()
 
         # --- Save the figure ---
-        fig.savefig(os.path.join(write_dir, f'cosmic_rays_{base}.pdf'), bbox_inches='tight')
+        fig.savefig(
+            os.path.join(write_dir, f"cosmic_rays_{base}.pdf"), bbox_inches="tight"
+        )
         plt.close(fig)
 
     # --- Cosmic Ray Removal ---
@@ -262,6 +279,7 @@ class RemoveCosmicRays:
         # --- Variance map (astroscrappy/ccdproc expect variance = sigma^2 in counts^2) ---
         if invar is None:
             from photutils.utils import calc_total_error
+
             sigma = calc_total_error(self.image, bkg_rms, effective_gain=gain)
             invar = np.asarray(sigma, dtype=np.float32) ** 2
             self.logger.info("Computed variance map from total error.")
@@ -275,7 +293,9 @@ class RemoveCosmicRays:
         # --- Run cosmic ray removal ---
         try:
             if self.use_lacosmic:
-                self.logger.info("Using ccdproc.cosmicray_lacosmic for cosmic ray removal")
+                self.logger.info(
+                    "Using ccdproc.cosmicray_lacosmic for cosmic ray removal"
+                )
                 clean_image, cr_mask = cosmicray_lacosmic(
                     self.image,
                     sigclip=sigclip,
@@ -287,9 +307,9 @@ class RemoveCosmicRays:
                     pssl=0.0,
                     niter=4,
                     sepmed=True,
-                    cleantype='meanmask',
-                    fsmode='median',
-                    psfmodel='gauss',
+                    cleantype="meanmask",
+                    fsmode="median",
+                    psfmodel="gauss",
                     psffwhm=psf_fwhm,
                     psfsize=psf_size,
                     psfk=None,
@@ -337,15 +357,21 @@ class RemoveCosmicRays:
             cr_fraction = n_cr / total_pixels
 
             if cr_fraction > 0.1:
-                self.logger.warning(f"High cosmic ray fraction: {cr_fraction:.2%}. Check parameters.")
-            self.logger.info(f"Removed {n_cr:,} contaminated cosmic ray pixels ({cr_fraction:.2%} of image)")
+                self.logger.warning(
+                    f"High cosmic ray fraction: {cr_fraction:.2%}. Check parameters."
+                )
+            self.logger.info(
+                f"Removed {n_cr:,} contaminated cosmic ray pixels ({cr_fraction:.2%} of image)"
+            )
 
             # --- Plot Comparison ---
             if plot:
                 self.plot_comparison(self.image, clean_image, processed_mask)
 
             # --- Update Header ---
-            method = "ccdproc.cosmicray_lacosmic" if self.use_lacosmic else "astroscrappy"
+            method = (
+                "ccdproc.cosmicray_lacosmic" if self.use_lacosmic else "astroscrappy"
+            )
             self.header.update(
                 {
                     "CRAY_RMD": (True, "Cosmic rays removed; skip CR step on rerun"),

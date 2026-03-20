@@ -26,7 +26,7 @@ from astropy.wcs import WCS
 from astropy.utils.exceptions import AstropyWarning
 
 # --- Local Imports ---
-from functions import border_msg,get_header,get_image
+from functions import border_msg, get_header, get_image
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -45,6 +45,7 @@ _ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 # Helper Functions
 # =============================================================================
 
+
 @contextmanager
 def silence_astropy_wcs_info():
     """
@@ -60,7 +61,9 @@ def silence_astropy_wcs_info():
         wcs_logger.setLevel(prev_level)
 
 
-def update_wcs_center(fits_path: str, ra: float, dec: float, overwrite: bool = True) -> fits.Header:
+def update_wcs_center(
+    fits_path: str, ra: float, dec: float, overwrite: bool = True
+) -> fits.Header:
     """
     Updates the WCS header of a FITS file to center the reference pixel and set the reference sky coordinates.
     Uses FITS 1-indexed convention: reference pixel at image center is (NAXIS+1)/2.
@@ -88,12 +91,16 @@ def update_wcs_center(fits_path: str, ra: float, dec: float, overwrite: bool = T
             hdul.flush()
             logger.info(
                 "WCS header updated: CRPIX1=%.2f CRPIX2=%.2f CRVAL1=%.6f CRVAL2=%.6f",
-                header["CRPIX1"], header["CRPIX2"], ra, dec,
+                header["CRPIX1"],
+                header["CRPIX2"],
+                ra,
+                dec,
             )
             return header
     except Exception as e:
         logger.exception(f"Failed to update WCS header: {e}")
         return None
+
 
 def table_to_ldac(table, header=None, writeto=None) -> fits.HDUList:
     """
@@ -122,6 +129,7 @@ def table_to_ldac(table, header=None, writeto=None) -> fits.HDUList:
         hdulist.writeto(writeto, overwrite=True)
     return hdulist
 
+
 def get_wcs(header: fits.Header) -> WCS:
     """
     Create a WCS object from a FITS header, handling SIP if present.
@@ -148,6 +156,7 @@ def get_wcs(header: fits.Header) -> WCS:
         wcs = wcs.celestial
     return wcs
 
+
 def load_background_std(background_std) -> np.ndarray:
     """
     Load background standard deviation from a FITS file or use a 2D array.
@@ -166,7 +175,10 @@ def load_background_std(background_std) -> np.ndarray:
             return hdul[0].data
     if isinstance(background_std, np.ndarray):
         return background_std
-    raise TypeError("background_std must be a string (FITS filepath), a 2D numpy array, or None.")
+    raise TypeError(
+        "background_std must be a string (FITS filepath), a 2D numpy array, or None."
+    )
+
 
 def create_conv_file(path: str, fwhm_pixels: float = 3.0, force: bool = False) -> None:
     """
@@ -188,11 +200,12 @@ def create_conv_file(path: str, fwhm_pixels: float = 3.0, force: bool = False) -
     for i in range(kernel_size):
         for j in range(kernel_size):
             x, y = i - center, j - center
-            val = np.exp(-0.5 * (x**2 + y**2) / sigma**2)
-            conv_text += f"{val:.6f} "
+            weight_value = np.exp(-0.5 * (x**2 + y**2) / sigma**2)
+            conv_text += f"{weight_value:.6f} "
         conv_text += "\n"
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(conv_text)
+
 
 def create_nnw_file(path: str) -> None:
     """
@@ -224,9 +237,11 @@ NNW
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(nnw_text)
 
+
 # =============================================================================
 # Main Class
 # =============================================================================
+
 
 class WCSSolver:
     """
@@ -234,7 +249,9 @@ class WCSSolver:
     Handles faint sources, cosmic rays, and edge cases gracefully.
     """
 
-    def __init__(self, fpath: str, image: np.ndarray, header: fits.Header, default_input: dict):
+    def __init__(
+        self, fpath: str, image: np.ndarray, header: fits.Header, default_input: dict
+    ):
         """
         Initialize the WCS checker and solver.
 
@@ -262,25 +279,153 @@ class WCSSolver:
         """
         logger.info("Removing any pre-existing WCS keys")
         keywords = {
-            "CD1_1", "CD1_2", "CD2_1", "CD2_2", "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2",
-            "CUNIT1", "CUNIT2", "CTYPE1", "CTYPE2", "WCSAXES", "EQUINOX", "LONPOLE", "LATPOLE",
-            "CDELT1", "CDELT2", "A_ORDER", "A_0_0", "A_0_1", "A_0_2", "A_1_0", "A_1_1",
-            "A_2_0", "B_ORDER", "B_0_0", "B_0_1", "B_0_2", "B_1_0", "B_1_1", "B_2_0",
-            "AP_ORDER", "AP_0_0", "AP_0_1", "AP_0_2", "AP_1_0", "AP_1_1", "AP_2_0",
-            "BP_ORDER", "BP_0_0", "BP_0_1", "BP_0_2", "BP_1_0", "BP_1_1", "BP_2_0",
-            "PROJP1", "PROJP3", "RADECSYS", "PV1_1", "PV1_2", "PV2_1", "PV2_2", "LTV1", "LTV2",
-            "LTM1_1", "LTM2_2", "PC1_1", "PC1_2", "PC2_1", "PC2_2", "RADESYS",
-            "PV1_0", "PV1_1", "PV1_2", "PV1_3", "PV1_4", "PV1_5", "PV1_6", "PV1_7", "PV1_8",
-            "PV1_9", "PV1_10", "PV1_11", "PV1_12", "PV1_13", "PV1_14", "PV1_15", "PV1_16",
-            "PV1_17", "PV1_18", "PV1_19", "PV1_20", "PV1_21", "PV1_22", "TNX_0_0", "TNX_1_0",
-            "TNX_0_1", "TNX_2_0", "TNX_1_1", "TNX_0_2", "TNX_3_0", "TNX_2_1", "TNX_1_2",
-            "TNX_0_3", "TNX_4_0", "TNX_3_1", "TNX_2_2", "TNX_1_3", "TNX_0_4", "TNX_5_0",
-            "TNX_4_1", "TNX_3_2", "TNX_2_3", "TNX_1_4", "TNX_0_5", "TNX_6_0", "TNX_5_1",
-            "TNX_4_2", "TNX_3_3", "TNX_2_4", "TNX_1_5", "TNX_0_6", "PC001001", "PC001002",
-            "PC002001", "PC002002", "A_1_1", "A_1_2", "A_1_3", "A_2_0", "A_2_1", "A_2_2",
-            "A_2_3", "A_3_0", "A_3_1", "A_3_2", "A_3_3", "B_1_1", "B_1_2", "B_1_3",
-            "B_2_0", "B_2_1", "B_2_2", "B_2_3", "B_3_0", "B_3_1", "B_3_2", "B_3_3",
-            "SIP_A", "SIP_B", "SIP_C", "SIP_D", "SIP_AP", "SIP_BP", "SIP_CP", "SIP_DP",
+            "CD1_1",
+            "CD1_2",
+            "CD2_1",
+            "CD2_2",
+            "CRVAL1",
+            "CRVAL2",
+            "CRPIX1",
+            "CRPIX2",
+            "CUNIT1",
+            "CUNIT2",
+            "CTYPE1",
+            "CTYPE2",
+            "WCSAXES",
+            "EQUINOX",
+            "LONPOLE",
+            "LATPOLE",
+            "CDELT1",
+            "CDELT2",
+            "A_ORDER",
+            "A_0_0",
+            "A_0_1",
+            "A_0_2",
+            "A_1_0",
+            "A_1_1",
+            "A_2_0",
+            "B_ORDER",
+            "B_0_0",
+            "B_0_1",
+            "B_0_2",
+            "B_1_0",
+            "B_1_1",
+            "B_2_0",
+            "AP_ORDER",
+            "AP_0_0",
+            "AP_0_1",
+            "AP_0_2",
+            "AP_1_0",
+            "AP_1_1",
+            "AP_2_0",
+            "BP_ORDER",
+            "BP_0_0",
+            "BP_0_1",
+            "BP_0_2",
+            "BP_1_0",
+            "BP_1_1",
+            "BP_2_0",
+            "PROJP1",
+            "PROJP3",
+            "RADECSYS",
+            "PV1_1",
+            "PV1_2",
+            "PV2_1",
+            "PV2_2",
+            "LTV1",
+            "LTV2",
+            "LTM1_1",
+            "LTM2_2",
+            "PC1_1",
+            "PC1_2",
+            "PC2_1",
+            "PC2_2",
+            "RADESYS",
+            "PV1_0",
+            "PV1_1",
+            "PV1_2",
+            "PV1_3",
+            "PV1_4",
+            "PV1_5",
+            "PV1_6",
+            "PV1_7",
+            "PV1_8",
+            "PV1_9",
+            "PV1_10",
+            "PV1_11",
+            "PV1_12",
+            "PV1_13",
+            "PV1_14",
+            "PV1_15",
+            "PV1_16",
+            "PV1_17",
+            "PV1_18",
+            "PV1_19",
+            "PV1_20",
+            "PV1_21",
+            "PV1_22",
+            "TNX_0_0",
+            "TNX_1_0",
+            "TNX_0_1",
+            "TNX_2_0",
+            "TNX_1_1",
+            "TNX_0_2",
+            "TNX_3_0",
+            "TNX_2_1",
+            "TNX_1_2",
+            "TNX_0_3",
+            "TNX_4_0",
+            "TNX_3_1",
+            "TNX_2_2",
+            "TNX_1_3",
+            "TNX_0_4",
+            "TNX_5_0",
+            "TNX_4_1",
+            "TNX_3_2",
+            "TNX_2_3",
+            "TNX_1_4",
+            "TNX_0_5",
+            "TNX_6_0",
+            "TNX_5_1",
+            "TNX_4_2",
+            "TNX_3_3",
+            "TNX_2_4",
+            "TNX_1_5",
+            "TNX_0_6",
+            "PC001001",
+            "PC001002",
+            "PC002001",
+            "PC002002",
+            "A_1_1",
+            "A_1_2",
+            "A_1_3",
+            "A_2_0",
+            "A_2_1",
+            "A_2_2",
+            "A_2_3",
+            "A_3_0",
+            "A_3_1",
+            "A_3_2",
+            "A_3_3",
+            "B_1_1",
+            "B_1_2",
+            "B_1_3",
+            "B_2_0",
+            "B_2_1",
+            "B_2_2",
+            "B_2_3",
+            "B_3_0",
+            "B_3_1",
+            "B_3_2",
+            "B_3_3",
+            "SIP_A",
+            "SIP_B",
+            "SIP_C",
+            "SIP_D",
+            "SIP_AP",
+            "SIP_BP",
+            "SIP_CP",
+            "SIP_DP",
         }
         for key in keywords:
             try:
@@ -309,7 +454,9 @@ class WCSSolver:
         with open(input_file, "r") as f:
             content = f.read()
         clean_content = _ANSI_ESCAPE.sub("", content)
-        clean_content = "\n".join(line for line in clean_content.split("\n") if line.strip())
+        clean_content = "\n".join(
+            line for line in clean_content.split("\n") if line.strip()
+        )
         output_file = output_file or input_file
         with open(output_file, "w") as f:
             f.write(clean_content)
@@ -348,7 +495,9 @@ class WCSSolver:
             logger.warning("solve-field run failed: %s", e)
             return False
 
-    def _plate_solve_scamp(self, wcs_cfg: dict, cpulimit: float | None = None) -> fits.Header | float:
+    def _plate_solve_scamp(
+        self, wcs_cfg: dict, cpulimit: float | None = None
+    ) -> fits.Header | float:
         """
         Attempt WCS solution using SExtractor + SCAMP.
 
@@ -364,14 +513,24 @@ class WCSSolver:
         if not sex_exe and shutil.which("sex") is None:
             logger.warning("SExtractor executable not found; cannot use SCAMP solver.")
             return np.nan
-        scamp_exe = str(scamp_exe if scamp_exe and os.path.isfile(str(scamp_exe)) else shutil.which("scamp"))
-        sex_exe = str(sex_exe if sex_exe and os.path.isfile(str(sex_exe)) else shutil.which("sex"))
+        scamp_exe = str(
+            scamp_exe
+            if scamp_exe and os.path.isfile(str(scamp_exe))
+            else shutil.which("scamp")
+        )
+        sex_exe = str(
+            sex_exe if sex_exe and os.path.isfile(str(sex_exe)) else shutil.which("sex")
+        )
 
         if not os.path.isfile(self.fpath):
             logger.error("Image file not found: %s", self.fpath)
             return np.nan
 
-        timeout_sec = float(cpulimit) if cpulimit is not None else float(wcs_cfg.get("cpulimit", 60))
+        timeout_sec = (
+            float(cpulimit)
+            if cpulimit is not None
+            else float(wcs_cfg.get("cpulimit", 60))
+        )
 
         dirname = os.path.dirname(self.fpath)
         base = os.path.splitext(os.path.basename(self.fpath))[0]
@@ -380,9 +539,22 @@ class WCSSolver:
         with tempfile.TemporaryDirectory() as temp_dir:
             param_file = os.path.join(temp_dir, "scamp.param")
             params = [
-                "XWIN_IMAGE", "YWIN_IMAGE", "FLUX_AUTO", "FLUXERR_AUTO", "MAG_AUTO",
-                "MAGERR_AUTO", "FLUX_RADIUS", "FWHM_IMAGE", "CLASS_STAR", "ELLIPTICITY",
-                "BACKGROUND", "THRESHOLD", "FLAGS", "SNR_WIN", "XPEAK_IMAGE", "YPEAK_IMAGE",
+                "XWIN_IMAGE",
+                "YWIN_IMAGE",
+                "FLUX_AUTO",
+                "FLUXERR_AUTO",
+                "MAG_AUTO",
+                "MAGERR_AUTO",
+                "FLUX_RADIUS",
+                "FWHM_IMAGE",
+                "CLASS_STAR",
+                "ELLIPTICITY",
+                "BACKGROUND",
+                "THRESHOLD",
+                "FLAGS",
+                "SNR_WIN",
+                "XPEAK_IMAGE",
+                "YPEAK_IMAGE",
             ]
             Path(param_file).write_text("\n".join(params))
 
@@ -397,9 +569,15 @@ class WCSSolver:
                 except (TypeError, KeyError):
                     pass
             if not pixel_scale:
-                logger.warning("SCAMP: no pixel_scale in config or header; using 0.1--5 arcsec/pix")
+                logger.warning(
+                    "SCAMP: no pixel_scale in config or header; using 0.1--5 arcsec/pix"
+                )
 
-            gain_val = self.header.get("GAIN") or self.header.get("gain") or self.default_input.get("gain")
+            gain_val = (
+                self.header.get("GAIN")
+                or self.header.get("gain")
+                or self.default_input.get("gain")
+            )
             gain_str = str(float(gain_val)) if gain_val is not None else "0"
 
             detect_thresh = str(float(wcs_cfg.get("sextractor_detect_thresh", 1.5)))
@@ -407,11 +585,19 @@ class WCSSolver:
                 "DETECT_TYPE": "CCD",
                 "DETECT_MINAREA": str(int(wcs_cfg.get("sextractor_detect_minarea", 5))),
                 "DETECT_THRESH": detect_thresh,
-                "ANALYSIS_THRESH": str(float(wcs_cfg.get("sextractor_analysis_thresh", 1.2))),
-                "DEBLEND_NTHRESH": str(int(wcs_cfg.get("sextractor_deblend_nthresh", 32))),
-                "DEBLEND_MINCONT": str(float(wcs_cfg.get("sextractor_deblend_mincont", 0.005))),
+                "ANALYSIS_THRESH": str(
+                    float(wcs_cfg.get("sextractor_analysis_thresh", 1.2))
+                ),
+                "DEBLEND_NTHRESH": str(
+                    int(wcs_cfg.get("sextractor_deblend_nthresh", 32))
+                ),
+                "DEBLEND_MINCONT": str(
+                    float(wcs_cfg.get("sextractor_deblend_mincont", 0.005))
+                ),
                 "FILTER": "Y",
-                "FILTER_NAME": os.path.join(os.path.dirname(__file__), "gaussian_7x7.conv"),
+                "FILTER_NAME": os.path.join(
+                    os.path.dirname(__file__), "gaussian_7x7.conv"
+                ),
                 "CLEAN": "Y",
                 "CLEAN_PARAM": "1",
                 "PHOT_AUTOPARAMS": "2.5,3.5",
@@ -430,11 +616,15 @@ class WCSSolver:
             sex_cmd = [
                 sex_exe,
                 self.fpath,
-                "-c", config_file,
-                "-CATALOG_NAME", cat_path,
+                "-c",
+                config_file,
+                "-CATALOG_NAME",
+                cat_path,
             ]
             try:
-                logger.info("Running SExtractor for SCAMP: %s", " ".join(map(str, sex_cmd)))
+                logger.info(
+                    "Running SExtractor for SCAMP: %s", " ".join(map(str, sex_cmd))
+                )
                 subprocess.run(
                     sex_cmd,
                     check=False,
@@ -443,10 +633,14 @@ class WCSSolver:
                     timeout=timeout_sec,
                 )
             except subprocess.TimeoutExpired:
-                logger.warning("SExtractor for SCAMP exceeded timeout (%.1f s)", timeout_sec)
+                logger.warning(
+                    "SExtractor for SCAMP exceeded timeout (%.1f s)", timeout_sec
+                )
                 return np.nan
             if not os.path.isfile(cat_path):
-                logger.warning("SCAMP: SExtractor catalog not created; aborting SCAMP solve.")
+                logger.warning(
+                    "SCAMP: SExtractor catalog not created; aborting SCAMP solve."
+                )
                 return np.nan
 
             head_path = os.path.join(temp_dir, f"{base}.head")
@@ -454,11 +648,16 @@ class WCSSolver:
             scamp_cmd = [
                 scamp_exe,
                 cat_path,
-                "-ASTREF_CATALOG", astref_cat,
-                "-CHECKPLOT_TYPE", "NONE",
-                "-WRITE_XML", "N",
-                "-SAVE_TYPE", "HEAD",
-                "-HEAD_NAME", head_path,
+                "-ASTREF_CATALOG",
+                astref_cat,
+                "-CHECKPLOT_TYPE",
+                "NONE",
+                "-WRITE_XML",
+                "N",
+                "-SAVE_TYPE",
+                "HEAD",
+                "-HEAD_NAME",
+                head_path,
             ]
             try:
                 logger.info("Running SCAMP: %s", " ".join(map(str, scamp_cmd)))
@@ -484,10 +683,29 @@ class WCSSolver:
 
                 self.header = remove_wcs_from_header(self.header)
                 _wcs_prefixes = (
-                    "CRPIX", "CRVAL", "CTYPE", "CD", "PC", "CDELT", "CROTA",
-                    "PV", "LONPOLE", "LATPOLE", "EQUINOX", "WCSNAME", "CUNIT", "WCSAXES",
-                    "PROJP", "LTV", "LTM", "RADECSYS", "RADESYS", "RADYSYS",
-                    "LONGPOLE", "TNX", "SIP_",
+                    "CRPIX",
+                    "CRVAL",
+                    "CTYPE",
+                    "CD",
+                    "PC",
+                    "CDELT",
+                    "CROTA",
+                    "PV",
+                    "LONPOLE",
+                    "LATPOLE",
+                    "EQUINOX",
+                    "WCSNAME",
+                    "CUNIT",
+                    "WCSAXES",
+                    "PROJP",
+                    "LTV",
+                    "LTM",
+                    "RADECSYS",
+                    "RADESYS",
+                    "RADYSYS",
+                    "LONGPOLE",
+                    "TNX",
+                    "SIP_",
                 )
                 _wcs_stems = ("A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_")
                 for key in wcs_header:
@@ -532,9 +750,14 @@ class WCSSolver:
                 header = self._plate_solve_scamp(wcs_cfg=wcs_cfg, cpulimit=cpulimit)
                 if isinstance(header, fits.Header):
                     return header
-                logger.warning("SCAMP solve failed or unavailable; falling back to Astrometry.net.")
+                logger.warning(
+                    "SCAMP solve failed or unavailable; falling back to Astrometry.net."
+                )
             except Exception as exc:
-                logger.warning("SCAMP solve raised an exception (%s); falling back to Astrometry.net.", exc)
+                logger.warning(
+                    "SCAMP solve raised an exception (%s); falling back to Astrometry.net.",
+                    exc,
+                )
 
         logger.info(
             border_msg(
@@ -571,8 +794,14 @@ class WCSSolver:
                 merged.update(overrides)
                 wcs_cfg = merged
                 logger.info("WCS profile=crowded: applying crowded-field overrides")
-        timeout_sec = float(cpulimit if cpulimit is not None else wcs_cfg.get("cpulimit", 45))
-        downsample = int(downsample) if downsample is not None else int(wcs_cfg.get("downsample", 2))
+        timeout_sec = float(
+            cpulimit if cpulimit is not None else wcs_cfg.get("cpulimit", 45)
+        )
+        downsample = (
+            int(downsample)
+            if downsample is not None
+            else int(wcs_cfg.get("downsample", 2))
+        )
 
         # --- Create Gaussian convolution filter file if it doesn't exist ---
         conv_filter_path = os.path.join(os.path.dirname(__file__), "gaussian_7x7.conv")
@@ -589,9 +818,22 @@ class WCSSolver:
         with tempfile.TemporaryDirectory() as temp_dir:
             param_file = os.path.join(temp_dir, "default.param")
             params = [
-                "XWIN_IMAGE", "YWIN_IMAGE", "FLUX_AUTO", "FLUXERR_AUTO", "MAG_AUTO",
-                "MAGERR_AUTO", "FLUX_RADIUS", "FWHM_IMAGE", "CLASS_STAR", "ELLIPTICITY",
-                "BACKGROUND", "THRESHOLD", "FLAGS", "SNR_WIN", "XPEAK_IMAGE", "YPEAK_IMAGE"
+                "XWIN_IMAGE",
+                "YWIN_IMAGE",
+                "FLUX_AUTO",
+                "FLUXERR_AUTO",
+                "MAG_AUTO",
+                "MAGERR_AUTO",
+                "FLUX_RADIUS",
+                "FWHM_IMAGE",
+                "CLASS_STAR",
+                "ELLIPTICITY",
+                "BACKGROUND",
+                "THRESHOLD",
+                "FLAGS",
+                "SNR_WIN",
+                "XPEAK_IMAGE",
+                "YPEAK_IMAGE",
             ]
             Path(param_file).write_text("\n".join(params))
             nnw_file = os.path.join(temp_dir, "default.nnw")
@@ -600,23 +842,37 @@ class WCSSolver:
             pixel_scale = self.default_input.get("pixel_scale") or 0
             if not pixel_scale and self.header.get("CDELT1") is not None:
                 try:
-                    pixel_scale = abs(float(self.header["CDELT1"])) * 3600.0  # deg to arcsec/pix
+                    pixel_scale = (
+                        abs(float(self.header["CDELT1"])) * 3600.0
+                    )  # deg to arcsec/pix
                 except (TypeError, KeyError):
                     pass
             if not pixel_scale:
-                logger.warning("No pixel_scale in config or header; using 0.1--5 arcsec/pix")
+                logger.warning(
+                    "No pixel_scale in config or header; using 0.1--5 arcsec/pix"
+                )
             # SExtractor: use header gain when available for better centroid weighting
-            gain_val = self.header.get("GAIN") or self.header.get("gain") or self.default_input.get("gain")
+            gain_val = (
+                self.header.get("GAIN")
+                or self.header.get("gain")
+                or self.default_input.get("gain")
+            )
             gain_str = str(float(gain_val)) if gain_val is not None else "0"
             detect_thresh = str(float(wcs_cfg.get("sextractor_detect_thresh", 1.5)))
             final_config = {
                 "DETECT_TYPE": "CCD",
                 "DETECT_MINAREA": str(int(wcs_cfg.get("sextractor_detect_minarea", 5))),
                 "DETECT_THRESH": detect_thresh,
-                "ANALYSIS_THRESH": str(float(wcs_cfg.get("sextractor_analysis_thresh", 1.2))),
+                "ANALYSIS_THRESH": str(
+                    float(wcs_cfg.get("sextractor_analysis_thresh", 1.2))
+                ),
                 # Deblending helps split overlapping sources in crowded fields.
-                "DEBLEND_NTHRESH": str(int(wcs_cfg.get("sextractor_deblend_nthresh", 32))),
-                "DEBLEND_MINCONT": str(float(wcs_cfg.get("sextractor_deblend_mincont", 0.005))),
+                "DEBLEND_NTHRESH": str(
+                    int(wcs_cfg.get("sextractor_deblend_nthresh", 32))
+                ),
+                "DEBLEND_MINCONT": str(
+                    float(wcs_cfg.get("sextractor_deblend_mincont", 0.005))
+                ),
                 "FILTER": "Y",
                 "FILTER_NAME": conv_filter_path,
                 "CLEAN": "Y",
@@ -627,37 +883,53 @@ class WCSSolver:
                 "VERBOSE_TYPE": "NORMAL",
                 "CATALOG_TYPE": "FITS_LDAC",
                 "PARAMETERS_NAME": param_file,
-                "STARNNW_NAME": nnw_file
+                "STARNNW_NAME": nnw_file,
             }
             with open(config_file, "w") as f:
                 for k, v in final_config.items():
                     f.write(f"{k}\t{v}\n")
-    
+
             # --- Prepare SExtractor command ---
             sextractor_cmd = None
             if use_sextractor:
-                logger.info("Using SExtractor with Gaussian convolution filter for source detection.")
+                logger.info(
+                    "Using SExtractor with Gaussian convolution filter for source detection."
+                )
                 sextractor_cmd = f"sex -c {config_file}"
             else:
                 logger.warning("SExtractor not found. Proceeding without.")
-    
+
             # --- Scale bounds: use range around known pixel scale when available ---
             # A wrong pixel_scale can prevent convergence. We therefore build two sets:
             #   - constrained: around the hint (if present)
             #   - wide: 0.1--5.0 arcsec/pix (no hint)
-            ra, dec = self.default_input.get("target_ra"), self.default_input.get("target_dec")
+            ra, dec = self.default_input.get("target_ra"), self.default_input.get(
+                "target_dec"
+            )
             radius_deg = float(wcs_cfg.get("search_radius", 0.5))
 
-            def _build_scale_args(scale_low: float, scale_high: float, include_pos: bool) -> list[str]:
+            def _build_scale_args(
+                scale_low: float, scale_high: float, include_pos: bool
+            ) -> list[str]:
                 out = [
-                    "--scale-units", "arcsecperpix",
-                    "--scale-low", str(scale_low),
-                    "--scale-high", str(scale_high),
+                    "--scale-units",
+                    "arcsecperpix",
+                    "--scale-low",
+                    str(scale_low),
+                    "--scale-high",
+                    str(scale_high),
                 ]
                 if background_std is not None:
                     out += ["--sigma", str(background_std)]
                 if include_pos and ra is not None and dec is not None:
-                    out += ["--ra", str(ra), "--dec", str(dec), "--radius", str(radius_deg)]
+                    out += [
+                        "--ra",
+                        str(ra),
+                        "--dec",
+                        str(dec),
+                        "--radius",
+                        str(radius_deg),
+                    ]
                 return out
 
             if pixel_scale and pixel_scale > 0:
@@ -668,10 +940,18 @@ class WCSSolver:
 
             scale_low_wide, scale_high_wide = 0.1, 5.0
 
-            scale_args_constrained = _build_scale_args(scale_low_hint, scale_high_hint, include_pos=True)
-            scale_only_args_constrained = _build_scale_args(scale_low_hint, scale_high_hint, include_pos=False)
-            scale_args_wide = _build_scale_args(scale_low_wide, scale_high_wide, include_pos=True)
-            scale_only_args_wide = _build_scale_args(scale_low_wide, scale_high_wide, include_pos=False)
+            scale_args_constrained = _build_scale_args(
+                scale_low_hint, scale_high_hint, include_pos=True
+            )
+            scale_only_args_constrained = _build_scale_args(
+                scale_low_hint, scale_high_hint, include_pos=False
+            )
+            scale_args_wide = _build_scale_args(
+                scale_low_wide, scale_high_wide, include_pos=True
+            )
+            scale_only_args_wide = _build_scale_args(
+                scale_low_wide, scale_high_wide, include_pos=False
+            )
 
             # Start with constrained args (if pixel_scale provided); we will drop the hint on retry.
             scale_args = scale_args_constrained
@@ -697,17 +977,27 @@ class WCSSolver:
             solved_temp = os.path.join(dirname, "astrometry_temp.solved")
             common_args = [
                 str(solvefield_exe),
-                "--no-remove-lines", "--overwrite",
-                "--downsample", str(downsample),
-                "--new-fits", new_fits_temp,
-                "--wcs", str(wcs_file),
-                "--scamp", scamp_temp,
-                "--corr", corr_temp,
-                "--rdls", rdl_temp,
-                "--match", match_temp,
-                "--solved", solved_temp,
+                "--no-remove-lines",
+                "--overwrite",
+                "--downsample",
+                str(downsample),
+                "--new-fits",
+                new_fits_temp,
+                "--wcs",
+                str(wcs_file),
+                "--scamp",
+                scamp_temp,
+                "--corr",
+                corr_temp,
+                "--rdls",
+                rdl_temp,
+                "--match",
+                match_temp,
+                "--solved",
+                solved_temp,
                 "--no-plots",
-                "--cpulimit", str(int(timeout_sec)),
+                "--cpulimit",
+                str(int(timeout_sec)),
                 str(self.fpath),
             ]
             # Limit the number of sources used by solve-field (helpful in very crowded images).
@@ -729,10 +1019,19 @@ class WCSSolver:
                 args_verify = common_args + ["--no-verify"] + scale_args
                 if use_sextractor and sextractor_cmd:
                     args_verify += [
-                        "--use-source-extractor", "--source-extractor-path", sextractor_cmd,
-                        "--x-column", "XWIN_IMAGE", "--y-column", "YWIN_IMAGE", "--sort-column", "MAG_AUTO"
+                        "--use-source-extractor",
+                        "--source-extractor-path",
+                        sextractor_cmd,
+                        "--x-column",
+                        "XWIN_IMAGE",
+                        "--y-column",
+                        "YWIN_IMAGE",
+                        "--sort-column",
+                        "MAG_AUTO",
                     ]
-                if self._run_solve_field(args_verify, wcs_file, timeout_sec, astrometry_log_fpath):
+                if self._run_solve_field(
+                    args_verify, wcs_file, timeout_sec, astrometry_log_fpath
+                ):
                     logger.info("WCS verified successfully")
                 else:
                     logger.warning("Could not verify WCS - proceeding to blind solve")
@@ -742,21 +1041,50 @@ class WCSSolver:
                 for tweak_order in tweak_orders:
                     if os.path.isfile(wcs_file):
                         break
-                    logger.info("Attempting WCS solve (%s) with tweak order %s", label, tweak_order)
-                    args = common_args + ["--tweak-order", str(tweak_order), "--no-verify"] + scale_args_use
+                    logger.info(
+                        "Attempting WCS solve (%s) with tweak order %s",
+                        label,
+                        tweak_order,
+                    )
+                    args = (
+                        common_args
+                        + ["--tweak-order", str(tweak_order), "--no-verify"]
+                        + scale_args_use
+                    )
                     if use_sextractor and sextractor_cmd:
                         # XWIN_IMAGE/YWIN_IMAGE = weighted centroid, more accurate than X_IMAGE/Y_IMAGE
                         args += [
-                            "--use-source-extractor", "--source-extractor-path", sextractor_cmd,
-                            "--x-column", "XWIN_IMAGE", "--y-column", "YWIN_IMAGE", "--sort-column", "MAG_AUTO", "--sort-ascending"
+                            "--use-source-extractor",
+                            "--source-extractor-path",
+                            sextractor_cmd,
+                            "--x-column",
+                            "XWIN_IMAGE",
+                            "--y-column",
+                            "YWIN_IMAGE",
+                            "--sort-column",
+                            "MAG_AUTO",
+                            "--sort-ascending",
                         ]
-                    if self._run_solve_field(args, wcs_file, timeout_sec, astrometry_log_fpath):
-                        logger.info("WCS solved (%s) with tweak order %s", label, tweak_order)
+                    if self._run_solve_field(
+                        args, wcs_file, timeout_sec, astrometry_log_fpath
+                    ):
+                        logger.info(
+                            "WCS solved (%s) with tweak order %s", label, tweak_order
+                        )
                         break
-                    logger.warning("No solution (%s) with tweak order %s", label, tweak_order)
+                    logger.warning(
+                        "No solution (%s) with tweak order %s", label, tweak_order
+                    )
 
             # First attempt: use the pixel-scale hint when available
-            _attempt_solve_with_args(scale_args, label="with pixel-scale hint" if (pixel_scale and pixel_scale > 0) else "wide scale")
+            _attempt_solve_with_args(
+                scale_args,
+                label=(
+                    "with pixel-scale hint"
+                    if (pixel_scale and pixel_scale > 0)
+                    else "wide scale"
+                ),
+            )
 
             # If still not solved and we had a pixel-scale hint, drop it and retry once.
             if not os.path.isfile(wcs_file) and (pixel_scale and pixel_scale > 0):
@@ -766,7 +1094,9 @@ class WCSSolver:
                 )
                 scale_args = scale_args_wide
                 scale_only_args = scale_only_args_wide
-                _attempt_solve_with_args(scale_args, label="wide scale (dropped pixel-scale hint)")
+                _attempt_solve_with_args(
+                    scale_args, label="wide scale (dropped pixel-scale hint)"
+                )
 
             # --- Step 3: Retry without SExtractor ---
             if not os.path.isfile(wcs_file):
@@ -774,12 +1104,26 @@ class WCSSolver:
                 for tweak_order in tweak_orders:
                     if os.path.isfile(wcs_file):
                         break
-                    logger.info("Attempting WCS solve without SExtractor (tweak order %s)", tweak_order)
-                    args_no_sex = common_args + ["--tweak-order", str(tweak_order), "--no-verify"] + scale_args
-                    if self._run_solve_field(args_no_sex, wcs_file, timeout_sec, astrometry_log_fpath):
-                        logger.info("WCS solved without SExtractor (tweak order %s)", tweak_order)
+                    logger.info(
+                        "Attempting WCS solve without SExtractor (tweak order %s)",
+                        tweak_order,
+                    )
+                    args_no_sex = (
+                        common_args
+                        + ["--tweak-order", str(tweak_order), "--no-verify"]
+                        + scale_args
+                    )
+                    if self._run_solve_field(
+                        args_no_sex, wcs_file, timeout_sec, astrometry_log_fpath
+                    ):
+                        logger.info(
+                            "WCS solved without SExtractor (tweak order %s)",
+                            tweak_order,
+                        )
                         break
-                    logger.warning("No solution without SExtractor (tweak order %s)", tweak_order)
+                    logger.warning(
+                        "No solution without SExtractor (tweak order %s)", tweak_order
+                    )
 
             # --- Step 4: If position-constrained solve failed, retry blind (no RA/Dec/radius) ---
             if not os.path.isfile(wcs_file) and ra is not None and dec is not None:
@@ -788,23 +1132,44 @@ class WCSSolver:
                     if os.path.isfile(wcs_file):
                         break
                     logger.info("Blind solve with tweak order %s", tweak_order)
-                    args_blind = common_args + ["--tweak-order", str(tweak_order), "--no-verify"] + scale_only_args
+                    args_blind = (
+                        common_args
+                        + ["--tweak-order", str(tweak_order), "--no-verify"]
+                        + scale_only_args
+                    )
                     if use_sextractor and sextractor_cmd:
                         args_blind += [
-                            "--use-source-extractor", "--source-extractor-path", sextractor_cmd,
-                            "--x-column", "XWIN_IMAGE", "--y-column", "YWIN_IMAGE",
-                            "--sort-column", "MAG_AUTO", "--sort-ascending",
+                            "--use-source-extractor",
+                            "--source-extractor-path",
+                            sextractor_cmd,
+                            "--x-column",
+                            "XWIN_IMAGE",
+                            "--y-column",
+                            "YWIN_IMAGE",
+                            "--sort-column",
+                            "MAG_AUTO",
+                            "--sort-ascending",
                         ]
-                    if self._run_solve_field(args_blind, wcs_file, timeout_sec, astrometry_log_fpath):
-                        logger.info("WCS solved with blind solve (tweak order %s)", tweak_order)
+                    if self._run_solve_field(
+                        args_blind, wcs_file, timeout_sec, astrometry_log_fpath
+                    ):
+                        logger.info(
+                            "WCS solved with blind solve (tweak order %s)", tweak_order
+                        )
                         break
-                    logger.warning("No solution with blind solve (tweak order %s)", tweak_order)
+                    logger.warning(
+                        "No solution with blind solve (tweak order %s)", tweak_order
+                    )
 
             # --- If WCS still not solved, try SCAMP as fallback (e.g. crowded or IR fields) ---
             if not os.path.isfile(wcs_file):
-                logger.warning("Astrometry.net did not solve WCS; trying SCAMP as fallback.")
+                logger.warning(
+                    "Astrometry.net did not solve WCS; trying SCAMP as fallback."
+                )
                 try:
-                    scamp_header = self._plate_solve_scamp(wcs_cfg=wcs_cfg, cpulimit=cpulimit)
+                    scamp_header = self._plate_solve_scamp(
+                        wcs_cfg=wcs_cfg, cpulimit=cpulimit
+                    )
                     if isinstance(scamp_header, fits.Header):
                         logger.info("SCAMP fallback succeeded.")
                         return scamp_header
@@ -818,15 +1183,15 @@ class WCSSolver:
                         os.remove(f)
                 logger.warning("\tCould not solve WCS - returning NaN")
                 return np.nan
-    
+
             # --- Clean up temporary files ---
-            for pattern in [".corr", ".axy", ".match", ".rdls", ".solved", '.xyls']:
+            for pattern in [".corr", ".axy", ".match", ".rdls", ".solved", ".xyls"]:
                 for f in glob.glob(os.path.join(dirname, f"*{pattern}")):
                     os.remove(f)
             for f in [new_fits_temp, scamp_temp, os.path.join(dirname, "none")]:
                 if os.path.isfile(f):
                     os.remove(f)
-    
+
             # --- Update FITS header with WCS from the .wcs.fits file ---
             try:
                 with fits.open(wcs_file) as wcs_hdul:
@@ -836,19 +1201,38 @@ class WCSSolver:
                 # Remove all previous WCS from science header, then add only WCS keywords from solver
                 self.header = remove_wcs_from_header(self.header)
                 _wcs_prefixes = (
-                    'CRPIX', 'CRVAL', 'CTYPE', 'CD', 'PC', 'CDELT', 'CROTA',
-                    'PV', 'LONPOLE', 'LATPOLE', 'EQUINOX', 'WCSNAME', 'CUNIT', 'WCSAXES',
-                    'PROJP', 'LTV', 'LTM', 'RADECSYS', 'RADESYS', 'RADYSYS',
-                    'LONGPOLE', 'TNX', 'SIP_',
+                    "CRPIX",
+                    "CRVAL",
+                    "CTYPE",
+                    "CD",
+                    "PC",
+                    "CDELT",
+                    "CROTA",
+                    "PV",
+                    "LONPOLE",
+                    "LATPOLE",
+                    "EQUINOX",
+                    "WCSNAME",
+                    "CUNIT",
+                    "WCSAXES",
+                    "PROJP",
+                    "LTV",
+                    "LTM",
+                    "RADECSYS",
+                    "RADESYS",
+                    "RADYSYS",
+                    "LONGPOLE",
+                    "TNX",
+                    "SIP_",
                 )
-                _wcs_stems = ('A_', 'B_', 'AP_', 'BP_', 'D_', 'DP_','PV_')
+                _wcs_stems = ("A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_")
                 for key in wcs_header:
-                    if key in ('NAXIS', 'NAXIS1', 'NAXIS2'):
+                    if key in ("NAXIS", "NAXIS1", "NAXIS2"):
                         continue
                     is_wcs = any(key.startswith(p) for p in _wcs_prefixes)
-                    if not is_wcs and '_' in key:
-                        stem = key.split('_')[0] + '_'
-                        is_wcs = stem in _wcs_stems and key.startswith(stem.rstrip('_'))
+                    if not is_wcs and "_" in key:
+                        stem = key.split("_")[0] + "_"
+                        is_wcs = stem in _wcs_stems and key.startswith(stem.rstrip("_"))
                     if is_wcs:
                         self.header[key] = wcs_header[key]
                 self.header["NAXIS1"] = self.image.shape[1]
@@ -873,7 +1257,10 @@ class WCSSolver:
                             self.header["CRPIX2"] = crpix2 + crpix_offset
                             self.header["CRVAL1"] = float(rd[0].flat[0])
                             self.header["CRVAL2"] = float(rd[1].flat[0])
-                            logger.debug("Applied CRPIX offset %.2f for solver convention", crpix_offset)
+                            logger.debug(
+                                "Applied CRPIX offset %.2f for solver convention",
+                                crpix_offset,
+                            )
                         except Exception as e:
                             logger.warning("CRPIX offset correction skipped: %s", e)
 
@@ -882,21 +1269,40 @@ class WCSSolver:
                     merged_wcs = get_wcs(self.header)
                     try:
                         from astropy.wcs import utils as wcs_utils
+
                         scale_val = wcs_utils.proj_plane_pixel_scales(merged_wcs)[0]
-                        scale = float(scale_val * 3600) if hasattr(scale_val, "value") else float(scale_val * 3600)  # arcsec/pix
+                        scale = (
+                            float(scale_val * 3600)
+                            if hasattr(scale_val, "value")
+                            else float(scale_val * 3600)
+                        )  # arcsec/pix
                         if not np.isfinite(scale) or scale <= 0 or scale > 3600:
-                            logger.warning("Merged WCS has invalid pixel scale (%.6f); rejecting", scale)
+                            logger.warning(
+                                "Merged WCS has invalid pixel scale (%.6f); rejecting",
+                                scale,
+                            )
                             return np.nan
                     except Exception as ev:
                         logger.warning("Could not validate merged WCS: %s", ev)
 
-                fits.writeto(self.fpath, self.image, self.header, overwrite=True, output_verify="ignore")
+                fits.writeto(
+                    self.fpath,
+                    self.image,
+                    self.header,
+                    overwrite=True,
+                    output_verify="ignore",
+                )
                 if os.path.isfile(wcs_file):
                     os.remove(wcs_file)
                 logger.info("WCS information updated in the FITS header")
                 return self.header
             except Exception as e:
-                for f in [new_fits_temp, scamp_temp, wcs_file, os.path.join(dirname, "none")]:
+                for f in [
+                    new_fits_temp,
+                    scamp_temp,
+                    wcs_file,
+                    os.path.join(dirname, "none"),
+                ]:
                     if f and os.path.isfile(f):
                         try:
                             os.remove(f)

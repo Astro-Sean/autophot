@@ -33,8 +33,11 @@ import os
 # Force BLAS/OpenMP to 1 thread so subprocesses and any early imports don't exhaust
 # process/thread limits on HPC (OpenBLAS often defaults to 128 threads per process).
 for _env in (
-    "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS",
-    "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
 ):
     os.environ[_env] = "1"
 
@@ -234,4 +237,3 @@ def main(argv: Iterable[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

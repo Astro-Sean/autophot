@@ -1,33 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Zeropoint calibration: sequence-star cleaning, offset measurement,
-RANSAC/sigma-clip fitting, and colour-term estimation.
+Zeropoint calibration utilities.
 
-Optimisations vs. original
---------------------------
-1.  Duplicate imports removed (warnings appeared twice; multiprocessing was
-    imported but never used; median_absolute_deviation came from both
-    astropy and scipy - unified to scipy).
-2.  ConstantRegressor and ConstrainedSlopeRegressor were almost identical
-    classes re-defined inside two separate method bodies on every call.
-    Unified into a single module-level PenalisedSlopeRegressor.
-3.  Re-imports inside _robust_RANSAC_fit (logging, numpy, sklearn) removed -
-    these ran on every call.
-4.  drop_in_zeropoint was a nested function duplicated between fit_zeropoint
-    and estimate_zeropoint.  Extracted to a private instance method
-    _fallback_zeropoint() shared by both callers.
-5.  freedman_diaconis_bins was defined inside estimate_zeropoint but never
-    called (np.histogram_bin_edges(..., bins='fd') was used directly instead).
-    Dead code removed.
-6.  Repetitive AP / PSF magnitude / error computation extracted into
-    _compute_delta_mag() so the identical block does not appear three times.
-7.  self.logger -> module-level logger; fit_color_term referenced self.logger
-    which does not exist on the class, causing an AttributeError.
-8.  check_is_fitted missing from ConstrainedSlopeRegressor.predict (original
-    raised NotFittedError silently caught by RANSAC).  Fixed in unified class.
-9.  Minor: consistent use of np.asarray vs .values, redundant .copy() calls
-    on already-copied slices removed.
+This module cleans reference stars, measures magnitude offsets between
+instrumental and catalog photometry, and performs robust fitting (with
+optional sigma-clipping and colour-term estimation) to derive the final
+photometric zeropoint used by the pipeline.
 """
 
 # ---------------------------------------------------------------------------
@@ -52,7 +31,7 @@ from astropy.stats import (
     sigma_clipped_stats,
     mad_std,
 )
-from scipy.stats import median_abs_deviation   # single source; avoids duplicate
+from scipy.stats import median_abs_deviation  # single source; avoids duplicate
 
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
@@ -64,7 +43,7 @@ from scipy.odr import ODR, Model, RealData
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import border_msg, SNR_err, set_size, calculate_bins
+from functions import border_msg, snr_err, set_size, calculate_bins
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -75,6 +54,7 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 # Module-level sklearn estimator
 # ===========================================================================
+
 
 class PenalisedSlopeRegressor(BaseEstimator, RegressorMixin):
     """
@@ -100,8 +80,8 @@ class PenalisedSlopeRegressor(BaseEstimator, RegressorMixin):
         penalty_weight: float = 100.0,
     ):
         self.slope_constraint = slope_constraint
-        self.slope_tolerance  = slope_tolerance
-        self.penalty_weight   = penalty_weight
+        self.slope_tolerance = slope_tolerance
+        self.penalty_weight = penalty_weight
 
     def fit(self, X, y):
         X, y = check_X_y(X, y)
@@ -110,12 +90,12 @@ class PenalisedSlopeRegressor(BaseEstimator, RegressorMixin):
         def _loss(params):
             slope, intercept = params
             residuals = y - (slope * x_flat + intercept)
-            mse       = np.mean(residuals ** 2)
-            excess    = max(0.0, abs(slope - self.slope_constraint) - self.slope_tolerance)
+            mse = np.mean(residuals**2)
+            excess = max(0.0, abs(slope - self.slope_constraint) - self.slope_tolerance)
             return mse + self.penalty_weight * excess
 
-        init   = [0.1, np.mean(y) - 0.1 * np.mean(x_flat)]
-        result = minimize(_loss, init, method='L-BFGS-B')
+        init = [0.1, np.mean(y) - 0.1 * np.mean(x_flat)]
+        result = minimize(_loss, init, method="L-BFGS-B")
         self.slope_, self.intercept_ = result.x
         return self
 
@@ -129,7 +109,8 @@ class PenalisedSlopeRegressor(BaseEstimator, RegressorMixin):
 # zeropoint class
 # ===========================================================================
 
-class zeropoint:
+
+class Zeropoint:
     """
     Photometric zeropoint calibration against a sequence-star catalog.
 
@@ -176,7 +157,7 @@ class zeropoint:
 
         v = values[mask]
         e = errors[mask]
-        weights = 1.0 / (e ** 2)
+        weights = 1.0 / (e**2)
         weighted_avg = np.sum(weights * v) / np.sum(weights)
         weighted_err = np.sqrt(1.0 / np.sum(weights))
         return weighted_avg, weighted_err
@@ -189,11 +170,19 @@ class zeropoint:
         Raises ValueError for unknown filters.
         """
         color_map = {
-            'u': ('u', 'g'), 'g': ('g', 'r'), 'r': ('g', 'r'),
-            'i': ('r', 'i'), 'z': ('i', 'z'),
-            'J': ('J', 'H'), 'H': ('J', 'H'), 'K': ('H', 'K'),
-            'U': ('U', 'B'), 'B': ('B', 'V'), 'V': ('B', 'V'),
-            'R': ('V', 'R'), 'I': ('R', 'I'),
+            "u": ("u", "g"),
+            "g": ("g", "r"),
+            "r": ("g", "r"),
+            "i": ("r", "i"),
+            "z": ("i", "z"),
+            "J": ("J", "H"),
+            "H": ("J", "H"),
+            "K": ("H", "K"),
+            "U": ("U", "B"),
+            "B": ("B", "V"),
+            "V": ("B", "V"),
+            "R": ("V", "R"),
+            "I": ("R", "I"),
         }
         if filter_name not in color_map:
             raise ValueError(f"No colour term defined for filter '{filter_name}'")
@@ -211,21 +200,26 @@ class zeropoint:
         zp_params = {}
         # Optional aperture correction (AP -> total flux) in magnitudes.
         # Only applied when apply_aperture_correction is True; otherwise stored for use later.
-        ap_corr_mag = float(self.input_yaml.get('aperture_correction', 0.0) or 0.0)
-        apply_ap = bool(self.input_yaml.get('apply_aperture_correction', False))
-        ap_scale = (10.0 ** (-0.4 * ap_corr_mag) if (apply_ap and np.isfinite(ap_corr_mag) and ap_corr_mag != 0.0) else 1.0)
+        ap_corr_mag = float(self.input_yaml.get("aperture_correction", 0.0) or 0.0)
+        apply_ap = bool(self.input_yaml.get("apply_aperture_correction", False))
+        ap_scale = (
+            10.0 ** (-0.4 * ap_corr_mag)
+            if (apply_ap and np.isfinite(ap_corr_mag) and ap_corr_mag != 0.0)
+            else 1.0
+        )
 
-        for flux_type in ['AP', 'PSF']:
-            fcol = f'flux_{flux_type}'
+        for flux_type in ["AP", "PSF"]:
+            fcol = f"flux_{flux_type}"
             if fcol not in catalog.columns:
                 zp_params[flux_type] = {
-                    'zeropoint': np.nan, 'zeropoint_error': np.nan,
-                    'has_color_term': False,
+                    "zeropoint": np.nan,
+                    "zeropoint_error": np.nan,
+                    "has_color_term": False,
                 }
                 continue
 
             flux = np.asarray(catalog[fcol].values, float)
-            if flux_type == 'AP' and ap_scale != 1.0:
+            if flux_type == "AP" and ap_scale != 1.0:
                 flux = flux * ap_scale
 
             catmag = np.asarray(catalog[use_filter].values, float)
@@ -236,19 +230,20 @@ class zeropoint:
             else:
                 delta = catmag[ok] - (-2.5 * np.log10(flux[ok]))
                 delta = delta[np.isfinite(delta)]
-                n_d   = len(delta)
+                n_d = len(delta)
                 median_zp = np.nanmedian(delta) if n_d else np.nan
                 mad_raw = (
-                    float(median_abs_deviation(delta, nan_policy='omit'))
-                    if n_d else np.nan
+                    float(median_abs_deviation(delta, nan_policy="omit"))
+                    if n_d
+                    else np.nan
                 )
                 # SE(median) ~ 1.858 * MAD/sqrt(N); use MAD as fallback if N < 2
                 mad_zp = (1.858 * mad_raw / np.sqrt(n_d)) if n_d >= 2 else mad_raw
 
             zp_params[flux_type] = {
-                'zeropoint':       median_zp,
-                'zeropoint_error': mad_zp,
-                'has_color_term':  False,
+                "zeropoint": median_zp,
+                "zeropoint_error": mad_zp,
+                "has_color_term": False,
             }
         return zp_params
 
@@ -265,10 +260,10 @@ class zeropoint:
         -------
         inst_mag, inst_mag_err, delta_mag, delta_mag_err : ndarrays
         """
-        inst_mag     = -2.5 * np.log10(flux)
+        inst_mag = -2.5 * np.log10(flux)
         inst_mag_err = (2.5 / np.log(10.0)) * (flux_err / flux)
-        delta_mag    = catmag - inst_mag
-        delta_mag_err = np.sqrt(inst_mag_err ** 2 + catmag_err ** 2)
+        delta_mag = catmag - inst_mag
+        delta_mag_err = np.sqrt(inst_mag_err**2 + catmag_err**2)
         return inst_mag, inst_mag_err, delta_mag, delta_mag_err
 
     @staticmethod
@@ -293,11 +288,15 @@ class zeropoint:
         c2_vals = np.asarray(clean_catalog[color2].values, float)[vmask]
 
         c1_err = np.asarray(
-            clean_catalog.get(f'{color1}_err', pd.Series(0.0, index=clean_catalog.index)).values,
+            clean_catalog.get(
+                f"{color1}_err", pd.Series(0.0, index=clean_catalog.index)
+            ).values,
             float,
         )[vmask]
         c2_err = np.asarray(
-            clean_catalog.get(f'{color2}_err', pd.Series(0.0, index=clean_catalog.index)).values,
+            clean_catalog.get(
+                f"{color2}_err", pd.Series(0.0, index=clean_catalog.index)
+            ).values,
             float,
         )[vmask]
 
@@ -305,10 +304,10 @@ class zeropoint:
 
         # Propagate both catalog colour errors and uncertainty in the
         # colour-term slope itself, if provided.
-        sigma_color = np.sqrt(c1_err ** 2 + c2_err ** 2)
+        sigma_color = np.sqrt(c1_err**2 + c2_err**2)
         term_color_measure = abs(fixed_color_slope) * sigma_color
         term_color_slope = abs(color_slope_err) * np.abs(color_diff)
-        color_corr_err = np.sqrt(term_color_measure ** 2 + term_color_slope ** 2)
+        color_corr_err = np.sqrt(term_color_measure**2 + term_color_slope**2)
 
         delta_corr = delta_mag - fixed_color_slope * color_diff
         return delta_corr, color_corr_err
@@ -324,26 +323,25 @@ class zeropoint:
         clean_catalog : DataFrame or None (None -> caller should use fallback)
         """
         df = catalog.copy()
-        if 'sky' in df.columns:
-            sky_mask = sigma_clip(np.abs(df['sky'].values), sigma=5, maxiters=10)
+        if "sky" in df.columns:
+            sky_mask = sigma_clip(np.abs(df["sky"].values), sigma=5, maxiters=10)
             df = df[~sky_mask.mask]
-        if 'threshold' in df.columns:
-            df = df[df['threshold'] >= threshold]
+        if "threshold" in df.columns:
+            df = df[df["threshold"] >= threshold]
 
-        err_col   = f'{use_filter}_err'
+        err_col = f"{use_filter}_err"
         error_mask = np.asarray(df[err_col].values, float) < 0.32
-        clean     = df[error_mask].copy()
+        clean = df[error_mask].copy()
 
         if len(clean) < min_sources:
             logger.warning(
-                f'Too few sources ({len(clean)} < {min_sources}) after quality cuts.'
+                f"Too few sources ({len(clean)} < {min_sources}) after quality cuts."
             )
             return None
         return clean
 
     def _finite_vmask(
-        self, clean_catalog: pd.DataFrame,
-        flux_type: str, use_filter: str
+        self, clean_catalog: pd.DataFrame, flux_type: str, use_filter: str
     ):
         """
         Boolean mask for rows with all required finite, positive values.
@@ -352,36 +350,41 @@ class zeropoint:
         -------
         (flux, flux_err, catmag, catmag_err, vmask) or None if < 3 rows survive
         """
-        fcol     = f'flux_{flux_type}'
-        ecol     = f'flux_{flux_type}_err'
-        flux     = np.asarray(clean_catalog[fcol].values, float)
+        fcol = f"flux_{flux_type}"
+        ecol = f"flux_{flux_type}_err"
+        flux = np.asarray(clean_catalog[fcol].values, float)
         flux_err = np.asarray(clean_catalog[ecol].values, float)
-        catmag   = np.asarray(clean_catalog[use_filter].values, float)
-        catmag_err = np.asarray(clean_catalog[f'{use_filter}_err'].values, float)
+        catmag = np.asarray(clean_catalog[use_filter].values, float)
+        catmag_err = np.asarray(clean_catalog[f"{use_filter}_err"].values, float)
 
         # Optional aperture correction (AP -> total flux) in magnitudes; apply only
         # when apply_aperture_correction is True (otherwise stored for use later).
-        if flux_type == 'AP':
-            ap_corr_mag = float(self.input_yaml.get('aperture_correction', 0.0) or 0.0)
-            apply_ap = bool(self.input_yaml.get('apply_aperture_correction', False))
+        if flux_type == "AP":
+            ap_corr_mag = float(self.input_yaml.get("aperture_correction", 0.0) or 0.0)
+            apply_ap = bool(self.input_yaml.get("apply_aperture_correction", False))
             if apply_ap and np.isfinite(ap_corr_mag) and ap_corr_mag != 0.0:
                 ap_scale = 10.0 ** (-0.4 * ap_corr_mag)
-                flux     = flux * ap_scale
+                flux = flux * ap_scale
                 flux_err = flux_err * ap_scale
 
         vmask = (
-            np.isfinite(flux)     & (flux     > 0) &
-            np.isfinite(flux_err) & (flux_err > 0) &
-            np.isfinite(catmag)   &
-            np.isfinite(catmag_err) & (catmag_err > 0)
+            np.isfinite(flux)
+            & (flux > 0)
+            & np.isfinite(flux_err)
+            & (flux_err > 0)
+            & np.isfinite(catmag)
+            & np.isfinite(catmag_err)
+            & (catmag_err > 0)
         )
         if vmask.sum() < 3:
-            logger.warning(f'{flux_type}: only {vmask.sum()} valid sources; skipping.')
+            logger.warning(f"{flux_type}: only {vmask.sum()} valid sources; skipping.")
             return None
 
         return (
-            flux[vmask], flux_err[vmask],
-            catmag[vmask], catmag_err[vmask],
+            flux[vmask],
+            flux_err[vmask],
+            catmag[vmask],
+            catmag_err[vmask],
             vmask,
         )
 
@@ -410,25 +413,25 @@ class zeropoint:
         -------
         cleaned_sources : DataFrame, or None on error
         """
-        logger.info(border_msg('Cleaning Sequence Stars for Zeropoint'))
+        logger.info(border_msg("Cleaning Sequence Stars for Zeropoint"))
 
         try:
-            filter_col = self.input_yaml.get('imageFilter')
+            filter_col = self.input_yaml.get("imageFilter")
             if not filter_col or filter_col not in sources.columns:
                 logger.error(f"Filter column '{filter_col}' not found in sources")
                 return None
 
-            if 'threshold' not in sources.columns:
+            if "threshold" not in sources.columns:
                 logger.error("Missing 'threshold' column in sources")
                 return None
 
             valid_mags = sources[filter_col].notna()
-            n_missing  = (~valid_mags).sum()
+            n_missing = (~valid_mags).sum()
             if n_missing:
                 logger.info(f"Removing {n_missing} sources with missing {filter_col}")
 
-            too_bright  = sources[filter_col] < upperMaglimit
-            too_faint   = sources[filter_col] > lowerMaglimit
+            too_bright = sources[filter_col] < upperMaglimit
+            too_faint = sources[filter_col] > lowerMaglimit
             n_brightness = (too_bright | too_faint).sum()
             if n_brightness:
                 logger.info(
@@ -438,8 +441,8 @@ class zeropoint:
                     lowerMaglimit,
                 )
 
-            low_snr  = sources['threshold'] < threshold_limit
-            n_snr    = low_snr.sum()
+            low_snr = sources["threshold"] < threshold_limit
+            n_snr = low_snr.sum()
             if n_snr:
                 logger.info(
                     "Removing %d sources with detection threshold < %.1f",
@@ -448,17 +451,17 @@ class zeropoint:
                 )
 
             mask = (
-                valid_mags &
-                (sources[filter_col] >= upperMaglimit) &
-                (sources[filter_col] <= lowerMaglimit) &
-                (sources['threshold'] >= threshold_limit)
+                valid_mags
+                & (sources[filter_col] >= upperMaglimit)
+                & (sources[filter_col] <= lowerMaglimit)
+                & (sources["threshold"] >= threshold_limit)
             )
             cleaned = sources.loc[mask].copy()
             logger.info("%d sources remaining after quality cuts", len(cleaned))
             return cleaned
 
         except Exception as exc:
-            logger.error(f'Error in clean(): {exc}\n{traceback.format_exc()}')
+            logger.error(f"Error in clean(): {exc}\n{traceback.format_exc()}")
             return None
 
     # -----------------------------------------------------------------------
@@ -479,60 +482,73 @@ class zeropoint:
         -------
         (sources, output_zp) : (DataFrame, dict)
         """
-        logger.info(border_msg('Measuring Zeropoint Offset'))
+        logger.info(border_msg("Measuring Zeropoint Offset"))
 
-        methods       = ['AP'] + (['PSF'] if 'flux_PSF' in sources.columns else [])
-        method_labels = {'AP': 'Aperture', 'PSF': 'PSF'}
-        output_zp     = {}
+        methods = ["AP"] + (["PSF"] if "flux_PSF" in sources.columns else [])
+        method_labels = {"AP": "Aperture", "PSF": "PSF"}
+        output_zp = {}
 
-        image_filter = self.input_yaml['imageFilter']
-        mag_col      = sources[image_filter]
-        mag_err_col  = sources[f'{image_filter}_err']
+        image_filter = self.input_yaml["imageFilter"]
+        mag_col = sources[image_filter]
+        mag_err_col = sources[f"{image_filter}_err"]
 
         for method in methods:
             try:
                 src = sources.copy()
 
-                if method == 'PSF':
-                    if 'flags' in src.columns:
+                if method == "PSF":
+                    if "flags" in src.columns:
                         before = len(src)
-                        src = src[src['flags'] <= 0]
-                        logger.info(f'Removed {before - len(src)} flagged sources')
+                        src = src[src["flags"] <= 0]
+                        logger.info(f"Removed {before - len(src)} flagged sources")
 
-                    if 'qfit' in src.columns:
+                    if "qfit" in src.columns:
                         before = len(src)
                         qfit_clip = sigma_clip(
-                            src['qfit'], sigma=3, sigma_lower=np.inf,
-                            maxiters=5, masked=True,
-                            cenfunc=np.nanmedian, stdfunc=mad_std,
+                            src["qfit"],
+                            sigma=3,
+                            sigma_lower=np.inf,
+                            maxiters=5,
+                            masked=True,
+                            cenfunc=np.nanmedian,
+                            stdfunc=mad_std,
                         )
                         src = src[~qfit_clip.mask]
-                        logger.info(f'Removed {before - len(src)} qfit outliers')
+                        logger.info(f"Removed {before - len(src)} qfit outliers")
 
-                inst_mag  = src[f'inst_{image_filter}_{method}']
-                snr       = src['SNR']
-                error_snr = SNR_err(snr)
+                inst_mag = src[f"inst_{image_filter}_{method}"]
+                snr = src["SNR"]
+                error_snr = snr_err(snr)
 
-                zp     = mag_col.loc[src.index] - inst_mag
-                zp_err = np.sqrt(error_snr ** 2 + mag_err_col.loc[src.index] ** 2)
+                zp = mag_col.loc[src.index] - inst_mag
+                zp_err = np.sqrt(error_snr**2 + mag_err_col.loc[src.index] ** 2)
 
-                zp_col     = f'zp_{image_filter}_{method}'
-                zp_err_col = f'{zp_col}_err'
-                src[zp_col]     = zp
+                zp_col = f"zp_{image_filter}_{method}"
+                zp_err_col = f"{zp_col}_err"
+                src[zp_col] = zp
                 src[zp_err_col] = zp_err
 
                 # Build combined bad-value mask.
-                mask   = ~np.isfinite(zp)
-                clip1  = sigma_clip(mag_col.loc[src.index].values, sigma=5,
-                                    masked=True, maxiters=10)
-                mask  |= clip1.mask
-                clip2  = sigma_clip(zp.values, sigma=5, masked=True, maxiters=10,
-                                    cenfunc=np.nanmedian, stdfunc=mad_std)
-                mask  |= clip2.mask
+                mask = ~np.isfinite(zp)
+                clip1 = sigma_clip(
+                    mag_col.loc[src.index].values, sigma=5, masked=True, maxiters=10
+                )
+                mask |= clip1.mask
+                clip2 = sigma_clip(
+                    zp.values,
+                    sigma=5,
+                    masked=True,
+                    maxiters=10,
+                    cenfunc=np.nanmedian,
+                    stdfunc=mad_std,
+                )
+                mask |= clip2.mask
 
                 n_bad = int(mask.sum())
                 if n_bad:
-                    logger.info(f'[{method_labels[method]}] Removing {n_bad} non-finite/outlier sources')
+                    logger.info(
+                        f"[{method_labels[method]}] Removing {n_bad} non-finite/outlier sources"
+                    )
 
                 valid = ~mask
                 n_valid = int(np.sum(valid))
@@ -542,23 +558,29 @@ class zeropoint:
                     )
                 else:
                     image_zp, _, mad_val = sigma_clipped_stats(
-                        zp.values[valid], sigma=3.0,
-                        cenfunc=np.nanmedian, stdfunc=mad_std,
+                        zp.values[valid],
+                        sigma=3.0,
+                        cenfunc=np.nanmedian,
+                        stdfunc=mad_std,
                     )
                     # SE(median) ~ 1.858 * MAD/sqrt(N); use MAD as fallback if N < 2
                     image_zp_err = (
-                        (1.858 * mad_val / np.sqrt(n_valid)) if n_valid >= 2 else mad_val
+                        (1.858 * mad_val / np.sqrt(n_valid))
+                        if n_valid >= 2
+                        else mad_val
                     )
 
-                src[f'mask_{method}']       = mask
+                src[f"mask_{method}"] = mask
                 sources.loc[src.index, src.columns] = src
                 output_zp[method] = [image_zp, image_zp_err]
                 logger.info(
-                    f'[{method_labels[method]}] ZP = {image_zp:.3f} +/- {image_zp_err:.3f}'
+                    f"[{method_labels[method]}] ZP = {image_zp:.3f} +/- {image_zp_err:.3f}"
                 )
 
             except Exception as exc:
-                logger.error(f'Error in get() for {method}: {exc}\n{traceback.format_exc()}')
+                logger.error(
+                    f"Error in get() for {method}: {exc}\n{traceback.format_exc()}"
+                )
 
         return sources, output_zp
 
@@ -568,7 +590,9 @@ class zeropoint:
 
     def _robust_RANSAC_fit(
         self,
-        x_indep, delta_mag, w_mag,
+        x_indep,
+        delta_mag,
+        w_mag,
         x_err=None,
         slope: float = 0.0,
         slope_err: float = 0.0,
@@ -596,24 +620,28 @@ class zeropoint:
         -------
         (ZP, slope, inlier_mask, cov) : (float, float, ndarray, ndarray)
         """
-        logger.info('Starting RANSAC + weighted constant fit.')
+        logger.info("Starting RANSAC + weighted constant fit.")
 
-        x   = np.asarray(x_indep,  float)
-        y   = np.asarray(delta_mag, float)
-        w0  = np.asarray(w_mag,     float)
+        x = np.asarray(x_indep, float)
+        y = np.asarray(delta_mag, float)
+        w0 = np.asarray(w_mag, float)
         x_err = np.zeros_like(x) if x_err is None else np.asarray(x_err, float)
 
         orig_size = len(x)
 
         # Quality filter: finite, positive weight, error <= 0.5 mag.
         mag_err = 1.0 / np.sqrt(np.clip(w0, 1e-12, None))
-        finite  = (
-            np.isfinite(x) & np.isfinite(y) & np.isfinite(w0) & (w0 > 0)
-            & np.isfinite(x_err) & (mag_err <= 0.5)
+        finite = (
+            np.isfinite(x)
+            & np.isfinite(y)
+            & np.isfinite(w0)
+            & (w0 > 0)
+            & np.isfinite(x_err)
+            & (mag_err <= 0.5)
         )
         x, y, w0, x_err = x[finite], y[finite], w0[finite], x_err[finite]
         keep_idx = np.where(finite)[0]
-        logger.info(f'Filtered {len(x)}/{orig_size} points.')
+        logger.info(f"Filtered {len(x)}/{orig_size} points.")
 
         # Trivial fallback for very sparse data.
         if len(x) < 3:
@@ -622,11 +650,11 @@ class zeropoint:
             zp_se = 1.0 / np.sqrt(sum_w) if (len(y) and sum_w > 0) else np.nan
             full = np.zeros(orig_size, dtype=bool)
             full[keep_idx] = True
-            return ZP, slope, full, np.diag([zp_se ** 2, slope_err ** 2])
+            return ZP, slope, full, np.diag([zp_se**2, slope_err**2])
 
         # RANSAC threshold from MAD of residuals.
-        r0   = y - np.average(y, weights=w0)
-        mad  = np.nanmedian(np.abs(r0)) * 1.4826 + 1e-12
+        r0 = y - np.average(y, weights=w0)
+        mad = np.nanmedian(np.abs(r0)) * 1.4826 + 1e-12
 
         ransac = RANSACRegressor(
             PenalisedSlopeRegressor(
@@ -641,23 +669,23 @@ class zeropoint:
         )
         ransac.fit(x[:, None], y)
         inlier_mask = ransac.inlier_mask_
-        logger.info(f'RANSAC: {inlier_mask.sum()}/{len(x)} inliers')
+        logger.info(f"RANSAC: {inlier_mask.sum()}/{len(x)} inliers")
 
         if inlier_mask.sum() < 2:
             inlier_mask = np.ones(len(x), dtype=bool)
-            logger.warning('RANSAC found too few inliers; using all points.')
+            logger.warning("RANSAC found too few inliers; using all points.")
 
         xi, yi, wi = x[inlier_mask], y[inlier_mask], w0[inlier_mask]
-        intercept     = np.average(yi, weights=wi)
+        intercept = np.average(yi, weights=wi)
         # SE(weighted mean) = 1/sqrt(sum(w_i)) for w_i = 1/sigma_i^2
-        sum_wi        = np.sum(wi)
+        sum_wi = np.sum(wi)
         intercept_err = 1.0 / np.sqrt(sum_wi) if sum_wi > 0 else np.nan
 
-        cov      = np.diag([intercept_err ** 2, slope_err ** 2])
-        full     = np.zeros(orig_size, dtype=bool)
+        cov = np.diag([intercept_err**2, slope_err**2])
+        full = np.zeros(orig_size, dtype=bool)
         full[keep_idx[inlier_mask]] = True
 
-        logger.info(f'ZP = {intercept:.4f} +/- {intercept_err:.4f}')
+        logger.info(f"ZP = {intercept:.4f} +/- {intercept_err:.4f}")
         return intercept, slope, full, cov
 
     # -----------------------------------------------------------------------
@@ -683,48 +711,60 @@ class zeropoint:
         -------
         (clean_catalog, fit_params) : (DataFrame, dict)
         """
-        t0         = time.time()
-        fit_params = {'AP': {}, 'PSF': {}}
-        logger.info('Fitting zeropoints vs m_inst.')
+        t0 = time.time()
+        fit_params = {"AP": {}, "PSF": {}}
+        logger.info("Fitting zeropoints vs m_inst.")
 
         try:
-            fpath      = self.input_yaml.get('fpath', '')
-            base_name  = os.path.splitext(os.path.basename(fpath))[0] or 'zeropoint'
-            write_dir  = os.path.dirname(fpath) or '.'
-            use_filter = self.input_yaml.get('imageFilter')
+            fpath = self.input_yaml.get("fpath", "")
+            base_name = os.path.splitext(os.path.basename(fpath))[0] or "zeropoint"
+            write_dir = os.path.dirname(fpath) or "."
+            use_filter = self.input_yaml.get("imageFilter")
 
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
 
             required = [
-                'flux_AP', 'flux_AP_err', 'flux_PSF', 'flux_PSF_err',
-                use_filter, f'{use_filter}_err',
+                "flux_AP",
+                "flux_AP_err",
+                "flux_PSF",
+                "flux_PSF_err",
+                use_filter,
+                f"{use_filter}_err",
             ]
             missing = [c for c in required if c not in catalog.columns]
             if missing:
-                raise KeyError(f'Missing columns: {missing}')
+                raise KeyError(f"Missing columns: {missing}")
 
             try:
                 color1, color2 = self.get_color_term_for_filter(use_filter)
-                has_color_term = (color1 in catalog.columns) and (color2 in catalog.columns)
+                has_color_term = (color1 in catalog.columns) and (
+                    color2 in catalog.columns
+                )
             except Exception:
                 has_color_term, color1, color2 = False, None, None
 
-            clean_catalog = self._prepare_catalog(catalog, threshold, use_filter, min_sources)
+            clean_catalog = self._prepare_catalog(
+                catalog, threshold, use_filter, min_sources
+            )
             if clean_catalog is None:
                 fit_params = self._fallback_zeropoint(catalog, use_filter)
                 return catalog, fit_params
 
-            _style = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'autophot.mplstyle')
+            _style = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
+            )
             if os.path.exists(_style):
                 plt.style.use(_style)
             fig, ax = plt.subplots(1, 1, figsize=set_size(540, 1))
-            inlier_masks_full = {k: np.zeros(len(clean_catalog), dtype=bool) for k in ['AP', 'PSF']}
-            colors  = {'AP': 'blue', 'PSF': 'green'}
-            labels  = {'AP': 'Aperture', 'PSF': 'PSF'}
+            inlier_masks_full = {
+                k: np.zeros(len(clean_catalog), dtype=bool) for k in ["AP", "PSF"]
+            }
+            colors = {"AP": "blue", "PSF": "green"}
+            labels = {"AP": "Aperture", "PSF": "PSF"}
             global_xmins, global_xmaxs, global_ymins, global_ymaxs = [], [], [], []
 
-            for flux_type in ['AP', 'PSF']:
+            for flux_type in ["AP", "PSF"]:
                 pack = self._finite_vmask(clean_catalog, flux_type, use_filter)
                 if pack is None:
                     continue
@@ -747,11 +787,13 @@ class zeropoint:
                         color_slope_err=fixed_color_slope_err or 0.0,
                     )
 
-                yerr    = np.sqrt(delta_mag_err ** 2 + color_corr_err ** 2)
-                weights = 1.0 / (yerr ** 2 + 1e-12)
+                yerr = np.sqrt(delta_mag_err**2 + color_corr_err**2)
+                weights = 1.0 / (yerr**2 + 1e-12)
 
                 ZP, _, inlier_short, cov = self._robust_RANSAC_fit(
-                    inst_mag, delta_mag, weights,
+                    inst_mag,
+                    delta_mag,
+                    weights,
                     x_err=inst_mag_err,
                     max_trials=max_trials,
                     ransac_min_samples=ransac_min_samples,
@@ -759,19 +801,26 @@ class zeropoint:
                 )
                 zp_std = float(np.sqrt(np.clip(cov[0, 0], 0, np.inf)))
 
-                fit_params[flux_type].update({
-                    'zeropoint':       ZP,
-                    'zeropoint_error': zp_std,
-                    'has_color_term':  bool(has_color_term and fixed_color_slope is not None),
-                })
+                fit_params[flux_type].update(
+                    {
+                        "zeropoint": ZP,
+                        "zeropoint_error": zp_std,
+                        "has_color_term": bool(
+                            has_color_term and fixed_color_slope is not None
+                        ),
+                    }
+                )
                 if has_color_term and fixed_color_slope is not None:
-                    fit_params[flux_type].update({
-                        'color_term':       fixed_color_slope,
-                        'color_term_error': fixed_color_slope_err or 0.0,
-                        'color1': color1, 'color2': color2,
-                    })
+                    fit_params[flux_type].update(
+                        {
+                            "color_term": fixed_color_slope,
+                            "color_term_error": fixed_color_slope_err or 0.0,
+                            "color1": color1,
+                            "color2": color2,
+                        }
+                    )
 
-                msg = f'[{flux_type}] ZP={ZP:.3f} +/- {zp_std:.3f}'
+                msg = f"[{flux_type}] ZP={ZP:.3f} +/- {zp_std:.3f}"
                 logger.info(msg)
 
                 # ---- Plot --------------------------------------------------
@@ -780,22 +829,35 @@ class zeropoint:
                 in_e = yerr[inlier_short]
 
                 ax.errorbar(
-                    in_x, in_y,
-                    xerr=inst_mag_err[inlier_short], yerr=in_e,
-                    fmt='o', ms=3, color=colors[flux_type], alpha=0.75,
-                    capsize=1.5, label=f'{labels[flux_type]} inliers',
+                    in_x,
+                    in_y,
+                    xerr=inst_mag_err[inlier_short],
+                    yerr=in_e,
+                    fmt="o",
+                    ms=3,
+                    color=colors[flux_type],
+                    alpha=0.75,
+                    capsize=1.5,
+                    label=f"{labels[flux_type]} inliers",
                 )
                 out_mask = ~inlier_short
                 if out_mask.any():
-                    ax.scatter(inst_mag[out_mask], delta_mag[out_mask],
-                               s=20, marker='x', alpha=0.5, color=colors[flux_type])
+                    ax.scatter(
+                        inst_mag[out_mask],
+                        delta_mag[out_mask],
+                        s=20,
+                        marker="x",
+                        alpha=0.5,
+                        color=colors[flux_type],
+                    )
 
-                xs     = np.linspace(in_x.min() - 0.5, in_x.max() + 0.5, 200)
-                ys     = np.full_like(xs, ZP)
-                sig_y  = np.full_like(xs, zp_std)
-                ax.plot(xs, ys, '--', color=colors[flux_type], label=msg)
-                ax.fill_between(xs, ys - sig_y, ys + sig_y,
-                                color=colors[flux_type], alpha=0.2)
+                xs = np.linspace(in_x.min() - 0.5, in_x.max() + 0.5, 200)
+                ys = np.full_like(xs, ZP)
+                sig_y = np.full_like(xs, zp_std)
+                ax.plot(xs, ys, "--", color=colors[flux_type], label=msg)
+                ax.fill_between(
+                    xs, ys - sig_y, ys + sig_y, color=colors[flux_type], alpha=0.2
+                )
 
                 global_xmins.append(xs[0])
                 global_xmaxs.append(xs[-1])
@@ -804,14 +866,16 @@ class zeropoint:
 
                 full_mask = np.zeros(len(clean_catalog), dtype=bool)
                 full_mask[np.flatnonzero(vmask)] = inlier_short
-                inlier_masks_full[flux_type]     = full_mask
+                inlier_masks_full[flux_type] = full_mask
 
             # Axis limits.
             if global_xmins:
                 xr = max(global_xmaxs) - min(global_xmins)
                 yr = max(global_ymaxs) - min(global_ymins)
-                ax.set_xlim(min(global_xmins) - 0.05 * xr, max(global_xmaxs) + 0.05 * xr)
-                ax.set_ylim(min(global_ymins) - 0.1  * yr, max(global_ymaxs) + 0.1  * yr)
+                ax.set_xlim(
+                    min(global_xmins) - 0.05 * xr, max(global_xmaxs) + 0.05 * xr
+                )
+                ax.set_ylim(min(global_ymins) - 0.1 * yr, max(global_ymaxs) + 0.1 * yr)
 
             y_label = (
                 rf"$m_\mathrm{{cal,{use_filter}}} - m_\mathrm{{inst,{use_filter}}}$"
@@ -822,42 +886,42 @@ class zeropoint:
                     rf"{sign}{abs(fixed_color_slope):.2f}"
                     rf"($m_\mathrm{{cal,{color1}}} - m_\mathrm{{cal,{color2}}}$)"
                 )
-            y_label += ' [mag]'
+            y_label += " [mag]"
             ax.set_xlabel(rf"$m_\mathrm{{inst,{use_filter}}}$ [mag]")
             ax.set_ylabel(y_label)
-            ax.grid(True, ls='--', alpha=0.5)
-            ax.legend(ncol=2, loc='upper left', frameon=False)
+            ax.grid(True, ls="--", alpha=0.5)
+            ax.legend(ncol=2, loc="upper left", frameon=False)
 
             fig.savefig(
-                os.path.join(write_dir, f'zeropoint_{base_name}.pdf'),
-                bbox_inches='tight', dpi=150, facecolor='white',
+                os.path.join(write_dir, f"zeropoint_{base_name}.pdf"),
+                bbox_inches="tight",
+                dpi=150,
+                facecolor="white",
             )
             plt.close(fig)
 
             # Build joint inlier mask only from flux types that actually
             # contributed inliers, so that missing PSF or AP measurements
             # do not zero-out the catalog.
-            valid_masks = [
-                m for m in inlier_masks_full.values() if np.any(m)
-            ]
+            valid_masks = [m for m in inlier_masks_full.values() if np.any(m)]
             if valid_masks:
                 joint_mask = np.logical_and.reduce(valid_masks)
                 clean_catalog = clean_catalog[joint_mask]
             else:
                 logger.warning(
-                    'fit_zeropoint: no inliers from any flux type; '
-                    'returning unfiltered clean_catalog.'
+                    "fit_zeropoint: no inliers from any flux type; "
+                    "returning unfiltered clean_catalog."
                 )
 
-            logger.info(f'[fit_zeropoint] Done in {time.time() - t0:.3f}s')
+            logger.info(f"[fit_zeropoint] Done in {time.time() - t0:.3f}s")
             return clean_catalog, fit_params
 
         except Exception as exc:
             exc_type, _, exc_tb = sys.exc_info()
             fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
             logger.error(
-                f'fit_zeropoint failed: {exc_type.__name__} in '
-                f'{fname}:{exc_tb.tb_lineno}: {exc}'
+                f"fit_zeropoint failed: {exc_type.__name__} in "
+                f"{fname}:{exc_tb.tb_lineno}: {exc}"
             )
             return catalog, fit_params
 
@@ -884,54 +948,66 @@ class zeropoint:
         (clean_catalog, zp_params) : (DataFrame, dict)
         """
         with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
+            warnings.simplefilter("ignore", UserWarning)
 
-            t0        = time.time()
+            t0 = time.time()
             zp_params = {"AP": {}, "PSF": {}}
             logger.info("Estimating zeropoint via sigma clipping.")
 
             try:
-                fpath      = self.input_yaml.get('fpath', '')
-                base_name  = os.path.splitext(os.path.basename(fpath))[0] or 'zeropoint'
-                write_dir  = os.path.dirname(fpath) or '.'
-                use_filter = self.input_yaml.get('imageFilter')
+                fpath = self.input_yaml.get("fpath", "")
+                base_name = os.path.splitext(os.path.basename(fpath))[0] or "zeropoint"
+                write_dir = os.path.dirname(fpath) or "."
+                use_filter = self.input_yaml.get("imageFilter")
                 if not use_filter:
                     raise ValueError("Missing 'imageFilter' in input YAML.")
 
                 required = [
-                    'flux_AP', 'flux_AP_err', 'flux_PSF', 'flux_PSF_err',
-                    use_filter, f'{use_filter}_err',
+                    "flux_AP",
+                    "flux_AP_err",
+                    "flux_PSF",
+                    "flux_PSF_err",
+                    use_filter,
+                    f"{use_filter}_err",
                 ]
                 missing = [c for c in required if c not in catalog.columns]
                 if missing:
-                    raise KeyError(f'Missing columns: {missing}')
+                    raise KeyError(f"Missing columns: {missing}")
 
                 try:
                     color1, color2 = self.get_color_term_for_filter(use_filter)
-                    has_color_term = (color1 in catalog.columns) and (color2 in catalog.columns)
+                    has_color_term = (color1 in catalog.columns) and (
+                        color2 in catalog.columns
+                    )
                 except Exception:
                     has_color_term, color1, color2 = False, None, None
 
-                clean_catalog = self._prepare_catalog(catalog, threshold, use_filter, min_sources)
+                clean_catalog = self._prepare_catalog(
+                    catalog, threshold, use_filter, min_sources
+                )
                 if clean_catalog is None:
                     zp_params = self._fallback_zeropoint(catalog, use_filter)
                     return catalog, zp_params
 
-                _style = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'autophot.mplstyle')
+                _style = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
+                )
                 if os.path.exists(_style):
                     plt.style.use(_style)
                 fig_hist, ax_hist = plt.subplots(1, 1, figsize=set_size(540, 1))
-                colors       = {'AP': 'blue', 'PSF': 'green'}
-                labels_base  = {'AP': 'Aperture', 'PSF': 'PSF'}
-                inlier_masks_full = {k: np.zeros(len(clean_catalog), dtype=bool)
-                                     for k in ['AP', 'PSF']}
+                colors = {"AP": "blue", "PSF": "green"}
+                labels_base = {"AP": "Aperture", "PSF": "PSF"}
+                inlier_masks_full = {
+                    k: np.zeros(len(clean_catalog), dtype=bool) for k in ["AP", "PSF"]
+                }
 
-                for flux_type in ['AP', 'PSF']:
+                for flux_type in ["AP", "PSF"]:
                     pack = self._finite_vmask(clean_catalog, flux_type, use_filter)
                     if pack is None:
                         zp_params[flux_type] = {
-                            'zeropoint': np.nan, 'zeropoint_error': np.nan,
-                            'has_color_term': False,
+                            "zeropoint": np.nan,
+                            "zeropoint_error": np.nan,
+                            "has_color_term": False,
                         }
                         continue
 
@@ -940,7 +1016,7 @@ class zeropoint:
                         flux, flux_err, catmag_v, catmag_err_v
                     )
 
-                    delta_no_corr = delta_mag.copy()   # before colour correction
+                    delta_no_corr = delta_mag.copy()  # before colour correction
 
                     if has_color_term and fixed_color_slope is not None:
                         delta_mag, _ = self._apply_color_correction(
@@ -955,59 +1031,84 @@ class zeropoint:
 
                     delta_mag = delta_mag[np.isfinite(delta_mag)]
                     if len(delta_mag) == 0:
-                        logger.warning(f'{flux_type}: no finite delta_mag after masking; skipping.')
+                        logger.warning(
+                            f"{flux_type}: no finite delta_mag after masking; skipping."
+                        )
                         zp_params[flux_type] = {
-                            'zeropoint': np.nan, 'zeropoint_error': np.nan,
-                            'has_color_term': False,
+                            "zeropoint": np.nan,
+                            "zeropoint_error": np.nan,
+                            "has_color_term": False,
                         }
                         continue
 
-                    clipped     = sigma_clip(
-                        delta_mag, sigma=sigma_clip_sigma,
+                    clipped = sigma_clip(
+                        delta_mag,
+                        sigma=sigma_clip_sigma,
                         maxiters=sigma_clip_maxiters,
-                        cenfunc=np.nanmedian, stdfunc=median_abs_deviation,
+                        cenfunc=np.nanmedian,
+                        stdfunc=median_abs_deviation,
                     )
                     inlier_deltas = clipped.data[~clipped.mask]
                     inlier_deltas = inlier_deltas[np.isfinite(inlier_deltas)]
 
                     if len(inlier_deltas) == 0:
-                        logger.warning(f'{flux_type}: no inliers after sigma clipping; skipping.')
+                        logger.warning(
+                            f"{flux_type}: no inliers after sigma clipping; skipping."
+                        )
                         zp_params[flux_type] = {
-                            'zeropoint': np.nan, 'zeropoint_error': np.nan,
-                            'has_color_term': False,
+                            "zeropoint": np.nan,
+                            "zeropoint_error": np.nan,
+                            "has_color_term": False,
                         }
                         continue
 
                     zp_final = float(np.nanmedian(inlier_deltas))
-                    n_inl    = len(inlier_deltas)
-                    mad_zp   = float(median_abs_deviation(inlier_deltas, nan_policy='omit'))
+                    n_inl = len(inlier_deltas)
+                    mad_zp = float(
+                        median_abs_deviation(inlier_deltas, nan_policy="omit")
+                    )
                     # SE(median) ~ 1.858 * MAD/sqrt(N) (1.253*sigma/sqrt(N), sigma~1.4826*MAD)
-                    zp_std   = (1.858 * mad_zp / np.sqrt(n_inl)) if n_inl >= 2 else mad_zp
+                    zp_std = (1.858 * mad_zp / np.sqrt(n_inl)) if n_inl >= 2 else mad_zp
 
-                    zp_params[flux_type].update({
-                        'zeropoint':       zp_final,
-                        'zeropoint_error': zp_std,
-                        'has_color_term':  bool(has_color_term and fixed_color_slope is not None),
-                    })
+                    zp_params[flux_type].update(
+                        {
+                            "zeropoint": zp_final,
+                            "zeropoint_error": zp_std,
+                            "has_color_term": bool(
+                                has_color_term and fixed_color_slope is not None
+                            ),
+                        }
+                    )
                     if has_color_term and fixed_color_slope is not None:
-                        zp_params[flux_type].update({
-                            'color_term':       fixed_color_slope,
-                            'color_term_error': fixed_color_slope_err or 0.0,
-                            'color1': color1, 'color2': color2,
-                        })
+                        zp_params[flux_type].update(
+                            {
+                                "color_term": fixed_color_slope,
+                                "color_term_error": fixed_color_slope_err or 0.0,
+                                "color1": color1,
+                                "color2": color2,
+                            }
+                        )
 
-                    logger.info("[%s] Zeropoint: %.3f +/- %.3f mag", flux_type, zp_final, zp_std)
+                    logger.info(
+                        "[%s] Zeropoint: %.3f +/- %.3f mag", flux_type, zp_final, zp_std
+                    )
 
                     # ---- Histogram (colour-corrected) ----------------------
-                    bin_edges   = np.histogram_bin_edges(inlier_deltas, bins='fd')
+                    bin_edges = np.histogram_bin_edges(inlier_deltas, bins="fd")
                     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-                    width       = bin_edges[1] - bin_edges[0]
-                    counts, _   = np.histogram(inlier_deltas, bins=bin_edges, density=True)
+                    width = bin_edges[1] - bin_edges[0]
+                    counts, _ = np.histogram(
+                        inlier_deltas, bins=bin_edges, density=True
+                    )
 
                     ax_hist.bar(
-                        bin_centers, counts, width=width,
-                        color=colors[flux_type], edgecolor='none',
-                        alpha=0.8, zorder=4,
+                        bin_centers,
+                        counts,
+                        width=width,
+                        color=colors[flux_type],
+                        edgecolor="none",
+                        alpha=0.8,
+                        zorder=4,
                         label=(
                             f"{labels_base[flux_type]} (color corr., "
                             f"N={len(inlier_deltas)}, "
@@ -1019,24 +1120,34 @@ class zeropoint:
                     if has_color_term and fixed_color_slope is not None:
                         dnc = delta_no_corr[np.isfinite(delta_no_corr)]
                         clipped_nc = sigma_clip(
-                            dnc, sigma=sigma_clip_sigma, maxiters=sigma_clip_maxiters,
-                            cenfunc=np.nanmedian, stdfunc=median_abs_deviation,
+                            dnc,
+                            sigma=sigma_clip_sigma,
+                            maxiters=sigma_clip_maxiters,
+                            cenfunc=np.nanmedian,
+                            stdfunc=median_abs_deviation,
                         )
                         inl_nc = clipped_nc.data[~clipped_nc.mask]
                         inl_nc = inl_nc[np.isfinite(inl_nc)]
 
                         if len(inl_nc) > 0:
-                            be_nc = np.histogram_bin_edges(inl_nc, bins='fd')
+                            be_nc = np.histogram_bin_edges(inl_nc, bins="fd")
                             bc_nc = (be_nc[:-1] + be_nc[1:]) / 2
-                            w_nc  = be_nc[1] - be_nc[0]
+                            w_nc = be_nc[1] - be_nc[0]
                             ct_nc, _ = np.histogram(inl_nc, bins=be_nc, density=True)
-                            zp_nc    = float(np.nanmedian(inl_nc))
-                            std_nc   = float(median_abs_deviation(inl_nc, nan_policy='omit'))
+                            zp_nc = float(np.nanmedian(inl_nc))
+                            std_nc = float(
+                                median_abs_deviation(inl_nc, nan_policy="omit")
+                            )
 
                             ax_hist.bar(
-                                bc_nc, ct_nc, width=w_nc,
-                                color='none', edgecolor=colors[flux_type],
-                                linewidth=0.5, alpha=0.6, zorder=3,
+                                bc_nc,
+                                ct_nc,
+                                width=w_nc,
+                                color="none",
+                                edgecolor=colors[flux_type],
+                                linewidth=0.5,
+                                alpha=0.6,
+                                zorder=3,
                                 label=(
                                     f"{labels_base[flux_type]} (no corr., "
                                     f"N={len(inl_nc)}, ZP={zp_nc:.3f}+/-{std_nc:.3f})"
@@ -1046,29 +1157,29 @@ class zeropoint:
                     # Update inlier mask.
                     full_mask = np.zeros(len(clean_catalog), dtype=bool)
                     full_mask[np.flatnonzero(vmask)] = ~clipped.mask
-                    inlier_masks_full[flux_type]     = full_mask
+                    inlier_masks_full[flux_type] = full_mask
 
-                ax_hist.set_xlabel('Zeropoint [mag]')
-                ax_hist.set_ylabel('Density')
-                ax_hist.grid(True, ls='--', alpha=0.3, zorder=0)
-                ax_hist.legend(loc='best', frameon=False)
+                ax_hist.set_xlabel("Zeropoint [mag]")
+                ax_hist.set_ylabel("Density")
+                ax_hist.grid(True, ls="--", alpha=0.3, zorder=0)
+                ax_hist.legend(loc="best", frameon=False)
                 for patch in ax_hist.patches:
                     patch.set_zorder(3)
 
                 fig_hist.tight_layout()
                 os.makedirs(write_dir, exist_ok=True)
                 fig_hist.savefig(
-                    os.path.join(write_dir, f'zeropoint_hist_combined_{base_name}.pdf'),
-                    bbox_inches='tight', dpi=150, facecolor='white',
+                    os.path.join(write_dir, f"zeropoint_hist_combined_{base_name}.pdf"),
+                    bbox_inches="tight",
+                    dpi=150,
+                    facecolor="white",
                 )
                 plt.close(fig_hist)
 
                 # Combine inliers only over flux types that actually had
                 # valid measurements, to avoid emptying the catalog when
                 # only AP or PSF is present.
-                valid_masks = [
-                    m for m in inlier_masks_full.values() if np.any(m)
-                ]
+                valid_masks = [m for m in inlier_masks_full.values() if np.any(m)]
                 if valid_masks:
                     joint_mask = np.logical_and.reduce(valid_masks)
                     clean_catalog = clean_catalog[joint_mask]
@@ -1083,11 +1194,11 @@ class zeropoint:
                 exc_type, _, exc_tb = sys.exc_info()
                 fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
                 logger.error(
-                    f'estimate_zeropoint failed: {exc_type.__name__} in '
-                    f'{fname}:{exc_tb.tb_lineno}: {exc}'
+                    f"estimate_zeropoint failed: {exc_type.__name__} in "
+                    f"{fname}:{exc_tb.tb_lineno}: {exc}"
                 )
                 zp_params = self._fallback_zeropoint(
-                    catalog, self.input_yaml.get('imageFilter')
+                    catalog, self.input_yaml.get("imageFilter")
                 )
                 return catalog, zp_params
 
@@ -1107,45 +1218,53 @@ class zeropoint:
             Returns (None, None) on failure.
         """
         try:
-            use_filter = self.input_yaml.get('imageFilter')
+            use_filter = self.input_yaml.get("imageFilter")
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
 
             color1, color2 = self.get_color_term_for_filter(use_filter)
 
             df = catalog.copy()
-            if 'sky' in df.columns:
-                sky_mask = sigma_clip(np.abs(df['sky'].values), sigma=5, maxiters=10)
+            if "sky" in df.columns:
+                sky_mask = sigma_clip(np.abs(df["sky"].values), sigma=5, maxiters=10)
                 df = df[~sky_mask.mask]
-            if 'threshold' in df.columns:
-                df = df[df['threshold'] >= 5]
+            if "threshold" in df.columns:
+                df = df[df["threshold"] >= 5]
 
-            clean = df[df[f'{use_filter}_err'] < 0.32].copy()
+            clean = df[df[f"{use_filter}_err"] < 0.32].copy()
 
             required = [
-                use_filter, f'{use_filter}_err',
-                color1, color2, f'{color1}_err', f'{color2}_err',
-                'flux_AP', 'flux_AP_err',
+                use_filter,
+                f"{use_filter}_err",
+                color1,
+                color2,
+                f"{color1}_err",
+                f"{color2}_err",
+                "flux_AP",
+                "flux_AP_err",
             ]
             missing = [c for c in required if c not in clean.columns]
             if missing:
-                raise KeyError(f'Missing columns: {missing}')
+                raise KeyError(f"Missing columns: {missing}")
 
-            flux_ap   = np.asarray(clean['flux_AP'],     float)
-            flux_err  = np.asarray(clean['flux_AP_err'], float)
-            x         = np.asarray(clean[color1] - clean[color2], float)
-            y         = np.asarray(clean[use_filter], float) - (-2.5 * np.log10(flux_ap))
-            x_err     = np.sqrt(
-                clean[f'{color1}_err'] ** 2 + clean[f'{color2}_err'] ** 2
+            flux_ap = np.asarray(clean["flux_AP"], float)
+            flux_err = np.asarray(clean["flux_AP_err"], float)
+            x = np.asarray(clean[color1] - clean[color2], float)
+            y = np.asarray(clean[use_filter], float) - (-2.5 * np.log10(flux_ap))
+            x_err = np.sqrt(
+                clean[f"{color1}_err"] ** 2 + clean[f"{color2}_err"] ** 2
             ).values
-            y_err     = np.sqrt(
-                clean[f'{use_filter}_err'] ** 2
+            y_err = np.sqrt(
+                clean[f"{use_filter}_err"] ** 2
                 + (2.5 / np.log(10) * flux_err / flux_ap) ** 2
             ).values
 
             finite = (
-                np.isfinite(x) & np.isfinite(y)
-                & np.isfinite(x_err) & np.isfinite(y_err) & (flux_ap > 0)
+                np.isfinite(x)
+                & np.isfinite(y)
+                & np.isfinite(x_err)
+                & np.isfinite(y_err)
+                & (flux_ap > 0)
             )
             x, y, x_err, y_err = x[finite], y[finite], x_err[finite], y_err[finite]
 
@@ -1153,13 +1272,13 @@ class zeropoint:
             min_color_range = 0.05  # mag
             if len(x) < min_sources:
                 logger.warning(
-                    f'fit_color_term: too few sources ({len(x)} < {min_sources}).'
+                    f"fit_color_term: too few sources ({len(x)} < {min_sources})."
                 )
                 return 0.0, np.nan
             x_range = float(np.ptp(x))
             if x_range < min_color_range:
                 logger.warning(
-                    f'fit_color_term: colour range too small ({x_range:.3f} mag).'
+                    f"fit_color_term: colour range too small ({x_range:.3f} mag)."
                 )
                 return 0.0, np.nan
 
@@ -1167,7 +1286,7 @@ class zeropoint:
             try:
                 ols_slope = np.polyfit(x, y, 1)[0]
                 ols_resid = y - (ols_slope * x + np.median(y - ols_slope * x))
-                mad_resid = median_abs_deviation(ols_resid, scale='normal')
+                mad_resid = median_abs_deviation(ols_resid, scale="normal")
                 residual_threshold = float(np.clip(2.5 * mad_resid, 0.05, 0.35))
             except Exception:
                 residual_threshold = 0.1
@@ -1209,7 +1328,7 @@ class zeropoint:
                     best_estimator = ransac.estimator_
 
             if best_inlier_mask is None or best_n_inliers < 4:
-                logger.warning('fit_color_term: RANSAC found no usable inlier set.')
+                logger.warning("fit_color_term: RANSAC found no usable inlier set.")
                 return 0.0, np.nan
 
             inlier_mask = best_inlier_mask
@@ -1223,7 +1342,9 @@ class zeropoint:
                 clipped = sigma_clip(resid, sigma=3, maxiters=5)
                 inlier_mask = ~clipped.mask
                 if np.sum(inlier_mask) >= 5:
-                    ransac_slope = float(np.polyfit(x[inlier_mask], y[inlier_mask], 1)[0])
+                    ransac_slope = float(
+                        np.polyfit(x[inlier_mask], y[inlier_mask], 1)[0]
+                    )
                     ransac_intercept = float(
                         np.median(y[inlier_mask] - ransac_slope * x[inlier_mask])
                     )
@@ -1253,8 +1374,8 @@ class zeropoint:
 
             # Fallback if ODR did not converge or covariance invalid.
             odr_ok = (
-                getattr(odr_out, 'stopreason', None) is not None
-                and getattr(odr_out, 'info', None) is not None
+                getattr(odr_out, "stopreason", None) is not None
+                and getattr(odr_out, "info", None) is not None
                 and odr_out.info <= 4
                 and np.isfinite(color_term)
             )
@@ -1263,7 +1384,8 @@ class zeropoint:
                 resid_in = yi - (ransac_slope * xi + ransac_intercept)
                 color_term_error = float(
                     mad_std(resid_in) / np.sqrt(max(1, n_in - 2))
-                    if n_in > 2 else np.nan
+                    if n_in > 2
+                    else np.nan
                 )
                 if not np.isfinite(color_term_error) or color_term_error <= 0:
                     color_term_error = 0.2
@@ -1272,8 +1394,8 @@ class zeropoint:
             max_slope = 2.0
             if not np.isfinite(color_term) or abs(color_term) > max_slope:
                 logger.warning(
-                    f'fit_color_term: slope {color_term} out of range [-{max_slope},{max_slope}], '
-                    'returning 0 +/- 0.5.'
+                    f"fit_color_term: slope {color_term} out of range [-{max_slope},{max_slope}], "
+                    "returning 0 +/- 0.5."
                 )
                 return 0.0, 0.5
 
@@ -1284,33 +1406,64 @@ class zeropoint:
             )
 
             # ---- Plot ------------------------------------------------------
-            _style = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'autophot.mplstyle')
+            _style = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
+            )
             if os.path.exists(_style):
                 plt.style.use(_style)
             fig, ax = plt.subplots(figsize=set_size(340, 1))
 
-            ax.errorbar(xi, yi, xerr=xe, yerr=ye,
-                        fmt='o', ms=4, color='black', ecolor='lightgrey',
-                        alpha=0.8, capsize=2, lw=0.5, label='Inliers')
+            ax.errorbar(
+                xi,
+                yi,
+                xerr=xe,
+                yerr=ye,
+                fmt="o",
+                ms=4,
+                color="black",
+                ecolor="lightgrey",
+                alpha=0.8,
+                capsize=2,
+                lw=0.5,
+                label="Inliers",
+            )
 
             out_mask = ~inlier_mask
             if out_mask.any():
-                ax.scatter(x[out_mask], y[out_mask],
-                           s=30, marker='x', alpha=0.4, color='red', label='Outliers')
+                ax.scatter(
+                    x[out_mask],
+                    y[out_mask],
+                    s=30,
+                    marker="x",
+                    alpha=0.4,
+                    color="red",
+                    label="Outliers",
+                )
 
             x_plot = np.linspace(xi.min() * 0.95, xi.max() * 1.05, 200)
             y_plot = plot_intercept + color_term * x_plot
-            if odr_ok and odr_out.cov_beta is not None and np.all(np.isfinite(odr_out.cov_beta)):
-                cov    = odr_out.cov_beta
-                sig_y  = np.sqrt(
-                    cov[1, 1] + x_plot ** 2 * cov[0, 0] + 2 * x_plot * cov[0, 1]
+            if (
+                odr_ok
+                and odr_out.cov_beta is not None
+                and np.all(np.isfinite(odr_out.cov_beta))
+            ):
+                cov = odr_out.cov_beta
+                sig_y = np.sqrt(
+                    cov[1, 1] + x_plot**2 * cov[0, 0] + 2 * x_plot * cov[0, 1]
                 )
-                ax.fill_between(x_plot, y_plot - sig_y, y_plot + sig_y,
-                                color='red', alpha=0.15)
-            ax.plot(x_plot, y_plot, 'r--', lw=0.5,
-                    label=f'Slope={color_term:.3f} +/- {color_term_error:.3f}')
+                ax.fill_between(
+                    x_plot, y_plot - sig_y, y_plot + sig_y, color="red", alpha=0.15
+                )
+            ax.plot(
+                x_plot,
+                y_plot,
+                "r--",
+                lw=0.5,
+                label=f"Slope={color_term:.3f} +/- {color_term_error:.3f}",
+            )
 
             pad = 0.25
+
             def _padded_lim(arr):
                 lo, hi = arr.min(), arr.max()
                 delta = hi - lo
@@ -1325,20 +1478,22 @@ class zeropoint:
                 rf"$m_\mathrm{{cal,{color1}}} - m_\mathrm{{inst,{use_filter}}}$ [mag]"
             )
             ax.grid(True, alpha=0.3)
-            ax.legend(loc='best', frameon=False)
+            ax.legend(loc="best", frameon=False)
 
-            fpath     = self.input_yaml.get('fpath', '')
-            base_name = os.path.splitext(os.path.basename(fpath))[0] or 'color_term'
-            write_dir = os.path.dirname(fpath) or '.'
+            fpath = self.input_yaml.get("fpath", "")
+            base_name = os.path.splitext(os.path.basename(fpath))[0] or "color_term"
+            write_dir = os.path.dirname(fpath) or "."
             fig.savefig(
-                os.path.join(write_dir, f'color_term_{base_name}.pdf'),
-                bbox_inches='tight', dpi=150, facecolor='white',
+                os.path.join(write_dir, f"color_term_{base_name}.pdf"),
+                bbox_inches="tight",
+                dpi=150,
+                facecolor="white",
             )
             plt.close(fig)
 
-            logger.info(f'Color term: {color_term:.3f} +/- {color_term_error:.3f}')
+            logger.info(f"Color term: {color_term:.3f} +/- {color_term_error:.3f}")
             return color_term, color_term_error
 
         except Exception as exc:
-            logger.error(f'fit_color_term failed: {exc}')
+            logger.error(f"fit_color_term failed: {exc}")
             return None, None

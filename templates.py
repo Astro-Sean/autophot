@@ -97,6 +97,7 @@ from photutils.detection import DAOStarFinder
 # Reproject Imports
 # =============================================================================
 from reproject import reproject_interp, reproject_adaptive, reproject_exact
+
 try:
     from skimage.registration import phase_cross_correlation
 except ImportError:
@@ -105,7 +106,7 @@ except ImportError:
 # =============================================================================
 # Custom / Local Module Imports
 # =============================================================================
-from catalog import catalog
+from catalog import Catalog
 from functions import (
     border_msg,
     distance_to_uniform_row_col,
@@ -122,6 +123,7 @@ from utils import run_IDC
 # =============================================================================
 try:
     import legacystamps  # Optional: only required for Legacy Survey templates
+
     _HAS_LEGACYSTAMPS = True
 except ImportError:
     legacystamps = None  # type: ignore[assignment]
@@ -182,6 +184,7 @@ DEFAULT_FWHM_PADDING_MULTIPLIER = 5
 #   - Default values in one place
 #   - Type checking via IDE / mypy
 #   - Easy conversion to/from dicts for YAML compatibility
+
 
 @dataclass
 class MaskParams:
@@ -420,6 +423,7 @@ def deduplicate_points(
 # Install PyZOGY
 # =============================================================================
 
+
 def install_pyzogy() -> None:
     """
     Download PyZOGY from GitHub into ~/Downloads and run ``setup.py install``.
@@ -433,19 +437,19 @@ def install_pyzogy() -> None:
     repo_url = "https://github.com/dguevel/PyZOGY/archive/refs/heads/master.zip"
     downloads = Path.home() / "Downloads"
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir_path = Path(temp_dir)
         logger.info("Downloading PyZOGY from GitHub...")
-        zip_path = tmp / "PyZOGY-master.zip"
+        zip_path = temp_dir_path / "PyZOGY-master.zip"
         urlretrieve(repo_url, str(zip_path))
 
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmp)
+            zf.extractall(temp_dir_path)
 
         dest = downloads / "PyZOGY"
         if dest.exists():
             shutil.rmtree(dest)
-        shutil.copytree(tmp / "PyZOGY-master", dest)
+        shutil.copytree(temp_dir_path / "PyZOGY-master", dest)
         logger.info("PyZOGY extracted to %s", dest)
 
         subprocess.run(
@@ -459,6 +463,7 @@ def install_pyzogy() -> None:
 # =============================================================================
 # Largest Rectangle from Target
 # =============================================================================
+
 
 def largest_rectangle_from_target(
     mask: np.ndarray,
@@ -495,8 +500,7 @@ def largest_rectangle_from_target(
 
     if not (0 <= tr < rows and 0 <= tc < cols):
         raise ValueError(
-            f"Target pixel ({tr}, {tc}) is outside image bounds "
-            f"({rows}x{cols})."
+            f"Target pixel ({tr}, {tc}) is outside image bounds " f"({rows}x{cols})."
         )
     if not mask[tr, tc]:
         raise ValueError("Target pixel is not in a valid (True) region.")
@@ -539,6 +543,7 @@ def largest_rectangle_from_target(
 # =============================================================================
 # Fill Masked Regions in FITS
 # =============================================================================
+
 
 def fill_masked_regions_in_fits(
     image_fpath: str,
@@ -617,6 +622,7 @@ def fill_masked_regions_in_fits(
 # =============================================================================
 # Download PanSTARRS Template
 # =============================================================================
+
 
 def download_panstarrs_template(
     ra: float,
@@ -699,7 +705,9 @@ def download_panstarrs_template(
         template_fpath = sub_folder / f"panstarrs_{band}_band_template.fits"
 
         if template_fpath.exists():
-            logger.info("Template already exists at %s - skipping download", template_fpath)
+            logger.info(
+                "Template already exists at %s - skipping download", template_fpath
+            )
             return str(template_fpath)
 
         # Step 4: download and repackage
@@ -780,10 +788,14 @@ def download_sdss_template(
     template_fpath = sub_folder / f"sdss_{band}_band_template.fits"
 
     if template_fpath.exists():
-        logger.info("SDSS template already exists at %s - skipping download", template_fpath)
+        logger.info(
+            "SDSS template already exists at %s - skipping download", template_fpath
+        )
         return str(template_fpath)
 
-    logger.info("Downloading %s-band template from SDSS for (%.4f, %.4f)", band, ra, dec)
+    logger.info(
+        "Downloading %s-band template from SDSS for (%.4f, %.4f)", band, ra, dec
+    )
 
     try:
         coord = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
@@ -795,7 +807,9 @@ def download_sdss_template(
             show_progress=False,
         )
         if not images or len(images) == 0:
-            logger.warning("No SDSS %s-band image found for (%.4f, %.4f)", band, ra, dec)
+            logger.warning(
+                "No SDSS %s-band image found for (%.4f, %.4f)", band, ra, dec
+            )
             return None
 
         hdul = images[0]
@@ -1011,7 +1025,9 @@ def download_legacy_template(
                 if combined_path.exists():
                     try:
                         combined_path.unlink()
-                        logger.info("Removed partial Legacy Survey file after failed download")
+                        logger.info(
+                            "Removed partial Legacy Survey file after failed download"
+                        )
                     except OSError:
                         pass
                 if attempt < LEGACY_DOWNLOAD_ATTEMPTS:
@@ -1038,12 +1054,9 @@ def download_legacy_template(
             header = hdul[0].header.copy()
             if primary is not None and primary.ndim == 3:
                 data = np.asarray(primary, dtype=float)
-            elif (
-                len(hdul) >= 3
-                and all(
-                    hdul[i].data is not None and hdul[i].data.ndim == 2
-                    for i in range(1, min(4, len(hdul)))
-                )
+            elif len(hdul) >= 3 and all(
+                hdul[i].data is not None and hdul[i].data.ndim == 2
+                for i in range(1, min(4, len(hdul)))
             ):
                 # Legacy viewer cutouts commonly store the bands as extensions 1..3,
                 # with an empty primary HDU. Do NOT include HDU[0] here.
@@ -1085,19 +1098,21 @@ def download_legacy_template(
         header_bands = None
     if not header_bands:
         # Fallback: try BAND0/BAND1/... keywords
-        tmp = []
+        band_tokens = []
         for k in ("BAND0", "BAND1", "BAND2"):
             v = header.get(k)
             if isinstance(v, str) and v.strip():
-                tmp.append(v.strip().lower())
-        header_bands = tuple(tmp) if tmp else None
+                band_tokens.append(v.strip().lower())
+        header_bands = tuple(band_tokens) if band_tokens else None
 
     if header_bands:
         band_to_idx = {b: i for i, b in enumerate(header_bands)}
         logger.info("Legacy cutout band order from header: %s", "".join(header_bands))
     else:
         band_to_idx = dict(LEGACY_BAND_INDEX)
-        logger.info("Legacy cutout band order not found; assuming %s", "".join(LEGACY_FILTERS))
+        logger.info(
+            "Legacy cutout band order not found; assuming %s", "".join(LEGACY_FILTERS)
+        )
 
     n_bands = min(len(LEGACY_FILTERS), data.shape[0])
     saved = []
@@ -1139,13 +1154,16 @@ def download_legacy_template(
 
     if out_path.exists():
         return str(out_path)
-    logger.warning("Band '%s' not written from Legacy FITS (shape %s).", band, data.shape)
+    logger.warning(
+        "Band '%s' not written from Legacy FITS (shape %s).", band, data.shape
+    )
     return None
 
 
 # =============================================================================
 # Download 2MASS Template
 # =============================================================================
+
 
 def download_2mass_template(
     ra: float,
@@ -1237,6 +1255,7 @@ def download_2mass_template(
 # Constrained Slope Regressor
 # =============================================================================
 
+
 class ConstrainedSlopeRegressor(BaseEstimator, RegressorMixin):
     """
     Ordinary-least-squares linear fit with an optional soft constraint
@@ -1284,7 +1303,9 @@ class ConstrainedSlopeRegressor(BaseEstimator, RegressorMixin):
             slope, intercept = params
             mse = np.mean((y - (slope * x + intercept)) ** 2)
             if self.enforce:
-                violation = max(0.0, abs(slope - self.slope_constraint) - self.slope_tolerance)
+                violation = max(
+                    0.0, abs(slope - self.slope_constraint) - self.slope_tolerance
+                )
                 return mse + 100.0 * violation
             return mse
 
@@ -1303,7 +1324,8 @@ class ConstrainedSlopeRegressor(BaseEstimator, RegressorMixin):
 # Templates Class - Main Processing Pipeline
 # =============================================================================
 
-class templates:
+
+class Templates:
     """
     End-to-end handler for template-based image subtraction.
 
@@ -1385,10 +1407,9 @@ class templates:
     ) -> bool:
         """Check whether *point* falls inside the padded bounding box of *source*."""
         x, y = point
-        return (
-            (source["bbox_xmin"] - padding) <= x <= (source["bbox_xmax"] + padding)
-            and (source["bbox_ymin"] - padding) <= y <= (source["bbox_ymax"] + padding)
-        )
+        return (source["bbox_xmin"] - padding) <= x <= (
+            source["bbox_xmax"] + padding
+        ) and (source["bbox_ymin"] - padding) <= y <= (source["bbox_ymax"] + padding)
 
     @staticmethod
     def find_non_uniform_center(
@@ -1450,7 +1471,9 @@ class templates:
             magCutoff = [13.0]
 
         try:
-            logger.info(border_msg(f"Masking bright sources from {catalogName} catalog"))
+            logger.info(
+                border_msg(f"Masking bright sources from {catalogName} catalog")
+            )
             target = SkyCoord(
                 self.input_yaml["target_ra"],
                 self.input_yaml["target_dec"],
@@ -1458,8 +1481,10 @@ class templates:
             )
             imageWCS = get_wcs(header)
 
-            sequenceData = catalog(input_yaml=self.input_yaml)
-            bright_sources_catalog = sequenceData.download(target, catalogName=catalogName)
+            sequenceData = Catalog(input_yaml=self.input_yaml)
+            bright_sources_catalog = sequenceData.download(
+                target, catalogName=catalogName
+            )
             if bright_sources_catalog is None:
                 return None
 
@@ -1593,7 +1618,9 @@ class templates:
                 cx = (src["bbox_xmin"] + src["bbox_xmax"]) / 2
                 cy = (src["bbox_ymin"] + src["bbox_ymax"]) / 2
 
-                if any(self.does_box_overlap(src, pos, padding) for pos in ignore_position):
+                if any(
+                    self.does_box_overlap(src, pos, padding) for pos in ignore_position
+                ):
                     continue
 
                 w = src["bbox_xmax"] - src["bbox_xmin"]
@@ -1615,10 +1642,10 @@ class templates:
     # Template discovery
     # -----------------------------------------------------------------
 
-    def getTemplate(self) -> Optional[str]:
+    def get_template(self) -> Optional[str]:
         """
         Locate a pre-downloaded template FITS file for the current filter.
-        
+
         Searches under ``<fits_dir>/templates/<filter>_template/`` for
         files ending in .fits / .fts / .fit that contain "_template" in
         their name (excluding PSF models and weight maps).
@@ -1634,11 +1661,7 @@ class templates:
             return None
 
         # PanSTARRS filters get a 'p' suffix by convention
-        logger.info(
-            border_msg(
-                f"Finding template file for filter {use_filter}"
-            )
-        )
+        logger.info(border_msg(f"Finding template file for filter {use_filter}"))
 
         filter_label = (
             use_filter + "p" if use_filter in {"g", "r", "i", "z", "u"} else use_filter
@@ -1732,6 +1755,7 @@ class templates:
                     if sci_data.shape != ref_data.shape:
                         return
                     from astropy.stats import sigma_clipped_stats as _scs
+
                     _, med_sci, std_sci = _scs(sci_data, sigma=3.0)
                     _, med_ref, std_ref = _scs(ref_data, sigma=3.0)
                     fwhm = max(float(fwhm_pixels), 2.0)
@@ -1763,20 +1787,31 @@ class templates:
 
             def _reproject() -> Tuple[Optional[str], Optional[str]]:
                 align_cfg = self.input_yaml.get("alignment", {})
-                method_name = str(align_cfg.get("reproject_method", "adaptive")).lower().strip()
+                method_name = (
+                    str(align_cfg.get("reproject_method", "adaptive")).lower().strip()
+                )
                 roundtrip = bool(align_cfg.get("reproject_roundtrip_coords", False))
-                interp_order = str(align_cfg.get("reproject_interp_order", "bilinear")).lower()
+                interp_order = str(
+                    align_cfg.get("reproject_interp_order", "bilinear")
+                ).lower()
                 parallel = bool(align_cfg.get("reproject_parallel", False))
                 logger.info(
                     "Aligning via WCS reproject (%s) order=%s roundtrip=%s parallel=%s",
-                    method_name, interp_order, roundtrip, parallel,
+                    method_name,
+                    interp_order,
+                    roundtrip,
+                    parallel,
                 )
                 try:
                     shape_out = scienceImage.shape
                     # Honour requested method; if it fails, fall back in a predictable order.
                     # (exact -> adaptive -> interp) gives robust behaviour and consistent logs.
                     if method_name in ("exact", "adaptive", "interp"):
-                        fallbacks = [method_name] + [m for m in ("exact", "adaptive", "interp") if m != method_name]
+                        fallbacks = [method_name] + [
+                            m
+                            for m in ("exact", "adaptive", "interp")
+                            if m != method_name
+                        ]
                     else:
                         logger.warning(
                             "Unknown reproject_method=%r; defaulting to 'exact' with fallbacks.",
@@ -1821,7 +1856,9 @@ class templates:
                             logger.warning("Reproject (%s) failed: %s", m, _e)
 
                     if used_method is None or aligned is None or footprint is None:
-                        raise RuntimeError(f"All reproject methods failed; last error: {last_exc}")
+                        raise RuntimeError(
+                            f"All reproject methods failed; last error: {last_exc}"
+                        )
 
                     fp_mask = footprint.astype(bool)
                     aligned = np.nan_to_num(
@@ -1839,7 +1876,8 @@ class templates:
                     ):
                         try:
                             ref_valid = np.asarray(
-                                np.isfinite(scienceImage) & (np.abs(scienceImage) < 1e30),
+                                np.isfinite(scienceImage)
+                                & (np.abs(scienceImage) < 1e30),
                                 dtype=bool,
                             )
                             mov_valid = np.asarray(
@@ -1850,15 +1888,31 @@ class templates:
                                 ref_img = np.asarray(scienceImage, dtype=np.float64)
                                 mov_img = np.asarray(aligned, dtype=np.float64)
                                 shift_result = phase_cross_correlation(
-                                    ref_img, mov_img,
-                                    reference_mask=ref_valid, moving_mask=mov_valid,
+                                    ref_img,
+                                    mov_img,
+                                    reference_mask=ref_valid,
+                                    moving_mask=mov_valid,
                                 )
-                                subpix_shift = shift_result[0] if isinstance(shift_result, tuple) else shift_result
-                                subpix_shift = np.atleast_1d(np.asarray(subpix_shift, dtype=float))
-                                if subpix_shift.size >= 2 and np.all(np.abs(subpix_shift[:2]) < 5.0):
+                                subpix_shift = (
+                                    shift_result[0]
+                                    if isinstance(shift_result, tuple)
+                                    else shift_result
+                                )
+                                subpix_shift = np.atleast_1d(
+                                    np.asarray(subpix_shift, dtype=float)
+                                )
+                                if subpix_shift.size >= 2 and np.all(
+                                    np.abs(subpix_shift[:2]) < 5.0
+                                ):
                                     aligned = ndimage_shift(
-                                        aligned, (-float(subpix_shift[0]), -float(subpix_shift[1])),
-                                        order=3, mode="constant", cval=np.nan,
+                                        aligned,
+                                        (
+                                            -float(subpix_shift[0]),
+                                            -float(subpix_shift[1]),
+                                        ),
+                                        order=3,
+                                        mode="constant",
+                                        cval=np.nan,
                                     )
                                     aligned = np.nan_to_num(
                                         aligned,
@@ -1868,13 +1922,16 @@ class templates:
                                     )
                                     logger.info(
                                         "Reproject subpixel refinement applied: shift (row, col) = (%.3f, %.3f)",
-                                        float(subpix_shift[0]), float(subpix_shift[1]),
+                                        float(subpix_shift[0]),
+                                        float(subpix_shift[1]),
                                     )
                         except Exception as e:
                             import traceback
+
                             logger.warning(
                                 "Subpixel refinement failed (using WCS-aligned only): %s\n%s",
-                                e, traceback.format_exc(),
+                                e,
+                                traceback.format_exc(),
                             )
 
                     hdr = templateHeader.copy()
@@ -1890,6 +1947,7 @@ class templates:
                     return scienceFpath, new_templateFpath
                 except Exception as exc:
                     import traceback
+
                     logger.warning("Reproject failed: %s", exc)
                     logger.warning("Reproject traceback:\n%s", traceback.format_exc())
                     return None, None
@@ -2094,15 +2152,22 @@ class templates:
             # Try tighter crop to largest valid rectangle
             coords = self.find_largest_available_area(scienceImage)
             scienceImage_tmp, scienceHeader_newwcs = self.process_fits_file(
-                scienceImage, scienceHeader, coords,
+                scienceImage,
+                scienceHeader,
+                coords,
             )
             target_x_pix, target_y_pix = scienceHeader_newwcs.all_world2pix(
-                target_ra, target_dec, 0,
+                target_ra,
+                target_dec,
+                0,
             )
 
             border = 10
             h, w = scienceImage_tmp.shape
-            if border <= target_x_pix < w - border and border <= target_y_pix < h - border:
+            if (
+                border <= target_x_pix < w - border
+                and border <= target_y_pix < h - border
+            ):
                 scienceImage = scienceImage_tmp
                 scienceHeader.update(scienceHeader_newwcs.to_header())
 
@@ -2115,7 +2180,9 @@ class templates:
         templateImage, templateHeader = read_fits(templateFpath)
         cropped_templateFpath = str(scienceDir / Path(templateFpath).name)
 
-        cy_t, cx_t, top_t, bot_t, left_t, right_t = self.find_non_uniform_center(templateImage)
+        cy_t, cx_t, top_t, bot_t, left_t, right_t = self.find_non_uniform_center(
+            templateImage
+        )
         height_t = bot_t - top_t
         width_t = right_t - left_t
 
@@ -2129,46 +2196,68 @@ class templates:
         position = (np.floor(cx), np.floor(cy))
 
         # Check proximity to padding edges
-        d_uniform_template = distance_to_uniform_row_col(templateImage, x=target_x_pix, y=target_y_pix)
-        d_uniform_science = distance_to_uniform_row_col(scienceImage, x=target_x_pix, y=target_y_pix)
+        d_uniform_template = distance_to_uniform_row_col(
+            templateImage, x=target_x_pix, y=target_y_pix
+        )
+        d_uniform_science = distance_to_uniform_row_col(
+            scienceImage, x=target_x_pix, y=target_y_pix
+        )
 
         if np.isfinite(d_uniform_template) or np.isfinite(d_uniform_science):
             # Initial cutout
             scienceCutout = Cutout2D(
-                scienceImage, position, size, wcs=imageWCS,
-                mode="trim", fill_value=NO_DATA_SENTINEL,
+                scienceImage,
+                position,
+                size,
+                wcs=imageWCS,
+                mode="trim",
+                fill_value=NO_DATA_SENTINEL,
             )
             scienceImage = scienceCutout.data
             imageWCS = WCS(scienceCutout.wcs.to_header(), relax=True)
             scienceHeader.update(imageWCS.to_header(), relax=True)
 
             templateCutout = Cutout2D(
-                templateImage, position, size,
-                mode="trim", fill_value=NO_DATA_SENTINEL,
+                templateImage,
+                position,
+                size,
+                mode="trim",
+                fill_value=NO_DATA_SENTINEL,
             )
             templateImage = templateCutout.data
 
             # Mark shared invalid regions
-            mask = (templateImage == NO_DATA_SENTINEL) | (scienceImage == NO_DATA_SENTINEL)
+            mask = (templateImage == NO_DATA_SENTINEL) | (
+                scienceImage == NO_DATA_SENTINEL
+            )
             templateImage[mask] = np.nan
             scienceImage[mask] = np.nan
 
             # Tight crop to largest valid rectangle
             coords = self.find_largest_available_area(scienceImage)
             scienceImage_tmp, scienceHeader_newwcs = self.process_fits_file(
-                scienceImage, scienceHeader, coords,
+                scienceImage,
+                scienceHeader,
+                coords,
             )
             templateImage_tmp, templateHeader_newwcs = self.process_fits_file(
-                templateImage, templateHeader, coords,
+                templateImage,
+                templateHeader,
+                coords,
             )
 
             target_x_pix, target_y_pix = scienceHeader_newwcs.all_world2pix(
-                target_ra, target_dec, 0,
+                target_ra,
+                target_dec,
+                0,
             )
             border = self.input_yaml.get("scale", 10)
             h, w = scienceImage_tmp.shape
 
-            if border <= target_x_pix < w - border and border <= target_y_pix < h - border:
+            if (
+                border <= target_x_pix < w - border
+                and border <= target_y_pix < h - border
+            ):
                 scienceImage = scienceImage_tmp
                 templateImage = templateImage_tmp
                 scienceHeader.update(scienceHeader_newwcs.to_header())
@@ -2359,14 +2448,18 @@ class templates:
             n_img, n_tpl = len(catalog_img), len(catalog_tpl)
             logger.info(
                 "Finding consistent sources: image [%d] vs reference [%d]",
-                n_img, n_tpl,
+                n_img,
+                n_tpl,
             )
 
             # --- Validation ---
             if n_img != n_tpl:
                 logger.info("Catalog length mismatch")
                 return empty, nan_fit
-            if params.flux_key not in catalog_img or params.flux_key_err not in catalog_img:
+            if (
+                params.flux_key not in catalog_img
+                or params.flux_key_err not in catalog_img
+            ):
                 logger.info("Missing flux columns in catalog")
                 return empty, nan_fit
             if n_img < params.min_absolute_samples:
@@ -2504,11 +2597,17 @@ class templates:
                     bin_width = 0.5  # mag
                     mag_min = float(np.nanmin(mag_img_r))
                     mag_max = float(np.nanmax(mag_img_r))
-                    if np.isfinite(mag_min) and np.isfinite(mag_max) and mag_max > mag_min:
+                    if (
+                        np.isfinite(mag_min)
+                        and np.isfinite(mag_max)
+                        and mag_max > mag_min
+                    ):
                         edges = np.arange(mag_min, mag_max + bin_width, bin_width)
                         min_bin_count = max(params.min_absolute_samples, 5)
                         for i in range(len(edges) - 1):
-                            in_bin = (mag_img_r >= edges[i]) & (mag_img_r < edges[i + 1])
+                            in_bin = (mag_img_r >= edges[i]) & (
+                                mag_img_r < edges[i + 1]
+                            )
                             count = int(in_bin.sum())
                             if count < min_bin_count:
                                 continue
@@ -2516,7 +2615,10 @@ class templates:
                             if frac_inlier < bin_majority_frac:
                                 final_inliers[in_bin] = False
                 except Exception:
-                    logger.debug("Bin-wise inlier refinement skipped due to an error.", exc_info=True)
+                    logger.debug(
+                        "Bin-wise inlier refinement skipped due to an error.",
+                        exc_info=True,
+                    )
 
             # --- Build result DataFrame ---
             result = catalog_img.loc[idx_r].copy()
@@ -2538,21 +2640,32 @@ class templates:
 
             # Convert mag-domain fit to flux-domain
             flux_slope = slope
-            flux_intercept = 10 ** (-0.4 * intercept) if np.isfinite(intercept) else np.nan
+            flux_intercept = (
+                10 ** (-0.4 * intercept) if np.isfinite(intercept) else np.nan
+            )
 
             logger.info(
-                "Fit [%s]: slope=%.3f, intercept=%.3f, "
-                "inliers=%d/%d, robust=%d/%d",
-                method_used, slope, intercept,
-                final_inliers.sum(), len(y),
-                len(mag_img_r), len(mag_img),
+                "Fit [%s]: slope=%.3f, intercept=%.3f, " "inliers=%d/%d, robust=%d/%d",
+                method_used,
+                slope,
+                intercept,
+                final_inliers.sum(),
+                len(y),
+                len(mag_img_r),
+                len(mag_img),
             )
 
             # --- Optional diagnostic plot ---
             if make_plot and "fpath" in self.input_yaml:
                 self._plot_flux_comparison(
-                    full, result, mag_err, mag_err_r,
-                    mag_img_r, slope, intercept, final_inliers,
+                    full,
+                    result,
+                    mag_err,
+                    mag_err_r,
+                    mag_img_r,
+                    slope,
+                    intercept,
+                    final_inliers,
                 )
 
             return (
@@ -2584,17 +2697,31 @@ class templates:
 
         # All matched sources (faint, small markers to reduce overlap)
         ax.errorbar(
-            full["mag_img"], full["mag_tpl"],
-            xerr=mag_err_all, yerr=mag_err_all,
-            fmt="o", color="lightgray", alpha=0.25, markersize=1.8,
-            capsize=0, elinewidth=0.4, label="All",
+            full["mag_img"],
+            full["mag_tpl"],
+            xerr=mag_err_all,
+            yerr=mag_err_all,
+            fmt="o",
+            color="lightgray",
+            alpha=0.25,
+            markersize=1.8,
+            capsize=0,
+            elinewidth=0.4,
+            label="All",
         )
         # Robust candidates (before final inlier mask)
         ax.errorbar(
-            robust["mag_img"], robust["mag_tpl"],
-            xerr=mag_err_robust, yerr=mag_err_robust,
-            fmt="o", color="steelblue", alpha=0.5, markersize=2.2,
-            capsize=0, elinewidth=0.4, label="Robust",
+            robust["mag_img"],
+            robust["mag_tpl"],
+            xerr=mag_err_robust,
+            yerr=mag_err_robust,
+            fmt="o",
+            color="steelblue",
+            alpha=0.5,
+            markersize=2.2,
+            capsize=0,
+            elinewidth=0.4,
+            label="Robust",
         )
         # Final selected inliers - small outlined markers
         sel = robust["is_inlier"].to_numpy(bool)
@@ -2745,10 +2872,10 @@ class templates:
         yi = np.clip(((y_f - y_min) / dy * n_bins).astype(int), 0, n_bins - 1)
 
         if value is not None:
-            val = np.asarray(value, float)[finite]
+            cell_value_scores = np.asarray(value, float)[finite]
         else:
             # Flat priority when no value is supplied.
-            val = np.zeros_like(x_f)
+            cell_value_scores = np.zeros_like(x_f)
 
         for i in range(n_bins):
             for j in range(n_bins):
@@ -2761,7 +2888,7 @@ class templates:
                     continue
 
                 # Rank within the cell.
-                order = np.argsort(val[cell_idx])
+                order = np.argsort(cell_value_scores[cell_idx])
                 if not prefer_small_value:
                     order = order[::-1]
                 keep_local = cell_idx[order[:max_per_bin]]
@@ -2790,7 +2917,9 @@ class templates:
         stamp_loc: Optional[str] = None,
         scienceNoise: Optional[str] = None,
         templateNoise: Optional[str] = None,
-    ) -> Tuple[Optional[str], Optional[np.ndarray], Optional[List[Tuple[float, float]]]]:
+    ) -> Tuple[
+        Optional[str], Optional[np.ndarray], Optional[List[Tuple[float, float]]]
+    ]:
         """
         Subtract the template from the science image.
 
@@ -2838,11 +2967,7 @@ class templates:
         t0 = time.time()
         sci_name = Path(scienceFpath).name
         ref_name = Path(templateFpath).name
-        logger.info(
-            border_msg(
-                f"Starting image subtraction ({sci_name} - {ref_name})"
-            )
-        )
+        logger.info(border_msg(f"Starting image subtraction ({sci_name} - {ref_name})"))
 
         try:
             # =============================================================
@@ -2854,9 +2979,8 @@ class templates:
             # Ensure reference (template) is background-subtracted so both inputs
             # to SFFT/HOTPANTS have comparable zero level (science is already
             # background-subtracted in main.py).
-            template_invalid = (
-                ~np.isfinite(templateImage)
-                | (np.abs(templateImage) < 1.1e-20)
+            template_invalid = ~np.isfinite(templateImage) | (
+                np.abs(templateImage) < 1.1e-20
             )
             template_bg_median = 0.0
             if not template_invalid.all():
@@ -2881,9 +3005,9 @@ class templates:
             # by mapping them to np.inf. Downstream code interprets np.inf as
             # "do not mask on saturation".
             def _safe_saturate(hdr: fits.Header) -> float:
-                val = hdr.get("saturate", np.inf)
+                saturate_raw_value = hdr.get("saturate", np.inf)
                 try:
-                    sat = float(val)
+                    sat = float(saturate_raw_value)
                 except Exception:
                     sat = np.inf
                 if not np.isfinite(sat) or sat <= 0:
@@ -2913,18 +3037,34 @@ class templates:
                     "Template scaling enabled: will rescale template to match science robust sigma when scale mismatch is large."
                 )
                 try:
-                    sci_invalid = ~np.isfinite(scienceImage) | (np.abs(scienceImage) < 1.1e-20)
-                    ref_invalid = ~np.isfinite(templateImage) | (np.abs(templateImage) < 1.1e-20)
-                    _, _, sci_std = sigma_clipped_stats(scienceImage, mask=sci_invalid, sigma=3, maxiters=5)
-                    _, _, ref_std = sigma_clipped_stats(templateImage, mask=ref_invalid, sigma=3, maxiters=5)
+                    sci_invalid = ~np.isfinite(scienceImage) | (
+                        np.abs(scienceImage) < 1.1e-20
+                    )
+                    ref_invalid = ~np.isfinite(templateImage) | (
+                        np.abs(templateImage) < 1.1e-20
+                    )
+                    _, _, sci_std = sigma_clipped_stats(
+                        scienceImage, mask=sci_invalid, sigma=3, maxiters=5
+                    )
+                    _, _, ref_std = sigma_clipped_stats(
+                        templateImage, mask=ref_invalid, sigma=3, maxiters=5
+                    )
                     sci_std = float(sci_std)
                     ref_std = float(ref_std)
                     if np.isfinite(sci_std) and np.isfinite(ref_std) and ref_std > 0:
                         scale_fac = sci_std / ref_std
                         # Only apply when the mismatch is large (avoid tiny jitter).
                         if scale_fac >= 50 or scale_fac <= 0.02:
-                            old_gain = float(template_gain) if np.isfinite(template_gain) else template_gain
-                            old_sat = float(template_saturate) if np.isfinite(template_saturate) else template_saturate
+                            old_gain = (
+                                float(template_gain)
+                                if np.isfinite(template_gain)
+                                else template_gain
+                            )
+                            old_sat = (
+                                float(template_saturate)
+                                if np.isfinite(template_saturate)
+                                else template_saturate
+                            )
                             templateImage = templateImage * scale_fac
                             # Saturation scales with pixel units
                             if np.isfinite(template_saturate):
@@ -2943,7 +3083,11 @@ class templates:
                                 f"{old_gain:.4g}" if np.isfinite(old_gain) else "inf",
                                 float(template_gain),
                                 f"{old_sat:.4g}" if np.isfinite(old_sat) else "inf",
-                                f"{template_saturate:.4g}" if np.isfinite(template_saturate) else "inf",
+                                (
+                                    f"{template_saturate:.4g}"
+                                    if np.isfinite(template_saturate)
+                                    else "inf"
+                                ),
                             )
                         else:
                             logger.info(
@@ -2971,17 +3115,27 @@ class templates:
             # Optional: inpaint broken/saturated template cores (cosmetic/robustness).
             # This can reduce subtraction artefacts around very bright stars, but does not
             # recover lost flux. Controlled by YAML to keep default behaviour unchanged.
-            ts_cfg_inp = (self.input_yaml.get("template_subtraction") or {}) if isinstance(self.input_yaml, dict) else {}
-            if bool(ts_cfg_inp.get("inpaint_template_cores", False)) and np.isfinite(template_saturate):
+            ts_cfg_inp = (
+                (self.input_yaml.get("template_subtraction") or {})
+                if isinstance(self.input_yaml, dict)
+                else {}
+            )
+            if bool(ts_cfg_inp.get("inpaint_template_cores", False)) and np.isfinite(
+                template_saturate
+            ):
                 try:
                     from utils.inpaint import InpaintConfig, inpaint_saturated_cores
 
                     cfg = InpaintConfig(
                         enabled=True,
                         method=str(ts_cfg_inp.get("inpaint_method", "biharmonic")),
-                        saturate_frac=float(ts_cfg_inp.get("inpaint_saturate_frac", 0.90)),
+                        saturate_frac=float(
+                            ts_cfg_inp.get("inpaint_saturate_frac", 0.90)
+                        ),
                         dilate_radius=int(ts_cfg_inp.get("inpaint_dilate_radius", 6)),
-                        max_mask_fraction=float(ts_cfg_inp.get("inpaint_max_mask_fraction", 0.01)),
+                        max_mask_fraction=float(
+                            ts_cfg_inp.get("inpaint_max_mask_fraction", 0.01)
+                        ),
                     )
                     before = templateImage
                     templateImage, _mask_used = inpaint_saturated_cores(
@@ -2998,7 +3152,9 @@ class templates:
                             cfg.dilate_radius,
                         )
                 except Exception as _e:
-                    logger.info("Template inpainting skipped/failed (non-fatal): %s", _e)
+                    logger.info(
+                        "Template inpainting skipped/failed (non-fatal): %s", _e
+                    )
             science_readnoise = float(scienceHeader.get("READNOISE", 1))
             template_readnoise = float(templateHeader.get("READNOISE", 1))
 
@@ -3013,9 +3169,13 @@ class templates:
             KER_HW_MAX = 50
             fwhm_ref = float(template_fwhm)
             fwhm_sci = float(science_fwhm)
-            ker_hw = int(max(KER_HW_MIN, min(KER_HW_MAX, round(2.0 * max(fwhm_ref, fwhm_sci)))))
+            ker_hw = int(
+                max(KER_HW_MIN, min(KER_HW_MAX, round(2.0 * max(fwhm_ref, fwhm_sci))))
+            )
             scale = ker_hw
-            target_location = [(self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"])]
+            target_location = [
+                (self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"])
+            ]
 
             scienceDir = Path(scienceFpath).parent
             base_name = Path(scienceFpath).name
@@ -3067,11 +3227,14 @@ class templates:
 
             # Combined mask: NaN/invalid (essential) + segmentation-based source masks
             mask_essential = np.clip(
-                science_mask_nans + template_mask_nans, 0, 1,
+                science_mask_nans + template_mask_nans,
+                0,
+                1,
             ).astype(bool)
             mask_sources = np.clip(
                 science_seg_mask.astype(np.int32) + template_seg_mask.astype(np.int32),
-                0, 1,
+                0,
+                1,
             ).astype(bool)
             universal_mask_full = (mask_essential | mask_sources).astype(np.int32)
 
@@ -3079,13 +3242,19 @@ class templates:
             # subtraction (e.g. HOTPANTS needs usable stamps), use only the essential
             # (NaN/invalid) mask so that source masks are effectively excluded.
             ts_cfg_early = self.input_yaml.get("template_subtraction", {})
-            max_masked_frac = float(ts_cfg_early.get("subtraction_max_masked_fraction", 0.90))
+            max_masked_frac = float(
+                ts_cfg_early.get("subtraction_max_masked_fraction", 0.90)
+            )
             total_pix = universal_mask_full.size
-            full_masked_frac = np.sum(universal_mask_full) / total_pix if total_pix > 0 else 0.0
+            full_masked_frac = (
+                np.sum(universal_mask_full) / total_pix if total_pix > 0 else 0.0
+            )
 
             if full_masked_frac > max_masked_frac:
                 universal_mask = np.where(mask_essential, 1, 0).astype(np.int32)
-                reduced_frac = np.sum(universal_mask) / total_pix if total_pix > 0 else 0.0
+                reduced_frac = (
+                    np.sum(universal_mask) / total_pix if total_pix > 0 else 0.0
+                )
                 logger.info(
                     "Subtraction mask capped: full mask would mask %.1f%% (limit %.0f%%); "
                     "using only NaN/invalid mask (%.1f%% masked) so subtraction has enough good pixels.",
@@ -3102,7 +3271,8 @@ class templates:
 
             # Deduplicate masked centres
             masked_centers = deduplicate_points(
-                science_seg_centers + template_seg_centers, min_sep=5.0,
+                science_seg_centers + template_seg_centers,
+                min_sep=5.0,
             )
 
             masked_percentage = np.sum(universal_mask) / universal_mask.size * 100
@@ -3171,7 +3341,9 @@ class templates:
                         density,
                     )
             elif "sfft_crowded_method" not in ts_cfg and "crowded_field" not in ts_cfg:
-                ts_cfg["sfft_crowded_method"] = True  # default to ECP; sparse (ESP) only when explicitly set False
+                ts_cfg["sfft_crowded_method"] = (
+                    True  # default to ECP; sparse (ESP) only when explicitly set False
+                )
             # Kernel polynomial order: default to 0 unless the user explicitly overrides
             user_kernel = ts_cfg.get("kernel_order", None)
             if user_kernel is None or user_kernel < 0:
@@ -3203,31 +3375,60 @@ class templates:
 
             if method.lower() in ("zogy", "pyzogy"):
                 method = self._subtract_zogy(
-                    scienceFpath, templateFpath, differenceFpath,
-                    scienceHeader, science_psf, template_psf,
-                    science_saturate, template_saturate, method,
+                    scienceFpath,
+                    templateFpath,
+                    differenceFpath,
+                    scienceHeader,
+                    science_psf,
+                    template_psf,
+                    science_saturate,
+                    template_saturate,
+                    method,
                 )
 
             if method == "sfft":
                 method = self._subtract_sfft(
-                    scienceFpath, templateFpath, differenceFpath,
-                    mask_loc, scienceDir, base_name,
-                    masked_sources, masked_centers, matching_sources,
-                    kernel_order, scale, method,
-                    science_fwhm, template_fwhm,
-                    science_gain, template_gain, science_saturate, template_saturate,
+                    scienceFpath,
+                    templateFpath,
+                    differenceFpath,
+                    mask_loc,
+                    scienceDir,
+                    base_name,
+                    masked_sources,
+                    masked_centers,
+                    matching_sources,
+                    kernel_order,
+                    scale,
+                    method,
+                    science_fwhm,
+                    template_fwhm,
+                    science_gain,
+                    template_gain,
+                    science_saturate,
+                    template_saturate,
                 )
 
             if method == "hotpants":
                 success = self._subtract_hotpants(
-                    scienceFpath, templateFpath, differenceFpath,
-                    mask_loc, scienceDir, base_name,
-                    scienceMedian, scienceSTD,
-                    templateMedian, templateSTD,
-                    science_saturate, template_saturate,
-                    science_readnoise, template_readnoise,
-                    science_fwhm, template_fwhm, kernel_order,
-                    stamp_loc, scienceNoise,
+                    scienceFpath,
+                    templateFpath,
+                    differenceFpath,
+                    mask_loc,
+                    scienceDir,
+                    base_name,
+                    scienceMedian,
+                    scienceSTD,
+                    templateMedian,
+                    templateSTD,
+                    science_saturate,
+                    template_saturate,
+                    science_readnoise,
+                    template_readnoise,
+                    science_fwhm,
+                    template_fwhm,
+                    kernel_order,
+                    stamp_loc,
+                    scienceNoise,
                 )
                 if not success:
                     return None, None, None
@@ -3235,7 +3436,9 @@ class templates:
             # =============================================================
             # 6. Validate output
             # =============================================================
-            if not (os.path.isfile(differenceFpath) and os.path.getsize(differenceFpath) > 0):
+            if not (
+                os.path.isfile(differenceFpath) and os.path.getsize(differenceFpath) > 0
+            ):
                 logger.error("Difference file missing or empty")
                 return None, None, None
 
@@ -3275,9 +3478,15 @@ class templates:
 
     def _subtract_zogy(
         self,
-        scienceFpath, templateFpath, differenceFpath,
-        scienceHeader, science_psf, template_psf,
-        science_saturate, template_saturate, method,
+        scienceFpath,
+        templateFpath,
+        differenceFpath,
+        scienceHeader,
+        science_psf,
+        template_psf,
+        science_saturate,
+        template_saturate,
+        method,
     ) -> str:
         """Attempt ZOGY subtraction; return next method to try on failure."""
         logger.info("Starting ZOGY subtraction...")
@@ -3312,7 +3521,9 @@ class templates:
                 normalization="science",
             )
             diff_image = diff[0] if isinstance(diff, (tuple, list)) else diff
-            write_fits(str(differenceFpath), np.asarray(diff_image, dtype=float), scienceHeader)
+            write_fits(
+                str(differenceFpath), np.asarray(diff_image, dtype=float), scienceHeader
+            )
             logger.info("ZOGY subtraction succeeded")
             return "done"
         except Exception as exc:
@@ -3321,18 +3532,38 @@ class templates:
 
     def _subtract_sfft(
         self,
-        scienceFpath, templateFpath, differenceFpath,
-        mask_loc, scienceDir, base_name,
-        masked_sources, masked_centers, matching_sources,
-        kernel_order, scale, method,
-        science_fwhm, template_fwhm,
-        science_gain, template_gain, science_saturate, template_saturate,
+        scienceFpath,
+        templateFpath,
+        differenceFpath,
+        mask_loc,
+        scienceDir,
+        base_name,
+        masked_sources,
+        masked_centers,
+        matching_sources,
+        kernel_order,
+        scale,
+        method,
+        science_fwhm,
+        template_fwhm,
+        science_gain,
+        template_gain,
+        science_saturate,
+        template_saturate,
     ) -> str:
         """Attempt SFFT subtraction; return next method to try on failure."""
         # Use finite saturation for SFFT (FITS/MeLOn cannot use inf)
         _saturate_fallback = 1e30
-        sat_sci = float(science_saturate) if np.isfinite(science_saturate) else _saturate_fallback
-        sat_ref = float(template_saturate) if np.isfinite(template_saturate) else _saturate_fallback
+        sat_sci = (
+            float(science_saturate)
+            if np.isfinite(science_saturate)
+            else _saturate_fallback
+        )
+        sat_ref = (
+            float(template_saturate)
+            if np.isfinite(template_saturate)
+            else _saturate_fallback
+        )
         try:
             script = Path(__file__).parent / "utils" / "run_sfft.py"
             excluded = masked_sources + masked_centers
@@ -3402,20 +3633,34 @@ class templates:
             cmd = [
                 sys.executable,
                 str(script),
-                "-sci", str(scienceFpath),
-                "-ref", str(templateFpath),
-                "-diff", str(differenceFpath),
-                "-mask", str(mask_loc),
-                "-masked_sources", excl_str,
-                "-kernel_order", str(kernel_order),
-                "-bg_order", str(bg_order),
-                "-matching_sources", match_str,
-                "-kernel_half_width", str(scale),
-                "-forceconv", forceconv,
-                "-gain_sci", str(float(science_gain)),
-                "-gain_ref", str(float(template_gain)),
-                "-saturate_sci", str(sat_sci),
-                "-saturate_ref", str(sat_ref),
+                "-sci",
+                str(scienceFpath),
+                "-ref",
+                str(templateFpath),
+                "-diff",
+                str(differenceFpath),
+                "-mask",
+                str(mask_loc),
+                "-masked_sources",
+                excl_str,
+                "-kernel_order",
+                str(kernel_order),
+                "-bg_order",
+                str(bg_order),
+                "-matching_sources",
+                match_str,
+                "-kernel_half_width",
+                str(scale),
+                "-forceconv",
+                forceconv,
+                "-gain_sci",
+                str(float(science_gain)),
+                "-gain_ref",
+                str(float(template_gain)),
+                "-saturate_sci",
+                str(sat_sci),
+                "-saturate_ref",
+                str(sat_ref),
             ]
             # Optional: finer background mesh for SExtractor/SFFT (helps with gradients/host light).
             back_size = ts_sub.get("sfft_back_size", None)
@@ -3430,12 +3675,18 @@ class templates:
             # Force single process/CPU: one thread for BLAS/OpenMP and common env limits.
             sfft_env = {**os.environ}
             for _k in (
-                "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
-                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "OPENMP_NUM_THREADS",
+                "OMP_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS",
+                "VECLIB_MAXIMUM_THREADS",
+                "OPENMP_NUM_THREADS",
             ):
                 sfft_env[_k] = "1"
             with open(log_path, "w") as lf:
-                subprocess.run(cmd, check=True, text=True, stdout=lf, stderr=lf, env=sfft_env)
+                subprocess.run(
+                    cmd, check=True, text=True, stdout=lf, stderr=lf, env=sfft_env
+                )
 
             logger.info("SFFT subtraction succeeded")
             return "done"
@@ -3445,13 +3696,25 @@ class templates:
 
     def _subtract_hotpants(
         self,
-        scienceFpath, templateFpath, differenceFpath,
-        mask_loc, scienceDir, base_name,
-        scienceMedian, scienceSTD, templateMedian, templateSTD,
-        science_saturate, template_saturate,
-        science_readnoise, template_readnoise,
-        science_fwhm, template_fwhm, kernel_order,
-        stamp_loc, scienceNoise,
+        scienceFpath,
+        templateFpath,
+        differenceFpath,
+        mask_loc,
+        scienceDir,
+        base_name,
+        scienceMedian,
+        scienceSTD,
+        templateMedian,
+        templateSTD,
+        science_saturate,
+        template_saturate,
+        science_readnoise,
+        template_readnoise,
+        science_fwhm,
+        template_fwhm,
+        kernel_order,
+        stamp_loc,
+        scienceNoise,
     ) -> bool:
         """Attempt HOTPANTS subtraction. Returns True on success."""
         logger.info("Starting HOTPANTS subtraction...")
@@ -3487,7 +3750,9 @@ class templates:
             clean_fits_nans(scienceFpath)
             clean_fits_nans(templateFpath)
 
-            hotpants_fwhm = ensure_odd(int(max(np.ceil(template_fwhm), np.ceil(science_fwhm))))
+            hotpants_fwhm = ensure_odd(
+                int(max(np.ceil(template_fwhm), np.ceil(science_fwhm)))
+            )
             r = ensure_odd(max(int(1.5 * hotpants_fwhm), 5))
             rss = ensure_odd(max(3 * r, 11))
 
@@ -3504,24 +3769,42 @@ class templates:
             timeout_sec = float(ts.get("hotpants_timeout", 100))
             args = [
                 resolved_exe,
-                "-inim", str(scienceFpath),
-                "-tmplim", str(templateFpath),
-                "-outim", str(differenceFpath),
-                "-il", str(scienceMedian - 25 * scienceSTD),
-                "-tl", str(templateMedian - 25 * templateSTD),
-                "-tu", str(ul),
-                "-iu", str(ul),
-                "-tr", str(template_readnoise),
-                "-ir", str(science_readnoise),
-                "-imi", mask_abs,
-                "-tmi", mask_abs,
-                "-n", "i",
-                "-c", "t",
-                "-v", "2",
-                "-r", str(r),
-                "-rss", str(rss),
-                "-ko", str(kernel_order),
-                "-bgo", "0",
+                "-inim",
+                str(scienceFpath),
+                "-tmplim",
+                str(templateFpath),
+                "-outim",
+                str(differenceFpath),
+                "-il",
+                str(scienceMedian - 25 * scienceSTD),
+                "-tl",
+                str(templateMedian - 25 * templateSTD),
+                "-tu",
+                str(ul),
+                "-iu",
+                str(ul),
+                "-tr",
+                str(template_readnoise),
+                "-ir",
+                str(science_readnoise),
+                "-imi",
+                mask_abs,
+                "-tmi",
+                mask_abs,
+                "-n",
+                "i",
+                "-c",
+                "t",
+                "-v",
+                "2",
+                "-r",
+                str(r),
+                "-rss",
+                str(rss),
+                "-ko",
+                str(kernel_order),
+                "-bgo",
+                "0",
             ]
             if stamp_loc:
                 args += ["-ssf", stamp_loc]

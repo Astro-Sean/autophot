@@ -20,7 +20,9 @@ class InpaintConfig:
     method: str = "biharmonic"  # currently only biharmonic is implemented
     saturate_frac: float = 0.90  # mask pixels >= saturate_frac * SATURATE
     dilate_radius: int = 6  # pixels; dilate the core mask before inpainting
-    max_mask_fraction: float = 0.01  # safety: skip if mask too large (fraction of image)
+    max_mask_fraction: float = (
+        0.01  # safety: skip if mask too large (fraction of image)
+    )
 
 
 def build_saturation_core_mask(
@@ -128,4 +130,3 @@ def inpaint_saturated_cores(
 
     out = inpaint_image(img, mask, method=cfg.method)
     return out, mask
-

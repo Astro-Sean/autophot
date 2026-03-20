@@ -3,12 +3,14 @@
 
 import logging
 
+
 # # https://wis-tns.weizmann.ac.il/api/get
 def format_to_json(source):
-    
+
     import json
     from collections import OrderedDict
-    '''
+
+    """
     
     Change data to json format and return
     
@@ -17,11 +19,12 @@ def format_to_json(source):
     :return:  data in json format 
     :rtype: json
 
-    '''
-    parsed=json.loads(source,object_pairs_hook=OrderedDict)
-    result=json.dumps(parsed,indent=4)
-    
+    """
+    parsed = json.loads(source, object_pairs_hook=OrderedDict)
+    result = json.dumps(parsed, indent=4)
+
     return result
+
 
 def plot_transient_info(data):
     """
@@ -49,20 +52,20 @@ def plot_transient_info(data):
         f"Discoverer:   {data.get('discoverer')}",
         f"Reporter:     {data.get('reporter')}",
     ]
-    internal = data.get('internal_names')
+    internal = data.get("internal_names")
     if internal:
         summary_lines.append(f"Internal IDs: {internal}")
     summary_lines.append("-" * 40)
 
     for line in summary_lines:
         logger.info(line)
-    
-    
+
 
 def get_coords(objname, TNS_BOT_ID=None, TNS_BOT_NAME=None, TNS_BOT_API=None):
     import requests
     import json
     from collections import OrderedDict
+
     """
     Query the Transient Name Server (TNS) for transient coordinates and basic info.
 
@@ -81,19 +84,19 @@ def get_coords(objname, TNS_BOT_ID=None, TNS_BOT_NAME=None, TNS_BOT_API=None):
 
     url = "https://www.wis-tns.org/api/get/object"
     headers = {
-        'User-Agent': f'tns_marker{{"tns_id": {TNS_BOT_ID}, "type": "bot", "name": "{TNS_BOT_NAME}"}}'
+        "User-Agent": f'tns_marker{{"tns_id": {TNS_BOT_ID}, "type": "bot", "name": "{TNS_BOT_NAME}"}}'
     }
 
     payload = {
-        'api_key': TNS_BOT_API,
-        'data': json.dumps(OrderedDict([("objname", objname)]))
+        "api_key": TNS_BOT_API,
+        "data": json.dumps(OrderedDict([("objname", objname)])),
     }
 
     try:
         response = requests.post(url, headers=headers, data=payload)
         response.raise_for_status()
         json_data = json.loads(format_to_json(response.text))
-        data = json_data.get('data')
+        data = json_data.get("data")
 
         if not data:
             logging.getLogger(__name__).warning(
@@ -101,9 +104,7 @@ def get_coords(objname, TNS_BOT_ID=None, TNS_BOT_NAME=None, TNS_BOT_API=None):
             )
             return None
 
-        logging.getLogger(__name__).info(
-            "Found transient '%s' on TNS.", objname
-        )
+        logging.getLogger(__name__).info("Found transient '%s' on TNS.", objname)
         plot_transient_info(data)
         return data
 
@@ -112,4 +113,3 @@ def get_coords(objname, TNS_BOT_ID=None, TNS_BOT_NAME=None, TNS_BOT_API=None):
             "Error querying TNS for object '%s': %s", objname, exc, exc_info=True
         )
         return None
-

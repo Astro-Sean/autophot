@@ -26,8 +26,6 @@
 # =============================================================================
 
 
-
-
 # TODO: Mask out regions where the pixel shares the same value as it's nearest nighbout. Also dilute this to avoid aretifacts at the edges
 
 
@@ -42,7 +40,12 @@ import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
-from astropy.stats import SigmaClip, sigma_clipped_stats, mad_std, gaussian_fwhm_to_sigma
+from astropy.stats import (
+    SigmaClip,
+    sigma_clipped_stats,
+    mad_std,
+    gaussian_fwhm_to_sigma,
+)
 from astropy.convolution import Gaussian2DKernel
 from astropy.visualization import ZScaleInterval
 from astropy.coordinates import SkyCoord
@@ -79,6 +82,7 @@ def _make_red_overlay_cmap(alpha: float = 0.5) -> mcolors.Colormap:
     colors_rgba[:, 3] = np.linspace(0, alpha, 256)
     return mcolors.ListedColormap(colors_rgba)
 
+
 _RED_OVERLAY_CMAP = _make_red_overlay_cmap(alpha=0.5)
 
 
@@ -87,7 +91,7 @@ _RED_OVERLAY_CMAP = _make_red_overlay_cmap(alpha=0.5)
 # ---------------------------------------------------------------------------
 @lru_cache(maxsize=32)
 def _disk_structuring_element(r: int) -> np.ndarray:
-    y, x = np.ogrid[-r: r + 1, -r: r + 1]
+    y, x = np.ogrid[-r : r + 1, -r : r + 1]
     return (x * x + y * y) <= r * r
 
 
@@ -185,7 +189,10 @@ class BackgroundSubtractor:
     # Galaxy masking
     # -------------------------------------------------------------------------
     def masked_simbad_galaxies(
-        self, galaxies: pd.DataFrame, image: np.ndarray, header,
+        self,
+        galaxies: pd.DataFrame,
+        image: np.ndarray,
+        header,
         scale_factor: float = 2.0,
     ) -> np.ndarray:
         """
@@ -204,19 +211,16 @@ class BackgroundSubtractor:
         xy_pixel_scales = awcs.utils.proj_plane_pixel_scales(wcs)
         pix_scale_arcsec = xy_pixel_scales[0] * 3600.0
 
-        valid = (
-            galaxies["galdim_majaxis"].apply(
-                lambda x: isinstance(x, (int, float)) and not pd.isna(x) and x > 0
-            )
-            & galaxies["galdim_minaxis"].apply(
-                lambda x: isinstance(x, (int, float)) and not pd.isna(x) and x > 0
-            )
+        valid = galaxies["galdim_majaxis"].apply(
+            lambda x: isinstance(x, (int, float)) and not pd.isna(x) and x > 0
+        ) & galaxies["galdim_minaxis"].apply(
+            lambda x: isinstance(x, (int, float)) and not pd.isna(x) and x > 0
         )
         filtered_galaxies = galaxies[valid]
         self.logger.info(f"Masking {len(filtered_galaxies)} galaxies from SIMBAD")
 
         mask = np.zeros(image.shape, dtype=bool)
-        y_grid, x_grid = np.mgrid[0: image.shape[0], 0: image.shape[1]]
+        y_grid, x_grid = np.mgrid[0 : image.shape[0], 0 : image.shape[1]]
 
         for _, row in filtered_galaxies.iterrows():
             try:
@@ -224,11 +228,17 @@ class BackgroundSubtractor:
                 xpix, ypix = wcs.world_to_pixel(sky_pos)
 
                 # FIX: scale_factor ensures faint galaxy outskirts are masked.
-                maj_pix = scale_factor * (row["galdim_majaxis"] * 60.0) / pix_scale_arcsec
-                min_pix = scale_factor * (row["galdim_minaxis"] * 60.0) / pix_scale_arcsec
+                maj_pix = (
+                    scale_factor * (row["galdim_majaxis"] * 60.0) / pix_scale_arcsec
+                )
+                min_pix = (
+                    scale_factor * (row["galdim_minaxis"] * 60.0) / pix_scale_arcsec
+                )
 
                 delta = 1 if rotation_angle < 0 else -1
-                ellipse_angle = (90.0 + delta * (row["galdim_angle"] + rotation_angle)) % 360.0
+                ellipse_angle = (
+                    90.0 + delta * (row["galdim_angle"] + rotation_angle)
+                ) % 360.0
 
                 theta = np.radians(ellipse_angle)
                 cos_t, sin_t = np.cos(-theta), np.sin(-theta)
@@ -290,7 +300,7 @@ class BackgroundSubtractor:
                 sample_size = min(128, min_dim // 2)
                 cy, cx = shape[0] // 2, shape[1] // 2
                 hs = sample_size // 2
-                sample = image[cy - hs:cy + hs, cx - hs:cx + hs]
+                sample = image[cy - hs : cy + hs, cx - hs : cx + hs]
                 sample = sample - np.nanmedian(sample)
 
                 ac = np.fft.fftshift(
@@ -306,7 +316,9 @@ class BackgroundSubtractor:
 
         # --- Compute mesh (box) size ---
         # Allow config to tighten/relax mesh behaviour.
-        cfg_bkg = self.config.get("background", {}) if isinstance(self.config, dict) else {}
+        cfg_bkg = (
+            self.config.get("background", {}) if isinstance(self.config, dict) else {}
+        )
         fast_mode = bool(cfg_bkg.get("fast_mode", False))
         mesh_min = float(cfg_bkg.get("mesh_scale_min", 4.0))
         mesh_max = float(cfg_bkg.get("mesh_scale_max", 10.0))
@@ -316,7 +328,7 @@ class BackgroundSubtractor:
         base = max(min_box, int(mesh_scale * fwhm_pixels))
         max_allowed = max(min_box, int(min(shape) * region_fraction_limit))
         base = min(base, max_allowed)
-        base = base | 1   # force odd
+        base = base | 1  # force odd
 
         box_size = (base, base)
 
@@ -354,7 +366,7 @@ class BackgroundSubtractor:
         npixels: int = 3,
         fwhm_pixels: float = 3.0,
         dilate_factor: float = 1.2,
-        n_iterations: int = 3,          # NEW: iterative masking
+        n_iterations: int = 3,  # NEW: iterative masking
     ) -> np.ndarray:
         """
         Iteratively detect and mask sources.
@@ -447,15 +459,11 @@ class BackgroundSubtractor:
                 # Subtract a quick background estimate so the next iteration
                 # can detect fainter sources hidden under the sky gradient.
                 if iteration < n_iterations - 1:
-                    _, gmed, _ = sigma_clipped_stats(
-                        residual, sigma=3.0, mask=mask
-                    )
+                    _, gmed, _ = sigma_clipped_stats(residual, sigma=3.0, mask=mask)
                     residual = image - gmed
 
             except Exception as exc:
-                self.logger.warning(
-                    f"Source mask iteration {iteration} failed: {exc}"
-                )
+                self.logger.warning(f"Source mask iteration {iteration} failed: {exc}")
                 break
 
         n_masked = np.sum(mask)
@@ -522,7 +530,7 @@ class BackgroundSubtractor:
         r, c = r0, c0
         half_cone = np.deg2rad(cone_deg)
         for _ in range(max_steps - 1):
-            best_r, best_c, best_val = None, None, -np.inf
+            best_r, best_c, best_pixel_value = None, None, -np.inf
             for dangle in (0.0, half_cone, -half_cone):
                 a = angle_rad + dangle
                 dc = np.cos(a)
@@ -531,9 +539,12 @@ class BackgroundSubtractor:
                     cn = int(round(c + step * dc))
                     rn = int(round(r + step * dr))
                     if 0 <= rn < ny and 0 <= cn < nx:
-                        val = float(image[rn, cn])
-                        if val >= flux_threshold and val > best_val:
-                            best_val = val
+                        pixel_value = float(image[rn, cn])
+                        if (
+                            pixel_value >= flux_threshold
+                            and pixel_value > best_pixel_value
+                        ):
+                            best_pixel_value = pixel_value
                             best_r, best_c = rn, cn
             if best_r is None:
                 break
@@ -599,9 +610,14 @@ class BackgroundSubtractor:
             if follow_curved:
                 # Principal axes + diagonals (8 directions) to catch oblique streaks
                 angles = [
-                    angle1, angle1 + np.pi, angle2, angle2 + np.pi,
-                    angle1 + np.pi / 4, angle1 + np.pi * 5 / 4,
-                    angle2 + np.pi / 4, angle2 + np.pi * 5 / 4,
+                    angle1,
+                    angle1 + np.pi,
+                    angle2,
+                    angle2 + np.pi,
+                    angle1 + np.pi / 4,
+                    angle1 + np.pi * 5 / 4,
+                    angle2 + np.pi / 4,
+                    angle2 + np.pi * 5 / 4,
                 ]
                 for angle in angles:
                     pr, pc = self._follow_streak_path(
@@ -714,7 +730,9 @@ class BackgroundSubtractor:
                 trail_mask |= blob
                 n_trails += 1
         if np.any(trail_mask):
-            trail_mask = binary_dilation(trail_mask, structure=struct, iterations=dilate_iterations)
+            trail_mask = binary_dilation(
+                trail_mask, structure=struct, iterations=dilate_iterations
+            )
             self.logger.info(
                 "Satellite/trail mask: %d px (%d elongated component(s))",
                 int(np.sum(trail_mask)),
@@ -803,14 +821,14 @@ class BackgroundSubtractor:
                 sigma_smooth = max(min(image.shape) / 50.0, 10.0)
 
             img_finite = np.where(np.isfinite(image), image, med)
-            smooth = gaussian_filter(img_finite, sigma=float(sigma_smooth), mode="nearest")
+            smooth = gaussian_filter(
+                img_finite, sigma=float(sigma_smooth), mode="nearest"
+            )
             resid = img_finite - smooth
 
             std_smooth = np.nanstd(smooth[finite])
             std_resid = np.nanstd(resid[finite])
-            large_scale_ratio = float(
-                std_smooth / (std_smooth + std_resid + 1e-6)
-            )
+            large_scale_ratio = float(std_smooth / (std_smooth + std_resid + 1e-6))
         except Exception:
             large_scale_ratio = 0.0
 
@@ -820,7 +838,9 @@ class BackgroundSubtractor:
         # above the 4-sigma threshold. This is intended to track the regime
         # where genuine background pixels are scarce (image effectively filled
         # with stellar profiles), not simply "many stars present".
-        cfg_bkg = self.config.get("background", {}) if isinstance(self.config, dict) else {}
+        cfg_bkg = (
+            self.config.get("background", {}) if isinstance(self.config, dict) else {}
+        )
         fast_mode = bool(cfg_bkg.get("fast_mode", False))
         crowded_bright_min = float(cfg_bkg.get("crowded_bright_frac_min", 0.40))
         if bright_frac >= crowded_bright_min:
@@ -873,7 +893,9 @@ class BackgroundSubtractor:
 
         # Fast mode: lighter masking and somewhat coarser mesh for speed.
         if fast_mode:
-            self.logger.info("Background: fast_mode=True – using lighter masking and coarser mesh for speed.")
+            self.logger.info(
+                "Background: fast_mode=True – using lighter masking and coarser mesh for speed."
+            )
             params["n_iterations"] = max(1, min(params["n_iterations"], 2))
             params["dilate_factor"] = min(params["dilate_factor"], 2.0)
             params["mesh_scale"] = max(5.0, params["mesh_scale"] * 0.8)
@@ -928,7 +950,9 @@ class BackgroundSubtractor:
                 rms_median = np.nanmedian(bkg_rms)
                 rms_floor = max(rms_median * 0.5, 1e-30)
                 bkg_rms = np.clip(
-                    np.nan_to_num(bkg_rms, nan=rms_median * 0.1, posinf=1e10, neginf=0.0),
+                    np.nan_to_num(
+                        bkg_rms, nan=rms_median * 0.1, posinf=1e10, neginf=0.0
+                    ),
                     rms_floor,
                     None,
                 )
@@ -1063,7 +1087,9 @@ class BackgroundSubtractor:
                 "mesh_scale": 5.0,
                 "exclude_percentile": 85.0,
             }
-            self.logger.info("Config crowded_field=True; using crowded background regime.")
+            self.logger.info(
+                "Config crowded_field=True; using crowded background regime."
+            )
         nsigma_src = regime_params["nsigma"]
         n_iter_src = regime_params["n_iterations"]
         dilate_factor = regime_params["dilate_factor"]
@@ -1105,7 +1131,9 @@ class BackgroundSubtractor:
         if self.config.get("mask_satellite_trails", True):
             trail_n_sigma = float(self.config.get("satellite_trail_n_sigma", 3.0))
             trail_min_length = int(self.config.get("satellite_trail_min_length_px", 40))
-            trail_min_aspect = float(self.config.get("satellite_trail_min_aspect_ratio", 5.0))
+            trail_min_aspect = float(
+                self.config.get("satellite_trail_min_aspect_ratio", 5.0)
+            )
             trail_min_area = int(self.config.get("satellite_trail_min_area_px", 100))
             trail_mask = self._make_satellite_trail_mask(
                 np.nan_to_num(image, nan=0.0),
@@ -1130,11 +1158,23 @@ class BackgroundSubtractor:
         galaxy_mask = np.zeros(image.shape, dtype=bool)
         if mask_simbad_galaxies and len(galaxies) > 0:
             galaxy_mask = self.masked_simbad_galaxies(
-                galaxies, image, header, scale_factor=2.0,
+                galaxies,
+                image,
+                header,
+                scale_factor=2.0,
             )
 
         # Union of all mask layers.
-        mask = mask | nan_mask | source_mask | galaxy_mask | zero_mask | sat_mask | streak_mask | trail_mask
+        mask = (
+            mask
+            | nan_mask
+            | source_mask
+            | galaxy_mask
+            | zero_mask
+            | sat_mask
+            | streak_mask
+            | trail_mask
+        )
 
         masked_frac = mask.mean()
         self.logger.info(f"Masked fraction (total): {masked_frac:.2%}")
@@ -1217,7 +1257,7 @@ class BackgroundSubtractor:
         box_half_size: int = 100,
         fwhm_pixels: float = None,
         exclude_inner_radius: float = None,
-        dilate_factor: float = 1,      # balanced: masks wings without over-masking
+        dilate_factor: float = 1,  # balanced: masks wings without over-masking
         plot: bool = True,
     ):
         """
@@ -1247,11 +1287,17 @@ class BackgroundSubtractor:
 
         # ---- Local config overrides (optional) ----
         # These live under the `background:` block in the YAML.
-        bcfg = (self.config.get("background", {}) or {}) if isinstance(self.config, dict) else {}
+        bcfg = (
+            (self.config.get("background", {}) or {})
+            if isinstance(self.config, dict)
+            else {}
+        )
         # Default to a finer mesh for local transient fits so the cutout background
         # is as flat as possible for PSF measurement.
         local_mesh_scale = float(bcfg.get("local_mesh_scale", 1.0))
-        local_region_fraction_limit = float(bcfg.get("local_region_fraction_limit", 0.15))
+        local_region_fraction_limit = float(
+            bcfg.get("local_region_fraction_limit", 0.15)
+        )
         local_min_box = int(bcfg.get("local_min_box", 6))
         local_nsigma = float(bcfg.get("local_source_mask_nsigma", 5.0))
         local_npixels = int(bcfg.get("local_source_mask_npixels", 7))
@@ -1270,7 +1316,9 @@ class BackgroundSubtractor:
         # background estimation. Default to 2.5*FWHM when not provided.
         if exclude_inner_radius is None:
             exclude_inner_radius = 2.5 * float(fwhm_pixels)
-        exclude_inner_radius = float(exclude_inner_radius) if exclude_inner_radius is not None else 0.0
+        exclude_inner_radius = (
+            float(exclude_inner_radius) if exclude_inner_radius is not None else 0.0
+        )
 
         # ---- Box/filter sizes for the cutout ----
         # Use a smaller mesh_scale for local fits so the background model can
@@ -1336,7 +1384,7 @@ class BackgroundSubtractor:
         if exclude_inner_radius and exclude_inner_radius > 0:
             cy = float(y0 - y_min)
             cx = float(x0 - x_min)
-            yy, xx = np.mgrid[0:cutout.shape[0], 0:cutout.shape[1]]
+            yy, xx = np.mgrid[0 : cutout.shape[0], 0 : cutout.shape[1]]
             r2 = (xx - cx) ** 2 + (yy - cy) ** 2
             source_mask |= r2 <= float(exclude_inner_radius) ** 2
 
@@ -1378,9 +1426,7 @@ class BackgroundSubtractor:
             self.logger.warning(
                 f"Background2D failed on cutout: {exc} - using median fallback"
             )
-            _, local_med, _ = sigma_clipped_stats(
-                cutout, sigma=3.0, mask=source_mask
-            )
+            _, local_med, _ = sigma_clipped_stats(cutout, sigma=3.0, mask=source_mask)
             bkg_surface_local = np.full_like(cutout, local_med, dtype=float)
 
         # ---- Subtract locally and insert back ----
@@ -1390,8 +1436,12 @@ class BackgroundSubtractor:
 
         # ---- Full-image RMS for downstream use ----
         full_mask = self._make_source_mask(
-            image, nsigma=3, npixels=5, fwhm_pixels=fwhm_pixels,
-            dilate_factor=1.5, n_iterations=2,
+            image,
+            nsigma=3,
+            npixels=5,
+            fwhm_pixels=fwhm_pixels,
+            dilate_factor=1.5,
+            n_iterations=2,
         )
         box_size_full, filter_size_full, _ = self._compute_box_sizes(
             image, full_mask, fwhm_pixels
@@ -1404,8 +1454,11 @@ class BackgroundSubtractor:
             # For plotting, show only the conservative source mask (target
             # region is not specially excluded).
             self._plot_local_diagnostics(
-                cutout, bkg_surface_local, corrected_cutout,
-                self.config["fpath"], source_mask,
+                cutout,
+                bkg_surface_local,
+                corrected_cutout,
+                self.config["fpath"],
+                source_mask,
             )
 
         return image_sub, bkg_surface_local, bkg_rms_full
@@ -1414,7 +1467,13 @@ class BackgroundSubtractor:
     # Diagnostic plots
     # =========================================================================
     def _plot_diagnostics(
-        self, image, background, subtracted, rms, fpath, mask=None,
+        self,
+        image,
+        background,
+        subtracted,
+        rms,
+        fpath,
+        mask=None,
     ) -> None:
         arrays = [image, background, rms, subtracted]
         titles = ["Original", "Background", "Background Noise RMS", "Subtracted"]
@@ -1428,8 +1487,12 @@ class BackgroundSubtractor:
             disp = np.where(np.isfinite(data), data, vmin)
 
             im = ax.imshow(
-                disp, origin="lower", cmap="Grays_r",
-                vmin=vmin, vmax=vmax, interpolation="none",
+                disp,
+                origin="lower",
+                cmap="Grays_r",
+                vmin=vmin,
+                vmax=vmax,
+                interpolation="none",
             )
             self._attach_colorbar(fig, ax, im, title)
             ax.set_aspect("equal")
@@ -1440,12 +1503,19 @@ class BackgroundSubtractor:
             # Leftmost subplot: overlay masked pixels as a second image:
             # an RGBA array where masked pixels are semi-transparent red and
             # unmasked pixels are fully transparent.
-            if i == 0 and mask is not None and np.any(mask) and mask.shape == data.shape:
+            if (
+                i == 0
+                and mask is not None
+                and np.any(mask)
+                and mask.shape == data.shape
+            ):
                 try:
                     ny, nx = mask.shape
                     overlay = np.zeros((ny, nx, 4), dtype=float)
-                    overlay[..., 0] = mask.astype(float)         # red channel = 1 where masked
-                    overlay[..., 3] = mask.astype(float) * 0.6   # alpha = 0.6 where masked
+                    overlay[..., 0] = mask.astype(float)  # red channel = 1 where masked
+                    overlay[..., 3] = (
+                        mask.astype(float) * 0.6
+                    )  # alpha = 0.6 where masked
 
                     ax.imshow(
                         overlay,
@@ -1460,7 +1530,12 @@ class BackgroundSubtractor:
         self._save_figure(fig, fpath, "background")
 
     def _plot_local_diagnostics(
-        self, cutout, background, subtracted, fpath, mask=None,
+        self,
+        cutout,
+        background,
+        subtracted,
+        fpath,
+        mask=None,
     ) -> None:
         arrays = [cutout, background, subtracted]
         titles = ["Cutout", "Background", "Subtracted"]
@@ -1474,8 +1549,12 @@ class BackgroundSubtractor:
             disp = np.where(np.isfinite(data), data, vmin)
 
             im = ax.imshow(
-                disp, origin="lower", cmap="Grays_r",
-                vmin=vmin, vmax=vmax, interpolation="none",
+                disp,
+                origin="lower",
+                cmap="Grays_r",
+                vmin=vmin,
+                vmax=vmax,
+                interpolation="none",
             )
             self._attach_colorbar(fig, ax, im, title)
             ax.set_aspect("equal")

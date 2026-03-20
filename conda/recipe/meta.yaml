@@ -1,5 +1,5 @@
 {% set name = "autophot" %}
-{% set version = "0.1.7" %}
+{% set version = "0.1.10" %}
 
 package:
   name: {{ name|lower }}
@@ -10,7 +10,8 @@ source:
 
 build:
   noarch: python
-  number: 1
+  # Increment when re-publishing the same package version to Anaconda (avoids 409 conflict).
+  number: 2
 
 requirements:
   host:

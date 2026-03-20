@@ -4,6 +4,7 @@ Patch Pan-STARRS FITS headers in-place so they work with autophot.
 Combines primary and extension headers when two are present, then fills
 TELESCOP, INSTRUME, FILTER, EXPTIME, GAIN, RDNOISE, OBSMJD from existing keywords.
 """
+
 import sys
 from pathlib import Path
 from astropy.io import fits
@@ -87,10 +88,7 @@ def fix_panstarrs_header(h):
 
     # --- Gain ---
     if "GAIN" not in h:
-        gain = (
-            h.get("HIERARCH CELL.GAIN")
-            or h.get("HIERARCH DET.GAIN")
-        )
+        gain = h.get("HIERARCH CELL.GAIN") or h.get("HIERARCH DET.GAIN")
         if gain is not None:
             try:
                 h["GAIN"] = float(gain)
@@ -99,10 +97,7 @@ def fix_panstarrs_header(h):
 
     # --- Read noise ---
     if "RDNOISE" not in h:
-        rd = (
-            h.get("READNOISE")
-            or h.get("HIERARCH CELL.READNOISE")
-        )
+        rd = h.get("READNOISE") or h.get("HIERARCH CELL.READNOISE")
         if rd is not None:
             try:
                 h["RDNOISE"] = float(rd)
@@ -134,7 +129,10 @@ def main(root, recursive=False):
                 primary_data = hdul[0].data
                 if primary_data is None and len(hdul) > 1:
                     for i in range(1, len(hdul)):
-                        if hasattr(hdul[i], "data") and getattr(hdul[i].data, "ndim", 0) == 2:
+                        if (
+                            hasattr(hdul[i], "data")
+                            and getattr(hdul[i].data, "ndim", 0) == 2
+                        ):
                             primary_data = hdul[i].data
                             break
 
@@ -146,15 +144,15 @@ def main(root, recursive=False):
 
                 fix_panstarrs_header(combined)
 
-                tmp = f.with_suffix(f.suffix + ".tmp")
+                tmp_path = f.with_suffix(f.suffix + ".tmp")
                 fits.writeto(
-                    tmp,
+                    tmp_path,
                     primary_data,
                     combined,
                     overwrite=True,
                     output_verify="ignore",
                 )
-            tmp.replace(f)
+            tmp_path.replace(f)
             print(f"  OK: {f.name}.")
         except Exception as e:
             print(f"  Failed: {f.name} ({e})")
@@ -162,8 +160,11 @@ def main(root, recursive=False):
 
 if __name__ == "__main__":
     import argparse
+
     p = argparse.ArgumentParser(description="Fix Pan-STARRS FITS headers for autophot")
     p.add_argument("directory", help="Directory containing FITS files")
-    p.add_argument("-r", "--recursive", action="store_true", help="Search subdirectories for .fits")
+    p.add_argument(
+        "-r", "--recursive", action="store_true", help="Search subdirectories for .fits"
+    )
     args = p.parse_args()
     main(args.directory, recursive=args.recursive)

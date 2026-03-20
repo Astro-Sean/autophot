@@ -1,7 +1,9 @@
-AutoPHOT Object Photometry Pipeline
-===================================
+AutoPHoT
+========
 
-AutoPHOT is a Python pipeline for publication-quality photometry of transients and variable sources. It reduces CCD/NIR FITS images through WCS solving, cosmic-ray removal, and background subtraction; builds or uses reference catalogs (e.g. Gaia, Pan-STARRS); measures **aperture** and **PSF** (ePSF) photometry; and calibrates zeropoints with robust fitting and optional colour terms. Optional **template subtraction** (SFFT by default, or HOTPANTS/ZOGY) produces difference images for transient detection. The pipeline reports target magnitudes, errors, limiting magnitudes (via injection/recovery), and can output light curves and detection-limit plots.
+The Automated photometry of transients
+
+AutoPHoT is a Python pipeline for publication-quality photometry of transients and variable sources. It reduces CCD/NIR FITS images through WCS solving, cosmic-ray removal, and background subtraction; builds or uses reference catalogs (e.g. Gaia, Pan-STARRS); measures **aperture** and **PSF** (ePSF) photometry; and calibrates zeropoints with robust fitting and optional colour terms. Optional **template subtraction** (SFFT by default, or HOTPANTS/ZOGY) produces difference images for transient detection. The pipeline reports target magnitudes, errors, limiting magnitudes (via injection/recovery), and can output light curves and detection-limit plots.
 
 Project links:
 - GitHub: https://github.com/Astro-Sean/autophot
@@ -29,10 +31,12 @@ To update:
 conda update astro-sean::autophot
 ```
 
+**Maintainers:** publishing the same version again requires bumping the conda **build number** in `conda/recipe/meta.yaml` (or using `anaconda upload --force`). See `conda/README.md` if uploads fail with HTTP 409.
+
 You can sanity‑check the install with:
 
 ```bash
-python -c "from autophot import AutomatedPhotometry; print('AutoPHOT import OK')"
+python -c "from autophot import AutomatedPhotometry; print('AutoPHoT import OK')"
 autophot-main -h
 ```
 
@@ -79,7 +83,7 @@ wget -c -nd -r -np -A "*.fits" "https://data.astrometry.net/4200/"
 export ASTROMETRY_NET_DATA_DIR="/path/to/astrometry_index"
 ```
 
-If `solve-field` is missing, AutoPHOT will warn and skip WCS solving (unless you force it).
+If `solve-field` is missing, AutoPHoT will warn and skip WCS solving (unless you force it).
 
 ### Astromatic tools (SExtractor/SCAMP/SWarp)
 
@@ -95,7 +99,7 @@ conda install -c conda-forge astromatic-swarp
 
 ### HOTPANTS for template subtraction
 
-AutoPHOT can call HOTPANTS for image subtraction when `template_subtraction.method` is set to `hotpants` (default is `sfft`).
+AutoPHoT can call HOTPANTS for image subtraction when `template_subtraction.method` is set to `hotpants` (default is `sfft`).
 
 - **Install dependencies** (CFITSIO is required):
 
@@ -111,7 +115,7 @@ cd hotpants
 make
 ```
 
-When using the HOTPANTS backend, AutoPHOT runs the `hotpants` command from your `PATH` and prints a warning if it cannot be found.
+When using the HOTPANTS backend, AutoPHoT runs the `hotpants` command from your `PATH` and prints a warning if it cannot be found.
 
 ## Recommended usage (Python driver script)
 
@@ -128,7 +132,7 @@ Below is a copy-pasteable template you can adapt for your target, paths, and cat
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Run AutoPHOT with a small driver script.
+Run AutoPHoT with a small driver script.
 Override defaults and run the pipeline; optionally plot lightcurve and tables.
 """
 
@@ -139,13 +143,13 @@ from autophot import AutomatedPhotometry
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run AutoPHOT with optional image-level parallelism via nCPU."
+        description="Run AutoPHoT with optional image-level parallelism via nCPU."
     )
     parser.add_argument(
         "--ncpu",
         type=int,
         default=1,
-        help="Number of images to process in parallel (nCPU>1 enables multiprocessing inside AutoPHOT).",
+        help="Number of images to process in parallel (nCPU>1 enables multiprocessing inside AutoPHoT).",
     )
     args = parser.parse_args()
 
@@ -265,7 +269,7 @@ if __name__ == "__main__":
 
 ## Template subtraction setup
 
-AutoPHOT expects templates to live under a `templates/` directory inside your `fits_dir`. At runtime it chooses the template based on the **science image filter** and the folder naming conventions below.
+AutoPHoT expects templates to live under a `templates/` directory inside your `fits_dir`. At runtime it chooses the template based on the **science image filter** and the folder naming conventions below.
 
 ### Directory structure and naming rules
 
@@ -304,14 +308,14 @@ my_field/                         # fits_dir
 
 - **User-provided template:**
   - Place the template FITS into the correct folder under `templates/` (as above)
-  - No special config is required beyond enabling subtraction (AutoPHOT will discover templates in `fits_dir/templates/...` automatically):
+  - No special config is required beyond enabling subtraction (AutoPHoT will discover templates in `fits_dir/templates/...` automatically):
 
 ```python
 autophot_input["template_subtraction"]["do_subtraction"] = True
 ```
 
 - **Downloaded template:**
-  - AutoPHOT can download templates into `fits_dir/templates/` before running subtraction.
+  - AutoPHoT can download templates into `fits_dir/templates/` before running subtraction.
   - Select the download source via `template_subtraction.download_templates`:
 
 ```python
@@ -349,11 +353,11 @@ If you use the SFFT backend, please cite the SFFT method and see upstream docume
 - Repo: `https://github.com/thomasvrussell/sfft`
 - ADS (Hu et al. 2022, ApJ 936, 157): `https://ui.adsabs.harvard.edu/abs/2022ApJ...936..157H/abstract`
 
-When template folders are present/used, AutoPHOT will automatically apply the required preparation steps for subtraction (e.g. WCS checks and preprocessing required by the chosen backend).
+When template folders are present/used, AutoPHoT will automatically apply the required preparation steps for subtraction (e.g. WCS checks and preprocessing required by the chosen backend).
 
-## Citing AutoPHOT
+## Citing AutoPHoT
 
-If you use AutoPHOT in a publication, please cite:
+If you use AutoPHoT in a publication, please cite:
 
 - ADS: `https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B/abstract`
 
