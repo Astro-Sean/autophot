@@ -203,9 +203,10 @@ class RemoveCosmicRays:
         plt.tight_layout()
 
         # --- Save the figure ---
-        fig.savefig(
-            os.path.join(write_dir, f"cosmic_rays_{base}.pdf"), bbox_inches="tight"
-        )
+        pdf_path = os.path.join(write_dir, f"cosmic_rays_{base}.pdf")
+        png_path = os.path.join(write_dir, f"Cosmic_Rays_{base}.png")
+        fig.savefig(pdf_path, bbox_inches="tight")
+        fig.savefig(png_path, bbox_inches="tight")
         plt.close(fig)
 
     # --- Cosmic Ray Removal ---

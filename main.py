@@ -319,16 +319,24 @@ def run_photometry():
         reduced_dir_name = fits_basename + output_dir_suffix
         new_output_dir = os.path.join(os.path.dirname(wdir), reduced_dir_name)
         cur_dir = os.path.join(new_output_dir, base)
-        output_csv_path = os.path.join(cur_dir, "output.csv")
-        calibration_file = os.path.join(cur_dir, "calib.csv")
+        # Standardized per-image outputs (must include the FITS filename stem).
+        # In template-preparation mode, the completion marker is the generated
+        # template catalog rather than the normal per-image output CSV.
+        if prepare_template:
+            output_csv_path = os.path.join(
+                os.path.dirname(science_file), f"imageCalib_template_{base}.csv"
+            )
+        else:
+            output_csv_path = os.path.join(cur_dir, f"OUTPUT_{base}.csv")
+            calibration_file = os.path.join(cur_dir, f"CALIB_{base}.csv")
 
         #  Store Base Filename in YAML
         # Stores the base filename without any extension in the YAML configuration.
         input_yaml["base"] = base
 
         #  Skip if output exists and we are not restarting (resume mode).
-        # restart=True (default): reprocess all files (redo even if output.csv exists).
-        # restart=False: skip files that already have output.csv (only process new/unprocessed).
+        # restart=True (default): reprocess all files (redo even if OUTPUT exists).
+        # restart=False: skip files that already have OUTPUT_{base}.csv (only process new/unprocessed).
         if (
             os.path.exists(output_csv_path)
             and not input_yaml.get("restart", True)
@@ -336,7 +344,14 @@ def run_photometry():
         ):
             logging.info(
                 border_msg(
-                    f"Skipping {science_file}:\nOutput.csv already exists in {cur_dir}\nSet 'restart' to True to reprocess all.",
+                    (
+                        f"Skipping {science_file}:\n"
+                        f"imageCalib_template_{base}.csv already exists in "
+                        f"{os.path.dirname(science_file)}\n"
+                        f"Set 'restart' to True to reprocess all."
+                        if prepare_template
+                        else f"Skipping {science_file}:\nOUTPUT_{base}.csv already exists in {cur_dir}\nSet 'restart' to True to reprocess all."
+                    ),
                     body="~",
                     corner="~",
                 )
@@ -2520,8 +2535,13 @@ def run_photometry():
                 )
 
             # Saves the cleaned catalog and PSF sources to CSV files.
-            CatalogSources.to_csv(os.path.join(cur_dir, "imageCalib_template.csv"))
-            IsolatedSources.to_csv(os.path.join(cur_dir, "PSFSources_template.csv"))
+            # Use the FITS filename stem for consistent naming.
+            CatalogSources.to_csv(
+                os.path.join(cur_dir, f"imageCalib_template_{input_yaml['base']}.csv")
+            )
+            IsolatedSources.to_csv(
+                os.path.join(cur_dir, f"PSFSources_template_{input_yaml['base']}.csv")
+            )
 
             # Writes the modified image and header to the new FITS file.
             fits.writeto(
@@ -3272,8 +3292,15 @@ def run_photometry():
 
             try:
                 sfft_matched_sources = os.path.join(
+                    write_dir, f"SFFT_Matching_Sources_{input_yaml['base']}.csv"
+                )
+                sfft_matched_sources_legacy = os.path.join(
                     write_dir, "sfft_matching_sources.csv"
                 )
+                if not os.path.exists(sfft_matched_sources) and os.path.exists(
+                    sfft_matched_sources_legacy
+                ):
+                    sfft_matched_sources = sfft_matched_sources_legacy
                 fpath_nosub = fpath
 
                 if os.path.exists(sfft_matched_sources):
@@ -3869,7 +3896,11 @@ def run_photometry():
         #  Initialize Output Dictionary
         # Initializes the output dictionary with all values at once.
         output = {
-            "filename": fpath,
+            # More descriptive than the full FITS path:
+            # `filename` is the FITS stem used in our standardized output names.
+            "filename": input_yaml["base"],
+            # Keep full path for downstream code that needs to locate plot files.
+            "filename_path": fpath,
             "date": date,
             "mjd": date_mjd,
             "telescope": telescope,
@@ -3987,9 +4018,10 @@ def run_photometry():
 
         # Normalise column headers to lowercase for consistent downstream use (lightcurve, etc.).
         output_normalised = {str(k).strip().lower(): v for k, v in output.items()}
-        # Saves the output.
-        pd.DataFrame(output_normalised, index=[0]).to_csv(
-            os.path.join(write_dir, "output.csv"),
+        # Saves the standardized per-image output.
+        output_df = pd.DataFrame(output_normalised, index=[0])
+        output_df.to_csv(
+            output_csv_path,
             index=False,
             float_format="%.6f",
         )
@@ -4048,17 +4080,21 @@ def run_photometry():
             # Adds the RA and DEC columns to the IsolatedSources DataFrame.
             IsolatedSources["RA"] = ra_IsolatedSources
             IsolatedSources["DEC"] = dec_IsolatedSources
-            # Opens the file in write mode to add the output string first.
-            with open(
-                os.path.join(write_dir, "SOURCES_" + input_yaml["base"] + ".csv"), "w"
-            ) as file:
-                file.write("# Output dictionary")
-                file.write(output_str + "")
-            # Opens the file again in append mode to add the clean catalog.
-            with open(
-                os.path.join(write_dir, "SOURCES_" + input_yaml["base"] + ".csv"), "a"
-            ) as file:
-                IsolatedSources.to_csv(file, index=False, float_format="%.6f")
+            isolated_sources_legacy = os.path.join(
+                write_dir, "SOURCES_" + input_yaml["base"] + ".csv"
+            )
+            isolated_sources_std = os.path.join(
+                write_dir, f"ISOLATED_SOURCES_{input_yaml['base']}.csv"
+            )
+
+            for path in (isolated_sources_std, isolated_sources_legacy):
+                # Opens the file in write mode to add the output string first.
+                with open(path, "w") as file:
+                    file.write("# Output dictionary")
+                    file.write(output_str + "")
+                # Opens the file again in append mode to add the clean catalog.
+                with open(path, "a") as file:
+                    IsolatedSources.to_csv(file, index=False, float_format="%.6f")
 
         #  Global Photometry
         # Performs global photometry if enabled.
@@ -4067,9 +4103,14 @@ def run_photometry():
             and input_yaml["photometry"].get("perform_global_photometry_sigma", None)
             is not None
         ):
-            fname = f"sources_{input_yaml['photometry']['perform_global_photometry_sigma']:.0f}sigma_{base}.csv"
+            sigma_val = float(input_yaml["photometry"]["perform_global_photometry_sigma"])
+            fname = f"sources_{sigma_val:.0f}sigma_{base}.csv"
+            fname_std = f"GLOBAL_PHOT_{sigma_val:.0f}SIGMA_{base}.csv"
             # Writes both the output string and the catalog in one operation.
             with open(os.path.join(write_dir, fname), "w") as file:
+                file.write(output_str)
+                image_sources.to_csv(file, index=False, float_format="%.6f")
+            with open(os.path.join(write_dir, fname_std), "w") as file:
                 file.write(output_str)
                 image_sources.to_csv(file, index=False, float_format="%.6f")
 

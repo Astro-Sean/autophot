@@ -1238,9 +1238,36 @@ def check_detection_plots(output_file, method="PSF"):
 
     for _, row in data.iterrows():
         try:
-            loc = os.path.dirname(row["filename"])
-            search = os.path.join(loc, f"{prefix}*")
-            files = glob.glob(search)
+            # `filename` may be either a base stem (new) or a full path (legacy).
+            # Prefer `filename_path` when present so we can locate plot files.
+            filename_path = row.get("filename_path", None)
+            if (
+                isinstance(filename_path, str)
+                and filename_path
+                and filename_path.strip().lower() not in {"nan", "none"}
+            ):
+                loc = os.path.dirname(filename_path)
+            else:
+                fn = row.get("filename", "")
+                if isinstance(fn, str) and fn.strip().lower() not in {"nan", "none"}:
+                    loc = os.path.dirname(fn)
+                else:
+                    loc = ""
+
+            # Prefer new PNG names when both PNG and PDF exist.
+            prefixes = [prefix]
+            if method == "PSF":
+                # Support both legacy (`targetPSF_`) and new (`PSF_Target_`) plot prefixes.
+                prefixes = ["PSF_Target_", "targetPSF_"]
+
+            candidates = []
+            for pfx in prefixes:
+                search = os.path.join(loc, f"{pfx}*")
+                candidates.extend(glob.glob(search))
+
+            pngs = [f for f in candidates if f.lower().endswith(".png")]
+            pdfs = [f for f in candidates if f.lower().endswith(".pdf")]
+            files = sorted(pngs) if pngs else sorted(pdfs)
             if not files:
                 continue
 

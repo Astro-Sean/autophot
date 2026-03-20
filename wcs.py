@@ -558,6 +558,12 @@ class WCSSolver:
             ]
             Path(param_file).write_text("\n".join(params))
 
+            # SExtractor's FILTER_NAME must point to a writable convolution file.
+            # We generate a temporary Gaussian kernel at runtime so we can omit
+            # repository/distribution `.conv` files.
+            conv_filter_path = os.path.join(temp_dir, "gaussian_7x7.conv")
+            create_conv_file(conv_filter_path)
+
             nnw_file = os.path.join(temp_dir, "default.nnw")
             create_nnw_file(nnw_file)
             config_file = os.path.join(temp_dir, "scamp.sex")
@@ -595,9 +601,7 @@ class WCSSolver:
                     float(wcs_cfg.get("sextractor_deblend_mincont", 0.005))
                 ),
                 "FILTER": "Y",
-                "FILTER_NAME": os.path.join(
-                    os.path.dirname(__file__), "gaussian_7x7.conv"
-                ),
+                "FILTER_NAME": conv_filter_path,
                 "CLEAN": "Y",
                 "CLEAN_PARAM": "1",
                 "PHOT_AUTOPARAMS": "2.5,3.5",
@@ -803,10 +807,6 @@ class WCSSolver:
             else int(wcs_cfg.get("downsample", 2))
         )
 
-        # --- Create Gaussian convolution filter file if it doesn't exist ---
-        conv_filter_path = os.path.join(os.path.dirname(__file__), "gaussian_7x7.conv")
-        create_conv_file(conv_filter_path)
-
         # --- Prepare paths (fixed temp names to avoid collisions) ---
         dirname = os.path.dirname(self.fpath)
         base = os.path.splitext(os.path.basename(self.fpath))[0]
@@ -839,6 +839,11 @@ class WCSSolver:
             nnw_file = os.path.join(temp_dir, "default.nnw")
             create_nnw_file(nnw_file)
             config_file = os.path.join(temp_dir, "default.sex")
+
+            # Generate a temporary Gaussian convolution filter for SExtractor.
+            conv_filter_path = os.path.join(temp_dir, "gaussian_7x7.conv")
+            create_conv_file(conv_filter_path)
+
             pixel_scale = self.default_input.get("pixel_scale") or 0
             if not pixel_scale and self.header.get("CDELT1") is not None:
                 try:

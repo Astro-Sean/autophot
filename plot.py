@@ -330,8 +330,19 @@ class Plot:
                     ax.add_line(hline)
                     ax.add_line(vline)
 
-            # Save figure
-            fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+            # Save figure (PDF + standardized PNG copy)
+            fig.savefig(
+                save_path, dpi=150, bbox_inches="tight", facecolor="white"
+            )
+            try:
+                fig.savefig(
+                    save_path.replace(".pdf", ".png"),
+                    dpi=150,
+                    bbox_inches="tight",
+                    facecolor="white",
+                )
+            except Exception:
+                pass
             plt.close(fig)
             return 1
 
@@ -484,6 +495,10 @@ class Plot:
 
         fig.suptitle(f"Crowding diagnostic {title_extra}".strip())
         fig.savefig(save_path, dpi=300)
+        try:
+            fig.savefig(save_path.replace(".pdf", ".png"), dpi=300)
+        except Exception:
+            pass
         plt.close(fig)
 
     def source_check(
@@ -744,7 +759,18 @@ class Plot:
                     write_dir, "subtracted_sourcecheck_" + base + ".pdf"
                 )
 
-            fig.savefig(save_loc, dpi=150, bbox_extra_artists=[leg], facecolor="white")
+            fig.savefig(
+                save_loc, dpi=150, bbox_extra_artists=[leg], facecolor="white"
+            )
+            try:
+                fig.savefig(
+                    save_loc.replace(".pdf", ".png"),
+                    dpi=150,
+                    bbox_extra_artists=[leg],
+                    facecolor="white",
+                )
+            except Exception:
+                pass
             plt.close()
 
         except Exception as exc:

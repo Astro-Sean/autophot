@@ -45,6 +45,62 @@ import re
 # Module-level flag to optionally silence user-facing logging
 QUIET_MODE = False
 
+# Cache the parsed default schema so config validation is fast.
+_DEFAULT_INPUT_SCHEMA_CACHE: Optional[dict] = None
+
+
+def _get_default_input_schema() -> dict:
+    """
+    Load and cache the default configuration schema from `databases/default_input.yml`.
+
+    This is used to validate that driver scripts (e.g. `run_autophot.py`) only set
+    keys that exist in the pipeline's declared configuration.
+    """
+    global _DEFAULT_INPUT_SCHEMA_CACHE, QUIET_MODE
+    if _DEFAULT_INPUT_SCHEMA_CACHE is not None:
+        return _DEFAULT_INPUT_SCHEMA_CACHE
+
+    prior_quiet = QUIET_MODE
+    QUIET_MODE = True  # suppress log spam while loading the schema
+    try:
+        # Reuse the pipeline's own loader to ensure the schema includes
+        # any "expected" nested dict scaffolding it adds.
+        _DEFAULT_INPUT_SCHEMA_CACHE = AutomatedPhotometry.load()
+    finally:
+        QUIET_MODE = prior_quiet
+    return _DEFAULT_INPUT_SCHEMA_CACHE
+
+
+def _find_unknown_config_paths(
+    config: dict, schema: dict, prefix: str = ""
+) -> list[str]:
+    """
+    Return a list of unknown key paths present in `config` but not in `schema`.
+
+    Notes
+    -----
+    - This validates keys only (not value types), because YAML defaults use
+      `null`/None in several places where the expected type depends on later
+      pipeline logic.
+    - Validation is recursive for nested dicts.
+    """
+    unknown: list[str] = []
+    if not isinstance(config, dict) or not isinstance(schema, dict):
+        return unknown
+
+    for key, value in config.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if key not in schema:
+            unknown.append(path)
+            continue
+        schema_value = schema[key]
+        if isinstance(value, dict) and isinstance(schema_value, dict):
+            unknown.extend(
+                _find_unknown_config_paths(value, schema_value, prefix=path)
+            )
+
+    return unknown
+
 # Project-specific helpers (assumed to be in your codebase)
 from functions import (
     border_msg,
@@ -472,12 +528,35 @@ class AutomatedPhotometry:
                     continue
 
         # Normalise paths and close open figures
-        fits_dir = default_input.get("fits_dir", "")
-        if fits_dir.endswith("/"):
+        fits_dir = default_input.get("fits_dir") or ""
+        if isinstance(fits_dir, str) and fits_dir.endswith("/"):
             fits_dir = fits_dir[:-1]
             default_input["fits_dir"] = fits_dir
 
         plt.close("all")
+
+        # ------------------------------------------------------------------
+        # Config validation: fail fast on typos/unknown keys from driver scripts
+        # ------------------------------------------------------------------
+        strict_validation_raw = os.environ.get("AUTOPHOT_STRICT_CONFIG", "1")
+        strict_validation = str(strict_validation_raw).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+        if strict_validation:
+            schema = _get_default_input_schema()
+            unknown_paths = _find_unknown_config_paths(default_input, schema)
+            if unknown_paths:
+                unique_sorted = sorted(set(unknown_paths))
+                raise KeyError(
+                    "Unknown AutoPHOT config keys detected. "
+                    "These were found in the driver-provided configuration but "
+                    "do not exist in `databases/default_input.yml`:\n  - "
+                    + "\n  - ".join(unique_sorted)
+                )
 
         # Initialise preparation helper and validate catalog configuration
         prepare_db = Prepare(default_input=default_input)
@@ -875,7 +954,9 @@ class AutomatedPhotometry:
         _log(border_msg(f"Collecting reduced photometry in {reduced_loc}"))
         output_loc = os.path.join(reduced_loc, "lightcurve_output.csv")
         concatenate_csv_files(
-            folder_path=reduced_loc, output_filename=output_loc, loc_file="output.csv"
+            folder_path=reduced_loc,
+            output_filename=output_loc,
+            loc_file="OUTPUT_*.csv",
         )
         _log(
             f"Photometry pipeline completed in {time.perf_counter() - t0:.3f} seconds."

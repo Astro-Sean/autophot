@@ -19,6 +19,14 @@ import sys
 import time
 import warnings
 
+# Ensure repo root is on sys.path when run as a standalone script.
+# This avoids `ModuleNotFoundError: No module named 'functions'` when the
+# current working directory is not the project root.
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_repo_root = os.path.abspath(os.path.join(_script_dir, ".."))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
 from functions import ColoredLevelFormatter
 
 # Limit BLAS/OpenMP threads before any scientific imports (avoids libgomp
@@ -252,6 +260,15 @@ def run_sfft() -> Optional[int]:
 
     # --- Output Paths ---
     out_dir = os.path.dirname(os.path.abspath(FITS_SCI)) or "."
+    # Standardize to the same "base" used by main.py (remove suffixes, normalize
+    # punctuation), so output file names include the FITS filename stem.
+    fits_sci_stem = os.path.splitext(os.path.basename(FITS_SCI))[0]
+    out_base = (
+        fits_sci_stem.replace(" ", "_")
+        .replace(".", "_")
+        .replace("_APT", "")
+        .replace("_ERROR", "")
+    )
     FITS_DIFF = args.diff or os.path.join(out_dir, f"diff_{os.path.basename(FITS_SCI)}")
 
     # --- Load Headers (Once) ---
@@ -627,7 +644,9 @@ def run_sfft() -> Optional[int]:
                         ):
                             xcol, ycol = a, b
                             break
-                out_csv = os.path.join(out_dir, "sfft_matching_sources.csv")
+                out_csv = os.path.join(
+                    out_dir, f"SFFT_Matching_Sources_{out_base}.csv"
+                )
                 if xcol and ycol:
                     df_out = matched_sources[[xcol, ycol]].rename(
                         columns={
@@ -780,7 +799,9 @@ def run_sfft() -> Optional[int]:
                     if a in matched_sources.columns and b in matched_sources.columns:
                         xcol, ycol = a, b
                         break
-            out_csv = os.path.join(out_dir, "sfft_matching_sources.csv")
+            out_csv = os.path.join(
+                out_dir, f"SFFT_Matching_Sources_{out_base}.csv"
+            )
             if xcol and ycol:
                 df_out = matched_sources[[xcol, ycol]].rename(
                     columns={xcol: "X_IMAGE_REF_SCI_MEAN", ycol: "Y_IMAGE_REF_SCI_MEAN"}
@@ -874,9 +895,13 @@ def run_sfft() -> Optional[int]:
                     ax.set_ylabel("MAG_REF (SCI) - MAG_REF (REF)")
                     ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
                     ax.legend(fontsize=9, framealpha=1)
-                    plt.savefig(
-                        os.path.join(out_dir, "varcheck.pdf"), bbox_inches="tight"
-                    )
+                    pdf_path = os.path.join(out_dir, f"Varcheck_{out_base}.pdf")
+                    png_path = os.path.join(out_dir, f"Varcheck_{out_base}.png")
+                    plt.savefig(pdf_path, bbox_inches="tight")
+                    try:
+                        plt.savefig(png_path, bbox_inches="tight")
+                    except Exception:
+                        pass
                     plt.close(fig)
                 except Exception as e:
                     log_info(f"Warning: Failed to generate diagnostic plot: {e}")

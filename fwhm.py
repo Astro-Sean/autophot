@@ -248,8 +248,10 @@ class Find_FWHM:
             fpath = self.input_yaml["fpath"]
             write_dir = self.input_yaml["write_dir"]
             base = os.path.basename(fpath).split(".")[0]
-            out = os.path.join(write_dir, f"segmentation_{base}.pdf")
-            fig.savefig(out, bbox_inches="tight")
+            pdf_out = os.path.join(write_dir, f"segmentation_{base}.pdf")
+            png_out = os.path.join(write_dir, f"Segmentation_{base}.png")
+            fig.savefig(pdf_out, bbox_inches="tight")
+            fig.savefig(png_out, bbox_inches="tight")
             plt.close(fig)
 
         return cleaned_df
@@ -557,8 +559,10 @@ class Find_FWHM:
                     fpath = self.input_yaml["fpath"]
                     write_dir = self.input_yaml["write_dir"]
                     base = os.path.basename(fpath).split(".")[0]
-                    out = os.path.join(write_dir, f"linear_{base}.pdf")
-                    fig.savefig(out, bbox_inches="tight")
+                    pdf_out = os.path.join(write_dir, f"linear_{base}.pdf")
+                    png_out = os.path.join(write_dir, f"Linear_{base}.png")
+                    fig.savefig(pdf_out, bbox_inches="tight")
+                    fig.savefig(png_out, bbox_inches="tight")
                 plt.close(fig)
             except Exception as _pe:
                 logger.debug(f"Plotting skipped: {_pe}")

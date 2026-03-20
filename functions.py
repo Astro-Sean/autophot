@@ -426,9 +426,25 @@ def border_msg(msg: str, body: str = "-", corner: str = "+") -> str:
     if not text:
         return ""
 
-    line = f"{text} "
+    line = text
     border = body * len(line)
-    return f"\n\n{border}\n{line}\n{border}\n"
+
+    # Bold the title line on interactive terminals.
+    # (ANSI sequences are ignored by non-TTY log capture.)
+    try:
+        use_bold = sys.stdout.isatty()
+    except Exception:
+        use_bold = False
+    if use_bold:
+        bold_prefix = "\033[1m"
+        reset_suffix = "\033[0m"
+        line = f"{bold_prefix}{line}{reset_suffix}"
+
+    # Avoid leading newlines: most loggers prefix the first line with
+    # "<timestamp> - INFO - " and then print message. If the message starts
+    # with "\n", the "INFO -" portion appears blank, which looks messy.
+    # Instead, put separators at the end so the banner still reads cleanly.
+    return f"\n{border}\n{line}\n{border}\n\n"
 
 
 # Telescope/instrument config: images must have FITS header keywords TELESCOP and INSTRUME.
@@ -1058,10 +1074,30 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
     # Initialize an empty list to hold DataFrames
     concatenated_data = []
 
+    from fnmatch import fnmatch
+
     # Traverse the folder using os.walk
     for root, dirs, files in os.walk(folder_path):
         for file in files:
-            if file == loc_file:
+            # Support wildcard patterns, e.g. loc_file="OUTPUT_*.csv"
+            if ("*" in loc_file) and fnmatch(file, loc_file):
+                file_path = os.path.join(root, file)
+
+                # Read CSV with empty cells treated as NaN
+                df = pd.read_csv(
+                    file_path,
+                    keep_default_na=True,
+                    na_values=["", " ", "NA", "N/A", "NaN", "null"],
+                    dtype=str,  # Read all columns as string to preserve blanks before NaN replacement
+                )
+
+                # Replace all empty strings or whitespace-only strings with np.nan
+                df = df.map(
+                    lambda x: np.nan if isinstance(x, str) and x.strip() == "" else x
+                )
+
+                concatenated_data.append(df)
+            elif file == loc_file:
                 file_path = os.path.join(root, file)
 
                 # Read CSV with empty cells treated as NaN

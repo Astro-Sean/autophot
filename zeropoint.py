@@ -898,6 +898,16 @@ class Zeropoint:
                 dpi=150,
                 facecolor="white",
             )
+            # Standardized PNG copy for consistent naming.
+            try:
+                fig.savefig(
+                    os.path.join(write_dir, f"Zeropoint_{base_name}.png"),
+                    bbox_inches="tight",
+                    dpi=150,
+                    facecolor="white",
+                )
+            except Exception:
+                pass
             plt.close(fig)
 
             # Build joint inlier mask only from flux types that actually
@@ -1012,24 +1022,32 @@ class Zeropoint:
                         continue
 
                     flux, flux_err, catmag_v, catmag_err_v, vmask = pack
-                    _, _, delta_mag, _ = self._compute_delta_mag(
+                    _, _, delta_mag, delta_mag_err = self._compute_delta_mag(
                         flux, flux_err, catmag_v, catmag_err_v
                     )
 
                     delta_no_corr = delta_mag.copy()  # before colour correction
+                    delta_no_corr_err = delta_mag_err.copy()
 
                     if has_color_term and fixed_color_slope is not None:
-                        delta_mag, _ = self._apply_color_correction(
+                        delta_mag, color_corr_err = self._apply_color_correction(
                             delta_mag,
                             clean_catalog,
                             vmask,
                             color1,
                             color2,
                             fixed_color_slope,
-                            color_slope_err=fixed_color_slope_err or 0.0,
+                            color_slope_err=fixed_color_slope_err
+                            or 0.0,
                         )
+                        # Propagate colour-correction uncertainty into delta_mag_err.
+                        delta_mag_err = np.sqrt(delta_mag_err**2 + color_corr_err**2)
 
-                    delta_mag = delta_mag[np.isfinite(delta_mag)]
+                    finite_mask = np.isfinite(delta_mag) & np.isfinite(delta_mag_err)
+                    delta_mag = delta_mag[finite_mask]
+                    delta_mag_err = delta_mag_err[finite_mask]
+                    delta_no_corr = delta_no_corr[finite_mask]
+                    delta_no_corr_err = delta_no_corr_err[finite_mask]
                     if len(delta_mag) == 0:
                         logger.warning(
                             f"{flux_type}: no finite delta_mag after masking; skipping."
@@ -1048,8 +1066,13 @@ class Zeropoint:
                         cenfunc=np.nanmedian,
                         stdfunc=median_abs_deviation,
                     )
-                    inlier_deltas = clipped.data[~clipped.mask]
-                    inlier_deltas = inlier_deltas[np.isfinite(inlier_deltas)]
+                    inlier_mask = ~clipped.mask
+                    inlier_deltas = clipped.data[inlier_mask]
+                    inlier_delta_err = delta_mag_err[inlier_mask]
+
+                    finite2 = np.isfinite(inlier_deltas) & np.isfinite(inlier_delta_err)
+                    inlier_deltas = inlier_deltas[finite2]
+                    inlier_delta_err = inlier_delta_err[finite2]
 
                     if len(inlier_deltas) == 0:
                         logger.warning(
@@ -1062,7 +1085,10 @@ class Zeropoint:
                         }
                         continue
 
+                    # Robust central value from the median (stable against
+                    # residual outliers and imperfect error modelling).
                     zp_final = float(np.nanmedian(inlier_deltas))
+
                     n_inl = len(inlier_deltas)
                     mad_zp = float(
                         median_abs_deviation(inlier_deltas, nan_policy="omit")
@@ -1070,10 +1096,24 @@ class Zeropoint:
                     # SE(median) ~ 1.858 * MAD/sqrt(N) (1.253*sigma/sqrt(N), sigma~1.4826*MAD)
                     zp_std = (1.858 * mad_zp / np.sqrt(n_inl)) if n_inl >= 2 else mad_zp
 
+                    # Inverse-variance weighted uncertainty from propagated
+                    # per-star delta_mag_err.
+                    vm = np.isfinite(inlier_delta_err) & (inlier_delta_err > 0)
+                    zp_err_weighted = np.nan
+                    if np.sum(vm) >= 2:
+                        w = 1.0 / (inlier_delta_err[vm] ** 2)
+                        zp_err_weighted = float(np.sqrt(1.0 / np.sum(w)))
+
+                    zp_err = (
+                        float(zp_err_weighted)
+                        if np.isfinite(zp_err_weighted)
+                        else float(zp_std)
+                    )
+
                     zp_params[flux_type].update(
                         {
                             "zeropoint": zp_final,
-                            "zeropoint_error": zp_std,
+                            "zeropoint_error": zp_err,
                             "has_color_term": bool(
                                 has_color_term and fixed_color_slope is not None
                             ),
@@ -1090,7 +1130,10 @@ class Zeropoint:
                         )
 
                     logger.info(
-                        "[%s] Zeropoint: %.3f +/- %.3f mag", flux_type, zp_final, zp_std
+                        "[%s] Zeropoint: %.3f +/- %.3f mag",
+                        flux_type,
+                        zp_final,
+                        zp_err,
                     )
 
                     # ---- Histogram (colour-corrected) ----------------------
@@ -1112,7 +1155,7 @@ class Zeropoint:
                         label=(
                             f"{labels_base[flux_type]} (color corr., "
                             f"N={len(inlier_deltas)}, "
-                            f"ZP={zp_final:.3f}+/-{zp_std:.3f})"
+                            f"ZP={zp_final:.3f}+/-{zp_err:.3f})"
                         ),
                     )
 
@@ -1174,6 +1217,19 @@ class Zeropoint:
                     dpi=150,
                     facecolor="white",
                 )
+                # Standardized PNG copy for consistent naming.
+                try:
+                    fig_hist.savefig(
+                        os.path.join(
+                            write_dir,
+                            f"Zeropoint_Hist_Combined_{base_name}.png",
+                        ),
+                        bbox_inches="tight",
+                        dpi=150,
+                        facecolor="white",
+                    )
+                except Exception:
+                    pass
                 plt.close(fig_hist)
 
                 # Combine inliers only over flux types that actually had
@@ -1489,6 +1545,16 @@ class Zeropoint:
                 dpi=150,
                 facecolor="white",
             )
+            # Standardized PNG copy for consistent naming.
+            try:
+                fig.savefig(
+                    os.path.join(write_dir, f"Color_Term_{base_name}.png"),
+                    bbox_inches="tight",
+                    dpi=150,
+                    facecolor="white",
+                )
+            except Exception:
+                pass
             plt.close(fig)
 
             logger.info(f"Color term: {color_term:.3f} +/- {color_term_error:.3f}")

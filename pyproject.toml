@@ -76,5 +76,5 @@ databases = ["*.yml"]
 utils = ["*.py"]
 
 [tool.setuptools.data-files]
-"." = ["autophot.mplstyle", "gaussian_7x7.conv"]
+"." = ["autophot.mplstyle"]
 

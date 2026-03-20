@@ -984,6 +984,8 @@ class Limits:
             secax.invert_xaxis()
 
         fig.tight_layout()
-        save_loc = os.path.join(write_dir, f"completeness_{base}.pdf")
-        fig.savefig(save_loc, dpi=150, bbox_inches="tight", facecolor="white")
+        save_loc_pdf = os.path.join(write_dir, f"completeness_{base}.pdf")
+        save_loc_png = os.path.join(write_dir, f"Completeness_{base}.png")
+        fig.savefig(save_loc_pdf, dpi=150, bbox_inches="tight", facecolor="white")
+        fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)

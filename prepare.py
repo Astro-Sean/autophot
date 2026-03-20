@@ -166,9 +166,9 @@ class Prepare:
                     filepath = os.path.join(root, filename)
                     total_candidates += 1
                     # Construct the expected output directory for this file.
-                    # IMPORTANT: mirror main.py's directory logic so that
-                    # restart checks are consistent and we don't re-run files
-                    # that already have output.csv.
+                    # IMPORTANT: mirror main.py's directory logic so that restart
+                    # checks are consistent and we don't re-run files that already
+                    # have OUTPUT_{base}.csv.
                     base = (
                         os.path.splitext(filename)[0]
                         .replace(" ", "_")
@@ -195,11 +195,23 @@ class Prepare:
                             cur_dir = os.path.join(cur_dir, f"{sub}_APT")
                         cur_dir = os.path.join(cur_dir, base)
 
-                    output_csv_path = os.path.join(cur_dir, "output.csv")
+                    if self.input_yaml["template_subtraction"][
+                        "prepare_templates"
+                    ]:
+                        # Template preparation doesn't always write a per-image output
+                        # CSV; use the generated template catalog as the completion
+                        # marker.
+                        output_csv_path = os.path.join(
+                            cur_dir, f"imageCalib_template_{base}.csv"
+                        )
+                    else:
+                        output_csv_path = os.path.join(
+                            cur_dir, f"OUTPUT_{base}.csv"
+                        )
 
                     # Honour the restart flag (default True = redo all):
                     # - restart=True  -> include file (reprocess even if output exists)
-                    # - restart=False -> skip files that already have output.csv
+                    # - restart=False -> skip files that already have OUTPUT_{base}.csv
                     if os.path.exists(output_csv_path) and not self.input_yaml.get(
                         "restart", True
                     ):
@@ -212,13 +224,13 @@ class Prepare:
             "Restart = %s -> %s",
             restart,
             (
-                "reprocess all files (ignore existing output.csv)"
+                "reprocess all files (ignore existing OUTPUT_{base}.csv)"
                 if restart
-                else "skip files that already have output.csv (only process new/unprocessed)"
+                else "skip files that already have OUTPUT_{base}.csv (only process new/unprocessed)"
             ),
         )
         self.logger.info(
-            "Scanned %d FITS file(s): %d completed (output.csv present), %d pending.",
+            "Scanned %d FITS file(s): %d completed (OUTPUT present), %d pending.",
             total_candidates,
             files_removed,
             len(valid_files),
@@ -587,11 +599,10 @@ class Prepare:
             )
         )
         self.logger.info(
-            "Checking %d image(s). Catalog bands: %s",
+            "Checking %d image(s). Catalog bands: %s\n",
             len(flist),
             ", ".join(sorted(available_filters)),
         )
-        self.logger.info("")
 
         # Fail fast: the pipeline requires an explicit catalog choice to map
         # instrument filter names onto supported catalog bands.
@@ -803,7 +814,6 @@ class Prepare:
                 )
                 seen_filter_mappings[key] = filter_name
 
-        self.logger.info("")
         if len(filter_unavailable) > 0:
             self.logger.info(
                 "  %d file(s) removed: filter not in catalog (%s).",

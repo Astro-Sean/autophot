@@ -211,31 +211,41 @@ def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None)
     Extracted from the psf class because it is passed as a *callable* to
     centroid_sources_with_error - it never needs self.
     """
-    xcen, ycen = centroid_com(data, mask=mask)
-
+    # `photutils.centroid_com` can return NaNs when the input data contains
+    # substantial negative values (common after background subtraction).
+    # Here we compute a non-negative "flux" (offset by -nanmin and clip) and
+    # derive both the centroid and uncertainty from that.
     yy, xx = np.mgrid[0 : data.shape[0], 0 : data.shape[1]]
-    flux = data.copy()
+
+    flux = np.array(data, dtype=float, copy=True)
     if mask is not None:
         flux = np.where(mask, 0.0, flux)
 
-    flux = flux - np.nanmin(flux)
+    finite = np.isfinite(flux)
+    if not np.any(finite):
+        return np.nan, np.nan, np.nan, np.nan
+
+    offset = float(np.nanmin(flux[finite]))
+    flux = flux - offset
+    flux[~np.isfinite(flux)] = 0.0
     flux[flux < 0] = 0.0
 
-    if flux.sum() <= 0:
-        return float(xcen), float(ycen), np.nan, np.nan
+    total = float(np.sum(flux))
+    if total <= 0:
+        return np.nan, np.nan, np.nan, np.nan
 
-    total = flux.sum()
-    xvar = np.sum(flux * (xx - xcen) ** 2) / total
-    yvar = np.sum(flux * (yy - ycen) ** 2) / total
-    xerr = np.sqrt(xvar / total)
-    yerr = np.sqrt(yvar / total)
+    xcen = float(np.sum(flux * xx) / total)
+    ycen = float(np.sum(flux * yy) / total)
 
-    return (
-        float(np.atleast_1d(xcen)[0]),
-        float(np.atleast_1d(ycen)[0]),
-        float(np.atleast_1d(xerr)[0]),
-        float(np.atleast_1d(yerr)[0]),
-    )
+    # Variance about centroid under the same flux model.
+    xvar = float(np.sum(flux * (xx - xcen) ** 2) / total)
+    yvar = float(np.sum(flux * (yy - ycen) ** 2) / total)
+
+    # COM uncertainty proxy; preserve original behaviour/scale.
+    xerr = float(np.sqrt(xvar / total)) if xvar >= 0 else np.nan
+    yerr = float(np.sqrt(yvar / total)) if yvar >= 0 else np.nan
+
+    return xcen, ycen, xerr, yerr
 
 
 def centroid_2dg_with_error(data, mask=None, error=None, xpeak=None, ypeak=None):
@@ -1747,8 +1757,18 @@ class PSF:
         ax_right_3d.set_zticks([])
         ax_right_3d.view_init(elev=35, azim=135)
 
+        # Backward-compatible plot outputs (existing PDF names) plus standardized
+        # PNG outputs for easier downstream ingestion.
+        psf_sources_pdf = os.path.join(write_dir, f"PSF_sources_{base}.pdf")
+        psf_sources_png = os.path.join(write_dir, f"PSF_Sources_{base}.png")
         fig.savefig(
-            os.path.join(write_dir, f"PSF_sources_{base}.pdf"),
+            psf_sources_pdf,
+            bbox_inches="tight",
+            dpi=150,
+            facecolor="white",
+        )
+        fig.savefig(
+            psf_sources_png,
             bbox_inches="tight",
             dpi=150,
             facecolor="white",
@@ -1899,11 +1919,16 @@ class PSF:
         # perform_emcee_fitting_s2n 0 or None: never use emcee (LSQ only).
         # perform_emcee_fitting_s2n > 0: for target fit, use emcee only if target S/N < threshold.
         phot_cfg = self.input_yaml.get("photometry", {}) or {}
+        # NOTE: "surface plane fitting" (planar background via annulus fit and
+        # subtraction inside the PSF fit box) has been removed/disabled.
+        # We keep the config key for backward compatibility, but it no longer
+        # changes the behaviour.
         psf_bkg_order = int(phot_cfg.get("psf_background_order", 0) or 0)
-        fit_sloped_bkg = psf_bkg_order >= 1
-        if fit_sloped_bkg:
-            log.info(
-                "PSF background model: planar (order=%d) via annulus-fit subtraction before PSF fit.",
+        fit_sloped_bkg = False
+        if psf_bkg_order >= 1:
+            log.warning(
+                "psf_background_order=%d requested, but surface plane fitting "
+                "functionality has been removed; using constant local background.",
                 psf_bkg_order,
             )
         emcee_s2n = phot_cfg.get("perform_emcee_fitting_s2n", 0)
@@ -1985,130 +2010,12 @@ class PSF:
             outer_r: float,
         ) -> Optional[tuple[float, float, float]]:
             """
-            Fit z = a + bx*x + by*y to pixels in an annulus around (x0, y0),
-            using a *robust* fit that:
-
-            - Ensures the annulus contains enough pixels by expanding the outer
-              radius if necessary (up to the image size).
-            - Down-weights/ignores outliers from noise spikes and bright
-              point-like sources via sigma-clipping on both values and residuals.
+            Disabled: surface plane fitting (planar background via annulus-fit
+            and subtraction) has been removed; this helper always returns None.
             """
-            ny, nx = data2d.shape
-            if not (np.isfinite(x0) and np.isfinite(y0)):
-                return None
-
-            xcen = float(x0)
-            ycen = float(y0)
-            inner_r = float(inner_r)
-            # Start from requested outer radius, but allow it to grow if too few pixels.
-            rmax = float(outer_r)
-            if rmax <= inner_r or rmax <= 0:
-                rmax = max(inner_r + 2.0, 3.0)
-
-            max_r = 0.5 * float(min(nx, ny))
-            rmax = min(rmax, max_r)
-
-            target_min_npixels = 80
-            max_tries = 3
-
-            ann = None
-            sub = None
-            xx = yy = None
-
-            for _ in range(max_tries):
-                xmin = max(0, int(np.floor(xcen - rmax - 1)))
-                xmax = min(nx, int(np.ceil(xcen + rmax + 2)))
-                ymin = max(0, int(np.floor(ycen - rmax - 1)))
-                ymax = min(ny, int(np.ceil(ycen + rmax + 2)))
-                if xmax <= xmin or ymax <= ymin:
-                    return None
-
-                sub = data2d[ymin:ymax, xmin:xmax]
-                if sub.size == 0:
-                    return None
-
-                yy, xx = np.mgrid[ymin:ymax, xmin:xmax]
-                rr = np.hypot(xx - xcen, yy - ycen)
-
-                ann = (rr >= inner_r) & (rr <= rmax)
-                ann &= np.isfinite(sub)
-
-                n_ann = int(np.count_nonzero(ann))
-                if n_ann >= target_min_npixels or np.isclose(rmax, max_r):
-                    break
-
-                # Not enough pixels: expand the annulus and try again.
-                rmax = min(max_r, rmax * 1.5)
-
-            if ann is None or sub is None or xx is None or yy is None:
-                return None
-
-            n_ann = int(np.count_nonzero(ann))
-            if n_ann < 25:
-                return None
-
-            z = sub[ann].astype(float, copy=False)
-            x = xx[ann].astype(float, copy=False)
-            y = yy[ann].astype(float, copy=False)
-
-            # First-pass robustification: clip obvious outliers in value space.
-            med = float(np.nanmedian(z))
-            sig = float(mad_std(z, ignore_nan=True))
-            if not np.isfinite(sig) or sig <= 0:
-                sig = float(np.nanstd(z))
-            if np.isfinite(sig) and sig > 0:
-                good = np.abs(z - med) <= 3.0 * sig
-                if np.count_nonzero(good) >= 25:
-                    z, x, y = z[good], x[good], y[good]
-
-            if z.size < 3:
-                return None
-
-            A = np.vstack([np.ones_like(x), x, y]).T
-            try:
-                coef, *_ = np.linalg.lstsq(A, z, rcond=None)
-            except Exception:
-                return None
-
-            # Second-pass robustification: sigma-clip on residuals of the plane
-            # fit to de-weight bright stars / spikes, then refit.
-            try:
-                a0, bx0, by0 = (float(coef[0]), float(coef[1]), float(coef[2]))
-            except Exception:
-                return None
-
-            if not (np.isfinite(a0) and np.isfinite(bx0) and np.isfinite(by0)):
-                return None
-
-            model0 = a0 + bx0 * x + by0 * y
-            resid = z - model0
-            rsig = float(mad_std(resid, ignore_nan=True))
-            if not np.isfinite(rsig) or rsig <= 0:
-                rsig = float(np.nanstd(resid))
-
-            if np.isfinite(rsig) and rsig > 0:
-                good_resid = np.abs(resid) <= 3.0 * rsig
-                if np.count_nonzero(good_resid) >= 25:
-                    z, x, y = z[good_resid], x[good_resid], y[good_resid]
-                    if z.size >= 3:
-                        A = np.vstack([np.ones_like(x), x, y]).T
-                        try:
-                            coef, *_ = np.linalg.lstsq(A, z, rcond=None)
-                        except Exception:
-                            # Fall back to first-pass coefficients.
-                            coef = np.array([a0, bx0, by0], dtype=float)
-                else:
-                    # Too few residual-clipped points; keep the first-pass fit.
-                    coef = np.array([a0, bx0, by0], dtype=float)
-
-            try:
-                a, bx, by = (float(coef[0]), float(coef[1]), float(coef[2]))
-            except Exception:
-                return None
-
-            if not (np.isfinite(a) and np.isfinite(bx) and np.isfinite(by)):
-                return None
-            return a, bx, by
+            # Surface plane fitting removed (cleanup): this helper is intentionally
+            # disabled so no planar surface subtraction is applied.
+            return None
 
         def _subtract_plane_in_fit_box(
             data2d: np.ndarray,
@@ -2117,25 +2024,10 @@ class PSF:
             y0: float,
             fit_shape: tuple[int, int],
         ) -> bool:
-            """Subtract fitted plane from a fit_shape cutout around (x0,y0)."""
-            if coef is None:
-                return False
-            a, bx, by = coef
-            ny, nx = data2d.shape
-            fh, fw = int(fit_shape[0]), int(fit_shape[1])
-            if fh <= 1 or fw <= 1:
-                return False
-            # photutils uses pixel centers; round to nearest integer pixel for the cutout center.
-            xc = int(np.round(float(x0)))
-            yc = int(np.round(float(y0)))
-            slc_lg, slc_sm = overlap_slices((ny, nx), (fh, fw), (yc, xc), mode="trim")
-            if slc_lg is None:
-                return False
-            ys, xs = slc_lg
-            yy, xx = np.mgrid[ys.start : ys.stop, xs.start : xs.stop]
-            plane = a + bx * xx + by * yy
-            data2d[ys, xs] = data2d[ys, xs] - plane
-            return True
+            """Disabled: planar surface subtraction removed."""
+            # Surface plane fitting removed (cleanup): this helper is intentionally
+            # disabled so no planar surface subtraction is applied.
+            return False
 
         # ---- Fit helper ----------------------------------------------------
         # Background: photutils subtracts per-source local background (annulus inner_r..outer_r)
@@ -2149,7 +2041,7 @@ class PSF:
 
             if not iterative:
                 nd_for_fit = ndimage
-                if fit_sloped_bkg:
+                if False and fit_sloped_bkg:
                     # Work on a copy so other tiers/fits see the original image.
                     work = np.array(ndimage.data, dtype=float, copy=True)
                     sub_init_tmp = init_params[mask].to_pandas()
@@ -2285,31 +2177,36 @@ class PSF:
                     if nm not in res.columns:
                         res[nm] = np.nan
 
-                if isinstance(per_src, (list, tuple)) and len(per_src) == len(res):
-                    for i, rec in enumerate(per_src):
-                        names = list(rec.get("param_names", []))
-                        p16 = np.asarray(rec.get("p16", []), float)
-                        p50 = np.asarray(rec.get("p50", []), float)
-                        p84 = np.asarray(rec.get("p84", []), float)
-                        if p16.size == 0:
-                            continue
-                        sigma = 0.5 * ((p84 - p50) + (p50 - p16))
+                # MCMCFitter.fit_info is cumulative across fitter calls (e.g.
+                # different SNR tiers). The current `res` only corresponds to the
+                # most recent fitted batch, so take the last `len(res)` records.
+                if isinstance(per_src, (list, tuple)) and len(per_src) >= len(res):
+                    per_src_batch = per_src[-len(res) :]
+                    if len(per_src_batch) == len(res):
+                        for i, rec in enumerate(per_src_batch):
+                            names = list(rec.get("param_names", []))
+                            p16 = np.asarray(rec.get("p16", []), float)
+                            p50 = np.asarray(rec.get("p50", []), float)
+                            p84 = np.asarray(rec.get("p84", []), float)
+                            if p16.size == 0:
+                                continue
+                            sigma = 0.5 * ((p84 - p50) + (p50 - p16))
 
-                        def _get_sigma(keys):
-                            for k in keys:
-                                if k in names:
-                                    return float(max(sigma[names.index(k)], 0.0))
-                            return np.nan
+                            def _get_sigma(keys):
+                                for k in keys:
+                                    if k in names:
+                                        return float(max(sigma[names.index(k)], 0.0))
+                                return np.nan
 
-                        res.at[i, "x_fit_err"] = _get_sigma(
-                            ("x", "x_0", "x_mean", "xcenter")
-                        )
-                        res.at[i, "y_fit_err"] = _get_sigma(
-                            ("y", "y_0", "y_mean", "ycenter")
-                        )
-                        res.at[i, "flux_fit_err"] = _get_sigma(
-                            ("flux", "amplitude", "amp")
-                        )
+                            res.at[i, "x_fit_err"] = _get_sigma(
+                                ("x", "x_0", "x_mean", "xcenter")
+                            )
+                            res.at[i, "y_fit_err"] = _get_sigma(
+                                ("y", "y_0", "y_mean", "ycenter")
+                            )
+                            res.at[i, "flux_fit_err"] = _get_sigma(
+                                ("flux", "amplitude", "amp")
+                            )
 
             return res, psfphot
 
@@ -2509,6 +2406,15 @@ class PSF:
         try:
             phot_cfg = self.input_yaml.get("photometry", {}) or {}
             psf_bkg_order = int(phot_cfg.get("psf_background_order", 0) or 0)
+            if psf_bkg_order >= 1:
+                # Target diagnostics historically applied planar background
+                # subtraction; now disabled for robustness/consistency.
+                log.warning(
+                    "Target diagnostic: psf_background_order=%d requested, but "
+                    "surface plane fitting is disabled; skipping planar subtraction.",
+                    psf_bkg_order,
+                )
+                psf_bkg_order = 0
 
             # For the target diagnostic plot, ensure the plotted image/residual uses the
             # same planar-background subtraction strategy as the fitter (if enabled).
@@ -2516,7 +2422,7 @@ class PSF:
             if (
                 plotTarget
                 and psfphot is not None
-                and psf_bkg_order >= 1
+                and False
                 and len(sources) > 0
             ):
                 try:
@@ -2947,11 +2853,23 @@ class PSF:
                 _ax_B.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
                 _ax_R.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
             ax1.legend(loc="upper right", frameon=False, labelcolor="w")
-            save_name = (
-                f"targetPSF_{base}.pdf" if plotTarget else f"psfSubtractions_{base}.pdf"
+            save_name_pdf = (
+                f"targetPSF_{base}.pdf"
+                if plotTarget
+                else f"psfSubtractions_{base}.pdf"
+            )
+            save_name_png = (
+                f"PSF_Target_{base}.png" if plotTarget else f"PSF_Subtractions_{base}.png"
+            )
+            # Write both formats.
+            plt.savefig(
+                os.path.join(write_dir, save_name_pdf),
+                bbox_inches="tight",
+                dpi=150,
+                facecolor="white",
             )
             plt.savefig(
-                os.path.join(write_dir, save_name),
+                os.path.join(write_dir, save_name_png),
                 bbox_inches="tight",
                 dpi=150,
                 facecolor="white",
@@ -3078,10 +2996,9 @@ class PSF:
         fpath = cfg.get("fpath", "image")
         writedir = writedir or cfg.get("write_dir", ".")
         os.makedirs(writedir, exist_ok=True)
-        outpath = os.path.join(
-            writedir,
-            f"corner_{os.path.splitext(os.path.basename(fpath))[0]}.pdf",
-        )
+        stem = os.path.splitext(os.path.basename(fpath))[0]
+        outpath_pdf = os.path.join(writedir, f"corner_{stem}.pdf")
+        outpath_png = os.path.join(writedir, f"PSF_MCMC_Corner_{stem}.png")
 
         fig = corner.corner(
             samples,
@@ -3142,9 +3059,10 @@ class PSF:
                     ax2d.axhline(orig_arr[i], color="C1", lw=0.5, ls=":", alpha=0.85)
 
         try:
-            fig.savefig(outpath, dpi=150, bbox_inches="tight", facecolor="white")
+            fig.savefig(outpath_pdf, dpi=150, bbox_inches="tight", facecolor="white")
+            fig.savefig(outpath_png, dpi=150, bbox_inches="tight", facecolor="white")
             plt.close(fig)
-            return outpath
+            return outpath_pdf
         except Exception as exc:
             log.error(f"Corner plot save failed: {exc}")
             plt.close(fig)

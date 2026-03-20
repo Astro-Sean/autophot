@@ -60,7 +60,10 @@ default_input:
     ap_size: 1.7 # float --- Aperture radius in units of FWHM (used for aperture photometry / checks).
     apply_aperture_correction: False # bool --- If True, apply aperture correction from PSF stars to aperture mags.
     aperture_radius: null # float|null --- Explicit aperture radius (pixels). If null, computed from FWHM (typically max(1.5*FWHM, 2.0)).
+    psf_oversample: 1 # int --- Oversampling factor for PSF modelling/fitting grids.
     crowded_field: False # bool --- Photometry crowded-field toggle (affects source selection/cleaning heuristics where implemented).
+    redo_sources: False # bool --- If True, redo source detection/photometry even if intermediate outputs exist.
+    fitting_xy_bounds: 1 # int --- Bound on allowed X/Y fitting offsets (pipeline-specific; used to constrain centroid shifts).
 
     # PSF star selection: FFT-based outlier rejection (blends, cosmic rays).
     psf_fft_rejection: True # bool --- Enable FFT-based rejection during PSF star selection.
@@ -70,7 +73,7 @@ default_input:
     psf_fft_use_mad: True # bool --- Use MAD-based scale estimate for FFT rejection statistics.
     psf_fft_use_median_deviation: True # bool --- Use median absolute deviation around the median (robust).
 
-    psf_background_order: 1 # int --- Background model order during PSF fitting (0 constant, 1 planar).
+    psf_background_order: 1 # int --- Deprecated: surface plane fitting was disabled; constant local background is always used.
 
     # MCMC (emcee) tuning for PSF fits.
     perform_emcee_fitting_s2n: 0 # float --- If >0, run emcee PSF/MAG fitting when source S/N exceeds this value.
@@ -135,6 +138,8 @@ default_input:
     catalog_radius: 0.25 # float --- Search radius (degrees) around target for catalog query.
     gaia_xp_radius_deg: 0.1667 # float --- Search radius (degrees) for Gaia XP query (if used).
     include_IR_sequence_data: False # bool --- If True, augment catalog with IR sequence data (when available).
+    MASTcasjobs_wsid: null # str|null --- Optional MAST CasJobs workspace ID for refcat/casjobs-backed catalog queries.
+    MASTcasjobs_pwd: null # str|null --- Optional MAST CasJobs password/token for refcat/casjobs-backed catalog queries.
 
   cosmic_rays:
     remove_cmrays: False # bool --- Enable cosmic-ray removal in preprocessing.
@@ -163,6 +168,7 @@ default_input:
     do_subtraction: False # bool --- Enable template subtraction step.
     alignment_method: reproject # str --- Science–template registration method (reproject, swarp, astroalign).
     method: sfft # str --- Subtraction backend (sfft default; hotpants or zogy optional where available).
+    kernel_order: 0 # int --- Polynomial order for the SFFT kernel flux scaling model.
     download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).
     get_PS1_template: False # bool --- Deprecated legacy flag (use `download_templates: panstarrs` instead).
     templates_size: 10 # float --- Template cutout size (arcmin) around target when building/using templates.

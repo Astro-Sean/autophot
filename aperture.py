@@ -194,8 +194,17 @@ def _measure_worker(args):
         except Exception:
             mag_val = np.nan
 
+        # Magnitude uncertainty: guard against non-positive / non-finite flux and
+        # invalid SNR values so we don't emit inf/complex errors at low SNR.
+        mag_err_val = np.nan
         try:
-            mag_err_val = snr_err(snr)
+            if (
+                np.isfinite(flux_ap)
+                and flux_ap > 0
+                and np.isfinite(snr)
+                and snr > 0
+            ):
+                mag_err_val = snr_err(snr)
         except Exception:
             mag_err_val = np.nan
 
@@ -819,6 +828,15 @@ class Aperture:
         label = base if saveTarget else index
         save_name = os.path.join(write_dir, f"aperture_{label}.pdf")
         fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
+        try:
+            fig.savefig(
+                save_name.replace(".pdf", ".png"),
+                bbox_inches="tight",
+                dpi=150,
+                facecolor="white",
+            )
+        except Exception:
+            pass
         plt.close(fig)
 
     # -----------------------------------------------------------------------
@@ -1267,6 +1285,15 @@ class Aperture:
             ax1.set_xlim(-0.05, max_radius + 0.05)
 
             fig.savefig(save_loc, bbox_inches="tight", dpi=150, facecolor="white")
+            try:
+                fig.savefig(
+                    save_loc.replace(".pdf", ".png"),
+                    bbox_inches="tight",
+                    dpi=150,
+                    facecolor="white",
+                )
+            except Exception:
+                pass
             plt.close(fig)
 
         logger.info(
@@ -1375,13 +1402,26 @@ class Aperture:
             ax.set_ylabel("Frequency")
             ax.legend(frameon=False)
             fig.tight_layout()
+            pdf_path = os.path.join(write_dir, f"aperture_correction_{base_name}.pdf")
+            png_path = os.path.join(
+                write_dir, f"aperture_correction_{base_name}.png"
+            )
             fig.savefig(
-                os.path.join(write_dir, f"aperture_correction_{base_name}.pdf"),
+                pdf_path,
                 format="pdf",
                 bbox_inches="tight",
                 dpi=150,
                 facecolor="white",
             )
+            try:
+                fig.savefig(
+                    png_path,
+                    bbox_inches="tight",
+                    dpi=150,
+                    facecolor="white",
+                )
+            except Exception:
+                pass
             plt.close(fig)
 
         return correction, correction_err
