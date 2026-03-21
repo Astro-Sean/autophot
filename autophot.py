@@ -753,7 +753,7 @@ class AutomatedPhotometry:
                                 dec=default_input["target_dec"],
                                 size=size_default,
                                 template_folder=template_folder,
-                                band=f,
+                                f=f,
                             )
                     elif download_kind == "legacy":
                         from templates import download_legacy_template
