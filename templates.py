@@ -895,6 +895,63 @@ def _legacy_cutout_url(ra: float, dec: float, size_arcmin: float, bands: str) ->
     return url
 
 
+# def _download_legacy_cutout(
+#     ra: float,
+#     dec: float,
+#     size_arcmin: float,
+#     bands: str,
+#     dest_path: Path,
+# ) -> bool:
+#     """
+#     Download a Legacy Survey FITS cutout via HTTP with optional progress bar.
+#     Returns True if the file was written successfully, False otherwise.
+#     """
+#     url = _legacy_cutout_url(ra, dec, size_arcmin, bands)
+#     headers = {
+#         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+#     }
+#     try:
+#         logger.info("Downloading Legacy Survey cutout to %s ...", dest_path.name)
+#         resp = requests.get(url, headers=headers, stream=True, timeout=120)
+#         logger.info("Legacy Survey cutout URL: %s", url)
+#         logger.debug("HTTP response status: %d", resp.status_code)
+#         if resp.status_code != 200:
+#             logger.error(f"Error: {resp.status_code}")
+#             return False
+#         resp.raise_for_status()
+#         total = resp.headers.get("content-length")
+#         total = int(total) if total is not None else None
+#         pbar = (
+#             tqdm(
+#                 total=total,
+#                 unit="B",
+#                 unit_scale=True,
+#                 unit_divisor=1024,
+#                 leave=True,
+#                 desc="Legacy cutout",
+#                 ncols=100,
+#             )
+#             if tqdm is not None
+#             else None
+#         )
+#         try:
+#             with open(dest_path, "wb") as f:
+#                 for chunk in resp.iter_content(chunk_size=LEGACY_DOWNLOAD_CHUNK_SIZE):
+#                     if chunk:
+#                         f.write(chunk)
+#                         if pbar is not None:
+#                             pbar.update(len(chunk))
+#         finally:
+#             if pbar is not None:
+#                 pbar.close()
+#         if dest_path.exists() and dest_path.stat().st_size > 0:
+#             size_mb = dest_path.stat().st_size / (1024 * 1024)
+#             logger.info("Legacy Survey cutout saved (%s MB).", f"{size_mb:.1f}")
+#             return True
+#         return False
+#     except (requests.RequestException, OSError):
+#         return False
+
 def _download_legacy_cutout(
     ra: float,
     dec: float,
@@ -902,48 +959,33 @@ def _download_legacy_cutout(
     bands: str,
     dest_path: Path,
 ) -> bool:
-    """
-    Download a Legacy Survey FITS cutout via HTTP with optional progress bar.
-    Returns True if the file was written successfully, False otherwise.
-    """
-    url = _legacy_cutout_url(ra, dec, size_arcmin, bands)
-    try:
-        logger.info("Downloading Legacy Survey cutout to %s ...", dest_path.name)
-        resp = requests.get(url, stream=True, timeout=120)
-        resp.raise_for_status()
-        total = resp.headers.get("content-length")
-        total = int(total) if total is not None else None
-        pbar = (
-            tqdm(
-                total=total,
-                unit="B",
-                unit_scale=True,
-                unit_divisor=1024,
-                leave=True,
-                desc="Legacy cutout",
-                ncols=100,
-            )
-            if tqdm is not None
-            else None
-        )
-        try:
-            with open(dest_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=LEGACY_DOWNLOAD_CHUNK_SIZE):
-                    if chunk:
-                        f.write(chunk)
-                        if pbar is not None:
-                            pbar.update(len(chunk))
-        finally:
-            if pbar is not None:
-                pbar.close()
-        if dest_path.exists() and dest_path.stat().st_size > 0:
-            size_mb = dest_path.stat().st_size / (1024 * 1024)
-            logger.info("Legacy Survey cutout saved (%s MB).", f"{size_mb:.1f}")
-            return True
-        return False
-    except (requests.RequestException, OSError):
-        return False
 
+    import subprocess
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    url = _legacy_cutout_url(ra, dec, size_arcmin, bands)
+
+    curl_cmd = [
+        "curl", "-L", "-k",
+        "-A", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "-o", str(dest_path),
+        url
+    ]
+
+    try:
+        logger.info("Using system curl to download Legacy Survey cutout...")
+        result = subprocess.run(curl_cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0 and dest_path.exists() and dest_path.stat().st_size > 1024:
+            size_mb = dest_path.stat().st_size / (1024 * 1024)
+            logger.info(f"Download successful! File size: {size_mb:.1f} MB")
+            return True
+        else:
+            logger.error(f"curl download failed. Error message: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Exception occurred while executing system command: {e}")
+        return False
 
 def download_legacy_template(
     ra: float,
