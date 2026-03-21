@@ -742,7 +742,7 @@ class AutomatedPhotometry:
                                 dec=default_input["target_dec"],
                                 size=size_default,
                                 template_folder=template_folder,
-                                f=f,
+                                band=f,
                             )
                     elif download_kind == "sdss":
                         from templates import download_sdss_template
@@ -753,7 +753,7 @@ class AutomatedPhotometry:
                                 dec=default_input["target_dec"],
                                 size=size_default,
                                 template_folder=template_folder,
-                                f=f,
+                                band=f,
                             )
                     elif download_kind == "legacy":
                         from templates import download_legacy_template
