@@ -3641,7 +3641,8 @@ class Templates:
             except Exception:
                 fwhm_ref = float(template_fwhm) if template_fwhm is not None else 0.0
                 fwhm_sci = float(science_fwhm) if science_fwhm is not None else 0.0
-            forceconv = "REF" if fwhm_ref <= fwhm_sci else "SCI"
+            # forceconv = "REF" if fwhm_ref <= fwhm_sci else "SCI"
+            forceconv = "REF"
 
             # Background polynomial order: default to 0 unless the user explicitly overrides
             bg_order = ts_sub.get("sfft_bg_order", 0)
@@ -3811,6 +3812,9 @@ class Templates:
             ul = 1e30
             mask_abs = os.path.abspath(mask_loc)
             timeout_sec = float(ts.get("hotpants_timeout", 100))
+            
+            conv_target = "t" if float(template_fwhm) <= float(science_fwhm) else "i"
+            
             args = [
                 resolved_exe,
                 "-inim",
@@ -3820,9 +3824,9 @@ class Templates:
                 "-outim",
                 str(differenceFpath),
                 "-il",
-                str(scienceMedian - 25 * scienceSTD),
+                "-100000", # str(scienceMedian - 25 * scienceSTD)
                 "-tl",
-                str(templateMedian - 25 * templateSTD),
+                "-100000", # str(templateMedian - 25 * templateSTD)
                 "-tu",
                 str(ul),
                 "-iu",
@@ -3838,7 +3842,7 @@ class Templates:
                 "-n",
                 "i",
                 "-c",
-                "t",
+                conv_target, # "t"
                 "-v",
                 "2",
                 "-r",

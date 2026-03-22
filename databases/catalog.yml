@@ -50,6 +50,17 @@ legacy:
   z: !!str       mag_z
   z_err: !!str   mag_z_e
 
+legacy_dr9:
+  RA: !!str     ra
+  DEC: !!str     dec
+  g: !!str       mag_g
+  g_err: !!str   mag_g_e
+  r: !!str       mag_r
+  r_err: !!str   mag_r_e
+  i: !!str       mag_i
+  i_err: !!str   mag_i_e
+  z: !!str       mag_z
+  z_err: !!str   mag_z_e
 
 apass:
   name: !!str   recno
@@ -61,12 +72,12 @@ apass:
   V_err: !!str   e_Vmag
   B: !!str       Bmag
   B_err: !!str   e_Bmag
-  g: !!str       g'mag
-  g_err: !!str   e_g'mag
-  r: !!str       r'mag
-  r_err: !!str   e_r'mag
-  i: !!str       i'mag
-  i_err: !!str   e_i'mag
+  g: !!str       g_mag
+  g_err: !!str   e_g_mag
+  r: !!str       r_mag
+  r_err: !!str   e_r_mag
+  i: !!str       i_mag
+  i_err: !!str   e_i_mag
 
 pan_starrs:
   name: !!str   objName
