@@ -202,6 +202,42 @@ def run_sfft() -> Optional[int]:
         default="true",
         help="SFFT ConstPhotRatio: 'true' restricts kernel sum (default SFFT behaviour), 'false' fits flux scaling polynomial.",
     )
+    parser.add_argument(
+        "-only_flags",
+        type=str,
+        default="0,1",
+        help="Comma-separated SExtractor FLAGS values to keep (e.g. '0,1'); use 'none' to disable.",
+    )
+    parser.add_argument(
+        "-cvrej_magd_thresh",
+        type=float,
+        default=0.08,
+        help="SFFT coarse variable-rejection magnitude-difference threshold.",
+    )
+    parser.add_argument(
+        "-evrej_ratio_thresh",
+        type=float,
+        default=4.0,
+        help="SFFT elaborate variable-rejection ratio threshold.",
+    )
+    parser.add_argument(
+        "-evrej_safe_magdev",
+        type=float,
+        default=0.02,
+        help="SFFT elaborate variable-rejection safe magnitude-deviation threshold.",
+    )
+    parser.add_argument(
+        "-pac_ratio_thresh",
+        type=float,
+        default=2.2,
+        help="SFFT post-anomaly-check ratio threshold.",
+    )
+    parser.add_argument(
+        "-allow_crowded_bg_order_override",
+        type=str,
+        default="false",
+        help="If true and crowded mode with bg_order=0, override to bg_order=2.",
+    )
     args = parser.parse_args()
 
     # --- Parse Coordinate Lists ---
@@ -413,9 +449,21 @@ def run_sfft() -> Optional[int]:
     GAIN_KEY = "GAIN"
     SATUR_KEY = "SATURATE"
 
+    def _parse_bool_str(name: str, value: str) -> bool:
+        text = str(value).strip().lower()
+        if text in ("true", "1", "yes", "y", "on"):
+            return True
+        if text in ("false", "0", "no", "n", "off"):
+            return False
+        raise ValueError(f"Invalid -{name}='{value}'; expected true/false.")
+
     kernel_poly_order = args.kernel_order
     bg_poly_order = max(0, int(args.bg_order))
-    if args.crowded and bg_poly_order == 0:
+    allow_crowded_bg_order_override = _parse_bool_str(
+        "allow_crowded_bg_order_override",
+        getattr(args, "allow_crowded_bg_order_override", "false"),
+    )
+    if args.crowded and bg_poly_order == 0 and allow_crowded_bg_order_override:
         # MultiEasyCrowdedPacket default favours a non-trivial BGPolyOrder.
         # Pipelines often pass 0 as "no explicit background model", but in crowded
         # (non-sky-subtracted) cases this can destabilize scaling.
@@ -432,15 +480,9 @@ def run_sfft() -> Optional[int]:
     DETECT_THRESH = 5.0 if is_crowded else 2.0
     DEBLEND_MINCON = 0.005
 
-    _cpr = str(getattr(args, "constphotratio", "true")).strip().lower()
-    if _cpr in ("true", "1", "yes", "y"):
-        constant_phot_ratio = True
-    elif _cpr in ("false", "0", "no", "n"):
-        constant_phot_ratio = False
-    else:
-        raise ValueError(
-            f"Invalid -constphotratio='{args.constphotratio}'; expected true/false."
-        )
+    constant_phot_ratio = _parse_bool_str(
+        "constphotratio", getattr(args, "constphotratio", "true")
+    )
 
     # sfft defaults: StarExt_iter=2 for crowded; 4 for sparse.
     StarExt_iter = 2 if is_crowded else 4
@@ -462,10 +504,34 @@ def run_sfft() -> Optional[int]:
         f"SExtractor background mesh: BACK_SIZE={BACK_SIZE} px, BACK_FILTERSIZE={BACK_FILTERSIZE}"
     )
 
+    def parse_only_flags(s: str):
+        text = str(s or "").strip().lower()
+        if text in ("", "none", "null", "false"):
+            return None
+        vals = []
+        for tok in text.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            vals.append(int(tok))
+        return vals if len(vals) > 0 else None
+
+    ONLY_FLAGS = parse_only_flags(args.only_flags)
+
     COARSE_VAR_REJECTION = True
-    # UPDATED: tighter photometric dev threshold
-    CVREJ_MAGD_THRESH = 0.1
+    CVREJ_MAGD_THRESH = float(args.cvrej_magd_thresh)
     ELABO_VAR_REJECTION = True
+    EVREJ_RATIO_THREH = float(args.evrej_ratio_thresh)
+    EVREJ_SAFE_MAGDEV = float(args.evrej_safe_magdev)
+    PAC_RATIO_THRESH = float(args.pac_ratio_thresh)
+    log_info(
+        "SFFT rejection params: "
+        f"ONLY_FLAGS={ONLY_FLAGS} "
+        f"CVREJ_MAGD_THRESH={CVREJ_MAGD_THRESH:.3f} "
+        f"EVREJ_RATIO_THRESH={EVREJ_RATIO_THREH:.3f} "
+        f"EVREJ_SAFE_MAGDEV={EVREJ_SAFE_MAGDEV:.3f} "
+        f"PAC_RATIO_THRESH={PAC_RATIO_THRESH:.3f}"
+    )
 
     # KerHWRatio: ratio between FWHM and kernel half-width when GKerHW is None.
     # SFFT source (EasySparsePacket.ESP): KerHW = int(clip(KerHWRatio * Max(FWHM_REF, FWHM_SCI), limit[0], limit[1])).
@@ -588,7 +654,7 @@ def run_sfft() -> Optional[int]:
                 DETECT_MAXAREA=detect_maxarea,
                 DEBLEND_MINCONT=DEBLEND_MINCON,
                 BACKPHOTO_TYPE=BACKPHOTO_TYPE,
-                ONLY_FLAGS=None,
+                ONLY_FLAGS=ONLY_FLAGS,
                 BoundarySIZE=boundary,
                 BACK_SIZE_SUPER=128,
                 StarExt_iter=StarExt_iter,
@@ -700,14 +766,13 @@ def run_sfft() -> Optional[int]:
                     COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
                     CVREJ_MAGD_THRESH=CVREJ_MAGD_THRESH,
                     ELABO_VAR_REJECTION=ELABO_VAR_REJECTION,
-                    EVREJ_RATIO_THREH=5.0,
-                    # UPDATED: slightly tighter safety mag deviation
-                    EVREJ_SAFE_MAGDEV=0.03,
+                EVREJ_RATIO_THREH=EVREJ_RATIO_THREH,
+                EVREJ_SAFE_MAGDEV=EVREJ_SAFE_MAGDEV,
                     StarExt_iter=StarExt_iter,
                     PostAnomalyCheck=True,
-                    PAC_RATIO_THRESH=2.5,
+                PAC_RATIO_THRESH=PAC_RATIO_THRESH,
                     BoundarySIZE=boundary,
-                    ONLY_FLAGS=None,
+                ONLY_FLAGS=ONLY_FLAGS,
                     BACKEND_4SUBTRACT=BACKEND_4SUBTRACT,
                     CUDA_DEVICE_4SUBTRACT=CUDA_DEVICE_4SUBTRACT,
                     NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
@@ -753,13 +818,13 @@ def run_sfft() -> Optional[int]:
                     COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
                     CVREJ_MAGD_THRESH=CVREJ_MAGD_THRESH,
                     ELABO_VAR_REJECTION=ELABO_VAR_REJECTION,
-                    EVREJ_RATIO_THREH=5.0,
-                    EVREJ_SAFE_MAGDEV=0.03,
+                    EVREJ_RATIO_THREH=EVREJ_RATIO_THREH,
+                    EVREJ_SAFE_MAGDEV=EVREJ_SAFE_MAGDEV,
                     StarExt_iter=StarExt_iter,
                     PostAnomalyCheck=True,
-                    PAC_RATIO_THRESH=2.5,
+                    PAC_RATIO_THRESH=PAC_RATIO_THRESH,
                     BoundarySIZE=boundary,
-                    ONLY_FLAGS=[0, 1],
+                    ONLY_FLAGS=ONLY_FLAGS,
                     BACKEND_4SUBTRACT=BACKEND_4SUBTRACT,
                     CUDA_DEVICE_4SUBTRACT=CUDA_DEVICE_4SUBTRACT,
                     NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,

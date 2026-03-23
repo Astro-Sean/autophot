@@ -394,7 +394,7 @@ def run_photometry():
             encoding="utf-8",  # Explicit encoding for better compatibility
             force=True,  # Ensures this overrides any existing config
         )
-        normalize_filter = LogMessageNormalizeFilter(width=120)
+        normalize_filter = LogMessageNormalizeFilter(width=150)
         for _h in logging.getLogger("").handlers:
             _h.addFilter(normalize_filter)
 

@@ -830,13 +830,7 @@ class Plot:
                                             alpha=0.85,
                                             zorder=4,
                                         )
-                                    ax1.plot(
-                                        [],
-                                        [],
-                                        color="#D3D3D3",
-                                        lw=0.8,
-                                        label="Distortion contours",
-                                    )
+      
                             except Exception as e:
                                 logger.debug(
                                     "Distortion contour overlay skipped: %s", e
@@ -861,13 +855,7 @@ class Plot:
                         )
                         distortion_rms = float(np.sqrt(np.mean(u * u + v * v)))
                         distortion_rms_text = f"Distortion residual RMS: {distortion_rms:.2f} px"
-                        ax1.plot(
-                            [],
-                            [],
-                            color="#00FFFF",
-                            lw=0.8,
-                            label="Distortion vectors",
-                        )
+                        
             except Exception as e:
                 logger.debug("Distortion vector overlay skipped: %s", e)
 

@@ -3235,12 +3235,50 @@ class Templates:
         ref_name = Path(templateFpath).name
         logger.info(border_msg(f"Starting image subtraction ({sci_name} - {ref_name})"))
 
+        prepared_template_fpath: Optional[str] = None
+        template_work_fpath: str = str(templateFpath)
+
         try:
             # =============================================================
             # 1. Load images (one read each)
             # =============================================================
             scienceImage, scienceHeader = read_fits(scienceFpath)
             templateImage, templateHeader = read_fits(templateFpath)
+            scienceDir = Path(scienceFpath).parent
+            base_name = Path(scienceFpath).name
+            differenceFpath = str(scienceDir / f"diff_{base_name}")
+
+            def _as_bool(value, default: bool = False) -> bool:
+                if isinstance(value, bool):
+                    return value
+                if value is None:
+                    return default
+                if isinstance(value, (int, float)):
+                    return bool(value)
+                if isinstance(value, str):
+                    v = value.strip().lower()
+                    if v in ("1", "true", "t", "yes", "y", "on"):
+                        return True
+                    if v in ("0", "false", "f", "no", "n", "off", ""):
+                        return False
+                return default
+
+            def _ensure_prepared_template_path() -> str:
+                nonlocal prepared_template_fpath, template_work_fpath
+                if prepared_template_fpath is None:
+                    fd, tmp_path = tempfile.mkstemp(
+                        prefix="template_prepared_",
+                        suffix=".fits",
+                        dir=str(scienceDir),
+                    )
+                    os.close(fd)
+                    prepared_template_fpath = tmp_path
+                    template_work_fpath = tmp_path
+                    logger.info(
+                        "Using temporary prepared template: %s",
+                        os.path.basename(tmp_path),
+                    )
+                return template_work_fpath
 
             # Ensure reference (template) is background-subtracted so both inputs
             # to SFFT/HOTPANTS have comparable zero level (science is already
@@ -3254,9 +3292,9 @@ class Templates:
                     templateImage, mask=template_invalid, sigma=3, maxiters=5
                 )
                 templateImage = templateImage - template_bg_median
-                write_fits(templateFpath, templateImage, templateHeader)
+                write_fits(_ensure_prepared_template_path(), templateImage, templateHeader)
                 logger.info(
-                    "Reference image background subtracted (median %.4g) and saved.",
+                    "Reference image background subtracted (median %.4g).",
                     float(template_bg_median),
                 )
 
@@ -3300,7 +3338,7 @@ class Templates:
             # (so e- = ADU * gain remains consistent).
             # -------------------------------------------------------------
             ts_cfg_scale = self.input_yaml.get("template_subtraction", {}) or {}
-            if bool(ts_cfg_scale.get("scale_template_to_science", False)):
+            if _as_bool(ts_cfg_scale.get("scale_template_to_science", False), False):
                 logger.info(
                     "Template scaling enabled: will rescale template to match science robust sigma when scale mismatch is large."
                 )
@@ -3341,7 +3379,11 @@ class Templates:
                             if np.isfinite(template_gain) and template_gain > 0:
                                 template_gain = float(template_gain) / scale_fac
 
-                            write_fits(templateFpath, templateImage, templateHeader)
+                            write_fits(
+                                _ensure_prepared_template_path(),
+                                templateImage,
+                                templateHeader,
+                            )
                             logger.info(
                                 "Rescaled template to science scale: sci_std=%.4g, ref_std=%.4g, factor=%.4g. "
                                 "template_gain: %s -> %.4g; template_saturate: %s -> %s.",
@@ -3388,7 +3430,7 @@ class Templates:
                 if isinstance(self.input_yaml, dict)
                 else {}
             )
-            if bool(ts_cfg_inp.get("inpaint_template_cores", False)) and np.isfinite(
+            if _as_bool(ts_cfg_inp.get("inpaint_template_cores", False), False) and np.isfinite(
                 template_saturate
             ):
                 try:
@@ -3412,7 +3454,11 @@ class Templates:
                         cfg=cfg,
                     )
                     if np.any(_mask_used):
-                        write_fits(templateFpath, templateImage, templateHeader)
+                        write_fits(
+                            _ensure_prepared_template_path(),
+                            templateImage,
+                            templateHeader,
+                        )
                         logger.info(
                             "Inpainted template saturated cores: %.3f%% pixels (method=%s, dilate=%d px).",
                             float(np.mean(_mask_used)) * 100.0,
@@ -3444,10 +3490,6 @@ class Templates:
             target_location = [
                 (self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"])
             ]
-
-            scienceDir = Path(scienceFpath).parent
-            base_name = Path(scienceFpath).name
-            differenceFpath = str(scienceDir / f"diff_{base_name}")
 
             # =============================================================
             # 2. Locate PSF models
@@ -3644,7 +3686,7 @@ class Templates:
             if method.lower() in ("zogy", "pyzogy"):
                 method = self._subtract_zogy(
                     scienceFpath,
-                    templateFpath,
+                    template_work_fpath,
                     differenceFpath,
                     scienceHeader,
                     science_psf,
@@ -3657,7 +3699,7 @@ class Templates:
             if method == "sfft":
                 method = self._subtract_sfft(
                     scienceFpath,
-                    templateFpath,
+                    template_work_fpath,
                     differenceFpath,
                     mask_loc,
                     scienceDir,
@@ -3679,7 +3721,7 @@ class Templates:
             if method == "hotpants":
                 success = self._subtract_hotpants(
                     scienceFpath,
-                    templateFpath,
+                    template_work_fpath,
                     differenceFpath,
                     mask_loc,
                     scienceDir,
@@ -3741,6 +3783,12 @@ class Templates:
         except Exception:
             logger.exception("Unhandled error in subtract()")
             return None, None, None
+        finally:
+            if prepared_template_fpath:
+                try:
+                    os.remove(prepared_template_fpath)
+                except OSError:
+                    pass
 
     # ----- Private subtraction-backend methods -----
 
@@ -3820,6 +3868,21 @@ class Templates:
         template_saturate,
     ) -> str:
         """Attempt SFFT subtraction; return next method to try on failure."""
+        def _as_bool(value, default: bool = False) -> bool:
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return default
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                v = value.strip().lower()
+                if v in ("1", "true", "t", "yes", "y", "on"):
+                    return True
+                if v in ("0", "false", "f", "no", "n", "off", ""):
+                    return False
+            return default
+
         # Use finite saturation for SFFT (FITS/MeLOn cannot use inf)
         _saturate_fallback = 1e30
         sat_sci = (
@@ -3869,10 +3932,15 @@ class Templates:
 
             # Background polynomial order: default to 0 unless the user explicitly overrides
             bg_order = ts_sub.get("sfft_bg_order", 0)
+            allow_bg_override = _as_bool(
+                ts_sub.get("sfft_allow_crowded_bg_order_override", False), False
+            )
             # ConstPhotRatio controls whether SFFT forces a constant kernel-sum
             # photometric ratio across the image. Allowing it to vary can reduce
             # localized over/under-subtraction when flux scaling changes spatially.
-            const_phot_ratio = bool(ts_sub.get("sfft_const_phot_ratio", False))
+            const_phot_ratio = _as_bool(
+                ts_sub.get("sfft_const_phot_ratio", False), False
+            )
 
             # crowded_field is a shortcut: when True, use SFFT crowded (ECP) unless
             # the user *explicitly* forces sparse via `force_sparse_sfft`.
@@ -3880,7 +3948,7 @@ class Templates:
                 "sfft_crowded_method",
                 ts_sub.get("crowded_field", False),
             )
-            force_sparse = bool(ts_sub.get("force_sparse_sfft", False))
+            force_sparse = _as_bool(ts_sub.get("force_sparse_sfft", False), False)
 
             if phot_cfg.get("crowded_field", False) and not force_sparse:
                 if not sfft_crowded:
@@ -3923,6 +3991,8 @@ class Templates:
                 str(kernel_order),
                 "-bg_order",
                 str(bg_order),
+                "-allow_crowded_bg_order_override",
+                "true" if allow_bg_override else "false",
                 "-constphotratio",
                 "true" if const_phot_ratio else "false",
                 "-matching_sources",
@@ -3947,6 +4017,32 @@ class Templates:
                 cmd += ["-back_size", str(int(back_size))]
             if back_filt is not None:
                 cmd += ["-back_filtersize", str(int(back_filt))]
+            # Robust SFFT source rejection controls.
+            only_flags_cfg = ts_sub.get("sfft_only_flags", [0, 1])
+            if only_flags_cfg is None:
+                cmd += ["-only_flags", "none"]
+            elif isinstance(only_flags_cfg, (list, tuple)):
+                cmd += ["-only_flags", ",".join(str(int(v)) for v in only_flags_cfg)]
+            else:
+                cmd += ["-only_flags", str(only_flags_cfg)]
+
+            if ts_sub.get("sfft_cvrej_magd_thresh", None) is not None:
+                cmd += ["-cvrej_magd_thresh", str(float(ts_sub["sfft_cvrej_magd_thresh"]))]
+            if ts_sub.get("sfft_evrej_ratio_thresh", None) is not None:
+                cmd += [
+                    "-evrej_ratio_thresh",
+                    str(float(ts_sub["sfft_evrej_ratio_thresh"])),
+                ]
+            if ts_sub.get("sfft_evrej_safe_magdev", None) is not None:
+                cmd += [
+                    "-evrej_safe_magdev",
+                    str(float(ts_sub["sfft_evrej_safe_magdev"])),
+                ]
+            if ts_sub.get("sfft_pac_ratio_thresh", None) is not None:
+                cmd += [
+                    "-pac_ratio_thresh",
+                    str(float(ts_sub["sfft_pac_ratio_thresh"])),
+                ]
             if sfft_crowded:
                 cmd.append("-crowded")
             log_path = scienceDir / f"sfft_{Path(base_name).stem}.txt"

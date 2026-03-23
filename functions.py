@@ -50,10 +50,8 @@ class ColoredLevelFormatter(logging.Formatter):
 
     RESET = "\033[0m"
     BOLD = "\033[1m"
-    CYAN = "\033[36m"
-    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
     RED = "\033[31m"
-    GREY = "\033[90m"
 
     def __init__(self, *args, use_color: bool = True, **kwargs):
         super().__init__(*args, **kwargs)
@@ -83,16 +81,17 @@ class ColoredLevelFormatter(logging.Formatter):
         if record.levelno >= logging.ERROR:
             return f"{self.BOLD}{self.RED}{base}{self.RESET}"
         if record.levelno >= logging.WARNING:
-            return f"{self.BOLD}{self.YELLOW}{base}{self.RESET}"
+            # Keep warnings high-contrast without extra color coding.
+            return f"{self.BOLD}{base}{self.RESET}"
         if record.levelno >= logging.DEBUG:
-            # Debug can get lost; keep it readable but subdued.
-            return f"{self.CYAN}{base}{self.RESET}"
+            # Debug output: blue for quick visual scanning.
+            return f"{self.BLUE}{base}{self.RESET}"
 
-        # INFO and below: no special color
+        # INFO/default: plain text (terminal default color, typically black/white).
         return base
 
 
-def normalize_log_message(message: str, width: int = 120) -> str:
+def normalize_log_message(message: str, width: int = 150) -> str:
     """
     Normalize log message formatting for readability and consistency.
 
@@ -103,6 +102,9 @@ def normalize_log_message(message: str, width: int = 120) -> str:
     """
     text = str(message).replace("\t", "    ")
     lines = [ln.rstrip() for ln in text.splitlines()]
+    if text.endswith("\n"):
+        # Preserve intentional trailing spacer lines from banner-style messages.
+        lines.append("")
 
     compact: list[str] = []
     blank_seen = False
@@ -135,13 +137,15 @@ def normalize_log_message(message: str, width: int = 120) -> str:
         )
         wrapped.extend(wrapped_ln.splitlines())
 
-    return "\n".join(wrapped).strip("\n")
+    # Keep intentional leading/trailing spacing (e.g. border banners),
+    # but collapse internal blank-line runs via the logic above.
+    return "\n".join(wrapped)
 
 
 class LogMessageNormalizeFilter(logging.Filter):
     """Filter that normalizes message text before emission."""
 
-    def __init__(self, width: int = 120):
+    def __init__(self, width: int = 150):
         super().__init__()
         self.width = int(width)
 
@@ -168,7 +172,7 @@ def configure_console_logging(
 
     handler = logging.StreamHandler()
     handler.setLevel(level)
-    handler.addFilter(LogMessageNormalizeFilter())
+    handler.addFilter(LogMessageNormalizeFilter(width=150))
     if formatter is None:
         formatter = ColoredLevelFormatter(
             fmt="%(asctime)s - %(levelname)s - %(message)s",
@@ -516,7 +520,7 @@ def border_msg(msg: str, body: str = "-", corner: str = "+") -> str:
     # "<timestamp> - INFO - " and then print message. If the message starts
     # with "\n", the "INFO -" portion appears blank, which looks messy.
     # Instead, put separators at the end so the banner still reads cleanly.
-    return f"{border}\n{line}\n{border}"
+    return f"\n\n\n{border}\n{line}\n{border}\n\n"
 
 
 # Telescope/instrument config: images must have FITS header keywords TELESCOP and INSTRUME.

@@ -226,7 +226,7 @@ default_input:
     plot_source_check_distortion_vectors: True # bool --- Overlay catalog->detected residual vectors on Sourcecheck plot.
     plot_source_check_distortion_contours: True # bool --- Overlay light-grey contour map of residual distortion magnitude on Sourcecheck plot.
     plot_source_check_distortion_contour_levels: 7 # int --- Number of contour levels for distortion residual map.
-    plot_source_check_distortion_contour_grid_size: 160 # int --- Interpolation grid size for contouring residual distortion (higher = smoother, slower).
+    plot_source_check_distortion_contour_grid_size: 250 # int --- Interpolation grid size for contouring residual distortion (higher = smoother, slower).
     plot_source_check_max_sep_pix: 6.0 # float --- Max nearest-neighbor separation (pixels) for residual-vector pairing.
     plot_source_check_max_vectors: 300 # int --- Max vectors to draw on Sourcecheck plot (for readability).
     plot_source_check_min_vectors: 10 # int --- Minimum matched vectors required before drawing overlay.
@@ -259,6 +259,12 @@ default_input:
     sextractor_crowded: False # bool --- Use crowded-field SExtractor settings for subtraction/source selection (if supported).
     sfft_crowded_method: False # bool --- Force SFFT crowded-field configuration (overrides auto logic).
     sfft_const_phot_ratio: False # bool --- SFFT ConstPhotRatio; False allows spatially varying photometric scaling to reduce localized over-subtraction.
+    sfft_only_flags: [0, 1] # list[int]|null --- SExtractor FLAGS values kept by SFFT source selection (null disables flag filtering).
+    sfft_allow_crowded_bg_order_override: False # bool --- If True, crowded SFFT may override bg_order=0 to 2 for stability.
+    sfft_cvrej_magd_thresh: 0.08 # float --- Coarse variable-rejection magnitude-difference threshold (lower is stricter).
+    sfft_evrej_ratio_thresh: 4.0 # float --- Elaborate variable-rejection ratio threshold (lower is stricter).
+    sfft_evrej_safe_magdev: 0.02 # float --- Safe magnitude-deviation threshold for elaborate rejection.
+    sfft_pac_ratio_thresh: 2.2 # float --- Post-anomaly-check ratio threshold for SFFT source filtering.
 
     inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).
     inpaint_method: biharmonic # str --- Inpainting algorithm name (e.g. biharmonic).
