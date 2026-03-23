@@ -907,7 +907,7 @@ class Limits:
                 boxprops=dict(linewidth=0.6, color="#4D4D4D"),
                 whiskerprops=dict(linewidth=0.6, color="#4D4D4D"),
                 capprops=dict(linewidth=0.6, color="#4D4D4D"),
-                medianprops=dict(linewidth=0.8, color="#D55E00"),
+                medianprops=dict(linewidth=0.8, color="#FF0000"),
             )
 
         # Bracket and bisect search trajectories.
@@ -919,7 +919,7 @@ class Limits:
                 "o-",
                 ms=3.5,
                 lw=0.8,
-                color="#0072B2",
+                color="#0000FF",
                 label="Bracket path",
             )
         if bisect_steps:
@@ -930,7 +930,7 @@ class Limits:
                 "s--",
                 ms=3.5,
                 lw=0.8,
-                color="#009E73",
+                color="#00AA00",
                 label="Bisect path",
             )
 

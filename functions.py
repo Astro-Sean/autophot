@@ -17,6 +17,7 @@ import yaml
 import logging
 import matplotlib.pyplot as plt
 import traceback
+import textwrap
 
 import copy
 from astropy.io import fits
@@ -59,7 +60,14 @@ class ColoredLevelFormatter(logging.Formatter):
         self._use_color = use_color
 
     def format(self, record: logging.LogRecord) -> str:
+        msg_raw = record.getMessage()
+        msg_clean = normalize_log_message(msg_raw)
+        old_msg, old_args = record.msg, record.args
+        if msg_clean != msg_raw:
+            record.msg = msg_clean
+            record.args = ()
         base = super().format(record)
+        record.msg, record.args = old_msg, old_args
         if not self._use_color:
             return base
 
@@ -84,6 +92,69 @@ class ColoredLevelFormatter(logging.Formatter):
         return base
 
 
+def normalize_log_message(message: str, width: int = 120) -> str:
+    """
+    Normalize log message formatting for readability and consistency.
+
+    - Converts tabs to spaces.
+    - Trims trailing whitespace.
+    - Collapses repeated blank lines.
+    - Soft-wraps long lines to a fixed width with indentation preserved.
+    """
+    text = str(message).replace("\t", "    ")
+    lines = [ln.rstrip() for ln in text.splitlines()]
+
+    compact: list[str] = []
+    blank_seen = False
+    for ln in lines:
+        if ln.strip() == "":
+            if not blank_seen:
+                compact.append("")
+            blank_seen = True
+            continue
+        blank_seen = False
+        compact.append(ln)
+
+    wrapped: list[str] = []
+    for ln in compact:
+        if not ln:
+            wrapped.append("")
+            continue
+        if len(ln) <= width:
+            wrapped.append(ln)
+            continue
+        indent_len = len(ln) - len(ln.lstrip(" "))
+        indent = " " * indent_len
+        wrapped_ln = textwrap.fill(
+            ln.strip(),
+            width=width,
+            initial_indent=indent,
+            subsequent_indent=indent + "  ",
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        wrapped.extend(wrapped_ln.splitlines())
+
+    return "\n".join(wrapped).strip("\n")
+
+
+class LogMessageNormalizeFilter(logging.Filter):
+    """Filter that normalizes message text before emission."""
+
+    def __init__(self, width: int = 120):
+        super().__init__()
+        self.width = int(width)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            normalized = normalize_log_message(record.getMessage(), width=self.width)
+            record.msg = normalized
+            record.args = ()
+        except Exception:
+            pass
+        return True
+
+
 def configure_console_logging(
     *,
     level: int = logging.INFO,
@@ -97,6 +168,7 @@ def configure_console_logging(
 
     handler = logging.StreamHandler()
     handler.setLevel(level)
+    handler.addFilter(LogMessageNormalizeFilter())
     if formatter is None:
         formatter = ColoredLevelFormatter(
             fmt="%(asctime)s - %(levelname)s - %(message)s",
@@ -444,7 +516,7 @@ def border_msg(msg: str, body: str = "-", corner: str = "+") -> str:
     # "<timestamp> - INFO - " and then print message. If the message starts
     # with "\n", the "INFO -" portion appears blank, which looks messy.
     # Instead, put separators at the end so the banner still reads cleanly.
-    return f"\n{border}\n{line}\n{border}\n\n"
+    return f"{border}\n{line}\n{border}"
 
 
 # Telescope/instrument config: images must have FITS header keywords TELESCOP and INSTRUME.

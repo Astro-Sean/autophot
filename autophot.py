@@ -558,6 +558,121 @@ class AutomatedPhotometry:
                     + "\n  - ".join(unique_sorted)
                 )
 
+        # ------------------------------------------------------------------
+        # Optional Gaia custom catalog build from user transmission curves.
+        # If `catalog.curve_map` is provided, build once into output directory
+        # and force catalog mode to `custom` for this run.
+        # ------------------------------------------------------------------
+        catalog_cfg = default_input.setdefault("catalog", {})
+        curve_map = catalog_cfg.get("curve_map", None)
+        if curve_map:
+            if not isinstance(curve_map, dict):
+                raise TypeError(
+                    "catalog.curve_map must be a dictionary of band->curve path, "
+                    "e.g. {'g': '/path/g.dat', 'r': '/path/r.dat'}."
+                )
+
+            work_dir = default_input["fits_dir"]
+            out_dir_name = "_" + default_input["outdir_name"]
+            out_dir_base = os.path.basename(work_dir) + out_dir_name
+            out_dir = os.path.join(os.path.dirname(work_dir), out_dir_base)
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            curve_catalog_csv = os.path.join(out_dir, "GAIA_CurveMap_Catalog.csv")
+
+            catalog_cfg["use_catalog"] = "custom"
+            catalog_cfg["catalog_custom_fpath"] = curve_catalog_csv
+            default_input["catalog"] = catalog_cfg
+
+            if os.path.exists(curve_catalog_csv):
+                _log(
+                    f"Using existing Gaia curve-map catalog: {curve_catalog_csv} "
+                    "(skipping rebuild)."
+                )
+            else:
+                target_ra = default_input.get("target_ra", None)
+                target_dec = default_input.get("target_dec", None)
+                if target_ra is None or target_dec is None:
+                    raise ValueError(
+                        "catalog.curve_map is set, but target_ra/target_dec are missing. "
+                        "Please set both coordinates in degrees."
+                    )
+
+                radius_deg = float(
+                    catalog_cfg.get(
+                        "gaia_xp_radius_deg",
+                        catalog_cfg.get("catalog_radius", 0.25),
+                    )
+                )
+                max_sources = int(
+                    catalog_cfg.get(
+                        "gaia_curve_map_max_sources",
+                        catalog_cfg.get("gaia_xp_max_sources", 100),
+                    )
+                )
+                curve_order = str(
+                    catalog_cfg.get(
+                        "gaia_curve_map_order_by",
+                        catalog_cfg.get("gaia_xp_order_by", "distance"),
+                    )
+                ).strip().lower()
+                svo_curve_map = catalog_cfg.get("curve_map_svo", None)
+
+                _log(
+                    border_msg(
+                        "Building Gaia custom catalog from transmission curves"
+                    )
+                )
+                _log(
+                    f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}, "
+                    f"radius={radius_deg:.4f} deg, max_sources={max_sources}, "
+                    f"order_by={curve_order}"
+                )
+                from autophot_gaia_curves import build_custom_catalog
+
+                build_custom_catalog(
+                    ra_deg=float(target_ra),
+                    dec_deg=float(target_dec),
+                    radius_deg=radius_deg,
+                    max_sources=max_sources,
+                    curves={str(k): str(v) for k, v in curve_map.items()},
+                    out_csv=curve_catalog_csv,
+                    svo_filters=(
+                        {str(k): str(v) for k, v in svo_curve_map.items()}
+                        if isinstance(svo_curve_map, dict) and len(svo_curve_map) > 0
+                        else None
+                    ),
+                    gaia_query_pause_before_sec=float(
+                        catalog_cfg.get("gaia_archive_query_pause_before_sec", 1.0)
+                    ),
+                    gaia_query_pause_after_sec=float(
+                        catalog_cfg.get("gaia_archive_query_pause_after_sec", 1.0)
+                    ),
+                    gaia_xp_batch_size=int(catalog_cfg.get("gaia_xp_batch_size", 200)),
+                    gaia_xp_batch_pause_sec=float(
+                        catalog_cfg.get("gaia_xp_batch_pause_sec", 1.0)
+                    ),
+                    gaia_archive_max_retries=int(
+                        catalog_cfg.get("gaia_archive_max_retries", 3)
+                    ),
+                    gaia_archive_retry_base_delay_sec=float(
+                        catalog_cfg.get("gaia_archive_retry_base_delay_sec", 2.0)
+                    ),
+                    gaia_xp_order_by=curve_order,
+                    gaia_xp_show_progress=bool(
+                        catalog_cfg.get("gaia_xp_show_progress", True)
+                    ),
+                    gaia_nearest_prefetch_factor=int(
+                        catalog_cfg.get("gaia_nearest_prefetch_factor", 50)
+                    ),
+                    gaia_nearest_prefetch_min=int(
+                        catalog_cfg.get("gaia_nearest_prefetch_min", 500)
+                    ),
+                    gaia_nearest_prefetch_max=int(
+                        catalog_cfg.get("gaia_nearest_prefetch_max", 10000)
+                    ),
+                )
+                _log(f"Saved Gaia curve-map catalog: {curve_catalog_csv}")
+
         # Initialise preparation helper and validate catalog configuration
         prepare_db = Prepare(default_input=default_input)
         available_filters = prepare_db.check_catalog()
@@ -977,7 +1092,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%H:%M:%S",
     )
     ap = AutomatedPhotometry()
     config = ap.load()

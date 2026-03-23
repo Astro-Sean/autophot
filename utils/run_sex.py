@@ -17,28 +17,68 @@ Features:
 
 import logging
 import os
-import re
+import shutil
 import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Union, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
+import pandas as pd
 from astropy.io import fits
 from astropy.stats import sigma_clip
 from astropy.table import Table
-import pandas as pd
+from scipy.spatial import cKDTree
+
 from functions import border_msg
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Cached path to a working SExtractor binary (avoids repeated subprocess checks).
+_SEXTRACTOR_EXE: Optional[str] = None
+_SEXTRACTOR_PROBE_FAILED: bool = False
 
 # =============================================================================
 # Utility Functions
 # =============================================================================
+
+
+def get_sextractor_executable() -> Optional[str]:
+    """
+    Resolve and cache a working SExtractor binary (`sex` or `sextractor` on PATH).
+
+    Returns:
+        Absolute path to the executable, or None if not found / not working.
+    """
+    global _SEXTRACTOR_EXE, _SEXTRACTOR_PROBE_FAILED
+    if _SEXTRACTOR_EXE is not None:
+        return _SEXTRACTOR_EXE
+    if _SEXTRACTOR_PROBE_FAILED:
+        return None
+    for name in ("sex", "sextractor"):
+        path = shutil.which(name)
+        if path is None:
+            continue
+        try:
+            subprocess.run(
+                [path, "--version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                timeout=15,
+            )
+            _SEXTRACTOR_EXE = path
+            logger.info("SExtractor executable detected: %s", path)
+            return path
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            continue
+    _SEXTRACTOR_PROBE_FAILED = True
+    logger.error(
+        "SExtractor not found. Install SExtractor and ensure `sex` or `sextractor` is on PATH."
+    )
+    return None
 
 
 def is_sextractor_installed() -> bool:
@@ -48,22 +88,35 @@ def is_sextractor_installed() -> bool:
     Returns:
         bool: True if SExtractor is found, False otherwise.
     """
-    for cmd in ["sex", "sextractor"]:
+    return get_sextractor_executable() is not None
+
+
+def scale_multiplier_from_config(config: dict) -> float:
+    """
+    Factor used to convert measured FWHM (px) into pipeline ``scale`` (cutout/box size).
+
+    Reads ``source_detection.scale_multipler`` (historic YAML spelling) or
+    ``source_detection.scale_multiplier``, then top-level ``scale_multiplier``.
+    Default 4.0 matches legacy AutoPHoT when the YAML key was never wired up.
+    """
+    if not isinstance(config, dict):
+        return 4.0
+    sd = config.get("source_detection") or {}
+    if isinstance(sd, dict):
+        for key in ("scale_multipler", "scale_multiplier"):
+            v = sd.get(key)
+            if v is not None:
+                try:
+                    return max(0.5, float(v))
+                except (TypeError, ValueError):
+                    pass
+    v = config.get("scale_multiplier")
+    if v is not None:
         try:
-            subprocess.run(
-                [cmd, "--version"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            logger.info(f"SExtractor executable detected: {cmd}")
-            return True
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            continue
-    logger.error(
-        "SExtractor not found. Please ensure SExtractor is installed and in your system PATH."
-    )
-    return False
+            return max(0.5, float(v))
+        except (TypeError, ValueError):
+            pass
+    return 4.0
 
 
 @contextmanager
@@ -139,30 +192,34 @@ class SExtractorWrapper:
             Path: Path to the created convolution file.
         """
 
-        fwhm_pixels = max(3, min(fwhm_pixels, 10))
-        kernel_size = max(3, int(np.ceil(fwhm_pixels * 2)))
-
-        logger.info(f"Creating convolution kernel with FWHM: {fwhm_pixels:.1f} pixels")
+        logger.info(
+            "Creating convolution kernel with FWHM: %.1f pixels", fwhm_pixels
+        )
 
         if fwhm_pixels > 0:
-            kernel_size = max(3, int(np.ceil(fwhm_pixels * 2)))
+            fp = float(max(3.0, min(fwhm_pixels, 10.0)))
+            kernel_size = max(3, int(np.ceil(fp * 2)))
             if kernel_size % 2 == 0:
                 kernel_size += 1  # Ensure odd size
             center = kernel_size // 2
-            sigma = fwhm_pixels / 2.355  # FWHM = 2.355 * sigma
-            conv_text = f"CONV NORM\n# {kernel_size}x{kernel_size} convolution mask with FWHM = {fwhm_pixels:.1f} pixels\n"
-            for i in range(kernel_size):
-                for j in range(kernel_size):
-                    x, y = i - center, j - center
-                    weight_value = np.exp(-0.5 * (x**2 + y**2) / sigma**2)
-                    conv_text += f"{weight_value:.6f} "
-                conv_text += "\n"
+            sigma = fp / 2.355  # FWHM = 2.355 * sigma
+            # ogrid returns two broadcastable arrays (not one ndarray); subtract center after unpack.
+            yy, xx = np.ogrid[0:kernel_size, 0:kernel_size]
+            kernel = np.exp(
+                -0.5 * ((xx - center) ** 2 + (yy - center) ** 2) / (sigma**2)
+            )
+            header_lines = (
+                "CONV NORM",
+                f"# {kernel_size}x{kernel_size} convolution mask with FWHM = {fp:.1f} pixels",
+            )
+            row_strs = (" ".join(f"{v:.6f}" for v in row) for row in kernel)
+            conv_text = "\n".join((*header_lines, *row_strs))
         else:
             conv_text = """CONV NORM
-            # 3x3 convolution mask with FWHM = 2 pixels
-            1 2 1
-            2 4 2
-            1 2 1"""
+# 3x3 convolution mask with FWHM = 2 pixels
+1 2 1
+2 4 2
+1 2 1"""
         conv_path = temp_dir / "point_source.conv"
         with open(conv_path, "w") as f:
             f.write(conv_text.strip() + "\n")
@@ -243,18 +300,28 @@ class SExtractorWrapper:
     # --- Core Methods ---
 
     def calculate_robust_fwhm(
-        self, fwhm_values: np.ndarray, n_iterations: int = 15
+        self,
+        fwhm_values: np.ndarray,
+        n_iterations: Optional[int] = None,
     ) -> float:
         """
         Calculate the robust FWHM using iterative sigma clipping.
 
         Args:
             fwhm_values (np.ndarray): Array of FWHM values.
-            n_iterations (int, optional): Number of sigma-clipping iterations. Defaults to 15.
+            n_iterations (int, optional): Sigma-clipping iterations; if None, uses
+                ``photometry.fwhm_sigma_clip_maxiters`` from config (default 15).
 
         Returns:
             float: Median FWHM of the clipped values.
         """
+        if n_iterations is None:
+            phot = self.config.get("photometry") or {}
+            try:
+                n_iterations = int(phot.get("fwhm_sigma_clip_maxiters", 15))
+            except (TypeError, ValueError):
+                n_iterations = 15
+        n_iterations = max(1, int(n_iterations))
         clipped = sigma_clip(fwhm_values, sigma=5.0, maxiters=n_iterations)
         fwhm_value = float(np.ma.median(clipped))
         # Guard against pathological estimates (all zeros, NaNs, etc.).
@@ -374,8 +441,9 @@ class SExtractorWrapper:
             sources = sources_before_fwhm
 
         # --- Step 3: SNR cut ---
-        n_after_snr = len(sources[sources["snr"] <= snr_limit])
-        sources = sources[sources["snr"] > snr_limit].copy()
+        snr_ok = sources["snr"].to_numpy() > snr_limit
+        n_after_snr = int((~snr_ok).sum())
+        sources = sources.loc[snr_ok].copy()
         logger.info(f"Rejected {n_after_snr} low-SNR sources (SNR < {snr_limit:.1f})")
 
         # --- Step 4: Estimate FWHM if needed ---
@@ -389,19 +457,42 @@ class SExtractorWrapper:
         # --- Step 5: Drop sources near masked positions ---
         if (
             masked_sources is not None
-            and not masked_sources.empty
             and fwhm_est is not None
         ):
-            match_radius = fwhm_est * 2
-            coords = sources[["x_pix", "y_pix"]].values
-            mask_coords = masked_sources[["x_pix", "y_pix"]].values
-            d2 = np.sum((coords[:, None, :] - mask_coords[None, :, :]) ** 2, axis=-1)
-            near_masked = (d2 <= match_radius**2).any(axis=1)
-            removed_near_masked = near_masked.sum()
-            sources = sources[~near_masked].copy()
-            logger.info(
-                f"Rejected {removed_near_masked} sources within {match_radius:.2f} pixels of masked regions"
-            )
+            if isinstance(masked_sources, Table):
+                ms_df = masked_sources.to_pandas()
+            else:
+                ms_df = masked_sources
+            if getattr(ms_df, "empty", False):
+                ms_df = None
+            if ms_df is not None and len(ms_df) > 0:
+                match_radius = float(fwhm_est * 2)
+                coords = sources[["x_pix", "y_pix"]].to_numpy(dtype=np.float64)
+                mask_coords = ms_df[["x_pix", "y_pix"]].to_numpy(dtype=np.float64)
+            else:
+                mask_coords = np.empty((0, 2), dtype=np.float64)
+            if len(mask_coords) > 0:
+                tree = cKDTree(mask_coords)
+                # Inf distance if no neighbor within match_radius
+                try:
+                    dist, _ = tree.query(
+                        coords,
+                        k=1,
+                        distance_upper_bound=match_radius,
+                        workers=-1,
+                    )
+                except TypeError:
+                    dist, _ = tree.query(
+                        coords, k=1, distance_upper_bound=match_radius
+                    )
+                near_masked = np.isfinite(dist)
+                removed_near_masked = int(near_masked.sum())
+                sources = sources.loc[~near_masked].copy()
+                logger.info(
+                    "Rejected %d sources within %.2f pixels of masked regions",
+                    removed_near_masked,
+                    match_radius,
+                )
 
         # --- Step 6: FLAGS cut ---
         # sources = sources[sources["flags"] <= flags].copy()
@@ -470,6 +561,7 @@ class SExtractorWrapper:
             rng.shuffle(cells)
 
             selected_idx: list[int] = []
+            selected_set: set[int] = set()
 
             # First pass: take the best source from each non-empty cell to
             # guarantee at least one source per region, up to NMAX.
@@ -477,7 +569,9 @@ class SExtractorWrapper:
                 grp = groups[cell]
                 if grp.empty:
                     continue
-                selected_idx.append(grp.index[0])
+                ix = grp.index[0]
+                selected_idx.append(ix)
+                selected_set.add(ix)
                 if len(selected_idx) >= NMAX:
                     break
 
@@ -492,10 +586,11 @@ class SExtractorWrapper:
                     grp = groups[cell]
                     if len(grp) <= k:
                         continue
-                    idx = grp.index[k]
-                    if idx in selected_idx:
+                    idx = int(grp.index[k])
+                    if idx in selected_set:
                         continue
                     selected_idx.append(idx)
+                    selected_set.add(idx)
                     added += 1
                     if len(selected_idx) >= NMAX:
                         break
@@ -509,7 +604,8 @@ class SExtractorWrapper:
                 remaining = sources.drop(index=selected_idx).sort_values(
                     by="snr", ascending=False
                 )
-                extra = list(remaining.index[: max(0, NMAX - len(selected_idx))])
+                need = max(0, NMAX - len(selected_idx))
+                extra = list(remaining.index[:need])
                 selected_idx.extend(extra)
 
             # Combine and sort the selected sources
@@ -637,7 +733,7 @@ class SExtractorWrapper:
         Returns:
             tuple: (fwhm, sources, scale)
         """
-        if not is_sextractor_installed():
+        if get_sextractor_executable() is None:
             raise RuntimeError("SExtractor is not installed.")
         if crowded is None:
             # Crowded if photometry or template_subtraction request it (aligns with SFFT crowded).
@@ -666,6 +762,11 @@ class SExtractorWrapper:
                 raise FileNotFoundError(f"Weight map file not found: {weight_path}")
 
         with temp_directory_context(base_dir=mdir) as temp_dir:
+            # Resolve binary inside this block so the command always has a defined path
+            # (cached by get_sextractor_executable; fail-fast already ran above).
+            sextractor_bin = get_sextractor_executable()
+            if sextractor_bin is None:
+                raise RuntimeError("SExtractor is not installed.")
             # Clear, high-level banner for the SExtractor step.
             mode_label = (
                 "crowded-field parameters" if crowded else "standard parameters"
@@ -673,20 +774,38 @@ class SExtractorWrapper:
             logger.info(
                 border_msg(f"Running SExtractor on {fits_path.name} ({mode_label})")
             )
-            # Read FITS header and image
-            header = fits.getheader(fits_path, ext=0)
-            image_data = fits.getdata(fits_path, ext=0)
+            # Single open: one mmap/read pass for header + data (bad-region mask).
+            with fits.open(fits_path, memmap=True) as hdul:
+                hdu0 = hdul[0]
+                header = hdu0.header
+                image_data = hdu0.data
             gain = float(header.get(gain_key, 1.0))
             saturation = float(header.get(satur_key, 1e7))
 
-            if use_FWHM > 0:
+            fwhm_for_kernel = float(use_FWHM)
+            if not np.isfinite(fwhm_for_kernel) or fwhm_for_kernel <= 0:
+                # Use known image FWHM when available to avoid a generic kernel.
+                for v in (
+                    header.get("FWHM"),
+                    header.get("fwhm"),
+                    self.config.get("fwhm"),
+                ):
+                    try:
+                        vv = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    if np.isfinite(vv) and vv > 0:
+                        fwhm_for_kernel = vv
+                        break
+            if fwhm_for_kernel > 0:
                 logger.info(
-                    f"Using FWHM = {use_FWHM:.1f} pixels to construct the SExtractor convolution kernel"
+                    "Using FWHM = %.1f pixels to construct the SExtractor convolution kernel",
+                    fwhm_for_kernel,
                 )
-                phot_apertures = 1.7 * use_FWHM
+                phot_apertures = 1.7 * fwhm_for_kernel
 
             conv_path = (
-                self._create_conv_file(temp_dir, fwhm_pixels=use_FWHM)
+                self._create_conv_file(temp_dir, fwhm_pixels=fwhm_for_kernel)
                 if use_filt
                 else None
             )
@@ -788,7 +907,7 @@ class SExtractorWrapper:
 
             # Run SExtractor
             cmd = [
-                "sex",
+                sextractor_bin,
                 str(fits_path),
                 "-c",
                 str(config_path),
@@ -855,24 +974,32 @@ class SExtractorWrapper:
                 nmax = self.config.get("photometry", {}).get("sextractor_nmax", 1000)
                 snr_limit = 3.0
                 relaxed_cuts = False
-            # Build a mask for large constant-value / chip-gap regions so that
-            # spurious "sources" near these edges are removed from the catalogue.
+            # Optional mask for chip gaps / flat borders (can remove real stars on
+            # very smooth backgrounds — disable via photometry config if needed).
             bad_region_mask = None
-            try:
-                from background import _constant_region_mask  # local helper
+            phot_cfg_run = self.config.get("photometry") or {}
+            if phot_cfg_run.get("sextractor_reject_constant_regions", True):
+                try:
+                    from background import _constant_region_mask  # local helper
 
-                bad_region_mask = _constant_region_mask(
-                    np.asarray(image_data, dtype=float)
-                )
-                if bad_region_mask is not None and np.any(bad_region_mask):
-                    logger.info(
-                        "Bad-region (constant-value) mask: %d px (%.2f%% of image)",
-                        int(bad_region_mask.sum()),
-                        100.0 * bad_region_mask.sum() / bad_region_mask.size,
+                    bad_region_mask = _constant_region_mask(
+                        np.asarray(image_data, dtype=float)
                     )
-            except Exception as exc:
-                logger.warning(
-                    f"Could not build constant-region mask for source filtering: {exc}"
+                    if bad_region_mask is not None and np.any(bad_region_mask):
+                        logger.info(
+                            "Bad-region (constant-value) mask: %d px (%.2f%% of image)",
+                            int(bad_region_mask.sum()),
+                            100.0 * bad_region_mask.sum() / bad_region_mask.size,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not build constant-region mask for source filtering: %s",
+                        exc,
+                    )
+            else:
+                logger.info(
+                    "photometry.sextractor_reject_constant_regions=False: skipping "
+                    "constant-region source rejection"
                 )
 
             sources = self.filter_sextractor_sources(
@@ -895,10 +1022,15 @@ class SExtractorWrapper:
             # Calculate FWHM and scale
             fwhm_values = sources["fwhm"].values
             fwhm = self.calculate_robust_fwhm(fwhm_values)
-            scale_multiplier = self.config.get("scale_multiplier", 4)
+            scale_multiplier = scale_multiplier_from_config(self.config)
             scale = max(int(np.ceil(scale_multiplier * fwhm)) + 0.5, default_scale)
             scale = max(11, scale)
             logger.info(
-                f"Found {final_count} point sources with median FWHM {fwhm:.2f}"
+                "Found %d point sources, robust FWHM %.2f px; scale = %.1f "
+                "(FWHM × %.2f from source_detection / config)",
+                final_count,
+                fwhm,
+                scale,
+                scale_multiplier,
             )
             return fwhm, sources, scale

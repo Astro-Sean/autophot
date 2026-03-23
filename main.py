@@ -227,6 +227,7 @@ def run_photometry():
         log_exception,
         odd,
         ColoredLevelFormatter,
+        LogMessageNormalizeFilter,
     )
     from limits import Limits
     from plot import Plot
@@ -386,13 +387,16 @@ def run_photometry():
         # Sets up logging to file with improved configuration.
         logging.basicConfig(
             level=logging.INFO,
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            datefmt="%H:%M:%S",
             filename=os.path.join(cur_dir, f"LOG_{input_yaml['base']}.log"),
             filemode="w",
             encoding="utf-8",  # Explicit encoding for better compatibility
             force=True,  # Ensures this overrides any existing config
         )
+        normalize_filter = LogMessageNormalizeFilter(width=120)
+        for _h in logging.getLogger("").handlers:
+            _h.addFilter(normalize_filter)
 
         # Creates a console handler with improved settings.
         console = logging.StreamHandler()
@@ -405,6 +409,7 @@ def run_photometry():
             use_color=True,
         )
         console.setFormatter(formatter)
+        console.addFilter(normalize_filter)
 
         # Adds the handler to the root logger.
         logging.getLogger("").addHandler(console)
@@ -1106,7 +1111,7 @@ def run_photometry():
                 )
                 # Updates the image and header with the trimmed values.
                 image = cutout.data
-                header.update(cutout.wcs.to_header())
+                header.update(cutout.wcs.to_header(relax=True), relax=True)
                 # Updates the WCS values after trimming.
                 imageWCS = get_wcs(header)
                 # Writes the modified image and header back to the FITS file.
@@ -1156,8 +1161,8 @@ def run_photometry():
 
                 # Updates the image and WCS with the cutout values.
                 image = imageCutout.data
-                imageWCS = get_wcs(imageCutout.wcs.to_header())
-                header.update(imageWCS.to_header())
+                imageWCS = get_wcs(imageCutout.wcs.to_header(relax=True))
+                header.update(imageWCS.to_header(relax=True), relax=True)
 
                 # Writes the modified image and header back to the FITS file.
                 fits.writeto(fpath, image, header, overwrite=True)
@@ -1336,13 +1341,18 @@ def run_photometry():
                 isinstance(updated_header, float) and np.isnan(updated_header)
             ):
                 logging.info("Plate solve returned NaN or None")
-                if existingWCS:
+                allow_fallback_on_fail = bool(
+                    input_yaml.get("wcs", {}).get(
+                        "allow_fallback_to_existing_on_solve_fail", False
+                    )
+                )
+                if existingWCS and allow_fallback_on_fail:
                     logging.info("Falling back to pre-existing WCS")
-                    header.update(WCSvalues_old.to_header())
+                    header.update(WCSvalues_old.to_header(relax=True), relax=True)
                     break
                 else:
                     raise Exception(
-                        "No fallback WCS available; header left without WCS"
+                        "WCS solve failed and fallback to existing WCS is disabled."
                     )
             else:
                 logging.info("Plate solve successful")
@@ -1633,7 +1643,7 @@ def run_photometry():
                 logging.exception("NO RA/DEC keywords found")
                 raise
 
-        # Single summary line: image size, target, sky coords, pixel, round-trip, bounds.
+        # Structured summary: easier to scan than a single long line.
         nx, ny = image.shape[1], image.shape[0]
         ra = input_yaml["target_ra"]
         dec = input_yaml["target_dec"]
@@ -1644,18 +1654,33 @@ def run_photometry():
             ((ra_back - ra) * 3600) ** 2 + ((dec_back - dec) * 3600) ** 2
         )
         in_bounds = (0 <= x < nx) and (0 <= y < ny)
+        target_label = str(input_yaml.get("target_name", "Transient"))
+        x_center = 0.5 * (nx - 1)
+        y_center = 0.5 * (ny - 1)
+        dx_center = float(x - x_center)
+        dy_center = float(y - y_center)
+        border_margin_px = float(min(x, y, (nx - 1) - x, (ny - 1) - y))
         logging.info(
-            "Image %d x %d px | Target %s | RA %.6f deg Dec %.6f deg | "
-            "Pixel (%.2f, %.2f) | Round-trip %.4f arcsec | %s",
+            "Target summary:\n"
+            "  Name: %s\n"
+            "  Image size: %d x %d px\n"
+            "  Sky: RA %.6f deg, Dec %.6f deg\n"
+            "  Pixel: (%.2f, %.2f)\n"
+            "  Offset from image center: dx=%+.2f px, dy=%+.2f px\n"
+            "  WCS round-trip: %.4f arcsec\n"
+            "  Bounds: %s (min edge margin %.2f px)",
+            target_label,
             nx,
             ny,
-            input_yaml.get("target_name", "Transient"),
             ra,
             dec,
             x,
             y,
+            dx_center,
+            dy_center,
             offset_arcsec,
             "within bounds" if in_bounds else "OUTSIDE bounds",
+            border_margin_px,
         )
 
         # =============================================================================
@@ -1753,6 +1778,30 @@ def run_photometry():
                             ],
                         )
                         template_available = True
+                        try:
+                            _wcs_apply = input_yaml.get("wcs", {}).get(
+                                "apply_solved_to_fits", True
+                            )
+                            _am = str(
+                                input_yaml.get("template_subtraction", {}).get(
+                                    "alignment_method", ""
+                                )
+                            ).lower()
+                            if (
+                                not _wcs_apply
+                                and _am == "reproject"
+                            ):
+                                logging.warning(
+                                    "alignment_method=reproject but wcs.apply_solved_to_fits "
+                                    "is False: reprojection uses the WCS **on disk**, which may "
+                                    "differ from a newer plate solution computed in memory. "
+                                    "Expect residual source misalignment / dipoles. Fix: set "
+                                    "apply_solved_to_fits: True, enable "
+                                    "template_subtraction.subpixel_refine_before_subtraction, "
+                                    "or use alignment_method 'astroalign' / 'swarp'."
+                                )
+                        except Exception:
+                            pass
 
                 except Exception:
                     template_available = False
@@ -2451,9 +2500,33 @@ def run_photometry():
         GetZeropoint = Zeropoint(input_yaml=input_yaml)
         CatalogSources = GetZeropoint.clean(sources=CatalogSources)
 
-        ImageColorTerm, ImageColorTermError = GetZeropoint.fit_color_term(
-            catalog=CatalogSources
-        )
+        # When using a Gaia custom catalog built from user transmission curves
+        # (catalog.curve_map / custom throughputs), the catalog photometric system
+        # already incorporates the effective bandpasses. In that case, a
+        # separate empirical color-term correction is usually unnecessary and
+        # can even add extra noise when the color coverage is limited.
+        use_custom_throughputs = False
+        try:
+            cat_cfg = input_yaml.get("catalog") or {}
+            curve_map_cfg = cat_cfg.get("curve_map")
+            use_catalog = str(cat_cfg.get("use_catalog", "")).strip().lower()
+            use_custom_throughputs = bool(curve_map_cfg) and use_catalog == "custom"
+        except Exception:
+            use_custom_throughputs = False
+
+        if use_custom_throughputs:
+            logging.info(
+                "Using Gaia custom catalog via catalog.curve_map (custom throughputs); "
+                "disabling zeropoint color correction."
+            )
+            ImageColorTerm, ImageColorTermError = None, None
+        else:
+            ImageColorTerm, ImageColorTermError = GetZeropoint.fit_color_term(
+                catalog=CatalogSources
+            )
+            # Treat non-finite fitted slopes as "no color correction".
+            if ImageColorTerm is None or not np.isfinite(ImageColorTerm):
+                ImageColorTerm, ImageColorTermError = None, None
 
         # Gets the zeropoint and plots the histogram.
         # CatalogSources, image_zeropoint = GetZeropoint.fit_zeropoint(catalog=CatalogSources,
@@ -2619,7 +2692,7 @@ def run_photometry():
                         mode="partial",
                         fill_value=1e-30,
                     )
-                    science_header.update(science_cutout.wcs.to_header())
+                    science_header.update(science_cutout.wcs.to_header(relax=True), relax=True)
                     # Loads the template image.
                     template_image = get_image(templateFpath)
                     template_header = get_header(templateFpath)
@@ -2633,7 +2706,7 @@ def run_photometry():
                         mode="partial",
                         fill_value=1e-30,
                     )
-                    template_header.update(template_cutout.wcs.to_header())
+                    template_header.update(template_cutout.wcs.to_header(relax=True), relax=True)
                     # Saves the results.
                     fits.writeto(
                         fpath,
@@ -2982,6 +3055,18 @@ def run_photometry():
 
                 # Filter sources where the centroid is well-aligned with the original pixel position
                 well_aligned_mask = distance < POSITION_TOLERANCE
+
+                # If alignment is poor and we reject everything, adaptively relax
+                # the tolerance to keep enough sources for flux-consistent matching.
+                # This prevents template subtraction from cascading into failures
+                # when the WCS/distortion model is slightly mismatched.
+                if well_aligned_mask.sum() < 5 and np.any(np.isfinite(distance)):
+                    relaxed = float(max(POSITION_TOLERANCE, 0.75 * float(ImageFWHM)))
+                    well_aligned_mask = distance < relaxed
+                    logging.info(
+                        "Centroid alignment yielded <5 sources; relaxing centroid tolerance to %.2f px",
+                        relaxed,
+                    )
 
                 # Apply the mask to both image_sources and template_sources
                 image_sources = image_sources[well_aligned_mask]
@@ -3336,8 +3421,26 @@ def run_photometry():
 
                 if os.path.exists(sfft_matched_sources):
                     MatchingSources = pd.read_csv(sfft_matched_sources)
-                    MatchingSources["x_pix"] = MatchingSources["X_IMAGE_REF_SCI_MEAN"]
-                    MatchingSources["y_pix"] = MatchingSources["Y_IMAGE_REF_SCI_MEAN"]
+                    if {
+                        "X_IMAGE_REF_SCI_MEAN",
+                        "Y_IMAGE_REF_SCI_MEAN",
+                    }.issubset(MatchingSources.columns):
+                        MatchingSources["x_pix"] = MatchingSources[
+                            "X_IMAGE_REF_SCI_MEAN"
+                        ]
+                        MatchingSources["y_pix"] = MatchingSources[
+                            "Y_IMAGE_REF_SCI_MEAN"
+                        ]
+                    elif {"x_center", "y_center"}.issubset(MatchingSources.columns):
+                        MatchingSources["x_pix"] = MatchingSources["x_center"]
+                        MatchingSources["y_pix"] = MatchingSources["y_center"]
+                    elif {"x_pix", "y_pix"}.issubset(MatchingSources.columns):
+                        pass
+                    else:
+                        logging.warning(
+                            "SFFT matched-sources file missing expected coordinate columns; available=%s",
+                            list(MatchingSources.columns),
+                        )
                     os.remove(sfft_matched_sources)
 
             except Exception as e:
@@ -3377,6 +3480,36 @@ def run_photometry():
             input_yaml, imageWCS, index
         )
 
+        # Prevent downstream local background failures when WCS maps the
+        # target outside the trimmed image (this can happen when a plate
+        # solution WCS is used but its projection/distortion model disagrees
+        # with the pipeline's internal alignment expectations).
+        # For local background fitting only, clamp x/y into image bounds so
+        # `remove_local_surface()` does not hard-fail when the plate solution
+        # maps the expected transient position outside the trimmed frame.
+        # Keep `target_x_pix/y_pix` unchanged for the actual transient centroid
+        # fitting (so we do not silently “move” the transient).
+        ny, nx = image.shape[0], image.shape[1]
+        bg_target_x_pix = float(target_x_pix)
+        bg_target_y_pix = float(target_y_pix)
+        if not (0 <= bg_target_x_pix < nx and 0 <= bg_target_y_pix < ny):
+            margin = int(max(1, np.ceil(1.0 * float(ImageFWHM))))
+            xlo = min(max(0, margin), nx - 1)
+            ylo = min(max(0, margin), ny - 1)
+            xhi = max(0, nx - 1 - margin)
+            yhi = max(0, ny - 1 - margin)
+            bg_target_x_pix = float(np.clip(bg_target_x_pix, xlo, xhi))
+            bg_target_y_pix = float(np.clip(bg_target_y_pix, ylo, yhi))
+            logging.warning(
+                "Target pixel from WCS (%.1f, %.1f) outside image (%dx%d); clamping to (%.1f, %.1f) only for local background fit.",
+                float(target_x_pix),
+                float(target_y_pix),
+                int(nx),
+                int(ny),
+                bg_target_x_pix,
+                bg_target_y_pix,
+            )
+
         # Updates the input YAML with the target pixel coordinates.
         input_yaml["target_ra"] = target_coords.ra.degree
         input_yaml["target_dec"] = target_coords.dec.degree
@@ -3389,8 +3522,8 @@ def run_photometry():
             # extended host light is not pulled into the local background model.
             image, bkg_map, background_rms = bg_remover.remove_local_surface(
                 image,
-                x0=target_x_pix,
-                y0=target_y_pix,
+                x0=bg_target_x_pix,
+                y0=bg_target_y_pix,
                 box_half_size=int(25 * ImageFWHM),
                 fwhm_pixels=ImageFWHM,
                 exclude_inner_radius=2.5 * ImageFWHM,

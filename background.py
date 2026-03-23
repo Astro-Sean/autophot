@@ -1492,7 +1492,7 @@ class BackgroundSubtractor:
             im = ax.imshow(
                 disp,
                 origin="lower",
-                cmap="Grays_r",
+                cmap="viridis",
                 vmin=vmin,
                 vmax=vmax,
                 interpolation="none",
@@ -1554,7 +1554,7 @@ class BackgroundSubtractor:
             im = ax.imshow(
                 disp,
                 origin="lower",
-                cmap="Grays_r",
+                cmap="viridis",
                 vmin=vmin,
                 vmax=vmax,
                 interpolation="none",

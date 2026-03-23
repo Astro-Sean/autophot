@@ -1694,7 +1694,7 @@ class PSF:
                 Circle(
                     ctr,
                     aperture_radius,
-                    color="#D55E00",
+                    color="#FF0000",
                     ls="-",
                     fill=False,
                     lw=0.5,
@@ -1721,7 +1721,7 @@ class PSF:
         im = ax_right.imshow(
             psf_model, origin="lower", cmap="viridis", norm=norm_p, interpolation="none"
         )
-        ax_right.set_title("2d ePSF", fontsize=8, pad=2)
+        ax_right.set_title("2D ePSF", fontsize=8, pad=2)
         ax_right.set_xticks([])
         ax_right.set_yticks([])
         ctr = [psf_model.shape[1] / 2, psf_model.shape[0] / 2]
@@ -1729,7 +1729,7 @@ class PSF:
             Circle(
                 ctr,
                 aperture_radius,
-                color="#D55E00",
+                color="#FF0000",
                 ls="-",
                 fill=False,
                 lw=0.5,
@@ -1762,7 +1762,7 @@ class PSF:
             color=colors,
             shade=True,
         )
-        ax_right_3d.set_title("ePSF 3D", fontsize=8, pad=2)
+        ax_right_3d.set_title("3D ePSF", fontsize=8, pad=2)
         ax_right_3d.set_xlabel("")
         ax_right_3d.set_ylabel("")
         ax_right_3d.set_zlabel("")
@@ -2582,7 +2582,11 @@ class PSF:
             )
             if os.path.exists(_style):
                 plt.style.use(_style)
-            fig = plt.figure(figsize=(5.5 * ncols, 5.0))
+            golden_ratio = (5**0.5 + 1) / 2
+            width_in = 5.5 * ncols
+            aspect = 5.0 * golden_ratio / width_in
+            width_pt = width_in * 72.27
+            fig = plt.figure(figsize=set_size(width_pt, aspect=aspect))
             gs = GridSpec(1, ncols, width_ratios=[1] * ncols, wspace=0.45)
 
             ax_list, cax_list = [], []
@@ -2686,7 +2690,7 @@ class PSF:
                                 2 * xe,
                                 2 * ye,
                                 angle=0,
-                                edgecolor="#D55E00",
+                                edgecolor="#FF0000",
                                 facecolor="none",
                                 lw=0.5,
                                 alpha=1,
@@ -2819,7 +2823,7 @@ class PSF:
                 )
                 ax2_R.set_xlim(_lo_r - _margin_r, _hi_r + _margin_r)
 
-                _proj(ax1, ax1_R, ax1_B, fitted_model, color="#D55E00")
+                _proj(ax1, ax1_R, ax1_B, fitted_model, color="#FF0000")
                 idx += 1
 
             # ---- Panel 3: ePSF ---------------------------------------------

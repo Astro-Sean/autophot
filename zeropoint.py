@@ -198,6 +198,14 @@ class Zeropoint:
         zp_params : dict  keyed by 'AP' and 'PSF'
         """
         zp_params = {}
+        if catalog is None or getattr(catalog, "empty", False) or len(catalog) == 0:
+            for flux_type in ["AP", "PSF"]:
+                zp_params[flux_type] = {
+                    "zeropoint": np.nan,
+                    "zeropoint_error": np.nan,
+                    "has_color_term": False,
+                }
+            return zp_params
         # Optional aperture correction (AP -> total flux) in magnitudes.
         # Only applied when apply_aperture_correction is True; otherwise stored for use later.
         ap_corr_mag = float(self.input_yaml.get("aperture_correction", 0.0) or 0.0)
@@ -417,13 +425,38 @@ class Zeropoint:
 
         try:
             filter_col = self.input_yaml.get("imageFilter")
-            if not filter_col or filter_col not in sources.columns:
-                logger.error(f"Filter column '{filter_col}' not found in sources")
+            if not filter_col:
+                logger.warning(
+                    "No input_yaml.imageFilter provided; skipping sequence-star clean filter."
+                )
+                return sources
+            if sources is None:
                 return None
 
+            if filter_col not in sources.columns:
+                logger.warning(
+                    "Filter column '%s' not found in sources; skipping magnitude/colour clean.",
+                    filter_col,
+                )
+                return sources
+
+            # Newer SExtractor outputs use `snr` instead of `threshold`.
             if "threshold" not in sources.columns:
-                logger.error("Missing 'threshold' column in sources")
-                return None
+                if "snr" in sources.columns:
+                    sources = sources.copy()
+                    sources["threshold"] = sources["snr"]
+                    logger.info(
+                        "Using sources['snr'] as 'threshold' proxy for zeropoint cleaning."
+                    )
+                else:
+                    # If we have neither threshold nor snr, skip threshold-based SNR cuts.
+                    logger.warning(
+                        "Missing both 'threshold' and 'snr' columns in sources; skipping threshold/SNR cleaning."
+                    )
+                    valid_mags = sources[filter_col].notna()
+                    cleaned = sources.loc[valid_mags].copy()
+                    logger.info("%d sources remaining after magnitude-only clean", len(cleaned))
+                    return cleaned
 
             valid_mags = sources[filter_col].notna()
             n_missing = (~valid_mags).sum()
@@ -955,6 +988,15 @@ class Zeropoint:
             logger.info("Estimating zeropoint via sigma clipping.")
 
             try:
+                if catalog is None or getattr(catalog, "empty", False) or len(catalog) == 0:
+                    logger.warning(
+                        "estimate_zeropoint: catalog is None/empty; returning NaN zeropoint."
+                    )
+                    return catalog, {
+                        "AP": {"zeropoint": np.nan, "zeropoint_error": np.nan, "has_color_term": False},
+                        "PSF": {"zeropoint": np.nan, "zeropoint_error": np.nan, "has_color_term": False},
+                    }
+
                 fpath = self.input_yaml.get("fpath", "")
                 base_name = os.path.splitext(os.path.basename(fpath))[0] or "zeropoint"
                 write_dir = os.path.dirname(fpath) or "."
@@ -1253,6 +1295,10 @@ class Zeropoint:
             Returns (None, None) on failure.
         """
         try:
+            if catalog is None or getattr(catalog, "empty", False) or len(catalog) == 0:
+                logger.warning("fit_color_term: catalog is None/empty; skipping.")
+                return None, None
+
             use_filter = self.input_yaml.get("imageFilter")
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
@@ -1449,8 +1495,8 @@ class Zeropoint:
             fig, ax = plt.subplots(figsize=set_size(340, 1))
 
             # Okabe–Ito palette for consistent, colorblind-friendly plots.
-            okabe_blue = "#0072B2"
-            okabe_orange = "#E69F00"
+            okabe_blue = "#0000FF"
+            okabe_orange = "#FF0000"
 
             ax.errorbar(
                 xi,

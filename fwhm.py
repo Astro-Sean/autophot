@@ -221,12 +221,12 @@ class Find_FWHM:
         if plot:
             zscale = ZScaleInterval()
             norm = ImageNormalize(image, interval=zscale)
-            fig, ax = plt.subplots(figsize=(10, 8))
-            ax.imshow(image, cmap="Greys_r", origin="lower", norm=norm)
+            fig, ax = plt.subplots(figsize=set_size(540, aspect=1.3))
+            ax.imshow(image, cmap="viridis", origin="lower", norm=norm)
             ax.contour(
                 deblended_map.data,
                 levels=np.unique(deblended_map.data[deblended_map.data > 0]),
-                colors="#D55E00",
+                colors="#FF0000",
                 linewidths=0.5,
             )
             ax.scatter(
@@ -239,7 +239,7 @@ class Find_FWHM:
             ax.scatter(
                 coms[:, 0],
                 coms[:, 1],
-                color="#009E73",
+                    color="#00AA00",
                 marker="x",
                 label="Segment COMs",
                 s=50,
@@ -249,7 +249,7 @@ class Find_FWHM:
             write_dir = self.input_yaml["write_dir"]
             base = os.path.basename(fpath).split(".")[0]
             png_out = os.path.join(write_dir, f"Segmentation_{base}.png")
-            fig.savefig(png_out, bbox_inches="tight")
+            fig.savefig(png_out, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
 
         return cleaned_df
@@ -494,7 +494,7 @@ class Find_FWHM:
             # --- Diagnostic plot (small markers, minimal overlap) ---
             try:
                 plt.ioff()
-                fig, ax = plt.subplots(figsize=(8, 6))
+                fig, ax = plt.subplots(figsize=set_size(540, aspect=1.2))
                 # All quality-cut sources (faint background)
                 ax.errorbar(
                     df["m_inst"],
@@ -519,8 +519,8 @@ class Find_FWHM:
                     fmt="o",
                     ms=2.8,
                     mfc="none",
-                    mec="#009E73",
-                    ecolor="#009E73",
+                    mec="#00AA00",
+                    ecolor="#00AA00",
                     elinewidth=0.4,
                     capsize=0,
                     alpha=0.85,
@@ -534,7 +534,7 @@ class Find_FWHM:
                     yerr=df_out.get("m_peak_err", None),
                     fmt="x",
                     ms=2.2,
-                    color="#D55E00",
+                    color="#FF0000",
                     alpha=0.5,
                     lw=0.5,
                     capsize=0,
@@ -558,7 +558,12 @@ class Find_FWHM:
                     write_dir = self.input_yaml["write_dir"]
                     base = os.path.basename(fpath).split(".")[0]
                     png_out = os.path.join(write_dir, f"Linear_{base}.png")
-                    fig.savefig(png_out, bbox_inches="tight")
+                    fig.savefig(
+                        png_out,
+                        bbox_inches="tight",
+                        dpi=150,
+                        facecolor="white",
+                    )
                 plt.close(fig)
             except Exception as _pe:
                 logger.debug(f"Plotting skipped: {_pe}")

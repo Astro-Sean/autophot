@@ -171,7 +171,11 @@ class RemoveCosmicRays:
         write_dir = os.path.dirname(fpath)
 
         # --- Create the figure ---
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        from functions import set_size
+
+        fig, axes = plt.subplots(
+            1, 2, figsize=set_size(540, aspect=0.65)
+        )
 
         # --- Apply zscale for optimal contrast ---
         zscale_original = ZScaleInterval()
@@ -182,26 +186,25 @@ class RemoveCosmicRays:
         # --- Plot the original image ---
         im0 = axes[0].imshow(
             original,
-            cmap="Greys_r",
+            cmap="viridis",
             origin="lower",
             vmin=vmin_original,
             vmax=vmax_original,
         )
-        # Okabe–Ito palette:
-        #   Blue   = #0072B2
-        #   Orange = #E69F00
-        axes[0].contour(cr_mask, colors="#0072B2", alpha=0.5, linewidths=0.5)
+        axes[0].contour(
+            cr_mask, colors="#0000FF", alpha=0.5, linewidths=0.5
+        )
         fig.colorbar(im0, ax=axes[0], orientation="vertical", fraction=0.046, pad=0.04)
 
         # --- Plot the cleaned image ---
         im1 = axes[1].imshow(
             cleaned,
-            cmap="Greys_r",
+            cmap="viridis",
             origin="lower",
             vmin=vmin_cleaned,
             vmax=vmax_cleaned
         )
-        axes[1].contour(cr_mask, colors="#E69F00", alpha=0.5, linewidths=0.5)
+        axes[1].contour(cr_mask, colors="#FF0000", alpha=0.5, linewidths=0.5)
         fig.colorbar(im1, ax=axes[1], orientation="vertical", fraction=0.046, pad=0.04)
 
         # --- Finalize the plot (title allowed; no legends overlap here) ---
@@ -210,7 +213,9 @@ class RemoveCosmicRays:
         plt.tight_layout(rect=[0, 0, 1, 0.95])
 
         png_path = os.path.join(write_dir, f"Cosmic_Rays_{base}.png")
-        fig.savefig(png_path, bbox_inches="tight")
+        fig.savefig(
+            png_path, bbox_inches="tight", dpi=150, facecolor="white"
+        )
         plt.close(fig)
 
     # --- Cosmic Ray Removal ---

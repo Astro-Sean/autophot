@@ -205,52 +205,155 @@ class Catalog:
     # =============================================================================
     # =============================================================================
 
-    def gaia_synthetic_photometry(self, ra, dec, radius=0.1, max_sources=5000):
-        from gaiaxpy import generate, PhotometricSystem
-        from astroquery.gaia import Gaia
+    def gaia_synthetic_photometry(
+        self,
+        ra,
+        dec,
+        radius=0.1,
+        max_sources=5000,
+        photometric_systems=None,
+    ):
+        from gaiaxpy import PhotometricSystem
         import pandas as pd
         import warnings
-        from tqdm import tqdm
         import numpy as np
         import logging
 
+        from autophot_gaia_curves.gaia_archive import (
+            gaia_xp_source_query,
+            gaia_xp_sql_top_n,
+            generate_source_ids_batched,
+            launch_gaia_adql_to_pandas,
+            sort_gaia_table_nearest_to_target,
+        )
+
         logger = logging.getLogger(__name__)
+        cat_cfg = self.input_yaml.get("catalog", {}) or {}
+        query_pause_b = float(cat_cfg.get("gaia_archive_query_pause_before_sec", 1.0))
+        query_pause_a = float(cat_cfg.get("gaia_archive_query_pause_after_sec", 1.0))
+        xp_batch_size = int(cat_cfg.get("gaia_xp_batch_size", 200))
+        xp_batch_pause = float(cat_cfg.get("gaia_xp_batch_pause_sec", 1.0))
+        archive_retries = int(cat_cfg.get("gaia_archive_max_retries", 3))
+        retry_base_delay = float(cat_cfg.get("gaia_archive_retry_base_delay_sec", 2.0))
+        xp_order = str(cat_cfg.get("gaia_xp_order_by", "brightness")).strip().lower()
+        xp_show_progress = bool(cat_cfg.get("gaia_xp_show_progress", True))
+        prefetch_factor = int(cat_cfg.get("gaia_nearest_prefetch_factor", 50))
+        prefetch_min = int(cat_cfg.get("gaia_nearest_prefetch_min", 500))
+        prefetch_max = int(cat_cfg.get("gaia_nearest_prefetch_max", 10000))
+
+        sql_top, sort_by_distance = gaia_xp_sql_top_n(
+            max_sources,
+            xp_order,
+            prefetch_factor=prefetch_factor,
+            prefetch_min=prefetch_min,
+            prefetch_max=prefetch_max,
+        )
 
         # ADQL radius is in degrees; caller passes degrees (e.g. radius_deg).
-        query = f"""
-        SELECT TOP {max_sources} 
-               source_id, ra, dec, phot_g_mean_mag, phot_bp_mean_mag, phot_rp_mean_mag
-        FROM gaiadr3.gaia_source AS gs
-        WHERE has_xp_continuous = 'True'
-          AND CONTAINS(POINT('ICRS', gs.ra, gs.dec), 
-                       CIRCLE('ICRS', {ra}, {dec}, {radius})) = 1
-          AND phot_g_mean_mag IS NOT NULL
-        ORDER BY phot_g_mean_mag
-        """
+        query = gaia_xp_source_query(
+            ra,
+            dec,
+            radius,
+            sql_top,
+            include_bp_rp=True,
+        )
 
         try:
             logger.info(
-                "Querying Gaia DR3 (synthetic photometry, max %d sources)...",
+                "Querying Gaia DR3 (synthetic photometry, SQL TOP %d → target %d "
+                "sources; paced archive: pause %.2fs before/after ADQL)...",
+                sql_top,
                 max_sources,
+                max(query_pause_b, query_pause_a),
             )
-            job = Gaia.launch_job(query, dump_to_file=False)
-            results = job.get_results().to_pandas()
+            results = launch_gaia_adql_to_pandas(
+                query,
+                pause_before_sec=query_pause_b,
+                pause_after_sec=query_pause_a,
+                max_retries=archive_retries,
+                retry_base_delay_sec=retry_base_delay,
+                logger=logger,
+                op_name="Gaia ADQL (XP sources for synthetic photometry)",
+            )
             logger.info("Gaia DR3 query returned %d sources.", len(results))
+
+            if sort_by_distance and not results.empty:
+                logger.info(
+                    "Sorting %d rows by on-sky distance to target (Gaia ADQL "
+                    "does not support ORDER BY distance); keeping nearest %d.",
+                    len(results),
+                    max_sources,
+                )
+                results = sort_gaia_table_nearest_to_target(
+                    results, ra, dec, max_rows=max_sources
+                )
+                logger.info("After distance trim: %d sources.", len(results))
 
             if results.empty:
                 return pd.DataFrame()
 
             source_ids = results["source_id"].astype(str).tolist()
-            phot_systems = [PhotometricSystem.SDSS_Std, PhotometricSystem.JKC_Std]
+            # Resolve requested GaiaXPy photometric systems.
+            #
+            # If `photometric_systems` is None: keep prior behaviour (both).
+            # If it is an empty list/[]/None: skip GaiaXPy synthetic photometry and
+            # fall back to base DR3 photometry only (much faster).
+            if photometric_systems is None:
+                phot_systems = [
+                    PhotometricSystem.SDSS_Std,
+                    PhotometricSystem.JKC_Std,
+                ]
+            else:
+                cfg = photometric_systems
+                if isinstance(cfg, (str, bytes)):
+                    cfg = [cfg]
+                cfg_list = list(cfg) if cfg else []
+
+                if not cfg_list:
+                    logger.info(
+                        "Gaia XP synthetic photometry disabled (empty photometric systems)."
+                    )
+                    return results
+
+                phot_systems = []
+                for sys_name in cfg_list:
+                    if isinstance(sys_name, str):
+                        sys_name = sys_name.strip()
+                        phot_systems.append(getattr(PhotometricSystem, sys_name))
+                    else:
+                        # Allow passing enum values directly.
+                        phot_systems.append(sys_name)
 
             logger.info(
-                "Downloading Gaia XP spectra and synthetic photometry with GaiaXPy..."
+                "Downloading Gaia XP spectra and synthetic photometry with GaiaXPy "
+                "(batched: size=%d, inter-batch pause=%.2fs)...",
+                xp_batch_size if xp_batch_size > 0 else len(source_ids),
+                xp_batch_pause,
             )
             try:
+                logger.info(
+                    "GaiaXPy photometric systems: %s",
+                    [getattr(p, "name", str(p)) for p in phot_systems],
+                )
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore")
-                    photometry = generate(source_ids, photometric_system=phot_systems)
-                merged = pd.merge(results, photometry, on="source_id", how="inner")
+                    photometry = generate_source_ids_batched(
+                        source_ids,
+                        phot_systems,
+                        batch_size=xp_batch_size,
+                        inter_batch_pause_sec=xp_batch_pause,
+                        max_retries=archive_retries,
+                        retry_base_delay_sec=retry_base_delay,
+                        logger=logger,
+                        show_progress=xp_show_progress,
+                    )
+                results = results.copy()
+                results["source_id"] = results["source_id"].astype(str)
+                photometry = photometry.copy()
+                photometry["source_id"] = photometry["source_id"].astype(str)
+                merged = pd.merge(
+                    results, photometry, on="source_id", how="inner"
+                )
             except Exception as exc:
                 logger.warning(
                     "Gaia XP synthetic photometry failed (%s); falling back to base DR3 photometry only.",
@@ -655,10 +758,22 @@ class Catalog:
                         )
                     )
                     xp_radius_deg = min(radius_deg, cfg_radius, max_gaia_deg)
+                    gaia_xp_max_sources = int(
+                        self.input_yaml.get("catalog", {}).get(
+                            "gaia_xp_max_sources", 5000
+                        )
+                    )
+                    gaia_xp_photometric_systems = (
+                        self.input_yaml.get("catalog", {}).get(
+                            "gaia_xp_photometric_systems", None
+                        )
+                    )
                     result = self.gaia_synthetic_photometry(
                         ra=target_coords.ra.degree,
                         dec=target_coords.dec.degree,
                         radius=xp_radius_deg,
+                        max_sources=gaia_xp_max_sources,
+                        photometric_systems=gaia_xp_photometric_systems,
                     )
 
                     # Build final catalog table
@@ -1783,7 +1898,7 @@ class Catalog:
                 yerr=catalog_mag_err,
                 fmt="o",
                 alpha=0.35,
-                color="gray",
+                color="black",
                 markersize=2.2,
                 capsize=0,
                 elinewidth=0.4,
@@ -1801,7 +1916,7 @@ class Catalog:
                     yerr=catalog_mag_err_linear[outlier_mask],
                     xerr=inst_mag_err_linear[outlier_mask],
                     fmt="o",
-                    color="#D55E00",
+                    color="#FF0000",
                     markersize=2.2,
                     capsize=0,
                     elinewidth=0.4,
@@ -1838,14 +1953,14 @@ class Catalog:
                     max_inst_mag = -2.5 * np.log10(min_flux)
                     ax1.axvline(
                         x=min_inst_mag,
-                        color="#009E73",
+                        color="#00AA00",
                         linestyle=":",
                         alpha=0.7,
                         label=f"Linearity range: {min_flux:.1f}-{max_flux:.1f} flux",
                     )
                     ax1.axvline(
                         x=max_inst_mag,
-                        color="#009E73",
+                        color="#00AA00",
                         linestyle=":",
                         alpha=0.7,
                     )
@@ -2317,12 +2432,12 @@ class Catalog:
                 radial_profiles[valid_indices.index(i)] for i in inliers
             ]
             for profile in accepted_profiles:
-                ax_right.step(radii, profile, color="gray", alpha=0.3, linewidth=0.5)
+                ax_right.step(radii, profile, color="black", alpha=0.3, linewidth=0.5)
             median_profile = np.median(accepted_profiles, axis=0)
             ax_right.step(
                 radii,
                 median_profile,
-                color="#D55E00",
+                color="#FF0000",
                 linewidth=0.5,
                 label="Median\nRadial\nProfile",
             )

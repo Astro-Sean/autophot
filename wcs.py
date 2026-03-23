@@ -24,14 +24,24 @@ from contextlib import contextmanager
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.utils.exceptions import AstropyWarning
+import astropy.units as u
+from astropy.coordinates import SkyCoord
+from astropy.wcs.utils import fit_wcs_from_points
+from astropy.table import Table
 
-# --- Local Imports ---
-from functions import border_msg, get_header, get_image
+# --- Local Imports (optional) ---
+try:
+    from functions import border_msg  # type: ignore
+except (ModuleNotFoundError, ImportError):
+    # Minimal fallback for environments missing the full photometry stack.
+    def border_msg(message: str, *args, **kwargs) -> str:
+        return str(message)
 
 # --- Configure Logging ---
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
@@ -141,12 +151,7 @@ def get_wcs(header: fits.Header) -> WCS:
     Returns:
         WCS: 2D celestial WCS object.
     """
-    sip_keywords = ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"]
-    if any(k in header for k in sip_keywords):
-        header = header.copy()
-        for ctype in ["CTYPE1", "CTYPE2"]:
-            if ctype not in header or not str(header.get(ctype, "")).endswith("-SIP"):
-                header[ctype] = f"{header.get(ctype, 'RA---TAN')}-SIP"
+    header = _normalize_projection_codes(header, inplace=False)
     with warnings.catch_warnings():
         with silence_astropy_wcs_info():
             wcs = WCS(header, fix=True, relax=True)
@@ -155,6 +160,518 @@ def get_wcs(header: fits.Header) -> WCS:
     if naxis > 2:
         wcs = wcs.celestial
     return wcs
+
+
+def _normalize_projection_codes(
+    header: fits.Header,
+    *,
+    inplace: bool = False,
+) -> fits.Header:
+    """
+    Keep CTYPE projection codes consistent with distortion keyword family.
+
+    Rules:
+    - SIP keywords only   -> enforce TAN-SIP CTYPE.
+    - PV keywords only    -> enforce TPV CTYPE.
+    - Both/none present   -> keep existing CTYPE unchanged.
+    """
+    out = header if inplace else header.copy()
+
+    sip_order_keys = ("A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER")
+    sip_coeff_stems = ("A_", "B_", "AP_", "BP_")
+    has_sip = any(k in out for k in sip_order_keys)
+    if not has_sip:
+        for key in out.keys():
+            ks = str(key)
+            if any(ks.startswith(stem) for stem in sip_coeff_stems):
+                has_sip = True
+                break
+
+    has_pv = any(str(k).startswith("PV") for k in out.keys())
+
+    if has_sip and has_pv:
+        logger.debug(
+            "Projection normalization: both SIP and PV keywords found; keeping existing CTYPE."
+        )
+        return out
+    if not has_sip and not has_pv:
+        return out
+
+    model = "sip" if has_sip else "tpv"
+    defaults = (
+        ("CTYPE1", "RA---TAN-SIP" if model == "sip" else "RA---TPV"),
+        ("CTYPE2", "DEC--TAN-SIP" if model == "sip" else "DEC--TPV"),
+    )
+
+    for ctype_key, ctype_default in defaults:
+        cval = str(out.get(ctype_key, ctype_default))
+        cval_u = cval.upper()
+        updated = cval_u
+        if model == "sip":
+            if "TAN-SIP" in cval_u:
+                continue
+            if "TPV" in cval_u:
+                updated = cval_u.replace("TPV", "TAN-SIP")
+            elif "TAN" in cval_u:
+                updated = cval_u.replace("TAN", "TAN-SIP", 1)
+            else:
+                updated = ctype_default
+        else:
+            if "TPV" in cval_u:
+                continue
+            if "TAN-SIP" in cval_u:
+                updated = cval_u.replace("TAN-SIP", "TPV")
+            elif "TAN" in cval_u:
+                updated = cval_u.replace("TAN", "TPV", 1)
+            else:
+                updated = ctype_default
+        if updated != cval:
+            out[ctype_key] = updated
+            logger.info(
+                "Projection normalization: %s '%s' -> '%s' (%s model).",
+                ctype_key,
+                cval,
+                updated,
+                model.upper(),
+            )
+
+    return out
+
+
+def _is_non_linear_key(key: str) -> bool:
+    """Heuristic: detect non-linear distortion keywords in FITS WCS headers."""
+    if key.startswith("PV"):
+        return True
+    if key.startswith("SIP_"):
+        return True
+    parts = key.split("_", 1)
+    if len(parts) >= 2:
+        stem = parts[0] + "_"
+        return stem in ("A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_")
+    return False
+
+
+def _parse_floats_from_line(line: str) -> list[float]:
+    floats: list[float] = []
+    for tok in line.strip().split():
+        try:
+            floats.append(float(tok))
+        except Exception:
+            pass
+    return floats
+
+
+def _extract_match_points_from_solve_field(
+    match_path: str,
+    initial_wcs: WCS,
+    nx: int,
+    ny: int,
+    *,
+    max_points: int = 500,
+    max_lines: int = 20000,
+    min_sep_arcsec: float = 0.0,
+    max_sep_arcsec: float = 3.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """
+    Best-effort extraction of (x,y) pixel and (ra,dec) sky from a solve-field
+    *.match file.
+
+    Column order is not guaranteed, so we select columns by value ranges and
+    validate them using angular separation between the input RA/Dec and the
+    `initial_wcs` prediction at (x,y).
+    """
+    if not match_path or not os.path.isfile(match_path):
+        return None
+
+    pix_x: list[float] = []
+    pix_y: list[float] = []
+    ra_list: list[float] = []
+    dec_list: list[float] = []
+
+    # FITS convention: solve-field pixel coords are treated as 1-based.
+    with open(match_path, "r", encoding="utf-8", errors="ignore") as f:
+        for ln, line in enumerate(f):
+            if ln >= max_lines:
+                break
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            vals = _parse_floats_from_line(line)
+            if len(vals) < 4:
+                continue
+
+            ra_candidates = [i for i, v in enumerate(vals) if 0.0 <= v <= 360.0]
+            dec_candidates = [i for i, v in enumerate(vals) if -90.0 <= v <= 90.0]
+            x_candidates = [i for i, v in enumerate(vals) if -1.0 <= v <= (nx + 1.0)]
+            y_candidates = [i for i, v in enumerate(vals) if -1.0 <= v <= (ny + 1.0)]
+
+            if not ra_candidates or not dec_candidates or not x_candidates or not y_candidates:
+                continue
+
+            best_sep = None
+            best = None  # (xi, yi, rai, decj)
+
+            for rai in ra_candidates:
+                ra_val = vals[rai]
+                for decj in dec_candidates:
+                    dec_val = vals[decj]
+                    for xi in x_candidates:
+                        x_val = vals[xi]
+                        for yi in y_candidates:
+                            y_val = vals[yi]
+                            try:
+                                ra_pred, dec_pred = initial_wcs.all_pix2world(
+                                    [[x_val]], [[y_val]], 1
+                                )
+                            except Exception:
+                                continue
+
+                            try:
+                                c_pred = SkyCoord(
+                                    ra=float(ra_pred[0][0]) * u.deg,
+                                    dec=float(dec_pred[0][0]) * u.deg,
+                                    frame="icrs",
+                                )
+                                c_true = SkyCoord(
+                                    ra=ra_val * u.deg,
+                                    dec=dec_val * u.deg,
+                                    frame="icrs",
+                                )
+                                sep_arcsec = c_pred.separation(c_true).to(u.arcsec).value
+                            except Exception:
+                                continue
+
+                            if best_sep is None or sep_arcsec < best_sep:
+                                best_sep = float(sep_arcsec)
+                                best = (xi, yi, rai, decj)
+
+            if best is None or best_sep is None:
+                continue
+
+            if best_sep < min_sep_arcsec or best_sep > max_sep_arcsec:
+                continue
+
+            xi, yi, rai, decj = best
+            x_val = vals[xi]
+            y_val = vals[yi]
+            ra_val = vals[rai]
+            dec_val = vals[decj]
+
+            pix_x.append(float(x_val))
+            pix_y.append(float(y_val))
+            ra_list.append(float(ra_val))
+            dec_list.append(float(dec_val))
+
+            if len(pix_x) >= max_points:
+                break
+
+    if len(pix_x) < 10:
+        return None
+
+    return (
+        np.asarray(pix_x, dtype=float),
+        np.asarray(pix_y, dtype=float),
+        np.asarray(ra_list, dtype=float),
+        np.asarray(dec_list, dtype=float),
+    )
+
+
+def _extract_corr_points_from_solve_field(
+    corr_path: str,
+    *,
+    max_points: int = 500,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """
+    Extract matched (x,y) <-> (ra,dec) pairs from solve-field *.corr FITS table.
+
+    This is preferred over parsing *.match text because column names are explicit.
+    Typical astrometry.net columns include field_x/field_y and index_ra/index_dec.
+    """
+    if not corr_path or not os.path.isfile(corr_path):
+        return None
+
+    try:
+        tbl = Table.read(corr_path)
+    except Exception:
+        return None
+
+    if len(tbl) == 0:
+        return None
+
+    cols = {c.lower(): c for c in tbl.colnames}
+
+    def pick_name(priority: list[str], fallback_contains: list[str]) -> str | None:
+        for p in priority:
+            if p in cols:
+                return cols[p]
+        for c in tbl.colnames:
+            cl = c.lower()
+            if all(tok in cl for tok in fallback_contains):
+                return c
+        return None
+
+    x_col = pick_name(["field_x", "x"], ["field", "x"])
+    y_col = pick_name(["field_y", "y"], ["field", "y"])
+    # Prefer astrometry.net index-sky columns explicitly.
+    ra_col = pick_name(
+        ["index_ra", "index_alpha", "match_ra", "ra"],
+        ["index", "ra"],
+    )
+    dec_col = pick_name(
+        ["index_dec", "index_delta", "match_dec", "dec"],
+        ["index", "dec"],
+    )
+
+    if x_col is None or y_col is None or ra_col is None or dec_col is None:
+        return None
+    logger.info(
+        "solve-field .corr column mapping: x=%s y=%s ra=%s dec=%s",
+        str(x_col),
+        str(y_col),
+        str(ra_col),
+        str(dec_col),
+    )
+    if not str(ra_col).lower().startswith("index_") or not str(dec_col).lower().startswith("index_"):
+        logger.warning(
+            "solve-field .corr is not using index_* sky columns (ra=%s dec=%s); check .corr schema for this astrometry.net version.",
+            str(ra_col),
+            str(dec_col),
+        )
+
+    x = np.asarray(tbl[x_col], dtype=float)
+    y = np.asarray(tbl[y_col], dtype=float)
+    ra = np.asarray(tbl[ra_col], dtype=float)
+    dec = np.asarray(tbl[dec_col], dtype=float)
+
+    finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(ra) & np.isfinite(dec)
+    finite &= (ra >= 0.0) & (ra <= 360.0) & (dec >= -90.0) & (dec <= 90.0)
+    x = x[finite]
+    y = y[finite]
+    ra = ra[finite]
+    dec = dec[finite]
+
+    if len(x) < 10:
+        return None
+
+    # Keep a manageable number of points (evenly sampled by row order).
+    if len(x) > max_points:
+        idx = np.linspace(0, len(x) - 1, max_points, dtype=int)
+        x, y, ra, dec = x[idx], y[idx], ra[idx], dec[idx]
+
+    return x, y, ra, dec
+
+
+def _choose_xy_shift_for_fit_wcs(
+    initial_wcs: WCS,
+    x_m: np.ndarray,
+    y_m: np.ndarray,
+    ra_m: np.ndarray,
+    dec_m: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """
+    Determine whether matched x/y are likely 0-based or FITS 1-based.
+
+    `fit_wcs_from_points` expects FITS convention (1-based). We compare angular
+    residuals to the initial solve-field WCS under two hypotheses:
+      H1: x/y already FITS-like      -> use (x, y)
+      H0: x/y are 0-based centroids  -> use (x+1, y+1)
+    and choose the lower-median-separation case.
+    """
+    try:
+        sky_true = SkyCoord(ra=ra_m * u.deg, dec=dec_m * u.deg, frame="icrs")
+
+        # Assume x/y are FITS-like (1-based) for all_pix2world origin=1
+        ra1, dec1 = initial_wcs.all_pix2world(x_m, y_m, 1)
+        sky1 = SkyCoord(ra=np.asarray(ra1) * u.deg, dec=np.asarray(dec1) * u.deg, frame="icrs")
+        med_sep_1based = float(np.nanmedian(sky1.separation(sky_true).to(u.arcsec).value))
+
+        # Assume x/y are 0-based -> convert to FITS-like by +1
+        x0 = x_m + 1.0
+        y0 = y_m + 1.0
+        ra0, dec0 = initial_wcs.all_pix2world(x0, y0, 1)
+        sky0 = SkyCoord(ra=np.asarray(ra0) * u.deg, dec=np.asarray(dec0) * u.deg, frame="icrs")
+        med_sep_0based = float(np.nanmedian(sky0.separation(sky_true).to(u.arcsec).value))
+
+        if np.isfinite(med_sep_0based) and np.isfinite(med_sep_1based):
+            if med_sep_0based + 1e-6 < med_sep_1based:
+                return x0, y0, 1.0
+            return x_m, y_m, 0.0
+    except Exception:
+        pass
+    # Conservative fallback: do not shift
+    return x_m, y_m, 0.0
+
+
+def _wcs_match_separation_stats_arcsec(
+    wcs_obj: WCS,
+    x_pix: np.ndarray,
+    y_pix: np.ndarray,
+    ra_deg: np.ndarray,
+    dec_deg: np.ndarray,
+) -> tuple[float, float]:
+    """
+    Compute robust angular-separation stats (median, p95) for matched points.
+    """
+    sky_true = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
+    ra_p, dec_p = wcs_obj.all_pix2world(x_pix, y_pix, 1)
+    sky_pred = SkyCoord(
+        ra=np.asarray(ra_p) * u.deg, dec=np.asarray(dec_p) * u.deg, frame="icrs"
+    )
+    sep = sky_pred.separation(sky_true).to(u.arcsec).value
+    sep = np.asarray(sep, dtype=float)
+    if sep.size == 0:
+        return np.nan, np.nan
+    return float(np.nanmedian(sep)), float(np.nanpercentile(sep, 95.0))
+
+
+def _best_wcs_match_separation_stats_arcsec(
+    wcs_obj: WCS,
+    x_pix: np.ndarray,
+    y_pix: np.ndarray,
+    ra_deg: np.ndarray,
+    dec_deg: np.ndarray,
+) -> tuple[float, float, float]:
+    """
+    Compute robust separation stats for both pixel-origin hypotheses and return
+    the best one.
+
+    Returns:
+        (median_arcsec, p95_arcsec, applied_shift_px)
+    """
+    med1, p951 = _wcs_match_separation_stats_arcsec(wcs_obj, x_pix, y_pix, ra_deg, dec_deg)
+    x0 = np.asarray(x_pix, dtype=float) + 1.0
+    y0 = np.asarray(y_pix, dtype=float) + 1.0
+    med0, p950 = _wcs_match_separation_stats_arcsec(wcs_obj, x0, y0, ra_deg, dec_deg)
+    if np.isfinite(med0) and np.isfinite(med1):
+        if med0 + 1e-6 < med1:
+            return float(med0), float(p950), 1.0
+        return float(med1), float(p951), 0.0
+    if np.isfinite(med1):
+        return float(med1), float(p951), 0.0
+    if np.isfinite(med0):
+        return float(med0), float(p950), 1.0
+    return np.nan, np.nan, 0.0
+
+
+def _sip_summary(wcs_obj: WCS) -> str:
+    """
+    Return compact summary of SIP distortion terms for logging.
+    """
+    sip = getattr(wcs_obj, "sip", None)
+    if sip is None:
+        return "none"
+    try:
+        a_order = int(getattr(sip, "a_order", 0) or 0)
+        b_order = int(getattr(sip, "b_order", 0) or 0)
+        ap_order = int(getattr(sip, "ap_order", 0) or 0)
+        bp_order = int(getattr(sip, "bp_order", 0) or 0)
+        a_nnz = int(np.count_nonzero(getattr(sip, "a", np.zeros((1, 1)))))
+        b_nnz = int(np.count_nonzero(getattr(sip, "b", np.zeros((1, 1)))))
+        ap_nnz = int(np.count_nonzero(getattr(sip, "ap", np.zeros((1, 1)))))
+        bp_nnz = int(np.count_nonzero(getattr(sip, "bp", np.zeros((1, 1)))))
+        return (
+            f"a/b/ap/bp order={a_order}/{b_order}/{ap_order}/{bp_order}, "
+            f"nnz={a_nnz}/{b_nnz}/{ap_nnz}/{bp_nnz}"
+        )
+    except Exception:
+        return "present (summary unavailable)"
+
+
+def _log_sip_coefficients(wcs_obj: WCS, prefix: str = "fit_wcs_from_points") -> None:
+    """
+    Log compact SIP summary (no per-coefficient dump).
+    """
+    sip = getattr(wcs_obj, "sip", None)
+    if sip is None:
+        logger.info("%s SIP coefficients: none", prefix)
+        return
+    logger.info("%s SIP coefficients: %s", prefix, _sip_summary(wcs_obj))
+
+
+def _log_header_distortion_coefficients(
+    header: fits.Header, prefix: str = "astrometry.net solved"
+) -> None:
+    """
+    Log compact non-linear distortion summary (no per-coefficient dump).
+    """
+    try:
+        keys = []
+        pv_keys = []
+        sip_keys = []
+        for k in header.keys():
+            ks = str(k)
+            if ks.startswith("PV"):
+                keys.append(ks)
+                pv_keys.append(ks)
+                continue
+            if "_" in ks:
+                stem = ks.split("_", 1)[0] + "_"
+                if stem in ("A_", "B_", "AP_", "BP_"):
+                    keys.append(ks)
+                    sip_keys.append(ks)
+        keys = sorted(set(keys))
+        if len(keys) == 0:
+            logger.info("%s distortion coefficients: none (no SIP/PV keys)", prefix)
+            return
+        logger.info(
+            "%s distortion coefficients: total=%d (PV=%d, SIP=%d)",
+            prefix,
+            len(keys),
+            len(set(pv_keys)),
+            len(set(sip_keys)),
+        )
+    except Exception as exc:
+        logger.warning("%s distortion coefficient logging failed: %s", prefix, exc)
+
+
+def _filter_points_against_initial_wcs(
+    initial_wcs: WCS,
+    x_pix: np.ndarray,
+    y_pix: np.ndarray,
+    ra_deg: np.ndarray,
+    dec_deg: np.ndarray,
+    *,
+    max_sep_arcsec: float = 3.0,
+    clip_sigma: float = 3.5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, float, float]:
+    """
+    Reject outlier pixel<->sky matches using residuals to initial_wcs.
+    Returns filtered arrays, number removed, and pre-filter med/p95 residuals.
+    """
+    sky_true = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
+    ra_p, dec_p = initial_wcs.all_pix2world(x_pix, y_pix, 1)
+    sky_pred = SkyCoord(
+        ra=np.asarray(ra_p) * u.deg, dec=np.asarray(dec_p) * u.deg, frame="icrs"
+    )
+    sep = np.asarray(sky_pred.separation(sky_true).to(u.arcsec).value, dtype=float)
+    if sep.size == 0:
+        return x_pix, y_pix, ra_deg, dec_deg, 0, np.nan, np.nan
+
+    med0 = float(np.nanmedian(sep))
+    p950 = float(np.nanpercentile(sep, 95.0))
+    good = np.isfinite(sep)
+    if np.isfinite(max_sep_arcsec) and max_sep_arcsec > 0:
+        good &= sep <= float(max_sep_arcsec)
+
+    # Robust clip around median to suppress residual outliers.
+    if np.any(good):
+        s = sep[good]
+        med = float(np.nanmedian(s))
+        mad = float(np.nanmedian(np.abs(s - med)))
+        sigma_robust = 1.4826 * mad if np.isfinite(mad) and mad > 0 else 0.0
+        if sigma_robust > 0 and np.isfinite(clip_sigma) and clip_sigma > 0:
+            good &= sep <= (med + float(clip_sigma) * sigma_robust)
+
+    removed = int(len(sep) - int(np.count_nonzero(good)))
+    return (
+        x_pix[good],
+        y_pix[good],
+        ra_deg[good],
+        dec_deg[good],
+        removed,
+        med0,
+        p950,
+    )
 
 
 def load_background_std(background_std) -> np.ndarray:
@@ -205,6 +722,35 @@ def create_conv_file(path: str, fwhm_pixels: float = 3.0, force: bool = False) -
         conv_text += "\n"
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(conv_text)
+
+
+def _resolve_sextractor_conv_fwhm_pixels(
+    wcs_cfg: dict, header: fits.Header, default_input: dict
+) -> float:
+    """
+    Resolve the FWHM (pixels) used to build the SExtractor convolution kernel.
+
+    Priority:
+      1) wcs.sextractor_conv_fwhm_pixels
+      2) FITS header FWHM/fwhm
+      3) runtime config fwhm
+      4) fallback default of 3.0 px
+    """
+    candidate_values = [
+        wcs_cfg.get("sextractor_conv_fwhm_pixels"),
+        header.get("FWHM"),
+        header.get("fwhm"),
+        default_input.get("fwhm"),
+    ]
+    for raw in candidate_values:
+        try:
+            fwhm_pix = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(fwhm_pix) and fwhm_pix > 0:
+            # Keep kernel practical and stable for SExtractor.
+            return float(np.clip(fwhm_pix, 1.0, 20.0))
+    return 3.0
 
 
 def create_nnw_file(path: str) -> None:
@@ -541,6 +1087,9 @@ class WCSSolver:
             params = [
                 "XWIN_IMAGE",
                 "YWIN_IMAGE",
+                "ERRAWIN_IMAGE",
+                "ERRBWIN_IMAGE",
+                "ERRTHETAWIN_IMAGE",
                 "FLUX_AUTO",
                 "FLUXERR_AUTO",
                 "MAG_AUTO",
@@ -555,6 +1104,15 @@ class WCSSolver:
                 "SNR_WIN",
                 "XPEAK_IMAGE",
                 "YPEAK_IMAGE",
+                "XWIN_WORLD",
+                "YWIN_WORLD",
+                "X_WORLD",
+                "Y_WORLD",
+                "ERRA_WORLD",
+                "ERRB_WORLD",
+                "ERRTHETA_WORLD",
+                "ALPHA_J2000",
+                "DELTA_J2000",
             ]
             Path(param_file).write_text("\n".join(params))
 
@@ -562,7 +1120,14 @@ class WCSSolver:
             # We generate a temporary Gaussian kernel at runtime so we can omit
             # repository/distribution `.conv` files.
             conv_filter_path = os.path.join(temp_dir, "gaussian_7x7.conv")
-            create_conv_file(conv_filter_path)
+            conv_fwhm_pix = _resolve_sextractor_conv_fwhm_pixels(
+                wcs_cfg, self.header, self.default_input
+            )
+            create_conv_file(conv_filter_path, fwhm_pixels=conv_fwhm_pix)
+            logger.info(
+                "SCAMP/SExtractor convolution kernel built from FWHM=%.2f px",
+                conv_fwhm_pix,
+            )
 
             nnw_file = os.path.join(temp_dir, "default.nnw")
             create_nnw_file(nnw_file)
@@ -647,21 +1212,37 @@ class WCSSolver:
                 )
                 return np.nan
 
-            head_path = os.path.join(temp_dir, f"{base}.head")
             astref_cat = str(wcs_cfg.get("scamp_astref_catalog", "GAIA-DR3"))
+            scamp_cfg_path = os.path.join(temp_dir, "wcs_refine.scamp")
+            scamp_threads = int(max(1, (os.cpu_count() or 2) // 2))
+            scamp_cfg = {
+                "SOLVE_ASTROM": "Y",
+                "SOLVE_PHOTOM": "N",
+                "DISTORT_DEGREES": int(wcs_cfg.get("scamp_distort_degrees", 4)),
+                "MATCH": "Y",
+                "MATCH_RESOL": 0,
+                "MATCH_FLIPPED": "Y",
+                "WRITE_XML": "N",
+                "VERBOSE_TYPE": str(wcs_cfg.get("scamp_verbose_type", "LOG")),
+                "ASTREF_CATALOG": astref_cat,
+                "ASTREF_WEIGHT": 1,
+                "ASTREFMAG_KEY": "MAG_AUTO",
+                "ASTREFMAGERR_KEY": "MAGERR_AUTO",
+                "ASTREFCENT_KEYS": "XWIN_WORLD,YWIN_WORLD",
+                "ASTREFERR_KEYS": "ERRA_WORLD,ERRB_WORLD,ERRTHETA_WORLD",
+                "DISTORT_KEYS": "XWIN_IMAGE,YWIN_IMAGE",
+                "SN_THRESHOLDS": str(wcs_cfg.get("scamp_sn_thresholds", "5.0,100000.0")),
+            }
+            with open(scamp_cfg_path, "w") as f:
+                for k, v in scamp_cfg.items():
+                    f.write(f"{k}\t{v}\n")
             scamp_cmd = [
                 scamp_exe,
                 cat_path,
-                "-ASTREF_CATALOG",
-                astref_cat,
-                "-CHECKPLOT_TYPE",
-                "NONE",
-                "-WRITE_XML",
-                "N",
-                "-SAVE_TYPE",
-                "HEAD",
-                "-HEAD_NAME",
-                head_path,
+                "-c",
+                scamp_cfg_path,
+                "-NTHREADS",
+                str(scamp_threads),
             ]
             try:
                 logger.info("Running SCAMP: %s", " ".join(map(str, scamp_cmd)))
@@ -677,12 +1258,24 @@ class WCSSolver:
                 logger.warning("SCAMP exceeded timeout (%.1f s)", timeout_sec)
                 return np.nan
 
-            if not os.path.isfile(head_path):
+            head_candidates = sorted(glob.glob(os.path.join(temp_dir, "*.head")))
+            if not head_candidates:
+                # SCAMP did not emit any HEAD file in the working directory.
+                try:
+                    with open(scamp_log, "r", encoding="utf-8", errors="ignore") as f:
+                        scamp_out = f.read().strip()
+                    if scamp_out:
+                        logger.warning("SCAMP output:\n%s", scamp_out[-2000:])
+                except Exception:
+                    pass
                 logger.warning("SCAMP did not produce a .head file; WCS not updated.")
                 return np.nan
+            head_path = head_candidates[0]
+            logger.info("SCAMP produced .head file: %s", head_path)
 
             try:
                 wcs_header = fits.Header.fromtextfile(head_path)
+                wcs_header = _normalize_projection_codes(wcs_header, inplace=False)
                 from functions import remove_wcs_from_header
 
                 self.header = remove_wcs_from_header(self.header)
@@ -729,6 +1322,73 @@ class WCSSolver:
                 logger.warning("Failed to apply SCAMP WCS header: %s", exc)
                 return np.nan
 
+    def _refine_distortion_with_scamp_from_rough_wcs(
+        self,
+        rough_wcs_header: fits.Header,
+        wcs_cfg: dict,
+        cpulimit: float | None = None,
+    ) -> fits.Header | float:
+        """
+        Two-stage solve:
+          1) solve-field provides rough WCS (passed in as ``rough_wcs_header``)
+          2) SCAMP refines distortion (prefer TPV/PV) starting from that rough WCS
+
+        Returns refined header on success, else np.nan.
+        """
+        try:
+            logger.info(
+                "Refining distortion with SCAMP using solve-field rough WCS seed."
+            )
+            from functions import remove_wcs_from_header
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                seed_fpath = os.path.join(tmpdir, "scamp_seed.fits")
+                seed_header = self.header.copy()
+                seed_header = remove_wcs_from_header(seed_header)
+
+                # Carry over WCS terms from solve-field rough solution.
+                for k in rough_wcs_header:
+                    if k in ("NAXIS", "NAXIS1", "NAXIS2"):
+                        continue
+                    try:
+                        seed_header[k] = rough_wcs_header[k]
+                    except Exception:
+                        pass
+                seed_header["NAXIS1"] = self.image.shape[1]
+                seed_header["NAXIS2"] = self.image.shape[0]
+                fits.writeto(
+                    seed_fpath,
+                    self.image,
+                    seed_header,
+                    overwrite=True,
+                    output_verify="ignore",
+                )
+
+                # Run SCAMP on the seeded temporary image.
+                seeded_solver = WCSSolver(
+                    fpath=seed_fpath,
+                    image=self.image,
+                    header=seed_header,
+                    default_input=self.default_input,
+                )
+                scamp_header = seeded_solver._plate_solve_scamp(
+                    wcs_cfg=wcs_cfg, cpulimit=cpulimit
+                )
+                if isinstance(scamp_header, fits.Header):
+                    logger.info(
+                        "SCAMP distortion refinement succeeded from solve-field seed."
+                    )
+                    return scamp_header
+                logger.warning(
+                    "SCAMP distortion refinement unavailable/failed; keeping solve-field WCS."
+                )
+                return np.nan
+        except Exception as exc:
+            logger.warning(
+                "SCAMP distortion refinement from solve-field seed failed: %s", exc
+            )
+            return np.nan
+
     # --- Plate Solve ---
     def plate_solve(
         self,
@@ -746,10 +1406,29 @@ class WCSSolver:
         Astrometry.net solve-field.
         """
         wcs_cfg = self.default_input.get("wcs") or {}
+        redo_requested = bool(wcs_cfg.get("redo_wcs", False))
+        projection_type = str(wcs_cfg.get("projection_type", "TPV")).strip().upper()
+        if projection_type not in {"TPV", "SIP"}:
+            logger.warning(
+                "Unknown wcs.projection_type=%r; defaulting to TPV flow.",
+                projection_type,
+            )
+            projection_type = "TPV"
+        use_tpv_flow = projection_type == "TPV"
+        logger.info(
+            "WCS projection_type=%s (%s)",
+            projection_type,
+            "solve-field + SCAMP" if use_tpv_flow else "solve-field only",
+        )
+        if redo_requested and not skip_verify:
+            logger.info(
+                "redo_wcs=True: forcing fresh solve (skip verify of input WCS)."
+            )
+            skip_verify = True
         solver = str(wcs_cfg.get("solver", "astrometry")).strip().lower()
 
         # Optional SCAMP path
-        if solver == "scamp":
+        if solver == "scamp" and use_tpv_flow:
             try:
                 header = self._plate_solve_scamp(wcs_cfg=wcs_cfg, cpulimit=cpulimit)
                 if isinstance(header, fits.Header):
@@ -762,6 +1441,10 @@ class WCSSolver:
                     "SCAMP solve raised an exception (%s); falling back to Astrometry.net.",
                     exc,
                 )
+        elif solver == "scamp" and not use_tpv_flow:
+            logger.info(
+                "projection_type=SIP: ignoring solver=scamp and using solve-field only."
+            )
 
         logger.info(
             border_msg(
@@ -812,7 +1495,12 @@ class WCSSolver:
         base = os.path.splitext(os.path.basename(self.fpath))[0]
         wcs_file = os.path.join(dirname, "astrometry_temp.wcs.fits")
         astrometry_log_fpath = os.path.join(dirname, f"astrometry_{base}.log")
-        use_sextractor = shutil.which("sex") is not None
+        sextractor_exe = (
+            wcs_cfg.get("sextractor_exe_loc")
+            or shutil.which("sex")
+            or shutil.which("sextractor")
+        )
+        use_sextractor = sextractor_exe is not None
         # use_sextractor = False
         # --- Create a temporary SExtractor config file ---
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -842,7 +1530,14 @@ class WCSSolver:
 
             # Generate a temporary Gaussian convolution filter for SExtractor.
             conv_filter_path = os.path.join(temp_dir, "gaussian_7x7.conv")
-            create_conv_file(conv_filter_path)
+            conv_fwhm_pix = _resolve_sextractor_conv_fwhm_pixels(
+                wcs_cfg, self.header, self.default_input
+            )
+            create_conv_file(conv_filter_path, fwhm_pixels=conv_fwhm_pix)
+            logger.info(
+                "solve-field/SExtractor convolution kernel built from FWHM=%.2f px",
+                conv_fwhm_pix,
+            )
 
             pixel_scale = self.default_input.get("pixel_scale") or 0
             if not pixel_scale and self.header.get("CDELT1") is not None:
@@ -900,7 +1595,7 @@ class WCSSolver:
                 logger.info(
                     "Using SExtractor with Gaussian convolution filter for source detection."
                 )
-                sextractor_cmd = f"sex -c {config_file}"
+                sextractor_cmd = str(sextractor_exe)
             else:
                 logger.warning("SExtractor not found. Proceeding without.")
 
@@ -1005,18 +1700,59 @@ class WCSSolver:
                 str(int(timeout_sec)),
                 str(self.fpath),
             ]
-            # Limit the number of sources used by solve-field (helpful in very crowded images).
+            # Optional: request more detected objects for solve-field indexing/matching.
+            # Larger values can improve robustness in sparse fields at modest runtime cost.
             objs = wcs_cfg.get("objs", None)
             if objs is not None:
                 try:
-                    common_args.insert(-1, "--objs")
-                    common_args.insert(-1, str(int(objs)))
+                    n_objs = int(objs)
+                    if n_objs > 0:
+                        common_args.insert(-1, "--objs")
+                        common_args.insert(-1, str(n_objs))
+                        logger.info(
+                            "solve-field object budget: --objs %d", n_objs
+                        )
                 except Exception:
-                    pass
-            # Reference pixel at image center improves consistency with pipelines
-            common_args.insert(-1, "--crpix-center")
-            # Tweak order: try moderate SIP orders first (2, 1, 0)
-            tweak_orders = [2, 1, 0]
+                    logger.warning(
+                        "Ignoring invalid wcs.objs=%r (expected positive integer).",
+                        objs,
+                    )
+            # --crpix-center forces CRPIX to the image center. That is valid for
+            # astrometry.net but can disagree with instrument/subarray headers where
+            # CRPIX is elsewhere; users often get better agreement keeping raw WCS
+            # when this flag was always on. Default: omit (False); set True for
+            # legacy behavior matching older AutoPHoT.
+            use_crpix_center = bool(wcs_cfg.get("solve_field_crpix_center", False))
+            if use_crpix_center:
+                common_args.insert(-1, "--crpix-center")
+                logger.info(
+                    "solve-field: using --crpix-center (reference pixel at image center)"
+                )
+            else:
+                logger.info(
+                    "solve-field: omitting --crpix-center (solver reference pixel; "
+                    "often closer to instrument WCS — set wcs.solve_field_crpix_center: true for legacy)"
+                )
+            # Tweak order(s) for solve-field. Can be a single int or a list.
+            # Example YAML:
+            #   solve_field_tweak_order: 5
+            #   solve_field_tweak_orders: [5, 3, 2, 1, 0]
+            tweak_orders = [4]
+            try:
+                to_list = wcs_cfg.get("solve_field_tweak_orders", None)
+                to_single = wcs_cfg.get("solve_field_tweak_order", None)
+                if isinstance(to_list, (list, tuple)) and len(to_list) > 0:
+                    parsed = [int(v) for v in to_list]
+                    tweak_orders = [v for v in parsed if v >= 0]
+                elif to_single is not None:
+                    v = int(to_single)
+                    if v >= 0:
+                        tweak_orders = [v]
+            except Exception:
+                tweak_orders = [4]
+            if len(tweak_orders) == 0:
+                tweak_orders = [4]
+            logger.info("solve-field tweak order sequence: %s", tweak_orders)
 
             # --- Step 1: Optional verify existing WCS ---
             if not skip_verify:
@@ -1027,6 +1763,8 @@ class WCSSolver:
                         "--use-source-extractor",
                         "--source-extractor-path",
                         sextractor_cmd,
+                        "--source-extractor-config",
+                        str(config_file),
                         "--x-column",
                         "XWIN_IMAGE",
                         "--y-column",
@@ -1062,6 +1800,8 @@ class WCSSolver:
                             "--use-source-extractor",
                             "--source-extractor-path",
                             sextractor_cmd,
+                            "--source-extractor-config",
+                            str(config_file),
                             "--x-column",
                             "XWIN_IMAGE",
                             "--y-column",
@@ -1147,6 +1887,8 @@ class WCSSolver:
                             "--use-source-extractor",
                             "--source-extractor-path",
                             sextractor_cmd,
+                            "--source-extractor-config",
+                            str(config_file),
                             "--x-column",
                             "XWIN_IMAGE",
                             "--y-column",
@@ -1168,18 +1910,23 @@ class WCSSolver:
 
             # --- If WCS still not solved, try SCAMP as fallback (e.g. crowded or IR fields) ---
             if not os.path.isfile(wcs_file):
-                logger.warning(
-                    "Astrometry.net did not solve WCS; trying SCAMP as fallback."
-                )
-                try:
-                    scamp_header = self._plate_solve_scamp(
-                        wcs_cfg=wcs_cfg, cpulimit=cpulimit
+                if use_tpv_flow:
+                    logger.warning(
+                        "Astrometry.net did not solve WCS; trying SCAMP as fallback."
                     )
-                    if isinstance(scamp_header, fits.Header):
-                        logger.info("SCAMP fallback succeeded.")
-                        return scamp_header
-                except Exception as exc:
-                    logger.warning("SCAMP fallback failed: %s", exc)
+                    try:
+                        scamp_header = self._plate_solve_scamp(
+                            wcs_cfg=wcs_cfg, cpulimit=cpulimit
+                        )
+                        if isinstance(scamp_header, fits.Header):
+                            logger.info("SCAMP fallback succeeded.")
+                            return scamp_header
+                    except Exception as exc:
+                        logger.warning("SCAMP fallback failed: %s", exc)
+                else:
+                    logger.warning(
+                        "Astrometry.net did not solve WCS; projection_type=SIP disables SCAMP fallback."
+                    )
 
             # --- If still not solved, return NaN ---
             if not os.path.isfile(wcs_file):
@@ -1190,7 +1937,24 @@ class WCSSolver:
                 return np.nan
 
             # --- Clean up temporary files ---
-            for pattern in [".corr", ".axy", ".match", ".rdls", ".solved", ".xyls"]:
+            fit_sip_degree = wcs_cfg.get("fit_wcs_from_points_sip_degree")
+            try:
+                fit_sip_degree = int(fit_sip_degree) if fit_sip_degree else None
+            except Exception:
+                fit_sip_degree = None
+            keep_match_and_axy = fit_sip_degree is not None and fit_sip_degree > 0
+            # Keep solve-field match artifacts when we want input-vs-solved WCS
+            # diagnostics, even if fit_wcs_from_points is disabled.
+            compare_input_vs_solved = bool(
+                wcs_cfg.get("compare_input_vs_solved_wcs", True)
+            )
+            keep_match_for_compare = bool(compare_input_vs_solved)
+            keep_match_and_axy = keep_match_and_axy or keep_match_for_compare
+
+            patterns_to_remove = [".rdls", ".solved", ".xyls"]
+            if not keep_match_and_axy:
+                patterns_to_remove += [".axy", ".match", ".corr"]
+            for pattern in patterns_to_remove:
                 for f in glob.glob(os.path.join(dirname, f"*{pattern}")):
                     os.remove(f)
             for f in [new_fits_temp, scamp_temp, os.path.join(dirname, "none")]:
@@ -1201,9 +1965,283 @@ class WCSSolver:
             try:
                 with fits.open(wcs_file) as wcs_hdul:
                     wcs_header = wcs_hdul[0].header
+                wcs_header = _normalize_projection_codes(wcs_header, inplace=False)
+                _log_header_distortion_coefficients(
+                    wcs_header, prefix="astrometry.net solved WCS"
+                )
+                force_preserve_input_distortion = False
+                keep_input_wcs_full = False
+                try:
+                    input_wcs_for_compare = get_wcs(self.header)
+                    solved_wcs_for_compare = get_wcs(wcs_header)
+                    nx = int(self.image.shape[1])
+                    ny = int(self.image.shape[0])
+                    max_pts_diag = int(
+                        wcs_cfg.get("fit_wcs_from_points_max_points", 500)
+                    )
+                    diag_points = _extract_corr_points_from_solve_field(
+                        corr_temp, max_points=max_pts_diag
+                    )
+                    if diag_points is None:
+                        diag_points = _extract_match_points_from_solve_field(
+                            match_temp,
+                            solved_wcs_for_compare,
+                            nx,
+                            ny,
+                            max_points=max_pts_diag,
+                            max_lines=int(
+                                wcs_cfg.get("fit_wcs_from_points_max_match_lines", 20000)
+                            ),
+                            max_sep_arcsec=float(
+                                wcs_cfg.get("fit_wcs_from_points_max_sep_arcsec", 3.0)
+                            ),
+                        )
+                    if diag_points is not None:
+                        x_d, y_d, ra_d, dec_d = diag_points
+                        med_in, p95_in, sh_in = _best_wcs_match_separation_stats_arcsec(
+                            input_wcs_for_compare, x_d, y_d, ra_d, dec_d
+                        )
+                        med_sv, p95_sv, sh_sv = _best_wcs_match_separation_stats_arcsec(
+                            solved_wcs_for_compare, x_d, y_d, ra_d, dec_d
+                        )
+                        logger.info(
+                            "WCS compare on solve-field matches (n=%d): input med/p95=%.3f/%.3f arcsec (shift=%+.1f px) | solved med/p95=%.3f/%.3f arcsec (shift=%+.1f px)",
+                            int(len(x_d)),
+                            float(med_in),
+                            float(p95_in),
+                            float(sh_in),
+                            float(med_sv),
+                            float(p95_sv),
+                            float(sh_sv),
+                        )
+                        # If solve-field switches distortion model family
+                        # (e.g. TPV -> TAN-SIP) without clear improvement,
+                        # preserve the input distortion model and update
+                        # linear terms only.
+                        ctype1_in_u = str(self.header.get("CTYPE1", "")).upper()
+                        ctype2_in_u = str(self.header.get("CTYPE2", "")).upper()
+                        ctype1_sv_u = str(wcs_header.get("CTYPE1", "")).upper()
+                        ctype2_sv_u = str(wcs_header.get("CTYPE2", "")).upper()
+                        model_switch = (
+                            ("TPV" in ctype1_in_u or "TPV" in ctype2_in_u)
+                            and ("TAN-SIP" in ctype1_sv_u or "TAN-SIP" in ctype2_sv_u)
+                        )
+                        clear_gain = bool(
+                            np.isfinite(med_in)
+                            and np.isfinite(med_sv)
+                            and np.isfinite(p95_in)
+                            and np.isfinite(p95_sv)
+                            and (med_sv <= med_in * 0.90)
+                            and (p95_sv <= p95_in * 1.02)
+                        )
+                        if model_switch and not clear_gain:
+                            if redo_requested:
+                                logger.info(
+                                    "redo_wcs=True: model-switch safeguard disabled "
+                                    "(TPV->TAN-SIP check); continuing with solved/refined WCS."
+                                )
+                            else:
+                                force_preserve_input_distortion = True
+                                logger.warning(
+                                    "WCS model switch TPV->TAN-SIP without clear gain "
+                                    "(input med/p95=%.3f/%.3f, solved med/p95=%.3f/%.3f arcsec): "
+                                    "preserving input distortion model and updating linear terms only.",
+                                    float(med_in),
+                                    float(p95_in),
+                                    float(med_sv),
+                                    float(p95_sv),
+                                )
+                        keep_if_not_better = bool(
+                            wcs_cfg.get(
+                                "keep_input_wcs_if_solved_not_better", True
+                            )
+                        )
+                        if redo_requested:
+                            keep_if_not_better = False
+                        solved_not_better = bool(
+                            np.isfinite(med_in)
+                            and np.isfinite(med_sv)
+                            and np.isfinite(p95_in)
+                            and np.isfinite(p95_sv)
+                            and ((med_sv > med_in * 1.02) or (p95_sv > p95_in * 1.02))
+                        )
+                        if keep_if_not_better and solved_not_better:
+                            keep_input_wcs_full = True
+                            logger.warning(
+                                "Solved WCS is not better than input on matched points "
+                                "(input med/p95=%.3f/%.3f, solved med/p95=%.3f/%.3f arcsec): "
+                                "keeping original full input WCS for this frame.",
+                                float(med_in),
+                                float(p95_in),
+                                float(med_sv),
+                                float(p95_sv),
+                            )
+                    ctype1_in = str(self.header.get("CTYPE1", ""))
+                    ctype2_in = str(self.header.get("CTYPE2", ""))
+                    ctype1_sv = str(wcs_header.get("CTYPE1", ""))
+                    ctype2_sv = str(wcs_header.get("CTYPE2", ""))
+                    crpix1_in = float(self.header.get("CRPIX1", np.nan))
+                    crpix2_in = float(self.header.get("CRPIX2", np.nan))
+                    crpix1_sv = float(wcs_header.get("CRPIX1", np.nan))
+                    crpix2_sv = float(wcs_header.get("CRPIX2", np.nan))
+                    crval1_in = float(self.header.get("CRVAL1", np.nan))
+                    crval2_in = float(self.header.get("CRVAL2", np.nan))
+                    crval1_sv = float(wcs_header.get("CRVAL1", np.nan))
+                    crval2_sv = float(wcs_header.get("CRVAL2", np.nan))
+                    dra_arcsec = (crval1_sv - crval1_in) * 3600.0
+                    ddec_arcsec = (crval2_sv - crval2_in) * 3600.0
+                    logger.info(
+                        "WCS header delta: CTYPE (%s,%s) -> (%s,%s); dCRPIX=(%.3f, %.3f) px; dCRVAL=(%.3f, %.3f) arcsec",
+                        ctype1_in,
+                        ctype2_in,
+                        ctype1_sv,
+                        ctype2_sv,
+                        float(crpix1_sv - crpix1_in),
+                        float(crpix2_sv - crpix2_in),
+                        float(dra_arcsec),
+                        float(ddec_arcsec),
+                    )
+                except Exception as exc:
+                    logger.warning("WCS input-vs-solved comparison skipped: %s", exc)
+
+                if keep_input_wcs_full and not redo_requested:
+                    try:
+                        self.header["NAXIS1"] = self.image.shape[1]
+                        self.header["NAXIS2"] = self.image.shape[0]
+                        fits.writeto(
+                            self.fpath,
+                            self.image,
+                            self.header,
+                            overwrite=True,
+                            output_verify="ignore",
+                        )
+                        # Cleanup solve artifacts even when keeping input WCS.
+                        for pattern in [".rdls", ".solved", ".xyls", ".axy", ".match", ".corr"]:
+                            for f in glob.glob(os.path.join(dirname, f"*{pattern}")):
+                                try:
+                                    os.remove(f)
+                                except OSError:
+                                    pass
+                        for f in [new_fits_temp, scamp_temp, os.path.join(dirname, "none"), wcs_file]:
+                            if f and os.path.isfile(f):
+                                try:
+                                    os.remove(f)
+                                except OSError:
+                                    pass
+                        logger.info(
+                            "Kept original input WCS (solved WCS not better on matched points)."
+                        )
+                        return self.header
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed while keeping original input WCS after solve comparison: %s",
+                            exc,
+                        )
+
+                # Prefer SCAMP after solve-field when available to preserve TPV/PV-style
+                # distortion solutions; fall back to solve-field WCS otherwise.
+                used_refined_wcs = False
+                fit_sip_degree_int = None
+                trust_input_distortion = bool(
+                    wcs_cfg.get("trust_input_distortion_model", False)
+                )
+                if redo_requested and trust_input_distortion:
+                    logger.info(
+                        "redo_wcs=True: ignoring input distortion trust and solving for a fresh distortion model."
+                    )
+                    trust_input_distortion = False
+                prefer_scamp_tpv = bool(use_tpv_flow)
+                if prefer_scamp_tpv and not bool(
+                    wcs_cfg.get("prefer_scamp_tpv_after_solve", True)
+                ):
+                    logger.info(
+                        "projection_type=TPV overrides prefer_scamp_tpv_after_solve=False; using solve-field -> SCAMP."
+                    )
+                if prefer_scamp_tpv:
+                    try:
+                        scamp_header = self._refine_distortion_with_scamp_from_rough_wcs(
+                            rough_wcs_header=wcs_header,
+                            wcs_cfg=wcs_cfg,
+                            cpulimit=cpulimit,
+                        )
+                        if isinstance(scamp_header, fits.Header):
+                            wcs_header = scamp_header
+                            logger.info(
+                                "Using SCAMP WCS solution (preferred TPV/PV distortion model)."
+                            )
+                            _log_header_distortion_coefficients(
+                                wcs_header, prefix="SCAMP solved WCS"
+                            )
+                        else:
+                            logger.info(
+                                "SCAMP unavailable/failed after solve-field; keeping solve-field WCS."
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "SCAMP preference after solve-field failed: %s. Keeping solve-field WCS.",
+                            exc,
+                        )
+                else:
+                    logger.info(
+                        "projection_type=SIP: skipping SCAMP refinement and using solve-field WCS."
+                    )
                 from functions import remove_wcs_from_header
 
-                # Remove all previous WCS from science header, then add only WCS keywords from solver
+                # Remove all previous WCS from science header, then add only WCS keywords from solver.
+                # Optional behavior (option 1): preserve the *input* non-linear distortion model
+                # (e.g. instrument TPV/PV polynomials) and only update linear terms from the solver.
+                preserve_distortion = bool(
+                    wcs_cfg.get("preserve_distortion_on_redo", True)
+                )
+                if redo_requested and preserve_distortion:
+                    logger.info(
+                        "redo_wcs=True: not preserving input distortion keywords; using freshly solved distortion model."
+                    )
+                    preserve_distortion = False
+                if trust_input_distortion:
+                    preserve_distortion = True
+                    logger.info(
+                        "trust_input_distortion_model=True: preserving input distortion keywords on redo_wcs"
+                    )
+                if force_preserve_input_distortion:
+                    preserve_distortion = True
+                    logger.info(
+                        "Applying forced preserve-input-distortion mode due to weak TPV->TAN-SIP gain."
+                    )
+                # If we explicitly refit a new TAN-SIP solution from matched points,
+                # do NOT preserve old distortion keywords from the input header.
+                # This avoids mixing old PV/TPV terms with newly-fitted SIP terms.
+                if used_refined_wcs:
+                    preserve_distortion = False
+                    logger.info(
+                        "Accepted fit_wcs_from_points refinement (sip_degree=%d): not preserving old distortion keywords on redo_wcs",
+                        int(fit_sip_degree_int or 0),
+                    )
+                # Heuristic: treat presence of PV or SIP/A/B polynomial coefficients as "non-linear distortion".
+                _non_linear_key_prefixes = (
+                    "PV",
+                    "SIP_",
+                    "A_",
+                    "B_",
+                    "AP_",
+                    "BP_",
+                    "D_",
+                    "DP_",
+                )
+                had_non_linear_distortion = any(
+                    k.startswith(_non_linear_key_prefixes)
+                    for k in list(self.header.keys())
+                )
+
+                preserved_distortion_keys = {}
+                preserved_ctype1 = self.header.get("CTYPE1")
+                preserved_ctype2 = self.header.get("CTYPE2")
+                if preserve_distortion and had_non_linear_distortion:
+                    # Snapshot the non-linear/projection-specific keywords from the input WCS.
+                    for k in list(self.header.keys()):
+                        if k.startswith(_non_linear_key_prefixes):
+                            preserved_distortion_keys[k] = self.header[k]
+
                 self.header = remove_wcs_from_header(self.header)
                 _wcs_prefixes = (
                     "CRPIX",
@@ -1239,7 +2277,34 @@ class WCSSolver:
                         stem = key.split("_")[0] + "_"
                         is_wcs = stem in _wcs_stems and key.startswith(stem.rstrip("_"))
                     if is_wcs:
+                        if preserve_distortion and had_non_linear_distortion:
+                            # Skip non-linear distortion + projection identifiers.
+                            if key in ("CTYPE1", "CTYPE2"):
+                                continue
+                            if key.startswith(
+                                (
+                                    "SIP_",
+                                    "A_",
+                                    "B_",
+                                    "AP_",
+                                    "BP_",
+                                    "D_",
+                                    "DP_",
+                                    "PV",
+                                )
+                            ):
+                                continue
                         self.header[key] = wcs_header[key]
+
+                if preserve_distortion and had_non_linear_distortion:
+                    # Restore input distortion model + projection identifiers.
+                    if preserved_ctype1 is not None:
+                        self.header["CTYPE1"] = preserved_ctype1
+                    if preserved_ctype2 is not None:
+                        self.header["CTYPE2"] = preserved_ctype2
+                    for k, v in preserved_distortion_keys.items():
+                        self.header[k] = v
+                self.header = _normalize_projection_codes(self.header, inplace=True)
                 self.header["NAXIS1"] = self.image.shape[1]
                 self.header["NAXIS2"] = self.image.shape[0]
 
@@ -1251,6 +2316,18 @@ class WCSSolver:
                     crpix_offset = 0.5  # legacy: old configs that applied +0.5
                 if crpix_offset is None:
                     crpix_offset = 0.0
+                if crpix_offset != 0.0:
+                    if preserve_distortion and had_non_linear_distortion:
+                        # When preserving distortion, we also preserve the
+                        # distortion's associated linear terms. Applying an
+                        # extra CRPIX offset would break that consistency.
+                        allow = bool(wcs_cfg.get("allow_crpix_offset_with_preserved_distortion", False))
+                        if not allow:
+                            logger.info(
+                                "Preserving distortion on redo: skipping crpix_offset=%.3f to keep PV/SIP consistency",
+                                float(crpix_offset),
+                            )
+                            crpix_offset = 0.0
                 if crpix_offset != 0.0:
                     with silence_astropy_wcs_info():
                         try:
@@ -1297,6 +2374,15 @@ class WCSSolver:
                     overwrite=True,
                     output_verify="ignore",
                 )
+                # Final cleanup of heavy solve-field artifacts once diagnostics
+                # and header updates are complete.
+                if keep_match_for_compare:
+                    for pattern in [".axy", ".match", ".corr"]:
+                        for f in glob.glob(os.path.join(dirname, f"*{pattern}")):
+                            try:
+                                os.remove(f)
+                            except OSError:
+                                pass
                 if os.path.isfile(wcs_file):
                     os.remove(wcs_file)
                 logger.info("WCS information updated in the FITS header")

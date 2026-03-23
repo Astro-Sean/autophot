@@ -126,7 +126,7 @@ class Plot:
                     img_data,
                     origin="lower",
                     aspect="auto",
-                    cmap="Greys_r",
+                    cmap="viridis",
                     vmin=vmins[title],
                     vmax=vmaxs[title],
                 )
@@ -138,23 +138,39 @@ class Plot:
 
             square_size = int(inset_size * 2)  # Width/height of the square in pixels
             if matching_sources is not None and len(matching_sources) > 0:
-                half_size = square_size / 2
-                for ax in axes:  # Only first two panels (Image and Reference)
-                    for x_pix, y_pix in zip(
-                        matching_sources["x_pix"], matching_sources["y_pix"]
-                    ):
-                        x_pix -= 1
-                        y_pix -= 1
-                        rect = patches.Rectangle(
-                            (x_pix - half_size, y_pix - half_size),
-                            square_size,
-                            square_size,
-                            linewidth=0.5,
-                            edgecolor="b",
-                            facecolor="none",
-                            alpha=0.5,
-                        )
-                        ax.add_patch(rect)
+                x_col = y_col = None
+                for xc, yc in (
+                    ("x_pix", "y_pix"),
+                    ("X_IMAGE_REF_SCI_MEAN", "Y_IMAGE_REF_SCI_MEAN"),
+                    ("X_IMAGE_SCI", "Y_IMAGE_SCI"),
+                    ("x_center", "y_center"),
+                ):
+                    if xc in matching_sources.columns and yc in matching_sources.columns:
+                        x_col, y_col = xc, yc
+                        break
+                if x_col is None or y_col is None:
+                    logger.warning(
+                        "subtraction_check: matching_sources missing expected x/y columns; available=%s",
+                        list(matching_sources.columns),
+                    )
+                else:
+                    half_size = square_size / 2
+                    for ax in axes:  # Only first two panels (Image and Reference)
+                        for x_pix, y_pix in zip(
+                            matching_sources[x_col], matching_sources[y_col]
+                        ):
+                            x_pix -= 1
+                            y_pix -= 1
+                            rect = patches.Rectangle(
+                                (x_pix - half_size, y_pix - half_size),
+                                square_size,
+                                square_size,
+                                linewidth=0.5,
+                                edgecolor="b",
+                                facecolor="none",
+                                alpha=0.5,
+                            )
+                            ax.add_patch(rect)
 
             # Plot variable sources as red "x" and annotate with otype
             if masked_sources is not None and len(masked_sources) > 0:
@@ -172,7 +188,7 @@ class Plot:
                         circle = mpatches.Circle(
                             (x, y),
                             cross_len * 2,
-                            edgecolor="#D55E00",
+                            edgecolor="#FF0000",
                             facecolor="none",
                             zorder=4,
                             lw=0.5,
@@ -184,14 +200,14 @@ class Plot:
                         axes[0].plot(
                             [x - cross_len, x + cross_len],
                             [y - cross_len, y + cross_len],
-                            color="#D55E00",
+                            color="#FF0000",
                             lw=0.5,
                             zorder=2,
                         )
                         axes[0].plot(
                             [x - cross_len, x + cross_len],
                             [y + cross_len, y - cross_len],
-                            color="#D55E00",
+                            color="#FF0000",
                             lw=0.5,
                             zorder=2,
                         )
@@ -202,7 +218,7 @@ class Plot:
                         ha="center",
                         va="bottom",
                         fontsize=3,
-                        color="#D55E00",
+                        color="#FF0000",
                         zorder=3,
                     )
 
@@ -229,7 +245,7 @@ class Plot:
                         img_data,
                         origin="lower",
                         aspect="auto",
-                        cmap="Greys_r",
+                        cmap="viridis",
                         vmin=vmins[title],
                         vmax=vmaxs[title],
                     )
@@ -238,7 +254,7 @@ class Plot:
                     ax_inset.set_xticks([])
                     ax_inset.set_yticks([])
                     for spine in ax_inset.spines.values():
-                        spine.set_color("#D55E00")
+                        spine.set_color("#000000")
                         spine.set_linewidth(0.5)
                     inset_axes_list.append(ax_inset)
 
@@ -248,7 +264,7 @@ class Plot:
                         2 * inset_size,
                         2 * inset_size,
                         linewidth=0.5,
-                        edgecolor="#D55E00",
+                        edgecolor="#FF0000",
                         facecolor="none",
                     )
                     ax.add_patch(rect)
@@ -284,14 +300,14 @@ class Plot:
                                 coordsB=ax_inset.transAxes,
                                 axesA=ax,
                                 axesB=ax_inset,
-                                color="#D55E00",
+                                color="#FF0000",
                                 linewidth=0.5,
                             )
                         )
 
             # Optional mask overlay
             if mask is not None:
-                red_overlay = colors.ListedColormap(["none", "#D55E00"])
+                red_overlay = colors.ListedColormap(["none", "#FF0000"])
                 for ax in fig.axes:
                     if ax not in inset_axes_list:
                         ax.imshow(mask, cmap=red_overlay, alpha=0.5, origin="lower")
@@ -305,7 +321,7 @@ class Plot:
                     circle = mpatches.Circle(
                         fitted_location,
                         radius=radius,
-                        edgecolor="#D55E00",
+                        edgecolor="#FF0000",
                         facecolor="none",
                         linewidth=0.5,
                         transform=ax.transData,
@@ -319,14 +335,14 @@ class Plot:
                     hline = mlines.Line2D(
                         [x - cross_len, x + cross_len],
                         [y, y],
-                        color="#0072B2",
+                        color="#0000FF",
                         linewidth=0.5,
                         transform=ax.transData,
                     )
                     vline = mlines.Line2D(
                         [x, x],
                         [y - cross_len, y + cross_len],
-                        color="#0072B2",
+                        color="#0000FF",
                         linewidth=0.5,
                         transform=ax.transData,
                     )
@@ -452,10 +468,10 @@ class Plot:
 
         # Panel 1
         axes[0].imshow(
-            cut, origin="lower", cmap="Greys_r", vmin=vmin, vmax=vmax
+            cut, origin="lower", cmap="viridis", vmin=vmin, vmax=vmax
         )
-        axes[0].axvline(tx, color="#0072B2", lw=0.6, alpha=0.9)
-        axes[0].axhline(ty, color="#0072B2", lw=0.6, alpha=0.9)
+        axes[0].axvline(tx, color="#0000FF", lw=0.6, alpha=0.9)
+        axes[0].axhline(ty, color="#0000FF", lw=0.6, alpha=0.9)
         if (
             aperture_radius is not None
             and np.isfinite(aperture_radius)
@@ -465,7 +481,7 @@ class Plot:
                 mpatches.Circle(
                     (tx, ty),
                     float(aperture_radius),
-                    edgecolor="#0072B2",
+                        edgecolor="#0000FF",
                     facecolor="none",
                     lw=0.8,
                 )
@@ -473,7 +489,7 @@ class Plot:
 
         # Panel 2
         axes[1].imshow(
-            cut, origin="lower", cmap="Greys_r", vmin=vmin, vmax=vmax
+            cut, origin="lower", cmap="viridis", vmin=vmin, vmax=vmax
         )
         levels = np.unique(seg)
         levels = levels[levels > 0]
@@ -481,22 +497,22 @@ class Plot:
             axes[1].contour(
                 seg,
                 levels=levels,
-                colors="#009E73",
+                    colors="#00AA00",
                 linewidths=0.4,
                 alpha=0.9,
             )
-        axes[1].axvline(tx, color="#0072B2", lw=0.6, alpha=0.9)
-        axes[1].axhline(ty, color="#0072B2", lw=0.6, alpha=0.9)
+        axes[1].axvline(tx, color="#0000FF", lw=0.6, alpha=0.9)
+        axes[1].axhline(ty, color="#0000FF", lw=0.6, alpha=0.9)
 
         # Panel 3
         axes[2].imshow(
-            cut, origin="lower", cmap="Greys_r", vmin=vmin, vmax=vmax
+            cut, origin="lower", cmap="viridis", vmin=vmin, vmax=vmax
         )
-        overlay = colors.ListedColormap(["none", "#D55E00"])
+        overlay = colors.ListedColormap(["none", "#FF0000"])
         axes[2].imshow(nmask.astype(int), origin="lower", cmap=overlay, alpha=0.35)
-        axes[2].axvline(tx, color="#0072B2", lw=0.6, alpha=0.9)
-        axes[2].axhline(ty, color="#0072B2", lw=0.6, alpha=0.9)
-        fig.savefig(save_path, dpi=300)
+        axes[2].axvline(tx, color="#0000FF", lw=0.6, alpha=0.9)
+        axes[2].axhline(ty, color="#0000FF", lw=0.6, alpha=0.9)
+        fig.savefig(save_path, dpi=150)
         plt.close(fig)
 
     def source_check(
@@ -539,6 +555,7 @@ class Plot:
             from matplotlib.cm import ScalarMappable
             from matplotlib.colors import Normalize
             from matplotlib.lines import Line2D
+            from scipy.spatial import cKDTree
 
             # Set up matplotlib style
             dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -556,7 +573,7 @@ class Plot:
 
             # Create the figure
             plt.ioff()  # Turn interactive mode off
-            fig = plt.figure(figsize=set_size(330, 1))
+            fig = plt.figure(figsize=set_size(540, 1))
             ax1 = fig.add_subplot(111)
 
             # Normalize and plot the image
@@ -567,7 +584,7 @@ class Plot:
                 image,
                 origin="lower",
                 aspect="auto",
-                cmap="Greys_r",
+                cmap="viridis",
                 interpolation=None,
                 norm=norm,
             )
@@ -576,7 +593,7 @@ class Plot:
             circle = Circle(
                 (self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"]),
                 radius,
-                edgecolor="#D55E00",
+                edgecolor="#FF0000",
                 facecolor="none",
                 zorder=4,
                 lw=0.5,
@@ -586,7 +603,7 @@ class Plot:
                 self.input_yaml["target_x_pix"],
                 self.input_yaml["target_y_pix"] + radius + 2,
                 self.input_yaml["target_name"],
-                color="#D55E00",
+                color="#FF0000",
                 fontsize=3,
                 ha="center",
                 va="bottom",
@@ -600,7 +617,7 @@ class Plot:
                     s=max(8, 0.6 * scale),
                     marker="+",
                     linewidths=0.5,
-                    color="#009E73",
+                    color="#00AA00",
                     label="PSF sources",
                     zorder=1,
                 )
@@ -614,7 +631,7 @@ class Plot:
                         lower_left,
                         square_size,
                         square_size,
-                        edgecolor="#0072B2",
+                        edgecolor="#0000FF",
                         facecolor="none",
                         label="Reference Sources",
                         zorder=1,
@@ -682,14 +699,14 @@ class Plot:
                         ax1.plot(
                             [x - cross_len, x + cross_len],
                             [y - cross_len, y + cross_len],
-                            color="#CC79A7",
+                            color="#FF0000",
                             lw=0.5,
                             zorder=2,
                         )
                         ax1.plot(
                             [x - cross_len, x + cross_len],
                             [y + cross_len, y - cross_len],
-                            color="#CC79A7",
+                            color="#FF0000",
                             lw=0.5,
                             zorder=2,
                         )
@@ -707,16 +724,159 @@ class Plot:
                             ha="center",
                             va="bottom",
                             fontsize=3,
-                            color="#CC79A7",
+                            color="#FF0000",
                             zorder=3,
                         )
+
+            # Optional: distortion/residual vectors (catalog -> detected/FWHM sources).
+            # This helps visualize non-uniform astrometric residuals across the field.
+            distortion_rms_text = None
+            try:
+                align_cfg = self.input_yaml.get("alignment", {})
+                show_vec = bool(
+                    align_cfg.get("plot_source_check_distortion_vectors", True)
+                )
+                max_sep = float(align_cfg.get("plot_source_check_max_sep_pix", 6.0))
+                max_vec = int(align_cfg.get("plot_source_check_max_vectors", 300))
+                min_vec = int(align_cfg.get("plot_source_check_min_vectors", 10))
+                show_contours = bool(
+                    align_cfg.get("plot_source_check_distortion_contours", True)
+                )
+                contour_levels = int(
+                    align_cfg.get("plot_source_check_distortion_contour_levels", 7)
+                )
+                if (
+                    show_vec
+                    and catalogSources is not None
+                    and FWHMSources is not None
+                    and len(catalogSources) >= min_vec
+                    and len(FWHMSources) >= min_vec
+                    and {"x_pix", "y_pix"}.issubset(catalogSources.columns)
+                    and {"x_pix", "y_pix"}.issubset(FWHMSources.columns)
+                ):
+                    cat_xy = np.vstack(
+                        [catalogSources["x_pix"].values, catalogSources["y_pix"].values]
+                    ).T
+                    det_xy = np.vstack(
+                        [FWHMSources["x_pix"].values, FWHMSources["y_pix"].values]
+                    ).T
+                    tree = cKDTree(det_xy)
+                    dists, idx = tree.query(cat_xy, k=1, distance_upper_bound=max_sep)
+                    keep = np.isfinite(dists) & (idx < len(det_xy))
+                    if np.count_nonzero(keep) >= min_vec:
+                        cat_m = cat_xy[keep]
+                        det_m = det_xy[idx[keep]]
+                        u = det_m[:, 0] - cat_m[:, 0]
+                        v = det_m[:, 1] - cat_m[:, 1]
+                        residual_mag = np.sqrt(u * u + v * v)
+                        # Optional light-grey contour map of residual magnitude.
+                        if (
+                            show_contours
+                            and len(cat_m) >= max(12, min_vec)
+                            and np.any(np.isfinite(residual_mag))
+                        ):
+                            try:
+                                # Use robust min/max to avoid single-point outlier contours.
+                                lo, hi = np.nanpercentile(residual_mag, [5, 95])
+                                if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                                    levels = np.linspace(
+                                        float(lo), float(hi), max(3, contour_levels)
+                                    )
+                                    contour_grid_size = int(
+                                        align_cfg.get(
+                                            "plot_source_check_distortion_contour_grid_size",
+                                            160,
+                                        )
+                                    )
+                                    contour_grid_size = int(
+                                        np.clip(contour_grid_size, 60, 400)
+                                    )
+                                    # Interpolate sparse residual samples onto a dense
+                                    # grid first; this increases contour points and
+                                    # reduces jagged/spiky triangulation artifacts.
+                                    import matplotlib.tri as mtri
+
+                                    tri = mtri.Triangulation(
+                                        cat_m[:, 0].astype(float),
+                                        cat_m[:, 1].astype(float),
+                                    )
+                                    interp = mtri.LinearTriInterpolator(
+                                        tri, residual_mag.astype(float)
+                                    )
+                                    xg = np.linspace(
+                                        np.nanmin(cat_m[:, 0]),
+                                        np.nanmax(cat_m[:, 0]),
+                                        contour_grid_size,
+                                    )
+                                    yg = np.linspace(
+                                        np.nanmin(cat_m[:, 1]),
+                                        np.nanmax(cat_m[:, 1]),
+                                        contour_grid_size,
+                                    )
+                                    Xg, Yg = np.meshgrid(xg, yg)
+                                    Zg = interp(Xg, Yg)
+                                    if hasattr(Zg, "filled"):
+                                        Zg = Zg.filled(np.nan)
+                                    if np.count_nonzero(np.isfinite(Zg)) >= max(
+                                        100, contour_grid_size
+                                    ):
+                                        ax1.contour(
+                                            Xg,
+                                            Yg,
+                                            Zg,
+                                            levels=levels,
+                                            colors="#D3D3D3",
+                                            linewidths=0.45,
+                                            alpha=0.85,
+                                            zorder=4,
+                                        )
+                                    ax1.plot(
+                                        [],
+                                        [],
+                                        color="#D3D3D3",
+                                        lw=0.8,
+                                        label="Distortion contours",
+                                    )
+                            except Exception as e:
+                                logger.debug(
+                                    "Distortion contour overlay skipped: %s", e
+                                )
+                        if len(cat_m) > max_vec:
+                            sel = np.linspace(0, len(cat_m) - 1, max_vec, dtype=int)
+                            cat_m = cat_m[sel]
+                            u = u[sel]
+                            v = v[sel]
+                        ax1.quiver(
+                            cat_m[:, 0],
+                            cat_m[:, 1],
+                            u,
+                            v,
+                            angles="xy",
+                            scale_units="xy",
+                            scale=1.0,
+                            color="#00FFFF",
+                            alpha=0.65,
+                            width=0.0018,
+                            zorder=5,
+                        )
+                        distortion_rms = float(np.sqrt(np.mean(u * u + v * v)))
+                        distortion_rms_text = f"Distortion residual RMS: {distortion_rms:.2f} px"
+                        ax1.plot(
+                            [],
+                            [],
+                            color="#00FFFF",
+                            lw=0.8,
+                            label="Distortion vectors",
+                        )
+            except Exception as e:
+                logger.debug("Distortion vector overlay skipped: %s", e)
 
             # Overlay the mask if provided
             if mask is not None:
                 from matplotlib import colors
 
-                # Cyan overlay for masks to avoid confusion with other markers
-                mask_cmap = colors.ListedColormap(["none", "#00BFC4"])
+                # Green overlay for masks to avoid confusion with other markers
+                mask_cmap = colors.ListedColormap(["none", "#00AA00"])
                 ax1.imshow(mask, cmap=mask_cmap, alpha=0.5, origin="lower")
 
             # Set axis labels and limits
@@ -724,7 +884,7 @@ class Plot:
             ax1.set_ylabel("Y [Pixel]")
             ax1.set_xlim(0, image.shape[1])
             ax1.set_ylim(0, image.shape[0])
-
+    
             # Create and add legend
             handles, labels = ax1.get_legend_handles_labels()
             by_label = dict(zip(labels, handles))

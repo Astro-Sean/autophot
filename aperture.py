@@ -781,13 +781,13 @@ class Aperture:
 
         norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
         ax_main.imshow(
-            image, origin="lower", norm=norm, cmap="Greys_r", aspect="auto"
+            image, origin="lower", norm=norm, cmap="viridis", aspect="auto"
         )
 
         for radius, color, style in [
-            (ap_size, "#009E73", "-"),
-            (annulusIN, "#D55E00", "--"),
-            (annulusOUT, "#D55E00", "--"),
+            (ap_size, "#00AA00", "-"),
+            (annulusIN, "#FF0000", "--"),
+            (annulusOUT, "#FF0000", "--"),
         ]:
             ax_main.add_patch(
                 Circle((cx, cy), radius, ec=color, fc="none", lw=0.5, ls=style)
@@ -1222,7 +1222,7 @@ class Aperture:
                 ax1.plot(fine_r / fwhm, fine_profile, ls="--", color="black")
 
             ax1.axvline(
-                global_optimum_pre, color="grey", ls=":", label="Initial global"
+                global_optimum_pre, color="black", ls=":", label="Initial global"
             )
             ax1.axvline(optimum_radius, color="black", ls="--", label="Final optimum")
             ax1.set_ylabel("Normalized Flux")
@@ -1375,7 +1375,7 @@ class Aperture:
 
         if plot:
             plt.ioff()
-            fig, ax = plt.subplots(figsize=(8, 6))
+            fig, ax = plt.subplots(figsize=set_size(540, aspect=1.2))
             ax.hist(
                 corrections, bins=15, alpha=0.7, color="steelblue", edgecolor="black"
             )

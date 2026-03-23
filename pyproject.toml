@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autophot"
-version = "0.1.10"
+version = "0.1.11"
 description = "AutoPHOT object photometry pipeline (CCD/NIR; calibrated aperture/PSF photometry; template subtraction)."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -28,6 +28,7 @@ dependencies = [
   "scikit-image==0.25.0",
   "scikit-learn>=1.3",
   "scipy==1.15.1",
+  "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +42,7 @@ all = ["mastcasjobs==0.0.7", "sfft==1.6.3", "aafitrans==0.2.1"]
 [project.scripts]
 autophot-main = "main:run_photometry"
 autophot-driver = "autophot:main"
+autophot-gaia-curves = "autophot_gaia_curves.cli:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -69,7 +71,7 @@ py-modules = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["utils*", "databases*"]
+include = ["utils*", "databases*", "autophot_gaia_curves*"]
 
 [tool.setuptools.package-data]
 databases = ["*.yml"]

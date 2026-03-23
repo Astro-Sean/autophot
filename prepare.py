@@ -282,7 +282,21 @@ class Prepare:
                 sys.exit(1)
             else:
                 fname = self.input_yaml["catalog"]["catalog_custom_fpath"]
-            custom_table = pd.read_csv(fname)
+            try:
+                custom_table = pd.read_csv(fname)
+            except pd.errors.EmptyDataError:
+                self.logger.error(
+                    "Custom catalog CSV is empty or has no parseable header. "
+                    "Remove the file to force a rebuild, or fix the path: %s",
+                    fname,
+                )
+                sys.exit(1)
+            if custom_table.empty:
+                self.logger.error(
+                    "Custom catalog contains no sources (0 data rows): %s",
+                    fname,
+                )
+                sys.exit(1)
             available_filters = [
                 f for f in catalog_input.keys() if f in custom_table.columns
             ]

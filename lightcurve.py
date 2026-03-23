@@ -52,22 +52,38 @@ BAND_WAVELENGTHS = {
     "K": 21590,
 }
 
-# Hand-tuned plotting colours: wavelength-inspired for optical, distinct for IR.
-BAND_COLORS = {
-    "u": "#4B0082",
-    "g": "#00BFFF",
-    "r": "#FF4500",
-    "i": "#B22222",
-    "z": "#800000",
-    "U": "#7B2FBE",
-    "B": "#1E90FF",
-    "V": "#228B22",
-    "R": "#DC143C",
-    "I": "#8B0000",
-    "J": "#A0522D",
-    "H": "#DAA520",
-    "K": "#556B2F",
+# Colours for plots (per-band). Keep these in sync with the palette user-supplied.
+cols = {
+    "u": "dodgerblue",
+    "g": "g",
+    "r": "r",
+    "i": "goldenrod",
+    "z": "k",
+    "y": "0.5",
+    "w": "firebrick",
+    "Y": "0.5",
+    "U": "slateblue",
+    "B": "b",
+    "V": "yellowgreen",
+    "R": "crimson",
+    "I": "chocolate",
+    "G": "salmon",
+    "E": "salmon",
+    "J": "darkred",
+    "H": "orangered",
+    "K": "saddlebrown",
+    "S": "mediumorchid",
+    "D": "purple",
+    "A": "midnightblue",
+    "F": "hotpink",
+    "N": "magenta",
+    "o": "darkorange",
+    "c": "cyan",
+    "W": "forestgreen",
+    "Q": "peru",
 }
+
+BAND_COLORS = cols
 
 # Colour indices -> plotting colour (distinct, hue between constituent bands).
 COLOR_INDEX_COLORS = {
@@ -173,7 +189,7 @@ def plot_lightcurve(
     use_SNR_limit=True,
     mark_today=False,
     target_name=None,
-    dpi=100,
+    dpi=150,
     plot_color=False,
     color_match_days=0.5,
 ):
@@ -238,28 +254,11 @@ def plot_lightcurve(
         today_mjd = today.mjd
 
     dm = get_distance_modulus(redshift) if redshift else 0
-    # High-contrast, colourblind-friendly palette for filters. Prefer a small,
-    # well-separated set and fall back to BAND_COLORS, then a neutral grey.
-    base_cols = {
-        # Core optical set (Okabe–Ito style)
-        "g": "#0072B2",  # blue
-        "r": "#D55E00",  # orange
-        "i": "#009E73",  # green
-        "z": "#CC79A7",  # magenta
-        "u": "#56B4E9",
-        # Johnson–Cousins mapped to similar hues
-        "B": "#0072B2",
-        "V": "#009E73",
-        "R": "#D55E00",
-        "I": "#CC79A7",
-        # NIR
-        "J": "#332288",
-        "H": "#88CCEE",
-        "K": "#117733",
-    }
+    # Use the shared per-band palette.
+    base_cols = BAND_COLORS
     # Band plotting order (exclude Gaia G so it is not conflated with SDSS g).
     band_order = "FSDNAuUBgcVwrRoEiIzyYJHKWQ"
-    cols = {b: base_cols.get(b, BAND_COLORS.get(b, "#4D4D4D")) for b in band_order}
+    cols = {b: base_cols.get(b, BAND_COLORS.get(b, "k")) for b in band_order}
     data = pd.read_csv(output_file)
     data = _normalize_photometry_columns(data)
     # If the CSV has duplicate column names (can happen after concatenation or
@@ -530,7 +529,7 @@ def plot_lightcurve(
         for ax in curve_axes:
             ax.axvline(
                 x=today_rel,
-                color="#D55E00",
+                color="#FF0000",
                 linestyle="--",
                 alpha=0.7,
                 linewidth=1.2,
@@ -554,7 +553,7 @@ def plot_lightcurve(
             transform=curve_axes[0].transAxes,
             va="top",
             ha="left",
-            bbox=dict(facecolor="white", alpha=0.9, edgecolor="gray", linewidth=0.5),
+            bbox=dict(facecolor="white", alpha=0.9, edgecolor="black", linewidth=0.5),
         )
 
     # Legend: filter symbols; optionally add limit legend entry once
@@ -565,11 +564,11 @@ def plot_lightcurve(
         limit_handle = Line2D(
             [0],
             [0],
-            color="gray",
+            color="black",
             marker="v",
             markersize=5,
             markerfacecolor="none",
-            markeredgecolor="gray",
+            markeredgecolor="black",
             markeredgewidth=0.5,
             ls="",
             label="Upper limit",
@@ -602,7 +601,7 @@ def plot_lightcurve(
         loc="best",
         frameon=True,
         framealpha=0.95,
-        edgecolor="gray",
+        edgecolor="black",
         ncol=ncol,
     )
 
@@ -775,7 +774,7 @@ def plot_lightcurve(
                     phase_ll.append(phase)
                     color_ll.append(row["lmag"] - mag2[j])
             label = f"{b1}-{b2}"
-            c = COLOR_INDEX_COLORS.get(label, cols.get(b1, "gray"))
+            c = COLOR_INDEX_COLORS.get(label, cols.get(b1, "k"))
             if phase_pts:
                 phase_arr = np.array(phase_pts)
                 color_arr = np.array(color_pts)

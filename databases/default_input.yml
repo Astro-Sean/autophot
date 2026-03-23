@@ -65,6 +65,11 @@ default_input:
     redo_sources: False # bool --- If True, redo source detection/photometry even if intermediate outputs exist.
     fitting_xy_bounds: 1 # int --- Bound on allowed X/Y fitting offsets (pipeline-specific; used to constrain centroid shifts).
 
+    # SExtractor → pipeline FWHM / scale: constant-region mask can drop many stars on ultra-smooth sky (biased FWHM).
+    sextractor_reject_constant_regions: True # bool --- If False, do not reject sources in flat-variance regions.
+    # Robust median FWHM from SExtractor FWHM_IMAGE (sigma-clipping iterations).
+    fwhm_sigma_clip_maxiters: 15 # int --- Higher = more stable FWHM on noisy outlier stars; slower is negligible.
+
     # PSF star selection: FFT-based outlier rejection (blends, cosmic rays).
     psf_fft_rejection: True # bool --- Enable FFT-based rejection during PSF star selection.
     psf_fft_n_sigma: 4.0 # float --- Rejection threshold (sigma units) for FFT outlier metric.
@@ -96,8 +101,36 @@ default_input:
     crowded_auto_background_rms_min: null # float|null --- Crowded-field trigger: minimum background RMS (optional).
 
     redo_wcs: True # bool --- If True, solve/refresh WCS even if a WCS exists in the header.
+    projection_type: TPV # str --- WCS projection/distortion mode: TPV (default: solve-field + SCAMP) or SIP (solve-field only).
+    allow_fallback_to_existing_on_solve_fail: False # bool --- If False, require a fresh solve when redo_wcs=True (no silent fallback to original header WCS).
     apply_solved_to_fits: True # bool --- If True, write solved WCS back into the FITS header on disk.
     solve_field_exe_loc: solve-field # str --- `solve-field` executable name/path (defaults to `solve-field` on PATH).
+    solve_field_tweak_order: 4 # int --- solve-field SIP tweak order to use (single-value mode).
+    prefer_scamp_tpv_after_solve: True # bool --- After solve-field succeeds, prefer SCAMP WCS (TPV/PV distortion) when available.
+    # If True, preserve input non-linear distortion keywords (PV/SIP) when
+    # merging solve-field WCS. Set False to fully replace distortion terms.
+    # For fit_wcs_from_points-based refinement (below), this is ignored and
+    # old distortion is NOT preserved.
+    preserve_distortion_on_redo: False # bool
+    # Deprecated/no-op: fit_wcs_from_points refinement path has been removed.
+    fit_wcs_from_points_sip_degree: null # int|null --- Deprecated; ignored.
+    compare_input_vs_solved_wcs: True # bool --- Log input-vs-solved WCS quality/parameter deltas on solve-field matched stars.
+    keep_input_wcs_if_solved_not_better: True # bool --- If solve-field WCS is not better than input on matched points, keep original full input WCS for this frame.
+    trust_input_distortion_model: False # bool --- If True, keep input distortion model (PV/SIP) and solve only linear WCS terms.
+    fit_wcs_from_points_max_points: 1000 # int --- Max matched points to use.
+    fit_wcs_from_points_min_points: 30 # int --- Minimum matched points required to attempt refit.
+    fit_wcs_from_points_max_match_lines: 20000 # int --- Max lines to scan.
+    fit_wcs_from_points_max_sep_arcsec: 3.0 # float --- Column validation threshold.
+    fit_wcs_from_points_clip_sigma: 3.5 # float --- Robust sigma clip on initial-WCS residuals before SIP refit.
+    fit_wcs_from_points_prefilter_min_keep_frac: 0.55 # float --- If strict prefilter keeps fewer than this fraction, retry with relaxed thresholds.
+    fit_wcs_from_points_prefilter_relax_factor: 2.0 # float --- Multiplicative relaxation factor for max_sep_arcsec and clip_sigma in fallback prefilter.
+    fit_wcs_from_points_accept_only_if_improves: True # bool --- Accept refined WCS only when residual metrics improve.
+    fit_wcs_from_points_allow_degraded_accept: False # bool --- Keep False for science runs; True forces acceptance even when refinement catastrophically worsens residuals.
+    fit_wcs_from_points_min_improvement_frac: 0.05 # float --- Require >=5% median residual improvement to accept refit.
+    fit_wcs_from_points_min_improvement_arcsec: 0.05 # float --- Also require >=0.05 arcsec absolute median improvement.
+    # If True, pass astrometry.net --crpix-center (CRPIX at image center). Omitting it often matches
+    # telescope/subarray headers better and can improve photometry vs a forced-center solved WCS.
+    solve_field_crpix_center: False # bool --- Legacy/previous AutoPHoT behavior used True (always pass --crpix-center).
     refine_after_solve: False # bool --- If True, run an additional WCS refinement pass after a successful solve.
 
     scamp_exe_loc: null # str|null --- Optional explicit path to `scamp` executable.
@@ -107,7 +140,7 @@ default_input:
     search_radius: 0.5 # float --- Search radius (degrees) for blind/assisted WCS solving.
     downsample: 4 # int --- Downsampling factor used for source detection/solving speed-up.
     code_tolerance: 0.01 # float --- Tolerance for WCS solution acceptance (backend-dependent).
-    objs: null # int|null --- Optional target number of objects to use in solving (backend-dependent).
+    objs: 1200 # int|null --- Optional target number of objects to use in solve-field.
 
     sextractor_detect_thresh: 1.5 # float --- SExtractor DETECT_THRESH for WCS source detection.
     sextractor_detect_minarea: 5 # int --- SExtractor DETECT_MINAREA for WCS source detection.
@@ -116,7 +149,7 @@ default_input:
     sextractor_deblend_mincont: 0.005 # float --- SExtractor DEBLEND_MINCONT for WCS source detection.
 
     crowded:
-      objs: 300 # int --- Target number of objects in crowded-field solving mode.
+      objs: 800 # int --- Target number of objects in crowded-field solving mode.
       sextractor_detect_thresh: 2.5 # float --- Crowded-field SExtractor DETECT_THRESH.
       sextractor_detect_minarea: 8 # int --- Crowded-field SExtractor DETECT_MINAREA.
       sextractor_analysis_thresh: 2.0 # float --- Crowded-field SExtractor ANALYSIS_THRESH.
@@ -135,8 +168,29 @@ default_input:
   catalog:
     use_catalog: null # str|null --- Catalog backend to use for calibration (e.g. APASS, PS1, GAIA); null to auto/disable.
     catalog_custom_fpath: null # str|null --- Optional path to a user-supplied catalog file.
+    curve_map: null # dict[str,str]|null --- Optional band->transmission-curve file map. If set, AutoPHoT builds a Gaia custom catalog and auto-uses `custom`.
+    curve_map_svo: null # dict[str,str]|null --- Optional band->SVO filter ID map (e.g. {"r": "SDSS/SDSS.r"}) to fetch curves automatically.
     catalog_radius: 0.25 # float --- Search radius (degrees) around target for catalog query.
     gaia_xp_radius_deg: 0.1667 # float --- Search radius (degrees) for Gaia XP query (if used).
+    gaia_xp_max_sources: 5000 # int --- Max Gaia sources for XP spectra/synthetic photometry (speed vs completeness).
+    gaia_xp_order_by: brightness # str --- `brightness` (SQL order) or `distance` (prefetch + Python sort by on-sky sep; Gaia ADQL has no ORDER BY distance).
+    gaia_xp_show_progress: False # bool --- tqdm progress for GaiaXPy batched calibrate/generate.
+    # Transmission-curve custom catalog (catalog.curve_map) uses these if set; else falls back to gaia_xp_max_sources / order.
+    gaia_curve_map_max_sources: 100 # int --- Max sources for curve-map Gaia CSV (nearest stars by default).
+    gaia_curve_map_order_by: distance # str --- `distance` (Python sort after prefetch) or `brightness` (SQL order only).
+    # When order is distance: Gaia ADQL cannot ORDER BY sky distance; we request TOP N (prefetch) then sort in Python.
+    gaia_nearest_prefetch_factor: 50 # int --- SQL TOP >= max_sources * factor (capped below) before distance sort.
+    gaia_nearest_prefetch_min: 500 # int --- Minimum prefetch TOP when using distance ordering.
+    gaia_nearest_prefetch_max: 10000 # int --- Maximum prefetch TOP (archive load vs completeness tradeoff).
+    # Gaia archive / GaiaXPy pacing (ESA recommends spacing heavy queries, e.g. 1 s).
+    gaia_archive_query_pause_before_sec: 1.0 # float --- Sleep before each Gaia ADQL job (seconds).
+    gaia_archive_query_pause_after_sec: 1.0 # float --- Sleep after each Gaia ADQL job (seconds).
+    gaia_xp_batch_size: 200 # int --- Sources per GaiaXPy calibrate/generate call; use <=0 for one call (heavy).
+    gaia_xp_batch_pause_sec: 1.0 # float --- Sleep between GaiaXPy batches (seconds).
+    gaia_archive_max_retries: 3 # int --- Retries per ADQL batch / GaiaXPy batch on failure.
+    gaia_archive_retry_base_delay_sec: 2.0 # float --- Initial backoff (seconds); doubles each retry.
+    gaia_xp_photometric_systems: ["SDSS_Std", "JKC_Std"] # list[str]|null --- Which GaiaXPy photometric systems to generate.
+      # Set to null or [] to disable XP synthetic photometry and fall back to base DR3 photometry only.
     include_IR_sequence_data: False # bool --- If True, augment catalog with IR sequence data (when available).
     MASTcasjobs_wsid: null # str|null --- Optional MAST CasJobs workspace ID for refcat/casjobs-backed catalog queries.
     MASTcasjobs_pwd: null # str|null --- Optional MAST CasJobs password/token for refcat/casjobs-backed catalog queries.
@@ -149,7 +203,8 @@ default_input:
     bkg_level: 3 # int --- Background handling mode/level (pipeline-specific; higher typically more aggressive).
 
   source_detection:
-    scale_multipler: 3 # float --- Scale factor applied to detection thresholds (pipeline-specific).
+    # Also multiplies measured FWHM to set runtime ``scale`` (PSF cutouts, limits, plots). Legacy code ignored this key and used 4.0.
+    scale_multipler: 3 # float --- FWHM→scale factor (see utils/run_sex.scale_multiplier_from_config).
     use_catalog: null # str|null --- Optional catalog to seed/guide source detection (if supported).
 
   limiting_magnitude:
@@ -159,10 +214,22 @@ default_input:
 
   alignment:
     reproject_method: adaptive # str --- Reprojection strategy/method selector for WCS alignment (pipeline-specific).
-    reproject_roundtrip_coords: False # bool --- If True, perform a coordinate round-trip sanity check during reproject.
+    reproject_roundtrip_coords: True # bool --- Coordinate round-trip check (matches reproject default; False can mis-register).
     reproject_interp_order: bicubic # str|int --- Interpolation order/mode for reprojection (e.g. nearest, bilinear, bicubic).
     reproject_parallel: False # bool --- Enable parallel reprojection where supported.
+    # reproject_adaptive only: library default is False; True rescales pixels for flux conservation (can blur when scales match).
+    reproject_adaptive_conserve_flux: False # bool
+    reproject_adaptive_center_jacobian: False # bool --- More accurate Jacobian at grid points; slower (non-smooth WCS).
     reproject_subpixel_refine: False # bool --- If True, apply subpixel refinement after WCS alignment (where implemented).
+    reproject_enforce_rms_fallback: False # bool --- Deprecated/no-op: reproject RMS safeguard removed; kept for backward config compatibility.
+    reproject_max_rms_pixels: 0.90 # float --- Maximum acceptable reproject alignment score (median mutual-pair residual, pixels) before fallback.
+    plot_source_check_distortion_vectors: True # bool --- Overlay catalog->detected residual vectors on Sourcecheck plot.
+    plot_source_check_distortion_contours: True # bool --- Overlay light-grey contour map of residual distortion magnitude on Sourcecheck plot.
+    plot_source_check_distortion_contour_levels: 7 # int --- Number of contour levels for distortion residual map.
+    plot_source_check_distortion_contour_grid_size: 160 # int --- Interpolation grid size for contouring residual distortion (higher = smoother, slower).
+    plot_source_check_max_sep_pix: 6.0 # float --- Max nearest-neighbor separation (pixels) for residual-vector pairing.
+    plot_source_check_max_vectors: 300 # int --- Max vectors to draw on Sourcecheck plot (for readability).
+    plot_source_check_min_vectors: 10 # int --- Minimum matched vectors required before drawing overlay.
 
   template_subtraction:
     do_subtraction: False # bool --- Enable template subtraction step.
@@ -191,6 +258,7 @@ default_input:
     crowded_field: False # bool --- Global crowded-field flag for subtraction/source selection heuristics.
     sextractor_crowded: False # bool --- Use crowded-field SExtractor settings for subtraction/source selection (if supported).
     sfft_crowded_method: False # bool --- Force SFFT crowded-field configuration (overrides auto logic).
+    sfft_const_phot_ratio: False # bool --- SFFT ConstPhotRatio; False allows spatially varying photometric scaling to reduce localized over-subtraction.
 
     inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).
     inpaint_method: biharmonic # str --- Inpainting algorithm name (e.g. biharmonic).

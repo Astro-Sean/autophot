@@ -27,7 +27,7 @@ _repo_root = os.path.abspath(os.path.join(_script_dir, ".."))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-from functions import ColoredLevelFormatter
+from functions import ColoredLevelFormatter, LogMessageNormalizeFilter, set_size
 
 # Limit BLAS/OpenMP threads before any scientific imports (avoids libgomp
 # "Resource temporarily unavailable" when this script is run as a subprocess
@@ -78,13 +78,17 @@ def run_sfft() -> Optional[int]:
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(levelname)s - %(message)s",
+            datefmt="%H:%M:%S",
         )
         # Add ANSI highlighting for WARN/ERROR/DEBUG in the console.
         root_logger = logging.getLogger()
+        _normalize_filter = LogMessageNormalizeFilter(width=120)
         for h in root_logger.handlers:
+            h.addFilter(_normalize_filter)
             h.setFormatter(
                 ColoredLevelFormatter(
                     fmt="%(asctime)s - %(levelname)s - %(message)s",
+                    datefmt="%H:%M:%S",
                     use_color=True,
                 )
             )
@@ -867,7 +871,9 @@ def run_sfft() -> Optional[int]:
                         median - CVREJ_MAGD_THRESH,
                         median + CVREJ_MAGD_THRESH,
                     )
-                    fig, ax = plt.subplots(figsize=(8, 5), dpi=300)
+                    fig, ax = plt.subplots(
+                        figsize=set_size(540, aspect=1.01), dpi=150
+                    )
                     ax.errorbar(
                         x_data,
                         y_data,
@@ -897,7 +903,9 @@ def run_sfft() -> Optional[int]:
                     ax.legend(fontsize=9, framealpha=1)
                     png_path = os.path.join(out_dir, f"Varcheck_{out_base}.png")
                     try:
-                        plt.savefig(png_path, bbox_inches="tight")
+                        plt.savefig(
+                            png_path, bbox_inches="tight", dpi=150
+                        )
                     except Exception:
                         pass
                     plt.close(fig)

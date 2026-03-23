@@ -58,9 +58,28 @@ from scipy.ndimage import shift as ndimage_shift
 from scipy.optimize import minimize
 from scipy.spatial import cKDTree
 from scipy.stats import median_abs_deviation
-from sklearn.base import BaseEstimator, RegressorMixin
-from sklearn.linear_model import RANSACRegressor
-from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
+try:
+    from sklearn.base import BaseEstimator, RegressorMixin
+    from sklearn.linear_model import RANSACRegressor
+    from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
+
+    _SKLEARN_AVAILABLE = True
+except ModuleNotFoundError:
+    # Template download code should be usable even when scikit-learn isn't
+    # installed; the regression/color-term sections will error at runtime.
+    class _BaseEstimatorPlaceholder:
+        pass
+
+    class _RegressorMixinPlaceholder:
+        pass
+
+    BaseEstimator = _BaseEstimatorPlaceholder
+    RegressorMixin = _RegressorMixinPlaceholder
+    RANSACRegressor = None
+    check_X_y = None
+    check_array = None
+    check_is_fitted = None
+    _SKLEARN_AVAILABLE = False
 
 # =============================================================================
 # Astropy Imports
@@ -79,24 +98,52 @@ from astropy.wcs import WCS
 # =============================================================================
 # Astroquery Imports
 # =============================================================================
-from astroquery.sdss import SDSS
+try:
+    from astroquery.sdss import SDSS  # type: ignore
+
+    _ASTROQUERY_AVAILABLE = True
+except ModuleNotFoundError:
+    SDSS = None
+    _ASTROQUERY_AVAILABLE = False
 
 # =============================================================================
 # Photutils Imports
 # =============================================================================
-from photutils.aperture import CircularAperture, RectangularAperture
-from photutils.segmentation import (
-    detect_sources,
-    SourceCatalog,
-    make_2dgaussian_kernel,
-    SegmentationImage,
-)
-from photutils.detection import DAOStarFinder
+try:
+    from photutils.aperture import CircularAperture, RectangularAperture
+    from photutils.segmentation import (
+        detect_sources,
+        SourceCatalog,
+        make_2dgaussian_kernel,
+        SegmentationImage,
+    )
+    from photutils.detection import DAOStarFinder
+
+    _PHOTUTILS_AVAILABLE = True
+except ModuleNotFoundError:
+    # Allow module import for template downloading; alignment/photometry will
+    # fail at runtime if these are required but missing.
+    CircularAperture = None
+    RectangularAperture = None
+    detect_sources = None
+    SourceCatalog = None
+    make_2dgaussian_kernel = None
+    SegmentationImage = None
+    DAOStarFinder = None
+    _PHOTUTILS_AVAILABLE = False
 
 # =============================================================================
 # Reproject Imports
 # =============================================================================
-from reproject import reproject_interp, reproject_adaptive, reproject_exact
+try:
+    from reproject import reproject_interp, reproject_adaptive, reproject_exact
+
+    _REPROJECT_AVAILABLE = True
+except ModuleNotFoundError:
+    reproject_interp = None
+    reproject_adaptive = None
+    reproject_exact = None
+    _REPROJECT_AVAILABLE = False
 
 try:
     from skimage.registration import phase_cross_correlation
@@ -106,17 +153,34 @@ except ImportError:
 # =============================================================================
 # Custom / Local Module Imports
 # =============================================================================
-from catalog import Catalog
-from functions import (
-    border_msg,
-    distance_to_uniform_row_col,
-    get_header,
-    get_image,
-    get_image_stats,
-    save_to_fits,
-)
+try:
+    from catalog import Catalog
+except ModuleNotFoundError:
+    Catalog = None
+try:
+    from functions import (
+        border_msg,
+        distance_to_uniform_row_col,
+        get_header,
+        get_image,
+        get_image_stats,
+        save_to_fits,
+    )
+except (ModuleNotFoundError, ImportError):
+    # Download-only use cases shouldn't require the full photometry stack.
+    def border_msg(message: Any, *args: Any, **kwargs: Any) -> str:
+        return str(message)
+
+    distance_to_uniform_row_col = None
+    get_header = None
+    get_image = None
+    get_image_stats = None
+    save_to_fits = None
 from wcs import get_wcs
-from utils import run_IDC
+try:
+    from utils import run_IDC
+except (ModuleNotFoundError, ImportError):
+    run_IDC = None
 
 # =============================================================================
 # External Tool Imports
@@ -145,8 +209,8 @@ except ImportError:
 # =============================================================================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
@@ -313,6 +377,29 @@ def find_conda_env(env_name: str) -> Optional[str]:
     except FileNotFoundError:
         logger.debug("conda not found on PATH")
     return None
+
+
+def _normalize_reproject_interp_order(order: Any) -> Any:
+    """
+    Map YAML / user strings to values accepted by ``reproject.reproject_interp``.
+
+    Reproject accepts int 0–5 or specific strings (e.g. ``'bicubic'``); unknown
+    strings fall back to ``'bilinear'``.
+    """
+    if isinstance(order, int):
+        return max(0, min(5, int(order)))
+    s = str(order).lower().strip()
+    if s in ("nearest", "nearest-neighbor", "nn"):
+        return "nearest-neighbor"
+    if s in ("bilinear", "linear", "1"):
+        return "bilinear"
+    if s in ("biquadratic", "2"):
+        return "biquadratic"
+    if s in ("bicubic", "cubic", "3"):
+        return "bicubic"
+    if s.isdigit():
+        return max(0, min(5, int(s)))
+    return "bilinear"
 
 
 def read_fits(
@@ -721,13 +808,13 @@ def download_panstarrs_template(
                     "TELESCOP": "PS1",
                     "INSTRUME": "GPC1",
                     "FILTER": band,
-                    "GAIN": src_header["CELL.GAIN"],
-                    "MJD-OBS": src_header["MJD-OBS"],
-                    "EXPTIME": src_header["EXPTIME"],
+                    "GAIN": src_header.get("CELL.GAIN", src_header.get("GAIN", 1.0)),
+                    "MJD-OBS": src_header.get("MJD-OBS", 0.0),
+                    "EXPTIME": src_header.get("EXPTIME", 1.0),
                 }
             )
             template_wcs = get_wcs(src_header)
-            new_header.update(template_wcs.to_header(), relax=True)
+            new_header.update(template_wcs.to_header(relax=True), relax=True)
 
             write_fits(str(template_fpath), hdu[0].data, new_header)
 
@@ -777,6 +864,12 @@ def download_sdss_template(
         Path to the downloaded FITS file, or None on failure.
     """
     warnings.filterwarnings("ignore", category=AstropyWarning)
+
+    if not _ASTROQUERY_AVAILABLE or SDSS is None:
+        logger.warning(
+            "SDSS template download requested but 'astroquery' is not installed; skipping."
+        )
+        return None
 
     band = str(f).strip().lower()
     if band not in SDSS_FILTERS:
@@ -977,11 +1070,10 @@ def download_legacy_template(
         Path to the downloaded FITS file for the requested band, or None on failure.
     """
     if not _HAS_LEGACYSTAMPS:
-        raise RuntimeError(
-            "Legacy Survey template download requested but the 'legacystamps' package is not installed.\n"
-            "Install it in your environment, e.g. with:\n\n"
-            "    pip install legacystamps\n"
+        logger.warning(
+            "Legacy Survey template download requested but 'legacystamps' is not installed; skipping."
         )
+        return None
 
     band = str(band).strip().lower()
     if band not in LEGACY_FILTERS:
@@ -990,6 +1082,7 @@ def download_legacy_template(
 
     # Path for requested band; subfolders must match find_templates (gp_template, etc.)
     template_base = Path(template_folder)
+    template_base.mkdir(parents=True, exist_ok=True)
     out_path = template_base / f"{band}p_template" / f"legacy_{band}_band_template.fits"
 
     if out_path.exists():
@@ -1171,7 +1264,7 @@ def download_2mass_template(
     size: float,
     template_folder: str,
     band: str = "J",
-) -> Dict[str, str]:
+) -> Optional[Dict[str, str]]:
     """
     Download a 2MASS image cutout via IRSA's Simple Image Access service.
 
@@ -1246,7 +1339,7 @@ def download_2mass_template(
 
     except Exception:
         logger.exception("Error downloading 2MASS template")
-        raise
+        return None
 
     return {query_band: str(out_path)}
 
@@ -1291,6 +1384,10 @@ class ConstrainedSlopeRegressor(BaseEstimator, RegressorMixin):
         self.fixed_slope = fixed_slope
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "ConstrainedSlopeRegressor":
+        if check_X_y is None or not _SKLEARN_AVAILABLE:
+            raise ModuleNotFoundError(
+                "scikit-learn is required for ConstrainedSlopeRegressor."
+            )
         X, y = check_X_y(X, y)
         x = X.ravel()
 
@@ -1315,6 +1412,10 @@ class ConstrainedSlopeRegressor(BaseEstimator, RegressorMixin):
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
+        if check_is_fitted is None or check_array is None or not _SKLEARN_AVAILABLE:
+            raise ModuleNotFoundError(
+                "scikit-learn is required for ConstrainedSlopeRegressor.predict."
+            )
         check_is_fitted(self)
         X = check_array(X)
         return self.slope_ * X.ravel() + self.intercept_
@@ -1550,6 +1651,13 @@ class Templates:
         if ignore_position is None:
             ignore_position = []
 
+        # Be strict about the input type for photutils.
+        data = np.asarray(data)
+        if data.ndim != 2:
+            raise TypeError(
+                f"create_image_mask expected 2-D image data, got shape {data.shape}"
+            )
+
         # Resolve parameters: prefer dataclass, fall back to kwargs
         if params is not None:
             sat_lvl = params.saturation_level
@@ -1580,10 +1688,20 @@ class Templates:
 
             # --- Source detection via segmentation ---
             seg = detect_sources(data, threshold, npixels=npixels_det)
+            if seg is None:
+                logger.warning(
+                    "create_image_mask: detect_sources returned None; returning empty mask."
+                )
+                return mask, masked_centres
             # Photutils >= 1.1 expects a SegmentationImage for SourceCatalog;
             # older versions may return a plain array, so normalise here.
             if not isinstance(seg, SegmentationImage):
-                seg = SegmentationImage(seg)
+                seg_arr = np.asarray(getattr(seg, "data", seg))
+                if seg_arr.ndim != 2:
+                    raise TypeError(
+                        f"create_image_mask: expected 2-D segmentation array, got shape {seg_arr.shape}"
+                    )
+                seg = SegmentationImage(seg_arr)
 
             cat = SourceCatalog(data, seg, localbkg_width=15 * fwhm)
             tbl = cat.to_table().to_pandas()
@@ -1745,7 +1863,7 @@ class Templates:
                 sci_path: str,
                 ref_path: str,
                 fwhm_pixels: float,
-            ) -> None:
+            ) -> Optional[float]:
                 """
                 Log approximate alignment RMS (diagnostic only). Does not reject.
                 """
@@ -1753,7 +1871,7 @@ class Templates:
                     sci_data, _ = read_fits(sci_path)
                     ref_data, _ = read_fits(ref_path)
                     if sci_data.shape != ref_data.shape:
-                        return
+                        return None
                     from astropy.stats import sigma_clipped_stats as _scs
 
                     _, med_sci, std_sci = _scs(sci_data, sigma=3.0)
@@ -1764,46 +1882,129 @@ class Templates:
                     tbl_sci = daofind_sci(sci_data - med_sci) or []
                     tbl_ref = daofind_ref(ref_data - med_ref) or []
                     if len(tbl_sci) < 5 or len(tbl_ref) < 5:
-                        return
+                        return None
                     sci_xy = np.vstack(
                         (tbl_sci["xcentroid"].data, tbl_sci["ycentroid"].data)
                     ).T
                     ref_xy = np.vstack(
                         (tbl_ref["xcentroid"].data, tbl_ref["ycentroid"].data)
                     ).T
-                    tree = cKDTree(ref_xy)
-                    dists, _ = tree.query(sci_xy, k=1)
-                    good = np.isfinite(dists)
-                    if not np.any(good):
-                        return
-                    rms = float(np.sqrt(np.mean(dists[good] ** 2)))
-                    logger.info("Alignment RMS offset: %.3f pixels (diagnostic).", rms)
+                    if len(sci_xy) < 5 or len(ref_xy) < 5:
+                        return None
+
+                    # Use mutual nearest-neighbor pairs and clip by a generous
+                    # distance tied to image FWHM. One-way nearest-neighbor
+                    # pairing can overestimate RMS in crowded fields.
+                    max_sep = float(max(2.5, 2.5 * fwhm))
+                    tree_ref = cKDTree(ref_xy)
+                    d_sr, i_sr = tree_ref.query(sci_xy, k=1)
+                    tree_sci = cKDTree(sci_xy)
+                    d_rs, i_rs = tree_sci.query(ref_xy, k=1)
+
+                    if len(i_sr) == 0 or len(i_rs) == 0:
+                        return None
+                    idx_s = np.arange(len(sci_xy), dtype=int)
+                    mutual = (i_rs[i_sr] == idx_s) & np.isfinite(d_sr)
+                    if not np.any(mutual):
+                        return None
+                    d_mut = d_sr[mutual]
+                    d_mut = d_mut[np.isfinite(d_mut) & (d_mut <= max_sep)]
+                    if len(d_mut) < 10:
+                        return None
+
+                    med = float(np.nanmedian(d_mut))
+                    p90 = float(np.nanpercentile(d_mut, 90.0))
+                    rms = float(np.sqrt(np.mean(d_mut**2)))
+                    logger.info(
+                        "Alignment offset diagnostics: median=%.3f px rms=%.3f px p90=%.3f px (%d mutual pairs, max_sep=%.2f px).",
+                        med,
+                        rms,
+                        p90,
+                        int(len(d_mut)),
+                        max_sep,
+                    )
+                    # Return a robust score for gating; RMS can be dominated by
+                    # a small high-residual tail in crowded fields.
+                    return med
                 except Exception:
-                    pass
+                    return None
 
             # ------------------------------------------------------------------
             # Strategy implementations
             # ------------------------------------------------------------------
 
             def _reproject() -> Tuple[Optional[str], Optional[str]]:
+                def _prepare_projection_header(header_in):
+                    """
+                    Build a projection header for reproject while preserving
+                    distortion keywords (SIP/PV/TPV) where possible.
+                    """
+                    hdr = header_in.copy()
+                    sip_keys = ("A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER")
+                    if any(k in hdr for k in sip_keys):
+                        for ctype_key in ("CTYPE1", "CTYPE2"):
+                            cval = str(hdr.get(ctype_key, ""))
+                            # SIP is defined for TAN projections; avoid invalid
+                            # projection strings like RA---TPV-SIP.
+                            if (
+                                cval
+                                and ("TAN" in cval)
+                                and not cval.endswith("-SIP")
+                            ):
+                                hdr[ctype_key] = f"{cval}-SIP"
+                    return hdr
+
+                def _distortion_summary(header_in) -> str:
+                    keys = list(header_in.keys())
+                    pv = sum(1 for k in keys if str(k).startswith("PV"))
+                    sip = sum(
+                        1
+                        for k in keys
+                        if str(k).startswith(("A_", "B_", "AP_", "BP_", "SIP_"))
+                    )
+                    c1 = str(header_in.get("CTYPE1", ""))
+                    c2 = str(header_in.get("CTYPE2", ""))
+                    return f"CTYPE1={c1} CTYPE2={c2} PV={pv} SIP={sip}"
+
                 align_cfg = self.input_yaml.get("alignment", {})
                 method_name = (
                     str(align_cfg.get("reproject_method", "adaptive")).lower().strip()
                 )
-                roundtrip = bool(align_cfg.get("reproject_roundtrip_coords", False))
-                interp_order = str(
-                    align_cfg.get("reproject_interp_order", "bilinear")
-                ).lower()
+                # Reproject defaults roundtrip_coords=True; keeping True avoids
+                # one-way WCS glitches that show up as systematic misalignment.
+                roundtrip = bool(align_cfg.get("reproject_roundtrip_coords", True))
+                interp_order_raw = align_cfg.get("reproject_interp_order", "bilinear")
+                interp_order = _normalize_reproject_interp_order(interp_order_raw)
                 parallel = bool(align_cfg.get("reproject_parallel", False))
+                # conserve_flux=True rescales adaptive output; for similar plate
+                # scales it can blur or skew template–science match vs. library default.
+                conserve_flux = bool(
+                    align_cfg.get("reproject_adaptive_conserve_flux", False)
+                )
+                center_jacobian = bool(
+                    align_cfg.get("reproject_adaptive_center_jacobian", False)
+                )
                 logger.info(
-                    "Aligning via WCS reproject (%s) order=%s roundtrip=%s parallel=%s",
+                    "Aligning via WCS reproject (%s) order=%s roundtrip=%s parallel=%s "
+                    "adaptive_conserve_flux=%s adaptive_center_jacobian=%s",
                     method_name,
                     interp_order,
                     roundtrip,
                     parallel,
+                    conserve_flux,
+                    center_jacobian,
                 )
                 try:
                     shape_out = scienceImage.shape
+                    # Use FITS headers directly for reproject so distortion
+                    # conventions (SIP/PV/TPV) are preserved in the transform.
+                    template_proj = _prepare_projection_header(templateHeader)
+                    science_proj = _prepare_projection_header(scienceHeader)
+                    logger.info(
+                        "Reproject distortion inputs: template[%s] -> science[%s]",
+                        _distortion_summary(template_proj),
+                        _distortion_summary(science_proj),
+                    )
                     # Honour requested method; if it fails, fall back in a predictable order.
                     # (exact -> adaptive -> interp) gives robust behaviour and consistent logs.
                     if method_name in ("exact", "adaptive", "interp"):
@@ -1822,21 +2023,33 @@ class Templates:
                     last_exc = None
                     aligned = footprint = None
                     used_method = None
+                    import inspect as _inspect
+
+                    _adaptive_extras: Dict[str, Any] = {}
+                    try:
+                        _asig = _inspect.signature(reproject_adaptive)
+                        if "conserve_flux" in _asig.parameters:
+                            _adaptive_extras["conserve_flux"] = conserve_flux
+                        if "center_jacobian" in _asig.parameters:
+                            _adaptive_extras["center_jacobian"] = center_jacobian
+                    except (TypeError, ValueError):
+                        pass
+
                     for m in fallbacks:
                         try:
                             if m == "adaptive":
                                 aligned, footprint = reproject_adaptive(
-                                    (templateImage, templateHeader),
-                                    output_projection=imageWCS,
+                                    (templateImage, template_proj),
+                                    output_projection=science_proj,
                                     shape_out=shape_out,
                                     roundtrip_coords=roundtrip,
                                     parallel=parallel,
-                                    conserve_flux=True,
+                                    **_adaptive_extras,
                                 )
                             elif m == "interp":
                                 aligned, footprint = reproject_interp(
-                                    (templateImage, templateHeader),
-                                    output_projection=imageWCS,
+                                    (templateImage, template_proj),
+                                    output_projection=science_proj,
                                     shape_out=shape_out,
                                     roundtrip_coords=roundtrip,
                                     order=interp_order,
@@ -1844,8 +2057,8 @@ class Templates:
                                 )
                             else:
                                 aligned, footprint = reproject_exact(
-                                    (templateImage, templateHeader),
-                                    output_projection=imageWCS,
+                                    (templateImage, template_proj),
+                                    output_projection=science_proj,
                                     shape_out=shape_out,
                                     parallel=parallel,
                                 )
@@ -1907,8 +2120,8 @@ class Templates:
                                     aligned = ndimage_shift(
                                         aligned,
                                         (
-                                            -float(subpix_shift[0]),
-                                            -float(subpix_shift[1]),
+                                            float(subpix_shift[0]),
+                                            float(subpix_shift[1]),
                                         ),
                                         order=3,
                                         mode="constant",
@@ -1935,11 +2148,20 @@ class Templates:
                             )
 
                     hdr = templateHeader.copy()
-                    hdr.update(imageWCS.to_header(), relax=True)
+                    hdr.update(science_proj, relax=True)
                     # Ensure header dimensions match the aligned array (science grid)
                     hdr["NAXIS1"] = aligned.shape[1]
                     hdr["NAXIS2"] = aligned.shape[0]
                     write_fits(new_templateFpath, aligned.astype(np.float32), hdr)
+
+                    rms_pix = None
+                    try:
+                        fwhm_pix = float(self.input_yaml.get("fwhm", 3.0))
+                        rms_pix = _log_alignment_rms(
+                            scienceFpath, new_templateFpath, fwhm_pix
+                        )
+                    except Exception:
+                        rms_pix = None
 
                     logger.info(
                         "Alignment via WCS reproject (%s) succeeded.", used_method
@@ -1990,6 +2212,16 @@ class Templates:
                 out = _astroalign()
                 if out[0]:
                     return out
+
+            if method == "reproject":
+                out = _reproject()
+                if out[0]:
+                    return out
+                # Reproject failed or failed quality gate: try feature/scamp fallback.
+                out = _astroalign()
+                if out[0]:
+                    return out
+                return _swarp()
 
             return _reproject()
 
@@ -2145,8 +2377,8 @@ class Templates:
                 mode="partial",
                 fill_value=NO_DATA_SENTINEL,
             )
-            imageWCS = WCS(cutout.wcs.to_header(), relax=True)
-            scienceHeader.update(imageWCS.to_header(), relax=True)
+            imageWCS = WCS(cutout.wcs.to_header(relax=True), relax=True)
+            scienceHeader.update(imageWCS.to_header(relax=True), relax=True)
             scienceImage = cutout.data
 
             # Try tighter crop to largest valid rectangle
@@ -2169,7 +2401,7 @@ class Templates:
                 and border <= target_y_pix < h - border
             ):
                 scienceImage = scienceImage_tmp
-                scienceHeader.update(scienceHeader_newwcs.to_header())
+                scienceHeader.update(scienceHeader_newwcs.to_header(relax=True), relax=True)
 
             write_fits(cropped_scienceFpath, scienceImage, scienceHeader)
             return cropped_scienceFpath, None
@@ -2178,6 +2410,7 @@ class Templates:
         # Joint science + template crop
         # ------------------------------------------------------------------
         templateImage, templateHeader = read_fits(templateFpath)
+        templateWCS = WCS(templateHeader, relax=True)
         cropped_templateFpath = str(scienceDir / Path(templateFpath).name)
 
         cy_t, cx_t, top_t, bot_t, left_t, right_t = self.find_non_uniform_center(
@@ -2214,17 +2447,20 @@ class Templates:
                 fill_value=NO_DATA_SENTINEL,
             )
             scienceImage = scienceCutout.data
-            imageWCS = WCS(scienceCutout.wcs.to_header(), relax=True)
-            scienceHeader.update(imageWCS.to_header(), relax=True)
+            imageWCS = WCS(scienceCutout.wcs.to_header(relax=True), relax=True)
+            scienceHeader.update(imageWCS.to_header(relax=True), relax=True)
 
             templateCutout = Cutout2D(
                 templateImage,
                 position,
                 size,
+                wcs=templateWCS,
                 mode="trim",
                 fill_value=NO_DATA_SENTINEL,
             )
             templateImage = templateCutout.data
+            templateWCS = WCS(templateCutout.wcs.to_header(relax=True), relax=True)
+            templateHeader.update(templateWCS.to_header(relax=True), relax=True)
 
             # Mark shared invalid regions
             mask = (templateImage == NO_DATA_SENTINEL) | (
@@ -2260,8 +2496,8 @@ class Templates:
             ):
                 scienceImage = scienceImage_tmp
                 templateImage = templateImage_tmp
-                scienceHeader.update(scienceHeader_newwcs.to_header())
-                templateHeader.update(templateHeader_newwcs.to_header())
+                scienceHeader.update(scienceHeader_newwcs.to_header(relax=True), relax=True)
+                templateHeader.update(templateHeader_newwcs.to_header(relax=True), relax=True)
             else:
                 logger.info("Target too close to border; keeping initial crop")
 
@@ -2271,6 +2507,25 @@ class Templates:
 
         write_fits(cropped_templateFpath, templateImage, templateHeader)
         write_fits(cropped_scienceFpath, scienceImage, scienceHeader)
+
+        # Diagnostic: after joint crop, the same sky target should map to
+        # similar pixels in both images if WCS updates were propagated correctly.
+        try:
+            sci_w = get_wcs(scienceHeader)
+            ref_w = get_wcs(templateHeader)
+            sx, sy = sci_w.all_world2pix(target_ra, target_dec, 0)
+            tx, ty = ref_w.all_world2pix(target_ra, target_dec, 0)
+            logger.info(
+                "Post-crop WCS target mapping: science=(%.2f, %.2f) template=(%.2f, %.2f) delta=(%.2f, %.2f) px",
+                float(sx),
+                float(sy),
+                float(tx),
+                float(ty),
+                float(sx - tx),
+                float(sy - ty),
+            )
+        except Exception as exc:
+            logger.warning("Post-crop WCS target-mapping diagnostic failed: %s", exc)
 
         return cropped_scienceFpath, cropped_templateFpath
 
@@ -2578,13 +2833,22 @@ class Templates:
                 lo, hi = np.nanpercentile(mag_img_r[inliers], params.percentiles)
                 central = inliers & (mag_img_r >= lo) & (mag_img_r <= hi)
                 if central.sum() >= params.min_absolute_samples:
-                    est = ConstrainedSlopeRegressor(
-                        enforce=params.enforce_slope_constraint,
-                        fixed_slope=1.0 if params.fix_slope_to_one else None,
-                    )
-                    est.fit(mag_img_r[central].reshape(-1, 1), mag_tpl_r[central])
-                    slope, intercept = est.slope_, est.intercept_
-                    final_inliers = central
+                    if _SKLEARN_AVAILABLE:
+                        est = ConstrainedSlopeRegressor(
+                            enforce=params.enforce_slope_constraint,
+                            fixed_slope=(
+                                1.0 if params.fix_slope_to_one else None
+                            ),
+                        )
+                        est.fit(
+                            mag_img_r[central].reshape(-1, 1), mag_tpl_r[central]
+                        )
+                        slope, intercept = est.slope_, est.intercept_
+                        final_inliers = central
+                    else:
+                        logger.debug(
+                            "Skipping percentile refinement; scikit-learn not available."
+                        )
 
             # --- Optional bin-wise consistency filter for low-S/N magnitude regimes ---
             # Only reject bins where very few sources are inliers (avoids isolated
@@ -2733,8 +2997,8 @@ class Templates:
             fmt="o",
             markersize=2.8,
             mfc="none",
-            mec="#009E73",
-            ecolor="#009E73",
+            mec="#00AA00",
+            ecolor="#00AA00",
             elinewidth=0.4,
             capsize=0,
             alpha=0.9,
@@ -2748,7 +3012,7 @@ class Templates:
             xerr=mag_err_robust[rej],
             yerr=mag_err_robust[rej],
             fmt="x",
-            color="#D55E00",
+            color="#FF0000",
             alpha=0.5,
             markersize=2.2,
             capsize=0,
@@ -2767,7 +3031,7 @@ class Templates:
         out = (
             Path(self.input_yaml["fpath"]).parent / f"flux_comparison_{base}.png"
         )
-        fig.savefig(str(out), bbox_inches="tight", dpi=300)
+        fig.savefig(str(out), bbox_inches="tight", dpi=150)
         plt.close(fig)
 
     # -----------------------------------------------------------------
@@ -2995,6 +3259,8 @@ class Templates:
                     "Reference image background subtracted (median %.4g) and saved.",
                     float(template_bg_median),
                 )
+
+            # Keep interpolation to the WCS reproject stage only.
 
             # Extract relevant header values with sensible defaults
             science_fwhm = scienceHeader["fwhm"]
@@ -3603,6 +3869,10 @@ class Templates:
 
             # Background polynomial order: default to 0 unless the user explicitly overrides
             bg_order = ts_sub.get("sfft_bg_order", 0)
+            # ConstPhotRatio controls whether SFFT forces a constant kernel-sum
+            # photometric ratio across the image. Allowing it to vary can reduce
+            # localized over/under-subtraction when flux scaling changes spatially.
+            const_phot_ratio = bool(ts_sub.get("sfft_const_phot_ratio", False))
 
             # crowded_field is a shortcut: when True, use SFFT crowded (ECP) unless
             # the user *explicitly* forces sparse via `force_sparse_sfft`.
@@ -3632,6 +3902,10 @@ class Templates:
                 sfft_method = "sparse"
 
             logger.info("Starting SFFT subtraction via %s method...", sfft_method)
+            logger.info(
+                "SFFT photometric scaling: ConstPhotRatio=%s",
+                const_phot_ratio,
+            )
             cmd = [
                 sys.executable,
                 str(script),
@@ -3649,6 +3923,8 @@ class Templates:
                 str(kernel_order),
                 "-bg_order",
                 str(bg_order),
+                "-constphotratio",
+                "true" if const_phot_ratio else "false",
                 "-matching_sources",
                 match_str,
                 "-kernel_half_width",

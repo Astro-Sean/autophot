@@ -272,8 +272,8 @@ NNW
         image_path: str,
         catalog_path: str,
         output_plot_path: str = "sextractor_sources.png",
-        cmap: str = "Greys_r",
-        figsize: tuple = (10, 10),
+        cmap: str = "viridis",
+        figsize: Optional[tuple] = None,
         max_sources: int = 1000,
         **imshow_kwargs,
     ) -> None:
@@ -291,6 +291,13 @@ NNW
             **imshow_kwargs: Additional arguments for imshow.
         """
         try:
+            if figsize is None:
+                # Prefer AutoPHoT figure sizing (golden-ratio based).
+                from functions import set_size
+
+                golden_ratio = (5**0.5 + 1) / 2
+                figsize = set_size(340, aspect=golden_ratio)  # square-ish
+
             # Load image
             with fits.open(image_path) as hdul:
                 data = hdul[0].data.astype(np.float32)
@@ -325,7 +332,7 @@ NNW
                         (x_0based, y_0based),
                         fwhm,
                         facecolor="none",
-                        edgecolor="#D55E00",
+                        edgecolor="#FF0000",
                         linewidth=0.5,
                         alpha=0.7,
                     )
@@ -334,7 +341,7 @@ NNW
                         x_0based,
                         y_0based - fwhm - 2,
                         str(i),
-                        color="#D55E00",
+                        color="#FF0000",
                         fontsize=8,
                         ha="center",
                         va="top",
@@ -890,11 +897,11 @@ NNW
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
                     output_plot_path=output_dir / "matched_sources.png",
-                    label_color="#D55E00",
+                    label_color="#FF0000",
                     label_fontsize=10,
                     circle_radius_sci=fwhm_sci_pix,
                     circle_radius_ref=fwhm_ref_pix,
-                    matched_circle_color="#D55E00",
+                    matched_circle_color="#FF0000",
                     unmatched_circle_color="blue",
                 )
             except Exception as e:
@@ -1304,6 +1311,7 @@ NNW
                 sci_wcs,
                 shape_out=sci_data.shape,
                 order="bilinear",
+                roundtrip_coords=True,
             )
             aligned_ref = np.asarray(aligned_ref, dtype=float)
             aligned_ref[~np.isfinite(aligned_ref)] = np.nan
@@ -1459,7 +1467,7 @@ NNW
                 sci_cat_path=sci_sex["catalog_path"],
                 ref_cat_path=ref_sex["catalog_path"],
                 output_plot_path=science_dir / "matched_sources.png",
-                label_color="#D55E00",
+                label_color="#FF0000",
                 label_fontsize=10,
                 circle_radius_sci=fwhm_sci_pix,
                 circle_radius_ref=fwhm_ref_pix,
@@ -2060,17 +2068,17 @@ NNW
         sci_cat_path: str,
         ref_cat_path: str,
         output_plot_path: str = "matched_sources_side_by_side.png",
-        label_color: str = "#D55E00",
+        label_color: str = "#FF0000",
         label_fontsize: int = 8,
-        figsize: tuple = (12, 6),
-        cmap: str = "Greys_r",
+        figsize: Optional[tuple] = None,
+        cmap: str = "viridis",
         draw_lines: bool = True,
-        line_color: str = "#D55E00",
+        line_color: str = "#FF0000",
         line_alpha: float = 0.5,
         line_width: float = 0.5,
         circle_radius_sci: float = 5.0,
         circle_radius_ref: float = 5.0,
-        matched_circle_color: str = "#D55E00",
+        matched_circle_color: str = "#FF0000",
         unmatched_circle_color: str = "blue",
         circle_alpha: float = 0.7,
         circle_edge_color: str = "none",
@@ -2083,6 +2091,14 @@ NNW
             import gc
 
             gc.collect()
+            if figsize is None:
+                from functions import set_size
+
+                # Original default was (12, 6): height/width = 0.5
+                # set_size uses height/width = aspect / golden_ratio
+                golden_ratio = (5**0.5 + 1) / 2
+                figsize = set_size(540, aspect=0.5 * golden_ratio)
+
             with (
                 fits.open(sci_cat_path) as sci_hdul,
                 fits.open(ref_cat_path) as ref_hdul,
@@ -2100,7 +2116,9 @@ NNW
 
                 sci_data = block_reduce(sci_data, block_size=(4, 4), func=np.mean)
                 ref_data = block_reduce(ref_data, block_size=(4, 4), func=np.mean)
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+            fig, (ax1, ax2) = plt.subplots(
+                1, 2, figsize=figsize, constrained_layout=True
+            )
             zscale_sci = ZScaleInterval()
             zscale_ref = ZScaleInterval()
             vmin_sci, vmax_sci = zscale_sci.get_limits(sci_data)
@@ -2114,7 +2132,11 @@ NNW
                 origin="lower",
             )
             ax1.set_title("Science Image")
-            fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+            cbar1 = fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+            cbar1.set_label("Science counts", fontsize=7)
+            cbar1.ax.tick_params(labelsize=6)
+            ax1.set_xlabel("X [Pixel]")
+            ax1.set_ylabel("Y [Pixel]")
             im2 = ax2.imshow(
                 ref_data,
                 cmap=cmap,
@@ -2124,7 +2146,11 @@ NNW
                 origin="lower",
             )
             ax2.set_title("Reference Image")
-            fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+            cbar2 = fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+            cbar2.set_label("Reference counts", fontsize=7)
+            cbar2.ax.tick_params(labelsize=6)
+            ax2.set_xlabel("X [Pixel]")
+            ax2.set_ylabel("Y [Pixel]")
 
             def int_to_label(i):
                 if i < 26:
@@ -2191,8 +2217,9 @@ NNW
                         ha="center",
                         va="top",
                     )
-            plt.tight_layout()
-            plt.savefig(output_plot_path)
+            # `constrained_layout=True` keeps colorbars and labels from
+            # overlapping, so no additional tight_layout is needed.
+            plt.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
             plt.close()
             gc.collect()
         except Exception as e:
@@ -2431,7 +2458,12 @@ NNW
                             f"RANSAC mag filter kept {len(sci_cat_matched)} sources, zp={ransac.estimator_.intercept_:.3f} mag"
                         )
                         if len(sci_cat_matched) >= 5:
-                            plt.figure(figsize=(6, 6))
+                            from functions import set_size
+
+                            golden_ratio = (5**0.5 + 1) / 2
+                            plt.figure(
+                                figsize=set_size(340, aspect=golden_ratio)
+                            )
                             plt.errorbar(
                                 ref_cat_matched["MAG_APER"],
                                 sci_cat_matched["MAG_APER"],
