@@ -117,12 +117,22 @@ def main() -> int:
     }
 
     # Optional credentials from environment (do not hard-code secrets):
+    # TNS credentials are only needed if you want TNS lookups from target_name.
     # export MASTCASJOBS_WSID="..."
     # export MASTCASJOBS_PWD="..."
+    # export TNS_BOT_ID="..."
+    # export TNS_BOT_NAME="..."
+    # export TNS_BOT_API="..."
     if os.getenv("MASTCASJOBS_WSID"):
         autophot_input["catalog"]["MASTcasjobs_wsid"] = os.getenv("MASTCASJOBS_WSID")
     if os.getenv("MASTCASJOBS_PWD"):
         autophot_input["catalog"]["MASTcasjobs_pwd"] = os.getenv("MASTCASJOBS_PWD")
+    if os.getenv("TNS_BOT_ID"):
+        autophot_input["wcs"]["TNS_BOT_ID"] = os.getenv("TNS_BOT_ID")
+    if os.getenv("TNS_BOT_NAME"):
+        autophot_input["wcs"]["TNS_BOT_NAME"] = os.getenv("TNS_BOT_NAME")
+    if os.getenv("TNS_BOT_API"):
+        autophot_input["wcs"]["TNS_BOT_API"] = os.getenv("TNS_BOT_API")
 
     # ------------------------------------------------------------------
     # Preprocessing / photometry / WCS
