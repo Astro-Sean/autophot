@@ -3,7 +3,6 @@
 [![Anaconda Version](https://anaconda.org/astro-sean/autophot/badges/version.svg)](https://anaconda.org/astro-sean/autophot)
 [![Latest Release Date](https://anaconda.org/astro-sean/autophot/badges/latest_release_date.svg)](https://anaconda.org/astro-sean/autophot)
 [![Latest Release Relative Date](https://anaconda.org/astro-sean/autophot/badges/latest_release_relative_date.svg)](https://anaconda.org/astro-sean/autophot)
-[![Platforms](https://anaconda.org/astro-sean/autophot/badges/platforms.svg)](https://anaconda.org/astro-sean/autophot)
 [![License](https://anaconda.org/astro-sean/autophot/badges/license.svg)](https://anaconda.org/astro-sean/autophot)
 [![Downloads](https://anaconda.org/astro-sean/autophot/badges/downloads.svg)](https://anaconda.org/astro-sean/autophot)
 
@@ -17,7 +16,9 @@ Project links:
 
 ## Support
 
-I am the sole developer of AutoPHoT and also a full-time researcher at MPE. Please open issues on GitHub and I will do my best to resolve them.
+> [!NOTE]
+> I am the sole developer and maintainer of AutoPHoT and also a full-time researcher at MPE.
+> Please open issues on GitHub and I will do my best to resolve them.
 
 ## Installation (Conda)
 
