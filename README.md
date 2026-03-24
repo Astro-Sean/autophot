@@ -75,19 +75,13 @@ Run automated photometry with AutoPHoT.
 Override default_input and run pipeline; optionally plot lightcurve and tables.
 """
 
-import argparse
 import os
 from autophot import AutomatedPhotometry, prepare_template_directory
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Run AutoPHoT with optional image-level parallelism via nCPU."
-    )
-    parser.add_argument("--ncpu", type=int, default=1)
-    args = parser.parse_args()
-
     autophot_input = AutomatedPhotometry.load()
+    autophot_input["nCPU"] = 1
 
     # ------------------------------------------------------------------
     # Paths
@@ -156,8 +150,6 @@ def main() -> int:
         include_legacy_p_folders=False,  # create only *_template by default
         confirm_before_continue=True,
     )
-
-    autophot_input["nCPU"] = max(1, int(args.ncpu))
 
     loc = AutomatedPhotometry.run_photometry(
         default_input=autophot_input,
