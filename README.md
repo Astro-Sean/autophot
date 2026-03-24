@@ -15,6 +15,10 @@ Project links:
 - GitHub: [https://github.com/Astro-Sean/autophot](https://github.com/Astro-Sean/autophot)
 - Paper: [https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B)
 
+## Support
+
+I am the sole developer of AutoPHoT and also a full-time researcher at MPE. Please open issues on GitHub and I will do my best to resolve them.
+
 ## Installation (Conda)
 
 ```bash
