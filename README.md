@@ -8,13 +8,13 @@
 
 # AutoPHoT
 
-Automated photometry pipeline for transients and variable sources, with aperture/PSF photometry, catalog calibration, WCS solving, and optional template subtraction.
+The Automated Photometry of Transients (AutoPHoT) pipeline, built on Photutils and Astropy, provides a comprehensive photometric solution for transients and variable sources, offering aperture/PSF photometry, catalogue calibration, WCS solving, and optional template subtraction.
+
 
 Project links:
-- GitHub: [https://github.com/Astro-Sean/autophot](https://github.com/Astro-Sean/autophot)
+- Conda: [https://anaconda.org/channels/astro-sean/packages/autophot/overview](https://anaconda.org/channels/astro-sean/packages/autophot/overview)
 - Paper: [https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B)
 
-## Support
 
 > [!NOTE]
 > I am the sole developer and maintainer of AutoPHoT and also a full-time researcher at MPE.
@@ -62,6 +62,10 @@ make
 ## Driver Script Example (Sanitized)
 
 The script below follows your requested workflow style while avoiding sensitive paths/tokens.
+
+> [!NOTE]
+> FITS images require the TELESCOP and INSTRUME header keywords (otherwise they will be ignored), as well as a keyword giving the image bandpass (e.g., FILTER).
+
 
 ```python
 #!/usr/bin/env python3
