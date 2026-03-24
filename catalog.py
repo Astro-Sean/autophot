@@ -371,65 +371,6 @@ class Catalog:
         except Exception as e:
             logger.info(f"Error during query: {e}")
             return None
-
-    
-    def query_legacy_survey_dr9(self, ra, dec, radius=0.1):
-        """
-        Query the Legacy Survey using the NOIRLab Data Lab TAP service via astroquery's TAP+.
-
-        Parameters:
-        -----------
-        ra : float
-            Right Ascension in degrees.
-        dec : float
-            Declination in degrees.
-        radius : float, optional
-            Search radius in degrees
-
-        Returns:
-        --------
-        str
-            Path to the downloaded file, or None if an error occurred.
-        """
-        # TAP service URL for NOIRLab Data Lab
-        tap_service_url = "https://datalab.noirlab.edu/tap"
-        # radius_deg = radius / 60
-
-        # SQL query to search the Legacy Survey catalog using ADQL
-        query = f"""
-            SELECT TOP 1000 ra, dec, mag_g, mag_r, mag_i, mag_z,
-                DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', {ra}, {dec})) AS angular_distance
-            FROM ls_dr9.tractor
-            WHERE CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', {ra}, {dec}, {radius})) = 1
-            ORDER BY angular_distance ASC
-        """
-
-        try:
-            logging.info(
-                f"Fetching Legacy Survey Dr9 catalog over {radius:.1f} field-of-view centered at ra = {ra:.1f} dec = {dec:.1f}"
-            )
-            logging.info(query)
-
-            from astroquery.utils.tap import TapPlus
-
-            # Initialize the TAP service using TapPlus from astroquery
-            tap = TapPlus(url=tap_service_url)
-
-            # Perform the query using TAP+ (synchronous execution)
-            result = tap.launch_job(query)
-
-            # Convert the result to an Astropy Table
-            table = result.get_results().to_pandas()
-            filters = ["g", "r", "i", "z"]
-
-            for f in filters:
-                table[f"mag_{f}_e"] = [0.01] * len(table)
-
-            return table
-
-        except Exception as e:
-            logger.info(f"Error during query: {e}")
-            return None
     
     # =============================================================================
     # =============================================================================
@@ -792,25 +733,6 @@ class Catalog:
                         f"Downloading reference sources from {catalogName.upper()}"
                     )
                     selectedCatalog = self.query_legacy_survey(
-                        ra=target_coords.ra.degree,
-                        dec=target_coords.dec.degree,
-                        radius=radius_deg,
-                    )
-                    self._require_nonempty_catalog(
-                        selectedCatalog, catalogName, target_coords, radius
-                    )
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
-                    )
-
-                elif catalogName == "legacy_dr9":
-
-                    logger.info(
-                        f"Downloading reference sources from {catalogName.upper()}"
-                    )
-                    selectedCatalog = self.query_legacy_survey_dr9(
                         ra=target_coords.ra.degree,
                         dec=target_coords.dec.degree,
                         radius=radius_deg,
