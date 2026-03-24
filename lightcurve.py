@@ -170,6 +170,93 @@ def _resolve_band_triplet(cols, band: str, method: str):
     return None
 
 
+def _compute_detection_mask(
+    df: pd.DataFrame,
+    mag_col: str,
+    err_col: str,
+    method: str,
+    *,
+    snr_limit: float,
+    beta_limit: float,
+    use_SNR_limit: bool,
+) -> np.ndarray:
+    """
+    Compute detection mask used consistently across lightcurve products.
+
+    Detection rule:
+    - SNR cut (if use_SNR_limit) or mag < lmag (otherwise), both with beta cut.
+    """
+    mag = pd.to_numeric(df[mag_col], errors="coerce").to_numpy(dtype=float, copy=False)
+    err = pd.to_numeric(df[err_col], errors="coerce").to_numpy(dtype=float, copy=False)
+    lmag = (
+        pd.to_numeric(df["lmag"], errors="coerce").to_numpy(dtype=float, copy=False)
+        if "lmag" in df.columns
+        else np.full(len(df), np.nan, dtype=float)
+    )
+
+    method_u = str(method).upper()
+    if use_SNR_limit:
+        if method_u == "PSF" and "snr_psf" in df.columns:
+            snr = pd.to_numeric(df["snr_psf"], errors="coerce").to_numpy(
+                dtype=float, copy=False
+            )
+        elif method_u == "PSF" and "flux_psf" in df.columns and "flux_psf_err" in df.columns:
+            flux = pd.to_numeric(df["flux_psf"], errors="coerce").to_numpy(
+                dtype=float, copy=False
+            )
+            flux_err = pd.to_numeric(df["flux_psf_err"], errors="coerce").to_numpy(
+                dtype=float, copy=False
+            )
+            snr = np.divide(
+                flux,
+                flux_err,
+                out=np.full(len(df), np.nan, dtype=float),
+                where=(flux_err > 0) & np.isfinite(flux_err),
+            )
+        elif method_u == "AP" and "snr_ap" in df.columns:
+            snr = pd.to_numeric(df["snr_ap"], errors="coerce").to_numpy(
+                dtype=float, copy=False
+            )
+        elif "snr" in df.columns:
+            snr = pd.to_numeric(df["snr"], errors="coerce").to_numpy(
+                dtype=float, copy=False
+            )
+        else:
+            snr = np.divide(
+                mag,
+                err,
+                out=np.full(len(df), np.nan, dtype=float),
+                where=err > 0,
+            )
+    else:
+        snr = np.divide(
+            mag,
+            err,
+            out=np.full(len(df), np.nan, dtype=float),
+            where=err > 0,
+        )
+
+    beta_ok = (
+        pd.to_numeric(df["beta"], errors="coerce").to_numpy(dtype=float, copy=False)
+        > float(beta_limit)
+        if "beta" in df.columns
+        else np.ones(len(df), dtype=bool)
+    )
+
+    if use_SNR_limit:
+        detected = (
+            np.isfinite(mag)
+            & np.isfinite(err)
+            & np.isfinite(snr)
+            & (snr >= float(snr_limit))
+            & beta_ok
+        )
+    else:
+        detected = np.isfinite(mag) & np.isfinite(err) & (mag < lmag) & beta_ok
+
+    return np.asarray(detected, dtype=bool)
+
+
 def plot_lightcurve(
     output_file,
     snr_limit=3,
@@ -349,6 +436,7 @@ def plot_lightcurve(
 
     num_detect, num_nondetect = 0, 0
     detections_list = [] if return_detections else None
+    nondetections_list = [] if return_detections else None
     bands_in_data = bands_in_data[::-1]
     has_limits_plotted = False
     mid_idx = (
@@ -369,85 +457,15 @@ def plot_lightcurve(
         df[col] = df[col] + band_offset
         df["lmag"] = df["lmag"] + band_offset
 
-        # Ensure numeric arrays (CSV concatenation can yield object dtype),
-        # and keep all boolean logic in NumPy to avoid pandas alignment issues.
-        mag = pd.to_numeric(df[col], errors="coerce")
-        mag_err = pd.to_numeric(df[err_col], errors="coerce")
-        lmag = pd.to_numeric(df["lmag"], errors="coerce")
-
-        if use_SNR_limit:
-            if method == "PSF" and "snr_psf" in df.columns:
-                snr = pd.to_numeric(df["snr_psf"], errors="coerce").to_numpy(
-                    dtype=float, copy=False
-                )
-            elif (
-                method == "PSF"
-                and "flux_psf" in df.columns
-                and "flux_psf_err" in df.columns
-            ):
-                flux = pd.to_numeric(df["flux_psf"], errors="coerce").to_numpy(
-                    dtype=float, copy=False
-                )
-                flux_err = pd.to_numeric(df["flux_psf_err"], errors="coerce").to_numpy(
-                    dtype=float, copy=False
-                )
-                snr = np.divide(
-                    flux,
-                    flux_err,
-                    out=np.full(len(df), np.nan, dtype=float),
-                    where=(flux_err > 0) & np.isfinite(flux_err),
-                )
-            elif method == "AP" and "snr_ap" in df.columns:
-                snr = pd.to_numeric(df["snr_ap"], errors="coerce").to_numpy(
-                    dtype=float, copy=False
-                )
-            elif "snr" in df.columns:
-                snr = pd.to_numeric(df["snr"], errors="coerce").to_numpy(
-                    dtype=float, copy=False
-                )
-            else:
-                snr = np.divide(
-                    mag.to_numpy(dtype=float, copy=False),
-                    mag_err.to_numpy(dtype=float, copy=False),
-                    out=np.full(len(df), np.nan, dtype=float),
-                    where=mag_err.to_numpy(dtype=float, copy=False) > 0,
-                )
-        else:
-            snr = np.divide(
-                mag.to_numpy(dtype=float, copy=False),
-                mag_err.to_numpy(dtype=float, copy=False),
-                out=np.full(len(df), np.nan, dtype=float),
-                where=mag_err.to_numpy(dtype=float, copy=False) > 0,
-            )
-        # Beta (detectability): require beta > beta_limit if column present; otherwise treat as pass
-        beta_ok = (
-            (
-                pd.to_numeric(df["beta"], errors="coerce").to_numpy(
-                    dtype=float, copy=False
-                )
-                > float(beta_limit)
-            )
-            if "beta" in df.columns
-            else np.ones(len(df), dtype=bool)
+        detected = _compute_detection_mask(
+            df,
+            col,
+            err_col,
+            method,
+            snr_limit=float(snr_limit),
+            beta_limit=float(beta_limit),
+            use_SNR_limit=bool(use_SNR_limit),
         )
-        if use_SNR_limit:
-            detected = (
-                np.isfinite(mag.to_numpy(dtype=float, copy=False))
-                & np.isfinite(mag_err.to_numpy(dtype=float, copy=False))
-                & np.isfinite(snr)
-                & (snr >= float(snr_limit))
-                & beta_ok
-            )
-        else:
-            detected = (
-                np.isfinite(mag.to_numpy(dtype=float, copy=False))
-                & np.isfinite(mag_err.to_numpy(dtype=float, copy=False))
-                & (
-                    mag.to_numpy(dtype=float, copy=False)
-                    < lmag.to_numpy(dtype=float, copy=False)
-                )
-                & beta_ok
-            )
 
         detects = df[detected]
         nondetects = df[~detected]
@@ -456,6 +474,8 @@ def plot_lightcurve(
 
         if return_detections and not detects.empty:
             detections_list.append(detects)
+        if return_detections and not nondetects.empty:
+            nondetections_list.append(nondetects)
 
         c = cols.get(band, "k")
         if offset != 0:
@@ -840,6 +860,13 @@ def plot_lightcurve(
         if valid_detections:
             det_file = os.path.join(save_path, f"detections_{base}_{method}.csv")
             pd.concat(valid_detections, ignore_index=True).to_csv(det_file, index=False)
+    if return_detections and nondetections_list:
+        valid_nondetections = [df for df in nondetections_list if not df.empty]
+        if valid_nondetections:
+            nondet_file = os.path.join(save_path, f"nondetections_{base}_{method}.csv")
+            pd.concat(valid_nondetections, ignore_index=True).to_csv(
+                nondet_file, index=False
+            )
 
     return det_file
 
@@ -920,59 +947,15 @@ def generate_photometry_table(
         data["lmag"] = pd.to_numeric(data["lmag"], errors="coerce") + data[
             zp_col
         ]
-        if use_SNR_limit:
-            if method == "PSF" and "snr_psf" in data.columns:
-                snr = np.asarray(data["snr_psf"], dtype=float)
-            elif (
-                method == "PSF"
-                and "flux_psf" in data.columns
-                and "flux_psf_err" in data.columns
-            ):
-                snr = np.divide(
-                    data["flux_psf"],
-                    data["flux_psf_err"],
-                    out=np.full(len(data), np.nan),
-                    where=(np.asarray(data["flux_psf_err"]) > 0)
-                    & np.isfinite(data["flux_psf_err"]),
-                )
-            elif method == "AP" and "snr_ap" in data.columns:
-                snr = np.asarray(data["snr_ap"], dtype=float)
-            elif "snr" in data.columns:
-                snr = np.asarray(data["snr"], dtype=float)
-            else:
-                snr = np.divide(
-                    data[col],
-                    data[err_col],
-                    out=np.zeros_like(data[col]),
-                    where=data[err_col] > 0,
-                )
-        else:
-            snr = np.divide(
-                data[col],
-                data[err_col],
-                out=np.zeros_like(data[col]),
-                where=data[err_col] > 0,
-            )
-        beta_ok = (
-            (data["beta"] > beta_limit)
-            if "beta" in data.columns
-            else np.ones(len(data), dtype=bool)
+        detected = _compute_detection_mask(
+            data,
+            col,
+            err_col,
+            method,
+            snr_limit=float(snr_limit),
+            beta_limit=float(beta_limit),
+            use_SNR_limit=bool(use_SNR_limit),
         )
-        if use_SNR_limit:
-            detected = (
-                np.isfinite(data[col])
-                & np.isfinite(data[err_col])
-                & np.isfinite(snr)
-                & (snr >= snr_limit)
-                & beta_ok
-            )
-        else:
-            detected = (
-                np.isfinite(data[col])
-                & np.isfinite(data[err_col])
-                & (data[col] < data["lmag"])
-                & beta_ok
-            )
 
         detects = data[detected].copy()
         nondetects = data[~detected].copy()
@@ -1212,10 +1195,10 @@ def generate_photometry_table(
 
 
 def check_detection_plots(output_file, method="PSF"):
-    """Copy detection plots to an organized directory structure and print the number of files moved per band.
+    """Copy target plots into detections/nondetections folders by filter.
 
     Args:
-        output_file (str): Path to the CSV file containing detection data.
+        output_file (str): Path to a CSV file containing photometry rows.
         method (str): Detection method, either 'PSF' or 'AP'. Defaults to 'PSF'.
 
     Returns:
@@ -1227,6 +1210,20 @@ def check_detection_plots(output_file, method="PSF"):
     try:
         data = pd.read_csv(output_file)
         data = _normalize_photometry_columns(data)
+        data = data.copy()
+        data["is_detection"] = True
+        # If called with detections_*.csv and a matching nondetections_*.csv exists,
+        # include those rows so folder split is fully populated.
+        base_name = os.path.basename(output_file)
+        if base_name.startswith("detections_"):
+            nondet_name = "nondetections_" + base_name[len("detections_") :]
+            nondet_path = os.path.join(os.path.dirname(output_file), nondet_name)
+            if os.path.isfile(nondet_path):
+                nd = pd.read_csv(nondet_path)
+                nd = _normalize_photometry_columns(nd)
+                nd = nd.copy()
+                nd["is_detection"] = False
+                data = pd.concat([data, nd], ignore_index=True)
     except Exception as exc:
         logging.getLogger(__name__).error(
             "Failed to read detections table '%s': %s", output_file, exc, exc_info=True
@@ -1235,11 +1232,42 @@ def check_detection_plots(output_file, method="PSF"):
 
     save_path = os.path.join(os.path.dirname(output_file), f"detections_{method}")
     pathlib.Path(save_path).mkdir(parents=True, exist_ok=True)
+    det_root = os.path.join(save_path, "detections")
+    nondet_root = os.path.join(save_path, "nondetections")
+    pathlib.Path(det_root).mkdir(parents=True, exist_ok=True)
+    pathlib.Path(nondet_root).mkdir(parents=True, exist_ok=True)
 
     prefix_map = {"AP": "aperture_", "PSF": "targetPSF_"}
     prefix = prefix_map.get(method, "")
 
     band_counter = Counter()
+    log = logging.getLogger(__name__)
+
+    def _row_detection_state(row_obj) -> bool:
+        """Best-effort detection classification for one photometry row."""
+        for k in ("is_detection", "detected", "is_detected"):
+            if k in row_obj and pd.notna(row_obj.get(k)):
+                v = row_obj.get(k)
+                if isinstance(v, str):
+                    vv = v.strip().lower()
+                    if vv in {"true", "t", "1", "yes", "y", "det"}:
+                        return True
+                    if vv in {"false", "f", "0", "no", "n", "nondet", "limit"}:
+                        return False
+                try:
+                    return bool(int(v))
+                except Exception:
+                    return bool(v)
+        # If this function is called with detections_<...>.csv, rows are detections by construction.
+        return True
+
+    # Process detections first so ambiguous files are preferentially assigned
+    # to detections and never duplicated into nondetections.
+    if "is_detection" in data.columns:
+        data = data.sort_values(by="is_detection", ascending=False).reset_index(drop=True)
+
+    assigned_group_by_src = {}
+    copied_pairs = set()
 
     for _, row in data.iterrows():
         try:
@@ -1275,23 +1303,78 @@ def check_detection_plots(output_file, method="PSF"):
             if not files:
                 continue
 
-            date = "".join(row["date"].split("-"))
-            band = row["filter"]
-            src_file = files[0]
+            date = "".join(str(row.get("date", "")).split("-"))
+            band = str(row.get("filter", "unknown")).strip() or "unknown"
+            is_detection = _row_detection_state(row)
+            split_root = det_root if is_detection else nondet_root
+            band_dir = os.path.join(split_root, band)
+            pathlib.Path(band_dir).mkdir(parents=True, exist_ok=True)
+
+            # Pick the best-matching plot for this row to avoid accidental
+            # cross-copying between rows in the same directory.
+            row_stem = None
+            fn_path = row.get("filename_path", None)
+            if isinstance(fn_path, str) and fn_path.strip() and fn_path.strip().lower() not in {"nan", "none"}:
+                row_stem = os.path.splitext(os.path.basename(fn_path.strip()))[0]
+            else:
+                fn = row.get("filename", None)
+                if isinstance(fn, str) and fn.strip() and fn.strip().lower() not in {"nan", "none"}:
+                    row_stem = os.path.splitext(os.path.basename(fn.strip()))[0]
+
+            date_token = date if len(date) == 8 else None
+            band_token = str(band).lower()
+
+            def _score_candidate(path):
+                base = os.path.basename(path).lower()
+                score = 0
+                if row_stem:
+                    rs = row_stem.lower()
+                    if rs in base:
+                        score += 4
+                if date_token and date_token in base:
+                    score += 2
+                if band_token and (
+                    f"_{band_token}_" in base
+                    or base.startswith(f"{band_token}_")
+                    or f"{band_token}band_" in base
+                ):
+                    score += 1
+                return score
+
+            scored = sorted(((_score_candidate(f), f) for f in files), key=lambda t: (t[0], t[1]), reverse=True)
+            best_score, src_file = scored[0]
+            if len(files) > 1 and best_score <= 0:
+                # Ambiguous: multiple candidates and no match signal -> skip.
+                continue
+
+            current_group = "detections" if is_detection else "nondetections"
+            existing_group = assigned_group_by_src.get(src_file)
+            if existing_group is not None and existing_group != current_group:
+                # Never allow the same source plot into both trees.
+                # Prefer detections when conflict occurs.
+                if existing_group == "detections" and current_group == "nondetections":
+                    continue
+            assigned_group_by_src[src_file] = current_group
+
+            dedupe_key = (src_file, current_group, band)
+            if dedupe_key in copied_pairs:
+                continue
+
             dest_file = os.path.join(
-                save_path, f"{band}band_{date}_{os.path.basename(src_file)}"
+                band_dir, f"{band}band_{date}_{os.path.basename(src_file)}"
             )
             shutil.copyfile(src_file, dest_file)
-            band_counter[band] += 1
+            copied_pairs.add(dedupe_key)
+            key = ("detections" if is_detection else "nondetections", band)
+            band_counter[key] += 1
         except (IndexError, KeyError, AttributeError) as exc:
-            logging.getLogger(__name__).warning(
+            log.warning(
                 "Skipping detections row due to missing or malformed fields: %s",
                 exc,
             )
             continue
 
-    # print("Number of files moved per band:")
-    # for band, count in band_counter.items():
-    #     print(f"{band}: {count}")
+    for (group_name, band), count in sorted(band_counter.items()):
+        log.info("check_detection_plots: %s/%s -> %d file(s)", group_name, band, count)
 
     return save_path
