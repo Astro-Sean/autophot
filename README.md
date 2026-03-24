@@ -267,6 +267,165 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
+### Full-featured driver script (sanitized)
+
+If you prefer a single, explicit driver script with many runtime toggles (target,
+catalog mapping, subtraction backend, lightcurve output), use this pattern.
+
+Notes:
+- All filesystem paths below are placeholders (`/path/to/...`).
+- `autophot_tokens` is optional. Use it only to load credentials from a local module.
+- Do not hard-code secrets in the script; prefer environment variables where possible.
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Run automated photometry with AutoPHoT.
+Override defaults and run the pipeline; optionally plot lightcurve and tables.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+# Optional: if running this script outside the repository root.
+PROJECT_ROOT = Path("/path/to/autophot_object")
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from autophot import AutomatedPhotometry
+
+# Optional local token module (credentials are not required unless your setup uses them).
+try:
+    import autophot_tokens  # local, user-managed module
+except ImportError:
+    autophot_tokens = None
+
+
+def main() -> int:
+    # ---------------------------------------------------------------------
+    # CLI
+    # ---------------------------------------------------------------------
+    parser = argparse.ArgumentParser(
+        description="Run AutoPHoT with optional image-level parallelism via nCPU."
+    )
+    parser.add_argument(
+        "--ncpu",
+        type=int,
+        default=1,
+        help="Number of images to process in parallel (nCPU>1 enables multiprocessing inside AutoPHoT).",
+    )
+    args = parser.parse_args()
+
+    # ---------------------------------------------------------------------
+    # Load defaults and set core paths
+    # ---------------------------------------------------------------------
+    autophot_input = AutomatedPhotometry.load()
+    autophot_input["outdir_name"] = "REDUCED"
+    autophot_input["wdir"] = "/path/to/autophot_db"
+    autophot_input["fits_dir"] = "/path/to/images/"
+
+    # Optional: set False to skip already-processed files.
+    # autophot_input["restart"] = False
+
+    # ---------------------------------------------------------------------
+    # Target
+    # ---------------------------------------------------------------------
+    autophot_input["target_name"] = "SNXXXXabc"  # optional
+    autophot_input["target_ra"] = 123.456789
+    autophot_input["target_dec"] = -12.345678
+
+    # ---------------------------------------------------------------------
+    # Catalog
+    # ---------------------------------------------------------------------
+    # You can use one catalog globally:
+    # autophot_input["catalog"]["use_catalog"] = "gaia"
+    #
+    # Or a per-filter mapping:
+    autophot_input["catalog"]["use_catalog"] = {
+        "griz": "refcat",
+        "u": "gaia",
+        "UBVRI": "apass",
+        # "default": "gaia",
+    }
+
+    # Custom catalog examples:
+    # autophot_input["catalog"]["use_catalog"] = "custom"
+    # autophot_input["catalog"]["catalog_custom_fpath"] = "/path/to/my_catalog.csv"
+
+    # Optional credentials for Refcat/CasJobs if needed by your setup.
+    if autophot_tokens is not None:
+        autophot_input["catalog"]["MASTcasjobs_wsid"] = getattr(
+            autophot_tokens, "MASTcasjobs_wsid", None
+        )
+        autophot_input["catalog"]["MASTcasjobs_pwd"] = getattr(
+            autophot_tokens, "MASTcasjobs_pwd", None
+        )
+
+    # ---------------------------------------------------------------------
+    # Preprocessing / photometry / WCS
+    # ---------------------------------------------------------------------
+    autophot_input["cosmic_rays"]["remove_cmrays"] = False
+    autophot_input["preprocessing"]["trim_image"] = 5  # arcmin
+
+    autophot_input["photometry"]["psf_oversample"] = 2
+    autophot_input["photometry"]["perform_emcee_fitting_s2n"] = 10
+    autophot_input["photometry"]["redo_sources"] = False
+
+    autophot_input["wcs"]["redo_wcs"] = True
+    autophot_input["wcs"]["solve_field_exe_loc"] = "solve-field"
+
+    # ---------------------------------------------------------------------
+    # Template subtraction
+    # ---------------------------------------------------------------------
+    autophot_input["template_subtraction"]["do_subtraction"] = True
+    autophot_input["template_subtraction"]["alignment_method"] = "reproject"
+    autophot_input["template_subtraction"]["method"] = "sfft"
+
+    # ---------------------------------------------------------------------
+    # Parallelism (image-level)
+    # ---------------------------------------------------------------------
+    autophot_input["nCPU"] = max(1, int(args.ncpu))
+
+    # ---------------------------------------------------------------------
+    # Run
+    # ---------------------------------------------------------------------
+    loc = AutomatedPhotometry.run_photometry(default_input=autophot_input)
+
+    # ---------------------------------------------------------------------
+    # Post-run: lightcurve and tables (optional)
+    # ---------------------------------------------------------------------
+    from lightcurve import (
+        plot_lightcurve,
+        check_detection_plots,
+        generate_photometry_table,
+    )
+
+    detections_loc = plot_lightcurve(
+        loc,
+        snr_limit=3,
+        method="PSF",
+        format="png",
+        offset=1,
+        show=True,
+        plot_color=False,
+        color_match_days=0.5,
+    )
+    check_detection_plots(detections_loc, method="PSF")
+    generate_photometry_table(
+        loc,
+        snr_limit=3,
+        method="PSF",
+        reference_epoch=0,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
 ## Template subtraction setup
 
 AutoPHoT expects templates to live under a `templates/` directory inside your `fits_dir`. At runtime it chooses the template based on the **science image filter** and the folder naming conventions below.
