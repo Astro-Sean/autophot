@@ -1732,6 +1732,7 @@ class Templates:
                         masked_centres.append((cx, cy))
 
             # --- Mask remaining flagged sources (skip if near target) ---
+            invalid_bbox_count = 0
             for _, src in tbl.iterrows():
                 cx = (src["bbox_xmin"] + src["bbox_xmax"]) / 2
                 cy = (src["bbox_ymin"] + src["bbox_ymax"]) / 2
@@ -1741,11 +1742,35 @@ class Templates:
                 ):
                     continue
 
-                w = src["bbox_xmax"] - src["bbox_xmin"]
-                h = src["bbox_ymax"] - src["bbox_ymin"]
+                # Guard against degenerate/invalid segmentation boxes.
+                x_min = float(src["bbox_xmin"])
+                x_max = float(src["bbox_xmax"])
+                y_min = float(src["bbox_ymin"])
+                y_max = float(src["bbox_ymax"])
+                if not np.all(np.isfinite([x_min, x_max, y_min, y_max, cx, cy])):
+                    invalid_bbox_count += 1
+                    continue
+
+                # Photutils bounding boxes can be tight; enforce at least 1 pixel.
+                w = max(1.0, x_max - x_min)
+                h = max(1.0, y_max - y_min)
+                if w <= 0 or h <= 0:
+                    invalid_bbox_count += 1
+                    continue
+
                 rect = RectangularAperture((cx, cy), w=w, h=h, theta=0)
-                mask += rect.to_mask().to_image(shape=mask.shape).astype(np.int32)
+                rect_img = rect.to_mask().to_image(shape=mask.shape)
+                if rect_img is None:
+                    invalid_bbox_count += 1
+                    continue
+                mask += rect_img.astype(np.int32)
                 masked_centres.append((cx, cy))
+
+            if invalid_bbox_count > 0:
+                logger.warning(
+                    "create_image_mask: skipped %d invalid/degenerate segmentation boxes.",
+                    invalid_bbox_count,
+                )
 
             # Collapse overlapping regions
             mask = np.clip(mask, 0, 1)
@@ -1778,38 +1803,45 @@ class Templates:
             logger.info("Image filter not specified in input YAML")
             return None
 
-        # PanSTARRS filters get a 'p' suffix by convention
         logger.info(border_msg(f"Finding template file for filter {use_filter}"))
+        fits_root = Path(self.input_yaml.get("fits_dir", "")) / "templates"
+        use_filter = str(use_filter).strip()
 
-        filter_label = (
-            use_filter + "p" if use_filter in {"g", "r", "i", "z", "u"} else use_filter
+        # Prefer modern naming for ugriz, keep legacy *p_template as fallback.
+        dir_labels = [f"{use_filter}_template"]
+        if use_filter in {"u", "g", "r", "i", "z"}:
+            dir_labels.append(f"{use_filter}p_template")
+
+        candidate_dirs = [fits_root / d for d in dir_labels]
+
+        for template_dir in candidate_dirs:
+            if not template_dir.is_dir():
+                continue
+            candidates = [
+                p
+                for p in template_dir.iterdir()
+                if p.suffix.lower() in {".fits", ".fts", ".fit"}
+                and "PSF_model_" not in p.name
+                and ".weight" not in p.name.lower()
+            ]
+            if not candidates:
+                logger.info("No template files found in %s", template_dir)
+                continue
+            result = str(candidates[0])
+            if template_dir.name.endswith("p_template"):
+                logger.info(
+                    "Template filepath (legacy folder): %s",
+                    result,
+                )
+            else:
+                logger.info("Template filepath: %s", result)
+            return result
+
+        logger.info(
+            "Template directory does not exist: %s",
+            ", ".join(str(d) for d in candidate_dirs),
         )
-        template_dir = (
-            Path(self.input_yaml.get("fits_dir", ""))
-            / "templates"
-            / f"{filter_label}_template"
-        )
-
-        if not template_dir.is_dir():
-            logger.info("Template directory does not exist: %s", template_dir)
-            return None
-
-        candidates = [
-            p
-            for p in template_dir.iterdir()
-            if p.suffix.lower() in {".fits", ".fts", ".fit"}
-            and "PSF_model_" not in p.name
-            and ".weight" not in p.name.lower()
-            and "_template" in p.name
-        ]
-
-        if not candidates:
-            logger.info("No template files found in %s", template_dir)
-            return None
-
-        result = str(candidates[0])
-        logger.info("Template filepath: %s", result)
-        return result
+        return None
 
     # -----------------------------------------------------------------
     # Alignment
@@ -3898,49 +3930,23 @@ class Templates:
         try:
             script = Path(__file__).parent / "utils" / "run_sfft.py"
             excluded = masked_sources + masked_centers
-            if excluded:
-                excl_coords = ",".join(f"[{x},{y}]" for x, y in excluded)
-                excl_str = f"[{excl_coords}]"
-            else:
-                excl_str = "[]"
-            # If fewer than 5 pipeline-matched sources, let SFFT do the matching (better subtraction)
-            min_sources_for_prior = 5
-            if len(matching_sources) < min_sources_for_prior:
-                logger.info(
-                    "Fewer than %d pipeline-matched sources (%d); letting SFFT perform source matching.",
-                    min_sources_for_prior,
-                    len(matching_sources),
-                )
-                match_str = "[]"
-            else:
-                coords = ",".join(f"[{x},{y}]" for x, y in matching_sources)
-                match_str = f"[{coords}]"
+            current_excluded = list(excluded)
+            current_matching_sources = list(matching_sources)
 
             ts_sub = self.input_yaml["template_subtraction"]
             phot_cfg = self.input_yaml.get("photometry", {})
 
-            # SFFT ForceConv: choose which image to convolve so we only "blur"
-            # (avoid effectively sharpening the narrower PSF, which can create
-            # point-source over/under-subtraction artefacts).
-            try:
-                fwhm_ref = float(template_fwhm)
-                fwhm_sci = float(science_fwhm)
-            except Exception:
-                fwhm_ref = float(template_fwhm) if template_fwhm is not None else 0.0
-                fwhm_sci = float(science_fwhm) if science_fwhm is not None else 0.0
-            forceconv = "REF" if fwhm_ref <= fwhm_sci else "SCI"
+            # Enforce REF convolution for SFFT so DIFF = SCI - conv(REF).
+            forceconv = "REF"
 
             # Background polynomial order: default to 0 unless the user explicitly overrides
             bg_order = ts_sub.get("sfft_bg_order", 0)
             allow_bg_override = _as_bool(
                 ts_sub.get("sfft_allow_crowded_bg_order_override", False), False
             )
-            # ConstPhotRatio controls whether SFFT forces a constant kernel-sum
-            # photometric ratio across the image. Allowing it to vary can reduce
-            # localized over/under-subtraction when flux scaling changes spatially.
-            const_phot_ratio = _as_bool(
-                ts_sub.get("sfft_const_phot_ratio", False), False
-            )
+            # Enforce a global flux scale in SFFT (constant kernel-sum photometric ratio).
+            # This intentionally disables spatially varying photometric scaling.
+            const_phot_ratio = True
 
             # crowded_field is a shortcut: when True, use SFFT crowded (ECP) unless
             # the user *explicitly* forces sparse via `force_sparse_sfft`.
@@ -3974,77 +3980,111 @@ class Templates:
                 "SFFT photometric scaling: ConstPhotRatio=%s",
                 const_phot_ratio,
             )
-            cmd = [
-                sys.executable,
-                str(script),
-                "-sci",
-                str(scienceFpath),
-                "-ref",
-                str(templateFpath),
-                "-diff",
-                str(differenceFpath),
-                "-mask",
-                str(mask_loc),
-                "-masked_sources",
-                excl_str,
-                "-kernel_order",
-                str(kernel_order),
-                "-bg_order",
-                str(bg_order),
-                "-allow_crowded_bg_order_override",
-                "true" if allow_bg_override else "false",
-                "-constphotratio",
-                "true" if const_phot_ratio else "false",
-                "-matching_sources",
-                match_str,
-                "-kernel_half_width",
-                str(scale),
-                "-forceconv",
-                forceconv,
-                "-gain_sci",
-                str(float(science_gain)),
-                "-gain_ref",
-                str(float(template_gain)),
-                "-saturate_sci",
-                str(sat_sci),
-                "-saturate_ref",
-                str(sat_ref),
-            ]
-            # Optional: finer background mesh for SExtractor/SFFT (helps with gradients/host light).
-            back_size = ts_sub.get("sfft_back_size", None)
-            back_filt = ts_sub.get("sfft_back_filtersize", None)
-            if back_size is not None:
-                cmd += ["-back_size", str(int(back_size))]
-            if back_filt is not None:
-                cmd += ["-back_filtersize", str(int(back_filt))]
-            # Robust SFFT source rejection controls.
-            only_flags_cfg = ts_sub.get("sfft_only_flags", [0, 1])
-            if only_flags_cfg is None:
-                cmd += ["-only_flags", "none"]
-            elif isinstance(only_flags_cfg, (list, tuple)):
-                cmd += ["-only_flags", ",".join(str(int(v)) for v in only_flags_cfg)]
-            else:
-                cmd += ["-only_flags", str(only_flags_cfg)]
+            def _serialize_xy_pairs(xy_list) -> str:
+                if not xy_list:
+                    return "[]"
+                coords = ",".join(f"[{float(x):.3f},{float(y):.3f}]" for x, y in xy_list)
+                return f"[{coords}]"
 
-            if ts_sub.get("sfft_cvrej_magd_thresh", None) is not None:
-                cmd += ["-cvrej_magd_thresh", str(float(ts_sub["sfft_cvrej_magd_thresh"]))]
-            if ts_sub.get("sfft_evrej_ratio_thresh", None) is not None:
-                cmd += [
-                    "-evrej_ratio_thresh",
-                    str(float(ts_sub["sfft_evrej_ratio_thresh"])),
+            def _build_sfft_cmd(run_excluded, run_matching):
+                # If fewer than 5 pipeline-matched sources, let SFFT perform matching.
+                min_sources_for_prior = 5
+                if len(run_matching) < min_sources_for_prior:
+                    logger.info(
+                        "Fewer than %d pipeline-matched sources (%d); letting SFFT perform source matching.",
+                        min_sources_for_prior,
+                        len(run_matching),
+                    )
+                    match_str = "[]"
+                else:
+                    match_str = _serialize_xy_pairs(run_matching)
+                excl_str = _serialize_xy_pairs(run_excluded)
+
+                cmd_local = [
+                    sys.executable,
+                    str(script),
+                    "-sci",
+                    str(scienceFpath),
+                    "-ref",
+                    str(templateFpath),
+                    "-diff",
+                    str(differenceFpath),
+                    "-mask",
+                    str(mask_loc),
+                    "-masked_sources",
+                    excl_str,
+                    "-kernel_order",
+                    str(kernel_order),
+                    "-bg_order",
+                    str(bg_order),
+                    "-allow_crowded_bg_order_override",
+                    "true" if allow_bg_override else "false",
+                    "-constphotratio",
+                    "true" if const_phot_ratio else "false",
+                    "-matching_sources",
+                    match_str,
+                    "-kernel_half_width",
+                    str(scale),
+                    "-forceconv",
+                    forceconv,
+                    "-gain_sci",
+                    str(float(science_gain)),
+                    "-gain_ref",
+                    str(float(template_gain)),
+                    "-saturate_sci",
+                    str(sat_sci),
+                    "-saturate_ref",
+                    str(sat_ref),
                 ]
-            if ts_sub.get("sfft_evrej_safe_magdev", None) is not None:
-                cmd += [
-                    "-evrej_safe_magdev",
-                    str(float(ts_sub["sfft_evrej_safe_magdev"])),
-                ]
-            if ts_sub.get("sfft_pac_ratio_thresh", None) is not None:
-                cmd += [
-                    "-pac_ratio_thresh",
-                    str(float(ts_sub["sfft_pac_ratio_thresh"])),
-                ]
-            if sfft_crowded:
-                cmd.append("-crowded")
+
+                # Optional: finer background mesh for SExtractor/SFFT.
+                back_size = ts_sub.get("sfft_back_size", None)
+                back_filt = ts_sub.get("sfft_back_filtersize", None)
+                if back_size is not None:
+                    cmd_local += ["-back_size", str(int(back_size))]
+                if back_filt is not None:
+                    cmd_local += ["-back_filtersize", str(int(back_filt))]
+
+                # Robust SFFT source rejection controls.
+                only_flags_cfg = ts_sub.get("sfft_only_flags", [0, 1, 2])
+                if only_flags_cfg is None:
+                    cmd_local += ["-only_flags", "none"]
+                elif isinstance(only_flags_cfg, (list, tuple)):
+                    cmd_local += ["-only_flags", ",".join(str(int(v)) for v in only_flags_cfg)]
+                else:
+                    cmd_local += ["-only_flags", str(only_flags_cfg)]
+
+                if ts_sub.get("sfft_cvrej_magd_thresh", None) is not None:
+                    cmd_local += [
+                        "-cvrej_magd_thresh",
+                        str(float(ts_sub["sfft_cvrej_magd_thresh"])),
+                    ]
+                if ts_sub.get("sfft_evrej_ratio_thresh", None) is not None:
+                    cmd_local += [
+                        "-evrej_ratio_thresh",
+                        str(float(ts_sub["sfft_evrej_ratio_thresh"])),
+                    ]
+                if ts_sub.get("sfft_evrej_safe_magdev", None) is not None:
+                    cmd_local += [
+                        "-evrej_safe_magdev",
+                        str(float(ts_sub["sfft_evrej_safe_magdev"])),
+                    ]
+                if ts_sub.get("sfft_pac_ratio_thresh", None) is not None:
+                    cmd_local += [
+                        "-pac_ratio_thresh",
+                        str(float(ts_sub["sfft_pac_ratio_thresh"])),
+                    ]
+                if sfft_crowded:
+                    cmd_local.append("-crowded")
+                return cmd_local
+
+            out_base = (
+                Path(base_name).stem.replace(" ", "_")
+                .replace(".", "_")
+                .replace("_APT", "")
+                .replace("_ERROR", "")
+            )
+            post_anomaly_csv = scienceDir / f"SFFT_PostAnomaly_Sources_{out_base}.csv"
             log_path = scienceDir / f"sfft_{Path(base_name).stem}.txt"
             # Force single process/CPU: one thread for BLAS/OpenMP and common env limits.
             sfft_env = {**os.environ}
@@ -4057,10 +4097,96 @@ class Templates:
                 "OPENMP_NUM_THREADS",
             ):
                 sfft_env[_k] = "1"
+
+            cmd = _build_sfft_cmd(current_excluded, current_matching_sources)
             with open(log_path, "w") as lf:
                 subprocess.run(
                     cmd, check=True, text=True, stdout=lf, stderr=lf, env=sfft_env
                 )
+
+            # Optional one-pass feedback: exclude SFFT post-anomaly sources and rerun.
+            use_post_anom_feedback = _as_bool(
+                ts_sub.get("sfft_use_post_anomaly_feedback", True), True
+            )
+            post_anom_min_count = int(ts_sub.get("sfft_post_anomaly_min_count", 1))
+            post_anom_max_frac = float(ts_sub.get("sfft_post_anomaly_max_fraction", 0.80))
+            post_anom_match_radius_px = float(
+                ts_sub.get("sfft_post_anomaly_match_radius_px", 1.5)
+            )
+            if use_post_anom_feedback and post_anomaly_csv.exists():
+                try:
+                    df_anom = pd.read_csv(post_anomaly_csv)
+                    xcol = (
+                        "X_IMAGE_REF_SCI_MEAN"
+                        if "X_IMAGE_REF_SCI_MEAN" in df_anom.columns
+                        else None
+                    )
+                    ycol = (
+                        "Y_IMAGE_REF_SCI_MEAN"
+                        if "Y_IMAGE_REF_SCI_MEAN" in df_anom.columns
+                        else None
+                    )
+                    if xcol and ycol:
+                        xy = df_anom[[xcol, ycol]].apply(pd.to_numeric, errors="coerce")
+                        xy = xy.replace([np.inf, -np.inf], np.nan).dropna()
+                        post_anom_xy = [tuple(v) for v in xy.to_numpy(float)]
+                    else:
+                        post_anom_xy = []
+                except Exception:
+                    post_anom_xy = []
+
+                n_post = len(post_anom_xy)
+                n_ref = max(1, len(current_matching_sources))
+                frac_post = float(n_post) / float(n_ref)
+                if n_post >= post_anom_min_count and frac_post <= post_anom_max_frac:
+                    # Extend prior-ban list.
+                    current_excluded = current_excluded + post_anom_xy
+
+                    # Remove prior-selected matches too close to anomaly sources.
+                    if current_matching_sources:
+                        anom_arr = np.asarray(post_anom_xy, float)
+                        filtered_matching = []
+                        for x0, y0 in current_matching_sources:
+                            dist2 = (anom_arr[:, 0] - float(x0)) ** 2 + (
+                                anom_arr[:, 1] - float(y0)
+                            ) ** 2
+                            if np.any(dist2 <= post_anom_match_radius_px**2):
+                                continue
+                            filtered_matching.append((x0, y0))
+                        dropped_matching = len(current_matching_sources) - len(
+                            filtered_matching
+                        )
+                        current_matching_sources = filtered_matching
+                    else:
+                        dropped_matching = 0
+
+                    logger.info(
+                        "SFFT post-anomaly feedback: banning %d sources and removing %d prior matches; rerunning subtraction once.",
+                        n_post,
+                        dropped_matching,
+                    )
+                    cmd_retry = _build_sfft_cmd(
+                        current_excluded,
+                        current_matching_sources,
+                    )
+                    retry_log_path = scienceDir / f"sfft_{Path(base_name).stem}_postanom_retry.txt"
+                    with open(retry_log_path, "w") as lf:
+                        subprocess.run(
+                            cmd_retry,
+                            check=True,
+                            text=True,
+                            stdout=lf,
+                            stderr=lf,
+                            env=sfft_env,
+                        )
+                elif n_post > 0:
+                    logger.info(
+                        "SFFT post-anomaly feedback skipped (count=%d, fraction=%.2f, limits: min=%d, max_frac=%.2f).",
+                        n_post,
+                        frac_post,
+                        post_anom_min_count,
+                        post_anom_max_frac,
+                    )
 
             logger.info("SFFT subtraction succeeded")
             return "done"

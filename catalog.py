@@ -46,18 +46,6 @@ from astroquery.vizier import Vizier
 # Photutils imports
 from photutils.centroids import centroid_sources, centroid_com, centroid_2dg
 
-# Optional: error-weighted centroiding (when error is provided)
-try:
-    from psf import (
-        _centroid_sources_with_error_impl,
-        centroid_com_with_error,
-        centroid_2dg_with_error,
-    )
-
-    _HAS_PSF_CENTROID_ERROR = True
-except ImportError:
-    _HAS_PSF_CENTROID_ERROR = False
-
 # Scikit-learn imports
 from sklearn.linear_model import RANSACRegressor
 from sklearn.base import BaseEstimator, RegressorMixin
@@ -67,7 +55,16 @@ from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 import traceback
 
 # Local imports
-from functions import AutophotYaml, border_msg, pix_dist, mag, snr, set_size
+from functions import (
+    AutophotYaml,
+    border_msg,
+    pix_dist,
+    mag,
+    snr,
+    set_size,
+    normalize_photometric_filter_name,
+    parse_supported_filter_group_key,
+)
 from aperture import Aperture
 
 # Initialize logger
@@ -159,6 +156,7 @@ class Catalog:
         workflows that do not require catalog calibration, but when a catalog
         query is requested we must fail fast with a clear message.
         """
+        catalogName = self._resolve_catalog_for_filter(catalogName)
         if (
             catalogName is None
             or str(catalogName).strip() == ""
@@ -169,6 +167,85 @@ class Catalog:
                 "(e.g. 'gaia', 'pan_starrs', 'sdss', 'apass', '2mass', 'legacy', 'refcat', or 'custom')."
             )
         return str(catalogName).strip()
+
+    def _resolve_catalog_for_filter(self, catalog_choice):
+        """
+        Resolve catalog selection from a scalar or per-filter mapping.
+
+        Supported mapping examples:
+            {'ugriz': 'sdss', 'UBVRI': 'apass', 'default': 'gaia'}
+            {'g': 'sdss', 'r': 'sdss', 'default': 'apass'}
+        """
+        if isinstance(catalog_choice, dict):
+            use_filter = str(self.input_yaml.get("imageFilter", "") or "").strip()
+            use_filter_norm = normalize_photometric_filter_name(use_filter)
+            # Warn when the current filter matches multiple mapping keys.
+            membership_matches = []
+            if use_filter:
+                for key, value in catalog_choice.items():
+                    if value is None:
+                        continue
+                    key_s = str(key).strip()
+                    key_l = key_s.lower()
+                    if key_l in {"default", "*", "all"}:
+                        continue
+                    key_bands = parse_supported_filter_group_key(key_s)
+                    if key_bands and use_filter in key_bands:
+                        membership_matches.append(str(key))
+                if len(membership_matches) > 1:
+                    logger.warning(
+                        "catalog.use_catalog mapping is ambiguous for filter '%s': matched keys=%s. "
+                        "Using precedence: exact key > first membership key > default.",
+                        use_filter,
+                        membership_matches,
+                    )
+
+            # 1) exact key match first (e.g. {"g": "sdss"})
+            for key, value in catalog_choice.items():
+                key_s = str(key).strip()
+                if value is None or key_s.lower() in {"default", "*", "all"}:
+                    continue
+                key_norm = normalize_photometric_filter_name(key_s)
+                if key_s == use_filter and key_norm is not None:
+                    return value
+            # Backward-compatible fallback: normalized exact match.
+            for key, value in catalog_choice.items():
+                key_s = str(key).strip()
+                if value is None or key_s.lower() in {"default", "*", "all"}:
+                    continue
+                key_norm = normalize_photometric_filter_name(key_s)
+                if (
+                    key_norm is not None
+                    and use_filter_norm is not None
+                    and key_norm == use_filter_norm
+                ):
+                    return value
+
+            # 2) grouped bands by membership string/list (e.g. {"ugriz": "sdss"})
+            for key, value in catalog_choice.items():
+                if value is None:
+                    continue
+                key_str = str(key).strip()
+                if key_str.lower() in {"default", "*", "all"}:
+                    continue
+                if not use_filter:
+                    continue
+                key_bands = parse_supported_filter_group_key(key_str)
+                if key_bands and use_filter in key_bands:
+                    return value
+
+            # 3) explicit default
+            for dkey in ("default", "*", "all"):
+                if dkey in catalog_choice and catalog_choice[dkey] is not None:
+                    return catalog_choice[dkey]
+
+            logger.warning(
+                "catalog.use_catalog mapping has no match for filter '%s'; available keys=%s",
+                use_filter,
+                list(catalog_choice.keys()),
+            )
+            return None
+        return catalog_choice
 
     @staticmethod
     def _catalog_len(obj) -> int:
@@ -1123,6 +1200,10 @@ class Catalog:
                     logger.warning(
                         f"Failed to convert RA/DEC to pixel coordinates: {e}. Skipping pixel coordinate conversion."
                     )
+                    # Keep schema stable for downstream code that expects pixel columns.
+                    outputCatalog = outputCatalog.copy()
+                    outputCatalog["x_pix"] = np.nan
+                    outputCatalog["y_pix"] = np.nan
 
             # --- Handle HST mode filtering ---
             if not self.input_yaml.get("HST_mode", False):
@@ -1214,8 +1295,8 @@ class Catalog:
         Recenter sources in an image, selecting centroiding method from FWHM.
         Undersampled (FWHM < 3 px): 2D Gaussian fit for subpixel accuracy.
         Well-sampled (FWHM >= 3 px): center-of-mass. Robust against fully masked cutouts.
-        When `error` is provided (e.g. background RMS), uses uncertainty-weighted centroiding
-        and returns centroid errors in x_pix_err, y_pix_err when available.
+        Error-weighted centroiding has been removed; this routine always uses
+        unweighted centroiding for stability across diverse background/error maps.
         """
         try:
             num_sources = len(selectedCatalog)
@@ -1233,7 +1314,14 @@ class Catalog:
                 return selectedCatalog
 
             fwhm = float(self.input_yaml.get("fwhm", 3))
-            undersampled = fwhm < 3.0
+            undersampled_thr = float(
+                (self.input_yaml.get("photometry", {}) or {}).get(
+                    "undersampled_fwhm_threshold", 2.5
+                )
+            )
+            undersampled = bool(
+                self.input_yaml.get("undersampled_mode", fwhm <= undersampled_thr)
+            )
 
             # Box size: default ~3xFWHM, odd, at least 3; for undersampled use at least 7 for 2DG
             if boxsize is None:
@@ -1278,108 +1366,30 @@ class Catalog:
             old_x_valid = old_x[valid_sources]
             old_y_valid = old_y[valid_sources]
 
-            # When error is provided, use uncertainty-weighted centroiding (psf module)
-            use_error_weighted = _HAS_PSF_CENTROID_ERROR and error is not None
-            if use_error_weighted:
-                err_arr = np.asarray(error, dtype=float).copy()
-                if err_arr.shape != image.shape:
-                    if np.isscalar(err_arr) or err_arr.size == 1:
-                        err_arr = np.full(image.shape, float(np.nanmedian(err_arr)))
-                    else:
-                        err_arr = np.broadcast_to(
-                            np.nanmedian(err_arr), image.shape
-                        ).copy()
-                # Sanitize: zeros/NaNs or very small values make weighted 2DG fit fail
-                err_median = np.nanmedian(err_arr)
-                if not np.isfinite(err_median) or err_median <= 0:
-                    logger.debug(
-                        "Error array has no valid positive median; skipping error-weighted centroiding."
-                    )
-                    use_error_weighted = False
-                    err_arr = None
-                else:
-                    err_arr = np.nan_to_num(
-                        err_arr, nan=err_median, posinf=err_median, neginf=err_median
-                    )
-                    err_floor = max(1e-30, float(err_median) * 1e-6)
-                    np.clip(err_arr, err_floor, None, out=err_arr)
+            # Undersampled (FWHM < 3): 2D Gaussian; well-sampled: COM
+            if undersampled:
+                logger.info("Using 2D Gaussian centroiding (FWHM < 3 px, undersampled)")
+                centroid_func = centroid_2dg
             else:
-                err_arr = None
-
-            if use_error_weighted:
-                # Undersampled: 2DG with error weighting; well-sampled: COM with error propagation
-                centroid_func = (
-                    centroid_2dg_with_error if undersampled else centroid_com_with_error
+                logger.info("Using center-of-mass centroiding (FWHM >= 3 px)")
+                centroid_func = centroid_com
+            try:
+                x_valid, y_valid = centroid_sources(
+                    image,
+                    old_x_valid,
+                    old_y_valid,
+                    box_size=boxsize,
+                    centroid_func=centroid_func,
+                    mask=nan_mask,
                 )
-                logger.info(
-                    "Using %s centroiding with uncertainty weighting",
-                    "2D Gaussian" if undersampled else "center-of-mass",
-                )
-                try:
-                    x_valid, y_valid, x_err_valid, y_err_valid = (
-                        _centroid_sources_with_error_impl(
-                            image,
-                            old_x_valid,
-                            old_y_valid,
-                            box_size=boxsize,
-                            mask=nan_mask,
-                            error=err_arr,
-                            centroid_func=centroid_func,
-                        )
-                    )
-                    good = np.isfinite(x_valid) & np.isfinite(y_valid)
-                    good_frac = good.sum() / max(1, len(x_valid))
-                    # If error-weighted centroiding produces too few valid centroids
-                    # (e.g. pathologically masked/noisy images), fall back to the
-                    # more robust unweighted centroiding instead of discarding most
-                    # sources.
-                    if good_frac < 0.5:
-                        logger.debug(
-                            "Error array (for centroiding): min=%.2e, max=%.2e, median=%.2e",
-                            np.nanmin(err_arr),
-                            np.nanmax(err_arr),
-                            np.nanmedian(err_arr),
-                        )
-                        logger.warning(
-                            "Error-weighted centroiding produced only %.1f%% valid centroids "
-                            "(%d/%d); falling back to unweighted centroiding.",
-                            100.0 * good_frac,
-                            good.sum(),
-                            len(x_valid),
-                        )
-                        use_error_weighted = False
-                except Exception as e:
-                    logger.warning(
-                        f"Error-weighted centroiding failed: {e}; falling back to unweighted"
-                    )
-                    use_error_weighted = False
-            if not use_error_weighted:
-                # Undersampled (FWHM < 3): 2D Gaussian; well-sampled: COM
-                if undersampled:
-                    logger.info(
-                        "Using 2D Gaussian centroiding (FWHM < 3 px, undersampled)"
-                    )
-                    centroid_func = centroid_2dg
-                else:
-                    logger.info("Using center-of-mass centroiding (FWHM >= 3 px)")
-                    centroid_func = centroid_com
-                try:
-                    x_valid, y_valid = centroid_sources(
-                        image,
-                        old_x_valid,
-                        old_y_valid,
-                        box_size=boxsize,
-                        centroid_func=centroid_func,
-                        mask=nan_mask,
-                    )
-                    x_valid = np.asarray(x_valid)
-                    y_valid = np.asarray(y_valid)
-                except Exception as e:
-                    logger.warning(f"Centroiding failed even on valid sources: {e}")
-                    x_valid = old_x_valid.copy()
-                    y_valid = old_y_valid.copy()
-                x_err_valid = np.full(len(x_valid), np.nan)
-                y_err_valid = np.full(len(y_valid), np.nan)
+                x_valid = np.asarray(x_valid)
+                y_valid = np.asarray(y_valid)
+            except Exception as e:
+                logger.warning(f"Centroiding failed even on valid sources: {e}")
+                x_valid = old_x_valid.copy()
+                y_valid = old_y_valid.copy()
+            x_err_valid = np.full(len(x_valid), np.nan)
+            y_err_valid = np.full(len(y_valid), np.nan)
 
             # Create full arrays with NaNs for invalid sources
             x = np.full(len(old_x), np.nan)
@@ -1450,7 +1460,9 @@ class Catalog:
     # =============================================================================
     # =============================================================================
 
-    def _check_valid_cutouts(self, image, x_coords, y_coords, boxsize, mask):
+    def _check_valid_cutouts(
+        self, image, x_coords, y_coords, boxsize, mask, min_unmasked_frac=0.0
+    ):
         """
         Check which source cutouts contain at least one unmasked pixel.
 
@@ -1469,6 +1481,8 @@ class Catalog:
         --------
         valid_mask : numpy.ndarray
             Boolean mask of valid cutouts
+        min_unmasked_frac : float
+            Minimum required fraction of unmasked pixels in a cutout.
         """
         height, width = image.shape
         half_box = boxsize // 2
@@ -1486,9 +1500,12 @@ class Catalog:
                 valid_mask[i] = False
                 continue
 
-            # Check if cutout has any unmasked pixels
+            # Check if cutout has enough unmasked pixels
             cutout_mask = mask[y_min:y_max, x_min:x_max]
-            if np.all(cutout_mask):
+            n_pix = cutout_mask.size
+            n_unmasked = int(np.sum(~cutout_mask))
+            frac_unmasked = n_unmasked / max(1, n_pix)
+            if frac_unmasked <= float(min_unmasked_frac):
                 valid_mask[i] = False
 
         return valid_mask
@@ -1555,7 +1572,8 @@ class Catalog:
         target_name=None,
         catalog_list=["refcat", "sdss", "pan_starrs", "apass", "2mass"],
         radius=2,
-        max_seperation=3,
+        max_separation=3,
+        **kwargs,
     ):
         """
         Build a complete catalog by combining multiple catalogs.
@@ -1570,8 +1588,19 @@ class Catalog:
             List of catalogs to combine (default is ['refcat', 'sdss', 'pan_starrs', 'apass', '2mass']).
         radius : float, optional
             Search radius in arcminutes (default is 2).
-        max_seperation : float, optional
+        max_separation : float, optional
             Maximum separation in arcseconds for matching sources (default is 3).
+        # Backward compatibility: support legacy misspelled keyword.
+        if "max_seperation" in kwargs:
+            legacy_value = kwargs.pop("max_seperation")
+            if legacy_value is not None:
+                max_separation = legacy_value
+        if kwargs:
+            logger.warning(
+                "Ignoring unexpected keyword(s) in build_complete_catalog: %s",
+                ", ".join(sorted(kwargs.keys())),
+            )
+
 
         Returns:
         --------
@@ -1627,7 +1656,7 @@ class Catalog:
             updated_filter_list.append(f"{filter}_err")
 
         # Matching tolerance in arcseconds (used by `find_source`)
-        tolerance_arcsec = max_seperation
+        tolerance_arcsec = max_separation
 
         cols = ["RA", "DEC"] + updated_filter_list
         output_catalog = pd.DataFrame(columns=cols)

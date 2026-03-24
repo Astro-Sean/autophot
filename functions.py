@@ -183,6 +183,136 @@ def configure_console_logging(
     return handler
 
 
+SUPPORTED_FILTER_GROUPS = {
+    "UBVRI": tuple("UBVRI"),
+    "ugriz": tuple("ugriz"),
+    "JHK": tuple("JHK"),
+}
+
+SUPPORTED_PHOTOMETRIC_FILTERS = tuple(
+    band for group in SUPPORTED_FILTER_GROUPS.values() for band in group
+)
+
+NON_PHOTOMETRIC_FILTER_KEYS = {
+    "RA",
+    "DEC",
+    "name",
+    "objname",
+    "name_prefix",
+    "RA_err",
+    "DEC_err",
+}
+
+
+def get_supported_filter_groups() -> dict:
+    """Return accepted filter-group keys for per-filter mapping."""
+    return dict(SUPPORTED_FILTER_GROUPS)
+
+
+def get_supported_photometric_filters() -> tuple:
+    """Return all accepted photometric band names."""
+    return tuple(SUPPORTED_PHOTOMETRIC_FILTERS)
+
+
+def parse_supported_filter_group_key(group_key):
+    """
+    Parse a mapping-group key into explicit supported bands.
+
+    Accepted examples:
+      - Full groups: "UBVRI", "ugriz", "JHK"
+      - Valid subsets/singletons of one family: "griz", "u", "BV", "HK"
+    Rejected:
+      - Mixed-family tokens: "uBV", "rJ"
+      - Unsupported tokens/bands.
+    """
+    if group_key is None:
+        return None
+    key = str(group_key).strip()
+    if key == "":
+        return None
+
+    # Fast path for canonical full-group keys.
+    if key in SUPPORTED_FILTER_GROUPS:
+        return tuple(SUPPORTED_FILTER_GROUPS[key])
+
+    # Support subsets of exactly one canonical family.
+    for family_bands in SUPPORTED_FILTER_GROUPS.values():
+        fam_set = set(family_bands)
+        if all(ch in fam_set for ch in key):
+            ordered = []
+            seen = set()
+            for ch in key:
+                if ch not in seen:
+                    ordered.append(ch)
+                    seen.add(ch)
+            return tuple(ordered)
+    return None
+
+
+def normalize_photometric_filter_name(filter_name):
+    """
+    Normalize a filter token to a supported photometric band.
+
+    Accepted bands are restricted to UBVRI, ugriz, and JHK families.
+    Non-photometric fields (RA/DEC/name and *_err columns) return None.
+    """
+    if filter_name is None:
+        return None
+
+    token = str(filter_name).strip()
+    if token == "":
+        return None
+
+    if token in NON_PHOTOMETRIC_FILTER_KEYS or token.lower().endswith("_err"):
+        return None
+
+    if token in SUPPORTED_PHOTOMETRIC_FILTERS:
+        return token
+
+    token_l = token.lower()
+    aliases = {
+        "up": "u",
+        "gp": "g",
+        "rp": "r",
+        "ip": "i",
+        "zp": "z",
+        "b": "B",
+        "v": "V",
+        "ks": "K",
+        "j": "J",
+        "h": "H",
+        "k": "K",
+    }
+    return aliases.get(token_l)
+
+
+def sanitize_photometric_filters(filters):
+    """
+    Keep only supported photometric filters while preserving order.
+
+    Returns
+    -------
+    (cleaned, dropped)
+        cleaned : list[str]
+            Deduplicated list of supported filters.
+        dropped : list[str]
+            Raw filter tokens that were rejected.
+    """
+    cleaned = []
+    seen = set()
+    dropped = []
+    for raw in filters or []:
+        norm = normalize_photometric_filter_name(raw)
+        if norm is None:
+            dropped.append(str(raw))
+            continue
+        if norm in seen:
+            continue
+        cleaned.append(norm)
+        seen.add(norm)
+    return cleaned, dropped
+
+
 def odd(n: int) -> int:
     """Return n if odd, else n+1."""
     n = int(n)

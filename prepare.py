@@ -34,6 +34,9 @@ from functions import (
     load_telescope_config,
     ColoredLevelFormatter,
     print_progress_bar,
+    normalize_photometric_filter_name,
+    sanitize_photometric_filters,
+    parse_supported_filter_group_key,
 )
 from check import FitsInfo
 from tns import get_coords
@@ -266,11 +269,75 @@ class Prepare:
         selected_catalog = self.input_yaml["catalog"]["use_catalog"]
         script_dir = os.path.dirname(os.path.abspath(__file__))
         catalog_yml_path = os.path.join(script_dir, "databases", "catalog.yml")
-        catalog_input = AutophotYaml(catalog_yml_path, selected_catalog).load()
+
+        def _resolve_catalog_for_filter(catalog_choice, image_filter=None):
+            if not isinstance(catalog_choice, dict):
+                return catalog_choice
+            use_filter = str(image_filter or "").strip()
+            use_filter_norm = normalize_photometric_filter_name(use_filter)
+            if use_filter:
+                membership_matches = []
+                for k, v in catalog_choice.items():
+                    if v is None:
+                        continue
+                    key_s = str(k).strip()
+                    key_l = key_s.lower()
+                    if key_l in {"default", "*", "all"}:
+                        continue
+                    key_bands = parse_supported_filter_group_key(key_s)
+                    if key_bands and use_filter in key_bands:
+                        membership_matches.append(str(k))
+                if len(membership_matches) > 1:
+                    self.logger.warning(
+                        "catalog.use_catalog mapping is ambiguous for filter '%s': matched keys=%s. "
+                        "Using precedence: exact key > first membership key > default.",
+                        image_filter,
+                        membership_matches,
+                    )
+            if use_filter:
+                for k, v in catalog_choice.items():
+                    key_s = str(k).strip()
+                    if v is None or key_s.lower() in {"default", "*", "all"}:
+                        continue
+                    key_norm = normalize_photometric_filter_name(key_s)
+                    if key_s == use_filter and key_norm is not None:
+                        return v
+                # Backward-compatible fallback: normalized exact match.
+                for k, v in catalog_choice.items():
+                    key_s = str(k).strip()
+                    if v is None or key_s.lower() in {"default", "*", "all"}:
+                        continue
+                    key_norm = normalize_photometric_filter_name(key_s)
+                    if (
+                        key_norm is not None
+                        and use_filter_norm is not None
+                        and key_norm == use_filter_norm
+                    ):
+                        return v
+                for k, v in catalog_choice.items():
+                    key_s = str(k).strip()
+                    key_l = key_s.lower()
+                    if key_l in {"default", "*", "all"}:
+                        continue
+                    key_bands = parse_supported_filter_group_key(key_s)
+                    if v is not None and key_bands and use_filter in key_bands:
+                        return v
+            for dkey in ("default", "*", "all"):
+                if dkey in catalog_choice and catalog_choice[dkey] is not None:
+                    return catalog_choice[dkey]
+            for v in catalog_choice.values():
+                if v is not None:
+                    return v
+            return None
+
+        selected_catalog_resolved = _resolve_catalog_for_filter(
+            selected_catalog, self.input_yaml.get("imageFilter")
+        )
+        catalog_input = AutophotYaml(catalog_yml_path, selected_catalog_resolved).load()
 
         if self.input_yaml["catalog"].get("build_catalog", False):
             available_filters = list(catalog_input.keys())
-        elif selected_catalog == "custom":
+        elif selected_catalog_resolved == "custom":
             target = self.input_yaml["target_name"]
             fname = (
                 f"{target}_RAD_{float(self.input_yaml['catalog']['catalog_radius'])}"
@@ -301,13 +368,39 @@ class Prepare:
                 f for f in catalog_input.keys() if f in custom_table.columns
             ]
         else:
-            available_filters = list(catalog_input.keys())
+            if isinstance(selected_catalog, dict):
+                available_filters = []
+                seen_filters = set()
+                cat_names = []
+                for v in selected_catalog.values():
+                    if v is None:
+                        continue
+                    vv = str(v).strip()
+                    if vv and vv not in cat_names:
+                        cat_names.append(vv)
+                for cat_name in cat_names:
+                    try:
+                        c_input = AutophotYaml(catalog_yml_path, cat_name).load()
+                        for f in c_input.keys():
+                            if f not in seen_filters:
+                                seen_filters.add(f)
+                                available_filters.append(f)
+                    except Exception:
+                        continue
+            else:
+                available_filters = list(catalog_input.keys())
 
         # Include IR sequence data if specified
         if self.input_yaml["catalog"].get("include_IR_sequence_data", False):
             available_filters += ["J", "H", "K"]
-            available_filters = list(set(available_filters))
-
+        available_filters, dropped_filters = sanitize_photometric_filters(
+            available_filters
+        )
+        if dropped_filters:
+            self.logger.info(
+                "Ignoring unsupported/non-photometric catalog keys: %s",
+                ", ".join(sorted(set(dropped_filters))),
+            )
         return available_filters
 
     # --- Check TNS ---
@@ -323,6 +416,34 @@ class Prepare:
         tns_dir = pathlib.Path(self.input_yaml["wdir"]) / "tns_objects"
         tns_dir.mkdir(parents=True, exist_ok=True)
         transient_path = tns_dir / f"{target_name}.yml"
+
+        def _log_tns_summary(tns_data: Dict, source: str) -> None:
+            """Log a concise TNS summary each time coordinates are used."""
+            try:
+                objname = tns_data.get("objname", target_name)
+                prefix = str(tns_data.get("name_prefix", "") or "").strip()
+                display_name = f"{prefix}{objname}" if prefix else str(objname)
+                ra_val = tns_data.get("radeg", tns_data.get("ra"))
+                dec_val = tns_data.get("decdeg", tns_data.get("dec"))
+                obj_type = tns_data.get("type", tns_data.get("object_type", "unknown"))
+                if ra_val is not None and dec_val is not None:
+                    self.logger.info(
+                        "TNS info (%s): %s  RA=%.6f  Dec=%.6f  Type=%s",
+                        source,
+                        display_name,
+                        float(ra_val),
+                        float(dec_val),
+                        obj_type,
+                    )
+                else:
+                    self.logger.info(
+                        "TNS info (%s): %s  Type=%s",
+                        source,
+                        display_name,
+                        obj_type,
+                    )
+            except Exception:
+                self.logger.info("TNS info (%s): %s", source, str(target_name))
 
         # Early return for user-provided coordinates
         if target_name is None:
@@ -354,6 +475,7 @@ class Prepare:
             self.logger.info(
                 "Using cached TNS information for %s.", tns_response["objname"]
             )
+            _log_tns_summary(tns_response, source="cache")
             return tns_response
 
         # Fetch new TNS data
@@ -386,6 +508,7 @@ class Prepare:
             AutophotYaml.create(str(transient_path), tns_response)
             obj_name = tns_response.get("name_prefix", "") + tns_response["objname"]
             self.logger.info("Retrieved TNS information for %s.", obj_name)
+            _log_tns_summary(tns_response, source="query")
             return tns_response
         except Exception as exc:
             exc_type, _, exc_tb = sys.exc_info()
@@ -588,6 +711,30 @@ class Prepare:
         files_removed = 0
         filters_removed = 0
         filters_not_selected = 0
+        available_filters, dropped_available = sanitize_photometric_filters(
+            available_filters
+        )
+        if dropped_available:
+            self.logger.info(
+                "Filter check: dropped unsupported catalog keys: %s",
+                ", ".join(sorted(set(dropped_available))),
+            )
+        selected_filters_cfg = self.input_yaml.get("selected_filters", [None])
+        selected_filters = [None]
+        if selected_filters_cfg and selected_filters_cfg[0] is not None:
+            selected_filters, dropped_selected = sanitize_photometric_filters(
+                selected_filters_cfg
+            )
+            if dropped_selected:
+                self.logger.warning(
+                    "selected_filters contains unsupported values; ignoring: %s",
+                    ", ".join(sorted(set(dropped_selected))),
+                )
+            if not selected_filters:
+                self.logger.warning(
+                    "selected_filters has no supported bands; no files will pass this constraint."
+                )
+                selected_filters = [None]
 
         # Cache of header filter -> catalog band mappings seen in this run,
         # keyed by (telescope, instrument, raw_header_value). This prevents us
@@ -730,6 +877,11 @@ class Prepare:
             if filter_name == "no_filter" and "templates" in os.path.normpath(name):
                 norm = os.path.normpath(name)
                 template_patterns = (
+                    "u_template",
+                    "g_template",
+                    "r_template",
+                    "i_template",
+                    "z_template",
                     "gp_template",
                     "rp_template",
                     "ip_template",
@@ -755,27 +907,16 @@ class Prepare:
 
             # Normalize raw filter name for catalog matching (instrument_prefix + band -> band)
             if filter_name not in available_filters and filter_name != "no_filter":
-                normalized = filter_name.strip().lower()
-                # NIR aliases (e.g. ESO/VISTA use "Ks"; catalog uses "K") so templates pass and get calibrated
-                nir_alias_to_catalog = {"ks": "K", "k": "K", "j": "J", "h": "H"}
-                if (
-                    normalized in nir_alias_to_catalog
-                    and nir_alias_to_catalog[normalized] in available_filters
-                ):
-                    filter_name = nir_alias_to_catalog[normalized]
-                else:
-                    # Try suffix after last underscore or hyphen (e.g. ZTF_i -> i, EFOSC_r784 -> r784)
-                    for sep in ("_", "-"):
-                        if sep in normalized:
-                            suffix = normalized.split(sep)[-1]
-                            if suffix in available_filters:
-                                filter_name = suffix
-                                break
-                    if (
-                        filter_name not in available_filters
-                        and normalized in available_filters
-                    ):
-                        filter_name = normalized
+                candidates = [str(filter_name).strip()]
+                normalized = candidates[0].lower()
+                for sep in ("_", "-"):
+                    if sep in normalized:
+                        candidates.append(normalized.split(sep)[-1])
+                for cand in candidates:
+                    norm_cand = normalize_photometric_filter_name(cand)
+                    if norm_cand in available_filters:
+                        filter_name = norm_cand
+                        break
 
             # Apply catalog and user filter constraints
             if (
@@ -798,8 +939,8 @@ class Prepare:
                     filter_unavailable.append(filter_name)
                     continue
 
-            if self.input_yaml["selected_filters"][0] is not None:
-                if filter_name not in self.input_yaml["selected_filters"]:
+            if selected_filters[0] is not None:
+                if filter_name not in selected_filters:
                     files_removed += 1
                     filters_not_selected += 1
                     continue
@@ -880,6 +1021,14 @@ class Prepare:
                 .keys()
             )
 
+        raw_filters = [str(f).strip() for f in required_filters if str(f).strip()]
+        required_filters, dropped_required = sanitize_photometric_filters(raw_filters)
+        if dropped_required:
+            self.logger.info(
+                "Template lookup: ignored %d unsupported/non-filter keys.",
+                len(dropped_required),
+            )
+
         if not os.path.isdir(template_dir):
             self.logger.warning(
                 "No template folder found at expected location; skipping templates. "
@@ -891,16 +1040,37 @@ class Prepare:
         incorrect_setup = False
 
         for filter_x in required_filters:
-            if filter_x in ["u", "g", "r", "i", "z"]:
-                filter_x += "p"
+            canonical_filter = str(filter_x).strip()
+            # Support both modern (r_template) and legacy (rp_template) folder names
+            # for ugriz bands. Prefer modern naming when both are present.
+            dir_candidates = [f"{canonical_filter}_template"]
+            if canonical_filter in {"u", "g", "r", "i", "z"}:
+                dir_candidates.append(f"{canonical_filter}p_template")
 
-            expected_template_dir = os.path.join(template_dir, f"{filter_x}_template")
-            template_status[filter_x] = {}
+            existing_dirs = [
+                os.path.join(template_dir, d) for d in dir_candidates if os.path.isdir(os.path.join(template_dir, d))
+            ]
+            template_status[canonical_filter] = {}
 
-            if not os.path.isdir(expected_template_dir):
-                template_status[filter_x]["status"] = "directory does not exist"
-                template_status[filter_x]["fpath"] = None
+            if len(existing_dirs) == 0:
+                template_status[canonical_filter]["status"] = "directory does not exist"
+                template_status[canonical_filter]["fpath"] = None
+                template_status[canonical_filter]["expected_dirs"] = [
+                    os.path.join(template_dir, d) for d in dir_candidates
+                ]
                 continue
+
+            expected_template_dir = existing_dirs[0]
+            template_status[canonical_filter]["expected_dirs"] = [
+                os.path.join(template_dir, d) for d in dir_candidates
+            ]
+            template_status[canonical_filter]["dir_used"] = expected_template_dir
+            if os.path.basename(expected_template_dir).endswith("p_template"):
+                self.logger.info(
+                    "[%s template] Using legacy folder naming: %s",
+                    canonical_filter,
+                    os.path.basename(expected_template_dir),
+                )
 
             template_files = glob.glob(os.path.join(expected_template_dir, "*.fits"))
             psf_model_files = glob.glob(
@@ -912,31 +1082,31 @@ class Prepare:
             )
 
             if len(original_files) == 1:
-                template_status[filter_x]["status"] = "found"
+                template_status[canonical_filter]["status"] = "found"
                 shutil.copyfile(
                     original_files[0], original_files[0].replace(".original", "")
                 )
-                template_status[filter_x]["fpath"] = original_files[0].replace(
+                template_status[canonical_filter]["fpath"] = original_files[0].replace(
                     ".original", ""
                 )
             elif len(template_files) == 0:
-                template_status[filter_x]["status"] = "not found"
-                template_status[filter_x]["fpath"] = None
+                template_status[canonical_filter]["status"] = "not found"
+                template_status[canonical_filter]["fpath"] = None
                 incorrect_setup = True
             elif len(template_files) > 1:
                 self.logger.warning(
                     "Multiple (%d) template files found for %s-band; choosing the largest.",
                     len(template_files),
-                    filter_x,
+                    canonical_filter,
                 )
                 incorrect_setup = True
                 template_file_sizes = {f: os.path.getsize(f) for f in template_files}
                 best_guess = max(template_file_sizes, key=template_file_sizes.get)
-                template_status[filter_x]["status"] = "multiple found"
-                template_status[filter_x]["fpath"] = best_guess
+                template_status[canonical_filter]["status"] = "multiple found"
+                template_status[canonical_filter]["fpath"] = best_guess
             else:
-                template_status[filter_x]["status"] = "found"
-                template_status[filter_x]["fpath"] = template_files[0]
+                template_status[canonical_filter]["status"] = "found"
+                template_status[canonical_filter]["fpath"] = template_files[0]
 
         # Log template status
         for key, info in template_status.items():
@@ -944,10 +1114,13 @@ class Prepare:
             if status == "found":
                 self.logger.info("[%s template] Using file: %s", key, info.get("fpath"))
             elif status in ("not found", "directory does not exist"):
+                expected_dirs = info.get("expected_dirs") or [
+                    os.path.join(template_dir, f"{key}_template")
+                ]
                 self.logger.warning(
-                    "[%s template] Missing; expected directory: %s",
+                    "[%s template] Missing; expected directory one of: %s",
                     key,
-                    os.path.join(template_dir, f"{key}_template"),
+                    ", ".join(expected_dirs),
                 )
             elif status == "multiple found":
                 self.logger.warning(

@@ -286,8 +286,9 @@ AutoPHoT expects templates to live under a `templates/` directory inside your `f
 Templates must be organised into per-filter subfolders. The folder name depends on the filter:
 
 - For common optical filters **`g r i z u`**:
-  - Folder name: **`{filter}p_template/`**
-  - Examples: `gp_template/`, `rp_template/`, `ip_template/`, `zp_template/`, `up_template/`
+  - Recommended folder name: **`{filter}_template/`**
+  - Examples: `g_template/`, `r_template/`, `i_template/`, `z_template/`, `u_template/`
+  - Backward compatibility: legacy names **`{filter}p_template/`** are also accepted (`gp_template/`, `rp_template/`, `ip_template/`, `zp_template/`, `up_template/`).
 - For **Johnson–Cousins UBVRI** (use uppercase band letters **`U B V R I`**):
   - Folder name: **`{filter}_template/`**
   - Examples: `U_template/`, `B_template/`, `V_template/`, `R_template/`, `I_template/`
@@ -302,7 +303,7 @@ my_field/                         # fits_dir
 ├── science_2024_01_15_r.fits
 ├── science_2024_01_20_r.fits
 └── templates/
-    ├── rp_template/
+    ├── r_template/
     │   └── r_template.fits
     └── K_template/
         └── K_template.fits
@@ -310,7 +311,7 @@ my_field/                         # fits_dir
 
 ### Template file rules
 
-- The template can be **any `*.fits` file** in the appropriate `{filter}_template/` folder (the filename does **not** need to contain `_template`).
+- The template can be **any `*.fits` file** in the appropriate filter folder (`{filter}_template/` recommended; `{filter}p_template/` also accepted for legacy `ugriz` setups). The filename does **not** need to contain `_template`.
 - Files containing `PSF_model` or ending in `.weight` are ignored as templates.
 - Keep exactly **one** usable template per filter folder to avoid ambiguity.
 

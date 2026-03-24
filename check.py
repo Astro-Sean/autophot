@@ -20,6 +20,7 @@ from functions import (
     AutophotYaml,
     concatenate_csv_files,
     print_progress_bar,
+    sanitize_photometric_filters,
 )
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -159,9 +160,15 @@ class FitsInfo:
 
         # Load available filters database
         filters_path = Path(__file__).parent / "databases" / "filters.yml"
-        self.available_filters = list(
-            AutophotYaml(filters_path).load().get("W_eff", {}).keys()
+        loaded_filters = list(AutophotYaml(filters_path).load().get("W_eff", {}).keys())
+        self.available_filters, dropped_filters = sanitize_photometric_filters(
+            loaded_filters
         )
+        if dropped_filters:
+            self.logger.info(
+                "Ignoring unsupported filter definitions: %s",
+                ", ".join(sorted(set(dropped_filters))),
+            )
 
         self.logger.info(f"Initialized: {len(self.flist)} files")
 

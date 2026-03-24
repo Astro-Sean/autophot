@@ -102,6 +102,139 @@ def run_sfft() -> Optional[int]:
         except Exception:
             print(msg)  # Fallback if logging not configured
 
+    def _to_dataframe(obj) -> pd.DataFrame:
+        """Best-effort conversion of an SFFT table-like object to DataFrame."""
+        if obj is None:
+            return pd.DataFrame()
+        if isinstance(obj, pd.DataFrame):
+            return obj.copy()
+        if hasattr(obj, "to_pandas"):
+            try:
+                return obj.to_pandas()
+            except Exception:
+                pass
+        try:
+            return pd.DataFrame(obj)
+        except Exception:
+            return pd.DataFrame()
+
+    def _pick_xy_columns(df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
+        """Find plausible x/y coordinate columns in an SFFT source catalog."""
+        candidates = [
+            ("X_IMAGE_REF_SCI_MEAN", "Y_IMAGE_REF_SCI_MEAN"),
+            ("x_center", "y_center"),
+            ("x", "y"),
+            ("x_pix", "y_pix"),
+            ("X_IMAGE", "Y_IMAGE"),
+        ]
+        for xcol, ycol in candidates:
+            if xcol in df.columns and ycol in df.columns:
+                return xcol, ycol
+        return None, None
+
+    def _flag_mask_from_columns(
+        df: pd.DataFrame, include_tokens: Tuple[str, ...], exclude_tokens: Tuple[str, ...] = ()
+    ) -> np.ndarray:
+        """
+        Build a boolean mask from likely flag columns.
+
+        Picks the matching flag-like column with the largest positive count.
+        """
+        if df.empty:
+            return np.zeros(0, dtype=bool)
+        best_mask = np.zeros(len(df), dtype=bool)
+        best_count = 0
+        for col in df.columns:
+            c_low = str(col).strip().lower()
+            if not all(tok in c_low for tok in include_tokens):
+                continue
+            if any(tok in c_low for tok in exclude_tokens):
+                continue
+            series = pd.to_numeric(df[col], errors="coerce")
+            if series.notna().sum() == 0:
+                continue
+            vals = series.dropna().values
+            uniq = np.unique(vals)
+            # Keep to flag-like columns only (bool / 0-1 style).
+            if len(uniq) > 6:
+                continue
+            if not np.all(np.isfinite(uniq)):
+                continue
+            col_mask = np.asarray(series.fillna(0).values > 0, bool)
+            count = int(np.count_nonzero(col_mask))
+            if count > best_count:
+                best_count = count
+                best_mask = col_mask
+        return best_mask
+
+    def _coords_from_prep_data(prep_data_obj) -> np.ndarray:
+        """Extract post-anomaly coordinates directly from prep_data keys when available."""
+        if not isinstance(prep_data_obj, dict):
+            return np.empty((0, 2), float)
+        for key, value in prep_data_obj.items():
+            key_l = str(key).lower()
+            if "post" not in key_l or "anom" not in key_l:
+                continue
+            try:
+                arr = np.asarray(value, dtype=float)
+            except Exception:
+                continue
+            if arr.ndim == 2 and arr.shape[1] >= 2 and arr.size > 0:
+                return arr[:, :2]
+        return np.empty((0, 2), float)
+
+    def _write_post_anomaly_sources_csv(
+        prep_data_obj, matched_df: Optional[pd.DataFrame], out_dir_path: str, out_base_name: str
+    ) -> int:
+        """
+        Export post-anomaly source coordinates for optional retry feedback.
+
+        Output: SFFT_PostAnomaly_Sources_<base>.csv with x/y columns in SCI/REF mean frame.
+        """
+        out_csv = os.path.join(out_dir_path, f"SFFT_PostAnomaly_Sources_{out_base_name}.csv")
+        anomaly_xy = _coords_from_prep_data(prep_data_obj)
+
+        # Fallback: derive from SubSource catalog flags.
+        if anomaly_xy.size == 0:
+            cat_df = pd.DataFrame()
+            if isinstance(prep_data_obj, dict) and "SExCatalog-SubSource" in prep_data_obj:
+                cat_df = _to_dataframe(prep_data_obj.get("SExCatalog-SubSource"))
+            if cat_df.empty and isinstance(matched_df, pd.DataFrame):
+                cat_df = matched_df.copy()
+            if not cat_df.empty:
+                xcol, ycol = _pick_xy_columns(cat_df)
+                if xcol and ycol:
+                    pac_mask = _flag_mask_from_columns(
+                        cat_df,
+                        include_tokens=("post", "anom"),
+                        exclude_tokens=("prior",),
+                    )
+                    if pac_mask.size == len(cat_df) and np.any(pac_mask):
+                        xy = cat_df.loc[pac_mask, [xcol, ycol]].copy()
+                        xy = xy.apply(pd.to_numeric, errors="coerce").dropna()
+                        anomaly_xy = xy.to_numpy(float)
+
+        if anomaly_xy.size == 0:
+            # Keep state explicit: remove stale file from prior runs.
+            try:
+                if os.path.exists(out_csv):
+                    os.remove(out_csv)
+            except Exception:
+                pass
+            return 0
+
+        # Deduplicate and write standardized columns.
+        df_anom = pd.DataFrame(anomaly_xy, columns=["X_IMAGE_REF_SCI_MEAN", "Y_IMAGE_REF_SCI_MEAN"])
+        df_anom = df_anom.replace([np.inf, -np.inf], np.nan).dropna()
+        if df_anom.empty:
+            return 0
+        df_anom = df_anom.drop_duplicates().reset_index(drop=True)
+        df_anom.to_csv(out_csv, index=False)
+        log_info(
+            f"Exported {len(df_anom)} post-anomaly sources for feedback: {out_csv}"
+        )
+        return int(len(df_anom))
+
     # --- Print SFFT Version ---
     log_info(f"Using SFFT version: {sfft.__version__}")
 
@@ -205,31 +338,31 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-only_flags",
         type=str,
-        default="0,1",
+        default="0,1,2",
         help="Comma-separated SExtractor FLAGS values to keep (e.g. '0,1'); use 'none' to disable.",
     )
     parser.add_argument(
         "-cvrej_magd_thresh",
         type=float,
-        default=0.08,
+        default=0.12,
         help="SFFT coarse variable-rejection magnitude-difference threshold.",
     )
     parser.add_argument(
         "-evrej_ratio_thresh",
         type=float,
-        default=4.0,
+        default=6.0,
         help="SFFT elaborate variable-rejection ratio threshold.",
     )
     parser.add_argument(
         "-evrej_safe_magdev",
         type=float,
-        default=0.02,
+        default=0.04,
         help="SFFT elaborate variable-rejection safe magnitude-deviation threshold.",
     )
     parser.add_argument(
         "-pac_ratio_thresh",
         type=float,
-        default=2.2,
+        default=2.8,
         help="SFFT post-anomaly-check ratio threshold.",
     )
     parser.add_argument(
@@ -319,6 +452,56 @@ def run_sfft() -> Optional[int]:
     hdr_sci, data_sci = get_fits_info(FITS_SCI)
     hdr_ref, data_ref = get_fits_info(FITS_REF)
 
+    def _sanitize_xy_sources(
+        xy: Optional[np.ndarray], label: str, width: int, height: int
+    ) -> Optional[np.ndarray]:
+        """
+        Keep source lists permissive but valid:
+        - remove non-finite coordinates
+        - remove out-of-image coordinates
+        - de-duplicate nearly identical points
+        """
+        if xy is None:
+            return None
+        arr = np.asarray(xy, dtype=float)
+        if arr.ndim != 2 or arr.shape[1] != 2 or arr.shape[0] == 0:
+            return None
+
+        n_in = int(arr.shape[0])
+        finite_mask = np.isfinite(arr[:, 0]) & np.isfinite(arr[:, 1])
+        arr = arr[finite_mask]
+
+        if arr.shape[0] > 0:
+            in_bounds = (
+                (arr[:, 0] >= 0.0)
+                & (arr[:, 0] < float(width))
+                & (arr[:, 1] >= 0.0)
+                & (arr[:, 1] < float(height))
+            )
+            arr = arr[in_bounds]
+
+        if arr.shape[0] > 0:
+            rounded = np.round(arr, decimals=3)
+            _, uniq_idx = np.unique(rounded, axis=0, return_index=True)
+            arr = arr[np.sort(uniq_idx)]
+
+        n_out = int(arr.shape[0])
+        n_drop = n_in - n_out
+        if n_drop > 0:
+            log_info(
+                f"{label}: kept {n_out}/{n_in} sources after basic validity checks "
+                f"(dropped {n_drop} unusable entries)."
+            )
+        else:
+            log_info(f"{label}: kept all {n_out} sources.")
+        return arr if n_out > 0 else None
+
+    ny, nx = data_sci.shape
+    matching_sources = _sanitize_xy_sources(matching_sources, "Matching sources", nx, ny)
+    masked_sources = _sanitize_xy_sources(masked_sources, "Masked sources", nx, ny)
+    if matching_sources is None:
+        log_info("No valid prior matching sources after checks; SFFT will perform source matching.")
+
     # --- Ensure GAIN and SATURATE in FITS (pass values, not keywords) ---
     # Write values into headers so SFFT/MeLOn find the keywords (avoids KeyError when SATURATE missing).
     SATURATE_FALLBACK = 1e30  # finite value for "no saturation" (FITS cannot store inf)
@@ -397,6 +580,12 @@ def run_sfft() -> Optional[int]:
     detect_maxarea = 0
 
     # Kernel half-width: user override, or auto. Use 2*FWHM so kernel is large enough
+    # KerHWLimit (min, max): SFFT clamps kernel half-width to this range.
+    # Keep max large enough that large sci/ref FWHM differences are not clamped.
+    KER_HW_LIMIT_MIN = 3
+    KER_HW_LIMIT_MAX = 50
+    KerHWLimit = (KER_HW_LIMIT_MIN, KER_HW_LIMIT_MAX)
+
     # to fit both science and template PSFs (user requirement). HOTPANTS uses 1.5*FWHM;
     # slightly larger kernel here can improve SFFT stability.
     if float(args.kernel_half_width) == 0:
@@ -408,18 +597,25 @@ def run_sfft() -> Optional[int]:
     if kernel_half_width % 2 == 0:
         kernel_half_width += 1
         log_info(f"Adjusted kernel half width to odd: {kernel_half_width:.1f} px")
-    else:
-        log_info(f"Using kernel half width: {kernel_half_width:.1f} px")
+
+    # Clamp auto/manual width to SFFT limits before any downstream use.
+    k_lo, k_hi = KerHWLimit
+    if kernel_half_width < k_lo:
+        log_info(
+            f"Kernel half width {kernel_half_width:.1f} px below limit {k_lo}; clamping."
+        )
+        kernel_half_width = float(k_lo)
+    if kernel_half_width > k_hi:
+        log_info(
+            f"Kernel half width {kernel_half_width:.1f} px above limit {k_hi}; clamping."
+        )
+        kernel_half_width = float(k_hi)
+
+    log_info(f"Using kernel half width: {kernel_half_width:.1f} px")
 
     # Boundary: strip where convolution is invalid. Use kernel half-width (minimal)
     # so the output diff image is as large as possible; was 3*fwhm_max which made output narrow.
     boundary = int(kernel_half_width)
-
-    # KerHWLimit (min, max): SFFT clamps kernel half-width to this range.
-    # Keep max large enough that large sci/ref FWHM differences are not clamped.
-    KER_HW_LIMIT_MIN = 3
-    KER_HW_LIMIT_MAX = 50
-    KerHWLimit = (KER_HW_LIMIT_MIN, KER_HW_LIMIT_MAX)
 
     # --- SFFT Parameters ---
     # (From SFFT source: thomasvrussell/sfft, EasySparsePacket.ESP / EasyCrowdedPacket.ECP)
@@ -440,12 +636,14 @@ def run_sfft() -> Optional[int]:
     # as a subprocess or on HPC (avoids "Thread creation failed" and semaphore leaks).
     NUM_CPU_THREADS_4SUBTRACT = 1
 
-    # Convolve REF to match SCI so DIFF = SCI - conv(REF). Transient (science-only) then
-    # keeps the science PSF. AUTO can convolve science when it has worse seeing, which
-    # makes the transient look wrong (e.g. broader).
-    ForceConv = str(getattr(args, "forceconv", "REF")).upper().strip()
-    if ForceConv not in ("REF", "SCI"):
-        raise ValueError(f"Invalid -forceconv='{ForceConv}'; expected 'REF' or 'SCI'.")
+    # Enforce REF convolution globally so DIFF = SCI - conv(REF).
+    # Ignore CLI override intentionally.
+    forceconv_arg = str(getattr(args, "forceconv", "REF")).upper().strip()
+    if forceconv_arg != "REF":
+        log_info(
+            f"Overriding requested ForceConv='{forceconv_arg}' -> 'REF' (enforced)."
+        )
+    ForceConv = "REF"
     GAIN_KEY = "GAIN"
     SATUR_KEY = "SATURATE"
 
@@ -622,6 +820,7 @@ def run_sfft() -> Optional[int]:
     # --- Run SFFT ---
     t0_sfft = time.time()
     try:
+        matched_sources = pd.DataFrame()
         if args.crowded:
             # Crowded-field subtraction (ECP): no prior source list; uses SExtractor + masking.
             log_info("Running crowded-field subtraction (ECP).")
@@ -685,11 +884,7 @@ def run_sfft() -> Optional[int]:
             cat_key = "SExCatalog-SubSource"
             if cat_key in prep_data:
                 catalog = prep_data[cat_key]
-                matched_sources = (
-                    catalog.to_pandas()
-                    if hasattr(catalog, "to_pandas")
-                    else pd.DataFrame(catalog)
-                )
+                matched_sources = _to_dataframe(catalog)
                 log_info(
                     f"Number of sources used in crowded-field matching: {len(matched_sources)}"
                 )
@@ -841,11 +1036,7 @@ def run_sfft() -> Optional[int]:
                     f"SFFT prep_data missing '{cat_key}'; incompatible SFFT version?"
                 )
             catalog = prep_data[cat_key]
-            matched_sources = (
-                catalog.to_pandas()
-                if hasattr(catalog, "to_pandas")
-                else pd.DataFrame(catalog)
-            )
+            matched_sources = _to_dataframe(catalog)
 
             log_info(f"Number of sources used in matching: {len(matched_sources)}")
 
@@ -878,6 +1069,16 @@ def run_sfft() -> Optional[int]:
                 df_out.to_csv(out_csv, index=False)
             else:
                 matched_sources.to_csv(out_csv, index=False)
+
+        try:
+            _write_post_anomaly_sources_csv(
+                prep_data_obj=prep_data,
+                matched_df=matched_sources,
+                out_dir_path=out_dir,
+                out_base_name=out_base,
+            )
+        except Exception as e:
+            log_info(f"Warning: Could not export post-anomaly sources: {e}")
 
         try:
             convd = fits.getheader(FITS_DIFF).get("CONVD", "UNKNOWN")

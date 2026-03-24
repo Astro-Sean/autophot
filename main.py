@@ -64,7 +64,7 @@ for _env in (
     os.environ[_env] = "1"
 
 
-# TODO: add in a trimming if the template image is smaller than the sciene image
+# TODO: add trimming if the template image is smaller than the science image
 
 
 # =============================================================================
@@ -505,23 +505,27 @@ def run_photometry():
                     h = hdul[0].header
                     if not h.get("TELESCOP") or not str(h.get("TELESCOP", "")).strip():
                         norm = os.path.normpath(fpath)
-                        if (
-                            "gp_template" in norm
-                            or "rp_template" in norm
-                            or "ip_template" in norm
-                            or "up_template" in norm
-                        ):
+                        # Support both modern (r_template) and legacy (rp_template)
+                        # folder names for ugriz template directories.
+                        folder_band = None
+                        for part in norm.split(os.sep):
+                            if not part.endswith("_template"):
+                                continue
+                            prefix = part.split("_")[0]
+                            if prefix in {"u", "g", "r", "i", "z"}:
+                                folder_band = prefix
+                                break
+                            if prefix in {"up", "gp", "rp", "ip", "zp"}:
+                                folder_band = prefix[:-1]
+                                break
+
+                        if folder_band is not None:
                             tele, inst = "SDSS", "SDSS"
-                            band = "g"
-                            if "up_template" in norm:
-                                band = "u"
-                            elif "gp_template" in norm:
-                                band = "g"
-                            elif "rp_template" in norm:
-                                band = "r"
-                            elif "ip_template" in norm:
-                                band = "i"
-                            h["TELESCOP"], h["INSTRUME"], h["FILTER"] = tele, inst, band
+                            h["TELESCOP"], h["INSTRUME"], h["FILTER"] = (
+                                tele,
+                                inst,
+                                folder_band,
+                            )
                         else:
                             for folder, (tele, inst, band) in [
                                 ("J_template", "2MASS", "2MASS", "J"),
@@ -1196,7 +1200,7 @@ def run_photometry():
             )
 
         # =============================================================================
-        # Measuring the background statitiscs (don't remove it)
+        # Measuring the background statistics (don't remove it)
         # =============================================================================
         # Creates a background remover instance.
 
@@ -1211,6 +1215,19 @@ def run_photometry():
         defects_mask = result["defects_mask"]
 
         logging.info(f"Preliminary FWHM: {ImageFWHM:.1f} pixels")
+
+        # Global undersampled-mode flag for consistent behavior across modules.
+        phot_cfg = input_yaml.get("photometry", {}) or {}
+        undersampled_thr = float(phot_cfg.get("undersampled_fwhm_threshold", 2.5))
+        input_yaml["undersampled_mode"] = bool(
+            np.isfinite(ImageFWHM) and float(ImageFWHM) <= undersampled_thr
+        )
+        logging.info(
+            "Undersampled mode: %s (FWHM=%.2f px, threshold=%.2f px)",
+            input_yaml["undersampled_mode"],
+            float(ImageFWHM),
+            undersampled_thr,
+        )
 
         header["fwhm"] = ImageFWHM
 
@@ -1436,12 +1453,52 @@ def run_photometry():
                 equinox="J2000",
             )
             # Converts sky coordinates to pixel coordinates using WCS.
-            x_pix, y_pix = imageWCS.world_to_pixel(coords)
+            try:
+                x_pix, y_pix = imageWCS.world_to_pixel(coords)
+            except Exception as exc:
+                logging.warning(
+                    "Variable-source WCS transform failed for bulk conversion; "
+                    "retrying per source and skipping non-convergent points: %s",
+                    exc,
+                )
+                x_pix = np.full(len(variable_sources), np.nan, dtype=float)
+                y_pix = np.full(len(variable_sources), np.nan, dtype=float)
+                for i, (ra_deg, dec_deg) in enumerate(
+                    zip(
+                        variable_sources["RA"].to_numpy(dtype=float),
+                        variable_sources["DEC"].to_numpy(dtype=float),
+                    )
+                ):
+                    try:
+                        xi, yi = imageWCS.all_world2pix(float(ra_deg), float(dec_deg), 0)
+                        if np.isfinite(xi) and np.isfinite(yi):
+                            x_pix[i] = float(xi)
+                            y_pix[i] = float(yi)
+                    except Exception as src_exc:
+                        logging.debug(
+                            "Skipping variable source RA=%.7f Dec=%.7f due to WCS "
+                            "conversion failure: %s",
+                            ra_deg,
+                            dec_deg,
+                            src_exc,
+                        )
+                n_failed = int(np.count_nonzero(~np.isfinite(x_pix) | ~np.isfinite(y_pix)))
+                if n_failed > 0:
+                    logging.warning(
+                        "Skipped %d/%d variable sources due to non-convergent WCS distortion inversion.",
+                        n_failed,
+                        len(variable_sources),
+                    )
             # Gets image size.
             height, width = image.shape
             # Creates a mask of sources inside the image boundaries.
             inside_mask = (
-                (x_pix >= 0) & (x_pix < width) & (y_pix >= 0) & (y_pix < height)
+                np.isfinite(x_pix)
+                & np.isfinite(y_pix)
+                & (x_pix >= 0)
+                & (x_pix < width)
+                & (y_pix >= 0)
+                & (y_pix < height)
             )
             # Filters sources inside the image.
             variable_sources = variable_sources.loc[inside_mask].copy()
@@ -1477,16 +1534,6 @@ def run_photometry():
         logging.info(
             f"Expected pixel position: ({target_x_expected:.2f}, {target_y_expected:.2f})"
         )
-
-        # Checks the reverse transform.
-        ra_back, dec_back = imageWCS.all_pix2world(
-            target_x_expected, target_y_expected, index
-        )
-        offset_arcsec = np.sqrt(
-            ((ra_back - input_yaml["target_ra"]) * 3600) ** 2
-            + ((dec_back - input_yaml["target_dec"]) * 3600) ** 2
-        )
-        logging.info(f"WCS round-trip error: {offset_arcsec:.3f} arcsec")
 
         # =============================================================================
         # Remove the background
@@ -1649,10 +1696,6 @@ def run_photometry():
         dec = input_yaml["target_dec"]
         x = input_yaml["target_x_pix"]
         y = input_yaml["target_y_pix"]
-        ra_back, dec_back = imageWCS.all_pix2world(x, y, index)
-        offset_arcsec = np.sqrt(
-            ((ra_back - ra) * 3600) ** 2 + ((dec_back - dec) * 3600) ** 2
-        )
         in_bounds = (0 <= x < nx) and (0 <= y < ny)
         target_label = str(input_yaml.get("target_name", "Transient"))
         x_center = 0.5 * (nx - 1)
@@ -1667,7 +1710,6 @@ def run_photometry():
             "  Sky: RA %.6f deg, Dec %.6f deg\n"
             "  Pixel: (%.2f, %.2f)\n"
             "  Offset from image center: dx=%+.2f px, dy=%+.2f px\n"
-            "  WCS round-trip: %.4f arcsec\n"
             "  Bounds: %s (min edge margin %.2f px)",
             target_label,
             nx,
@@ -1678,7 +1720,6 @@ def run_photometry():
             y,
             dx_center,
             dy_center,
-            offset_arcsec,
             "within bounds" if in_bounds else "OUTSIDE bounds",
             border_margin_px,
         )
@@ -1850,6 +1891,9 @@ def run_photometry():
         Calibrate_Catalog = Catalog(input_yaml=input_yaml)
 
         # Builds or downloads the catalog of reference sources.
+        selected_catalog_name = Calibrate_Catalog._require_catalog_selected(
+            input_yaml["catalog"].get("use_catalog")
+        )
         if input_yaml["catalog"].get("build_catalog", False):
             unCatalogSources = Calibrate_Catalog.build_complete_catalog(
                 target_coords=target_coords,
@@ -1860,7 +1904,7 @@ def run_photometry():
             unCatalogSources = Calibrate_Catalog.download(
                 target_coords=target_coords,
                 target_name=input_yaml["target_name"],
-                catalogName=input_yaml["catalog"]["use_catalog"],
+                catalogName=selected_catalog_name,
                 catalog_custom_fpath=input_yaml["catalog"].get(
                     "catalog_custom_fpath", None
                 ),
@@ -1875,7 +1919,7 @@ def run_photometry():
         CatalogSources = Calibrate_Catalog.clean(
             selectedCatalog=unCatalogSources,
             image_wcs=imageWCS,
-            catalogName=input_yaml["catalog"]["use_catalog"],
+            catalogName=selected_catalog_name,
             get_local_sources=False,
             border=border,
         )
@@ -1885,14 +1929,22 @@ def run_photometry():
             )
             CatalogSources = None
         else:
-            mask_x = (CatalogSources["x_pix"].values >= border) & (
-                CatalogSources["x_pix"].values < width - border
-            )
-            mask_y = (CatalogSources["y_pix"].values >= border) & (
-                CatalogSources["y_pix"].values < height - border
-            )
-            mask = (mask_x) & (mask_y)
-            CatalogSources = CatalogSources[mask]
+            if ("x_pix" not in CatalogSources.columns) or (
+                "y_pix" not in CatalogSources.columns
+            ):
+                logging.warning(
+                    "Catalog sources missing x_pix/y_pix after cleaning; skipping catalog border filter."
+                )
+                CatalogSources = None
+            else:
+                mask_x = (CatalogSources["x_pix"].values >= border) & (
+                    CatalogSources["x_pix"].values < width - border
+                )
+                mask_y = (CatalogSources["y_pix"].values >= border) & (
+                    CatalogSources["y_pix"].values < height - border
+                )
+                mask = (mask_x) & (mask_y)
+                CatalogSources = CatalogSources[mask]
 
         # =============================================================================
         # Run source detection on final calibrated image
@@ -1929,6 +1981,11 @@ def run_photometry():
 
         input_yaml["fwhm"] = ImageFWHM
         input_yaml["scale"] = scale
+        phot_cfg = input_yaml.get("photometry", {}) or {}
+        undersampled_thr = float(phot_cfg.get("undersampled_fwhm_threshold", 2.5))
+        input_yaml["undersampled_mode"] = bool(
+            np.isfinite(ImageFWHM) and float(ImageFWHM) <= undersampled_thr
+        )
 
         header["fwhm"] = ImageFWHM
 
@@ -2013,6 +2070,13 @@ def run_photometry():
                 )
                 input_yaml["fwhm"] = ImageFWHM
                 input_yaml["scale"] = scale
+                phot_cfg = input_yaml.get("photometry", {}) or {}
+                undersampled_thr = float(
+                    phot_cfg.get("undersampled_fwhm_threshold", 2.5)
+                )
+                input_yaml["undersampled_mode"] = bool(
+                    np.isfinite(ImageFWHM) and float(ImageFWHM) <= undersampled_thr
+                )
                 header["fwhm"] = ImageFWHM
                 logging.info(
                     "Re-ran SExtractor with crowded-field parameters for full source detection."
@@ -2185,6 +2249,10 @@ def run_photometry():
         )
         IsolatedSources = IsolatedSources[mask]
         logging.info(f"Number of sources: {len(IsolatedSources)}")
+        # Keep a broader pre-optimum pool for PSF building. Optimum-radius
+        # selection is tuned for aperture stability and can become too strict
+        # for robust ePSF construction in sparse/crowded epochs.
+        psf_source_pool = IsolatedSources.copy()
 
         # Too few isolated stars: cannot build PSF or measure optimum radius; continue with aperture-only.
         min_sources_for_psf = 3
@@ -2227,6 +2295,20 @@ def run_photometry():
                 optimum_radius = optimum_radius_crowded if crowded_field else 1.7
         else:
             optimum_radius = optimum_radius_crowded if crowded_field else 1.7
+
+        # If optimum-radius filtering left a very small set, keep using the
+        # broader pre-optimum pool for PSF modelling while retaining the
+        # filtered set for aperture-radius estimation/corrections.
+        min_psf_pool = max(4, int(input_yaml["photometry"].get("psf_min_candidates", 8)))
+        if len(IsolatedSources) < min_psf_pool and len(psf_source_pool) > len(IsolatedSources):
+            logging.info(
+                "Optimum-radius selection returned %d sources; using broader pre-optimum pool "
+                "(%d sources) for PSF building.",
+                len(IsolatedSources),
+                len(psf_source_pool),
+            )
+        else:
+            psf_source_pool = IsolatedSources.copy()
 
         input_yaml["photometry"]["aperture_radius"] = odd(
             int(np.ceil(optimum_radius * input_yaml["fwhm"]))
@@ -2387,7 +2469,7 @@ def run_photometry():
                     IsolatedSources["DEC"].values,
                     index,
                 )
-                psf_sources_orig = IsolatedSources.copy()
+                psf_sources_orig = psf_source_pool.copy()
                 psf_sources_orig["x_pix"] = x_orig
                 psf_sources_orig["y_pix"] = y_orig
                 h_orig, w_orig = image_orig.shape
@@ -2442,7 +2524,7 @@ def run_photometry():
                     image=image,
                     input_yaml=input_yaml,
                 ).build(
-                    psfSources=IsolatedSources,
+                    psfSources=psf_source_pool,
                     mask=defects_mask,
                     background_rms=background_rms,
                 )
@@ -2509,8 +2591,15 @@ def run_photometry():
         try:
             cat_cfg = input_yaml.get("catalog") or {}
             curve_map_cfg = cat_cfg.get("curve_map")
-            use_catalog = str(cat_cfg.get("use_catalog", "")).strip().lower()
-            use_custom_throughputs = bool(curve_map_cfg) and use_catalog == "custom"
+            resolved_use_catalog = str(
+                Calibrate_Catalog._resolve_catalog_for_filter(
+                    cat_cfg.get("use_catalog", "")
+                )
+                or ""
+            ).strip().lower()
+            use_custom_throughputs = (
+                bool(curve_map_cfg) and resolved_use_catalog == "custom"
+            )
         except Exception:
             use_custom_throughputs = False
 
@@ -2544,8 +2633,23 @@ def run_photometry():
         # Updates the header with the zeropoint values.
         for m in image_zeropoint.keys():
             try:
-                header[f"ZP_{m}"] = image_zeropoint[m]["zeropoint"]
-                header[f"ZP_{m}_e"] = image_zeropoint[m]["zeropoint_error"]
+                zp_val = image_zeropoint[m].get("zeropoint", np.nan)
+                zp_err = image_zeropoint[m].get("zeropoint_error", np.nan)
+
+                # FITS headers cannot store NaN reliably for scalar values.
+                if np.isfinite(zp_val):
+                    header[f"ZP_{m}"] = float(zp_val)
+                else:
+                    logging.warning(
+                        "%s zeropoint is not finite; writing 'unknown' to header.",
+                        m,
+                    )
+                    header[f"ZP_{m}"] = "unknown"
+
+                if np.isfinite(zp_err):
+                    header[f"ZP_{m}_e"] = float(zp_err)
+                else:
+                    header[f"ZP_{m}_e"] = "unknown"
             except Exception as e:
                 log_exception(e, f"Issue with {m} zeropoint")
                 header[f"ZP_{m}"] = "unknown"
@@ -2845,7 +2949,9 @@ def run_photometry():
             # Image shape fallback.
             _height, _width = image.shape if image is not None else (height, width)
             centroid_adjusted = 0
-            centroid_func = centroid_2dg if ImageFWHM < 3.0 else centroid_com
+            centroid_func = (
+                centroid_2dg if bool(input_yaml.get("undersampled_mode", False)) else centroid_com
+            )
             # Iterates clusters with >1 members and attempts centroiding using photutils.
             for label in merged_sources.index:
                 if cluster_counts.get(label, 1) <= 1:
@@ -3580,9 +3686,27 @@ def run_photometry():
         TargetPosition["x_fit_err"] = [np.nan]
         TargetPosition["y_fit_err"] = [np.nan]
 
-        # max_radius_arcsec = input_yaml["photometry"].get('fitting_xy_bounds',1) / 2
-        max_radius_pix = ImageFWHM * 1.5 / 2
-        logging.info(f"Fitting source within {max_radius_pix:.1f} pixels")
+        # Use the global photometry fitting bound configured in arcseconds.
+        # Conversion to pixels is handled in PSF.fit; here we log the expected
+        # value when pixel_scale is available.
+        fit_bound_arcsec = float(
+            (input_yaml.get("photometry", {}) or {}).get("fitting_xy_bounds", 1.0)
+        )
+        pix_scale = input_yaml.get("pixel_scale", np.nan)
+        if np.isfinite(pix_scale) and float(pix_scale) > 0:
+            fit_bound_pix = fit_bound_arcsec / float(pix_scale)
+            logging.info(
+                "Target PSF fitting bound: %.3f arcsec (%.2f px at %.3f arcsec/px)",
+                fit_bound_arcsec,
+                fit_bound_pix,
+                float(pix_scale),
+            )
+        else:
+            logging.info(
+                "Target PSF fitting bound: %.3f arcsec (pixel_scale unavailable; "
+                "PSF.fit will use robust fallback conversion).",
+                fit_bound_arcsec,
+            )
 
         # Performs PSF fitting on the target position if aperture photometry is not required.
         if not do_aperture_ONLY:
@@ -3596,7 +3720,6 @@ def run_photometry():
                 forcePhotometry=perform_ForcePhotometry,
                 is_target_fit=True,
                 background_rms=background_rms,
-                xy_bounds=max_radius_pix,
             )
 
             if "flags" in TargetPosition:
@@ -3644,7 +3767,7 @@ def run_photometry():
                 )
 
         # =============================================================================
-        # Limiting magnitdues
+        # Limiting magnitudes
         # =============================================================================
 
         get_LimitingMagnitude = input_yaml["photometry"].get(
