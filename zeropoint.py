@@ -483,11 +483,47 @@ class Zeropoint:
                     threshold_limit,
                 )
 
+            # Reject likely saturated/non-linear calibrators when peak flux is available.
+            zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
+            reject_nonlinear = bool(zp_cfg.get("reject_nonlinear_sources", True))
+            nonlin_peak_frac = float(zp_cfg.get("nonlinear_peak_frac", 0.85))
+            sat_peak_frac = float(zp_cfg.get("saturation_peak_frac", 0.99))
+            saturate_level = float(self.input_yaml.get("saturate", np.inf))
+            non_linear_mask = np.zeros(len(sources), dtype=bool)
+            saturated_mask = np.zeros(len(sources), dtype=bool)
+            if (
+                reject_nonlinear
+                and "peak_flux" in sources.columns
+                and np.isfinite(saturate_level)
+                and saturate_level > 0
+            ):
+                peak_flux = np.asarray(sources["peak_flux"], float)
+                finite_peak = np.isfinite(peak_flux)
+                saturated_mask = finite_peak & (peak_flux >= sat_peak_frac * saturate_level)
+                non_linear_mask = finite_peak & (
+                    peak_flux >= nonlin_peak_frac * saturate_level
+                )
+                n_sat = int(np.count_nonzero(saturated_mask))
+                n_nonlin = int(np.count_nonzero(non_linear_mask & ~saturated_mask))
+                if n_sat > 0:
+                    logger.info(
+                        "Removing %d saturated zeropoint sources (peak_flux >= %.2f x saturate).",
+                        n_sat,
+                        sat_peak_frac,
+                    )
+                if n_nonlin > 0:
+                    logger.info(
+                        "Removing %d near non-linear zeropoint sources (peak_flux >= %.2f x saturate).",
+                        n_nonlin,
+                        nonlin_peak_frac,
+                    )
+
             mask = (
                 valid_mags
                 & (sources[filter_col] >= upperMaglimit)
                 & (sources[filter_col] <= lowerMaglimit)
                 & (sources["threshold"] >= threshold_limit)
+                & (~non_linear_mask)
             )
             cleaned = sources.loc[mask].copy()
             logger.info("%d sources remaining after quality cuts", len(cleaned))
@@ -733,7 +769,7 @@ class Zeropoint:
         ransac_min_samples: int = 2,
         n_jobs=None,
         random_state: int = 42,
-        min_sources: int = 5,
+        min_sources: int = 1,
         fixed_color_slope: float = None,
         fixed_color_slope_err: float = None,
     ):
@@ -968,7 +1004,7 @@ class Zeropoint:
         threshold: float = 5.0,
         sigma_clip_sigma: float = 3.0,
         sigma_clip_maxiters: int = 10,
-        min_sources: int = 5,
+        min_sources: int = 1,
         fixed_color_slope: float = None,
         fixed_color_slope_err: float = None,
     ):
@@ -1349,7 +1385,10 @@ class Zeropoint:
             )
             x, y, x_err, y_err = x[finite], y[finite], x_err[finite], y_err[finite]
 
-            min_sources = 6
+            zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
+            min_sources = int(zp_cfg.get("min_source_no", 1))
+            if min_sources < 1:
+                min_sources = 1
             min_color_range = 0.05  # mag
             if len(x) < min_sources:
                 logger.warning(

@@ -1,3 +1,12 @@
+![AutoPHoT logo](logo.png)
+
+[![Anaconda Version](https://anaconda.org/astro-sean/autophot/badges/version.svg)](https://anaconda.org/astro-sean/autophot)
+[![Latest Release Date](https://anaconda.org/astro-sean/autophot/badges/latest_release_date.svg)](https://anaconda.org/astro-sean/autophot)
+[![Latest Release Relative Date](https://anaconda.org/astro-sean/autophot/badges/latest_release_relative_date.svg)](https://anaconda.org/astro-sean/autophot)
+[![Platforms](https://anaconda.org/astro-sean/autophot/badges/platforms.svg)](https://anaconda.org/astro-sean/autophot)
+[![License](https://anaconda.org/astro-sean/autophot/badges/license.svg)](https://anaconda.org/astro-sean/autophot)
+[![Downloads](https://anaconda.org/astro-sean/autophot/badges/downloads.svg)](https://anaconda.org/astro-sean/autophot)
+
 AutoPHoT
 ========
 
@@ -280,6 +289,20 @@ if __name__ == "__main__":
 ## Template subtraction setup
 
 AutoPHoT expects templates to live under a `templates/` directory inside your `fits_dir`. At runtime it chooses the template based on the **science image filter** and the folder naming conventions below.
+
+If you want AutoPHoT to create the template directory tree for you, use:
+
+```python
+from autophot import prepare_template_directory
+
+prepare_template_directory(
+    fits_dir="/path/to/images",
+    # optional: defaults to UBVRI + ugriz + JHK
+    # filters=["g", "r", "i", "B", "V", "J", "H", "K"],
+    include_legacy_p_folders=False,  # default; creates only g/r/i/z/u_template
+    confirm_before_continue=True,    # default; asks to continue so you can place templates first
+)
+```
 
 ### Directory structure and naming rules
 

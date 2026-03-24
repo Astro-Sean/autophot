@@ -553,6 +553,160 @@ def _best_wcs_match_separation_stats_arcsec(
     return np.nan, np.nan, 0.0
 
 
+def _safe_world_to_pixel_values(
+    wcs_obj: WCS, ra_deg: np.ndarray, dec_deg: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Convert sky coordinates to pixel coordinates robustly.
+
+    If vectorized inversion fails (common for some distorted points), fall back to
+    per-point conversion and return NaN for failed coordinates.
+    """
+    ra_arr = np.asarray(ra_deg, dtype=float)
+    dec_arr = np.asarray(dec_deg, dtype=float)
+    n = int(min(len(ra_arr), len(dec_arr)))
+    if n == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    ra_arr = ra_arr[:n]
+    dec_arr = dec_arr[:n]
+    try:
+        x_pix, y_pix = wcs_obj.all_world2pix(ra_arr, dec_arr, 1)
+        return np.asarray(x_pix, dtype=float), np.asarray(y_pix, dtype=float)
+    except Exception:
+        x_out = np.full(n, np.nan, dtype=float)
+        y_out = np.full(n, np.nan, dtype=float)
+        for i in range(n):
+            try:
+                x_i, y_i = wcs_obj.all_world2pix(
+                    np.array([ra_arr[i]], dtype=float),
+                    np.array([dec_arr[i]], dtype=float),
+                    1,
+                )
+                x_out[i] = float(np.asarray(x_i, dtype=float)[0])
+                y_out[i] = float(np.asarray(y_i, dtype=float)[0])
+            except Exception:
+                continue
+        return x_out, y_out
+
+
+def _build_scamp_optimization_trials(
+    wcs_cfg: dict,
+) -> list[tuple[str, dict]]:
+    """
+    Build SCAMP trial configurations for WCS optimization.
+
+    Trial 0 keeps user/base config. Extra trials progressively tighten matching
+    tolerances and optionally lower distortion degree by one, then we choose the
+    best solution from matched-point residuals.
+    """
+    base = dict(wcs_cfg or {})
+    trials: list[tuple[str, dict]] = [("base", dict(base))]
+
+    try:
+        max_trials = int(base.get("scamp_optimize_max_trials", 3))
+    except Exception:
+        max_trials = 3
+    max_trials = int(np.clip(max_trials, 1, 5))
+    if max_trials <= 1:
+        return trials
+
+    crossid = float(base.get("scamp_crossid_radius", 2.5))
+    poserr = float(base.get("scamp_position_maxerr", 1.0))
+    degree = int(base.get("scamp_distort_degrees", 4))
+
+    tight = dict(base)
+    tight["scamp_crossid_radius"] = float(np.clip(crossid * 0.8, 0.6, 5.0))
+    tight["scamp_position_maxerr"] = float(np.clip(poserr * 0.8, 0.3, 3.0))
+    trials.append(("tight_match", tight))
+    if len(trials) >= max_trials:
+        return trials[:max_trials]
+
+    low_degree = dict(tight)
+    low_degree["scamp_distort_degrees"] = int(np.clip(degree - 1, 2, 6))
+    trials.append(("tight_match_low_degree", low_degree))
+    if len(trials) >= max_trials:
+        return trials[:max_trials]
+
+    very_tight = dict(base)
+    very_tight["scamp_crossid_radius"] = float(np.clip(crossid * 0.65, 0.5, 5.0))
+    very_tight["scamp_position_maxerr"] = float(np.clip(poserr * 0.65, 0.25, 3.0))
+    very_tight["scamp_distort_degrees"] = int(np.clip(degree, 2, 6))
+    trials.append(("very_tight_match", very_tight))
+
+    return trials[:max_trials]
+
+
+def _estimate_crpix_linear_nudge_from_matches(
+    wcs_obj: WCS,
+    x_pix: np.ndarray,
+    y_pix: np.ndarray,
+    ra_deg: np.ndarray,
+    dec_deg: np.ndarray,
+    *,
+    min_points: int = 30,
+) -> dict | None:
+    """
+    Estimate a small global CRPIX nudge (dx, dy) from matched star residuals.
+
+    The estimate is based on robust medians of (x_obs - x_pred, y_obs - y_pred),
+    trying both pixel-origin hypotheses (raw and +1 px) for match-table columns.
+    """
+    x_obs = np.asarray(x_pix, dtype=float)
+    y_obs = np.asarray(y_pix, dtype=float)
+    ra_arr = np.asarray(ra_deg, dtype=float)
+    dec_arr = np.asarray(dec_deg, dtype=float)
+    n = int(min(len(x_obs), len(y_obs), len(ra_arr), len(dec_arr)))
+    if n < int(max(3, min_points)):
+        return None
+
+    x_obs = x_obs[:n]
+    y_obs = y_obs[:n]
+    ra_arr = ra_arr[:n]
+    dec_arr = dec_arr[:n]
+
+    x_pred, y_pred = _safe_world_to_pixel_values(wcs_obj, ra_arr, dec_arr)
+    if len(x_pred) != n or len(y_pred) != n:
+        return None
+
+    best = None
+    for shift_px in (0.0, 1.0):
+        xo = x_obs + shift_px
+        yo = y_obs + shift_px
+        valid = (
+            np.isfinite(xo)
+            & np.isfinite(yo)
+            & np.isfinite(x_pred)
+            & np.isfinite(y_pred)
+        )
+        if int(np.count_nonzero(valid)) < int(max(3, min_points)):
+            continue
+
+        dx = xo[valid] - x_pred[valid]
+        dy = yo[valid] - y_pred[valid]
+        dx_med = float(np.nanmedian(dx))
+        dy_med = float(np.nanmedian(dy))
+        r_pre = np.hypot(dx, dy)
+        r_post = np.hypot(dx - dx_med, dy - dy_med)
+        pre_med = float(np.nanmedian(r_pre))
+        post_med = float(np.nanmedian(r_post))
+
+        candidate = {
+            "origin_shift_px": float(shift_px),
+            "dx_px": dx_med,
+            "dy_px": dy_med,
+            "pre_med_resid_px": pre_med,
+            "post_med_resid_px": post_med,
+            "n_valid": int(np.count_nonzero(valid)),
+        }
+        if best is None or (
+            np.isfinite(candidate["pre_med_resid_px"])
+            and candidate["pre_med_resid_px"] < best["pre_med_resid_px"]
+        ):
+            best = candidate
+
+    return best
+
+
 def _sip_summary(wcs_obj: WCS) -> str:
     """
     Return compact summary of SIP distortion terms for logging.
@@ -1150,27 +1304,65 @@ class WCSSolver:
                 or self.default_input.get("gain")
             )
             gain_str = str(float(gain_val)) if gain_val is not None else "0"
+            satur_val = (
+                self.header.get("SATURATE")
+                or self.header.get("saturate")
+                or self.default_input.get("saturate")
+            )
+            try:
+                satur_str = str(float(satur_val))
+            except Exception:
+                satur_str = "1e7"
 
             detect_thresh = str(float(wcs_cfg.get("sextractor_detect_thresh", 1.5)))
+            analysis_thresh = str(
+                float(wcs_cfg.get("sextractor_analysis_thresh", 1.2))
+            )
+            detect_minarea = str(int(wcs_cfg.get("sextractor_detect_minarea", 5)))
+            detect_maxarea = str(int(wcs_cfg.get("sextractor_detect_maxarea", 0)))
+            deblend_nthresh = str(int(wcs_cfg.get("sextractor_deblend_nthresh", 32)))
+            deblend_mincont = str(
+                float(wcs_cfg.get("sextractor_deblend_mincont", 0.005))
+            )
+            back_type = str(wcs_cfg.get("sextractor_back_type", "AUTO"))
+            back_value = str(float(wcs_cfg.get("sextractor_back_value", 0.0)))
+            back_size = str(int(wcs_cfg.get("sextractor_back_size", 64)))
+            back_filtersize = str(int(wcs_cfg.get("sextractor_back_filtersize", 3)))
+            backphoto_type = str(wcs_cfg.get("sextractor_backphoto_type", "GLOBAL"))
+            backphoto_thick = str(int(wcs_cfg.get("sextractor_backphoto_thick", 24)))
+            back_filtthresh = str(
+                float(wcs_cfg.get("sextractor_back_filtthresh", 0.0))
+            )
+            seeing_fwhm_arcsec = (
+                float(conv_fwhm_pix) * float(pixel_scale)
+                if pixel_scale and float(pixel_scale) > 0
+                else 1.0
+            )
+            phot_apertures = str(float(wcs_cfg.get("sextractor_phot_apertures", 1.7 * conv_fwhm_pix)))
             final_config = {
                 "DETECT_TYPE": "CCD",
-                "DETECT_MINAREA": str(int(wcs_cfg.get("sextractor_detect_minarea", 5))),
+                "DETECT_MINAREA": detect_minarea,
+                "DETECT_MAXAREA": detect_maxarea,
                 "DETECT_THRESH": detect_thresh,
-                "ANALYSIS_THRESH": str(
-                    float(wcs_cfg.get("sextractor_analysis_thresh", 1.2))
-                ),
-                "DEBLEND_NTHRESH": str(
-                    int(wcs_cfg.get("sextractor_deblend_nthresh", 32))
-                ),
-                "DEBLEND_MINCONT": str(
-                    float(wcs_cfg.get("sextractor_deblend_mincont", 0.005))
-                ),
+                "ANALYSIS_THRESH": analysis_thresh,
+                "DEBLEND_NTHRESH": deblend_nthresh,
+                "DEBLEND_MINCONT": deblend_mincont,
                 "FILTER": "Y",
                 "FILTER_NAME": conv_filter_path,
+                "BACK_TYPE": back_type,
+                "BACK_VALUE": back_value,
+                "BACK_SIZE": back_size,
+                "BACK_FILTERSIZE": back_filtersize,
+                "BACKPHOTO_TYPE": backphoto_type,
+                "BACKPHOTO_THICK": backphoto_thick,
+                "BACK_FILTTHRESH": back_filtthresh,
                 "CLEAN": "Y",
-                "CLEAN_PARAM": "1",
+                "CLEAN_PARAM": "1.0",
                 "PHOT_AUTOPARAMS": "2.5,3.5",
+                "PHOT_APERTURES": phot_apertures,
+                "SEEING_FWHM": str(seeing_fwhm_arcsec),
                 "GAIN": gain_str,
+                "SATUR_LEVEL": satur_str,
                 "PIXEL_SCALE": str(pixel_scale),
                 "VERBOSE_TYPE": "NORMAL",
                 "CATALOG_TYPE": "FITS_LDAC",
@@ -1214,7 +1406,9 @@ class WCSSolver:
 
             astref_cat = str(wcs_cfg.get("scamp_astref_catalog", "GAIA-DR3"))
             scamp_cfg_path = os.path.join(temp_dir, "wcs_refine.scamp")
-            scamp_threads = int(max(1, (os.cpu_count() or 2) // 2))
+            scamp_threads = int(
+                max(1, wcs_cfg.get("scamp_nthreads", (os.cpu_count() or 2) // 2))
+            )
             scamp_cfg = {
                 "SOLVE_ASTROM": "Y",
                 "SOLVE_PHOTOM": "N",
@@ -1225,13 +1419,26 @@ class WCSSolver:
                 "WRITE_XML": "N",
                 "VERBOSE_TYPE": str(wcs_cfg.get("scamp_verbose_type", "LOG")),
                 "ASTREF_CATALOG": astref_cat,
-                "ASTREF_WEIGHT": 1,
-                "ASTREFMAG_KEY": "MAG_AUTO",
-                "ASTREFMAGERR_KEY": "MAGERR_AUTO",
-                "ASTREFCENT_KEYS": "XWIN_WORLD,YWIN_WORLD",
-                "ASTREFERR_KEYS": "ERRA_WORLD,ERRB_WORLD,ERRTHETA_WORLD",
-                "DISTORT_KEYS": "XWIN_IMAGE,YWIN_IMAGE",
+                "ASTREF_WEIGHT": int(wcs_cfg.get("scamp_astref_weight", 1)),
+                "ASTREFMAG_KEY": str(wcs_cfg.get("scamp_astrefmag_key", "MAG_AUTO")),
+                "ASTREFMAGERR_KEY": str(
+                    wcs_cfg.get("scamp_astrefmagerr_key", "MAGERR_AUTO")
+                ),
+                "ASTREFCENT_KEYS": str(
+                    wcs_cfg.get("scamp_astrefcent_keys", "XWIN_WORLD,YWIN_WORLD")
+                ),
+                "ASTREFERR_KEYS": str(
+                    wcs_cfg.get("scamp_astreferr_keys", "ERRA_WORLD,ERRB_WORLD,ERRTHETA_WORLD")
+                ),
+                "DISTORT_KEYS": str(wcs_cfg.get("scamp_distort_keys", "XWIN_IMAGE,YWIN_IMAGE")),
                 "SN_THRESHOLDS": str(wcs_cfg.get("scamp_sn_thresholds", "5.0,100000.0")),
+                "CROSSID_RADIUS": float(wcs_cfg.get("scamp_crossid_radius", 2.5)),
+                "POSITION_MAXERR": float(wcs_cfg.get("scamp_position_maxerr", 1.0)),
+                "FWHM_THRESHOLDS": str(wcs_cfg.get("scamp_fwhm_thresholds", "1.0,15.0")),
+                "MOSAIC_TYPE": str(wcs_cfg.get("scamp_mosaic_type", "UNCHANGED")),
+                "STABILITY_TYPE": str(
+                    wcs_cfg.get("scamp_stability_type", "EXPOSURE")
+                ),
             }
             with open(scamp_cfg_path, "w") as f:
                 for k, v in scamp_cfg.items():
@@ -1388,6 +1595,184 @@ class WCSSolver:
                 "SCAMP distortion refinement from solve-field seed failed: %s", exc
             )
             return np.nan
+
+    def _select_best_scamp_solution_after_solve(
+        self,
+        rough_wcs_header: fits.Header,
+        wcs_cfg: dict,
+        cpulimit: float | None,
+        matched_points: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None,
+    ) -> fits.Header | float:
+        """
+        Run one or more SCAMP refinement trials and return the best header.
+
+        If matched points are available, select by lowest median residual and then
+        lowest p95 residual (arcsec). Otherwise return the first successful trial.
+        """
+        optimize_scamp = bool(wcs_cfg.get("scamp_optimize_after_solve", True))
+        trials = [("base", dict(wcs_cfg))]
+        if optimize_scamp and matched_points is not None:
+            trials = _build_scamp_optimization_trials(wcs_cfg)
+
+        best_trial_label = None
+        best_trial_header = None
+        best_trial_med = np.inf
+        best_trial_p95 = np.inf
+        x_m = y_m = ra_m = dec_m = None
+        if matched_points is not None:
+            x_m, y_m, ra_m, dec_m = matched_points
+
+        for trial_label, trial_cfg in trials:
+            scamp_header = self._refine_distortion_with_scamp_from_rough_wcs(
+                rough_wcs_header=rough_wcs_header,
+                wcs_cfg=trial_cfg,
+                cpulimit=cpulimit,
+            )
+            if not isinstance(scamp_header, fits.Header):
+                continue
+
+            if x_m is not None and y_m is not None and ra_m is not None and dec_m is not None:
+                med_arcsec, p95_arcsec, _ = _best_wcs_match_separation_stats_arcsec(
+                    get_wcs(scamp_header), x_m, y_m, ra_m, dec_m
+                )
+                logger.info(
+                    "SCAMP trial '%s': matched-star residual med/p95=%.3f/%.3f arcsec",
+                    trial_label,
+                    float(med_arcsec),
+                    float(p95_arcsec),
+                )
+                if np.isfinite(med_arcsec) and (
+                    med_arcsec < best_trial_med
+                    or (
+                        np.isclose(med_arcsec, best_trial_med)
+                        and p95_arcsec < best_trial_p95
+                    )
+                ):
+                    best_trial_label = str(trial_label)
+                    best_trial_header = scamp_header
+                    best_trial_med = float(med_arcsec)
+                    best_trial_p95 = float(p95_arcsec)
+            elif best_trial_header is None:
+                best_trial_label = str(trial_label)
+                best_trial_header = scamp_header
+
+        if isinstance(best_trial_header, fits.Header):
+            if best_trial_label is None:
+                best_trial_label = "base"
+            logger.info(
+                "Using SCAMP WCS solution (trial='%s', preferred TPV/PV distortion model).",
+                best_trial_label,
+            )
+            _log_header_distortion_coefficients(
+                best_trial_header, prefix="SCAMP solved WCS"
+            )
+            return best_trial_header
+        logger.info("SCAMP unavailable/failed after solve-field; keeping solve-field WCS.")
+        return np.nan
+
+    def _apply_post_scamp_linear_refinement(
+        self,
+        wcs_header: fits.Header,
+        wcs_cfg: dict,
+        matched_points: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None,
+    ) -> fits.Header:
+        """
+        Optionally apply a small CRPIX nudge using matched points.
+
+        This preserves distortion terms and adjusts only the linear reference pixel.
+        """
+        try:
+            enable_nudge = bool(wcs_cfg.get("post_scamp_linear_refine", True))
+            if not enable_nudge or matched_points is None:
+                return wcs_header
+
+            x_m, y_m, ra_m, dec_m = matched_points
+            min_points = int(
+                max(8, wcs_cfg.get("post_scamp_linear_refine_min_points", 30))
+            )
+            max_shift_px = float(
+                max(0.0, wcs_cfg.get("post_scamp_linear_refine_max_shift_px", 2.0))
+            )
+            min_improve_px = float(
+                max(0.0, wcs_cfg.get("post_scamp_linear_refine_min_improve_px", 0.03))
+            )
+            min_improve_frac = float(
+                max(
+                    0.0,
+                    wcs_cfg.get("post_scamp_linear_refine_min_improve_frac", 0.02),
+                )
+            )
+
+            nudge = _estimate_crpix_linear_nudge_from_matches(
+                get_wcs(wcs_header),
+                x_m,
+                y_m,
+                ra_m,
+                dec_m,
+                min_points=min_points,
+            )
+            if nudge is None:
+                return wcs_header
+
+            dx_px = float(nudge["dx_px"])
+            dy_px = float(nudge["dy_px"])
+            shift_norm = float(np.hypot(dx_px, dy_px))
+            pre_med_px = float(nudge["pre_med_resid_px"])
+            post_med_px = float(nudge["post_med_resid_px"])
+            need_improve = max(min_improve_px, pre_med_px * min_improve_frac)
+            improve = pre_med_px - post_med_px
+            if not (
+                np.isfinite(dx_px)
+                and np.isfinite(dy_px)
+                and np.isfinite(pre_med_px)
+                and np.isfinite(post_med_px)
+                and shift_norm <= max_shift_px
+                and improve >= need_improve
+            ):
+                logger.info(
+                    "Skipped post-solve CRPIX nudge "
+                    "(n=%d, |shift|=%.3f px, improve=%.4f px, required>=%.4f px, max_shift=%.3f px).",
+                    int(nudge.get("n_valid", 0)),
+                    float(shift_norm),
+                    float(improve),
+                    float(need_improve),
+                    float(max_shift_px),
+                )
+                return wcs_header
+
+            old_crpix1 = float(wcs_header.get("CRPIX1", np.nan))
+            old_crpix2 = float(wcs_header.get("CRPIX2", np.nan))
+            if not (np.isfinite(old_crpix1) and np.isfinite(old_crpix2)):
+                return wcs_header
+
+            wcs_before_nudge = get_wcs(wcs_header)
+            wcs_header["CRPIX1"] = old_crpix1 + dx_px
+            wcs_header["CRPIX2"] = old_crpix2 + dy_px
+            med_before, p95_before, _ = _best_wcs_match_separation_stats_arcsec(
+                wcs_before_nudge, x_m, y_m, ra_m, dec_m
+            )
+            med_after, p95_after, _ = _best_wcs_match_separation_stats_arcsec(
+                get_wcs(wcs_header), x_m, y_m, ra_m, dec_m
+            )
+            logger.info(
+                "Applied post-solve CRPIX nudge: dCRPIX=(%+.3f,%+.3f) px "
+                "(n=%d, origin_shift=%+.1f px, residual med %.3f->%.3f px; "
+                "sky med/p95 %.3f/%.3f -> %.3f/%.3f arcsec).",
+                dx_px,
+                dy_px,
+                int(nudge["n_valid"]),
+                float(nudge["origin_shift_px"]),
+                pre_med_px,
+                post_med_px,
+                float(med_before),
+                float(p95_before),
+                float(med_after),
+                float(p95_after),
+            )
+            return wcs_header
+        except Exception as exc:
+            logger.warning("Post-solve linear refinement skipped: %s", exc)
+            return wcs_header
 
     # --- Plate Solve ---
     def plate_solve(
@@ -1737,7 +2122,7 @@ class WCSSolver:
             # Example YAML:
             #   solve_field_tweak_order: 5
             #   solve_field_tweak_orders: [5, 3, 2, 1, 0]
-            tweak_orders = [4]
+            tweak_orders = [0]
             try:
                 to_list = wcs_cfg.get("solve_field_tweak_orders", None)
                 to_single = wcs_cfg.get("solve_field_tweak_order", None)
@@ -1749,9 +2134,9 @@ class WCSSolver:
                     if v >= 0:
                         tweak_orders = [v]
             except Exception:
-                tweak_orders = [4]
+                tweak_orders = [0]
             if len(tweak_orders) == 0:
-                tweak_orders = [4]
+                tweak_orders = [0]
             logger.info("solve-field tweak order sequence: %s", tweak_orders)
 
             # --- Step 1: Optional verify existing WCS ---
@@ -1930,6 +2315,19 @@ class WCSSolver:
 
             # --- If still not solved, return NaN ---
             if not os.path.isfile(wcs_file):
+                # Final fallback: if the input header already contains a usable WCS,
+                # keep and return it when solve-field/scamp solving fails.
+                try:
+                    _ = get_wcs(self.header)
+                    logger.warning(
+                        "Could not solve a new WCS; falling back to original header WCS."
+                    )
+                    for f in [new_fits_temp, scamp_temp, os.path.join(dirname, "none")]:
+                        if os.path.isfile(f):
+                            os.remove(f)
+                    return self.header
+                except Exception:
+                    pass
                 for f in [new_fits_temp, scamp_temp, os.path.join(dirname, "none")]:
                     if os.path.isfile(f):
                         os.remove(f)
@@ -1971,6 +2369,7 @@ class WCSSolver:
                 )
                 force_preserve_input_distortion = False
                 keep_input_wcs_full = False
+                matched_points_for_refine = None
                 try:
                     input_wcs_for_compare = get_wcs(self.header)
                     solved_wcs_for_compare = get_wcs(wcs_header)
@@ -1998,6 +2397,12 @@ class WCSSolver:
                         )
                     if diag_points is not None:
                         x_d, y_d, ra_d, dec_d = diag_points
+                        matched_points_for_refine = (
+                            np.asarray(x_d, dtype=float),
+                            np.asarray(y_d, dtype=float),
+                            np.asarray(ra_d, dtype=float),
+                            np.asarray(dec_d, dtype=float),
+                        )
                         med_in, p95_in, sh_in = _best_wcs_match_separation_stats_arcsec(
                             input_wcs_for_compare, x_d, y_d, ra_d, dec_d
                         )
@@ -2159,23 +2564,14 @@ class WCSSolver:
                     )
                 if prefer_scamp_tpv:
                     try:
-                        scamp_header = self._refine_distortion_with_scamp_from_rough_wcs(
+                        scamp_header = self._select_best_scamp_solution_after_solve(
                             rough_wcs_header=wcs_header,
                             wcs_cfg=wcs_cfg,
                             cpulimit=cpulimit,
+                            matched_points=matched_points_for_refine,
                         )
                         if isinstance(scamp_header, fits.Header):
                             wcs_header = scamp_header
-                            logger.info(
-                                "Using SCAMP WCS solution (preferred TPV/PV distortion model)."
-                            )
-                            _log_header_distortion_coefficients(
-                                wcs_header, prefix="SCAMP solved WCS"
-                            )
-                        else:
-                            logger.info(
-                                "SCAMP unavailable/failed after solve-field; keeping solve-field WCS."
-                            )
                     except Exception as exc:
                         logger.warning(
                             "SCAMP preference after solve-field failed: %s. Keeping solve-field WCS.",
@@ -2185,6 +2581,12 @@ class WCSSolver:
                     logger.info(
                         "projection_type=SIP: skipping SCAMP refinement and using solve-field WCS."
                     )
+
+                wcs_header = self._apply_post_scamp_linear_refinement(
+                    wcs_header=wcs_header,
+                    wcs_cfg=wcs_cfg,
+                    matched_points=matched_points_for_refine,
+                )
                 from functions import remove_wcs_from_header
 
                 # Remove all previous WCS from science header, then add only WCS keywords from solver.

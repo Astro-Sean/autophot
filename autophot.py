@@ -32,6 +32,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Iterable, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from difflib import get_close_matches
 
 import numpy as np
 import pandas as pd
@@ -108,6 +109,7 @@ from functions import (
     concatenate_csv_files,
     print_progress_bar,
     log_exception,
+    sanitize_photometric_filters,
 )
 from prepare import Prepare
 
@@ -401,6 +403,147 @@ def find_variable_sources(
     return result_df
 
 
+def prepare_template_directory(
+    fits_dir: str,
+    filters: Optional[Iterable[str]] = None,
+    include_legacy_p_folders: bool = False,
+    confirm_before_continue: bool = True,
+) -> Dict[str, List[str]]:
+    """
+    Create the expected template folder structure under ``<fits_dir>/templates``.
+
+    Parameters
+    ----------
+    fits_dir : str
+        Root science-image directory used by AutoPHoT.
+    filters : iterable[str], optional
+        Filter list to build. If None, defaults to the supported families:
+        UBVRI, ugriz, and JHK.
+    include_legacy_p_folders : bool, optional
+        If True, also create legacy Pan-STARRS style folders for ugriz
+        (e.g. ``rp_template``) for backward compatibility. Defaults to False.
+    confirm_before_continue : bool, optional
+        If True (default), prompt the user after creating directories:
+        "template folder created, do you want to continue?"
+        This gives the user a chance to place template FITS files first.
+
+    Returns
+    -------
+    dict
+        Summary with keys:
+        - ``templates_root``: absolute path to templates directory
+        - ``created``: directories created during this call
+        - ``existing``: directories already present
+        - ``requested_filters``: normalized filters used
+    """
+    if fits_dir is None or str(fits_dir).strip() == "":
+        raise ValueError("fits_dir must be a valid directory path.")
+
+    fits_root = Path(str(fits_dir)).expanduser().resolve()
+    templates_root = fits_root / "templates"
+    templates_root.mkdir(parents=True, exist_ok=True)
+
+    default_filters = ["U", "B", "V", "R", "I", "u", "g", "r", "i", "z", "J", "H", "K"]
+    use_filters = list(filters) if filters is not None else default_filters
+    normalized_filters, dropped_filters = sanitize_photometric_filters(use_filters)
+    if dropped_filters:
+        _log(
+            "Ignoring unsupported/non-filter values while preparing templates: "
+            + ", ".join(sorted(set(str(v) for v in dropped_filters)))
+        )
+    if not normalized_filters:
+        raise ValueError(
+            "No supported filters provided. Supported families are UBVRI, ugriz, and JHK."
+        )
+
+    created_dirs: List[str] = []
+    existing_dirs: List[str] = []
+
+    for band in normalized_filters:
+        preferred_dir = templates_root / f"{band}_template"
+        if preferred_dir.exists():
+            existing_dirs.append(str(preferred_dir))
+        else:
+            preferred_dir.mkdir(parents=True, exist_ok=True)
+            created_dirs.append(str(preferred_dir))
+
+        if include_legacy_p_folders and band in {"u", "g", "r", "i", "z"}:
+            legacy_dir = templates_root / f"{band}p_template"
+            if legacy_dir.exists():
+                existing_dirs.append(str(legacy_dir))
+            else:
+                legacy_dir.mkdir(parents=True, exist_ok=True)
+                created_dirs.append(str(legacy_dir))
+
+    _log(
+        border_msg(
+            f"Template directory prepared: {templates_root}",
+            body="-",
+            corner="+",
+        )
+    )
+    _log(
+        "Template folder summary: "
+        f"created={len(created_dirs)} existing={len(existing_dirs)} "
+        f"filters={','.join(normalized_filters)}"
+    )
+
+    if confirm_before_continue:
+        prompt = (
+            f"\nTemplate folder created at: {templates_root}\n"
+            "Please place your template FITS files in the appropriate subfolders.\n"
+            "Do you want to continue? [y/N]: "
+        )
+        try:
+            answer = input(prompt).strip().lower()
+        except EOFError:
+            answer = "y"
+        if answer not in {"y", "yes"}:
+            raise RuntimeError(
+                "Stopped by user after template directory creation. "
+                "Add your templates, then rerun when ready."
+            )
+
+    return {
+        "templates_root": str(templates_root),
+        "created": created_dirs,
+        "existing": existing_dirs,
+        "requested_filters": normalized_filters,
+    }
+
+
+def __getattr__(name: str):
+    """
+    Resolve common misspellings for public module symbols.
+
+    This allows typo-tolerant imports like:
+        from autophot import prepapre_template_directory
+    by dynamically mapping to the closest public callable/class.
+    """
+    if not isinstance(name, str) or not name or name.startswith("_"):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    public_symbols = {
+        k: v
+        for k, v in globals().items()
+        if not k.startswith("_") and (callable(v) or isinstance(v, type))
+    }
+    if name in public_symbols:
+        return public_symbols[name]
+
+    matches = get_close_matches(name, list(public_symbols.keys()), n=1, cutoff=0.72)
+    if matches:
+        target = matches[0]
+        logging.getLogger(__name__).warning(
+            "Interpreting unknown symbol '%s' as '%s'.",
+            name,
+            target,
+        )
+        return public_symbols[target]
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 # =============================================================================
 # =============================================================================
 # #
@@ -592,9 +735,31 @@ class AutomatedPhotometry:
                 target_ra = default_input.get("target_ra", None)
                 target_dec = default_input.get("target_dec", None)
                 if target_ra is None or target_dec is None:
+                    # If coordinates are not set explicitly, try TNS lookup
+                    # using target_name before failing curve-map catalog build.
+                    try:
+                        tns_coords = prepare_db.check_tns()
+                        default_input.update(
+                            {
+                                "target_ra": tns_coords["radeg"],
+                                "target_dec": tns_coords["decdeg"],
+                                "name_prefix": tns_coords.get("name_prefix"),
+                                "objname": tns_coords.get("objname"),
+                            }
+                        )
+                        target_ra = default_input.get("target_ra", None)
+                        target_dec = default_input.get("target_dec", None)
+                        _log(
+                            "Resolved target coordinates from TNS for curve_map build: "
+                            f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}"
+                        )
+                    except Exception:
+                        pass
+                if target_ra is None or target_dec is None:
                     raise ValueError(
                         "catalog.curve_map is set, but target_ra/target_dec are missing. "
-                        "Please set both coordinates in degrees."
+                        "Please set both coordinates in degrees, or provide target_name "
+                        "with working TNS credentials."
                     )
 
                 radius_deg = float(

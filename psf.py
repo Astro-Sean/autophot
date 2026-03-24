@@ -595,7 +595,8 @@ class MCMCFitter:
             )
             total_steps += batch_n
 
-            if total_steps * self.nwalkers > self.min_autocorr_N:
+            # Start autocorrelation checks only after enough steps per walker.
+            if total_steps >= self.min_autocorr_N:
                 try:
                     # get_chain() is (nsteps, nwalkers, ndim); time axis is 0
                     tau = autocorr.integrated_time(self.sampler.get_chain(), axis=0)
@@ -676,6 +677,19 @@ class MCMCFitter:
             )
             noise_variance = np.asarray(sigma, float) ** 2
             weights = None  # use our variance only; avoid double-counting if caller passed weights
+        else:
+            # If the caller provides an explicit per-pixel variance map, treat it
+            # as authoritative and ignore extra weights to avoid ambiguity.
+            if weights is not None and not np.isscalar(noise_variance):
+                try:
+                    noise_variance_arr = np.asarray(noise_variance, float)
+                    if noise_variance_arr.size > 1:
+                        log.debug(
+                            "[MCMC] Per-pixel noise_variance provided; ignoring weights to avoid duplicate uncertainty scaling."
+                        )
+                        weights = None
+                except Exception:
+                    pass
 
         log.info(f"[MCMC] Fitting source {self.counter + 1} (adaptive)")
         self.run_mcmc(
@@ -702,7 +716,8 @@ class MCMCFitter:
                 discard = max(
                     discard, min(int(2 * tau_max), self.sampler.iteration // 2)
                 )
-                thin = max(1, min(thin, int(np.ceil(tau_max / 2))))
+                # Ensure thinning is not weaker than tau/2 (reduce correlated samples).
+                thin = max(1, thin, int(np.ceil(tau_max / 2)))
 
         chain = self.sampler.get_chain(discard=discard, thin=thin, flat=True)
         logp = self.sampler.get_log_prob(discard=discard, thin=thin, flat=True)
@@ -906,9 +921,17 @@ class PSF:
                 return EPSFStars([]), Table()
 
             # Centroiding.
-            cen_func = (
-                centroid_2dg if (fwhm is not None and fwhm < 3.0) else centroid_com
+            phot_cfg = self.input_yaml.get("photometry", {}) or {}
+            undersampled_thr = float(
+                phot_cfg.get("undersampled_fwhm_threshold", 2.5)
             )
+            undersampled_mode = bool(
+                self.input_yaml.get(
+                    "undersampled_mode",
+                    bool(fwhm is not None and float(fwhm) <= undersampled_thr),
+                )
+            )
+            cen_func = centroid_2dg if undersampled_mode else centroid_com
             cen_box = _odd(max(7, int(np.ceil(3.0 * max(1.0, fwhm or 2.0)))))
 
             if weightmap is None:
@@ -1022,7 +1045,7 @@ class PSF:
         numSources: int = 250,
         mask=None,
         background_rms=None,
-        threshold_limit: float = 10.0,
+        threshold_limit: float = 5.0,
         SNR_limit: list = None,
         plot: bool = True,
         filename_prefix: str = "PSF_model_image",
@@ -1036,7 +1059,7 @@ class PSF:
         (epsf, df) or (None, None) on failure
         """
         if SNR_limit is None:
-            SNR_limit = [10, 1e4]
+            SNR_limit = [5, 1e6]
 
         log = logging.getLogger(__name__)
 
@@ -1173,14 +1196,37 @@ class PSF:
             )
             log.info(f"Building ePSF from {len(df)} sources")
 
-            # Exclude saturated and streaky/elongated sources from PSF building
+            # Exclude saturated and streaky/elongated sources from PSF building.
+            # For small candidate pools, apply these cuts adaptively so we do not
+            # over-prune and end up with an unstable ePSF from too few stars.
             phot_cfg = self.input_yaml.get("photometry", {}) or {}
             saturate = float(self.input_yaml.get("saturate", np.inf))
             saturate_frac = float(phot_cfg.get("psf_saturate_fraction", 0.9))
-            max_roundness = float(phot_cfg.get("psf_max_roundness", 0.25))
-            max_elongation = float(phot_cfg.get("psf_max_elongation", 1.3))
+            min_psf_candidates = int(phot_cfg.get("psf_min_candidates", 8))
+            min_psf_candidates = max(4, min_psf_candidates)
+            min_keep_frac_after_cut = float(
+                phot_cfg.get("psf_build_min_keep_frac_after_cut", 0.60)
+            )
+            min_keep_frac_after_cut = max(0.10, min(0.95, min_keep_frac_after_cut))
+            thr_cfg = phot_cfg.get("psf_threshold_limit", threshold_limit)
+            threshold_limit_eff = (
+                float(thr_cfg)
+                if thr_cfg is not None and np.isfinite(float(thr_cfg))
+                else None
+            )
+            snr_min_eff = float(phot_cfg.get("psf_snr_min", SNR_limit[0]))
+            snr_max_eff = float(phot_cfg.get("psf_snr_max", SNR_limit[1]))
 
             n_before = len(df)
+            # When the starting pool is modest, relax shape/saturation cuts slightly.
+            if n_before <= max(2 * min_psf_candidates, 20):
+                saturate_frac = max(saturate_frac, 0.97)
+                log.info(
+                    "Small PSF-candidate pool (%d): relaxed cuts to "
+                    "saturate_frac=%.2f",
+                    n_before,
+                    saturate_frac,
+                )
             if saturate < np.inf:
                 peak_col = next(
                     (c for c in ["peak", "peak_flux", "FLUX_MAX"] if c in df.columns),
@@ -1191,31 +1237,21 @@ class PSF:
                     ok = df[peak_col] < sat_cut
                     n_sat = (~ok).sum()
                     if n_sat > 0:
-                        df = df[ok].copy()
-                        log.info(
-                            f"Excluded {n_sat} saturated PSF candidates (peak >= {saturate_frac:.2f} * saturate)"
-                        )
-            if "roundness" in df.columns:
-                ok = np.isfinite(df["roundness"]) & (df["roundness"] <= max_roundness)
-                n_round = (~ok).sum()
-                if n_round > 0:
-                    df = df[ok].copy()
-                    log.info(
-                        f"Excluded {n_round} elongated PSF candidates (roundness > {max_roundness:.2f})"
-                    )
-            for el_col in ["elongation", "ELONGATION"]:
-                if el_col in df.columns:
-                    ok = np.isfinite(df[el_col]) & (df[el_col] <= max_elongation)
-                    n_el = (~ok).sum()
-                    if n_el > 0:
-                        df = df[ok].copy()
-                        log.info(
-                            f"Excluded {n_el} elongated PSF candidates ({el_col} > {max_elongation:.2f})"
-                        )
-                    break
+                        n_keep = int(np.sum(ok))
+                        if n_keep >= min_psf_candidates:
+                            df = df[ok].copy()
+                            log.info(
+                                f"Excluded {n_sat} saturated PSF candidates (peak >= {saturate_frac:.2f} * saturate)"
+                            )
+                        else:
+                            log.info(
+                                "Skipping saturation cut: would leave only %d candidates (< %d).",
+                                n_keep,
+                                min_psf_candidates,
+                            )
             if len(df) < n_before:
                 log.info(
-                    f"PSF candidates after saturation/roundness cuts: {len(df)}/{n_before}"
+                    f"PSF candidates after saturation cuts: {len(df)}/{n_before}"
                 )
 
             fpath = self.input_yaml["fpath"]
@@ -1251,13 +1287,80 @@ class PSF:
                 fwhm = float(self.input_yaml["fwhm"])
 
             scale = float(self.input_yaml["scale"])
+            fwhm_input = float(fwhm)
+
+            # Re-estimate FWHM from the selected PSF-star table when possible.
+            # This keeps the ePSF build geometry tied to the actual stars used,
+            # rather than a potentially stale global image FWHM.
+            fwhm_cols = (
+                "FWHM_IMAGE",
+                "fwhm_image",
+                "FWHM",
+                "fwhm",
+            )
+            fwhm_candidates = None
+            for col in fwhm_cols:
+                if col in df.columns:
+                    arr = np.asarray(df[col], float)
+                    arr = arr[np.isfinite(arr) & (arr > 0)]
+                    if arr.size >= 5:
+                        lo, hi = np.nanpercentile(arr, [10, 90])
+                        arr = arr[(arr >= lo) & (arr <= hi)]
+                    if arr.size >= 3:
+                        fwhm_candidates = arr
+                        break
+            if fwhm_candidates is not None and fwhm_candidates.size >= 3:
+                fwhm_psf = float(np.nanmedian(fwhm_candidates))
+                fwhm_guard_lo = 0.5 * fwhm_input
+                fwhm_guard_hi = 2.0 * fwhm_input
+                if np.isfinite(fwhm_input) and fwhm_input > 0:
+                    if fwhm_psf < fwhm_guard_lo or fwhm_psf > fwhm_guard_hi:
+                        log.warning(
+                            "PSF-star FWHM median %.2f px is far from runtime FWHM %.2f px; clamping build FWHM to %.2f px.",
+                            fwhm_psf,
+                            fwhm_input,
+                            float(np.clip(fwhm_psf, fwhm_guard_lo, fwhm_guard_hi)),
+                        )
+                    fwhm = float(np.clip(fwhm_psf, fwhm_guard_lo, fwhm_guard_hi))
+                else:
+                    fwhm = fwhm_psf
+            else:
+                fwhm = fwhm_input
+
+            pixel_scale = self.input_yaml.get("pixel_scale", np.nan)  # arcsec/pix
+            try:
+                pixel_scale = float(pixel_scale)
+            except Exception:
+                pixel_scale = np.nan
+            has_pixel_scale = np.isfinite(pixel_scale) and pixel_scale > 0
+            fwhm_arcsec = float(fwhm * pixel_scale) if has_pixel_scale else np.nan
+
+            # Adaptive geometric boost for coarse/undersampled data.
+            # Coarser sampling generally needs larger windows to capture wings robustly.
+            build_sampling_boost = 1.0
+            if fwhm <= 2.5:
+                build_sampling_boost += 0.20
+            if has_pixel_scale and pixel_scale >= 0.8:
+                build_sampling_boost += 0.10
+            if has_pixel_scale and pixel_scale >= 1.2:
+                build_sampling_boost += 0.10
+            build_boost_cap = float(phot_cfg.get("psf_build_sampling_boost_max", 1.6))
 
             # Detect undersampling: FWHM <= 2 pixels is a typical regime where
             # a PSF spans only a handful of pixels across the core and is at
             # high risk of aliasing.  We *do not* change the oversampling
             # factor automatically (user controls this via config), but we
             # still adapt centroiding and cutout sizes below.
-            undersampled = fwhm <= 2.0
+            undersampled_fwhm_threshold = float(
+                phot_cfg.get("undersampled_fwhm_threshold", 2.5)
+            )
+            undersampled = fwhm <= undersampled_fwhm_threshold
+            if undersampled:
+                build_boost_cap_u = float(
+                    phot_cfg.get("psf_build_sampling_boost_max_undersampled", 2.2)
+                )
+                build_boost_cap = max(build_boost_cap, build_boost_cap_u)
+            build_sampling_boost = float(min(build_sampling_boost, max(1.0, build_boost_cap)))
             if undersampled and oversample <= 1:
                 log.info(
                     "Image appears undersampled (FWHM=%.2f pix) and psf_oversample=%d; "
@@ -1265,6 +1368,16 @@ class PSF:
                     "stars are available.",
                     fwhm,
                     oversample,
+                )
+            if undersampled and bool(
+                phot_cfg.get("psf_disable_build_quality_cuts_undersampled", True)
+            ):
+                threshold_limit_eff = None
+                snr_min_eff, snr_max_eff = 0.0, 1.0e12
+                min_keep_frac_after_cut = min(min_keep_frac_after_cut, 0.30)
+                log.info(
+                    "Undersampled regime (FWHM <= %.2f px): disabling strict threshold/SNR candidate cuts for PSF build.",
+                    undersampled_fwhm_threshold,
                 )
 
             # Image preprocessing.
@@ -1284,18 +1397,39 @@ class PSF:
 
             # Centroid and fit windows scale with FWHM, but must remain odd.
             cen_box = _odd(max(7, int(np.ceil(2.0 * fwhm))))
-            fit_boxsize = _odd(max(5, int(1.5 * fwhm)))
+            fit_boxsize_scale_base = float(
+                phot_cfg.get("psf_fit_boxsize_scale_fwhm", 2.5)
+            )
+            fit_boxsize_scale = fit_boxsize_scale_base * build_sampling_boost
+            fit_box_min_arcsec = float(phot_cfg.get("psf_fit_box_min_arcsec", 2.5))
+            fit_box_min_px = (
+                fit_box_min_arcsec / pixel_scale if has_pixel_scale else np.nan
+            )
+            fit_boxsize = _odd(
+                max(
+                    5,
+                    int(fit_boxsize_scale * fwhm),
+                    int(np.ceil(fit_box_min_px)) if np.isfinite(fit_box_min_px) else 0,
+                )
+            )
 
             # PSF cutout size: use both the configured angular scale and the
             # image-space FWHM to guarantee that even undersampled wings are
             # represented.  For undersampled images the FWHM constraint
             # dominates; for well-sampled data this reduces to the previous
             # behaviour.
+            cutout_size_scale_base = float(
+                phot_cfg.get("psf_cutout_size_scale_fwhm", 10.0)
+            )
+            cutout_size_scale = cutout_size_scale_base * build_sampling_boost
+            cutout_min_arcsec = float(phot_cfg.get("psf_cutout_min_arcsec", 9.0))
+            cutout_min_px = cutout_min_arcsec / pixel_scale if has_pixel_scale else np.nan
             cutout_n = _odd(
                 max(
                     12,
                     int(2 * scale),  # legacy behaviour (arcsec scale)
-                    int(6 * fwhm),  # ≥ ~3 FWHM radius around the core
+                    int(cutout_size_scale * fwhm),  # configurable wing coverage
+                    int(np.ceil(cutout_min_px)) if np.isfinite(cutout_min_px) else 0,
                 )
             )
             cutout_shape = (cutout_n, cutout_n)
@@ -1303,10 +1437,39 @@ class PSF:
                 fit_boxsize = _odd(cutout_n - 3)
 
             log.info(f"Initial sources: {len(df)}")
-            if "threshold" in df.columns:
-                df = df[df["threshold"] > threshold_limit]
+            if threshold_limit_eff is not None and "threshold" in df.columns:
+                mask_thr = df["threshold"] > threshold_limit_eff
+                n_keep_thr = int(np.sum(mask_thr))
+                min_keep_thr = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                )
+                if n_keep_thr >= min_keep_thr:
+                    df = df[mask_thr]
+                else:
+                    log.info(
+                        "Skipping threshold cut (>%s): would leave %d candidates (< required %d).",
+                        threshold_limit_eff,
+                        n_keep_thr,
+                        min_keep_thr,
+                    )
             if "SNR" in df.columns:
-                df = df[(df["SNR"] >= SNR_limit[0]) & (df["SNR"] <= SNR_limit[1])]
+                mask_snr = (df["SNR"] >= snr_min_eff) & (df["SNR"] <= snr_max_eff)
+                n_keep_snr = int(np.sum(mask_snr))
+                min_keep_snr = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                )
+                if n_keep_snr >= min_keep_snr:
+                    df = df[mask_snr]
+                else:
+                    log.info(
+                        "Skipping strict SNR cut ([%s, %s]): would leave %d candidates (< required %d).",
+                        snr_min_eff,
+                        snr_max_eff,
+                        n_keep_snr,
+                        min_keep_snr,
+                    )
             log.info(f"Sources after cuts: {len(df)}")
 
             if len(df) == 0:
@@ -1321,7 +1484,7 @@ class PSF:
             # Optionally pre-select the highest-quality candidates (by SNR /
             # threshold / flux) before enforcing spatial uniformity, so that
             # the downsampled set is drawn from the best stars available.
-            preselect_factor = float(phot_cfg.get("psf_preselect_factor", 2.0))
+            preselect_factor = float(phot_cfg.get("psf_preselect_factor", 1.3))
             if preselect_factor > 1.0 and len(df) > numSources:
                 rank_col = None
                 if snrcol and snrcol in df.columns:
@@ -1434,12 +1597,108 @@ class PSF:
 
             smooth_kernel = get_smoothing_kernel(fwhm, oversample=oversample)
 
-            log.info(
-                f"Normalisation radius: {aperture_radius} px  oversample: x{oversample}"
+            # Use a normalization radius that is at least a configurable multiple
+            # of the PSF-build FWHM to preserve wing structure.
+            norm_scale = float(phot_cfg.get("psf_norm_radius_scale_fwhm", 2.8))
+            norm_min_px = float(phot_cfg.get("psf_norm_radius_min_pixels", 5.0))
+            aperture_radius = float(
+                max(aperture_radius, norm_scale * fwhm, norm_min_px)
             )
 
+            log.info(
+                "PSF build FWHM: input=%.2f px, used=%.2f px; normalisation radius=%.2f px (>= max[input, %.2f*FWHM, %.1f px]); oversample=x%d",
+                fwhm_input,
+                fwhm,
+                aperture_radius,
+                norm_scale,
+                norm_min_px,
+                oversample,
+            )
+
+            epsf_clip_sigma = float(phot_cfg.get("psf_build_sigma_clip_sigma", 4.0))
+            epsf_clip_maxiters = int(
+                max(1, phot_cfg.get("psf_build_sigma_clip_maxiters", 15))
+            )
             sigma_clip_epsf = SigmaClip(
-                sigma=1.0, cenfunc=np.nanmedian, stdfunc=mad_std, maxiters=25
+                sigma=epsf_clip_sigma,
+                cenfunc=np.nanmedian,
+                stdfunc=mad_std,
+                maxiters=epsf_clip_maxiters,
+            )
+            log.info(
+                border_msg("PSF build parameters")
+                + "\n"
+                + (
+                    "  make_template_psf: {make_template_psf}\n"
+                    "  candidates: initial={n_before}, after_cuts={n_after}, used_after_uniform={n_uniform}\n"
+                    "  selection cuts: min_candidates={min_psf_candidates}, threshold_limit={threshold_limit}, "
+                    "SNR_limit=[{snr_lo}, {snr_hi}], min_keep_frac_after_cut={min_keep_frac_after_cut:.2f}, "
+                    "saturate_frac={saturate_frac:.2f}\n"
+                    "  geometry: fwhm_input={fwhm_input:.2f}px, fwhm_used={fwhm_used:.2f}px, "
+                    "fwhm_arcsec={fwhm_arcsec}, pixel_scale={pixel_scale}, "
+                    "build_sampling_boost={build_sampling_boost:.2f}, "
+                    "oversample=x{oversample}, recenter={recenter}, cen_box={cen_box}px, fit_box={fit_box}px, cutout={cutout}px\n"
+                    "  normalization: aperture_radius={aperture_radius:.2f}px, "
+                    "norm_scale={norm_scale:.2f}*FWHM, norm_min_px={norm_min_px:.1f}\n"
+                    "  epsf builder: sigma_clip={epsf_clip_sigma:.2f}, sigma_clip_maxiters={epsf_clip_maxiters}, "
+                    "maxiters=10, smoothing_kernel=quartic\n"
+                    "  fft rejection: enabled={fft_enabled}, n_sigma={fft_n_sigma:.2f}, "
+                    "min_frac_keep={fft_min_frac:.2f}, min_stars={fft_min_abs}"
+                ).format(
+                    make_template_psf=bool(make_template_psf),
+                    n_before=int(n_before),
+                    n_after=int(len(df)),
+                    n_uniform=int(len(df_uniform)),
+                    min_psf_candidates=int(min_psf_candidates),
+                    threshold_limit=(
+                        float(threshold_limit_eff)
+                        if threshold_limit_eff is not None
+                        else np.nan
+                    ),
+                    snr_lo=float(snr_min_eff),
+                    snr_hi=float(snr_max_eff),
+                    min_keep_frac_after_cut=float(min_keep_frac_after_cut),
+                    saturate_frac=float(saturate_frac),
+                    fwhm_input=float(fwhm_input),
+                    fwhm_used=float(fwhm),
+                    fwhm_arcsec=(
+                        f"{fwhm_arcsec:.2f}\"" if np.isfinite(fwhm_arcsec) else "unknown"
+                    ),
+                    pixel_scale=(
+                        f"{pixel_scale:.3f} arcsec/px"
+                        if has_pixel_scale
+                        else "unknown"
+                    ),
+                    build_sampling_boost=float(build_sampling_boost),
+                    oversample=int(oversample),
+                    recenter=str(recenter_func.__name__),
+                    cen_box=int(cen_box),
+                    fit_box=int(fit_boxsize),
+                    cutout=int(cutout_n),
+                    aperture_radius=float(aperture_radius),
+                    norm_scale=float(norm_scale),
+                    norm_min_px=float(norm_min_px),
+                    epsf_clip_sigma=float(epsf_clip_sigma),
+                    epsf_clip_maxiters=int(epsf_clip_maxiters),
+                    fft_enabled=bool(do_fft),
+                    fft_n_sigma=float(fft_n_sigma),
+                    fft_min_frac=float(fft_min_frac),
+                    fft_min_abs=int(fft_min_abs),
+                )
+            )
+            log.info(
+                "PSF build windows: fit_box=%.2f*FWHM (base %.2f, min %.2f arcsec) -> %d px, "
+                "cutout=%.2f*FWHM (base %.2f, min %.2f arcsec) -> %d px, sigma_clip=%.2f (%d iters)",
+                fit_boxsize_scale,
+                fit_boxsize_scale_base,
+                fit_box_min_arcsec,
+                fit_boxsize,
+                cutout_size_scale,
+                cutout_size_scale_base,
+                cutout_min_arcsec,
+                cutout_n,
+                epsf_clip_sigma,
+                epsf_clip_maxiters,
             )
             epsf_builder = EPSFBuilder(
                 oversampling=oversample,
@@ -1846,13 +2105,86 @@ class PSF:
                 "aperture_radius", max(1.5 * fwhm, 2.0)
             )
         )
+        phot_cfg = self.input_yaml.get("photometry", {}) or {}
 
-        undersampled = fwhm <= 2.0
+        undersampled_fwhm_threshold = float(
+            phot_cfg.get("undersampled_fwhm_threshold", 2.5)
+        )
+        undersampled = fwhm <= undersampled_fwhm_threshold
+
+        pixel_scale = self.input_yaml.get("pixel_scale", np.nan)  # arcsec / px
+        try:
+            pixel_scale = float(pixel_scale)
+        except Exception:
+            pixel_scale = np.nan
+        has_pixel_scale = np.isfinite(pixel_scale) and pixel_scale > 0
 
         # Fit box sizes chosen to enclose several FWHM in each regime.
-        fit_shape_bright = (_odd(max(7, int(2.5 * fwhm))),) * 2
-        fit_shape_faint = (_odd(max(7, int(2.0 * fwhm))),) * 2
-        fit_shape_vfaint = (_odd(max(7, int(1.5 * fwhm))),) * 2
+        # We also apply an adaptive boost for undersampled/coarse-scale data.
+        fs_bright_scale = float(phot_cfg.get("psf_fit_shape_bright_scale_fwhm", 3.0))
+        fs_faint_scale = float(phot_cfg.get("psf_fit_shape_faint_scale_fwhm", 2.5))
+        fs_vfaint_scale = float(phot_cfg.get("psf_fit_shape_vfaint_scale_fwhm", 2.0))
+        fit_sampling_boost = 1.0
+        if fwhm <= 2.5:
+            fit_sampling_boost += 0.20
+        if has_pixel_scale and pixel_scale >= 0.8:
+            fit_sampling_boost += 0.10
+        if has_pixel_scale and pixel_scale >= 1.2:
+            fit_sampling_boost += 0.10
+        fit_sampling_boost_max = float(
+            phot_cfg.get("psf_fit_sampling_boost_max", 1.6)
+        )
+        fit_sampling_boost = float(
+            min(max(1.0, fit_sampling_boost), max(1.0, fit_sampling_boost_max))
+        )
+        fs_bright_scale *= fit_sampling_boost
+        fs_faint_scale *= fit_sampling_boost
+        fs_vfaint_scale *= fit_sampling_boost
+        target_shape_boost = float(phot_cfg.get("psf_target_fit_shape_boost", 1.5))
+        if is_target_fit:
+            target_shape_boost = max(1.0, target_shape_boost)
+            fs_bright_scale *= target_shape_boost
+            fs_faint_scale *= target_shape_boost
+            fs_vfaint_scale *= target_shape_boost
+
+        bright_min_arcsec = float(
+            phot_cfg.get("psf_fit_shape_bright_min_arcsec", 3.0)
+        )
+        faint_min_arcsec = float(phot_cfg.get("psf_fit_shape_faint_min_arcsec", 2.5))
+        vfaint_min_arcsec = float(
+            phot_cfg.get("psf_fit_shape_vfaint_min_arcsec", 2.0)
+        )
+        bright_min_px = bright_min_arcsec / pixel_scale if has_pixel_scale else np.nan
+        faint_min_px = faint_min_arcsec / pixel_scale if has_pixel_scale else np.nan
+        vfaint_min_px = vfaint_min_arcsec / pixel_scale if has_pixel_scale else np.nan
+
+        fit_shape_bright = (
+            _odd(
+                max(
+                    7,
+                    int(fs_bright_scale * fwhm),
+                    int(np.ceil(bright_min_px)) if np.isfinite(bright_min_px) else 0,
+                )
+            ),
+        ) * 2
+        fit_shape_faint = (
+            _odd(
+                max(
+                    7,
+                    int(fs_faint_scale * fwhm),
+                    int(np.ceil(faint_min_px)) if np.isfinite(faint_min_px) else 0,
+                )
+            ),
+        ) * 2
+        fit_shape_vfaint = (
+            _odd(
+                max(
+                    7,
+                    int(fs_vfaint_scale * fwhm),
+                    int(np.ceil(vfaint_min_px)) if np.isfinite(vfaint_min_px) else 0,
+                )
+            ),
+        ) * 2
 
         # For undersampled data, enforce a minimum box that still captures
         # the first Airy ring / broader wings, helping the PSF distinguish
@@ -1863,15 +2195,96 @@ class PSF:
             fit_shape_vfaint = (_odd(max(fit_shape_vfaint[0], 7)),) * 2
 
         if xy_bounds is None:
-            # Allow slightly larger centroid excursions for undersampled data,
-            # where sub-pixel shifts can be substantial relative to the FWHM.
-            xy_bounds = 3.0 * fwhm if undersampled else 2.0 * fwhm
+            # Default xy-bounds are configured in arcseconds and converted to pixels.
+            # Fallback to legacy FWHM-based bounds when pixel_scale is unavailable.
+            cfg_xy_bounds_arcsec = phot_cfg.get("fitting_xy_bounds", None)
+            pixel_scale = self.input_yaml.get("pixel_scale", None)  # arcsec / pixel
+            if cfg_xy_bounds_arcsec is not None:
+                try:
+                    cfg_xy_bounds_arcsec = float(cfg_xy_bounds_arcsec)
+                    pixel_scale = (
+                        float(pixel_scale)
+                        if pixel_scale is not None and np.isfinite(pixel_scale)
+                        else np.nan
+                    )
+                    if np.isfinite(pixel_scale) and pixel_scale > 0:
+                        xy_bounds = cfg_xy_bounds_arcsec / pixel_scale
+                    else:
+                        # Allow slightly larger centroid excursions for undersampled data,
+                        # where sub-pixel shifts can be substantial relative to the FWHM.
+                        xy_bounds = 3.0 * fwhm if undersampled else 2.0 * fwhm
+                        log.info(
+                            "fitting_xy_bounds is set (%.3f arcsec) but pixel_scale is unavailable; "
+                            "using legacy xy_bounds=%.2f px fallback.",
+                            cfg_xy_bounds_arcsec,
+                            xy_bounds,
+                        )
+                except Exception:
+                    xy_bounds = 3.0 * fwhm if undersampled else 2.0 * fwhm
+            else:
+                # Legacy fallback when no explicit config is provided.
+                xy_bounds = 3.0 * fwhm if undersampled else 2.0 * fwhm
+
+        def _effective_xy_bounds_for_shape(fit_shape):
+            """
+            Constrain search bounds to be consistent with the PSF fit cutout.
+            A source cannot be robustly re-centered beyond roughly half the
+            fit box width; keep margin to avoid edge-dominated solutions.
+            """
+            half_box = 0.5 * (min(fit_shape) - 1)
+            frac_limit = 0.98 if undersampled else 0.90
+            max_from_shape = max(0.5, frac_limit * half_box)
+            return float(max(0.5, min(float(xy_bounds), max_from_shape)))
+
+        xb_bright = _effective_xy_bounds_for_shape(fit_shape_bright)
+        xb_faint = _effective_xy_bounds_for_shape(fit_shape_faint)
+        xb_vfaint = _effective_xy_bounds_for_shape(fit_shape_vfaint)
+        cfg_xy_arcsec_log = phot_cfg.get("fitting_xy_bounds", None)
+        pix_scale_log = self.input_yaml.get("pixel_scale", None)
+        if (
+            cfg_xy_arcsec_log is not None
+            and pix_scale_log is not None
+            and np.isfinite(float(pix_scale_log))
+            and float(pix_scale_log) > 0
+        ):
+            log.info(
+                "PSF fit bounds config: fitting_xy_bounds=%.3f arcsec, pixel_scale=%.3f arcsec/px, "
+                "base_xy_bounds=%.2f px, effective per tier (bright/faint/very-faint)=%.2f/%.2f/%.2f px",
+                float(cfg_xy_arcsec_log),
+                float(pix_scale_log),
+                float(xy_bounds),
+                xb_bright,
+                xb_faint,
+                xb_vfaint,
+            )
+        else:
+            log.info(
+                "PSF fit bounds config: fitting_xy_bounds=%s arcsec, pixel_scale=%s arcsec/px, "
+                "base_xy_bounds=%.2f px, effective per tier (bright/faint/very-faint)=%.2f/%.2f/%.2f px",
+                str(cfg_xy_arcsec_log),
+                str(pix_scale_log),
+                float(xy_bounds),
+                xb_bright,
+                xb_faint,
+                xb_vfaint,
+            )
 
         log.info(
             f"Fit shapes: bright={fit_shape_bright}, faint={fit_shape_faint}, "
             f"very-faint={fit_shape_vfaint}  xy_bounds={xy_bounds:.1f} "
             f"(undersampled={undersampled})"
         )
+        if is_target_fit:
+            log.info(
+                "Target-fit shape scaling: bright/faint/very-faint=%.2f/%.2f/%.2f * FWHM "
+                "(fit_sampling_boost=%.2f, target_boost=%.2f, pixel_scale=%s arcsec/px).",
+                fs_bright_scale,
+                fs_faint_scale,
+                fs_vfaint_scale,
+                fit_sampling_boost,
+                target_shape_boost,
+                f"{pixel_scale:.3f}" if has_pixel_scale else "unknown",
+            )
 
         epsf_model_copy = epsf_model.copy()
 
@@ -1882,9 +2295,29 @@ class PSF:
             background_rms=background_rms,
         )
 
+        if sources is None or len(sources) == 0:
+            log.info("No sources supplied to PSF fit; returning unchanged.")
+            return sources
+        if ("x_pix" not in sources.columns) or ("y_pix" not in sources.columns):
+            log.warning(
+                "PSF fit requires x_pix/y_pix columns; skipping PSF fit for this source table."
+            )
+            return sources
+
+        flux_col = None
+        for c in ("counts_AP", "flux_AP", "counts", "flux"):
+            if c in sources.columns:
+                flux_col = c
+                break
+        if flux_col is None:
+            log.warning(
+                "PSF fit requires an aperture-flux column (counts_AP/flux_AP); skipping PSF fit."
+            )
+            return sources
+
         x_all = np.asarray(sources["x_pix"], float)
         y_all = np.asarray(sources["y_pix"], float)
-        flux_all = np.asarray(sources["counts_AP"], float)
+        flux_all = np.asarray(sources[flux_col], float)
         orig_idx = np.arange(len(sources)).astype(int)
         valid = np.isfinite(x_all) & np.isfinite(y_all)
 
@@ -1923,20 +2356,9 @@ class PSF:
         # ---- Fitter --------------------------------------------------------
         # Emcee is driven only by perform_emcee_fitting_s2n. Used only when is_target_fit is True.
         # perform_emcee_fitting_s2n 0 or None: never use emcee (LSQ only).
-        # perform_emcee_fitting_s2n > 0: for target fit, use emcee only if target S/N < threshold.
-        phot_cfg = self.input_yaml.get("photometry", {}) or {}
-        # NOTE: "surface plane fitting" (planar background via annulus fit and
-        # subtraction inside the PSF fit box) has been removed/disabled.
-        # We keep the config key for backward compatibility, but it no longer
-        # changes the behaviour.
-        psf_bkg_order = int(phot_cfg.get("psf_background_order", 0) or 0)
-        fit_sloped_bkg = False
-        if psf_bkg_order >= 1:
-            log.warning(
-                "psf_background_order=%d requested, but surface plane fitting "
-                "functionality has been removed; using constant local background.",
-                psf_bkg_order,
-            )
+        # perform_emcee_fitting_s2n > 0: for target fit, use emcee only if target S/N is below threshold.
+        # Planar/surface background fitting was removed. PSF fitting always uses
+        # a constant local background estimate.
         emcee_s2n = phot_cfg.get("perform_emcee_fitting_s2n", 0)
         if emcee_s2n is None:
             emcee_s2n = 0
@@ -1948,7 +2370,7 @@ class PSF:
             target_snr = float(snr[0])
             use_emcee_for_all = target_snr < emcee_s2n
             log.info(
-                "Target S/N=%.2f; %s (threshold=%.1f).",
+                "Target S/N=%.2f; %s (low-S/N threshold=%.1f).",
                 target_snr,
                 "MCMC" if use_emcee_for_all else "LSQ",
                 emcee_s2n,
@@ -2044,10 +2466,11 @@ class PSF:
                 return None, None
 
             localbkg = LocalBackground(inner_r, outer_r, bkg_estimator=MMMBackground())
+            xy_bounds_this = _effective_xy_bounds_for_shape(fit_shape)
 
             if not iterative:
                 nd_for_fit = ndimage
-                if False and fit_sloped_bkg:
+                if False:
                     # Work on a copy so other tiers/fits see the original image.
                     work = np.array(ndimage.data, dtype=float, copy=True)
                     sub_init_tmp = init_params[mask].to_pandas()
@@ -2125,7 +2548,7 @@ class PSF:
                     fit_shape=fit_shape,
                     aperture_radius=aperture_radius,
                     localbkg_estimator=localbkg,
-                    xy_bounds=xy_bounds,
+                    xy_bounds=xy_bounds_this,
                     progress_bar=False,
                 )
                 sub_init = init_params[mask]
@@ -2144,7 +2567,7 @@ class PSF:
                     aperture_radius=aperture_radius,
                     localbkg_estimator=localbkg,
                     grouper=group_maker,
-                    xy_bounds=xy_bounds,
+                    xy_bounds=xy_bounds_this,
                     progress_bar=False,
                     finder=finder,
                     maxiters=3,
@@ -2155,9 +2578,11 @@ class PSF:
                 # Match back to input positions via KD-tree.
                 sub_init = sub_init.to_pandas()
                 res_df = res.to_pandas()
+                if res_df.empty:
+                    return None, psfphot
                 tree = cKDTree(np.vstack((res_df["x_fit"], res_df["y_fit"])).T)
                 dists, idxs = tree.query(np.vstack((sub_init["x"], sub_init["y"])).T)
-                match = dists <= xy_bounds
+                match = dists <= xy_bounds_this
                 res = res_df.iloc[idxs[match]].reset_index(drop=True)
                 sub_init = sub_init.iloc[match].reset_index(drop=True)
 
@@ -2173,6 +2598,79 @@ class PSF:
             )
             if "flags" not in res.columns:
                 res["flags"] = 0
+
+            # LSQ robustness retry:
+            # Re-fit only pathological rows with a slightly larger fit box but
+            # tighter centroid bounds to reduce divergence/outlier solutions.
+            if (not use_emcee_this_tier) and (not res.empty):
+                bad = (
+                    ~np.isfinite(self._first_present(res, ["x_fit", "xcenter_fit", "x_0_fit"]))
+                    | ~np.isfinite(self._first_present(res, ["y_fit", "ycenter_fit", "y_0_fit"]))
+                    | ~np.isfinite(self._first_present(res, ["flux_fit", "flux"]))
+                    | (self._first_present(res, ["flux_fit", "flux"]) <= 0)
+                    | (np.asarray(res.get("flags", 0), int) != 0)
+                )
+                if np.any(bad):
+                    bad_ids = np.asarray(res.loc[bad, "idx"], int)
+                    if "__row" in sub_init.columns:
+                        retry_sel = np.isin(
+                            np.asarray(sub_init["__row"], int), bad_ids
+                        )
+                    else:
+                        retry_sel = np.zeros(len(sub_init), dtype=bool)
+                    if np.any(retry_sel):
+                        retry_init = init_params[mask][retry_sel]
+                        fit_shape_retry = tuple(_odd(int(s) + 2) for s in fit_shape)
+                        xy_bounds_retry = max(0.5, 0.7 * float(xy_bounds_this))
+                        log.info(
+                            "LSQ retry for %d/%d problematic fits (fit_shape %s -> %s, xy_bounds %.2f -> %.2f).",
+                            int(np.sum(retry_sel)),
+                            len(sub_init),
+                            str(fit_shape),
+                            str(fit_shape_retry),
+                            float(xy_bounds_this),
+                            float(xy_bounds_retry),
+                        )
+                        try:
+                            psfphot_retry = PSFPhotometry(
+                                psf_model=epsf_model_copy,
+                                fitter=fitter,
+                                fitter_maxiters=1500,
+                                fit_shape=fit_shape_retry,
+                                aperture_radius=aperture_radius,
+                                localbkg_estimator=localbkg,
+                                xy_bounds=xy_bounds_retry,
+                                progress_bar=False,
+                            )
+                            res_retry = psfphot_retry(nd_for_fit, init_params=retry_init)
+                            res_retry = (
+                                res_retry.to_pandas()
+                                if hasattr(res_retry, "to_pandas")
+                                else res_retry
+                            )
+                            retry_init_df = (
+                                retry_init.to_pandas()
+                                if hasattr(retry_init, "to_pandas")
+                                else retry_init
+                            )
+                            if not res_retry.empty:
+                                res_retry["idx"] = (
+                                    retry_init_df["__row"].to_numpy()
+                                    if "__row" in retry_init_df.columns
+                                    else np.arange(len(res_retry), dtype=int)
+                                )
+                                if "flags" not in res_retry.columns:
+                                    res_retry["flags"] = 0
+                                # Prefer retry solutions for the retried ids.
+                                keep = ~np.isin(
+                                    np.asarray(res["idx"], int),
+                                    np.asarray(res_retry["idx"], int),
+                                )
+                                res = pd.concat(
+                                    [res.loc[keep], res_retry], ignore_index=True
+                                )
+                        except Exception as exc:
+                            log.info("LSQ retry skipped (non-fatal): %s", exc)
 
             # Propagate MCMC per-source errors.
             if use_emcee_this_tier and isinstance(
@@ -2337,11 +2835,10 @@ class PSF:
             df_out["flux_err_e"].to_numpy() / exposure_time
         )
 
-        if not any_emcee_used:
-            for col in ("flags", "cfit", "qfit", "reduced_chi2"):
-                updated.iloc[row_pos, updated.columns.get_indexer([col])] = df_out[
-                    col
-                ].to_numpy()
+        for col in ("flags", "cfit", "qfit", "reduced_chi2"):
+            updated.iloc[row_pos, updated.columns.get_indexer([col])] = df_out[
+                col
+            ].to_numpy()
 
         with np.errstate(divide="ignore", invalid="ignore"):
             inst_col = f"inst_{image_filter}_PSF"
@@ -2410,135 +2907,7 @@ class PSF:
         log = logging.getLogger(__name__)
 
         try:
-            phot_cfg = self.input_yaml.get("photometry", {}) or {}
-            psf_bkg_order = int(phot_cfg.get("psf_background_order", 0) or 0)
-            if psf_bkg_order >= 1:
-                # Target diagnostics historically applied planar background
-                # subtraction; now disabled for robustness/consistency.
-                log.warning(
-                    "Target diagnostic: psf_background_order=%d requested, but "
-                    "surface plane fitting is disabled; skipping planar subtraction.",
-                    psf_bkg_order,
-                )
-                psf_bkg_order = 0
-
-            # For the target diagnostic plot, ensure the plotted image/residual uses the
-            # same planar-background subtraction strategy as the fitter (if enabled).
             nd_for_plot = ndimage
-            if (
-                plotTarget
-                and psfphot is not None
-                and False
-                and len(sources) > 0
-            ):
-                try:
-                    fwhm = float(self.input_yaml.get("fwhm", 3.0))
-                    undersampled = fwhm <= 2.0
-                    crowded_field = bool(phot_cfg.get("crowded_field", False))
-
-                    # Fit shapes chosen as in psf_photometry().
-                    fit_shape_bright = (_odd(max(7, int(2.5 * fwhm))),) * 2
-                    fit_shape_faint = (_odd(max(7, int(2.0 * fwhm))),) * 2
-                    fit_shape_vfaint = (_odd(max(7, int(1.5 * fwhm))),) * 2
-                    if undersampled:
-                        fit_shape_bright = (_odd(max(fit_shape_bright[0], 9)),) * 2
-                        fit_shape_faint = (_odd(max(fit_shape_faint[0], 9)),) * 2
-                        fit_shape_vfaint = (_odd(max(fit_shape_vfaint[0], 7)),) * 2
-
-                    # Annulus radii as in psf_photometry().
-                    if crowded_field:
-                        inner_r = aperture_radius + 3.0 * fwhm
-                        outer_r = inner_r + 2.0 * fwhm
-                    else:
-                        inner_r = aperture_radius + 2.0 * fwhm
-                        outer_r = aperture_radius + 5.0 * fwhm
-
-                    # Pick a fit shape tier from SNR if available (else assume faint).
-                    if "SNR" in sources.columns:
-                        snr0 = float(np.asarray(sources["SNR"], float)[0])
-                    else:
-                        snr0 = np.nan
-                    if np.isfinite(snr0) and snr0 >= 8.0:
-                        fit_shape = fit_shape_bright
-                    elif np.isfinite(snr0) and snr0 < 4.0:
-                        fit_shape = fit_shape_vfaint
-                    else:
-                        fit_shape = fit_shape_faint
-
-                    x0t = (
-                        float(np.asarray(sources["x_pix"], float)[0])
-                        if "x_pix" in sources.columns
-                        else np.nan
-                    )
-                    y0t = (
-                        float(np.asarray(sources["y_pix"], float)[0])
-                        if "y_pix" in sources.columns
-                        else np.nan
-                    )
-
-                    # --- Fit plane in annulus and subtract in fit box ---
-                    work = np.array(ndimage.data, dtype=float, copy=True)
-                    ny, nx = work.shape
-                    rmax = float(outer_r)
-                    xmin = max(0, int(np.floor(x0t - rmax - 1)))
-                    xmax = min(nx, int(np.ceil(x0t + rmax + 2)))
-                    ymin = max(0, int(np.floor(y0t - rmax - 1)))
-                    ymax = min(ny, int(np.ceil(y0t + rmax + 2)))
-                    if (
-                        xmax > xmin
-                        and ymax > ymin
-                        and np.isfinite(x0t)
-                        and np.isfinite(y0t)
-                    ):
-                        sub = work[ymin:ymax, xmin:xmax]
-                        yy, xx = np.mgrid[ymin:ymax, xmin:xmax]
-                        rr = np.hypot(xx - x0t, yy - y0t)
-                        ann = (
-                            (rr >= float(inner_r))
-                            & (rr <= float(outer_r))
-                            & np.isfinite(sub)
-                        )
-                        if np.count_nonzero(ann) >= 25:
-                            z = sub[ann].astype(float, copy=False)
-                            x = xx[ann].astype(float, copy=False)
-                            y = yy[ann].astype(float, copy=False)
-                            med = float(np.nanmedian(z))
-                            sig = float(mad_std(z, ignore_nan=True))
-                            if np.isfinite(sig) and sig > 0:
-                                good = np.abs(z - med) <= 3.0 * sig
-                                if np.count_nonzero(good) >= 25:
-                                    z, x, y = z[good], x[good], y[good]
-                            A = np.vstack([np.ones_like(x), x, y]).T
-                            coef, *_ = np.linalg.lstsq(A, z, rcond=None)
-                            a, bx, by = float(coef[0]), float(coef[1]), float(coef[2])
-                            if np.isfinite(a) and np.isfinite(bx) and np.isfinite(by):
-                                fh, fw = int(fit_shape[0]), int(fit_shape[1])
-                                xc = int(np.round(x0t))
-                                yc = int(np.round(y0t))
-                                slc_lg, _ = overlap_slices(
-                                    (ny, nx), (fh, fw), (yc, xc), mode="trim"
-                                )
-                                if slc_lg is not None:
-                                    ys, xs = slc_lg
-                                    yy2, xx2 = np.mgrid[
-                                        ys.start : ys.stop, xs.start : xs.stop
-                                    ]
-                                    plane = a + bx * xx2 + by * yy2
-                                    work[ys, xs] = work[ys, xs] - plane
-                                    nd_for_plot = _nddata_clone(ndimage, data=work)
-                                    log.info(
-                                        "Target diagnostic: subtracted planar background (inner=%.1f, outer=%.1f, fit_shape=%s; bx=%.3g, by=%.3g).",
-                                        float(inner_r),
-                                        float(outer_r),
-                                        str(fit_shape),
-                                        bx,
-                                        by,
-                                    )
-                except Exception as _e:
-                    log.info(
-                        "Target diagnostic planar background subtraction skipped (non-fatal): %s",
-                        _e,
-                    )
 
             first_image = np.asarray(nd_for_plot.data)
             uncertainty = (
@@ -3036,34 +3405,23 @@ class PSF:
                 ):
                     blo, bhi = bnd.get(bkey, (None, None))
                     if blo is not None:
-                        fn(blo, color="0.25", lw=0.5, ls="--", alpha=0.9)
+                        fn(blo, color="0.25", lw=0.5, ls="--")
                     if bhi is not None:
-                        fn(bhi, color="0.25", lw=0.5, ls="--", alpha=0.9)
+                        fn(bhi, color="0.25", lw=0.5, ls="--")
 
-                if (
-                    orig_arr is not None
-                    and np.isfinite(orig_arr[j])
-                    and np.isfinite(orig_arr[i])
-                ):
-                    ax2d.plot(
-                        orig_arr[j],
-                        orig_arr[i],
-                        "x",
-                        ms=6.5,
-                        mew=1.3,
-                        color="C1",
-                        zorder=3,
-                    )
-                    ax2d.axvline(orig_arr[j], color="C1", lw=0.5, ls=":", alpha=0.85)
-                    ax2d.axhline(orig_arr[i], color="C1", lw=0.5, ls=":", alpha=0.85)
+                if orig_arr is not None:
+                    if np.isfinite(orig_arr[j]):
+                        ax2d.axvline(orig_arr[j], color="C1", lw=0.5, ls=":")
+                    if np.isfinite(orig_arr[i]):
+                        ax2d.axhline(orig_arr[i], color="C1", lw=0.5, ls=":")
 
-        try:
-            fig.savefig(
-                outpath_png, dpi=150, bbox_inches="tight", facecolor="white"
-            )
-            plt.close(fig)
-            return outpath_png
-        except Exception as exc:
-            log.error(f"Corner plot save failed: {exc}")
-            plt.close(fig)
-            return None
+        fig.suptitle("PSF MCMC posterior", y=0.98, fontsize=10)
+        fig.savefig(
+            outpath_png,
+            dpi=150,
+            bbox_inches="tight",
+            facecolor="white",
+        )
+        plt.close(fig)
+        log.info("Saved MCMC corner plot: %s", outpath_png)
+        return outpath_png

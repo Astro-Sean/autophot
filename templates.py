@@ -1813,6 +1813,11 @@ class Templates:
             dir_labels.append(f"{use_filter}p_template")
 
         candidate_dirs = [fits_root / d for d in dir_labels]
+        logger.info(
+            "Expected %s-band template folder(s): %s",
+            use_filter,
+            ", ".join(str(d) for d in candidate_dirs),
+        )
 
         for template_dir in candidate_dirs:
             if not template_dir.is_dir():

@@ -1,13 +1,14 @@
-# Font options
-
-font.size: 10
+# Font options (keep text legible and consistent across plots)
+font.size: 11
 
 # LaTeX options
 text.usetex: False
 
-axes.titlesize : 10
-axes.labelsize : 10
+figure.titlesize : 12
+axes.titlesize : 12
+axes.labelsize : 11
 axes.linewidth : 0.5
+axes.titlepad : 6.0
 
 # Subplots
 figure.subplot.wspace : 0.01
@@ -16,7 +17,7 @@ figure.subplot.hspace : 0.01
 # LINES
 lines.linewidth : 0.5
 lines.markeredgewidth : 0.5
-lines.markersize : 2
+lines.markersize : 3
 lines.solid_joinstyle : round
 lines.solid_capstyle : round
 
@@ -33,6 +34,7 @@ xtick.major.width    : 0.5    # major tick width in points
 xtick.minor.width    : 0.35    # minor tick width in points
 xtick.direction      : in    # direction: in, out, or inout
 xtick.minor.visible  : True  # visibility of minor ticks on x-axis
+xtick.labelsize      : 10
 
 ytick.left           : True   # draw ticks on the left side
 ytick.right          : True  # draw ticks on the right side
@@ -42,6 +44,7 @@ ytick.major.width    : 0.5    # major tick width in points
 ytick.minor.width    : 0.35    # minor tick width in points
 ytick.direction      : in    # direction: in, out, or inout
 ytick.minor.visible  : True  # visibility of minor ticks on y-axis
+ytick.labelsize      : 10
 
 
 # Legend
@@ -49,7 +52,8 @@ legend.markerscale   : 1
 legend.handletextpad : 0.25
 legend.columnspacing : 0.25
 legend.labelspacing  : 0.25
-legend.fontsize      : 6
+legend.fontsize      : 10
+legend.title_fontsize: 10
 
 scatter.marker : o
 savefig.dpi : 150

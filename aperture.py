@@ -892,10 +892,13 @@ class Aperture:
         ---------------
         1. Per-source optimum radii via CoG + SNR guard.
         2. Preliminary global radius = sigma-clipped median of per-source radii.
-        3. Global stability: reject sources with |profile - 1| > threshold or
-           profile > 1 + max_tail_excess beyond the preliminary global radius.
-        4. After final optimum_radius is set: exclude sources with profile
-           < min_tail_flux or > 1 + max_tail_excess beyond the final optimum radius.
+        3. Concentration gate: require a minimum enclosed-flux fraction at a
+           fixed core radius (default 1.7 * FWHM) to reject very broad sources.
+        3. Global stability (adaptive): primarily reject contaminated tails
+           (profile > 1 + excess) beyond the preliminary global radius.
+           Broad but monotonic profiles are retained.
+        4. After final optimum_radius is set: apply a gentle final tail screen,
+           then keep a minimum number/fraction of best-behaved stars.
            CoG is normalized 0->1 at aperture radius = max_radius (default 3.5 FWHM).
         5. Final global radius = sigma-clipped median of stable sources.
         6. Tail check w.r.t. final optimum (min_tail_flux / max_tail_excess).
@@ -907,13 +910,13 @@ class Aperture:
         (filtered_sources, optimum_radius, optimum_scale)
         """
         logger = logging.getLogger(__name__)
+        phot_cfg = self.input_yaml.get("photometry", {}) or {}
 
         # Crowded fields: always use a robust fixed aperture radius of
         # ~1.5 FWHM to avoid failures or unstable behaviour in very dense
         # regions.  This radius is in FWHM units and can be overridden by
         # `photometry.crowded_optimum_radius_fwhm` in the config.
         if crowded:
-            phot_cfg = self.input_yaml.get("photometry", {})
             fixed_radius = float(phot_cfg.get("crowded_optimum_radius_fwhm", 1.5))
             fwhm = float(self.input_yaml["fwhm"])
             optimum_radius = fixed_radius
@@ -962,6 +965,9 @@ class Aperture:
         sources["tail_excess_global"] = np.nan
         sources["stable_beyond_global"] = False
         sources["local_env_std"] = np.nan
+        sources["enc_flux_core"] = np.nan
+        sources["tail_outer_std"] = np.nan
+        sources["tail_outer_slope"] = np.nan
 
         gain = self.input_yaml.get("gain", 1.0)
         error = (
@@ -1036,7 +1042,12 @@ class Aperture:
         global_optimum_pre = float(np.nanmedian(prelim_r[prelim_keep]))
 
         # ---- Global stability filter (tail w.r.t. preliminary radius) -------
+        # Key change: avoid rejecting intrinsically broad stars just because
+        # their profile is still <1 beyond the preliminary global radius.
+        # Use one-sided tail-excess checks (contamination proxy), with adaptive
+        # tolerances based on the current epoch's source distribution.
         beyond_global = (radii / fwhm) > global_optimum_pre
+        finite_tail_excess = []
         for idx in range(len(sources)):
             prof = profiles_map.get(idx)
             if prof is None or not beyond_global.any():
@@ -1046,18 +1057,100 @@ class Aperture:
             tail_excess_global = float(max(0.0, np.nanmax(tail_region) - 1.0))
             sources.at[idx, "tail_max_dist_global"] = tmd
             sources.at[idx, "tail_excess_global"] = tail_excess_global
-            if (
-                np.isfinite(tmd)
-                and tmd < stability_threshold
-                and np.isfinite(tail_excess_global)
-                and tail_excess_global < max_tail_excess
-                and np.isfinite(sources.at[idx, "mean_slope"])
-            ):
+            if np.isfinite(tail_excess_global):
+                finite_tail_excess.append(tail_excess_global)
+
+        # Adaptive upper tolerance: if this epoch is noisier/crowded, avoid
+        # over-pruning while still rejecting clear positive-tail contamination.
+        if len(finite_tail_excess) > 0:
+            tail_excess_arr = np.asarray(finite_tail_excess, float)
+            adaptive_tail_excess = float(
+                np.nanpercentile(tail_excess_arr, 90) + 0.05
+            )
+            tail_excess_limit = max(max_tail_excess, adaptive_tail_excess)
+        else:
+            tail_excess_limit = max_tail_excess
+
+        for idx in range(len(sources)):
+            te = float(sources.at[idx, "tail_excess_global"])
+            ms = float(sources.at[idx, "mean_slope"])
+            if np.isfinite(te) and np.isfinite(ms) and ms > 0 and te <= tail_excess_limit:
                 sources.at[idx, "stable_beyond_global"] = True
 
         stable_mask = sources["stable_beyond_global"].values & np.isfinite(
             sources["optimum_radius"].values
         )
+        # Concentration gate to reject very broad sources:
+        # require a minimum enclosed-flux fraction within a fixed core radius.
+        core_radius_fwhm = float(
+            phot_cfg.get("optimum_radius_core_radius_fwhm", 1.7)
+        )
+        core_flux_min = float(phot_cfg.get("optimum_radius_core_flux_min", 0.5))
+        core_radius_fwhm = max(0.5, min(float(max_radius), core_radius_fwhm))
+        core_flux_min = max(0.05, min(0.95, core_flux_min))
+        radii_fwhm_arr = radii / fwhm
+        core_pass_mask = np.zeros(len(sources), dtype=bool)
+        for idx in range(len(sources)):
+            prof = profiles_map.get(idx)
+            if prof is None:
+                continue
+            try:
+                enc_core = float(
+                    np.interp(
+                        core_radius_fwhm,
+                        radii_fwhm_arr,
+                        np.asarray(prof, float),
+                    )
+                )
+            except Exception:
+                enc_core = np.nan
+            sources.at[idx, "enc_flux_core"] = enc_core
+            if np.isfinite(enc_core) and enc_core >= core_flux_min:
+                core_pass_mask[idx] = True
+        stable_mask &= core_pass_mask
+        n_core_rej = int(np.count_nonzero(~core_pass_mask & np.isfinite(sources["optimum_radius"].values)))
+        if n_core_rej > 0:
+            logger.info(
+                "Concentration gate rejected %d broad sources (enc_flux(%.2f*FWHM) < %.2f).",
+                n_core_rej,
+                core_radius_fwhm,
+                core_flux_min,
+            )
+
+        # Ensure a minimum stable pool: rescue high-SNR, near-global-radius stars
+        # when adaptive stability is still too strict.
+        min_keep_abs = int(phot_cfg.get("optimum_radius_min_keep_abs", 8))
+        min_keep_frac = float(phot_cfg.get("optimum_radius_min_keep_frac", 0.25))
+        min_keep_abs = max(3, min_keep_abs)
+        min_keep_frac = max(0.05, min(0.9, min_keep_frac))
+        min_keep = min(n_sources, max(min_keep_abs, int(np.ceil(min_keep_frac * n_sources))))
+
+        if np.count_nonzero(stable_mask) < min_keep:
+            candidates = sources[
+                np.isfinite(sources["optimum_radius"].values)
+                & np.isfinite(sources["mean_slope"].values)
+                & core_pass_mask
+            ].copy()
+            if not candidates.empty:
+                # Prefer high SNR and radii close to preliminary global value.
+                dr = np.abs(candidates["optimum_radius"].values - global_optimum_pre)
+                snr_vals = np.asarray(candidates.get("SNR", pd.Series(np.ones(len(candidates)))), float)
+                snr_rank = np.argsort(np.argsort(-snr_vals))
+                dr_rank = np.argsort(np.argsort(dr))
+                score = snr_rank + dr_rank
+                candidates["_score"] = score
+                rescue_idx = (
+                    candidates.sort_values("_score")
+                    .head(min_keep)
+                    .index.values
+                )
+                stable_mask[rescue_idx] = True
+                logger.info(
+                    "Adaptive rescue kept %d sources for optimum-radius stability (target minimum=%d).",
+                    int(np.count_nonzero(stable_mask)),
+                    min_keep,
+                )
+
         if not stable_mask.any():
             # Crowded fallback: use median of all preliminary radii (clipped) instead of failing
             if crowded and prelim_mask.any():
@@ -1125,24 +1218,83 @@ class Aperture:
             return sources.iloc[[]], fallback_radius, optimum_scale
 
         # ---- Tail check w.r.t. final optimum radius -----------------------
-        # Exclude sources whose normalized flux goes < min_tail_flux or
-        # > 1 + max_tail_excess beyond the final optimum radius.
+        # Gentle final screen: prioritize rejecting positive-tail contamination.
+        # Do not strongly penalize broad (still-rising) but otherwise smooth profiles.
         beyond_final = (radii / fwhm) > optimum_radius
         if beyond_final.any():
-            still_ok = []
+            tail_excess_vals = []
+            tail_min_vals = []
+            tail_by_idx = {}
+            outer_start_fwhm = float(
+                phot_cfg.get("optimum_radius_outer_start_fwhm", 2.2)
+            )
+            outer_start_fwhm = max(optimum_radius + 0.1, outer_start_fwhm)
+            outer_radii_mask = (radii / fwhm) >= outer_start_fwhm
             for i in final_indices:
                 prof = profiles_map.get(i)
                 if prof is None:
-                    still_ok.append(i)
                     continue
                 tail = prof[beyond_final]
                 t_min = float(np.nanmin(tail))
                 t_excess = float(max(0.0, np.nanmax(tail) - 1.0))
+                if np.any(outer_radii_mask):
+                    outer_prof = np.asarray(prof[outer_radii_mask], float)
+                    outer_r = np.asarray((radii / fwhm)[outer_radii_mask], float)
+                    outer_std = float(np.nanstd(outer_prof))
+                    if len(outer_prof) > 1 and np.isfinite(outer_prof).all():
+                        outer_slope = float(
+                            np.nanmean(np.gradient(outer_prof, outer_r))
+                        )
+                    else:
+                        outer_slope = np.nan
+                else:
+                    outer_std = np.nan
+                    outer_slope = np.nan
+                sources.at[i, "tail_outer_std"] = outer_std
+                sources.at[i, "tail_outer_slope"] = outer_slope
+                tail_by_idx[i] = (t_min, t_excess, outer_std, outer_slope)
+                if np.isfinite(t_excess):
+                    tail_excess_vals.append(t_excess)
+                if np.isfinite(t_min):
+                    tail_min_vals.append(t_min)
+
+            tail_excess_limit_final = max_tail_excess
+            if len(tail_excess_vals) > 0:
+                tail_excess_limit_final = max(
+                    max_tail_excess,
+                    float(np.nanpercentile(np.asarray(tail_excess_vals, float), 90) + 0.05),
+                )
+            min_tail_flux_final = min_tail_flux
+            if len(tail_min_vals) > 0:
+                # Keep this permissive to avoid excluding broad stars.
+                adaptive_min_tail = float(np.nanpercentile(np.asarray(tail_min_vals, float), 5) - 0.1)
+                min_tail_flux_final = min(min_tail_flux, adaptive_min_tail)
+            # Outer tail should be flat/negligible (no bright source contamination).
+            outer_std_max = float(phot_cfg.get("optimum_radius_outer_std_max", 0.05))
+            outer_slope_abs_max = float(
+                phot_cfg.get("optimum_radius_outer_slope_abs_max", 0.03)
+            )
+            outer_std_max = max(0.005, outer_std_max)
+            outer_slope_abs_max = max(0.001, outer_slope_abs_max)
+
+            still_ok = []
+            for i in final_indices:
+                if i not in tail_by_idx:
+                    still_ok.append(i)
+                    continue
+                t_min, t_excess, outer_std, outer_slope = tail_by_idx[i]
+                outer_ok = (
+                    np.isfinite(outer_std)
+                    and outer_std <= outer_std_max
+                    and np.isfinite(outer_slope)
+                    and np.abs(outer_slope) <= outer_slope_abs_max
+                )
                 if (
                     np.isfinite(t_min)
-                    and t_min >= min_tail_flux
+                    and t_min >= min_tail_flux_final
                     and np.isfinite(t_excess)
-                    and t_excess < max_tail_excess
+                    and t_excess <= tail_excess_limit_final
+                    and outer_ok
                 ):
                     still_ok.append(i)
             if len(still_ok) < len(final_indices):
@@ -1154,6 +1306,41 @@ class Aperture:
                             sources.loc[final_indices, "optimum_radius"].values
                         )
                     )
+                # Enforce minimum retention after final tail screen.
+                if len(final_indices) < min_keep:
+                    fallback_candidates = sources.loc[
+                        kept_indices[np.isin(kept_indices, np.where(core_pass_mask)[0])]
+                    ].copy()
+                    if not fallback_candidates.empty:
+                        snr_vals = np.asarray(
+                            fallback_candidates.get(
+                                "SNR", pd.Series(np.ones(len(fallback_candidates)))
+                            ),
+                            float,
+                        )
+                        dr = np.abs(
+                            fallback_candidates["optimum_radius"].values - optimum_radius
+                        )
+                        rank = np.argsort(np.argsort(-snr_vals)) + np.argsort(
+                            np.argsort(dr)
+                        )
+                        fallback_candidates["_rank"] = rank
+                        rescued = (
+                            fallback_candidates.sort_values("_rank")
+                            .head(min_keep)
+                            .index.values
+                        )
+                        final_indices = np.asarray(rescued, dtype=int)
+                        filtered_sources = sources.iloc[final_indices].copy()
+                        optimum_radius = float(
+                            np.nanmedian(
+                                sources.loc[final_indices, "optimum_radius"].values
+                            )
+                        )
+                        logger.info(
+                            "Final tail screen was over-restrictive; rescued to %d sources.",
+                            len(final_indices),
+                        )
 
         # ---- Optional EE model refinement ----------------------------------
         fine_r, fine_profile = None, None
@@ -1185,7 +1372,9 @@ class Aperture:
                 logger.warning(f"EE model fit failed: {exc}")
 
         # ---- Optimum scale -------------------------------------------------
-        optimum_scale = max(12, int(np.ceil(optimum_radius + 2 * fwhm))) + 0.5
+        # optimum_radius is in FWHM units; convert to pixels before adding a
+        # +2*FWHM margin for robust PSF-star cutout/context sizing.
+        optimum_scale = max(12, int(np.ceil((optimum_radius + 2.0) * fwhm))) + 0.5
         if (2 * optimum_scale) % 2 == 0:
             optimum_scale += 0.5
 
