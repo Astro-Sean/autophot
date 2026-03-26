@@ -47,6 +47,7 @@ from astropy.stats import (
     gaussian_fwhm_to_sigma,
 )
 from astropy.convolution import Gaussian2DKernel
+from astropy.convolution import convolve
 from astropy.visualization import ZScaleInterval
 from astropy.coordinates import SkyCoord
 import astropy.units as u
@@ -69,7 +70,7 @@ from scipy.ndimage import binary_dilation, uniform_filter, label as ndi_label
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # --- Local ---
-from functions import border_msg, set_size
+from functions import border_msg, set_size, log_warning_from_exception
 from wcs import get_wcs
 
 
@@ -182,7 +183,9 @@ class BackgroundSubtractor:
             angle_rad = np.arctan2(cd[1][0], cd[0][0])
             return np.degrees(angle_rad)
         except Exception as exc:
-            self.logger.warning(f"Could not compute rotation angle: {exc}")
+            log_warning_from_exception(
+                self.logger, "Could not compute rotation angle", exc
+            )
             return 0.0
 
     # -------------------------------------------------------------------------
@@ -403,6 +406,24 @@ class BackgroundSubtractor:
         r_dilate = max(2, int(dilate_factor * fwhm_pixels))
         selem = _disk_structuring_element(r_dilate)
 
+        cfg_bkg = (
+            (self.config.get("background", {}) or {})
+            if isinstance(self.config, dict)
+            else {}
+        )
+        # Inspired by the STScI notebook: convolve before thresholding so
+        # structured noise doesn't fragment detections into tiny islands.
+        use_convolved_detection = bool(cfg_bkg.get("source_mask_convolve", False))
+        # When True, only smooth on the first iteration (avoids N full-image convolves).
+        convolve_first_iter_only = bool(
+            cfg_bkg.get("source_mask_convolve_first_iter_only", True)
+        )
+        # Optional: update residual between iterations using a quick Background2D
+        # fit (closer to the notebook's "detect -> estimate -> subtract -> detect").
+        update_residual_with_background2d = bool(
+            cfg_bkg.get("source_mask_iterative_bkg_update", False)
+        )
+
         mask = np.zeros(image.shape, dtype=bool)
         residual = image.copy()
 
@@ -412,14 +433,32 @@ class BackgroundSubtractor:
 
         for iteration in range(n_iterations):
             try:
-                threshold = detect_threshold(residual, nsigma=nsigma, mask=mask)
+                work = residual
+                if use_convolved_detection and (
+                    not convolve_first_iter_only or iteration == 0
+                ):
+                    try:
+                        # Smooth only for detection; do not change the data used
+                        # for Background2D later.
+                        work = convolve(
+                            residual,
+                            kern,
+                            boundary="extend",
+                            nan_treatment="interpolate",
+                            preserve_nan=True,
+                            normalize_kernel=True,
+                        )
+                    except Exception:
+                        work = residual
+
+                threshold = detect_threshold(work, nsigma=nsigma, mask=mask)
 
                 # Use a small Gaussian filter kernel to suppress pixel noise
                 # before segmentation.  Newer versions of photutils expect
                 # this to be passed as "filter_kernel" (the legacy "kernel"
                 # keyword is no longer supported).
                 segm = detect_sources(
-                    residual,
+                    work,
                     threshold=threshold,
                     npixels=npixels,
                     connectivity=8,
@@ -459,11 +498,39 @@ class BackgroundSubtractor:
                 # Subtract a quick background estimate so the next iteration
                 # can detect fainter sources hidden under the sky gradient.
                 if iteration < n_iterations - 1:
-                    _, gmed, _ = sigma_clipped_stats(residual, sigma=3.0, mask=mask)
-                    residual = image - gmed
+                    if update_residual_with_background2d:
+                        # Cheap and robust: coarse mesh, minimal smoothing.
+                        # This is intentionally best-effort; if it fails, fall
+                        # back to a flat-median subtraction.
+                        try:
+                            bkg = Background2D(
+                                image,
+                                mask=mask,
+                                box_size=(64, 64),
+                                filter_size=3,
+                                sigma_clip=SigmaClip(sigma=3.0, maxiters=5),
+                                bkg_estimator=MedianBackground(),
+                                bkgrms_estimator=MADStdBackgroundRMS(),
+                                interpolator=BkgZoomInterpolator(order=1),
+                                edge_method="pad",
+                                exclude_percentile=90.0,
+                            )
+                            residual = image - np.asarray(bkg.background, dtype=float)
+                        except Exception:
+                            _, gmed, _ = sigma_clipped_stats(
+                                image, sigma=3.0, mask=mask
+                            )
+                            residual = image - float(gmed)
+                    else:
+                        _, gmed, _ = sigma_clipped_stats(residual, sigma=3.0, mask=mask)
+                        residual = image - float(gmed)
 
             except Exception as exc:
-                self.logger.warning(f"Source mask iteration {iteration} failed: {exc}")
+                log_warning_from_exception(
+                    self.logger,
+                    f"Source mask iteration {iteration} failed",
+                    exc,
+                )
                 break
 
         n_masked = np.sum(mask)
@@ -931,17 +998,38 @@ class BackgroundSubtractor:
         # Fallback 2: no mask + large boxes (last resort before flat).
         attempts.append(((big, big), 3, None))
 
+        cfg_bkg = (
+            (self.config.get("background", {}) or {})
+            if isinstance(self.config, dict)
+            else {}
+        )
+        fast_mode = bool(cfg_bkg.get("fast_mode", False))
+        global_interpolator = str(cfg_bkg.get("global_interpolator", "zoom")).strip().lower()
+        if fast_mode and global_interpolator == "idw":
+            global_interpolator = "zoom"
+            self.logger.info(
+                "Background: fast_mode=True – using zoom interpolator (IDW is slow on large images)."
+            )
+        global_interp_order = int(cfg_bkg.get("global_interp_order", 3))
+        clip_maxiters = int(cfg_bkg.get("global_sigma_clip_maxiters", 10))
+        if fast_mode:
+            clip_maxiters = min(clip_maxiters, 5)
+        clip_maxiters = max(1, clip_maxiters)
         for i, (bs, fs, m) in enumerate(attempts):
             try:
+                if global_interpolator == "idw":
+                    interp = BkgIDWInterpolator()
+                else:
+                    interp = BkgZoomInterpolator(order=max(0, int(global_interp_order)))
                 bkg = Background2D(
                     image,
                     mask=m,
                     box_size=bs,
                     filter_size=fs,
-                    sigma_clip=SigmaClip(sigma=3.0, maxiters=10),
+                    sigma_clip=SigmaClip(sigma=3.0, maxiters=clip_maxiters),
                     bkg_estimator=BiweightLocationBackground(),
                     bkgrms_estimator=MADStdBackgroundRMS(),
-                    interpolator=BkgZoomInterpolator(order=3),
+                    interpolator=interp,
                     edge_method="pad",
                     exclude_percentile=float(exclude_percentile),
                 )

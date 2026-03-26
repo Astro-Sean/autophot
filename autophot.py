@@ -703,27 +703,103 @@ class AutomatedPhotometry:
 
         # ------------------------------------------------------------------
         # Optional Gaia custom catalog build from user transmission curves.
-        # If `catalog.curve_map` is provided, build once into output directory
-        # and force catalog mode to `custom` for this run.
+        #
+        # New convention:
+        # - Users may set `catalog.use_catalog` (scalar or mapping) to "gaia_custom"
+        #   for the filter(s) they want calibrated using a Gaia curve-map catalog.
+        # - When "gaia_custom" is requested, AutoPhOT requires
+        #   `catalog.transition_curve_map` (and/or `catalog.curve_map_svo`) and will
+        #   build/reuse a single custom
+        #   catalog CSV, then transparently route "gaia_custom" → "custom" using
+        #   `catalog.catalog_custom_fpath`.
+        # - Plain "gaia" continues to use the standard Gaia photometry path with
+        #   no curve-map build.
         # ------------------------------------------------------------------
-        catalog_cfg = default_input.setdefault("catalog", {})
-        curve_map = catalog_cfg.get("curve_map", None)
-        if curve_map:
+        catalog_cfg = default_input.setdefault("catalog", {}) or {}
+
+        def _is_gaia_custom_token(v) -> bool:
+            if v is None:
+                return False
+            return str(v).strip().lower() in {"gaia_custom", "gaia-custom", "gaiacustom"}
+
+        use_catalog_cfg = catalog_cfg.get("use_catalog", None)
+        gaia_custom_requested = False
+        gaia_custom_groups = []
+        if _is_gaia_custom_token(use_catalog_cfg):
+            gaia_custom_requested = True
+            gaia_custom_groups = ["*"]
+        elif isinstance(use_catalog_cfg, dict):
+            for k, v in use_catalog_cfg.items():
+                if _is_gaia_custom_token(v):
+                    gaia_custom_requested = True
+                    gaia_custom_groups.append(str(k))
+
+        if gaia_custom_requested:
+            from functions import parse_supported_filter_group_key, normalize_photometric_filter_name
+
+            # Backward compatible: accept deprecated `curve_map` key.
+            curve_map = catalog_cfg.get(
+                "transition_curve_map",
+                catalog_cfg.get("curve_map", None),
+            )
+            if curve_map is None or curve_map == {}:
+                raise ValueError(
+                    "catalog.use_catalog requests 'gaia_custom', but catalog.transition_curve_map is not set. "
+                    "Provide a band->curve-path mapping, e.g. {'g':'/path/g.dat','r':'/path/r.dat','i':'/path/i.dat'}."
+                )
             if not isinstance(curve_map, dict):
                 raise TypeError(
-                    "catalog.curve_map must be a dictionary of band->curve path, "
+                    "catalog.transition_curve_map must be a dictionary of band->curve path, "
                     "e.g. {'g': '/path/g.dat', 'r': '/path/r.dat'}."
                 )
 
-            work_dir = default_input["fits_dir"]
-            out_dir_name = "_" + default_input["outdir_name"]
+            # Determine which bands must be present in curve_map based on the mapping keys.
+            required_bands = set()
+            if gaia_custom_groups == ["*"]:
+                # Global gaia_custom: require all curve_map keys (user-defined).
+                required_bands = {str(k) for k in curve_map.keys()}
+            else:
+                for g in gaia_custom_groups:
+                    bands = parse_supported_filter_group_key(g)
+                    if bands:
+                        required_bands.update(bands)
+                    else:
+                        # allow single-band keys (e.g. "g")
+                        nb = normalize_photometric_filter_name(g)
+                        if nb is not None:
+                            required_bands.add(nb)
+                        else:
+                            # If it's a non-standard token, we can't infer required curves.
+                            # Continue; the build will still use whatever is in curve_map.
+                            pass
+
+            missing = sorted([b for b in required_bands if b not in curve_map])
+            if missing:
+                raise ValueError(
+                    "catalog.use_catalog requests 'gaia_custom' for bands requiring transition_curve_map entries, "
+                    f"but these are missing from catalog.transition_curve_map: {missing}"
+                )
+
+            work_dir = default_input.get("fits_dir") or ""
+            out_dir_name = "_" + str(default_input.get("outdir_name", "REDUCED"))
             out_dir_base = os.path.basename(work_dir) + out_dir_name
             out_dir = os.path.join(os.path.dirname(work_dir), out_dir_base)
             Path(out_dir).mkdir(parents=True, exist_ok=True)
             curve_catalog_csv = os.path.join(out_dir, "GAIA_CurveMap_Catalog.csv")
 
-            catalog_cfg["use_catalog"] = "custom"
+            # Store the custom catalog path; downstream uses it when resolving "custom".
             catalog_cfg["catalog_custom_fpath"] = curve_catalog_csv
+
+            # Rewrite gaia_custom -> custom (scalar or mapping) so the rest of the
+            # pipeline doesn't need to special-case gaia_custom.
+            if _is_gaia_custom_token(use_catalog_cfg):
+                catalog_cfg["use_catalog"] = "custom"
+            elif isinstance(use_catalog_cfg, dict):
+                new_map = {}
+                for k, v in use_catalog_cfg.items():
+                    new_map[k] = ("custom" if _is_gaia_custom_token(v) else v)
+                catalog_cfg["use_catalog"] = new_map
+
             default_input["catalog"] = catalog_cfg
 
             if os.path.exists(curve_catalog_csv):
@@ -750,14 +826,14 @@ class AutomatedPhotometry:
                         target_ra = default_input.get("target_ra", None)
                         target_dec = default_input.get("target_dec", None)
                         _log(
-                            "Resolved target coordinates from TNS for curve_map build: "
+                            "Resolved target coordinates from TNS for gaia_custom build: "
                             f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}"
                         )
                     except Exception:
                         pass
                 if target_ra is None or target_dec is None:
                     raise ValueError(
-                        "catalog.curve_map is set, but target_ra/target_dec are missing. "
+                        "catalog.use_catalog requests 'gaia_custom', but target_ra/target_dec are missing. "
                         "Please set both coordinates in degrees, or provide target_name "
                         "with working TNS credentials."
                     )
@@ -782,15 +858,11 @@ class AutomatedPhotometry:
                 ).strip().lower()
                 svo_curve_map = catalog_cfg.get("curve_map_svo", None)
 
-                _log(
-                    border_msg(
-                        "Building Gaia custom catalog from transmission curves"
-                    )
-                )
+                _log(border_msg("Building Gaia curve-map custom catalog (gaia_custom)"))
                 _log(
                     f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}, "
                     f"radius={radius_deg:.4f} deg, max_sources={max_sources}, "
-                    f"order_by={curve_order}"
+                    f"order_by={curve_order}, bands={sorted(required_bands) if required_bands else 'curve_map keys'}"
                 )
                 from autophot_gaia_curves import build_custom_catalog
 
@@ -1154,11 +1226,18 @@ class AutomatedPhotometry:
                                 ): template
                                 for template in template_file_list
                             }
+                            total_t = len(futures)
+                            done_t = 0
                             for fut in as_completed(futures):
                                 fname, rc = fut.result()
+                                done_t += 1
                                 if rc != 0:
                                     # Minimal reporting; main.py already logged details.
-                                    _log(f"[TEMPLATE FAIL] {fname} (exit code {rc})")
+                                    _log(
+                                        f"[{done_t}/{total_t}] [TEMPLATE FAIL] {fname} (exit code {rc})"
+                                    )
+                                else:
+                                    _log(f"[{done_t}/{total_t}] [TEMPLATE OK]   {fname}")
                         gc.collect()
                     else:
                         _log(border_msg("Reducing and calibrating template files"))
@@ -1200,20 +1279,20 @@ class AutomatedPhotometry:
                                 ): str(file)
                                 for file in file_list
                             }
+                            total = len(futures)
                             for fut in as_completed(futures):
                                 fname, rc = fut.result()
-                                if rc == 0:
-                                    _log(f"[OK]    {fname}")
-                                else:
-                                    _log(f"[FAIL]  {fname} (exit code {rc})")
                                 counter += 1
+                                if rc == 0:
+                                    _log(f"[{counter}/{total}] [OK]    {fname}")
+                                else:
+                                    _log(f"[{counter}/{total}] [FAIL]  {fname} (exit code {rc})")
                         gc.collect()
                     else:
                         for file in print_progress_bar(
                             file_list, title="Science files calibrated\n"
                         ):
                             try:
-                                _log(f"\n{counter} / {len(file_list)}")
                                 _run_main_subprocess(
                                     python_executable,
                                     autophot_exe,
@@ -1223,11 +1302,14 @@ class AutomatedPhotometry:
                                 )
                                 gc.collect()
                                 counter += 1
+                                _log(f"[{counter}/{len(file_list)}] [OK]    {str(file)}")
                             except Exception as e:
                                 import traceback
 
                                 tb = traceback.format_exc(limit=1)
-                                _log(f"[ERROR] Problem with file: {file}: {e} | {tb}")
+                                _log(
+                                    f"[{counter + 1}/{len(file_list)}] [ERROR] Problem with file: {file}: {e} | {tb}"
+                                )
 
         # Concatenate per-image outputs into one light curve CSV
         reduced_loc = f"{default_input['fits_dir']}_{default_input['outdir_name']}"

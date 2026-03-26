@@ -43,6 +43,8 @@ from astropy.visualization import ZScaleInterval, ImageNormalize
 from photutils.detection import DAOStarFinder
 from photutils.aperture import CircularAperture
 
+from functions import log_warning_from_exception
+
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
@@ -306,7 +308,7 @@ class Limits:
         useBeta         : use Bayesian beta formalism (True) or n*sigma (False)
         beta            : beta probability threshold
         plot            : unused placeholder (kept for API compatibility)
-        n_jobs          : worker processes; defaults to os.cpu_count()
+        n_jobs          : worker processes; None defaults to 1 (serial)
 
         Returns
         -------
@@ -380,7 +382,7 @@ class Limits:
 
             # ---- Parallel or serial fake-aperture draws ----------------------
             number_of_points = 150
-            n_jobs = min(n_jobs or os.cpu_count(), number_of_points)
+            n_jobs = min(n_jobs if n_jobs is not None else 1, number_of_points)
             # Serial path when n_jobs==1 to avoid fork/ProcessPool (HPC resource limits).
             if n_jobs == 1:
                 fake_sums = _fake_aperture_worker(
@@ -436,7 +438,9 @@ class Limits:
                 )
                 std = abs(popt[2])
             except Exception as fit_err:
-                logger.warning(f"Gaussian fit failed ({fit_err}); using robust std")
+                log_warning_from_exception(
+                    logger, "Gaussian fit failed; using robust std", fit_err
+                )
                 std = np.nanstd(fake_sums)
                 if not np.isfinite(std) or std <= 0:
                     std = float(mad_std(fake_sums, ignore_nan=True))
@@ -503,7 +507,7 @@ class Limits:
         background_rms  : full-frame RMS map (optional)
         subtraction_ready: unused placeholder
         zeropoint       : adds an apparent-magnitude axis to the plot
-        n_jobs          : worker processes; defaults to os.cpu_count()
+        n_jobs          : worker processes; None defaults to 1 (serial)
 
         Returns
         -------
@@ -657,8 +661,8 @@ class Limits:
             y_pix_arr = injection_df["y_pix"].to_numpy()
             n_sites = len(injection_df)
 
-            n_jobs = n_jobs or os.cpu_count()
-            # Cap workers to avoid HPC fork/resource limits (serial when 1).
+            # Default serial; cap workers to avoid HPC fork/resource limits.
+            n_jobs = n_jobs if n_jobs is not None else 1
             n_jobs = max(1, min(n_jobs, 8))
 
             # =================================================================

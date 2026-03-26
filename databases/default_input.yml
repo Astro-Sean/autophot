@@ -19,7 +19,7 @@ default_input:
   target_ra: null # float --- degrees
   target_dec: null # float --- degrees
 
-  nCPU: 1 # int --- Number of CPU workers.
+  nCPU: 1 # int --- Number of CPU workers (default 1 = serial aperture/limits; raise for parallelism).
   ncpu: null # int|null --- Alias for `nCPU` (legacy; prefer `nCPU`).
   nCpu: null # int|null --- Alias for `nCPU` (legacy; prefer `nCPU`).
 
@@ -137,7 +137,7 @@ default_input:
     allow_fallback_to_existing_on_solve_fail: False # bool --- If False, require a fresh solve when redo_wcs=True (no silent fallback to original header WCS).
     apply_solved_to_fits: True # bool --- If True, write solved WCS back into the FITS header on disk.
     solve_field_exe_loc: solve-field # str --- `solve-field` executable name/path (defaults to `solve-field` on PATH).
-    solve_field_tweak_order: 0 # int --- solve-field SIP tweak order to use (single-value mode).
+    solve_field_tweak_order: 3 # int --- solve-field SIP tweak order to use (single-value mode).
     prefer_scamp_tpv_after_solve: True # bool --- After solve-field succeeds, prefer SCAMP WCS (TPV/PV distortion) when available.
     # If True, preserve input non-linear distortion keywords (PV/SIP) when
     # merging solve-field WCS. Set False to fully replace distortion terms.
@@ -175,10 +175,14 @@ default_input:
     scamp_exe_loc: null # str|null --- Optional explicit path to `scamp` executable.
     sextractor_exe_loc: null # str|null --- Optional explicit path to SExtractor executable.
     scamp_astref_catalog: GAIA-DR3 # str --- Reference catalog name for SCAMP (if used).
-    scamp_optimize_after_solve: True # bool --- Try multiple SCAMP parameter trials after solve-field and keep the best WCS by matched-star residuals.
-    scamp_optimize_max_trials: 3 # int --- Maximum SCAMP optimization trials to evaluate (1=base only; up to 5).
+    scamp_ref_timeout: 60 # int --- Vizier connection timeout (s) for SCAMP REF_TIMEOUT (built-in default 10 is often too low).
+    scamp_ref_server: vizier.cfa.harvard.edu # str --- SCAMP REF_SERVER (Vizier mirror). Override if needed (e.g. vizier.unistra.fr, vizier.ast.cam.ac.uk).
+    scamp_single_call: True # bool --- If True (default), run SCAMP only once per image (disables multi-trial optimization).
+    scamp_optimize_after_solve: False # bool --- (Advanced) If True, try multiple SCAMP parameter trials after solve-field.
+    scamp_optimize_max_trials: 1 # int --- Maximum SCAMP optimization trials to evaluate (1=base only).
     scamp_distort_degrees: 4 # int --- SCAMP distortion polynomial degree (higher can model stronger optical distortion; default 4).
-    scamp_nthreads: 4 # int --- Number of SCAMP threads.
+    scamp_nthreads: 4 # int --- Number of SCAMP threads (within one SCAMP run).
+    sextractor_nthreads: 4 # int --- SExtractor NTHREADS when run via run_sex wrapper.
     scamp_crossid_radius: 2.5 # float --- Cross-identification radius (arcsec) for SCAMP matching.
     scamp_position_maxerr: 1.0 # float --- Maximum positional error (arcsec) accepted by SCAMP.
     scamp_fwhm_thresholds: "1.0,15.0" # str --- SCAMP FWHM acceptance range (pixels), "min,max".
@@ -230,9 +234,10 @@ default_input:
     TNS_BOT_API: null # str|null --- Optional TNS API key/token (if querying TNS).
 
   catalog:
-    use_catalog: null # str|dict|null --- Catalog backend for calibration (e.g. "refcat") or per-filter mapping (e.g. {"ugriz":"sdss","UBVRI":"apass","default":"gaia"}).
+    use_catalog: null # str|dict|null --- Catalog backend for calibration (e.g. "refcat") or per-filter mapping (e.g. {"ugriz":"sdss","UBVRI":"apass","default":"gaia"}). Special value: "gaia_custom" builds a Gaia curve-map custom catalog from `catalog.transition_curve_map` and routes to `custom`.
     catalog_custom_fpath: null # str|null --- Optional path to a user-supplied catalog file.
-    curve_map: null # dict[str,str]|null --- Optional band->transmission-curve file map. If set, AutoPHoT builds a Gaia custom catalog and auto-uses `custom`.
+    transition_curve_map: null # dict[str,str]|null --- Optional band->transmission-curve file map for Gaia curve-map custom catalog builds.
+    curve_map: null # dict[str,str]|null --- Deprecated alias for transition_curve_map (kept for backward compatibility).
     curve_map_svo: null # dict[str,str]|null --- Optional band->SVO filter ID map (e.g. {"r": "SDSS/SDSS.r"}) to fetch curves automatically.
     catalog_radius: 0.25 # float --- Search radius (degrees) around target for catalog query.
     gaia_xp_radius_deg: 0.1667 # float --- Search radius (degrees) for Gaia XP query (if used).
@@ -253,6 +258,8 @@ default_input:
     gaia_xp_batch_pause_sec: 1.0 # float --- Sleep between GaiaXPy batches (seconds).
     gaia_archive_max_retries: 3 # int --- Retries per ADQL batch / GaiaXPy batch on failure.
     gaia_archive_retry_base_delay_sec: 2.0 # float --- Initial backoff (seconds); doubles each retry.
+    gaia_xp_generate_error_correction: True # bool --- If True, ask GaiaXPy `generate()` to apply empirical flux-error corrections (see Montegriffo+ 2022; GaiaXPy generator tutorial).
+    gaia_xp_generate_truncation: False # bool --- If True, enable GaiaXPy `generate(..., truncation=True)` (GaiaXPy >= 2.1.4) to reduce high-order basis noise for faint sources.
     gaia_xp_photometric_systems: ["SDSS_Std", "JKC_Std"] # list[str]|null --- Which GaiaXPy photometric systems to generate.
       # Set to null or [] to disable XP synthetic photometry and fall back to base DR3 photometry only.
     include_IR_sequence_data: False # bool --- If True, augment catalog with IR sequence data (when available).
@@ -352,6 +359,12 @@ default_input:
     mesh_scale_min: 4.0 # float --- Minimum background mesh scale (in FWHM units unless otherwise specified).
     mesh_scale_max: 10.0 # float --- Maximum background mesh scale (in FWHM units unless otherwise specified).
     mesh_filter_size_mesh_units: 3 # int --- Background smoothing filter size expressed in mesh-cell units.
+    global_interpolator: zoom # str --- Background2D interpolator ("zoom" fast; "idw" slower, can help pathological gradients).
+    global_interp_order: 3 # int --- Order for zoom interpolator (0 nearest, 1 linear, 3 cubic).
+    global_sigma_clip_maxiters: 6 # int --- SigmaClip max iterations per mesh cell (lower = faster; use 10+ if noisy).
+    source_mask_convolve: False # bool --- If True, Gaussian-smooth before detection (slower; can reduce mask fragmentation).
+    source_mask_convolve_first_iter_only: True # bool --- If source_mask_convolve=True, smooth only on iteration 0 (faster).
+    source_mask_iterative_bkg_update: False # bool --- If True, update residual between mask iterations using a quick coarse Background2D fit.
 
     local_mesh_scale: 0.8 # float --- Background2D box-size scale factor relative to FWHM (local background).
     local_min_box: 6 # int --- Minimum Background2D box size (pixels).

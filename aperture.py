@@ -59,7 +59,14 @@ from astropy.visualization import ImageNormalize, ZScaleInterval
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import mag, snr_err, set_size, border_msg, log_exception
+from functions import (
+    mag,
+    snr_err,
+    set_size,
+    border_msg,
+    log_exception,
+    log_warning_from_exception,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -71,17 +78,14 @@ MAX_WORKERS_DEFAULT = (
 
 
 def _resolve_n_jobs(n_jobs, half_cpus=False):
-    """Resolve and cap worker count for multiprocessing (safeguards HPC process/thread limits)."""
-    from multiprocessing import cpu_count
+    """Resolve and cap worker count for multiprocessing (safeguards HPC process/thread limits).
 
-    n = cpu_count()
-    default = (n // 2) if half_cpus else n
-    raw = (
-        min(MAX_WORKERS_DEFAULT, max(1, default))
-        if n_jobs is None
-        else max(1, int(n_jobs))
-    )
-    return min(MAX_WORKERS_DEFAULT, raw)
+    ``n_jobs is None`` defaults to 1 (serial). ``half_cpus`` is kept for call-site compatibility
+    and is ignored.
+    """
+    if n_jobs is None:
+        return 1
+    return min(MAX_WORKERS_DEFAULT, max(1, int(n_jobs)))
 
 
 # ===========================================================================
@@ -522,7 +526,7 @@ class Aperture:
         background_rms : 2-D RMS map for error model
         saveTarget     : use filename stem (not index) when naming plot files
         verbose        : 0 quiet, 1 normal, 2 debug
-        n_jobs         : worker processes; None -> cpu_count() // 2
+        n_jobs         : worker processes; None -> 1 (serial)
 
         Returns
         -------
@@ -1369,7 +1373,7 @@ class Aperture:
                     if np.isfinite(r_target_pix) and r_target_pix > 0:
                         optimum_radius = float(r_target_pix / fwhm)
             except Exception as exc:
-                logger.warning(f"EE model fit failed: {exc}")
+                log_warning_from_exception(logger, "EE model fit failed", exc)
 
         # ---- Optimum scale -------------------------------------------------
         # optimum_radius is in FWHM units; convert to pixels before adding a
@@ -1541,7 +1545,7 @@ class Aperture:
                 if 0 < frac <= 1:
                     corrections.append(-2.5 * np.log10(1.0 / frac))
             except Exception as exc:
-                logger.warning(f"Skipping star: {exc}")
+                log_warning_from_exception(logger, "Skipping star", exc)
 
         if not corrections:
             logger.warning("No valid aperture corrections computed.")

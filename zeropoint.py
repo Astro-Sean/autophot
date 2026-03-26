@@ -767,7 +767,7 @@ class Zeropoint:
         threshold: float = 5.0,
         max_trials: int = 4000,
         ransac_min_samples: int = 2,
-        n_jobs=None,
+        n_jobs: int | None = 1,
         random_state: int = 42,
         min_sources: int = 1,
         fixed_color_slope: float = None,

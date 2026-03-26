@@ -38,7 +38,7 @@ from scipy.optimize import minimize
 import astropy.units as u
 
 sys.path.append(str(Path(__file__).parent.parent))
-from functions import border_msg, remove_wcs_from_header
+from functions import border_msg, remove_wcs_from_header, log_warning_from_exception
 from wcs import get_wcs
 
 try:
@@ -90,6 +90,8 @@ class ImageDistortionCorrector:
     DEFAULT_SCAMP_CONFIG = {
         "SOLVE_ASTROM": "Y",
         "SOLVE_PHOTOM": "Y",
+        "REF_TIMEOUT": 60,
+        "REF_SERVER": "vizier.cfa.harvard.edu",
         "DISTORT_DEGREES": 1,
         "MATCH": "Y",
         "MATCH_RESOL": 0,
@@ -142,7 +144,7 @@ class ImageDistortionCorrector:
         self.verbose_level = verbose_level
         self.delete_originals = delete_originals
         self.logger = logging.getLogger(__name__)
-        self.default_threads = max(1, (os.cpu_count() or 2) // 2)
+        self.default_threads = 4
         self._executables: Dict[str, str] = {}
         self._temp_dirs: set[str] = set()
         self.cleanup_intermediate = True
@@ -482,7 +484,7 @@ NNW
                     "SATUR_LEVEL": self.determine_saturation_level(fits_image),
                     "FILTER_NAME": conv_path,
                     "STARNNW_NAME": nnw_path,
-                    "NTHREADS": 1,
+                    "NTHREADS": self.default_threads,
                     "PIXEL_SCALE": PIXEL_SCALE,
                     "CATALOG_TYPE": "FITS_LDAC",
                 }
@@ -873,7 +875,9 @@ NNW
                 try:
                     _num_matched, _ = _do_match(retry_radius)
                 except Exception as e:
-                    self.logger.warning("Retry matching failed: %s.", e)
+                    log_warning_from_exception(
+                        self.logger, "Retry matching failed", e
+                    )
                 if _num_matched < 5:
                     self.logger.info(
                         "Too few matched sources (%d) for SCAMP/SWarp. Falling back to reproject/AstroAlign.",
@@ -1110,7 +1114,9 @@ NNW
                                 "Copied SCAMP .head to %s for SWarp.", ref_head_dst
                             )
                         except Exception as e:
-                            self.logger.warning("Could not copy .head for SWarp: %s", e)
+                            log_warning_from_exception(
+                                self.logger, "Could not copy .head for SWarp", e
+                            )
                     else:
                         self.logger.debug("SCAMP .head already in place for SWarp.")
 
@@ -1813,7 +1819,9 @@ NNW
             _cleanup_swarp_outputs()
             return None
         except Exception as e:
-            self.logger.warning("SWarp execution failed: %s. See %s", e, log_file)
+            log_warning_from_exception(
+                self.logger, f"SWarp execution failed (see {log_file})", e
+            )
             _cleanup_swarp_outputs()
             return None
 

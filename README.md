@@ -1,4 +1,4 @@
-![AutoPHoT logo](logo.png)
+![AutoPhOT logo](logo.png)
 
 [![Anaconda Version](https://anaconda.org/astro-sean/autophot/badges/version.svg)](https://anaconda.org/astro-sean/autophot)
 [![Latest Release Date](https://anaconda.org/astro-sean/autophot/badges/latest_release_date.svg)](https://anaconda.org/astro-sean/autophot)
@@ -6,9 +6,9 @@
 [![License](https://anaconda.org/astro-sean/autophot/badges/license.svg)](https://anaconda.org/astro-sean/autophot)
 [![Downloads](https://anaconda.org/astro-sean/autophot/badges/downloads.svg)](https://anaconda.org/astro-sean/autophot)
 
-# AutoPHoT
+# AutoPhOT
 
-The Automated Photometry of Transients (AutoPHoT) pipeline, built on Photutils and Astropy, provides a comprehensive photometric solution for transients and variable sources, offering aperture/PSF photometry, catalogue calibration, WCS solving, and optional template subtraction.
+The Automated Photometry of Transients (AutoPhOT) pipeline, built on Photutils and Astropy, provides a comprehensive photometric solution for transients and variable sources, offering aperture/PSF photometry, catalogue calibration, WCS solving, and optional template subtraction.
 
 
 Project links:
@@ -17,7 +17,7 @@ Project links:
 
 
 > [!NOTE]
-> I am the sole developer and maintainer of AutoPHoT and also a full-time researcher at MPE.
+> I am the sole developer and maintainer of AutoPhOT and also a full-time researcher at MPE.
 > Please open issues on GitHub and I will do my best to resolve them.
 
 ## Installation (Conda)
@@ -31,7 +31,7 @@ conda install astro-sean::autophot
 Verify installation:
 
 ```bash
-python -c "from autophot import AutomatedPhotometry; print('AutoPHoT import OK')"
+python -c "from autophot import AutomatedPhotometry; print('AutoPhOT import OK')"
 autophot-main -h
 ```
 
@@ -71,7 +71,7 @@ The script below follows your requested workflow style while avoiding sensitive 
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Run automated photometry with AutoPHoT.
+Run automated photometry with AutoPhOT.
 Override default_input and run pipeline; optionally plot lightcurve and tables.
 """
 
@@ -109,6 +109,24 @@ def main() -> int:
         "UBVRI": "apass",
         # "default": "gaia",
     }
+
+    # Optional: Gaia + custom throughput curves ("gaia_custom")
+    # - Set one or more mapping entries to "gaia_custom"
+    # - Provide `catalog.transition_curve_map` with matching band keys (e.g. g/r/i)
+    # AutoPhOT will build/reuse a Gaia curve-map catalog and route those bands
+    # through the `custom` backend automatically.
+    #
+    # autophot_input["catalog"]["use_catalog"] = {
+    #     "gri": "gaia_custom",
+    #     "zJHK": "refcat",
+    #     "u": "gaia",
+    #     "UBVRI": "apass",
+    # }
+    # autophot_input["catalog"]["transition_curve_map"] = {
+    #     "g": "/path/to/throughputs/g.dat",
+    #     "r": "/path/to/throughputs/r.dat",
+    #     "i": "/path/to/throughputs/i.dat",
+    # }
 
     # Optional credentials from environment (do not hard-code secrets):
     # TNS credentials are only needed if you want TNS lookups from target_name.
@@ -186,7 +204,7 @@ if __name__ == "__main__":
    - `autophot_input["template_subtraction"]["method"] = "sfft"` (or `hotpants`, `zogy`)
 2. Create template directories:
    - Call `prepare_template_directory(...)`.
-   - AutoPHoT prints where folders were created and asks if you want to continue.
+  - AutoPhOT prints where folders were created and asks if you want to continue.
 3. Place template FITS files:
    - Put one usable template per filter in `fits_dir/templates/<filter>_template/`.
 4. Run photometry.
@@ -198,13 +216,13 @@ Notes:
 
 ## Citation
 
-If you use AutoPHoT in your research, please cite:
+If you use AutoPhOT in your research, please cite:
 - ADS: [https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B)
 
 ```bibtex
 @ARTICLE{2022A&A...667A..62B,
        author = {{Brennan}, S.~J. and {Fraser}, M.},
-        title = "{The Automated Photometry of Transients pipeline (AUTOPHOT)}",
+       title = "{The Automated Photometry of Transients pipeline (AutoPhOT)}",
       journal = {\aap},
      keywords = {techniques: photometric, techniques: image processing, methods: data analysis, Astrophysics - Instrumentation and Methods for Astrophysics, Astrophysics - High Energy Astrophysical Phenomena},
          year = 2022,

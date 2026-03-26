@@ -18,6 +18,7 @@ import logging
 import matplotlib.pyplot as plt
 import traceback
 import textwrap
+import inspect
 
 import copy
 from astropy.io import fits
@@ -214,6 +215,13 @@ def get_supported_photometric_filters() -> tuple:
     return tuple(SUPPORTED_PHOTOMETRIC_FILTERS)
 
 
+# Composite YAML keys (optical + near-IR) that are not one single family letter-set.
+_COMPOSITE_FILTER_GROUP_KEYS = {
+    "grizjhk": tuple("grizJHK"),  # g,r,i,z,J,H,K (matches common refcat / Pan-STARRS+2MASS style maps)
+    "ugrizjhk": tuple("ugrizJHK"),  # u,g,r,i,z,J,H,K
+}
+
+
 def parse_supported_filter_group_key(group_key):
     """
     Parse a mapping-group key into explicit supported bands.
@@ -221,6 +229,7 @@ def parse_supported_filter_group_key(group_key):
     Accepted examples:
       - Full groups: "UBVRI", "ugriz", "JHK"
       - Valid subsets/singletons of one family: "griz", "u", "BV", "HK"
+      - Composite keys: "grizJHK", "ugrizJHK" (optical + JHK for catalog.use_catalog maps)
     Rejected:
       - Mixed-family tokens: "uBV", "rJ"
       - Unsupported tokens/bands.
@@ -234,6 +243,10 @@ def parse_supported_filter_group_key(group_key):
     # Fast path for canonical full-group keys.
     if key in SUPPORTED_FILTER_GROUPS:
         return tuple(SUPPORTED_FILTER_GROUPS[key])
+
+    comp = _COMPOSITE_FILTER_GROUP_KEYS.get(key.lower())
+    if comp is not None:
+        return comp
 
     # Support subsets of exactly one canonical family.
     for family_bands in SUPPORTED_FILTER_GROUPS.values():
@@ -319,6 +332,65 @@ def odd(n: int) -> int:
     return n + (n % 2 == 0)
 
 
+def format_exception_origin(exc: BaseException) -> str:
+    """
+    Return ``path:lineno`` for the stack frame where *exc* was raised.
+
+    Used in warning logs when the active ``sys.exc_info()`` stack may not apply.
+    """
+    tb = getattr(exc, "__traceback__", None)
+    if tb is None:
+        return "<no traceback>"
+    while tb.tb_next:
+        tb = tb.tb_next
+    try:
+        co = tb.tb_frame.f_code
+        return f"{co.co_filename}:{tb.tb_lineno}"
+    except Exception:
+        return "<unknown>"
+
+
+def log_warning_from_exception(
+    logger: logging.Logger,
+    message: str,
+    exc: BaseException,
+    *,
+    exc_info: bool = False,
+) -> None:
+    """
+    Log a WARNING for *exc* with explicit file:line for the raise site and log site.
+
+    Prefer this over ``logger.warning("...%%s", e)`` inside ``except`` blocks so
+    debugging information is consistent. Set ``exc_info=True`` to append a full
+    traceback to the log record.
+    """
+    exc_origin = format_exception_origin(exc)
+    frame = inspect.currentframe()
+    try:
+        caller = frame.f_back if frame is not None else None
+        if caller is not None:
+            co = caller.f_code
+            log_origin = f"{co.co_filename}:{caller.f_lineno}"
+        else:
+            log_origin = "?"
+    finally:
+        del frame
+
+    einfo = False
+    if exc_info:
+        einfo = (type(exc), exc, exc.__traceback__)
+
+    logger.warning(
+        "%s | exc at %s | logged at %s | %s: %s",
+        message,
+        exc_origin,
+        log_origin,
+        type(exc).__name__,
+        exc,
+        exc_info=einfo,
+    )
+
+
 def log_exception(e: Exception, msg: str = None):
     """
     Logs detailed exception information.
@@ -333,9 +405,7 @@ def log_exception(e: Exception, msg: str = None):
     logger = logging.getLogger(__name__)
 
     exc_type, exc_obj, exc_tb = sys.exc_info()
-    fname = (
-        os.path.basename(exc_tb.tb_frame.f_code.co_filename) if exc_tb else "unknown"
-    )
+    fname = exc_tb.tb_frame.f_code.co_filename if exc_tb else "unknown"
     lineno = exc_tb.tb_lineno if exc_tb else -1
 
     log_message = ""

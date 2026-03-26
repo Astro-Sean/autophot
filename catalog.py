@@ -64,6 +64,7 @@ from functions import (
     set_size,
     normalize_photometric_filter_name,
     parse_supported_filter_group_key,
+    log_warning_from_exception,
 )
 from aperture import Aperture
 
@@ -164,7 +165,7 @@ class Catalog:
         ):
             raise ValueError(
                 "No catalog selected. Set `default_input.catalog.use_catalog` in your YAML "
-                "(e.g. 'gaia', 'pan_starrs', 'sdss', 'apass', '2mass', 'legacy', 'refcat', or 'custom')."
+                "(e.g. 'gaia', 'pan_starrs', 'sdss', 'apass', '2mass', 'legacy', 'refcat', 'custom', or 'gaia_custom')."
             )
         return str(catalogName).strip()
 
@@ -179,6 +180,10 @@ class Catalog:
         if isinstance(catalog_choice, dict):
             use_filter = str(self.input_yaml.get("imageFilter", "") or "").strip()
             use_filter_norm = normalize_photometric_filter_name(use_filter)
+            # Canonical band for group membership (e.g. imageFilter "h" -> "H" in JHK / grizJHK).
+            band_for_group = (
+                use_filter_norm if use_filter_norm is not None else use_filter
+            )
             # Warn when the current filter matches multiple mapping keys.
             membership_matches = []
             if use_filter:
@@ -190,7 +195,7 @@ class Catalog:
                     if key_l in {"default", "*", "all"}:
                         continue
                     key_bands = parse_supported_filter_group_key(key_s)
-                    if key_bands and use_filter in key_bands:
+                    if key_bands and band_for_group in key_bands:
                         membership_matches.append(str(key))
                 if len(membership_matches) > 1:
                     logger.warning(
@@ -231,7 +236,7 @@ class Catalog:
                 if not use_filter:
                     continue
                 key_bands = parse_supported_filter_group_key(key_str)
-                if key_bands and use_filter in key_bands:
+                if key_bands and band_for_group in key_bands:
                     return value
 
             # 3) explicit default
@@ -423,6 +428,12 @@ class Catalog:
                         retry_base_delay_sec=retry_base_delay,
                         logger=logger,
                         show_progress=xp_show_progress,
+                        error_correction=bool(
+                            cat_cfg.get("gaia_xp_generate_error_correction", True)
+                        ),
+                        truncation=bool(
+                            cat_cfg.get("gaia_xp_generate_truncation", False)
+                        ),
                     )
                 results = results.copy()
                 results["source_id"] = results["source_id"].astype(str)
@@ -1385,7 +1396,9 @@ class Catalog:
                 x_valid = np.asarray(x_valid)
                 y_valid = np.asarray(y_valid)
             except Exception as e:
-                logger.warning(f"Centroiding failed even on valid sources: {e}")
+                log_warning_from_exception(
+                    logger, "Centroiding failed even on valid sources", e
+                )
                 x_valid = old_x_valid.copy()
                 y_valid = old_y_valid.copy()
             x_err_valid = np.full(len(x_valid), np.nan)

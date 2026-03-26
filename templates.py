@@ -182,6 +182,8 @@ try:
 except (ModuleNotFoundError, ImportError):
     run_IDC = None
 
+from functions import log_warning_from_exception
+
 # =============================================================================
 # External Tool Imports
 # =============================================================================
@@ -2103,7 +2105,9 @@ class Templates:
                             break
                         except Exception as _e:
                             last_exc = _e
-                            logger.warning("Reproject (%s) failed: %s", m, _e)
+                            log_warning_from_exception(
+                                logger, f"Reproject ({m}) failed", _e
+                            )
 
                     if used_method is None or aligned is None or footprint is None:
                         raise RuntimeError(
@@ -2176,12 +2180,11 @@ class Templates:
                                         float(subpix_shift[1]),
                                     )
                         except Exception as e:
-                            import traceback
-
-                            logger.warning(
-                                "Subpixel refinement failed (using WCS-aligned only): %s\n%s",
+                            log_warning_from_exception(
+                                logger,
+                                "Subpixel refinement failed (using WCS-aligned only)",
                                 e,
-                                traceback.format_exc(),
+                                exc_info=True,
                             )
 
                     hdr = templateHeader.copy()
@@ -2205,10 +2208,9 @@ class Templates:
                     )
                     return scienceFpath, new_templateFpath
                 except Exception as exc:
-                    import traceback
-
-                    logger.warning("Reproject failed: %s", exc)
-                    logger.warning("Reproject traceback:\n%s", traceback.format_exc())
+                    log_warning_from_exception(
+                        logger, "Reproject failed", exc, exc_info=True
+                    )
                     return None, None
 
             def _swarp() -> Tuple[Optional[str], Optional[str]]:
@@ -2562,7 +2564,9 @@ class Templates:
                 float(sy - ty),
             )
         except Exception as exc:
-            logger.warning("Post-crop WCS target-mapping diagnostic failed: %s", exc)
+            log_warning_from_exception(
+                logger, "Post-crop WCS target-mapping diagnostic failed", exc
+            )
 
         return cropped_scienceFpath, cropped_templateFpath
 
@@ -3880,7 +3884,9 @@ class Templates:
             logger.info("ZOGY subtraction succeeded")
             return "done"
         except Exception as exc:
-            logger.warning("ZOGY failed, falling back to SFFT: %s", exc)
+            log_warning_from_exception(
+                logger, "ZOGY failed, falling back to SFFT", exc
+            )
             return "sfft"
 
     def _subtract_sfft(
@@ -4196,7 +4202,9 @@ class Templates:
             logger.info("SFFT subtraction succeeded")
             return "done"
         except Exception as exc:
-            logger.warning("SFFT failed, falling back to HOTPANTS: %s", exc)
+            log_warning_from_exception(
+                logger, "SFFT failed, falling back to HOTPANTS", exc
+            )
             return "hotpants"
 
     def _subtract_hotpants(
@@ -4332,5 +4340,7 @@ class Templates:
             return True
 
         except Exception as exc:
-            logger.warning("HOTPANTS subtraction failed: %s", exc)
+            log_warning_from_exception(
+                logger, "HOTPANTS subtraction failed", exc
+            )
             return False

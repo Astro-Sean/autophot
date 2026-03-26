@@ -75,7 +75,7 @@ from photutils.utils.cutouts import overlap_slices
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import border_msg, set_size
+from functions import border_msg, set_size, log_warning_from_exception
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -1810,7 +1810,9 @@ class PSF:
                         data
                     )
                 except Exception as exc:
-                    log.warning(f"ZScale failed ({exc}); using min/max.")
+                    log_warning_from_exception(
+                        log, "ZScale failed; using min/max", exc
+                    )
                     vmin, vmax = np.nanmin(data), np.nanmax(data)
             else:
                 vmin, vmax = np.nanmin(data), np.nanmax(data)
@@ -2403,7 +2405,9 @@ class PSF:
                     background_rms=bkgrmsval,
                 )
             except Exception as exc:
-                log.warning("MCMC unavailable (%s); using LSQ for all sources.", exc)
+                log_warning_from_exception(
+                    log, "MCMC unavailable; using LSQ for all sources", exc
+                )
                 emcee_fitter = None
                 use_emcee_for_all = False
                 use_emcee_tiered = False
@@ -2880,7 +2884,7 @@ class PSF:
                     ],
                 )
             except Exception as exc:
-                log.warning(f"Corner plot failed: {exc}")
+                log_warning_from_exception(log, "Corner plot failed", exc)
 
         return updated
 

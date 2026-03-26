@@ -225,6 +225,7 @@ def run_photometry():
         beta_aperture,
         beta_psf,
         log_exception,
+        log_warning_from_exception,
         odd,
         ColoredLevelFormatter,
         LogMessageNormalizeFilter,
@@ -268,10 +269,10 @@ def run_photometry():
     with open(input_yaml_loc, "r") as file:
         input_yaml = yaml.safe_load(file)
 
-    # Worker count for per-image parallelism (aperture sources, limits). When nCPU is 1,
-    # use 1 worker so we do one source at a time; otherwise respect nCPU or leave default.
+    # Worker count for per-image parallelism (aperture sources, limits). Default is serial
+    # when nCPU is omitted from the top-level YAML.
     _ncpu = input_yaml.get("nCPU") or input_yaml.get("nCpu") or input_yaml.get("ncpu")
-    n_jobs = max(1, int(_ncpu)) if _ncpu is not None else None
+    n_jobs = max(1, int(_ncpu)) if _ncpu is not None else 1
 
     #  Helper Function: Update Target Pixel Coordinates
     # Updates the target's pixel coordinates after any changes to the WCS.
@@ -1456,9 +1457,10 @@ def run_photometry():
             try:
                 x_pix, y_pix = imageWCS.world_to_pixel(coords)
             except Exception as exc:
-                logging.warning(
+                log_warning_from_exception(
+                    logging.getLogger(),
                     "Variable-source WCS transform failed for bulk conversion; "
-                    "retrying per source and skipping non-convergent points: %s",
+                    "retrying per source and skipping non-convergent points",
                     exc,
                 )
                 x_pix = np.full(len(variable_sources), np.nan, dtype=float)
@@ -2590,7 +2592,7 @@ def run_photometry():
         use_custom_throughputs = False
         try:
             cat_cfg = input_yaml.get("catalog") or {}
-            curve_map_cfg = cat_cfg.get("curve_map")
+            curve_map_cfg = cat_cfg.get("transition_curve_map", cat_cfg.get("curve_map"))
             resolved_use_catalog = str(
                 Calibrate_Catalog._resolve_catalog_for_filter(
                     cat_cfg.get("use_catalog", "")
@@ -2605,7 +2607,7 @@ def run_photometry():
 
         if use_custom_throughputs:
             logging.info(
-                "Using Gaia custom catalog via catalog.curve_map (custom throughputs); "
+                "Using Gaia custom catalog via catalog.transition_curve_map (custom throughputs); "
                 "disabling zeropoint color correction."
             )
             ImageColorTerm, ImageColorTermError = None, None
@@ -3452,8 +3454,9 @@ def run_photometry():
                                 len(template_isolated),
                             )
                     except Exception as e:
-                        logging.warning(
-                            "Independent template PSF star selection failed (%s); using matched stars.",
+                        log_warning_from_exception(
+                            logging.getLogger(),
+                            "Independent template PSF star selection failed; using matched stars",
                             e,
                         )
                 if not use_independent_template_psf:

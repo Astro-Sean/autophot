@@ -168,7 +168,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Number of images to process in parallel. "
-            "Default: min(number of files, max(1, os.cpu_count() // 4))."
+            "Default: 1 (serial); increase for multi-image throughput."
         ),
     )
     parser.add_argument(
@@ -188,10 +188,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     n_files = len(fits_files)
 
     if args.jobs is None:
-        # Conservative default: leave headroom for per-image threads (SExtractor, SCAMP, SWarp, etc.).
-        cpu_count = os.cpu_count() or 1
-        default_jobs = max(1, cpu_count // 4)
-        jobs = min(n_files, default_jobs)
+        jobs = 1
     else:
         jobs = max(1, min(args.jobs, n_files))
 

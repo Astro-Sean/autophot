@@ -22,6 +22,8 @@ import matplotlib.pyplot as plt
 from astropy.visualization import ZScaleInterval
 from skimage.morphology import disk
 
+from functions import log_warning_from_exception
+
 
 # --- Main Class ---
 class RemoveCosmicRays:
@@ -139,7 +141,9 @@ class RemoveCosmicRays:
             return dilated_mask
 
         except Exception as e:
-            self.logger.warning(f"Cosmic ray mask dilation failed: {e}")
+            log_warning_from_exception(
+                self.logger, "Cosmic ray mask dilation failed", e
+            )
             return cr_mask  # Return original mask on failure
 
     # --- Visualization ---

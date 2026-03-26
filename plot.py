@@ -126,7 +126,7 @@ class Plot:
                     img_data,
                     origin="lower",
                     aspect="auto",
-                    cmap="viridis",
+                    cmap="bone",
                     vmin=vmins[title],
                     vmax=vmaxs[title],
                 )
@@ -245,7 +245,7 @@ class Plot:
                         img_data,
                         origin="lower",
                         aspect="auto",
-                        cmap="viridis",
+                        cmap="bone",
                         vmin=vmins[title],
                         vmax=vmaxs[title],
                     )
@@ -584,7 +584,7 @@ class Plot:
                 image,
                 origin="lower",
                 aspect="auto",
-                cmap="viridis",
+                cmap="bone",
                 interpolation=None,
                 norm=norm,
             )

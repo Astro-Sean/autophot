@@ -31,11 +31,14 @@ from astropy.table import Table
 
 # --- Local Imports (optional) ---
 try:
-    from functions import border_msg  # type: ignore
+    from functions import border_msg, log_warning_from_exception  # type: ignore
 except (ModuleNotFoundError, ImportError):
     # Minimal fallback for environments missing the full photometry stack.
     def border_msg(message: str, *args, **kwargs) -> str:
         return str(message)
+
+    def log_warning_from_exception(logger, message, exc, *, exc_info=False):
+        logger.warning("%s: %s", message, exc, exc_info=exc_info)
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -56,6 +59,26 @@ _ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 # =============================================================================
 
 
+def _wcs_cfg_float(cfg: dict, key: str, default: float) -> float:
+    """
+    Numeric WCS/SExtractor/SCAMP config reader.
+
+    ``dict.get(key, default)`` does not fall back when the YAML value is ``null``
+    (key present, value ``None``), which otherwise breaks ``float(None)``.
+    """
+    v = cfg.get(key, default)
+    if v is None:
+        return float(default)
+    return float(v)
+
+
+def _wcs_cfg_int(cfg: dict, key: str, default: int) -> int:
+    v = cfg.get(key, default)
+    if v is None:
+        return int(default)
+    return int(v)
+
+
 @contextmanager
 def silence_astropy_wcs_info():
     """
@@ -69,6 +92,28 @@ def silence_astropy_wcs_info():
         yield
     finally:
         wcs_logger.setLevel(prev_level)
+
+
+def _log_scamp_vizier_failure_hint(
+    logger: logging.Logger, scamp_out: str, scamp_log_fpath: str
+) -> None:
+    """If SCAMP log shows Vizier/network failure, log an actionable YAML hint."""
+    if not scamp_out:
+        return
+    low = scamp_out.lower()
+    if "vizier" not in low:
+        return
+    if not any(
+        tok in low for tok in ("timeout", "connection", "error", "failed", "refused")
+    ):
+        return
+    logger.warning(
+        "SCAMP astrometric catalog fetch failed (Vizier/network). "
+        "Raise `wcs.scamp_ref_timeout` (AutoPHoT default 60 s; SCAMP built-in is 10 s) "
+        "or set `wcs.scamp_ref_server` to another mirror (default is vizier.cfa.harvard.edu; "
+        "alternatives include vizier.unistra.fr, vizier.ast.cam.ac.uk). SCAMP log: %s",
+        scamp_log_fpath,
+    )
 
 
 def update_wcs_center(
@@ -600,6 +645,10 @@ def _build_scamp_optimization_trials(
     best solution from matched-point residuals.
     """
     base = dict(wcs_cfg or {})
+    # Default behaviour: run SCAMP once per image.
+    # Multi-trial SCAMP optimization can be expensive and is opt-in.
+    if bool(base.get("scamp_single_call", True)):
+        return [("base", dict(base))]
     trials: list[tuple[str, dict]] = [("base", dict(base))]
 
     try:
@@ -775,7 +824,9 @@ def _log_header_distortion_coefficients(
             len(set(sip_keys)),
         )
     except Exception as exc:
-        logger.warning("%s distortion coefficient logging failed: %s", prefix, exc)
+        log_warning_from_exception(
+            logger, f"{prefix} distortion coefficient logging failed", exc
+        )
 
 
 def _filter_points_against_initial_wcs(
@@ -1192,7 +1243,7 @@ class WCSSolver:
             self.clean_log(logpath)
             return os.path.isfile(wcs_file)
         except Exception as e:
-            logger.warning("solve-field run failed: %s", e)
+            log_warning_from_exception(logger, "solve-field run failed", e)
             return False
 
     def _plate_solve_scamp(
@@ -1229,7 +1280,7 @@ class WCSSolver:
         timeout_sec = (
             float(cpulimit)
             if cpulimit is not None
-            else float(wcs_cfg.get("cpulimit", 60))
+            else _wcs_cfg_float(wcs_cfg, "cpulimit", 60.0)
         )
 
         dirname = os.path.dirname(self.fpath)
@@ -1314,31 +1365,43 @@ class WCSSolver:
             except Exception:
                 satur_str = "1e7"
 
-            detect_thresh = str(float(wcs_cfg.get("sextractor_detect_thresh", 1.5)))
+            detect_thresh = str(_wcs_cfg_float(wcs_cfg, "sextractor_detect_thresh", 1.5))
             analysis_thresh = str(
-                float(wcs_cfg.get("sextractor_analysis_thresh", 1.2))
+                _wcs_cfg_float(wcs_cfg, "sextractor_analysis_thresh", 1.2)
             )
-            detect_minarea = str(int(wcs_cfg.get("sextractor_detect_minarea", 5)))
-            detect_maxarea = str(int(wcs_cfg.get("sextractor_detect_maxarea", 0)))
-            deblend_nthresh = str(int(wcs_cfg.get("sextractor_deblend_nthresh", 32)))
+            detect_minarea = str(_wcs_cfg_int(wcs_cfg, "sextractor_detect_minarea", 5))
+            detect_maxarea = str(_wcs_cfg_int(wcs_cfg, "sextractor_detect_maxarea", 0))
+            deblend_nthresh = str(
+                _wcs_cfg_int(wcs_cfg, "sextractor_deblend_nthresh", 32)
+            )
             deblend_mincont = str(
-                float(wcs_cfg.get("sextractor_deblend_mincont", 0.005))
+                _wcs_cfg_float(wcs_cfg, "sextractor_deblend_mincont", 0.005)
             )
             back_type = str(wcs_cfg.get("sextractor_back_type", "AUTO"))
-            back_value = str(float(wcs_cfg.get("sextractor_back_value", 0.0)))
-            back_size = str(int(wcs_cfg.get("sextractor_back_size", 64)))
-            back_filtersize = str(int(wcs_cfg.get("sextractor_back_filtersize", 3)))
+            back_value = str(_wcs_cfg_float(wcs_cfg, "sextractor_back_value", 0.0))
+            back_size = str(_wcs_cfg_int(wcs_cfg, "sextractor_back_size", 64))
+            back_filtersize = str(
+                _wcs_cfg_int(wcs_cfg, "sextractor_back_filtersize", 3)
+            )
             backphoto_type = str(wcs_cfg.get("sextractor_backphoto_type", "GLOBAL"))
-            backphoto_thick = str(int(wcs_cfg.get("sextractor_backphoto_thick", 24)))
+            backphoto_thick = str(
+                _wcs_cfg_int(wcs_cfg, "sextractor_backphoto_thick", 24)
+            )
             back_filtthresh = str(
-                float(wcs_cfg.get("sextractor_back_filtthresh", 0.0))
+                _wcs_cfg_float(wcs_cfg, "sextractor_back_filtthresh", 0.0)
             )
             seeing_fwhm_arcsec = (
                 float(conv_fwhm_pix) * float(pixel_scale)
                 if pixel_scale and float(pixel_scale) > 0
                 else 1.0
             )
-            phot_apertures = str(float(wcs_cfg.get("sextractor_phot_apertures", 1.7 * conv_fwhm_pix)))
+            phot_apertures = str(
+                _wcs_cfg_float(
+                    wcs_cfg,
+                    "sextractor_phot_apertures",
+                    float(1.7 * conv_fwhm_pix),
+                )
+            )
             final_config = {
                 "DETECT_TYPE": "CCD",
                 "DETECT_MINAREA": detect_minarea,
@@ -1374,9 +1437,12 @@ class WCSSolver:
                     f.write(f"{k}\t{v}\n")
 
             cat_path = os.path.join(temp_dir, f"{base}.ldac")
+            # Run SExtractor/SCAMP with cwd=temp_dir so SCAMP writes *.head next to the
+            # LDAC catalog (SCAMP defaults to the current working directory).
+            image_fpath = os.path.abspath(self.fpath)
             sex_cmd = [
                 sex_exe,
-                self.fpath,
+                image_fpath,
                 "-c",
                 config_file,
                 "-CATALOG_NAME",
@@ -1392,6 +1458,7 @@ class WCSSolver:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     timeout=timeout_sec,
+                    cwd=temp_dir,
                 )
             except subprocess.TimeoutExpired:
                 logger.warning(
@@ -1406,20 +1473,39 @@ class WCSSolver:
 
             astref_cat = str(wcs_cfg.get("scamp_astref_catalog", "GAIA-DR3"))
             scamp_cfg_path = os.path.join(temp_dir, "wcs_refine.scamp")
-            scamp_threads = int(
-                max(1, wcs_cfg.get("scamp_nthreads", (os.cpu_count() or 2) // 2))
+            _snth = wcs_cfg.get("scamp_nthreads")
+            if _snth is None:
+                _snth = 4
+            try:
+                scamp_threads = int(_snth)
+            except Exception:
+                scamp_threads = 4
+            # Keep the pipeline "serial across images" (nCPU=1) but allow SCAMP to
+            # use a small amount of internal threading by default.
+            if scamp_threads < 4:
+                logger.info(
+                    "SCAMP threads requested=%r -> using 4 (minimum default).",
+                    _snth,
+                )
+                scamp_threads = 4
+            logger.info(
+                "SCAMP threads: %d (wcs.scamp_nthreads=%r)",
+                scamp_threads,
+                _snth,
             )
+            # SCAMP defaults REF_TIMEOUT=10s against vizier.unistra.fr; that often fails on slow links.
             scamp_cfg = {
                 "SOLVE_ASTROM": "Y",
                 "SOLVE_PHOTOM": "N",
-                "DISTORT_DEGREES": int(wcs_cfg.get("scamp_distort_degrees", 4)),
+                "REF_TIMEOUT": _wcs_cfg_int(wcs_cfg, "scamp_ref_timeout", 60),
+                "DISTORT_DEGREES": _wcs_cfg_int(wcs_cfg, "scamp_distort_degrees", 4),
                 "MATCH": "Y",
                 "MATCH_RESOL": 0,
                 "MATCH_FLIPPED": "Y",
                 "WRITE_XML": "N",
                 "VERBOSE_TYPE": str(wcs_cfg.get("scamp_verbose_type", "LOG")),
                 "ASTREF_CATALOG": astref_cat,
-                "ASTREF_WEIGHT": int(wcs_cfg.get("scamp_astref_weight", 1)),
+                "ASTREF_WEIGHT": _wcs_cfg_int(wcs_cfg, "scamp_astref_weight", 1),
                 "ASTREFMAG_KEY": str(wcs_cfg.get("scamp_astrefmag_key", "MAG_AUTO")),
                 "ASTREFMAGERR_KEY": str(
                     wcs_cfg.get("scamp_astrefmagerr_key", "MAGERR_AUTO")
@@ -1432,14 +1518,18 @@ class WCSSolver:
                 ),
                 "DISTORT_KEYS": str(wcs_cfg.get("scamp_distort_keys", "XWIN_IMAGE,YWIN_IMAGE")),
                 "SN_THRESHOLDS": str(wcs_cfg.get("scamp_sn_thresholds", "5.0,100000.0")),
-                "CROSSID_RADIUS": float(wcs_cfg.get("scamp_crossid_radius", 2.5)),
-                "POSITION_MAXERR": float(wcs_cfg.get("scamp_position_maxerr", 1.0)),
+                "CROSSID_RADIUS": _wcs_cfg_float(wcs_cfg, "scamp_crossid_radius", 2.5),
+                "POSITION_MAXERR": _wcs_cfg_float(
+                    wcs_cfg, "scamp_position_maxerr", 1.0
+                ),
                 "FWHM_THRESHOLDS": str(wcs_cfg.get("scamp_fwhm_thresholds", "1.0,15.0")),
                 "MOSAIC_TYPE": str(wcs_cfg.get("scamp_mosaic_type", "UNCHANGED")),
                 "STABILITY_TYPE": str(
                     wcs_cfg.get("scamp_stability_type", "EXPOSURE")
                 ),
             }
+            _ref_srv = wcs_cfg.get("scamp_ref_server") or "vizier.cfa.harvard.edu"
+            scamp_cfg["REF_SERVER"] = str(_ref_srv).strip()
             with open(scamp_cfg_path, "w") as f:
                 for k, v in scamp_cfg.items():
                     f.write(f"{k}\t{v}\n")
@@ -1460,6 +1550,7 @@ class WCSSolver:
                         stdout=logf,
                         stderr=subprocess.STDOUT,
                         timeout=timeout_sec,
+                        cwd=temp_dir,
                     )
             except subprocess.TimeoutExpired:
                 logger.warning("SCAMP exceeded timeout (%.1f s)", timeout_sec)
@@ -1473,6 +1564,9 @@ class WCSSolver:
                         scamp_out = f.read().strip()
                     if scamp_out:
                         logger.warning("SCAMP output:\n%s", scamp_out[-2000:])
+                        _log_scamp_vizier_failure_hint(
+                            logger, scamp_out, scamp_log
+                        )
                 except Exception:
                     pass
                 logger.warning("SCAMP did not produce a .head file; WCS not updated.")
@@ -1526,7 +1620,9 @@ class WCSSolver:
                 logger.info("SCAMP WCS solution applied to header.")
                 return self.header
             except Exception as exc:
-                logger.warning("Failed to apply SCAMP WCS header: %s", exc)
+                log_warning_from_exception(
+                    logger, "Failed to apply SCAMP WCS header", exc
+                )
                 return np.nan
 
     def _refine_distortion_with_scamp_from_rough_wcs(
@@ -1591,8 +1687,10 @@ class WCSSolver:
                 )
                 return np.nan
         except Exception as exc:
-            logger.warning(
-                "SCAMP distortion refinement from solve-field seed failed: %s", exc
+            log_warning_from_exception(
+                logger,
+                "SCAMP distortion refinement from solve-field seed failed",
+                exc,
             )
             return np.nan
 
@@ -1771,7 +1869,9 @@ class WCSSolver:
             )
             return wcs_header
         except Exception as exc:
-            logger.warning("Post-solve linear refinement skipped: %s", exc)
+            log_warning_from_exception(
+                logger, "Post-solve linear refinement skipped", exc
+            )
             return wcs_header
 
     # --- Plate Solve ---
@@ -1866,13 +1966,15 @@ class WCSSolver:
                 merged.update(overrides)
                 wcs_cfg = merged
                 logger.info("WCS profile=crowded: applying crowded-field overrides")
-        timeout_sec = float(
-            cpulimit if cpulimit is not None else wcs_cfg.get("cpulimit", 45)
+        timeout_sec = (
+            float(cpulimit)
+            if cpulimit is not None
+            else _wcs_cfg_float(wcs_cfg, "cpulimit", 45.0)
         )
         downsample = (
             int(downsample)
             if downsample is not None
-            else int(wcs_cfg.get("downsample", 2))
+            else _wcs_cfg_int(wcs_cfg, "downsample", 2)
         )
 
         # --- Prepare paths (fixed temp names to avoid collisions) ---
@@ -1943,20 +2045,24 @@ class WCSSolver:
                 or self.default_input.get("gain")
             )
             gain_str = str(float(gain_val)) if gain_val is not None else "0"
-            detect_thresh = str(float(wcs_cfg.get("sextractor_detect_thresh", 1.5)))
+            detect_thresh = str(
+                _wcs_cfg_float(wcs_cfg, "sextractor_detect_thresh", 1.5)
+            )
             final_config = {
                 "DETECT_TYPE": "CCD",
-                "DETECT_MINAREA": str(int(wcs_cfg.get("sextractor_detect_minarea", 5))),
+                "DETECT_MINAREA": str(
+                    _wcs_cfg_int(wcs_cfg, "sextractor_detect_minarea", 5)
+                ),
                 "DETECT_THRESH": detect_thresh,
                 "ANALYSIS_THRESH": str(
-                    float(wcs_cfg.get("sextractor_analysis_thresh", 1.2))
+                    _wcs_cfg_float(wcs_cfg, "sextractor_analysis_thresh", 1.2)
                 ),
                 # Deblending helps split overlapping sources in crowded fields.
                 "DEBLEND_NTHRESH": str(
-                    int(wcs_cfg.get("sextractor_deblend_nthresh", 32))
+                    _wcs_cfg_int(wcs_cfg, "sextractor_deblend_nthresh", 32)
                 ),
                 "DEBLEND_MINCONT": str(
-                    float(wcs_cfg.get("sextractor_deblend_mincont", 0.005))
+                    _wcs_cfg_float(wcs_cfg, "sextractor_deblend_mincont", 0.005)
                 ),
                 "FILTER": "Y",
                 "FILTER_NAME": conv_filter_path,
@@ -1991,7 +2097,7 @@ class WCSSolver:
             ra, dec = self.default_input.get("target_ra"), self.default_input.get(
                 "target_dec"
             )
-            radius_deg = float(wcs_cfg.get("search_radius", 0.5))
+            radius_deg = _wcs_cfg_float(wcs_cfg, "search_radius", 0.5)
 
             def _build_scale_args(
                 scale_low: float, scale_high: float, include_pos: bool
@@ -2307,7 +2413,7 @@ class WCSSolver:
                             logger.info("SCAMP fallback succeeded.")
                             return scamp_header
                     except Exception as exc:
-                        logger.warning("SCAMP fallback failed: %s", exc)
+                        log_warning_from_exception(logger, "SCAMP fallback failed", exc)
                 else:
                     logger.warning(
                         "Astrometry.net did not solve WCS; projection_type=SIP disables SCAMP fallback."
@@ -2507,7 +2613,9 @@ class WCSSolver:
                         float(ddec_arcsec),
                     )
                 except Exception as exc:
-                    logger.warning("WCS input-vs-solved comparison skipped: %s", exc)
+                    log_warning_from_exception(
+                        logger, "WCS input-vs-solved comparison skipped", exc
+                    )
 
                 if keep_input_wcs_full and not redo_requested:
                     try:
@@ -2746,7 +2854,9 @@ class WCSSolver:
                                 crpix_offset,
                             )
                         except Exception as e:
-                            logger.warning("CRPIX offset correction skipped: %s", e)
+                            log_warning_from_exception(
+                                logger, "CRPIX offset correction skipped", e
+                            )
 
                 # Validate merged WCS before writing
                 with silence_astropy_wcs_info():
@@ -2767,7 +2877,9 @@ class WCSSolver:
                             )
                             return np.nan
                     except Exception as ev:
-                        logger.warning("Could not validate merged WCS: %s", ev)
+                        log_warning_from_exception(
+                            logger, "Could not validate merged WCS", ev
+                        )
 
                 fits.writeto(
                     self.fpath,

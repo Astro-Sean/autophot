@@ -620,6 +620,34 @@ class GaiaCurveCatalogBuilder:
                 )
         else:
             out_df = pd.DataFrame(rows)
+
+        # ------------------------------------------------------------------
+        # Validate (warning-only): non-empty but all-NaN magnitudes is almost
+        # always a wavelength-unit/overlap problem (or a GaiaXPy output-format
+        # change). We warn loudly but do not raise, since some workflows prefer
+        # to proceed and handle missing mags downstream.
+        # ------------------------------------------------------------------
+        if not out_df.empty and loaded_curves:
+            n = int(len(out_df))
+            bad_bands = []
+            for b in loaded_curves.keys():
+                if b not in out_df.columns:
+                    bad_bands.append(f"{b} (missing column)")
+                    continue
+                finite = np.isfinite(pd.to_numeric(out_df[b], errors="coerce").values)
+                n_finite = int(np.count_nonzero(finite))
+                if n_finite == 0:
+                    bad_bands.append(f"{b} (0/{n} finite)")
+            if len(bad_bands) == len(list(loaded_curves.keys())):
+                self.logger.warning(
+                    "Gaia curve-map catalog build produced %d row(s) but no finite "
+                    "synthetic magnitudes for any requested band(s): %s. "
+                    "Likely causes: (1) curve wavelength units misinterpreted (Å vs nm), "
+                    "(2) no overlap with Gaia XP spectra (~330–1050 nm), "
+                    "(3) GaiaXPy output format changed (flux column names).",
+                    n,
+                    ", ".join(bad_bands),
+                )
         out_path = Path(out_csv)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_df.to_csv(out_path, index=False)

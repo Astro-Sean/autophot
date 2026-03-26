@@ -337,6 +337,8 @@ def generate_source_ids_batched(
     logger: Optional[logging.Logger] = None,
     show_progress: bool = True,
     quiet_tap_info_logs: bool = True,
+    error_correction: bool = False,
+    truncation: bool = False,
 ) -> pd.DataFrame:
     """Call ``gaiaxpy.generate`` in batches with pauses between batches."""
     from gaiaxpy import generate
@@ -358,7 +360,22 @@ def generate_source_ids_batched(
 
         def _once() -> pd.DataFrame:
             with quiet_gaia_tap_info_logs(quiet_tap_info_logs):
-                return generate(chunk, photometric_system=photometric_system)
+                # GaiaXPy supports optional error correction, and (>=2.1.4) truncation.
+                # We pass these through when available; older versions may not accept
+                # `truncation` and will raise TypeError, in which case we retry without it.
+                try:
+                    return generate(
+                        chunk,
+                        photometric_system=photometric_system,
+                        error_correction=bool(error_correction),
+                        truncation=bool(truncation),
+                    )
+                except TypeError:
+                    return generate(
+                        chunk,
+                        photometric_system=photometric_system,
+                        error_correction=bool(error_correction),
+                    )
 
         part = retry_with_backoff(
             _once,

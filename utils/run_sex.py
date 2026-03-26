@@ -32,7 +32,7 @@ from astropy.stats import sigma_clip
 from astropy.table import Table
 from scipy.spatial import cKDTree
 
-from functions import border_msg
+from functions import border_msg, log_warning_from_exception
 
 logger = logging.getLogger(__name__)
 
@@ -167,14 +167,19 @@ class SExtractorWrapper:
             config (dict): Configuration parameters for SExtractor.
         """
         self.config = config
-        # Default number of threads for SExtractor; can be overridden by
-        # providing 'sextractor_nthreads' in the config dict.
-        cpu_count = os.cpu_count() or 1
+        # Default number of threads for SExtractor; top-level or under wcs.* in YAML.
+        _wcs_cfg = config.get("wcs") or {}
         try:
-            cfg_threads = int(config.get("sextractor_nthreads", max(1, cpu_count // 2)))
+            cfg_threads = int(
+                config.get(
+                    "sextractor_nthreads",
+                    _wcs_cfg.get("sextractor_nthreads", 4),
+                )
+            )
         except (TypeError, ValueError):
-            cfg_threads = max(1, cpu_count // 2)
-        self.n_threads = max(1, cfg_threads)
+            cfg_threads = 4
+        # Default to 4 threads even if older configs set 1.
+        self.n_threads = max(4, cfg_threads)
 
     # --- Helper Methods ---
 
@@ -992,8 +997,9 @@ class SExtractorWrapper:
                             100.0 * bad_region_mask.sum() / bad_region_mask.size,
                         )
                 except Exception as exc:
-                    logger.warning(
-                        "Could not build constant-region mask for source filtering: %s",
+                    log_warning_from_exception(
+                        logger,
+                        "Could not build constant-region mask for source filtering",
                         exc,
                     )
             else:

@@ -37,6 +37,7 @@ from functions import (
     normalize_photometric_filter_name,
     sanitize_photometric_filters,
     parse_supported_filter_group_key,
+    log_warning_from_exception,
 )
 from check import FitsInfo
 from tns import get_coords
@@ -551,7 +552,9 @@ class Prepare:
             else:
                 data = {}
         except Exception as e:
-            self.logger.warning("Could not load telescope.yml for update: %s", e)
+            log_warning_from_exception(
+                self.logger, "Could not load telescope.yml for update", e
+            )
             return
         if telescope not in data:
             data[telescope] = {}
@@ -583,7 +586,9 @@ class Prepare:
                     catalog_band,
                 )
             except Exception as e:
-                self.logger.warning("Could not write telescope.yml: %s", e)
+                log_warning_from_exception(
+                    self.logger, "Could not write telescope.yml", e
+                )
         #
         # Pixel scale updates use a separate helper so they can be added without
         # touching user-defined values if already present.
