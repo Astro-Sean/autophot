@@ -156,10 +156,14 @@ class Prepare:
                 and not any(substring in root for substring in forbidden_substrings)
             )
 
-        # Determine the root directory to search (templates or main FITS directory)
+        # Determine the root directory to search (templates or main FITS directory).
+        # `template_subtraction.prepare_templates` was removed from the public config;
+        # keep the behavior behind a safe lookup so older configs won't crash.
+        ts_cfg = self.input_yaml.get("template_subtraction") or {}
+        prepare_templates = bool(ts_cfg.get("prepare_templates", False))
         search_root = (
             os.path.join(self.input_yaml["fits_dir"], "templates")
-            if self.input_yaml["template_subtraction"]["prepare_templates"]
+            if prepare_templates
             else self.input_yaml["fits_dir"]
         )
 
@@ -181,7 +185,7 @@ class Prepare:
                         .replace("_ERROR", "")
                     )
 
-                    if self.input_yaml["template_subtraction"]["prepare_templates"]:
+                    if prepare_templates:
                         # Template mode: outputs live directly under work_root/base
                         cur_dir = os.path.join(work_root, base)
                     else:
@@ -199,9 +203,7 @@ class Prepare:
                             cur_dir = os.path.join(cur_dir, f"{sub}_APT")
                         cur_dir = os.path.join(cur_dir, base)
 
-                    if self.input_yaml["template_subtraction"][
-                        "prepare_templates"
-                    ]:
+                    if prepare_templates:
                         # Template preparation doesn't always write a per-image output
                         # CSV; use the generated template catalog as the completion
                         # marker.
@@ -413,9 +415,29 @@ class Prepare:
         Returns:
             Dict: Dictionary containing RA, DEC, and object information.
         """
-        target_name = self.input_yaml["target_name"]
+        # If the user already provided coordinates, do NOT query TNS.
+        # Treat target_ra/target_dec as authoritative (degrees, FK5/J2000).
+        if (
+            self.input_yaml.get("target_ra") is not None
+            and self.input_yaml.get("target_dec") is not None
+        ):
+            self.logger.info(
+                "Skipping TNS query because target_ra/target_dec are already provided (%.6f, %.6f).",
+                float(self.input_yaml["target_ra"]),
+                float(self.input_yaml["target_dec"]),
+            )
+            return {
+                "ra": float(self.input_yaml["target_ra"]),
+                "dec": float(self.input_yaml["target_dec"]),
+            }
+
+        target_name = self.input_yaml.get("target_name", None)
         tns_dir = pathlib.Path(self.input_yaml["wdir"]) / "tns_objects"
         tns_dir.mkdir(parents=True, exist_ok=True)
+        if target_name is None or (isinstance(target_name, str) and target_name.strip() == ""):
+            # No name and no coordinates; caller decides whether to continue.
+            return {}
+
         transient_path = tns_dir / f"{target_name}.yml"
 
         def _log_tns_summary(tns_data: Dict, source: str) -> None:
@@ -724,8 +746,8 @@ class Prepare:
                 "Filter check: dropped unsupported catalog keys: %s",
                 ", ".join(sorted(set(dropped_available))),
             )
-        selected_filters_cfg = self.input_yaml.get("selected_filters", [None])
-        selected_filters = [None]
+        selected_filters_cfg = self.input_yaml.get("selected_filters", [])
+        selected_filters = []
         if selected_filters_cfg and selected_filters_cfg[0] is not None:
             selected_filters, dropped_selected = sanitize_photometric_filters(
                 selected_filters_cfg
@@ -739,7 +761,7 @@ class Prepare:
                 self.logger.warning(
                     "selected_filters has no supported bands; no files will pass this constraint."
                 )
-                selected_filters = [None]
+                selected_filters = []
 
         # Cache of header filter -> catalog band mappings seen in this run,
         # keyed by (telescope, instrument, raw_header_value). This prevents us
@@ -753,9 +775,6 @@ class Prepare:
 
         # Load telescope configuration (telescope.yml + built-in). Images must have TELESCOP and INSTRUME.
         tele_autophot_input = load_telescope_config(self.input_yaml["wdir"])
-
-        if self.input_yaml["HST_mode"]:
-            return flist, filter_available
 
         self.logger.info(
             border_msg(
@@ -793,8 +812,10 @@ class Prepare:
 
         for name in print_progress_bar(flist):
             is_template = "templates" in os.path.normpath(name)
+            ts_cfg = self.input_yaml.get("template_subtraction") or {}
+            prepare_templates = bool(ts_cfg.get("prepare_templates", False))
             if (
-                self.input_yaml["template_subtraction"]["prepare_templates"]
+                prepare_templates
                 and "PSF_model" in name
             ):
                 # Skip pre-computed PSF model products when validating templates
@@ -926,7 +947,7 @@ class Prepare:
             # Apply catalog and user filter constraints
             if (
                 filter_name not in available_filters
-                and not self.input_yaml["template_subtraction"]["prepare_templates"]
+                and not prepare_templates
             ):
                 files_removed += 1
                 filters_removed += 1
@@ -935,7 +956,7 @@ class Prepare:
 
             if (
                 self.input_yaml["select_filter"]
-                and not self.input_yaml["template_subtraction"]["prepare_templates"]
+                and not prepare_templates
             ):
                 # When using select_filter, require the raw header value to be in do_filter
                 if str(fits_filter) not in self.input_yaml["do_filter"]:
@@ -944,7 +965,7 @@ class Prepare:
                     filter_unavailable.append(filter_name)
                     continue
 
-            if selected_filters[0] is not None:
+            if selected_filters and selected_filters[0] is not None:
                 if filter_name not in selected_filters:
                     files_removed += 1
                     filters_not_selected += 1

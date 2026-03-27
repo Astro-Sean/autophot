@@ -25,7 +25,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.stats import linregress, median_abs_deviation
-from scipy.optimize import minimize
 from scipy.ndimage import gaussian_filter, binary_dilation, label
 from scipy.spatial import cKDTree, distance
 from astropy.io import fits
@@ -287,41 +286,25 @@ class Find_FWHM:
             med = np.nanmedian(x)
             return 1.4826 * np.nanmedian(np.abs(x - med))
 
-        class ConstrainedSlopeRegressor(BaseEstimator, RegressorMixin):
-            def __init__(
-                self,
-                slope_constraint: float = 0.0,
-                slope_tolerance: float = 0.0,
-                penalty_weight: float = 100.0,
-            ):
-                self.slope_constraint = slope_constraint
-                self.slope_tolerance = slope_tolerance
-                self.penalty_weight = penalty_weight
+        class ConstantOffsetRegressor(BaseEstimator, RegressorMixin):
+            """
+            Fast robust regressor for y = intercept (fixed zero slope).
+
+            In linearity space, we fit delta_mag = m_peak - m_inst as a constant.
+            Using the median keeps this robust and avoids expensive per-trial
+            numerical optimization inside RANSAC.
+            """
 
             def fit(self, X: np.ndarray, y: np.ndarray):
                 X, y = check_X_y(X, y)
-
-                def loss(params: np.ndarray) -> float:
-                    slope, intercept = params
-                    pred = slope * X.flatten() + intercept
-                    mse = np.mean((y - pred) ** 2)
-                    slope_diff = abs(slope - self.slope_constraint)
-                    penalty = self.penalty_weight * max(
-                        0, slope_diff - self.slope_tolerance
-                    )
-                    return mse + penalty
-
-                slope_init = 0.0
-                intercept_init = np.mean(y) - slope_init * np.mean(X)
-                init = [slope_init, intercept_init]
-                result = minimize(loss, init, method="L-BFGS-B")
-                self.slope_, self.intercept_ = result.x
+                self.slope_ = 0.0
+                self.intercept_ = float(np.nanmedian(y))
                 return self
 
             def predict(self, X: np.ndarray) -> np.ndarray:
                 check_is_fitted(self)
                 X = check_array(X)
-                return self.slope_ * X.flatten() + self.intercept_
+                return np.full(X.shape[0], float(self.intercept_), dtype=float)
 
         fit_params = {
             "intercept": np.nan,
@@ -417,12 +400,11 @@ class Find_FWHM:
                 logger.warning("Too few points for linearity RANSAC (need at least 2).")
                 return catalog, fit_params, saturation_range
 
+            max_trials = int(min(300, max(80, 12 * n_pts)))
             ransac = RANSACRegressor(
-                estimator=ConstrainedSlopeRegressor(
-                    slope_constraint=0.0, slope_tolerance=0.0
-                ),
+                estimator=ConstantOffsetRegressor(),
                 residual_threshold=residual_threshold,
-                max_trials=1000,
+                max_trials=max_trials,
                 min_samples=min_samples,
                 random_state=42,
             )

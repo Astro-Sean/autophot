@@ -49,7 +49,7 @@ from astropy.nddata import NDData, StdDevUncertainty
 from astropy.stats import SigmaClip, mad_std, sigma_clipped_stats
 from astropy.table import QTable, Table
 from astropy.visualization import ImageNormalize, LinearStretch, ZScaleInterval
-from astropy.convolution import Gaussian2DKernel
+from astropy.convolution import Moffat2DKernel
 from astropy.modeling.fitting import TRFLSQFitter, SLSQPLSQFitter
 
 # ---------------------------------------------------------------------------
@@ -189,15 +189,73 @@ def get_quartic_kernel(oversample: int = 4, kernel_size: int = None) -> np.ndarr
 
 
 def get_smoothing_kernel(
-    fwhm: float, oversample: int = 4, kernel_size: int = None
+    fwhm: float,
+    *,
+    oversample: int = 4,
+    kernel_size: int | None = None,
+    kind: str = "quartic",
+    size_scale_fwhm: float = 0.8,
+    size_max: int = 9,
 ) -> np.ndarray:
     """
-    Return the quartic smoothing kernel for ePSF construction.
+    Return a smoothing kernel for ePSF construction.
 
-    *fwhm* is accepted for API compatibility but not used - the quartic
-    polynomial kernel is preferred over a Gaussian for ePSF smoothing.
+    Defaults to the Anderson & King (2000)-style quartic kernel, but can also
+    return a Gaussian kernel for experimentation.
+
+    Parameters
+    ----------
+    fwhm : float
+        PSF FWHM in native pixels.
+    oversample : int
+        ePSF oversampling factor (kernel is defined on the oversampled grid).
+    kernel_size : int or None
+        Explicit odd kernel size on oversampled grid. If None, auto-size from
+        fwhm*oversample with a clamp.
+    kind : {"quartic","gaussian"}
+        Kernel family.
+    size_scale_fwhm : float
+        Auto kernel size scale, size ~= scale*(oversample*fwhm).
+    size_max : int
+        Maximum auto kernel size (odd).
     """
-    return get_quartic_kernel(oversample, kernel_size)
+    try:
+        osamp = max(1, int(oversample))
+    except Exception:
+        osamp = 1
+
+    if kernel_size is None:
+        try:
+            fw = float(fwhm)
+        except Exception:
+            fw = np.nan
+        base = 2 * osamp + 1  # conservative fallback
+        if np.isfinite(fw) and fw > 0:
+            base = int(np.ceil(float(size_scale_fwhm) * float(osamp) * fw))
+        base = max(3, base)
+        try:
+            mx = int(size_max)
+        except Exception:
+            mx = 9
+        mx = max(3, mx)
+        if mx % 2 == 0:
+            mx += 1
+        kernel_size = _odd(min(base, mx))
+    else:
+        kernel_size = _odd(int(kernel_size))
+
+    k = str(kind).strip().lower()
+    if k == "gaussian":
+        # sigma in oversampled pixels; small sigma keeps the kernel local.
+        sigma = max(0.6, 0.25 * float(kernel_size))
+        half = kernel_size // 2
+        yy, xx = np.mgrid[-half : half + 1, -half : half + 1]
+        ker = np.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
+        ker = ker / np.sum(ker)
+        return ker
+
+    # Default: quartic
+    return get_quartic_kernel(osamp, kernel_size)
 
 
 def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None):
@@ -1127,7 +1185,7 @@ class PSF:
                     if fluxcol
                     else np.random.default_rng(42).random(len(work))
                 )
-            # Grid size: aim for ~num_keep cells but at least 2×2
+            # Grid size: aim for ~num_keep cells but at least 2x2
             side = int(np.ceil(np.sqrt(max(4, num_keep))))
             xedges = np.linspace(0, nx, side + 1)
             yedges = np.linspace(0, ny, side + 1)
@@ -1534,7 +1592,7 @@ class PSF:
             ndimage = self.create_nddata_with_fitting_weights(
                 image=self.image.copy(),
                 gain=float(self.input_yaml.get("gain", gain)),
-                read_noise=float(self.input_yaml.get("readnoise", 0.0)),
+                read_noise=float(self.input_yaml.get("read_noise", 0.0)),
                 background_rms=background_rms,
             )
 
@@ -1595,7 +1653,18 @@ class PSF:
             elif do_fft and len(epsfstars) < 8:
                 log.info("Skipping FFT rejection (fewer than 8 PSF stars).")
 
-            smooth_kernel = get_smoothing_kernel(fwhm, oversample=oversample)
+            smooth_kind = str(phot_cfg.get("psf_smoothing_kernel", "quartic")).strip().lower()
+            smooth_size = phot_cfg.get("psf_smoothing_kernel_size", None)
+            smooth_scale = float(phot_cfg.get("psf_smoothing_kernel_size_scale_fwhm", 0.8))
+            smooth_max = int(phot_cfg.get("psf_smoothing_kernel_size_max", 9))
+            smooth_kernel = get_smoothing_kernel(
+                fwhm,
+                oversample=oversample,
+                kernel_size=(int(smooth_size) if smooth_size is not None else None),
+                kind=smooth_kind,
+                size_scale_fwhm=smooth_scale,
+                size_max=smooth_max,
+            )
 
             # Use a normalization radius that is at least a configurable multiple
             # of the PSF-build FWHM to preserve wing structure.
@@ -1713,9 +1782,23 @@ class PSF:
                 progress_bar=False,
             )
 
-            # Initialise ePSF from a Gaussian.
-            kernel = Gaussian2DKernel(
-                x_stddev=oversample * fwhm / 2.355,
+            # Initialise ePSF from a Moffat profile. The wing parameter is
+            # configurable; larger values approach Gaussian-like cores.
+            moffat_alpha = float(phot_cfg.get("psf_init_moffat_beta", 4.765))
+            moffat_alpha = max(1.1, moffat_alpha)
+            moffat_gamma = (oversample * fwhm) / (
+                2.0 * np.sqrt(2.0 ** (1.0 / moffat_alpha) - 1.0)
+            )
+            log.info(
+                "ePSF init kernel: moffat_beta=%g, gamma=%g px, size=%dx%d",
+                moffat_alpha,
+                float(moffat_gamma),
+                int(oversample * cutout_n),
+                int(oversample * cutout_n),
+            )
+            kernel = Moffat2DKernel(
+                gamma=max(float(moffat_gamma), 1e-6),
+                alpha=float(moffat_alpha),
                 x_size=oversample * cutout_n,
                 y_size=oversample * cutout_n,
             )
@@ -1729,13 +1812,10 @@ class PSF:
 
             epsf, fitted_stars = epsf_builder.build_epsf(epsfstars, init_epsf=init_epsf)
 
-            # Enforce non-negativity of the final ePSF model. Small negative
-            # lobes can appear from noise or overfitting; clipping them and
-            # renormalising keeps the PSF physically meaningful while
-            # preserving its overall shape.
+            # Keep the ePSF shape unchanged; only renormalize total flux to unity
+            # for consistent flux scaling across photometry and injections.
             try:
                 arr = np.asarray(epsf.data, float)
-                arr = np.clip(arr, 0.0, None)
                 s = arr.sum()
                 if s > 0:
                     arr /= s
@@ -2100,8 +2180,8 @@ class PSF:
 
         fwhm = float(self.input_yaml.get("fwhm", 3.0))
         exposure_time = float(self.input_yaml.get("exposure_time", 30.0))
-        image_filter = self.input_yaml.get("imageFilter", "unk")
-        scale = self.input_yaml.get("scale", 11.5)
+        image_filter = self.input_yaml.get("imageFilter", "")
+        scale = self.input_yaml.get("scale", 0)
         aperture_radius = float(
             self.input_yaml.get("photometry", {}).get(
                 "aperture_radius", max(1.5 * fwhm, 2.0)
@@ -2199,7 +2279,7 @@ class PSF:
         if xy_bounds is None:
             # Default xy-bounds are configured in arcseconds and converted to pixels.
             # Fallback to legacy FWHM-based bounds when pixel_scale is unavailable.
-            cfg_xy_bounds_arcsec = phot_cfg.get("fitting_xy_bounds", None)
+            cfg_xy_bounds_arcsec = phot_cfg.get("fitting_xy_bounds", 3.0)
             pixel_scale = self.input_yaml.get("pixel_scale", None)  # arcsec / pixel
             if cfg_xy_bounds_arcsec is not None:
                 try:
@@ -2241,7 +2321,7 @@ class PSF:
         xb_bright = _effective_xy_bounds_for_shape(fit_shape_bright)
         xb_faint = _effective_xy_bounds_for_shape(fit_shape_faint)
         xb_vfaint = _effective_xy_bounds_for_shape(fit_shape_vfaint)
-        cfg_xy_arcsec_log = phot_cfg.get("fitting_xy_bounds", None)
+        cfg_xy_arcsec_log = phot_cfg.get("fitting_xy_bounds", 3.0)
         pix_scale_log = self.input_yaml.get("pixel_scale", None)
         if (
             cfg_xy_arcsec_log is not None
@@ -2250,36 +2330,53 @@ class PSF:
             and float(pix_scale_log) > 0
         ):
             log.info(
-                "PSF fit bounds config: fitting_xy_bounds=%.3f arcsec, pixel_scale=%.3f arcsec/px, "
-                "base_xy_bounds=%.2f px, effective per tier (bright/faint/very-faint)=%.2f/%.2f/%.2f px",
+                "PSF fit bounds config:\n"
+                "\tfitting_xy_bounds=%.3g arcsec\n"
+                "\tpixel_scale=%.3g arcsec/px\n"
+                "\tbase_xy_bounds=%.3g px\n"
+                "\teffective per tier (bright/faint/very-faint)=%.3g/%.3g/%.3g px",
                 float(cfg_xy_arcsec_log),
                 float(pix_scale_log),
                 float(xy_bounds),
-                xb_bright,
-                xb_faint,
-                xb_vfaint,
+                float(xb_bright),
+                float(xb_faint),
+                float(xb_vfaint),
             )
         else:
             log.info(
-                "PSF fit bounds config: fitting_xy_bounds=%s arcsec, pixel_scale=%s arcsec/px, "
-                "base_xy_bounds=%.2f px, effective per tier (bright/faint/very-faint)=%.2f/%.2f/%.2f px",
+                "PSF fit bounds config:\n"
+                "\tfitting_xy_bounds=%s arcsec\n"
+                "\tpixel_scale=%s arcsec/px\n"
+                "\tbase_xy_bounds=%.3g px\n"
+                "\teffective per tier (bright/faint/very-faint)=%.3g/%.3g/%.3g px",
                 str(cfg_xy_arcsec_log),
                 str(pix_scale_log),
                 float(xy_bounds),
-                xb_bright,
-                xb_faint,
-                xb_vfaint,
+                float(xb_bright),
+                float(xb_faint),
+                float(xb_vfaint),
             )
 
         log.info(
-            f"Fit shapes: bright={fit_shape_bright}, faint={fit_shape_faint}, "
-            f"very-faint={fit_shape_vfaint}  xy_bounds={xy_bounds:.1f} "
-            f"(undersampled={undersampled})"
+            "Fit shapes:\n"
+            "\tbright=%s\n"
+            "\tfaint=%s\n"
+            "\tvery-faint=%s\n"
+            "\txy_bounds=%.3g px\n"
+            "\tundersampled=%s",
+            str(fit_shape_bright),
+            str(fit_shape_faint),
+            str(fit_shape_vfaint),
+            float(xy_bounds),
+            str(bool(undersampled)),
         )
         if is_target_fit:
             log.info(
-                "Target-fit shape scaling: bright/faint/very-faint=%.2f/%.2f/%.2f * FWHM "
-                "(fit_sampling_boost=%.2f, target_boost=%.2f, pixel_scale=%s arcsec/px).",
+                "Target-fit shape scaling:\n"
+                "\tbright/faint/very-faint=%.3g/%.3g/%.3g * FWHM\n"
+                "\tfit_sampling_boost=%.3g\n"
+                "\ttarget_boost=%.3g\n"
+                "\tpixel_scale=%s arcsec/px",
                 fs_bright_scale,
                 fs_faint_scale,
                 fs_vfaint_scale,
@@ -2474,6 +2571,112 @@ class PSF:
 
             if not iterative:
                 nd_for_fit = ndimage
+
+                # Optional: LPI-style structured background infill for the transient PSF fit.
+                # Target-only (single source) to keep runtime bounded.
+                if (
+                    is_target_fit
+                    and int(np.count_nonzero(mask)) == 1
+                    and bool((phot_cfg or {}).get("lpi_background_for_target", False))
+                ):
+                    try:
+                        if bool(self.input_yaml.get("_lpi_target_applied_to_image", False)):
+                            raise RuntimeError("LPI already applied in main pipeline; skipping PSF-side LPI to avoid double subtraction.")
+                        from lpi_background import predict_background_under_source
+
+                        sub_init_tmp_lpi = init_params[mask].to_pandas()
+                        _x0 = float(sub_init_tmp_lpi["x"].to_numpy()[0])
+                        _y0 = float(sub_init_tmp_lpi["y"].to_numpy()[0])
+
+                        fwhm_px = float(fwhm) if np.isfinite(fwhm) else 3.0
+                        inner_lpi = (
+                            float((phot_cfg or {}).get("lpi_inner_radius_scale_fwhm", 1.5))
+                            * fwhm_px
+                        )
+                        outer_lpi = (
+                            float((phot_cfg or {}).get("lpi_outer_radius_scale_fwhm", 4.5))
+                            * fwhm_px
+                        )
+                        half_lpi = int(
+                            np.ceil(
+                                float(
+                                    (phot_cfg or {}).get(
+                                        "lpi_stamp_half_size_scale_fwhm", 6.0
+                                    )
+                                )
+                                * fwhm_px
+                            )
+                        )
+
+                        # Work on copies so other tiers/fits see original NDData.
+                        work = np.array(ndimage.data, dtype=float, copy=True)
+                        unc_arr = None
+                        try:
+                            unc_arr = np.array(
+                                ndimage.uncertainty.array, dtype=float, copy=True
+                            )
+                        except Exception:
+                            unc_arr = None
+
+                        bg_pred, bg_sig = predict_background_under_source(
+                            work,
+                            x0=_x0,
+                            y0=_y0,
+                            inner_radius_px=inner_lpi,
+                            outer_radius_px=outer_lpi,
+                            stamp_half_size_px=half_lpi,
+                            n_samples=int((phot_cfg or {}).get("lpi_n_samples", 250)),
+                            sample_window_px=int(
+                                (phot_cfg or {}).get("lpi_sample_window_px", 30)
+                            ),
+                            min_shift_px=float(
+                                (phot_cfg or {}).get("lpi_min_shift_px", outer_lpi)
+                                if (phot_cfg or {}).get("lpi_min_shift_px", None) is not None
+                                else outer_lpi
+                            ),
+                            ridge_lambda=float(
+                                (phot_cfg or {}).get("lpi_ridge_lambda", 0.01)
+                            ),
+                            rng_seed=self.input_yaml.get("rng_seed", None),
+                        )
+
+                        # Apply in-bounds stamp update.
+                        y0i = int(np.rint(_y0))
+                        x0i = int(np.rint(_x0))
+                        y1 = max(0, y0i - half_lpi)
+                        y2 = min(work.shape[0], y0i + half_lpi + 1)
+                        x1 = max(0, x0i - half_lpi)
+                        x2 = min(work.shape[1], x0i + half_lpi + 1)
+                        sy1 = half_lpi - (y0i - y1)
+                        sx1 = half_lpi - (x0i - x1)
+                        sy2 = sy1 + (y2 - y1)
+                        sx2 = sx1 + (x2 - x1)
+
+                        work[y1:y2, x1:x2] = work[y1:y2, x1:x2] - bg_pred[
+                            sy1:sy2, sx1:sx2
+                        ]
+                        if unc_arr is not None:
+                            add_sig = np.asarray(bg_sig[sy1:sy2, sx1:sx2], float)
+                            unc_arr[y1:y2, x1:x2] = np.sqrt(
+                                unc_arr[y1:y2, x1:x2] ** 2 + add_sig**2
+                            )
+
+                        nd_for_fit = _nddata_clone(ndimage, data=work)
+                        if unc_arr is not None:
+                            nd_for_fit.uncertainty = StdDevUncertainty(unc_arr)
+
+                        log.info(
+                            "Target PSF: applied LPI background infill (inner=%.1f px, outer=%.1f px, samples=%d).",
+                            float(inner_lpi),
+                            float(outer_lpi),
+                            int((phot_cfg or {}).get("lpi_n_samples", 250)),
+                        )
+                    except Exception as exc:
+                        log_warning_from_exception(
+                            log,
+                            "Target PSF: LPI background infill failed; using standard local background",
+                            exc,
+                        )
                 if False:
                     # Work on a copy so other tiers/fits see the original image.
                     work = np.array(ndimage.data, dtype=float, copy=True)
@@ -3427,5 +3630,4 @@ class PSF:
             facecolor="white",
         )
         plt.close(fig)
-        log.info("Saved MCMC corner plot: %s", outpath_png)
         return outpath_png

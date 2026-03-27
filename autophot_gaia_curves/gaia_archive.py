@@ -419,7 +419,7 @@ def gaia_xp_sql_top_n(
     ms = max(1, int(max_sources))
     if gaia_xp_uses_python_distance_sort(order_by):
         factor = max(1, int(prefetch_factor))
-        # Smaller final N → cap multiplier so we do not over-fetch the archive
+        # Smaller final N -> cap multiplier so we do not over-fetch the archive
         # (e.g. 100 nearest does not need TOP 5000 by default).
         if ms <= 50:
             factor = min(factor, 12)

@@ -209,7 +209,7 @@ class Zeropoint:
         # Optional aperture correction (AP -> total flux) in magnitudes.
         # Only applied when apply_aperture_correction is True; otherwise stored for use later.
         ap_corr_mag = float(self.input_yaml.get("aperture_correction", 0.0) or 0.0)
-        apply_ap = bool(self.input_yaml.get("apply_aperture_correction", False))
+        apply_ap = bool((self.input_yaml.get("photometry") or {}).get("apply_aperture_correction", False))
         ap_scale = (
             10.0 ** (-0.4 * ap_corr_mag)
             if (apply_ap and np.isfinite(ap_corr_mag) and ap_corr_mag != 0.0)
@@ -369,7 +369,7 @@ class Zeropoint:
         # when apply_aperture_correction is True (otherwise stored for use later).
         if flux_type == "AP":
             ap_corr_mag = float(self.input_yaml.get("aperture_correction", 0.0) or 0.0)
-            apply_ap = bool(self.input_yaml.get("apply_aperture_correction", False))
+            apply_ap = bool((self.input_yaml.get("photometry") or {}).get("apply_aperture_correction", False))
             if apply_ap and np.isfinite(ap_corr_mag) and ap_corr_mag != 0.0:
                 ap_scale = 10.0 ** (-0.4 * ap_corr_mag)
                 flux = flux * ap_scale
@@ -1533,7 +1533,7 @@ class Zeropoint:
                 plt.style.use(_style)
             fig, ax = plt.subplots(figsize=set_size(340, 1))
 
-            # Okabe–Ito palette for consistent, colorblind-friendly plots.
+            # Okabe-Ito palette for consistent, colorblind-friendly plots.
             okabe_blue = "#0000FF"
             okabe_orange = "#FF0000"
 

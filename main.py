@@ -224,6 +224,7 @@ def run_photometry():
         SuppressStdout,
         beta_aperture,
         beta_psf,
+        flux_upper_limit,
         log_exception,
         log_warning_from_exception,
         odd,
@@ -266,13 +267,26 @@ def run_photometry():
 
     #  Load Input YAML File
     # Loads the YAML configuration file which contains parameters for the pipeline.
-    with open(input_yaml_loc, "r") as file:
-        input_yaml = yaml.safe_load(file)
+    try:
+        with open(input_yaml_loc, "r") as file:
+            input_yaml = yaml.safe_load(file)
+    except FileNotFoundError:
+        logging.getLogger(__name__).error(
+            "Input YAML file is missing: %s\n"
+            "It looks like this file was deleted mid-run. The pipeline must be re-run.",
+            str(input_yaml_loc),
+        )
+        raise SystemExit(2)
 
-    # Worker count for per-image parallelism (aperture sources, limits). Default is serial
-    # when nCPU is omitted from the top-level YAML.
-    _ncpu = input_yaml.get("nCPU") or input_yaml.get("nCpu") or input_yaml.get("ncpu")
-    n_jobs = max(1, int(_ncpu)) if _ncpu is not None else 1
+    # Worker counts for *within-image* parallelism.
+    #
+    # Note: `nCPU` controls image-level multiprocessing in driver/batch modes.
+    # These per-step worker counts control internal loops (sources, injection trials)
+    # for a single image.
+    ap_n_jobs = int((input_yaml.get("photometry") or {}).get("aperture_n_jobs", 1))
+    ap_n_jobs = max(1, ap_n_jobs)
+    lim_n_jobs = int((input_yaml.get("limiting_magnitude") or {}).get("n_jobs", 1))
+    lim_n_jobs = max(1, lim_n_jobs)
 
     #  Helper Function: Update Target Pixel Coordinates
     # Updates the target's pixel coordinates after any changes to the WCS.
@@ -385,9 +399,22 @@ def run_photometry():
             handler.close()
             logging.root.removeHandler(handler)  # Explicitly remove the handler
 
+        # Global verbosity control (0=warnings/errors, 1=info, 2=debug).
+        vlevel = input_yaml.get("global_verbose_level", 1)
+        try:
+            vlevel = int(vlevel)
+        except Exception:
+            vlevel = 1
+        if vlevel <= 0:
+            log_level = logging.WARNING
+        elif vlevel == 1:
+            log_level = logging.INFO
+        else:
+            log_level = logging.DEBUG
+
         # Sets up logging to file with improved configuration.
         logging.basicConfig(
-            level=logging.INFO,
+            level=log_level,
             format="%(asctime)s - %(levelname)s - %(message)s",
             datefmt="%H:%M:%S",
             filename=os.path.join(cur_dir, f"LOG_{input_yaml['base']}.log"),
@@ -401,7 +428,7 @@ def run_photometry():
 
         # Creates a console handler with improved settings.
         console = logging.StreamHandler()
-        console.setLevel(logging.INFO)
+        console.setLevel(log_level)
 
         # Creates a formatter with more detailed information.
         formatter = ColoredLevelFormatter(
@@ -416,7 +443,7 @@ def run_photometry():
         logging.getLogger("").addHandler(console)
 
         # Optionally sets the root logger level explicitly.
-        logging.getLogger("").setLevel(logging.INFO)
+        logging.getLogger("").setLevel(log_level)
 
         # Optionally adds exception handling.
         logging.raiseExceptions = (
@@ -752,7 +779,7 @@ def run_photometry():
             header.get(am_key, 1) if am_key and am_key != "not_given_by_user" else 1
         )
 
-        input_yaml["readnoise"] = readnoise
+        input_yaml["read_noise"] = readnoise
         header["RDNOISE"] = readnoise
 
         #  Handle Exposure Time
@@ -1024,20 +1051,55 @@ def run_photometry():
             input_yaml["target_dec"] = target_coords.dec.degree
         else:
             try:
-                if input_yaml.get("use_header_radec", False):
-                    # TODO: Address this in a future version
-                    raise Exception("Not available in current version")
-                    target_coords = SkyCoord(
-                        header["CAT-RA"],
-                        header["CAT-DEC"],
-                        unit=(u.hourangle, u.deg),
-                        frame="fk5",
-                        equinox="J2000",
-                    )
-                    input_yaml["target_ra"] = target_coords.ra.degree
-                    input_yaml["target_dec"] = target_coords.dec.degree
-            except Exception:
-                logging.info("No RA/DEC keywords found.")
+                use_hdr = input_yaml.get("use_header_radec", False)
+                if use_hdr:
+                    # Allow True (use default keys) or an explicit (RA_KEY, DEC_KEY) mapping.
+                    ra_key, dec_key = "CAT-RA", "CAT-DEC"
+                    if isinstance(use_hdr, (list, tuple)) and len(use_hdr) >= 2:
+                        ra_key, dec_key = str(use_hdr[0]).strip(), str(use_hdr[1]).strip()
+                    elif isinstance(use_hdr, str) and "," in use_hdr:
+                        parts = [p.strip() for p in use_hdr.split(",") if p.strip()]
+                        if len(parts) >= 2:
+                            ra_key, dec_key = parts[0], parts[1]
+
+                    if ra_key in header and dec_key in header:
+                        ra_val = header[ra_key]
+                        dec_val = header[dec_key]
+
+                        # Heuristic units:
+                        # - sexagesimal RA strings -> hourangle
+                        # - numeric values -> degrees
+                        ra_is_str = isinstance(ra_val, str)
+                        dec_is_str = isinstance(dec_val, str)
+                        ra_unit = u.hourangle if (ra_is_str and ":" in ra_val) else u.deg
+                        dec_unit = u.deg
+
+                        target_coords = SkyCoord(
+                            ra_val,
+                            dec_val,
+                            unit=(ra_unit, dec_unit),
+                            frame="fk5",
+                            equinox="J2000",
+                        )
+                        input_yaml["target_ra"] = float(target_coords.ra.degree)
+                        input_yaml["target_dec"] = float(target_coords.dec.degree)
+                        logging.info(
+                            "Using target RA/Dec from header keys %s/%s: RA=%.6f deg, Dec=%.6f deg",
+                            ra_key,
+                            dec_key,
+                            float(target_coords.ra.degree),
+                            float(target_coords.dec.degree),
+                        )
+                    else:
+                        logging.info(
+                            "use_header_radec enabled but header keys not found: RA_KEY=%s present=%s, DEC_KEY=%s present=%s",
+                            ra_key,
+                            ra_key in header,
+                            dec_key,
+                            dec_key in header,
+                        )
+            except Exception as e:
+                logging.info("No RA/DEC keywords found (%s).", e)
 
         #  Set Target Name
         # Sets the target name based on available information.
@@ -1211,9 +1273,10 @@ def run_photometry():
         result = bg_remover.remove(image, plot=False, fwhm=ImageFWHM)
 
         # Accesses the results.
-        background_surface = result["background"]
-        background_rms = result["background_rms"]
-        defects_mask = result["defects_mask"]
+        # Keep large background products in float32/bool to reduce memory footprint.
+        background_surface = np.asarray(result["background"], dtype=np.float32)
+        background_rms = np.asarray(result["background_rms"], dtype=np.float32)
+        defects_mask = np.asarray(result["defects_mask"], dtype=bool)
 
         logging.info(f"Preliminary FWHM: {ImageFWHM:.1f} pixels")
 
@@ -1235,7 +1298,7 @@ def run_photometry():
         # Set WCS profile to "crowded" from initial FWHM/background when crowded_auto is True.
         # Uses source count and density from the same run that produced ImageFWHM/FWHMSources.
         wcs_cfg = input_yaml.get("wcs") or {}
-        if wcs_cfg.get("crowded_auto", False):
+        if wcs_cfg.get("crowded_auto", True):
             profile = str(wcs_cfg.get("profile", "default")).strip().lower()
             if profile in ("auto", "default"):
                 n_src = 0
@@ -1283,7 +1346,7 @@ def run_photometry():
         # =============================================================================
         # Removes cosmic rays from the image if enabled. Skipped if header has
         # CRAY_RMD or CRSTATUS indicating prior cleaning (see default_input.yml).
-        cosmic_rays_mask = np.zeros(image.shape)
+        cosmic_rays_mask = np.zeros(image.shape, dtype=bool)
         _cr_status = header.get("CRSTATUS")
         _cr_status = (
             _cr_status[0] if isinstance(_cr_status, tuple) else _cr_status
@@ -1550,11 +1613,12 @@ def run_photometry():
             mask_simbad_galaxies=True,
         )
 
-        background_surface = result["background"]
-        background_rms = result["background_rms"]
-        defects_mask = result["defects_mask"]
+        background_surface = np.asarray(result["background"], dtype=np.float32)
+        background_rms = np.asarray(result["background_rms"], dtype=np.float32)
+        defects_mask = np.asarray(result["defects_mask"], dtype=bool)
 
         # Subtracts the background surface from the image.
+        # Background subtraction in-place; free the surface immediately after use.
         image -= background_surface
 
         # Update saturation to match background-subtracted image units so
@@ -1571,6 +1635,7 @@ def run_photometry():
         base, ext = os.path.splitext(fpath)
         weight_fpath = f"{base}.weight{ext}"
         fits.writeto(weight_fpath, background_rms, header, overwrite=True)
+        del background_surface
         # Keep using in-memory image, header (no reload needed)
 
         # =============================================================================
@@ -1631,7 +1696,7 @@ def run_photometry():
                     and (0 <= target_y_pix < image.shape[0])
                 ):
                     logging.warning(
-                        "Target outside image bounds (0,0)–(%d,%d)",
+                        "Target outside image bounds (0,0)-(%d,%d)",
                         image.shape[1],
                         image.shape[0],
                     )
@@ -1871,9 +1936,9 @@ def run_photometry():
             mask_simbad_galaxies=True,
         )
 
-        background_surface = result["background"]
-        background_rms = result["background_rms"]
-        defects_mask = result["defects_mask"]
+        background_surface = np.asarray(result["background"], dtype=np.float32)
+        background_rms = np.asarray(result["background_rms"], dtype=np.float32)
+        defects_mask = np.asarray(result["defects_mask"], dtype=bool)
 
         # Save the background_rms array with '.weight' inserted before the suffix
         base, ext = os.path.splitext(fpath)
@@ -2106,21 +2171,24 @@ def run_photometry():
             DISTANCE_THRESHOLD_FACTOR = 2
             distance_threshold = DISTANCE_THRESHOLD_FACTOR * ImageFWHM
 
-            # Build a KDTree for masked pixels for efficient nearest-neighbor search
-            masked_pixels = np.argwhere(cosmic_rays_mask)
-
-            if len(masked_pixels) == 0:
+            # Avoid building a huge list of masked-pixel coordinates (np.argwhere can
+            # dominate memory/time on large masks). Use a distance transform instead.
+            if not np.any(cosmic_rays_mask):
                 logging.info("No cosmic ray pixels found. Skipping source exclusion.")
                 excluded_sources = FWHMSources.iloc[
                     []
                 ]  # Empty DataFrame with same columns
             else:
-                tree = cKDTree(masked_pixels)
-                source_coords = FWHMSources[["x_pix", "y_pix"]].values
-                # Query the tree for the minimum distance to any masked pixel for each source
-                min_distances, _ = tree.query(
-                    source_coords, k=1, distance_upper_bound=distance_threshold
-                )
+                from scipy.ndimage import distance_transform_edt
+
+                # distance to nearest masked pixel for every pixel (float64, but avoids
+                # allocating an (N_mask, 2) coordinate array which can be much larger).
+                distmap = distance_transform_edt(~cosmic_rays_mask)
+                xy = FWHMSources[["x_pix", "y_pix"]].to_numpy(dtype=float)
+                xi = np.clip(np.rint(xy[:, 0]).astype(int), 0, distmap.shape[1] - 1)
+                yi = np.clip(np.rint(xy[:, 1]).astype(int), 0, distmap.shape[0] - 1)
+                min_distances = distmap[yi, xi]
+                del distmap
 
                 # Filter sources
                 excluded_sources = FWHMSources[min_distances <= distance_threshold]
@@ -2222,7 +2290,7 @@ def run_photometry():
             plot=False,
             ap_size=1.7 * input_yaml["fwhm"],
             background_rms=background_rms,
-            n_jobs=n_jobs,
+            n_jobs=ap_n_jobs,
         )
 
         IsolatedSources, fit_params, saturation_range = Find_FWHM(
@@ -2279,7 +2347,7 @@ def run_photometry():
                         sources=IsolatedSources,
                         plot=True,
                         background_rms=background_rms,
-                        n_jobs=n_jobs,
+                        n_jobs=input_yaml.get('n_jobs',1),
                         crowded=crowded_field,
                     )
                 )
@@ -2349,7 +2417,11 @@ def run_photometry():
                     fwhm=ImageFWHM,
                     ap_size=aperture_radius,
                     background_rms=background_rms,
-                    plot=input_yaml.get("zeropoint", {}).get("zp_plot", False),
+                    plot=bool(
+                        (input_yaml.get("photometry") or {}).get(
+                            "plot_aperture_correction", False
+                        )
+                    ),
                 )
                 if np.isfinite(ap_corr):
                     input_yaml["aperture_correction"] = float(ap_corr)
@@ -2464,14 +2536,22 @@ def run_photometry():
                     galaxies=variable_sources,
                     mask_simbad_galaxies=True,
                 )
-                # Use sources that passed linearity and optimum-aperture checks on the current image.
+                # Map the PSF source pool from current image pixels -> sky -> original image pixels.
+                # Do not mix IsolatedSources and psf_source_pool here because they can differ
+                # in length after optimum-radius filtering.
                 wcs_orig = get_wcs(header_orig)
-                x_orig, y_orig = wcs_orig.all_world2pix(
-                    IsolatedSources["RA"].values,
-                    IsolatedSources["DEC"].values,
+                psf_sources_orig = psf_source_pool.copy()
+                finite_xy = (
+                    np.isfinite(psf_sources_orig["x_pix"].to_numpy(dtype=float))
+                    & np.isfinite(psf_sources_orig["y_pix"].to_numpy(dtype=float))
+                )
+                psf_sources_orig = psf_sources_orig.loc[finite_xy].copy()
+                ra_pool, dec_pool = imageWCS.all_pix2world(
+                    psf_sources_orig["x_pix"].to_numpy(dtype=float),
+                    psf_sources_orig["y_pix"].to_numpy(dtype=float),
                     index,
                 )
-                psf_sources_orig = psf_source_pool.copy()
+                x_orig, y_orig = wcs_orig.all_world2pix(ra_pool, dec_pool, index)
                 psf_sources_orig["x_pix"] = x_orig
                 psf_sources_orig["y_pix"] = y_orig
                 h_orig, w_orig = image_orig.shape
@@ -2585,17 +2665,17 @@ def run_photometry():
         CatalogSources = GetZeropoint.clean(sources=CatalogSources)
 
         # When using a Gaia custom catalog built from user transmission curves
-        # (catalog.curve_map / custom throughputs), the catalog photometric system
+        # (catalog.transmission_curve_map / custom throughputs), the catalog photometric system
         # already incorporates the effective bandpasses. In that case, a
         # separate empirical color-term correction is usually unnecessary and
         # can even add extra noise when the color coverage is limited.
         use_custom_throughputs = False
         try:
             cat_cfg = input_yaml.get("catalog") or {}
-            curve_map_cfg = cat_cfg.get("transition_curve_map", cat_cfg.get("curve_map"))
+            curve_map_cfg = cat_cfg.get("transmission_curve_map")
             resolved_use_catalog = str(
                 Calibrate_Catalog._resolve_catalog_for_filter(
-                    cat_cfg.get("use_catalog", "")
+                    cat_cfg.get("use_catalog", None)
                 )
                 or ""
             ).strip().lower()
@@ -2607,7 +2687,7 @@ def run_photometry():
 
         if use_custom_throughputs:
             logging.info(
-                "Using Gaia custom catalog via catalog.transition_curve_map (custom throughputs); "
+                "Using Gaia custom catalog via catalog.transmission_curve_map (custom throughputs); "
                 "disabling zeropoint color correction."
             )
             ImageColorTerm, ImageColorTermError = None, None
@@ -2709,8 +2789,9 @@ def run_photometry():
                     get_header(weight_fpath),
                     overwrite=True,
                 )
-                logging.info(
-                    f"Saved weight map: {os.path.join(cur_dir, newWeightBasename)}"
+                logging.getLogger(__name__).debug(
+                    "Weight map written: %s",
+                    os.path.join(cur_dir, newWeightBasename),
                 )
 
             # Saves the cleaned catalog and PSF sources to CSV files.
@@ -3126,7 +3207,7 @@ def run_photometry():
                     exposure_time=template_header.get("exposure_time"),
                     ap_size=templatelarge_aperture,
                     gain=template_header.get("GAIN"),
-                    n_jobs=n_jobs,
+                    n_jobs=ap_n_jobs,
                 )
 
                 #  NEW: Centroid Check for Each Source
@@ -3597,7 +3678,7 @@ def run_photometry():
         # `remove_local_surface()` does not hard-fail when the plate solution
         # maps the expected transient position outside the trimmed frame.
         # Keep `target_x_pix/y_pix` unchanged for the actual transient centroid
-        # fitting (so we do not silently “move” the transient).
+        # fitting (so we do not silently "move" the transient).
         ny, nx = image.shape[0], image.shape[1]
         bg_target_x_pix = float(target_x_pix)
         bg_target_y_pix = float(target_y_pix)
@@ -3625,6 +3706,162 @@ def run_photometry():
         input_yaml["target_x_pix"] = target_x_pix
         input_yaml["target_y_pix"] = target_y_pix
 
+        # For subtraction diagnostics: keep a copy of the pre-local-background
+        # image so the difference panel reflects the raw subtraction output.
+        # Local background subtraction is a photometry aid and can visually
+        # suppress real residual structure in the difference image.
+        diff_image_for_plot = image if not PreformSubtraction else np.array(image, copy=True)
+
+        # Optional: LPI-style local background infill under the transient only
+        # (structured backgrounds). This is a small-stamp, target-only correction
+        # inspired by Saydjari & Finkbeiner 2022 (ApJ 933:155).
+        phot_cfg = input_yaml.get("photometry") or {}
+        lpi_extra_flux_err = np.nan
+        if bool(phot_cfg.get("lpi_background_for_target", False)):
+            try:
+                from lpi_background import (
+                    predict_background_under_source,
+                    save_lpi_diagnostic_plot,
+                )
+
+                fwhm_px = float(ImageFWHM)
+                inner_r = float(phot_cfg.get("lpi_inner_radius_scale_fwhm", 1.5)) * fwhm_px
+                outer_r = float(phot_cfg.get("lpi_outer_radius_scale_fwhm", 4.5)) * fwhm_px
+                half = int(
+                    np.ceil(float(phot_cfg.get("lpi_stamp_half_size_scale_fwhm", 6.0)) * fwhm_px)
+                )
+                raw_min_shift = phot_cfg.get("lpi_min_shift_px", None)
+                min_shift_px = float(raw_min_shift) if raw_min_shift is not None else float(outer_r)
+                # Snapshot the local stamp before applying LPI (for safety checks).
+                stamp_before = np.array(
+                    image[
+                        max(0, int(np.rint(bg_target_y_pix)) - half) : min(
+                            image.shape[0], int(np.rint(bg_target_y_pix)) + half + 1
+                        ),
+                        max(0, int(np.rint(bg_target_x_pix)) - half) : min(
+                            image.shape[1], int(np.rint(bg_target_x_pix)) + half + 1
+                        ),
+                    ],
+                    dtype=float,
+                    copy=True,
+                )
+                bg_pred, bg_sig = predict_background_under_source(
+                    image,
+                    x0=float(bg_target_x_pix),
+                    y0=float(bg_target_y_pix),
+                    inner_radius_px=inner_r,
+                    outer_radius_px=outer_r,
+                    stamp_half_size_px=half,
+                    n_samples=int(phot_cfg.get("lpi_n_samples", 250)),
+                    sample_window_px=int(phot_cfg.get("lpi_sample_window_px", 30)),
+                    min_shift_px=min_shift_px,
+                    ridge_lambda=float(phot_cfg.get("lpi_ridge_lambda", 0.01)),
+                    rng_seed=input_yaml.get("rng_seed", None),
+                )
+                # Apply only inside the hidden region (bg_pred is 0 elsewhere).
+                y0i = int(np.rint(float(bg_target_y_pix)))
+                x0i = int(np.rint(float(bg_target_x_pix)))
+                y1 = max(0, y0i - half)
+                y2 = min(image.shape[0], y0i + half + 1)
+                x1 = max(0, x0i - half)
+                x2 = min(image.shape[1], x0i + half + 1)
+                sy1 = half - (y0i - y1)
+                sx1 = half - (x0i - x1)
+                sy2 = sy1 + (y2 - y1)
+                sx2 = sx1 + (x2 - x1)
+                image[y1:y2, x1:x2] = image[y1:y2, x1:x2] - bg_pred[sy1:sy2, sx1:sx2]
+
+                # Safety: if the LPI correction would remove essentially all signal in the PSF core,
+                # skip it (this indicates the regression learned the source, not the background).
+                stamp_after = np.array(image[y1:y2, x1:x2], dtype=float, copy=False)
+                yy0, xx0 = np.mgrid[0 : bg_pred.shape[0], 0 : bg_pred.shape[1]]
+                rr0 = np.hypot(xx0 - half, yy0 - half)
+                core = rr0 <= float(inner_r)
+                core_before = float(np.nansum(stamp_before[core[sy1:sy2, sx1:sx2]]))
+                core_after = float(np.nansum(stamp_after[core[sy1:sy2, sx1:sx2]]))
+                if np.isfinite(core_before) and np.isfinite(core_after):
+                    # If the pre-LPI core sum is <= 0 (possible in noisy/oversubtracted
+                    # difference images), the ratio test is not meaningful. In that case,
+                    # conservatively skip LPI and keep the original image.
+                    if core_before <= 0:
+                        image[y1:y2, x1:x2] = image[y1:y2, x1:x2] + bg_pred[sy1:sy2, sx1:sx2]
+                        raise RuntimeError(
+                            "LPI core-flux safety triggered (core_before<=0; ratio undefined); "
+                            "skipping LPI to preserve transient flux."
+                        )
+                    frac = core_after / core_before
+                    if frac < 0.2:
+                        # Revert subtraction in the stamp region.
+                        image[y1:y2, x1:x2] = image[y1:y2, x1:x2] + bg_pred[sy1:sy2, sx1:sx2]
+                        raise RuntimeError(
+                            f"LPI core-flux safety triggered (core_after/core_before={frac:.3f}); "
+                            "skipping LPI to preserve transient flux."
+                        )
+
+                # Mark that LPI has already been applied to the target region in this image.
+                # This prevents double-application in PSF.fit (which would suppress real flux).
+                input_yaml["_lpi_target_applied_to_image"] = True
+
+                # Optional diagnostic plot (no "saved plot" log line).
+                try:
+                    if bool(phot_cfg.get("lpi_save_diagnostic_plot", True)):
+                        base0 = os.path.splitext(os.path.basename(fpath))[0]
+                        write_dir0 = os.path.dirname(fpath)
+                        save_png = os.path.join(write_dir0, f"LPI_Target_{base0}.png")
+                        save_lpi_diagnostic_plot(
+                            image=diff_image_for_plot if PreformSubtraction else image,
+                            x0=float(bg_target_x_pix),
+                            y0=float(bg_target_y_pix),
+                            stamp_half_size_px=int(half),
+                            inner_radius_px=float(inner_r),
+                            outer_radius_px=float(outer_r),
+                            bg_pred=np.asarray(bg_pred, float),
+                            bg_sig=np.asarray(bg_sig, float),
+                            save_path=str(save_png),
+                            title=f"LPI target background infill: {base0}",
+                        )
+                except Exception:
+                    pass
+
+                # Convert per-pixel predicted background scatter (in image units)
+                # into an additional flux uncertainty term inside the transient
+                # aperture. This is a conservative proxy for correlated-background
+                # uncertainty (Saydjari & Finkbeiner 2022).
+                try:
+                    phot_ap_rad = (input_yaml.get("photometry") or {}).get(
+                        "aperture_radius", None
+                    )
+                    if phot_ap_rad is None:
+                        phot_ap_rad = float(
+                            (input_yaml.get("photometry") or {}).get("aperture_size", 1.7)
+                        ) * float(input_yaml.get("fwhm", ImageFWHM))
+                    ap_rad = float(phot_ap_rad)
+                    yy, xx = np.mgrid[0 : bg_sig.shape[0], 0 : bg_sig.shape[1]]
+                    rr = np.hypot(xx - half, yy - half)
+                    ap_mask = rr <= ap_rad
+                    sig_ap = np.asarray(bg_sig, float)[ap_mask]
+                    sig_ap = sig_ap[np.isfinite(sig_ap)]
+                    if sig_ap.size > 0:
+                        extra_counts_err = float(np.sqrt(np.sum(sig_ap**2)))
+                        exptime = float(input_yaml.get("exposure_time", 1.0))
+                        if np.isfinite(exptime) and exptime > 0:
+                            lpi_extra_flux_err = extra_counts_err / exptime
+                except Exception:
+                    lpi_extra_flux_err = np.nan
+
+                logging.info(
+                    "Target LPI background infill applied (inner=%.1f px, outer=%.1f px, samples=%d).",
+                    float(inner_r),
+                    float(outer_r),
+                    int(phot_cfg.get("lpi_n_samples", 250)),
+                )
+            except Exception as e:
+                log_warning_from_exception(
+                    logging.getLogger(__name__),
+                    "Target LPI background infill failed; continuing without it",
+                    e,
+                )
+
         if input_yaml["photometry"].get("remove_local_surface", 3):
             bg_remover = BackgroundSubtractor(input_yaml)
             # Use a slightly larger exclusion radius around the target so that
@@ -3649,7 +3886,8 @@ def run_photometry():
         # Logs the start of targeted photometry.
         logging.info(border_msg(f"Targeted photometry on {input_yaml['target_name']}"))
 
-        # Sets the detection limit.
+        # Sets the detection limit used for target detection decisions elsewhere
+        # (this is distinct from limiting-magnitude recovery gating below).
         detection_limit = input_yaml["photometry"].get("detection_limit", 3)
 
         # Prepares initial target coordinates.
@@ -3678,8 +3916,22 @@ def run_photometry():
             plot=True,
             saveTarget=True,
             background_rms=background_rms,
-            n_jobs=n_jobs,
+            n_jobs=input_yaml.get('n_jobs',1),
         )
+        if np.isfinite(lpi_extra_flux_err) and "flux_AP_err" in TargetPosition.columns:
+            try:
+                old = float(TargetPosition["flux_AP_err"].iloc[0])
+                TargetPosition.loc[TargetPosition.index[0], "flux_AP_err"] = float(
+                    np.sqrt(old**2 + float(lpi_extra_flux_err) ** 2)
+                )
+                # Keep SNR consistent with updated uncertainty if possible.
+                if "flux_AP" in TargetPosition.columns and "SNR" in TargetPosition.columns:
+                    f = float(TargetPosition["flux_AP"].iloc[0])
+                    ferr = float(TargetPosition["flux_AP_err"].iloc[0])
+                    if np.isfinite(f) and np.isfinite(ferr) and ferr > 0:
+                        TargetPosition.loc[TargetPosition.index[0], "SNR"] = f / ferr
+            except Exception:
+                pass
         prelim_threshold = TargetPosition["threshold"].iloc[0]
         perform_ForcePhotometry = False
 
@@ -3799,20 +4051,32 @@ def run_photometry():
                 input_yaml["target_dec"],
                 index,
             )
+            # Ensure the header contains the aperture radius (pixels) used for plots.
+            # Some instruments do not provide APER; derive it from the config.
+            try:
+                phot_cfg = input_yaml.get("photometry") or {}
+                aper_rad_pix = phot_cfg.get("aperture_radius", None)
+                if aper_rad_pix is None:
+                    aper_size_fwhm = float(phot_cfg.get("aperture_size", 1.7))
+                    aper_rad_pix = aper_size_fwhm * float(input_yaml.get("fwhm", ImageFWHM))
+                aper_rad_pix = float(aper_rad_pix)
+                header["APER"] = aper_rad_pix
+            except Exception:
+                aper_rad_pix = float(1.7) * float(input_yaml.get("fwhm", ImageFWHM))
             # Creates an instance of the plot class.
             makePlots = Plot(input_yaml=input_yaml)
             # Plots the template subtraction check.
             makePlots.subtraction_check(
                 image=get_image(fpath_nosub),
                 ref=get_image(templateFpath),
-                diff=image,
+                diff=diff_image_for_plot,
                 expected_location=[target_x_pix_expected, target_y_pix_expected],
                 fitted_location=[
                     TargetPosition["x_fit"].iloc[0],
                     TargetPosition["y_fit"].iloc[0],
                 ],
                 inset_size=scale,
-                aperture_size=header["aper"],
+                aperture_size=float(header.get("APER", aper_rad_pix)),
                 mask=subtraction_mask,
                 matching_sources=MatchingSources,
                 masked_sources=variable_sources,
@@ -3826,6 +4090,9 @@ def run_photometry():
         ):
             target_fwhm = float(TargetPosition["fwhm_psf"].iloc[0])
         else:
+            # Maximum allowed offset (pixels) for the target Gaussian centroid.
+            # `Find_FWHM.fit_gaussian` caps dx/dy to 3 px internally for stability.
+            max_radius_pix = 3.0
             gaussian_fits = Find_FWHM(input_yaml=input_yaml).fit_gaussian(
                 image,
                 x=TargetPosition["x_fit"].iloc[0],
@@ -4017,7 +4284,11 @@ def run_photometry():
                 ap_corr_err = float(
                     input_yaml.get("aperture_correction_err", 0.0) or 0.0
                 )
-                apply_ap_corr = bool(input_yaml.get("apply_aperture_correction", False))
+                apply_ap_corr = bool(
+                    (input_yaml.get("photometry") or {}).get(
+                        "apply_aperture_correction", False
+                    )
+                )
                 if method == "AP" and apply_ap_corr and np.isfinite(ap_corr):
                     cal_mag = (
                         TargetPosition.at[idx, inst_col]
@@ -4078,8 +4349,7 @@ def run_photometry():
         # =============================================================================
         #          Detection Limits
         # =============================================================================
-        # Calculates the probable and injected detection limits if the target has low SNR.
-        ProbableLimit = np.nan
+        # Calculates the injected detection limit if the target has low SNR.
         InjectedLimit = np.nan
         if (
             TargetPosition.at[idx, "threshold"] < 5
@@ -4104,32 +4374,73 @@ def run_photometry():
                         logging.warning(
                             "getCutout returned None; skipping detection limits."
                         )
-                        ProbableLimit = np.nan
                         InjectedLimit = np.nan
                     else:
-                        # Calculates the probable detection limit.
-                        ProbableLimit = getDetectionLimits.get_probable_limit(
-                            expandedCutout,
-                            bkg_level=3,
-                            detection_limit=detection_limit,
-                            useBeta=True,
-                            beta=0.5,
-                            plot=True,
-                            n_jobs=n_jobs,
+                        lim_cfg = input_yaml.get("limiting_magnitude") or {}
+                        beta_limit = float(lim_cfg.get("beta_limit", 0.5))
+                        raw_initial_guess = lim_cfg.get("initial_guess", np.nan)
+                        try:
+                            initial_guess = (
+                                np.nan
+                                if raw_initial_guess is None
+                                else float(raw_initial_guess)
+                            )
+                        except Exception:
+                            initial_guess = np.nan
+                        try:
+                            beta_sigma = float(
+                                flux_upper_limit(
+                                    n=3.0, sigma=1.0, beta_p=float(beta_limit)
+                                )
+                            )
+                            beta_sigma_str = f"{beta_sigma:.2f}"
+                        except Exception:
+                            beta_sigma_str = "unknown"
+                        logging.info(
+                            "Limiting magnitude config:\n"
+                            "\tbeta_limit=%g (~%s sigma; n=3 beta formalism)\n"
+                            "\tdetection_limit=%r\n"
+                            "\tcompleteness_target=%.2f\n"
+                            "\trecovery_method=%s",
+                            float(beta_limit),
+                            beta_sigma_str,
+                            lim_cfg.get("detection_limit", None),
+                            float(lim_cfg.get("completeness_target", 0.5)),
+                            str(lim_cfg.get("recovery_method", "PSF")),
                         )
+                        detection_snr_limit = lim_cfg.get("detection_limit", None)
                         # Calculates the injected detection limit.
                         if epsf_model:
-                            if "AP" in image_zeropoint:
-                                zeropoint = image_zeropoint["AP"]["zeropoint"]
+                            # Use a zeropoint consistent with the recovery/photometry method.
+                            # - AP recovery -> AP zeropoint (if available)
+                            # - PSF/EMCEE recovery -> PSF zeropoint preferred, else fall back to AP
+                            rec_method = str(lim_cfg.get("recovery_method", "PSF")).strip().upper()
+                            if rec_method in {"MCMC", "EMCEE"}:
+                                rec_method = "EMCEE"
+                            if rec_method in {"PSF", "EMCEE"}:
+                                if "PSF" in image_zeropoint:
+                                    zeropoint = image_zeropoint["PSF"]["zeropoint"]
+                                elif "AP" in image_zeropoint:
+                                    zeropoint = image_zeropoint["AP"]["zeropoint"]
+                                else:
+                                    zeropoint = None
                             else:
-                                zeropoint = None
+                                if "AP" in image_zeropoint:
+                                    zeropoint = image_zeropoint["AP"]["zeropoint"]
+                                elif "PSF" in image_zeropoint:
+                                    zeropoint = image_zeropoint["PSF"]["zeropoint"]
+                                else:
+                                    zeropoint = None
                             logging.info(
-                                f"Performing artificial source injection with threshold [{detection_limit}] limit"
+                                "Performing artificial source injection (beta_limit=%.3f, snr_gate=%s)",
+                                float(beta_limit),
+                                "off" if detection_snr_limit is None else str(detection_snr_limit),
                             )
                             InjectedLimit = getDetectionLimits.get_injected_limit(
                                 image,
-                                initialGuess=ProbableLimit - 1,
-                                detection_limit=detection_limit,
+                                initialGuess=initial_guess,
+                                detection_limit=detection_snr_limit,
+                                detection_cutoff=beta_limit,
                                 position=(
                                     TargetPosition["x_fit"].iloc[0],
                                     TargetPosition["y_fit"].iloc[0],
@@ -4138,7 +4449,7 @@ def run_photometry():
                                 background_rms=background_rms,
                                 zeropoint=zeropoint,
                                 plot=True,
-                                n_jobs=n_jobs,
+                                n_jobs=lim_n_jobs,
                             )
                             # The injected limiting magnitude search uses
                             # aperture-based recovery (beta_aperture), so for
@@ -4166,16 +4477,8 @@ def run_photometry():
                             TargetPosition["flux_PSF"] = [np.nan]
                             TargetPosition["flux_PSF_err"] = [np.nan]
                             InjectedLimit = np.nan
-                        # Logs the injected detection limit for each method.
-                        for method in ["AP", "PSF"]:
-                            if method not in image_zeropoint:
-                                continue
-                            logging.info(
-                                f"\tInjected detection limit ({method}): {InjectedLimit + image_zeropoint[method]['zeropoint']:.3f}"
-                            )
                 except Exception as e:
                     log_exception(e)
-                    ProbableLimit = np.nan
                     InjectedLimit = np.nan
 
         # =============================================================================
@@ -4233,7 +4536,12 @@ def run_photometry():
             ),
             "separation": separation if "separation" in locals() else np.nan,
             "beta": target_beta,
-            "lmag": InjectedLimit,
+            # Limiting magnitude in the instrumental-magnitude system.
+            # Downstream lightcurve code converts to apparent magnitude by adding
+            # the selected band/method zeropoint (single zeropoint application).
+            "lmag": (
+                float(InjectedLimit) if np.isfinite(InjectedLimit) else np.nan
+            ),
             "PreformSubtractioned": (
                 PreformSubtraction if "PreformSubtraction" in locals() else False
             ),

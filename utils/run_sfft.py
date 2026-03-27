@@ -381,7 +381,7 @@ def run_sfft() -> Optional[int]:
         Accepted formats:
           - "[[x1, y1], [x2, y2]]"
           - "[x1, y1]" (single pair)
-          - "[x1, y1, x2, y2]" (flat list, reshaped to N×2)
+          - "[x1, y1, x2, y2]" (flat list, reshaped to Nx2)
         """
         s = (s or "").strip()
         if s in ("", "[]", "None"):

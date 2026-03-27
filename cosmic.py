@@ -157,8 +157,8 @@ class RemoveCosmicRays:
     ):
         """
         Plot a side-by-side comparison of the original and cleaned images.
-        Cosmic ray regions are marked in Okabe–Ito blue (original) and
-        Okabe–Ito orange (cleaned).
+        Cosmic ray regions are marked in Okabe-Ito blue (original) and
+        Okabe-Ito orange (cleaned).
 
         Args:
             original: Original image (before cosmic ray removal).

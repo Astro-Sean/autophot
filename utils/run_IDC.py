@@ -2,12 +2,12 @@
 Drop-in module: ImageDistortionCorrector
 Purpose:
   - Build robust SExtractor catalogs (optional PSFEx)
-  - Cross-match science/reference sources into 1↔1 tables, using extended sources as alignment anchors
+  - Cross-match science/reference sources into 1<->1 tables, using extended sources as alignment anchors
   - Align via SCAMP+SWarp, or Reproject (WCS), then AstroAlign on failure
   - Refine WCS with SCAMP (.head handling fixed)
   - Optimize convolution kernel if FWHM is available in the header
 Key guarantees:
-  - After filter_matched_sources(): same length catalogs, row i in science ↔ row i in reference, shared MATCH_ID
+  - After filter_matched_sources(): same length catalogs, row i in science <-> row i in reference, shared MATCH_ID
 External tools required on PATH:
   - sex, psfex (optional), scamp, swarp
 """
@@ -666,7 +666,7 @@ NNW
                 # Use str(card) to get the full card as a string
                 f.write(f"{str(card)}\n")
 
-        self.logger.info(f"Science header saved as .ahead file: {ahead_path}")
+        self.logger.debug("Science header written as .ahead file: %s", ahead_path)
 
         return ahead_path
 
@@ -1054,7 +1054,7 @@ NNW
                 # Overwrite original science and reference images with aligned versions
                 try:
                     shutil.copyfile(aligned_ref, reference_image)
-                    self.logger.info(
+                    self.logger.debug(
                         "Overwrote reference image with aligned version: %s",
                         reference_image,
                     )
@@ -1064,7 +1064,7 @@ NNW
                     )
                 try:
                     shutil.copyfile(aligned_sci, science_image)
-                    self.logger.info(
+                    self.logger.debug(
                         "Overwrote science image with aligned version: %s",
                         science_image,
                     )
@@ -1177,7 +1177,7 @@ NNW
                         ref_image_copy, resampled_dir / "reference_image.resamp.fits"
                     )
                 else:
-                    self.logger.info("Running SWarp on both images simultaneously...")
+                    self.logger.debug("Running SWarp on both images simultaneously...")
                     swarp_res = self.run_swarp(
                         [str(sci_image_copy), str(ref_image_copy)],
                         scamp_results=scamp_ref,
@@ -1191,7 +1191,7 @@ NNW
                         )
                     resampled_dir = Path(swarp_res["resampled_dir"])
 
-                self.logger.info(f"Looking for resampled images in {resampled_dir}")
+                self.logger.debug("Looking for resampled images in %s", resampled_dir)
                 aligned_sci = next(
                     resampled_dir.glob("science_image.resamp.fits"), None
                 )
@@ -1211,7 +1211,7 @@ NNW
                 aligned_reference_fpath = reference_image
                 try:
                     shutil.copyfile(aligned_ref, aligned_reference_fpath)
-                    self.logger.info(
+                    self.logger.debug(
                         "Overwrote reference image with aligned version: %s",
                         aligned_reference_fpath,
                     )
@@ -1223,7 +1223,7 @@ NNW
                     )
                 try:
                     shutil.copyfile(aligned_sci, aligned_science_fpath)
-                    self.logger.info(
+                    self.logger.debug(
                         "Overwrote science image with aligned version: %s",
                         aligned_science_fpath,
                     )
@@ -1370,7 +1370,7 @@ NNW
     ) -> Dict:
         """
         Align the reference image onto the science image pixel grid using AstroAlign.
-        Uses SExtractor catalogs and a 1↔1 filter to build control points, prioritizing extended sources.
+        Uses SExtractor catalogs and a 1<->1 filter to build control points, prioritizing extended sources.
         """
         try:
             # Define output directories
@@ -1768,8 +1768,8 @@ NNW
         if self.verbose_level >= 2:
             import shlex
 
-            self.logger.info(f"Output image: {output_image}")
-            self.logger.info(f"Running SWarp...\n{shlex.join(cmd)}")
+            self.logger.debug("Output image: %s", output_image)
+            self.logger.debug("Running SWarp...\n%s", shlex.join(cmd))
 
         def _cleanup_swarp_outputs():
             """Remove SWarp output files on failure so the directory is clean for fallback/retry."""
@@ -1999,9 +1999,9 @@ NNW
             self.logger.info(f"SCAMP did not produce a valid .head file at {head_file}")
             return None
 
-        self.logger.info(f"SCAMP produced .head file: {head_file}")
+        self.logger.debug("SCAMP produced .head file: %s", head_file)
 
-        self.logger.info(f"Running SWarp on {image_path}")
+        self.logger.debug("Running SWarp on %s", image_path)
         swarp_res = self.run_swarp(
             [str(image_path)],
             scamp_results=scamp_res,
@@ -2047,7 +2047,7 @@ NNW
         except Exception:
             pass
 
-    # ------------------------- Matched sources (1↔1) -------------------------
+    # ------------------------- Matched sources (1<->1) -------------------------
     def filter_well_defined_positions(
         self, catalog: Table, max_position_error_arcsec: float = 3
     ) -> Table:

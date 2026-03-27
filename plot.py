@@ -568,7 +568,9 @@ class Plot:
             base = os.path.splitext(base)[0]
 
             # Get photometry radius and scale from input YAML
-            radius = self.input_yaml["photometry"]["ap_size"] * self.input_yaml["fwhm"]
+            phot_cfg = self.input_yaml.get("photometry") or {}
+            ap_size_fwhm = phot_cfg.get("aperture_size", 1.7)
+            radius = float(ap_size_fwhm) * float(self.input_yaml["fwhm"])
             scale = self.input_yaml["scale"]
 
             # Create the figure
@@ -673,7 +675,7 @@ class Plot:
                 )
 
             # Plot reference (catalog) sources as squares
-            if catalogSources is not None and not self.input_yaml["HST_mode"]:
+            if catalogSources is not None:
                 for x, y in zip(catalogSources["x_pix"], catalogSources["y_pix"]):
                     x = float(x) + marker_dx
                     y = float(y) + marker_dy
@@ -736,7 +738,7 @@ class Plot:
             # from matplotlib.patches import Rectangle
 
             # Plot variable sources as red "x" and annotate with otype
-            if variable_sources is not None and not self.input_yaml["HST_mode"]:
+            if variable_sources is not None:
 
                 if len(variable_sources) > 0:
 
@@ -824,133 +826,8 @@ class Plot:
                         det_m = det_xy[idx[keep]]
                         u = det_m[:, 0] - cat_m[:, 0]
                         v = det_m[:, 1] - cat_m[:, 1]
-                        residual_mag = np.sqrt(u * u + v * v)
-                        # Optional gridded map of residual magnitude.
-                        if (
-                            len(cat_m) >= max(12, min_vec)
-                            and np.any(np.isfinite(residual_mag))
-                        ):
-                            try:
-                                # Use robust min/max to avoid single-point outlier contours.
-                                lo, hi = np.nanpercentile(residual_mag, [5, 95])
-                                if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
-                                    contour_grid_size = int(
-                                        align_cfg.get(
-                                            "plot_source_check_distortion_contour_grid_size",
-                                            160,
-                                        )
-                                    )
-                                    contour_grid_size = int(
-                                        np.clip(contour_grid_size, 60, 400)
-                                    )
-                                    # Interpolate sparse residual samples onto a dense
-                                    # grid first; this increases contour points and
-                                    # reduces jagged/spiky triangulation artifacts.
-                                    import matplotlib.tri as mtri
-                                    from scipy.ndimage import gaussian_filter
-
-                                    tri = mtri.Triangulation(
-                                        cat_m[:, 0].astype(float),
-                                        cat_m[:, 1].astype(float),
-                                    )
-                                    # Mask very flat/sliver triangles that can create
-                                    # spiky contour artifacts along sparse boundaries.
-                                    min_circle_ratio = float(
-                                        align_cfg.get(
-                                            "plot_source_check_distortion_contour_min_circle_ratio",
-                                            0.02,
-                                        )
-                                    )
-                                    if np.isfinite(min_circle_ratio) and min_circle_ratio > 0:
-                                        try:
-                                            tri_an = mtri.TriAnalyzer(tri)
-                                            bad_mask = tri_an.get_flat_tri_mask(
-                                                min_circle_ratio=min_circle_ratio
-                                            )
-                                            tri.set_mask(bad_mask)
-                                        except Exception:
-                                            pass
-                                    interp = mtri.LinearTriInterpolator(
-                                        tri, residual_mag.astype(float)
-                                    )
-                                    xg = np.linspace(
-                                        np.nanmin(cat_m[:, 0]),
-                                        np.nanmax(cat_m[:, 0]),
-                                        contour_grid_size,
-                                    )
-                                    yg = np.linspace(
-                                        np.nanmin(cat_m[:, 1]),
-                                        np.nanmax(cat_m[:, 1]),
-                                        contour_grid_size,
-                                    )
-                                    Xg, Yg = np.meshgrid(xg, yg)
-                                    Zg = interp(Xg, Yg)
-                                    if hasattr(Zg, "filled"):
-                                        Zg = Zg.filled(np.nan)
-                                    # Optional Gaussian smoothing on the interpolated
-                                    # contour field to suppress high-frequency spikes.
-                                    smooth_sigma = float(
-                                        align_cfg.get(
-                                            "plot_source_check_distortion_contour_smooth_sigma",
-                                            1.1,
-                                        )
-                                    )
-                                    if np.isfinite(smooth_sigma) and smooth_sigma > 0:
-                                        z_work = np.asarray(Zg, dtype=float)
-                                        valid = np.isfinite(z_work)
-                                        if np.count_nonzero(valid) >= 25:
-                                            z_fill = z_work.copy()
-                                            z_fill[~valid] = float(np.nanmedian(z_work[valid]))
-                                            z_s = gaussian_filter(
-                                                z_fill,
-                                                sigma=smooth_sigma,
-                                                mode="nearest",
-                                            )
-                                            # Restore NaN boundary mask so contours do not
-                                            # extrapolate outside supported regions.
-                                            z_s[~valid] = np.nan
-                                            Zg = z_s
-                                    if np.count_nonzero(np.isfinite(Zg)) >= max(100, contour_grid_size):
-                                        # Optional distortion grid map: continuous
-                                        # background field of residual magnitude [px].
-                                        if show_grid_map:
-                                            try:
-                                                grid_alpha = float(
-                                                    align_cfg.get(
-                                                        "plot_source_check_distortion_grid_alpha",
-                                                        0.35,
-                                                    )
-                                                )
-                                                grid_alpha = float(
-                                                    np.clip(grid_alpha, 0.05, 0.95)
-                                                )
-                                                grid_cmap = str(
-                                                    align_cfg.get(
-                                                        "plot_source_check_distortion_grid_cmap",
-                                                        "viridis",
-                                                    )
-                                                )
-                                                distortion_grid_artist = ax1.imshow(
-                                                    Zg,
-                                                    origin="lower",
-                                                    cmap=grid_cmap,
-                                                    alpha=grid_alpha,
-                                                    extent=[
-                                                        float(np.nanmin(xg)),
-                                                        float(np.nanmax(xg)),
-                                                        float(np.nanmin(yg)),
-                                                        float(np.nanmax(yg)),
-                                                    ],
-                                                    interpolation="bilinear",
-                                                    zorder=3,
-                                                )
-                                            except Exception as e:
-                                                logger.debug(
-                                                    "Distortion grid overlay skipped: %s",
-                                                    e,
-                                                )
-                            except Exception as e:
-                                logger.debug("Distortion grid interpolation skipped: %s", e)
+                        # Note: distortion contour overlays have been removed. We only
+                        # show per-source residual vectors (optionally) and the RMS text.
                         if len(cat_m) > max_vec:
                             sel = np.linspace(0, len(cat_m) - 1, max_vec, dtype=int)
                             cat_m = cat_m[sel]
@@ -979,8 +856,8 @@ class Plot:
             if mask is not None:
                 from matplotlib import colors
 
-                # Green overlay for masks to avoid confusion with other markers
-                mask_cmap = colors.ListedColormap(["none", "#00AA00"])
+                # Red overlay for masked regions.
+                mask_cmap = colors.ListedColormap(["none", "#FF0000"])
                 ax1.imshow(mask, cmap=mask_cmap, alpha=0.5, origin="lower")
 
             # Optional colorbar for distortion grid-map magnitude.

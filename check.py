@@ -141,7 +141,10 @@ class FitsInfo:
         """
         self.input_yaml = input_yaml
         self.wdir = Path(input_yaml.get("wdir", "."))
-        self.fits_dir = Path(input_yaml.get("fits_dir", "."))
+        fits_dir = input_yaml.get("fits_dir", None)
+        if fits_dir is None or str(fits_dir).strip() == "":
+            raise ValueError("fits_dir is required (set default_input.fits_dir).")
+        self.fits_dir = Path(str(fits_dir))
         self.template_files = bool(template_files)
 
         # Build file list

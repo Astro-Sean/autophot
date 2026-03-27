@@ -8,7 +8,7 @@
 
 # AutoPhOT
 
-The Automated Photometry of Transients (AutoPhOT) pipeline, built on Photutils and Astropy, provides a comprehensive photometric solution for transients and variable sources, offering aperture/PSF photometry, catalogue calibration, WCS solving, and optional template subtraction.
+The AUTOmated Photometry Of Transients (AutoPhOT) pipeline, built on Photutils and Astropy, provides a comprehensive photometric solution for transients and variable sources, offering aperture/PSF photometry, catalogue calibration, WCS solving, and optional template subtraction.
 
 
 Project links:
@@ -63,6 +63,18 @@ make
 
 The script below follows your requested workflow style while avoiding sensitive paths/tokens.
 
+## Listing all parameters
+
+For a full list of configuration parameters and defaults:
+
+```python
+from autophot import list_parameters
+
+list_parameters()
+```
+
+Note: many of the most important values (eg `fwhm`, `gain`, `exposure_time`, `imageFilter`) are **updated on a per-image basis** from FITS headers and runtime measurements. Use the `PER-IMG` column in the listing to identify these.
+
 > [!NOTE]
 > FITS images require the TELESCOP and INSTRUME header keywords (otherwise they will be ignored), as well as a keyword giving the image bandpass (e.g., FILTER).
 
@@ -112,7 +124,7 @@ def main() -> int:
 
     # Optional: Gaia + custom throughput curves ("gaia_custom")
     # - Set one or more mapping entries to "gaia_custom"
-    # - Provide `catalog.transition_curve_map` with matching band keys (e.g. g/r/i)
+    # - Provide `catalog.transmission_curve_map` with matching band keys (e.g. g/r/i)
     # AutoPhOT will build/reuse a Gaia curve-map catalog and route those bands
     # through the `custom` backend automatically.
     #
@@ -122,7 +134,7 @@ def main() -> int:
     #     "u": "gaia",
     #     "UBVRI": "apass",
     # }
-    # autophot_input["catalog"]["transition_curve_map"] = {
+    # autophot_input["catalog"]["transmission_curve_map"] = {
     #     "g": "/path/to/throughputs/g.dat",
     #     "r": "/path/to/throughputs/r.dat",
     #     "i": "/path/to/throughputs/i.dat",
@@ -222,7 +234,7 @@ If you use AutoPhOT in your research, please cite:
 ```bibtex
 @ARTICLE{2022A&A...667A..62B,
        author = {{Brennan}, S.~J. and {Fraser}, M.},
-       title = "{The Automated Photometry of Transients pipeline (AutoPhOT)}",
+       title = "{The AUTOmated Photometry Of Transients pipeline (AutoPhOT)}",
       journal = {\aap},
      keywords = {techniques: photometric, techniques: image processing, methods: data analysis, Astrophysics - Instrumentation and Methods for Astrophysics, Astrophysics - High Energy Astrophysical Phenomena},
          year = 2022,

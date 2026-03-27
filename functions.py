@@ -1719,7 +1719,7 @@ def remove_wcs_from_header(header):
 def convert_ra_dec_to_hms_dms(ra_deg, dec_deg):
 
     # Create a SkyCoord object using RA and DEC in degrees
-    coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
+    coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="fk5", equinox="J2000")
 
     # Convert to the required format
     ra_str = coord.ra.to_string(unit=u.hour, sep=":", precision=1)
@@ -1974,7 +1974,7 @@ def points_in_circum(r, center, n=8):
     ]
 
 
-def flux_upper_limit(n, sigma, beta_p=0.75):
+def flux_upper_limit(n, sigma, beta_p):
 
     peak_flux = (n + (np.sqrt(2) * erfinv((2 * beta_p) - 1))) * sigma
 

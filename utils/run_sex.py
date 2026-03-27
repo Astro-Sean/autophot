@@ -119,6 +119,31 @@ def scale_multiplier_from_config(config: dict) -> float:
     return 4.0
 
 
+def clamp_scale_from_config(config: dict, scale_px: float) -> int:
+    """
+    Clamp a computed runtime ``scale`` (pixels) to configured min/max bounds.
+
+    Reads:
+    - source_detection.scale_min_px
+    - source_detection.scale_max_px
+
+    Returns an integer scale >= 1.
+    """
+    try:
+        sd = (config.get("source_detection") or {}) if isinstance(config, dict) else {}
+        min_px = int(sd.get("scale_min_px", 11))
+        max_px = int(sd.get("scale_max_px", 300))
+        min_px = max(1, min_px)
+        max_px = max(min_px, max_px)
+        s = int(round(float(scale_px)))
+        return max(min_px, min(max_px, s))
+    except Exception:
+        try:
+            return max(1, int(round(float(scale_px))))
+        except Exception:
+            return 11
+
+
 @contextmanager
 def temp_directory_context(base_dir: Optional[str] = None):
     """
@@ -980,7 +1005,7 @@ class SExtractorWrapper:
                 snr_limit = 3.0
                 relaxed_cuts = False
             # Optional mask for chip gaps / flat borders (can remove real stars on
-            # very smooth backgrounds — disable via photometry config if needed).
+            # very smooth backgrounds - disable via photometry config if needed).
             bad_region_mask = None
             phot_cfg_run = self.config.get("photometry") or {}
             if phot_cfg_run.get("sextractor_reject_constant_regions", True):
@@ -1029,11 +1054,14 @@ class SExtractorWrapper:
             fwhm_values = sources["fwhm"].values
             fwhm = self.calculate_robust_fwhm(fwhm_values)
             scale_multiplier = scale_multiplier_from_config(self.config)
-            scale = max(int(np.ceil(scale_multiplier * fwhm)) + 0.5, default_scale)
-            scale = max(11, scale)
+            # Legacy behavior: `default_scale` is a hard floor when the FWHM-based
+            # scale is too small.
+            raw_scale = max(float(scale_multiplier) * float(fwhm), float(default_scale))
+            # Clamp to configured bounds (and ensure >= 1).
+            scale = float(clamp_scale_from_config(self.config, raw_scale))
             logger.info(
                 "Found %d point sources, robust FWHM %.2f px; scale = %.1f "
-                "(FWHM × %.2f from source_detection / config)",
+                "(FWHM x %.2f from source_detection / config)",
                 final_count,
                 fwhm,
                 scale,

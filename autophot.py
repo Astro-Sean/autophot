@@ -38,10 +38,23 @@ import numpy as np
 import pandas as pd
 import yaml
 import matplotlib.pyplot as plt
-from astroquery.simbad import Simbad
-from astropy.coordinates import SkyCoord
-from astropy import units as u
 import re
+
+# Optional heavy dependencies.
+# These are only required for parts of the pipeline (e.g. SIMBAD/TNS helpers).
+# Keeping them optional allows lightweight utilities (like list_parameters) to be
+# imported without requiring the full astronomy stack.
+try:
+    from astroquery.simbad import Simbad  # type: ignore
+except Exception:  # pragma: no cover
+    Simbad = None  # type: ignore
+
+try:
+    from astropy.coordinates import SkyCoord  # type: ignore
+    from astropy import units as u  # type: ignore
+except Exception:  # pragma: no cover
+    SkyCoord = None  # type: ignore
+    u = None  # type: ignore
 
 # Module-level flag to optionally silence user-facing logging
 QUIET_MODE = False
@@ -64,12 +77,413 @@ def _get_default_input_schema() -> dict:
     prior_quiet = QUIET_MODE
     QUIET_MODE = True  # suppress log spam while loading the schema
     try:
-        # Reuse the pipeline's own loader to ensure the schema includes
-        # any "expected" nested dict scaffolding it adds.
-        _DEFAULT_INPUT_SCHEMA_CACHE = AutomatedPhotometry.load()
+        # Prefer the pipeline loader when available; otherwise fall back to
+        # reading the default YAML directly (useful for minimal envs).
+        try:
+            _DEFAULT_INPUT_SCHEMA_CACHE = AutomatedPhotometry.load()
+        except Exception:
+            here = os.path.dirname(os.path.abspath(__file__))
+            default_input_path = os.path.join(here, "databases", "default_input.yml")
+            with open(default_input_path, "r") as f:
+                data = yaml.safe_load(f) or {}
+            _DEFAULT_INPUT_SCHEMA_CACHE = data.get("default_input", data)
     finally:
         QUIET_MODE = prior_quiet
     return _DEFAULT_INPUT_SCHEMA_CACHE
+
+
+def list_parameters(
+    *,
+    contains: str | None = None,
+    max_rows: int | None = None,
+    include_null: bool = False,
+    show_internal_params: bool = False,
+    format: str = "cli",
+    width: int | None = None,
+    wrap: bool = False,
+) -> list[dict]:
+    """
+    Print (and return) the configuration parameters accepted by AutoPhOT.
+
+    This reads `databases/default_input.yml` as text to preserve line numbers and
+    presents a flattened key list with defaults.
+
+    Examples
+    --------
+    >>> from autophot import list_parameters
+    >>> list_parameters(contains="aperture_size")
+    >>> list_parameters(show_internal_params=True)
+    """
+    import os
+    import yaml
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    yml_path = os.path.join(here, "databases", "default_input.yml")
+    with open(yml_path, "r") as f:
+        lines = f.read().splitlines()
+
+    # Parse the YAML for defaults.
+    parsed = yaml.safe_load("\n".join(lines)) or {}
+    root = parsed.get("default_input", parsed)
+
+    def _format_default(v) -> str:
+        if v is None:
+            return "null"
+        if isinstance(v, str):
+            return repr(v)
+        return str(v)
+
+    def _is_set_internally(desc: str) -> bool:
+        """
+        Heuristic: treat 'Runtime:' and '(set internally)' markers as internal-only.
+        """
+        d = (desc or "").lower()
+        return ("runtime:" in d) or ("set internally" in d)
+
+    def _is_per_image(path: str, desc: str) -> bool:
+        """
+        Best-effort flag for values that are populated/updated per FITS image.
+
+        In AutoPhOT, these are typically the 'Runtime:' fields and header-derived
+        fallbacks (exposure_time, gain, fwhm, etc.).
+        """
+        p = str(path or "")
+        d = (desc or "").lower()
+        if ("runtime:" in d) or ("set internally" in d) or ("runtime fallback" in d):
+            return True
+        # Known per-image fields even when the YAML comment is terse.
+        per_image_keys = {
+            "fpath",
+            "write_dir",
+            "imageFilter",
+            "exposure_time",
+            "gain",
+            "read_noise",
+            "pixel_scale",
+            "fwhm",
+            "science_fwhm",
+            "saturate",
+            "scale",
+        }
+        return p in per_image_keys
+
+    def _is_required(path: str) -> bool:
+        """
+        Best-effort required-key flag for a typical AutoPhOT run.
+
+        These are the keys most workflows must provide (directly or indirectly)
+        for the pipeline to do meaningful work.
+        """
+        required = {
+            "fits_dir",
+            "wdir",
+            "catalog.use_catalog",
+            "target_ra",
+            "target_dec",
+        }
+        return str(path or "") in required
+
+    # Walk text lines to map key-path -> line number and extract inline docs.
+    entries: list[dict] = []
+    stack: list[tuple[int, str]] = []  # (indent_spaces, key)
+
+    # YAML keys in our config are simple tokens (letters/digits/_). Avoid fancy
+    # regex character classes here; we only need a robust mapping of key->line.
+    key_re = re.compile(r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_]+)\s*:\s*(?P<rest>.*)$")
+    for idx0, raw in enumerate(lines):
+        m = key_re.match(raw)
+        if not m:
+            continue
+        indent = len(m.group("indent").replace("\\t", "    "))
+        key = str(m.group("key")).strip()
+        rest = str(m.group("rest")).strip()
+        # Split "value # comment" while preserving the value part.
+        value_part, comment_part = rest, ""
+        if "#" in rest:
+            value_part, comment_part = rest.split("#", 1)
+            value_part = value_part.strip()
+            comment_part = comment_part.strip()
+        type_hint = ""
+        desc = ""
+        if comment_part:
+            # Prefer the human description after '---' when present.
+            # Example: "float --- Aperture radius ..." -> "Aperture radius ..."
+            if "---" in comment_part:
+                lhs, rhs = comment_part.split("---", 1)
+                type_hint = lhs.strip()
+                desc = rhs.strip()
+            else:
+                # Some entries only include a type hint (eg: "# bool").
+                type_hint = comment_part.strip()
+                desc = ""
+
+        # Maintain indentation stack.
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        stack.append((indent, key))
+
+        # Only record scalar-ish leaves (skip pure dict headers like "photometry:").
+        if value_part == "" or value_part.endswith(":"):
+            continue
+        if value_part.startswith("#"):
+            # No explicit value present (comment-only line).
+            continue
+
+        # Build path, stripping the top-level "default_input" if present.
+        path_parts = [k for _, k in stack]
+        if path_parts and path_parts[0] == "default_input":
+            path_parts = path_parts[1:]
+        path = ".".join(path_parts)
+
+        # Look up parsed default value by traversing the YAML object.
+        cur = root
+        for p in path_parts:
+            if isinstance(cur, dict) and p in cur:
+                cur = cur[p]
+            else:
+                cur = None
+                break
+
+        if cur is None and not include_null:
+            # Still include if the YAML line explicitly sets null? (cur is None
+            # for both missing and null; we disambiguate by checking "null" token).
+            if not re.search(r"\bnull\b", rest, flags=re.IGNORECASE):
+                continue
+
+        start_line = idx0 + 1
+        end_line = start_line + 1 if (idx0 + 1 < len(lines) and lines[idx0 + 1].strip() == "") else start_line
+
+        entries.append(
+            {
+                "path": path,
+                "default": cur,
+                "default_str": _format_default(cur),
+                "description": desc,
+                "type_hint": type_hint,
+                "set_internally": _is_set_internally(desc),
+                "per_image": _is_per_image(path, desc),
+                "required": _is_required(path),
+                "file": yml_path,
+                "start_line": start_line,
+                "end_line": end_line,
+            }
+        )
+
+    # Filter.
+    if contains:
+        needle = str(contains).strip().lower()
+        entries = [e for e in entries if needle in e["path"].lower()]
+
+    if not bool(show_internal_params):
+        entries = [e for e in entries if not bool(e.get("set_internally"))]
+
+    # Sort for stable output (group runtime-set parameters together).
+    def _sort_key(e: dict) -> tuple:
+        p = str(e.get("path") or "")
+        sec = p.split(".", 1)[0] if "." in p else "top"
+        runtime_or_top = bool(e.get("set_internally")) or sec == "top"
+        runtime_bucket = 0 if runtime_or_top else 1
+        # Keep runtime/top items together and first.
+        sec_sort = "runtime/top" if runtime_or_top else sec
+        # Within each section, list required keys first for readability.
+        req_rank = 0 if bool(e.get("required")) else 1
+        return (runtime_bucket, sec_sort, req_rank, p)
+
+    entries.sort(key=_sort_key)
+    if max_rows is not None:
+        entries = entries[: max(0, int(max_rows))]
+
+    # Print.
+    fmt = str(format or "cli").strip().lower()
+    if fmt in {"md", "markdown"}:
+        print("AutoPhOT accepted parameters (from default_input.yml)")
+        for e in entries:
+            rel_file = os.path.relpath(e["file"], here)
+            desc = (e.get("description") or "").strip()
+            t = (e.get("type_hint") or "").strip()
+            info = desc
+            if t and desc:
+                info = f"{t} - {desc}"
+            elif t and not desc:
+                info = t
+            desc_str = f" - {desc}" if desc else ""
+            print(
+                f"- **{e['path']}** `@{rel_file}` ({e['start_line']}-{e['end_line']})  "
+                f"[default: {e['default_str']}]{desc_str}"
+            )
+        return entries
+
+    # Default: CLI-style aligned output for terminal use.
+    import shutil
+    import textwrap
+
+    # Table width:
+    # - If `width` is set: use it exactly (can be wider than the terminal).
+    # - Else: use detected terminal width.
+    term_w = int(getattr(shutil.get_terminal_size(fallback=(120, 24)), "columns", 120))
+    if width is not None:
+        term_w = max(80, int(width))
+    else:
+        term_w = max(80, term_w)
+
+    rel_file = os.path.relpath(yml_path, here)
+    title = f"AutoPhOT parameters (from {rel_file})"
+    print(title)
+    print("-" * min(len(title), term_w))
+    if not entries:
+        print("(no matches)")
+        return entries
+
+    # Add explicit TYPE + PER-IMAGE + REQUIRED columns so users don't have to infer these.
+    type_w = 12
+    per_w = 8
+    req_w = 8
+
+    # Column widths (leave room for wrapped description).
+    #
+    # Two modes:
+    # - wrap=True  : keep columns bounded so DESCRIPTION remains visible.
+    # - wrap=False : use "natural" widths (longest entry) so rows do not wrap;
+    #               this is intended for sideways scrolling.
+    sep = "  "
+    nat_key_w = max(3, max(len(str(e.get("path") or "")) for e in entries))
+    nat_def_w = max(7, max(len(str(e.get("default_str") or "")) for e in entries))
+    nat_type_w = max(4, max(len(str(e.get("type_hint") or "")) for e in entries))
+
+    if not wrap:
+        key_w = nat_key_w
+        def_w = nat_def_w
+        type_w = max(type_w, nat_type_w)
+        min_desc_w = 0
+        desc_w = max(20, term_w - (key_w + def_w + type_w + per_w + len(sep) * 4))
+    else:
+        def_w = min(22, nat_def_w)
+        def_w = max(10, def_w)
+        min_desc_w = 28
+        max_key_w_by_term = term_w - def_w - type_w - per_w - len(sep) * 4 - min_desc_w
+        key_w = min(60, nat_key_w, max(18, max_key_w_by_term))
+        key_w = max(18, key_w)
+        desc_w = max(min_desc_w, term_w - (key_w + def_w + type_w + per_w + len(sep) * 4))
+    header = (
+        f"{'KEY'.ljust(key_w)}{sep}"
+        f"{'DEFAULT'.ljust(def_w)}{sep}"
+        f"{'TYPE'.ljust(type_w)}{sep}"
+        f"{'PER-IMG'.ljust(per_w)}{sep}"
+        f"{'REQ'.ljust(req_w)}{sep}"
+        f"{'DESCRIPTION'}"
+    )
+    # Do not truncate to `term_w`; allow very wide lines so terminals that
+    # support horizontal scrolling can scroll sideways.
+    print(header)
+    print("-" * len(header))
+
+    def _section_of(path: str) -> str:
+        s = str(path or "").strip()
+        if not s:
+            return "other"
+        return s.split(".", 1)[0] if "." in s else "top"
+
+    last_section = None
+    for e in entries:
+        section = _section_of(e.get("path", ""))
+        if bool(e.get("set_internally")) or section == "top":
+            section = "runtime/top"
+        if section != last_section:
+            if last_section is not None:
+                print("-" * len(header))
+            # Make section headings visually obvious in plain terminals.
+            # Use asterisk "box" with blank lines around it.
+            section_title = str(section).replace("_", " ").upper()
+            title_line = f"*** {section_title} ***"
+            # Match the banner width to the title exactly.
+            star_line = "*" * len(title_line)
+            print("")
+            print(star_line)
+            print(title_line)
+            print(star_line)
+            print("")
+            last_section = section
+
+        desc = (e.get("description") or "").strip()
+        t = (e.get("type_hint") or "").strip()
+        # If the YAML doesn't include a type hint, infer a best-effort type from
+        # the default value.
+        if not t:
+            dv = e.get("default", None)
+            if dv is None:
+                t = "null"
+            elif isinstance(dv, bool):
+                t = "bool"
+            elif isinstance(dv, int) and not isinstance(dv, bool):
+                t = "int"
+            elif isinstance(dv, float):
+                t = "float"
+            elif isinstance(dv, (list, tuple)):
+                t = "list"
+            elif isinstance(dv, dict):
+                t = "dict"
+            elif isinstance(dv, str):
+                t = "str"
+            else:
+                t = type(dv).__name__
+        type_str = t
+        per_flag = "Y" if bool(e.get("per_image")) else "N"
+        req_flag = "Y" if bool(e.get("required")) else "N"
+        # Keep description text clean; per-image status is in the PER-IMG column.
+        info = desc
+        if wrap:
+            key_lines = (
+                textwrap.wrap(
+                    e["path"],
+                    width=key_w,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+                or [""]
+            )
+            desc_lines = (
+                textwrap.wrap(
+                    info,
+                    width=desc_w,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+                if info
+                else [""]
+            )
+        else:
+            key_lines = [e["path"]]
+            desc_lines = [info]
+
+        n_lines = max(len(key_lines), len(desc_lines))
+        for i in range(n_lines):
+            k = key_lines[i] if i < len(key_lines) else ""
+            d = desc_lines[i] if i < len(desc_lines) else ""
+            if i == 0:
+                line = (
+                    f"{k.ljust(key_w)}{sep}"
+                    f"{e['default_str'][:def_w].ljust(def_w)}{sep}"
+                    f"{type_str[:type_w].ljust(type_w)}{sep}"
+                    f"{per_flag.ljust(per_w)}{sep}"
+                    f"{req_flag.ljust(req_w)}{sep}"
+                    f"{d}"
+                )
+            else:
+                line = (
+                    f"{k.ljust(key_w)}{sep}"
+                    f"{'':{def_w}}{sep}"
+                    f"{'':{type_w}}{sep}"
+                    f"{'':{per_w}}{sep}"
+                    f"{'':{req_w}}{sep}"
+                    f"{d}"
+                )
+            print(line)
+    return entries
+
+
+# Backward/typo-friendly alias (requested): from autophot import list_paramters
+def list_paramters(**kwargs):  # noqa: N802
+    return list_parameters(**kwargs)
 
 
 def _find_unknown_config_paths(
@@ -102,16 +516,31 @@ def _find_unknown_config_paths(
 
     return unknown
 
-# Project-specific helpers (assumed to be in your codebase)
-from functions import (
-    border_msg,
-    AutophotYaml,
-    concatenate_csv_files,
-    print_progress_bar,
-    log_exception,
-    sanitize_photometric_filters,
-)
-from prepare import Prepare
+# Project-specific helpers (assumed to be in your codebase).
+#
+# These imports pull in the full scientific stack (e.g. scikit-image). Keep them
+# optional so lightweight utilities (like list_parameters) can be imported in
+# minimal environments.
+_IMPORT_ERROR_AUTOPHOT_DEPS: Exception | None = None
+try:
+    from functions import (  # type: ignore
+        border_msg,
+        AutophotYaml,
+        concatenate_csv_files,
+        print_progress_bar,
+        log_exception,
+        sanitize_photometric_filters,
+    )
+    from prepare import Prepare  # type: ignore
+except Exception as _exc:  # pragma: no cover
+    _IMPORT_ERROR_AUTOPHOT_DEPS = _exc
+    border_msg = None  # type: ignore
+    AutophotYaml = None  # type: ignore
+    concatenate_csv_files = None  # type: ignore
+    print_progress_bar = None  # type: ignore
+    log_exception = None  # type: ignore
+    sanitize_photometric_filters = None  # type: ignore
+    Prepare = None  # type: ignore
 
 
 # =============================================================================
@@ -150,6 +579,12 @@ def _run_main_subprocess(
 
     Returns (filename, return_code) so callers can detect failures.
     """
+    if not os.path.exists(input_file):
+        _log(
+            f"[ERROR] Input YAML snapshot is missing: {input_file}\n"
+            "It looks like it was deleted mid-run. Re-run the pipeline to regenerate it."
+        )
+        return filename, 2
     args = [python_executable, autophot_exe, "-f", filename, "-c", input_file]
     if is_template:
         args.append("-temp")
@@ -231,7 +666,7 @@ def find_variable_sources(
         "Ro*": "Rotating",
         "Ce*": "Cepheid",
         "RR*": "RR Lyr",
-        "dS*": "δ Sct",
+        "dS*": "delta Sct",
         "LP*": "Long Period",
         "Mi*": "Mira",
         "TT*": "T Tauri",
@@ -621,11 +1056,7 @@ class AutomatedPhotometry:
         # Determine how many CPU workers to use for *image-level* parallelism.
         # Priority: explicit config key, then environment override, then 1.
         env_ncpu = os.environ.get("AUTOPHOT_NCPU")
-        cfg_ncpu = (
-            default_input.get("nCPU")
-            or default_input.get("nCpu")
-            or default_input.get("ncpu")
-        )
+        cfg_ncpu = default_input.get("nCPU")
         try:
             n_cpu = (
                 int(env_ncpu)
@@ -708,9 +1139,9 @@ class AutomatedPhotometry:
         # - Users may set `catalog.use_catalog` (scalar or mapping) to "gaia_custom"
         #   for the filter(s) they want calibrated using a Gaia curve-map catalog.
         # - When "gaia_custom" is requested, AutoPhOT requires
-        #   `catalog.transition_curve_map` (and/or `catalog.curve_map_svo`) and will
+        #   `catalog.transmission_curve_map` (and/or `catalog.curve_map_svo`) and will
         #   build/reuse a single custom
-        #   catalog CSV, then transparently route "gaia_custom" → "custom" using
+        #   catalog CSV, then transparently route "gaia_custom" -> "custom" using
         #   `catalog.catalog_custom_fpath`.
         # - Plain "gaia" continues to use the standard Gaia photometry path with
         #   no curve-map build.
@@ -737,19 +1168,15 @@ class AutomatedPhotometry:
         if gaia_custom_requested:
             from functions import parse_supported_filter_group_key, normalize_photometric_filter_name
 
-            # Backward compatible: accept deprecated `curve_map` key.
-            curve_map = catalog_cfg.get(
-                "transition_curve_map",
-                catalog_cfg.get("curve_map", None),
-            )
+            curve_map = catalog_cfg.get("transmission_curve_map", None)
             if curve_map is None or curve_map == {}:
                 raise ValueError(
-                    "catalog.use_catalog requests 'gaia_custom', but catalog.transition_curve_map is not set. "
+                    "catalog.use_catalog requests 'gaia_custom', but catalog.transmission_curve_map is not set. "
                     "Provide a band->curve-path mapping, e.g. {'g':'/path/g.dat','r':'/path/r.dat','i':'/path/i.dat'}."
                 )
             if not isinstance(curve_map, dict):
                 raise TypeError(
-                    "catalog.transition_curve_map must be a dictionary of band->curve path, "
+                    "catalog.transmission_curve_map must be a dictionary of band->curve path, "
                     "e.g. {'g': '/path/g.dat', 'r': '/path/r.dat'}."
                 )
 
@@ -776,8 +1203,8 @@ class AutomatedPhotometry:
             missing = sorted([b for b in required_bands if b not in curve_map])
             if missing:
                 raise ValueError(
-                    "catalog.use_catalog requests 'gaia_custom' for bands requiring transition_curve_map entries, "
-                    f"but these are missing from catalog.transition_curve_map: {missing}"
+                    "catalog.use_catalog requests 'gaia_custom' for bands requiring transmission_curve_map entries, "
+                    f"but these are missing from catalog.transmission_curve_map: {missing}"
                 )
 
             work_dir = default_input.get("fits_dir") or ""
@@ -908,7 +1335,10 @@ class AutomatedPhotometry:
                         catalog_cfg.get("gaia_nearest_prefetch_max", 10000)
                     ),
                 )
-                _log(f"Saved Gaia curve-map catalog: {curve_catalog_csv}")
+                logging.getLogger(__name__).debug(
+                    "Gaia curve-map catalog written: %s",
+                    curve_catalog_csv,
+                )
 
         # Initialise preparation helper and validate catalog configuration
         prepare_db = Prepare(default_input=default_input)
@@ -1287,19 +1717,31 @@ class AutomatedPhotometry:
                                     _log(f"[{counter}/{total}] [OK]    {fname}")
                                 else:
                                     _log(f"[{counter}/{total}] [FAIL]  {fname} (exit code {rc})")
+                                    if rc == 2 and (not os.path.exists(input_file)):
+                                        _log(
+                                            "[ERROR] Input YAML snapshot disappeared during processing. "
+                                            "Stopping early; re-run required."
+                                        )
+                                        break
                         gc.collect()
                     else:
                         for file in print_progress_bar(
                             file_list, title="Science files calibrated\n"
                         ):
                             try:
-                                _run_main_subprocess(
+                                fname, rc = _run_main_subprocess(
                                     python_executable,
                                     autophot_exe,
                                     str(file),
                                     input_file,
                                     False,
                                 )
+                                if rc == 2 and (not os.path.exists(input_file)):
+                                    _log(
+                                        "[ERROR] Input YAML snapshot disappeared during processing. "
+                                        "Stopping early; re-run required."
+                                    )
+                                    break
                                 gc.collect()
                                 counter += 1
                                 _log(f"[{counter}/{len(file_list)}] [OK]    {str(file)}")
@@ -1337,13 +1779,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
 
+    ap = AutomatedPhotometry()
+    config = ap.load()
+
+    # Global verbosity control (0=warnings/errors, 1=info, 2=debug).
+    try:
+        vlevel = int(config.get("global_verbose_level", 1))
+    except Exception:
+        vlevel = 1
+    if vlevel <= 0:
+        log_level = logging.WARNING
+    elif vlevel == 1:
+        log_level = logging.INFO
+    else:
+        log_level = logging.DEBUG
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s - %(levelname)s - %(message)s",
         datefmt="%H:%M:%S",
     )
-    ap = AutomatedPhotometry()
-    config = ap.load()
     do_run = len(argv) > 0 and str(argv[0]).lower() == "run"
     output = ap.run_photometry(config, do_photometry=do_run)
     _log(f"Output light curve: {output}")

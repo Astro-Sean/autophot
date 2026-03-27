@@ -194,54 +194,59 @@ def _compute_detection_mask(
         else np.full(len(df), np.nan, dtype=float)
     )
 
+    def _snr_from_magerr(mag_err: np.ndarray) -> np.ndarray:
+        # For magnitudes m = -2.5 log10(F) + const, error propagation gives:
+        # sigma_m ~= 1.0857 / SNR  ->  SNR ~= 1.0857 / sigma_m
+        c = 2.5 / np.log(10.0)
+        mag_err = np.asarray(mag_err, dtype=float)
+        return np.divide(
+            c,
+            mag_err,
+            out=np.full_like(mag_err, np.nan, dtype=float),
+            where=(mag_err > 0) & np.isfinite(mag_err),
+        )
+
     method_u = str(method).upper()
     if use_SNR_limit:
         if method_u == "PSF" and "snr_psf" in df.columns:
-            snr = pd.to_numeric(df["snr_psf"], errors="coerce").to_numpy(
-                dtype=float, copy=False
-            )
+            snr = pd.to_numeric(df["snr_psf"], errors="coerce").to_numpy(dtype=float, copy=False)
+        elif method_u == "AP" and "snr_ap" in df.columns:
+            snr = pd.to_numeric(df["snr_ap"], errors="coerce").to_numpy(dtype=float, copy=False)
+        elif "snr" in df.columns:
+            snr = pd.to_numeric(df["snr"], errors="coerce").to_numpy(dtype=float, copy=False)
         elif method_u == "PSF" and "flux_psf" in df.columns and "flux_psf_err" in df.columns:
-            flux = pd.to_numeric(df["flux_psf"], errors="coerce").to_numpy(
-                dtype=float, copy=False
-            )
-            flux_err = pd.to_numeric(df["flux_psf_err"], errors="coerce").to_numpy(
-                dtype=float, copy=False
-            )
+            flux = pd.to_numeric(df["flux_psf"], errors="coerce").to_numpy(dtype=float, copy=False)
+            flux_err = pd.to_numeric(df["flux_psf_err"], errors="coerce").to_numpy(dtype=float, copy=False)
             snr = np.divide(
                 flux,
                 flux_err,
                 out=np.full(len(df), np.nan, dtype=float),
                 where=(flux_err > 0) & np.isfinite(flux_err),
             )
-        elif method_u == "AP" and "snr_ap" in df.columns:
-            snr = pd.to_numeric(df["snr_ap"], errors="coerce").to_numpy(
-                dtype=float, copy=False
-            )
-        elif "snr" in df.columns:
-            snr = pd.to_numeric(df["snr"], errors="coerce").to_numpy(
-                dtype=float, copy=False
+        elif method_u == "AP" and "flux_ap" in df.columns and "flux_ap_err" in df.columns:
+            flux = pd.to_numeric(df["flux_ap"], errors="coerce").to_numpy(dtype=float, copy=False)
+            flux_err = pd.to_numeric(df["flux_ap_err"], errors="coerce").to_numpy(dtype=float, copy=False)
+            snr = np.divide(
+                flux,
+                flux_err,
+                out=np.full(len(df), np.nan, dtype=float),
+                where=(flux_err > 0) & np.isfinite(flux_err),
             )
         else:
-            snr = np.divide(
-                mag,
-                err,
-                out=np.full(len(df), np.nan, dtype=float),
-                where=err > 0,
-            )
+            # Last resort: infer SNR from magnitude uncertainty.
+            snr = _snr_from_magerr(err)
     else:
-        snr = np.divide(
-            mag,
-            err,
-            out=np.full(len(df), np.nan, dtype=float),
-            where=err > 0,
-        )
+        # Still compute SNR for completeness, but detection uses lmag branch below.
+        snr = _snr_from_magerr(err)
 
-    beta_ok = (
-        pd.to_numeric(df["beta"], errors="coerce").to_numpy(dtype=float, copy=False)
-        > float(beta_limit)
-        if "beta" in df.columns
-        else np.ones(len(df), dtype=bool)
-    )
+    if "beta" in df.columns:
+        beta = pd.to_numeric(df["beta"], errors="coerce").to_numpy(dtype=float, copy=False)
+        # Beta is not guaranteed to be defined for all rows (and may refer to
+        # injection/recovery diagnostics rather than the target measurement).
+        # Do not let missing beta values veto detections.
+        beta_ok = (~np.isfinite(beta)) | (beta > float(beta_limit))
+    else:
+        beta_ok = np.ones(len(df), dtype=bool)
 
     if use_SNR_limit:
         detected = (
@@ -721,16 +726,16 @@ def plot_lightcurve(
                     out=np.zeros_like(d2["mag"]),
                     where=d2["err"] > 0,
                 )
-            beta_ok1 = (
-                (d1["beta"] > beta_limit)
-                if "beta" in d1.columns
-                else np.ones(len(d1), dtype=bool)
-            )
-            beta_ok2 = (
-                (d2["beta"] > beta_limit)
-                if "beta" in d2.columns
-                else np.ones(len(d2), dtype=bool)
-            )
+            if "beta" in d1.columns:
+                b1 = pd.to_numeric(d1["beta"], errors="coerce").to_numpy(dtype=float, copy=False)
+                beta_ok1 = (~np.isfinite(b1)) | (b1 > float(beta_limit))
+            else:
+                beta_ok1 = np.ones(len(d1), dtype=bool)
+            if "beta" in d2.columns:
+                b2 = pd.to_numeric(d2["beta"], errors="coerce").to_numpy(dtype=float, copy=False)
+                beta_ok2 = (~np.isfinite(b2)) | (b2 > float(beta_limit))
+            else:
+                beta_ok2 = np.ones(len(d2), dtype=bool)
             if use_SNR_limit:
                 d1["det"] = (
                     np.isfinite(d1["mag"])

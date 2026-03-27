@@ -14,11 +14,11 @@ Anaconda.org stores each file by **name + version + build string** (e.g. `autoph
 
 `Distribution already exists ... Conflict ... 409`
 
-**The local build still succeeds** — only the upload step is rejected. Users do not get a new package until a **new** artifact is uploaded.
+**The local build still succeeds** - only the upload step is rejected. Users do not get a new package until a **new** artifact is uploaded.
 
 **Fix (pick one):**
 
-1. **Recommended:** Bump `build: number:` in `recipe/meta.yaml` (e.g. `1` → `2`), rebuild, then upload. The new file will be `autophot-0.1.8-py_2.conda`.
+1. **Recommended:** Bump `build: number:` in `recipe/meta.yaml` (e.g. `1` -> `2`), rebuild, then upload. The new file will be `autophot-0.1.8-py_2.conda`.
 2. **Replace in place:** `anaconda upload --force /path/to/autophot-0.1.8-py_1.conda` (overwrites the existing file on the channel).
 3. **Remove then upload:** `anaconda remove <user>/autophot/0.1.8/noarch/autophot-0.1.8-py_1.conda`, then upload again.
 

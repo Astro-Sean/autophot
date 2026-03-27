@@ -385,7 +385,7 @@ def _normalize_reproject_interp_order(order: Any) -> Any:
     """
     Map YAML / user strings to values accepted by ``reproject.reproject_interp``.
 
-    Reproject accepts int 0–5 or specific strings (e.g. ``'bicubic'``); unknown
+    Reproject accepts int 0-5 or specific strings (e.g. ``'bicubic'``); unknown
     strings fall back to ``'bilinear'``.
     """
     if isinstance(order, int):
@@ -943,7 +943,7 @@ def download_sdss_template(
         if cutout_wcs is not None:
             new_header.update(cutout_wcs.to_header(relax=True), relax=True)
         write_fits(str(template_fpath), cutout_data, new_header)
-        logger.info("Saved SDSS template to %s", template_fpath)
+        logger.debug("SDSS template written: %s", template_fpath)
     except Exception:
         logger.exception("Error downloading SDSS template")
         return None
@@ -968,7 +968,7 @@ LEGACY_CUTOUT_PIXSCALE = 0.262
 LEGACY_CUTOUT_LAYER = "ls-dr10"
 LEGACY_CUTOUT_BASE = "https://www.legacysurvey.org/viewer/fits-cutout/"
 # Use subimage API (no server-side resampling). Subimage returns 19+ extensions and empty primary;
-# we expect either 3D primary or 3×2D extensions, so standard cutout is used.
+# we expect either 3D primary or 3x2D extensions, so standard cutout is used.
 LEGACY_USE_SUBIMAGE = False
 LEGACY_DOWNLOAD_CHUNK_SIZE = 2**20  # 1 MB for progress bar updates
 
@@ -1033,7 +1033,7 @@ def _download_legacy_cutout(
                 pbar.close()
         if dest_path.exists() and dest_path.stat().st_size > 0:
             size_mb = dest_path.stat().st_size / (1024 * 1024)
-            logger.info("Legacy Survey cutout saved (%s MB).", f"{size_mb:.1f}")
+            logger.debug("Legacy Survey cutout written (%s MB).", f"{size_mb:.1f}")
             return True
         return False
     except (requests.RequestException, OSError):
@@ -1245,7 +1245,7 @@ def download_legacy_template(
             logger.exception("Error writing Legacy template to %s", band_path)
 
     if saved:
-        logger.info("Saved Legacy band template(s): %s", ", ".join(saved))
+        logger.debug("Legacy band template(s) written: %s", ", ".join(saved))
 
     if out_path.exists():
         return str(out_path)
@@ -1685,7 +1685,16 @@ class Templates:
                 fwhm += 1
 
             # Detection threshold and minimum connected area
-            npixels_det = int(np.pi * (fwhm / 2) ** 2)
+            npixels_det_raw = float(np.pi * (float(fwhm) / 2.0) ** 2)
+            npixels_det = int(npixels_det_raw)
+            if npixels_det < 5:
+                logger.warning(
+                    "create_image_mask: computed npixels=%d from fwhm=%s (raw=%g); clamping to 5.",
+                    int(npixels_det),
+                    str(fwhm),
+                    float(npixels_det_raw),
+                )
+                npixels_det = 5
             threshold = 5.0 * image_std + image_median
 
             # --- Source detection via segmentation ---
@@ -1806,7 +1815,7 @@ class Templates:
             return None
 
         logger.info(border_msg(f"Finding template file for filter {use_filter}"))
-        fits_root = Path(self.input_yaml.get("fits_dir", "")) / "templates"
+        fits_root = Path(self.input_yaml.get("fits_dir", None) or "") / "templates"
         use_filter = str(use_filter).strip()
 
         # Prefer modern naming for ugriz, keep legacy *p_template as fallback.
@@ -2012,11 +2021,11 @@ class Templates:
                 # Reproject defaults roundtrip_coords=True; keeping True avoids
                 # one-way WCS glitches that show up as systematic misalignment.
                 roundtrip = bool(align_cfg.get("reproject_roundtrip_coords", True))
-                interp_order_raw = align_cfg.get("reproject_interp_order", "bilinear")
+                interp_order_raw = align_cfg.get("reproject_interp_order", "bicubic")
                 interp_order = _normalize_reproject_interp_order(interp_order_raw)
                 parallel = bool(align_cfg.get("reproject_parallel", False))
                 # conserve_flux=True rescales adaptive output; for similar plate
-                # scales it can blur or skew template–science match vs. library default.
+                # scales it can blur or skew template-science match vs. library default.
                 conserve_flux = bool(
                     align_cfg.get("reproject_adaptive_conserve_flux", False)
                 )
@@ -2526,7 +2535,7 @@ class Templates:
                 target_dec,
                 0,
             )
-            border = self.input_yaml.get("scale", 10)
+            border = self.input_yaml.get("scale", 0)
             h, w = scienceImage_tmp.shape
 
             if (
@@ -2718,8 +2727,11 @@ class Templates:
           3. Remove rolling-window outliers.
           4. Fit a constrained linear relation (slope ~ 1) with RANSAC.
           5. Optionally trim to a central percentile range and re-fit.
-          6. Return inlier catalog rows and the (slope, intercept) in
-             flux space.
+          6. Return inlier catalog rows and a compact fit tuple
+             ``(mag_slope, flux_scale)`` where:
+             - ``mag_slope`` is the fitted slope in magnitude space
+             - ``flux_scale`` is ``10**(-0.4 * intercept)``, i.e. the multiplicative
+               flux ratio corresponding to zero-point offset.
 
         Parameters
         ----------
@@ -2732,7 +2744,7 @@ class Templates:
 
         Returns
         -------
-        (inlier_df, (flux_slope, flux_intercept))
+        (inlier_df, (mag_slope, flux_scale))
         """
         if params is None:
             params = FluxMatchParams()
@@ -2943,11 +2955,11 @@ class Templates:
 
             full = pd.concat([result, nr])
 
-            # Convert mag-domain fit to flux-domain
-            flux_slope = slope
-            flux_intercept = (
-                10 ** (-0.4 * intercept) if np.isfinite(intercept) else np.nan
-            )
+            # Keep mag-space fit as authoritative. For convenience we also return
+            # the equivalent multiplicative flux scale from the intercept.
+            # NOTE: this is not a full linear flux model when slope != 1.
+            mag_slope = float(slope)
+            flux_scale = 10 ** (-0.4 * intercept) if np.isfinite(intercept) else np.nan
 
             logger.info(
                 "Fit [%s]: slope=%.3f, intercept=%.3f, " "inliers=%d/%d, robust=%d/%d",
@@ -2975,7 +2987,7 @@ class Templates:
 
             return (
                 full[full["is_inlier"]].reset_index(drop=True),
-                (flux_slope, flux_intercept),
+                (mag_slope, flux_scale),
             )
 
         except Exception:

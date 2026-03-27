@@ -118,6 +118,7 @@ def _measure_worker(args):
         area,
         phot,
         gain,
+        enforce_nonnegative_local_bkg,
         verbose,
     ) = args
 
@@ -142,6 +143,14 @@ def _measure_worker(args):
 
         # Robust background via MAD (handles negatives cleanly).
         bkg_value = np.median(bkg_pix)
+        bkg_value_used = (
+            max(float(bkg_value), 0.0)
+            if bool(enforce_nonnegative_local_bkg)
+            else float(bkg_value)
+        )
+        local_bkg_floored = bool(
+            bool(enforce_nonnegative_local_bkg) and np.isfinite(bkg_value) and bkg_value < 0
+        )
         empirical_std = 1.4826 * np.median(np.abs(bkg_pix - bkg_value))
 
         if empirical_std <= 0 or not np.isfinite(empirical_std):
@@ -159,11 +168,11 @@ def _measure_worker(args):
                 effective_area = area
         except Exception:
             effective_area = area
-        aperture_bkg = bkg_value * effective_area
+        aperture_bkg = bkg_value_used * effective_area
         aperture_sum = raw_aperture_sum - aperture_bkg
 
         raw_max = np.max(ap_pix)
-        max_val = raw_max - bkg_value
+        max_val = raw_max - bkg_value_used
 
         # Variance model: prefer fully propagated per-pixel uncertainties
         # when available; otherwise fall back to a simple Poisson+sky+read-noise
@@ -231,6 +240,9 @@ def _measure_worker(args):
             "threshold": max_val / empirical_std,
             "SNR": snr,
             "bkg_std_method": "MAD",
+            "local_bkg_raw": float(bkg_value),
+            "local_bkg_used": float(bkg_value_used),
+            "local_bkg_floored": local_bkg_floored,
             "mag": mag_val,
             "mag_err": mag_err_val,
         }
@@ -277,13 +289,25 @@ def _optimum_radius_worker(args):
     ----------
     args : tuple
         (idx, x_pix, y_pix, fwhm, radii, image, error,
-         norm_factor, stability_threshold)
+         norm_factor, stability_threshold, use_moffat_cog, moffat_beta)
 
     Returns
     -------
     dict or None
     """
-    idx, x_pix, y_pix, fwhm, radii, image, error, norm_factor, stability_threshold = (
+    (
+        idx,
+        x_pix,
+        y_pix,
+        fwhm,
+        radii,
+        image,
+        error,
+        norm_factor,
+        stability_threshold,
+        use_moffat_cog,
+        moffat_beta,
+    ) = (
         args
     )
 
@@ -297,7 +321,15 @@ def _optimum_radius_worker(args):
         norm_profile = cog.profile
         norm_profile_err = cog.profile_error
 
-        r_at_norm = cog.calc_radius_at_ee(norm_factor)
+        if use_moffat_cog:
+            # Analytic encircled-energy inversion for a circular Moffat profile:
+            # E(r) = 1 - [1 + (r/alpha)^2]^(1-beta), beta>1.
+            b = max(float(moffat_beta), 1.01)
+            alpha = float(fwhm) / (2.0 * np.sqrt(2.0 ** (1.0 / b) - 1.0))
+            ee = float(np.clip(norm_factor, 1e-6, 1 - 1e-6))
+            r_at_norm = alpha * np.sqrt((1.0 - ee) ** (1.0 / (1.0 - b)) - 1.0)
+        else:
+            r_at_norm = cog.calc_radius_at_ee(norm_factor)
         if not np.isfinite(r_at_norm):
             return None
 
@@ -542,10 +574,15 @@ class Aperture:
         fwhm = self.input_yaml["fwhm"]
         gain = gain or self.input_yaml.get("gain", 1.0)
         exposure_time = exposure_time or self.input_yaml.get("exposure_time", 30.0)
-        read_noise = read_noise or self.input_yaml.get("readnoise", 0.0)
+        read_noise = read_noise or self.input_yaml.get("read_noise", 0.0)
         ap_size = ap_size or self.input_yaml["photometry"]["aperture_radius"]
 
         crowded = self.input_yaml.get("photometry", {}).get("crowded_field", False)
+        enforce_nonnegative_local_bkg = bool(
+            self.input_yaml.get("photometry", {}).get(
+                "enforce_nonnegative_local_background", True
+            )
+        )
         if crowded:
             # Tighter annulus for crowded fields: smaller gap and width to avoid neighboring sources.
             annulusIN = float(np.ceil(ap_size + 0.35 * fwhm))
@@ -599,7 +636,7 @@ class Aperture:
                 np.isfinite(image_e), np.maximum(image_e, 0.0), np.nan
             )
             error = calc_total_error(
-                image_e_pois, background_rms * gain, effective_gain=1
+                image_e_pois, np.abs(background_rms) * gain, effective_gain=1
             )
         else:
             error = None
@@ -642,6 +679,7 @@ class Aperture:
                 area,
                 phot,
                 gain,
+                enforce_nonnegative_local_bkg,
                 verbose,
             )
             for i in range(len(sources))
@@ -661,12 +699,19 @@ class Aperture:
             updates[c] = [""] * len(sources)
 
         fail_count = 0
+        floored_count = 0
+        floored_values = []
         for res in results:
             i = res.pop("idx")
             if "fail_reason" in res:
                 updates["fail_reason"][i] = res["fail_reason"]
                 fail_count += 1
                 continue
+            if bool(res.get("local_bkg_floored", False)):
+                floored_count += 1
+                raw_bkg = res.get("local_bkg_raw", np.nan)
+                if np.isfinite(raw_bkg):
+                    floored_values.append(float(raw_bkg))
 
             updates["maxPixel"][i] = res["maxPixel"]
             updates["maxPixel_err"][i] = res["maxPixel_err"]
@@ -691,6 +736,18 @@ class Aperture:
             logger.warning(
                 f"{fail_count}/{len(results)} sources failed. "
                 "Check 'fail_reason' column."
+            )
+        if verbose >= 1 and floored_count > 0:
+            min_raw_bkg = (
+                float(np.nanmin(floored_values))
+                if len(floored_values) > 0
+                else float("nan")
+            )
+            logger.warning(
+                "Aperture photometry: floored negative local background to 0 for %d/%d sources (min raw local background=%g).",
+                int(floored_count),
+                int(len(results)),
+                min_raw_bkg,
             )
 
         # ---- Per-source diagnostic plots -----------------------------------
@@ -982,6 +1039,18 @@ class Aperture:
             )
         )
         n_jobs = _resolve_n_jobs(n_jobs, half_cpus=False)
+        use_moffat_cog = bool(phot_cfg.get("optimum_radius_use_moffat_cog", False))
+        moffat_beta = float(
+            phot_cfg.get(
+                "optimum_radius_moffat_beta",
+                phot_cfg.get("psf_init_moffat_beta", 4.765),
+            )
+        )
+        logger.info(
+            "Optimum-radius CoG mode: %s (moffat_beta=%g)",
+            "moffat" if use_moffat_cog else "empirical",
+            moffat_beta,
+        )
 
         # ---- Parallel CoG analysis -----------------------------------------
         args_list = [
@@ -995,6 +1064,8 @@ class Aperture:
                 error,
                 norm_factor,
                 stability_threshold,
+                use_moffat_cog,
+                moffat_beta,
             )
             for idx, row in sources.iterrows()
         ]

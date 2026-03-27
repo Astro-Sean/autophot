@@ -1572,7 +1572,7 @@ class WCSSolver:
                 logger.warning("SCAMP did not produce a .head file; WCS not updated.")
                 return np.nan
             head_path = head_candidates[0]
-            logger.info("SCAMP produced .head file: %s", head_path)
+            logger.debug("SCAMP produced .head file: %s", head_path)
 
             try:
                 wcs_header = fits.Header.fromtextfile(head_path)
@@ -1707,7 +1707,7 @@ class WCSSolver:
         If matched points are available, select by lowest median residual and then
         lowest p95 residual (arcsec). Otherwise return the first successful trial.
         """
-        optimize_scamp = bool(wcs_cfg.get("scamp_optimize_after_solve", True))
+        optimize_scamp = bool(wcs_cfg.get("scamp_optimize_after_solve", False))
         trials = [("base", dict(wcs_cfg))]
         if optimize_scamp and matched_points is not None:
             trials = _build_scamp_optimization_trials(wcs_cfg)
@@ -1891,7 +1891,7 @@ class WCSSolver:
         Astrometry.net solve-field.
         """
         wcs_cfg = self.default_input.get("wcs") or {}
-        redo_requested = bool(wcs_cfg.get("redo_wcs", False))
+        redo_requested = bool(wcs_cfg.get("redo_wcs", True))
         projection_type = str(wcs_cfg.get("projection_type", "TPV")).strip().upper()
         if projection_type not in {"TPV", "SIP"}:
             logger.warning(
@@ -2193,7 +2193,7 @@ class WCSSolver:
             ]
             # Optional: request more detected objects for solve-field indexing/matching.
             # Larger values can improve robustness in sparse fields at modest runtime cost.
-            objs = wcs_cfg.get("objs", None)
+            objs = wcs_cfg.get("objs", 1200)
             if objs is not None:
                 try:
                     n_objs = int(objs)
@@ -2222,7 +2222,7 @@ class WCSSolver:
             else:
                 logger.info(
                     "solve-field: omitting --crpix-center (solver reference pixel; "
-                    "often closer to instrument WCS — set wcs.solve_field_crpix_center: true for legacy)"
+                    "often closer to instrument WCS - set wcs.solve_field_crpix_center: true for legacy)"
                 )
             # Tweak order(s) for solve-field. Can be a single int or a list.
             # Example YAML:
@@ -2231,7 +2231,7 @@ class WCSSolver:
             tweak_orders = [0]
             try:
                 to_list = wcs_cfg.get("solve_field_tweak_orders", None)
-                to_single = wcs_cfg.get("solve_field_tweak_order", None)
+                to_single = wcs_cfg.get("solve_field_tweak_order", 3)
                 if isinstance(to_list, (list, tuple)) and len(to_list) > 0:
                     parsed = [int(v) for v in to_list]
                     tweak_orders = [v for v in parsed if v >= 0]
@@ -2482,7 +2482,7 @@ class WCSSolver:
                     nx = int(self.image.shape[1])
                     ny = int(self.image.shape[0])
                     max_pts_diag = int(
-                        wcs_cfg.get("fit_wcs_from_points_max_points", 500)
+                        wcs_cfg.get("fit_wcs_from_points_max_points", 1000)
                     )
                     diag_points = _extract_corr_points_from_solve_field(
                         corr_temp, max_points=max_pts_diag
@@ -2602,7 +2602,10 @@ class WCSSolver:
                     dra_arcsec = (crval1_sv - crval1_in) * 3600.0
                     ddec_arcsec = (crval2_sv - crval2_in) * 3600.0
                     logger.info(
-                        "WCS header delta: CTYPE (%s,%s) -> (%s,%s); dCRPIX=(%.3f, %.3f) px; dCRVAL=(%.3f, %.3f) arcsec",
+                        "WCS header delta:\n"
+                        "\tCTYPE: (%s, %s) -> (%s, %s)\n"
+                        "\tdCRPIX=(%g, %g) px\n"
+                        "\tdCRVAL=(%g, %g) arcsec",
                         ctype1_in,
                         ctype2_in,
                         ctype1_sv,
@@ -2701,7 +2704,7 @@ class WCSSolver:
                 # Optional behavior (option 1): preserve the *input* non-linear distortion model
                 # (e.g. instrument TPV/PV polynomials) and only update linear terms from the solver.
                 preserve_distortion = bool(
-                    wcs_cfg.get("preserve_distortion_on_redo", True)
+                    wcs_cfg.get("preserve_distortion_on_redo", False)
                 )
                 if redo_requested and preserve_distortion:
                     logger.info(

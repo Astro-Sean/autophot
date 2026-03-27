@@ -318,7 +318,7 @@ class Catalog:
         archive_retries = int(cat_cfg.get("gaia_archive_max_retries", 3))
         retry_base_delay = float(cat_cfg.get("gaia_archive_retry_base_delay_sec", 2.0))
         xp_order = str(cat_cfg.get("gaia_xp_order_by", "brightness")).strip().lower()
-        xp_show_progress = bool(cat_cfg.get("gaia_xp_show_progress", True))
+        xp_show_progress = bool(cat_cfg.get("gaia_xp_show_progress", False))
         prefetch_factor = int(cat_cfg.get("gaia_nearest_prefetch_factor", 50))
         prefetch_min = int(cat_cfg.get("gaia_nearest_prefetch_min", 500))
         prefetch_max = int(cat_cfg.get("gaia_nearest_prefetch_max", 10000))
@@ -342,7 +342,7 @@ class Catalog:
 
         try:
             logger.info(
-                "Querying Gaia DR3 (synthetic photometry, SQL TOP %d → target %d "
+                "Querying Gaia DR3 (synthetic photometry, SQL TOP %d -> target %d "
                 "sources; paced archive: pause %.2fs before/after ADQL)...",
                 sql_top,
                 max_sources,
@@ -718,7 +718,7 @@ class Catalog:
                     target_name = "target"
             else:
                 if "Unknown" not in target_name:
-                    target_name = self.input_yaml.get("target_name", "target")
+                    target_name = self.input_yaml.get("target_name", "Transient")
 
             # Set default custom catalog path if not provided
             if not catalog_custom_fpath:
@@ -1216,17 +1216,11 @@ class Catalog:
                     outputCatalog["x_pix"] = np.nan
                     outputCatalog["y_pix"] = np.nan
 
-            # --- Handle HST mode filtering ---
-            if not self.input_yaml.get("HST_mode", False):
-                image_filter = self.input_yaml["imageFilter"]
-                for col in [image_filter, f"{image_filter}_err"]:
-                    if (
-                        col in catalog_keywords
-                        and catalog_keywords[col] in selectedCatalog
-                    ):
-                        outputCatalog[col] = selectedCatalog[
-                            catalog_keywords[col]
-                        ].values
+            # Populate photometric band columns for the current filter.
+            image_filter = self.input_yaml["imageFilter"]
+            for col in [image_filter, f"{image_filter}_err"]:
+                if col in catalog_keywords and catalog_keywords[col] in selectedCatalog:
+                    outputCatalog[col] = selectedCatalog[catalog_keywords[col]].values
 
             # --- Retrieve all available filters ---
             baseDatabase = os.path.join(
@@ -1627,7 +1621,7 @@ class Catalog:
 
         # Set default target name if not provided
         if not target_name:
-            target_name = self.input_yaml.get("target_name", "target")
+            target_name = self.input_yaml.get("target_name", "Transient")
 
         # Generate file name for the catalog
         fname = f"{target_name}_r_{radius}arcmins_CUSTOM.csv".replace("", "")

@@ -66,7 +66,7 @@ from photutils.background import (
 from photutils.background.interpolators import BkgZoomInterpolator, BkgIDWInterpolator
 from photutils.segmentation import detect_threshold, detect_sources
 
-from scipy.ndimage import binary_dilation, uniform_filter, label as ndi_label
+from scipy.ndimage import binary_dilation, uniform_filter, gaussian_filter, label as ndi_label
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # --- Local ---
@@ -961,7 +961,7 @@ class BackgroundSubtractor:
         # Fast mode: lighter masking and somewhat coarser mesh for speed.
         if fast_mode:
             self.logger.info(
-                "Background: fast_mode=True – using lighter masking and coarser mesh for speed."
+                "Background: fast_mode=True - using lighter masking and coarser mesh for speed."
             )
             params["n_iterations"] = max(1, min(params["n_iterations"], 2))
             params["dilate_factor"] = min(params["dilate_factor"], 2.0)
@@ -1008,7 +1008,7 @@ class BackgroundSubtractor:
         if fast_mode and global_interpolator == "idw":
             global_interpolator = "zoom"
             self.logger.info(
-                "Background: fast_mode=True – using zoom interpolator (IDW is slow on large images)."
+                "Background: fast_mode=True - using zoom interpolator (IDW is slow on large images)."
             )
         global_interp_order = int(cfg_bkg.get("global_interp_order", 3))
         clip_maxiters = int(cfg_bkg.get("global_sigma_clip_maxiters", 10))
@@ -1312,6 +1312,46 @@ class BackgroundSubtractor:
             exclude_percentile=exclude_percentile,
         )
 
+        # Optional: damp Background2D interpolation overshoot near masked regions.
+        # This reduces "bowls/rings" around bright sources/galaxy masks caused by
+        # spline/zoom interpolation across large masked holes.
+        try:
+            cfg_bkg = (self.config.get("background", {}) or {}) if isinstance(self.config, dict) else {}
+            if bool(cfg_bkg.get("global_mask_edge_flatten", False)) and mask is not None:
+                # Radius (px) around masks to replace with a smoothed estimate.
+                raw_r_flat = cfg_bkg.get("global_mask_edge_flatten_radius_px", None)
+                r_flat = float(raw_r_flat) if raw_r_flat is not None else 0.0
+                if not np.isfinite(r_flat) or r_flat <= 0:
+                    # Default: ~1 FWHM (>=2 px).
+                    r_flat = max(2.0, float(fwhm_pixels) if fwhm_pixels is not None else 3.0)
+
+                m = np.asarray(mask, dtype=bool)
+                bkg = np.asarray(bkg_surface, dtype=float)
+
+                # Distance-to-mask band without an expensive distance transform:
+                # just grow the mask by r_flat pixels and correct only the ring.
+                grow = binary_dilation(m, structure=_disk_structuring_element(int(np.ceil(r_flat))))
+                band = grow & (~m)
+
+                # Smooth background using only unmasked pixels.
+                bkg_u = bkg.copy()
+                bkg_u[m] = np.nan
+                w = np.isfinite(bkg_u).astype(float)
+                # Gaussian smoothing + normalization by weights.
+                raw_sig = cfg_bkg.get("global_mask_edge_flatten_sigma_px", None)
+                sig = float(raw_sig) if raw_sig is not None else (float(r_flat) / 2.0)
+                sig = max(0.8, float(sig))
+                num = gaussian_filter(np.nan_to_num(bkg_u, nan=0.0), sigma=sig, mode="nearest")
+                den = gaussian_filter(w, sigma=sig, mode="nearest")
+                smooth = num / np.maximum(den, 1e-12)
+
+                if np.any(band) and np.any(np.isfinite(smooth[band])):
+                    bkg = bkg.copy()
+                    bkg[band] = smooth[band]
+                    bkg_surface = bkg
+        except Exception:
+            pass
+
         self.logger.info(
             f"Background median {bkg_median:.3e}  RMS mean {np.nanmean(bkg_rms):.3e}"
         )
@@ -1385,15 +1425,15 @@ class BackgroundSubtractor:
         )
         # Default to a finer mesh for local transient fits so the cutout background
         # is as flat as possible for PSF measurement.
-        local_mesh_scale = float(bcfg.get("local_mesh_scale", 1.0))
+        local_mesh_scale = float(bcfg.get("local_mesh_scale", 0.8))
         local_region_fraction_limit = float(
             bcfg.get("local_region_fraction_limit", 0.15)
         )
         local_min_box = int(bcfg.get("local_min_box", 6))
         local_nsigma = float(bcfg.get("local_source_mask_nsigma", 5.0))
         local_npixels = int(bcfg.get("local_source_mask_npixels", 7))
-        local_mask_iterations = int(bcfg.get("local_source_mask_iterations", 1))
-        local_exclude_percentile = float(bcfg.get("local_exclude_percentile", 90.0))
+        local_mask_iterations = int(bcfg.get("local_source_mask_iterations", 2))
+        local_exclude_percentile = float(bcfg.get("local_exclude_percentile", 95.0))
         local_sigma = float(bcfg.get("local_sigma_clip", 3.0))
         local_sigma_maxiters = int(bcfg.get("local_sigma_clip_maxiters", 10))
         local_filter_size_max = bcfg.get("local_filter_size_max", 3)
@@ -1520,6 +1560,39 @@ class BackgroundSubtractor:
             _, local_med, _ = sigma_clipped_stats(cutout, sigma=3.0, mask=source_mask)
             bkg_surface_local = np.full_like(cutout, local_med, dtype=float)
 
+        # ---- Guard against negative "bowls" around the target ----
+        # Even with the core masked, interpolation can overshoot near the masked
+        # region and produce an artificial negative bowl/ring after subtraction.
+        # To stabilize targeted photometry, flatten the background model in the
+        # central region to match a robust local ring level outside the exclusion.
+        if exclude_inner_radius and exclude_inner_radius > 0:
+            try:
+                cy = float(y0 - y_min)
+                cx = float(x0 - x_min)
+                yy, xx = np.mgrid[0 : cutout.shape[0], 0 : cutout.shape[1]]
+                rr = np.hypot(xx - cx, yy - cy)
+                rin = float(exclude_inner_radius)
+                ring_width = max(2.0, float(fwhm_pixels))
+
+                # Use a reference ring just outside the exclusion to estimate
+                # the local background level, but sample it slightly farther out
+                # to avoid the steepest interpolation curvature right at the edge.
+                ring_ref = (rr > (rin + ring_width)) & (rr <= (rin + 2.0 * ring_width))
+                ring_ref &= ~source_mask
+                ring_ref &= np.isfinite(bkg_surface_local) & np.isfinite(cutout)
+
+                # Flatten the model inside this radius. This is where "bowls"
+                # are visually obvious and most damaging for PSF/aperture fits.
+                r_flat = rin + ring_width
+                flat_region = rr <= float(r_flat)
+
+                if np.any(flat_region) and np.any(ring_ref):
+                    ring_level = float(np.nanmedian(bkg_surface_local[ring_ref]))
+                    bkg_surface_local = np.asarray(bkg_surface_local, dtype=float)
+                    bkg_surface_local[flat_region] = ring_level
+            except Exception:
+                pass
+
         # ---- Subtract locally and insert back ----
         corrected_cutout = cutout - bkg_surface_local
         image_sub = image.copy()
@@ -1567,7 +1640,7 @@ class BackgroundSubtractor:
         mask=None,
     ) -> None:
         arrays = [image, background, rms, subtracted]
-        titles = ["Original", "Background", "Background Noise RMS", "Subtracted"]
+        titles = ["Science", "Background", "Noise RMS", "Subtracted"]
         interval = ZScaleInterval()
 
         fig, axes = plt.subplots(1, 4, figsize=set_size(540, 1))
@@ -1629,7 +1702,7 @@ class BackgroundSubtractor:
         mask=None,
     ) -> None:
         arrays = [cutout, background, subtracted]
-        titles = ["Cutout", "Background", "Subtracted"]
+        titles = ["Science", "Background", "Subtracted"]
         interval = ZScaleInterval()
 
         fig, axes = plt.subplots(1, 3, figsize=set_size(540, 1))
@@ -1688,4 +1761,4 @@ class BackgroundSubtractor:
         cbar = fig.colorbar(im, cax=cax, orientation="horizontal")
         cbar.ax.xaxis.set_ticks_position("top")
         cbar.ax.xaxis.set_label_position("top")
-        cbar.set_label(f"{label} Counts")
+        cbar.set_label(str(label))

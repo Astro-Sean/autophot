@@ -24,7 +24,7 @@ def _format_gaia_source_id(val: Any) -> str:
     Stable string ID for cross-matching TAP rows to GaiaXPy output.
 
     Gaia ``source_id`` is a 64-bit integer; if it becomes ``float64`` in pandas,
-    string conversion can round and break joins — prefer integer paths.
+    string conversion can round and break joins - prefer integer paths.
     """
     if val is None:
         return ""
@@ -90,11 +90,11 @@ class GaiaCurveCatalogBuilder:
     @staticmethod
     def curve_wavelength_axis_to_nm(wl_raw: np.ndarray) -> Tuple[np.ndarray, str]:
         """
-        Map filter curve wavelengths to nanometres for overlap with Gaia XP (≈330–1050 nm).
+        Map filter curve wavelengths to nanometres for overlap with Gaia XP (~330-1050 nm).
 
-        Files may list **Angstrom** (typical SVO / instrument: ~3000–11000 Å) or **nm**
-        (~300–1100). Heuristic: if max wavelength > 2500, treat values as Å and divide
-        by 10; otherwise assume they are already nm. Mis-classifying Å as nm was the
+        Files may list **Angstrom** (typical SVO / instrument: ~3000-11000 A) or **nm**
+        (~300-1100). Heuristic: if max wavelength > 2500, treat values as A and divide
+        by 10; otherwise assume they are already nm. Mis-classifying A as nm was the
         main cause of all-NaN synthetic mags (no spectral overlap after scaling).
         """
         wl_raw = np.asarray(wl_raw, dtype=float)
@@ -102,17 +102,17 @@ class GaiaCurveCatalogBuilder:
         w_min = float(np.nanmin(wl_raw))
         if w_max > 2500.0:
             curve_nm = wl_raw / 10.0
-            note = f"wavelengths interpreted as Angstrom (raw {w_min:.1f}–{w_max:.1f} Å)"
+            note = f"wavelengths interpreted as Angstrom (raw {w_min:.1f}-{w_max:.1f} A)"
         else:
             curve_nm = wl_raw.copy()
-            note = f"wavelengths interpreted as nanometres ({w_min:.1f}–{w_max:.1f} nm)"
+            note = f"wavelengths interpreted as nanometres ({w_min:.1f}-{w_max:.1f} nm)"
         return curve_nm, note
 
     @staticmethod
     def read_curve(curve_path: Path) -> Tuple[np.ndarray, np.ndarray]:
         """
         Read a curve file with two numeric columns:
-            wavelength (Angstrom **or** nm — see :meth:`curve_wavelength_axis_to_nm`),
+            wavelength (Angstrom **or** nm - see :meth:`curve_wavelength_axis_to_nm`),
             throughput (arbitrary positive)
         """
         wl: List[float] = []
@@ -307,9 +307,9 @@ class GaiaCurveCatalogBuilder:
         curve_throughput: np.ndarray,
     ) -> Tuple[float, float]:
         """
-        AB magnitude and approximate 1σ magnitude error from band integration.
+        AB magnitude and approximate 1-sigma magnitude error from band integration.
 
-        Uses GaiaXPy ``flux_error`` (W m^-2 nm^-1), propagated through the same f_ν
+        Uses GaiaXPy ``flux_error`` (W m^-2 nm^-1), propagated through the same f_nu
         mapping and trapezoidal band average as the magnitude. Bin errors are treated
         as independent (ignores covariance). Returns ``(nan, nan)`` if the band
         integral is undefined; ``mag_err`` is ``nan`` if ``flux_err_w_m2_nm`` is
@@ -440,7 +440,7 @@ class GaiaCurveCatalogBuilder:
             curve_nm, wl_note = self.curve_wavelength_axis_to_nm(wl_raw)
             loaded_curves[band] = (curve_nm, tr)
             self.logger.info(
-                "Loaded curve for %s from %s — %s; on XP grid → %.1f–%.1f nm.",
+                "Loaded curve for %s from %s - %s; on XP grid -> %.1f-%.1f nm.",
                 band,
                 path,
                 wl_note,
@@ -642,8 +642,8 @@ class GaiaCurveCatalogBuilder:
                 self.logger.warning(
                     "Gaia curve-map catalog build produced %d row(s) but no finite "
                     "synthetic magnitudes for any requested band(s): %s. "
-                    "Likely causes: (1) curve wavelength units misinterpreted (Å vs nm), "
-                    "(2) no overlap with Gaia XP spectra (~330–1050 nm), "
+                    "Likely causes: (1) curve wavelength units misinterpreted (A vs nm), "
+                    "(2) no overlap with Gaia XP spectra (~330-1050 nm), "
                     "(3) GaiaXPy output format changed (flux column names).",
                     n,
                     ", ".join(bad_bands),
@@ -651,7 +651,7 @@ class GaiaCurveCatalogBuilder:
         out_path = Path(out_csv)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_df.to_csv(out_path, index=False)
-        self.logger.info("Wrote %d rows to %s", len(out_df), out_path)
+        self.logger.debug("Curve-map catalog written: %d rows -> %s", len(out_df), out_path)
         return out_df
 
 
