@@ -678,7 +678,7 @@ class Limits:
                 completeness_target = 0.5
 
             logger.info(
-                "Injected limiting magnitude: recovery_method=%s, completeness_target=%.2f (Harris 1990 definition)",
+                "Injected limiting magnitude: recovery_method=%s, completeness_target=%.2f",
                 str(recovery_method),
                 float(completeness_target),
             )
@@ -1075,7 +1075,9 @@ class Limits:
                 app_str = ""
                 try:
                     if zeropoint is not None and np.isfinite(float(zeropoint)):
-                        app_str = f" ({float(zeropoint) + float(inject_lmag):.3f} app)"
+                        app_str = (
+                            f" ({float(zeropoint) + float(inject_lmag):.3f} apparent)"
+                        )
                 except Exception:
                     app_str = ""
                 logger.info(
@@ -1338,7 +1340,7 @@ class Limits:
             ax.set_ylabel("Recovery fraction")
             ax.set_ylim(-0.05, 1.05)
             ax.invert_xaxis()
-            ax.legend(loc="lower left", fontsize=7)
+            ax.legend(loc="lower right", fontsize=7, frameon=False)
             fig.tight_layout()
             fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor="white")
             plt.close(fig)
@@ -1472,7 +1474,7 @@ class Limits:
         ax.set_ylabel(f"Recovery fraction (beta >= {float(DETECTION_BETA_THRESH):.2g})")
         ax.set_ylim(-0.05, 1.05)
         ax.invert_xaxis()
-        ax.legend(loc="lower left", fontsize=7)
+        ax.legend(loc="lower right", fontsize=7, frameon=False)
 
         # Optional apparent-magnitude secondary axis.
         if zeropoint is not None:
