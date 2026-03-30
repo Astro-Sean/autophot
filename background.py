@@ -1395,6 +1395,16 @@ class BackgroundSubtractor:
         Fit and subtract a local 2-D background surface around a target.
 
         Uses iterative masking and spline interpolation for a smooth result.
+
+        Returns
+        -------
+        image_sub, bkg_surface_local, bkg_rms_full, nn_meta
+
+        ``nn_meta`` is ``{"lift": float, "box": tuple|None}``: uniform DC added to
+        the subtracted cutout when ``local_nonnegative_target_offset`` is enabled
+        (``box`` is ``(y_min, y_max, x_min, x_max)`` in full-image indices). Use
+        this to revert that shift for analyses that must match the raw difference
+        image (e.g. injected limiting magnitude).
         """
         ny, nx = image.shape
         x0, y0 = int(np.round(x0)), int(np.round(y0))
@@ -1443,10 +1453,9 @@ class BackgroundSubtractor:
         local_box_size_override = bcfg.get("local_box_size", None)
         local_filter_size_override = bcfg.get("local_filter_size", None)
 
-        # Inner exclusion radius: ensure the target core/PSF is never used for
-        # background estimation. Default to 2.5*FWHM when not provided.
-        if exclude_inner_radius is None:
-            exclude_inner_radius = 2.5 * float(fwhm_pixels)
+        # Inner exclusion radius: optional. This masks the target core/PSF so it is
+        # not used for background estimation. Default is OFF unless explicitly
+        # requested by the caller (exclude_inner_radius passed in).
         exclude_inner_radius = (
             float(exclude_inner_radius) if exclude_inner_radius is not None else 0.0
         )
@@ -1510,8 +1519,7 @@ class BackgroundSubtractor:
             n_iterations=local_mask_iterations,
         )
 
-        # Mask the target core region explicitly so the background estimator never
-        # tries to model it (prevents "holes"/oversubtraction around transients).
+        # Optional: mask the target core region explicitly.
         if exclude_inner_radius and exclude_inner_radius > 0:
             cy = float(y0 - y_min)
             cx = float(x0 - x_min)
@@ -1594,7 +1602,129 @@ class BackgroundSubtractor:
                 pass
 
         # ---- Subtract locally and insert back ----
-        corrected_cutout = cutout - bkg_surface_local
+        bkg_surface_local = np.asarray(bkg_surface_local, dtype=float)
+        corrected_cutout = np.asarray(cutout, dtype=float) - bkg_surface_local
+
+        # ---- Optional: raise corrected cutout to a floor statistic ----
+        # This is a target-photometry aid only. We can enforce either:
+        # - a floor on the *minimum* finite pixel (strong; clamps all negatives), or
+        # - a floor on the *median* of finite, non-masked pixels (gentler; keeps some negatives).
+        #
+        # We return `nn_meta` so downstream code can optionally track/revert the lift.
+        cutout_nonneg_lift = 0.0
+        nn_enabled_cfg = None
+        try:
+            # Default ON: keep local cutout mean shifted positive unless explicitly disabled.
+            nn_enabled_cfg = bcfg.get("local_nonnegative_target_offset", True)
+            enforce_nn_cutout = bool(nn_enabled_cfg)
+        except Exception:
+            enforce_nn_cutout = True
+            nn_enabled_cfg = True
+        if enforce_nn_cutout:
+            try:
+                cut_floor = float(bcfg.get("local_cutout_min_value", 0.0))
+            except Exception:
+                cut_floor = 0.0
+            if not np.isfinite(cut_floor):
+                cut_floor = 0.0
+
+            try:
+                floor_stat = str(bcfg.get("local_cutout_floor_stat", "median")).strip().lower()
+            except Exception:
+                floor_stat = "median"
+            if floor_stat not in {"median", "min"}:
+                floor_stat = "median"
+
+            # Optional: derive a floor from an annulus around the target.
+            # Requirement: local background median (background-like pixels) >= k * annulus_std.
+            # This is intended for difference images where local subtraction can drive the
+            # background near/below zero at the target.
+            annulus_std = np.nan
+            try:
+                ann_k = float(bcfg.get("local_cutout_annulus_sigma_mult", 5.0))
+            except Exception:
+                ann_k = 5.0
+            try:
+                ann_in_scale = float(bcfg.get("local_cutout_annulus_in_scale_fwhm", 3.0))
+            except Exception:
+                ann_in_scale = 3.0
+            try:
+                ann_width_scale = float(bcfg.get("local_cutout_annulus_width_scale_fwhm", 2.0))
+            except Exception:
+                ann_width_scale = 2.0
+
+            if np.isfinite(ann_k) and ann_k > 0:
+                try:
+                    cy = float(y0 - y_min)
+                    cx = float(x0 - x_min)
+                    yy, xx = np.mgrid[0 : cutout.shape[0], 0 : cutout.shape[1]]
+                    rr = np.hypot(xx - cx, yy - cy)
+                    rin = max(float(exclude_inner_radius or 0.0), ann_in_scale * float(fwhm_pixels))
+                    rout = rin + max(1.0, ann_width_scale * float(fwhm_pixels))
+                    ann = (rr >= rin) & (rr <= rout)
+
+                    # Background-like pixels only: finite, unmasked, in annulus.
+                    ann_good = ann & (~source_mask) & np.isfinite(corrected_cutout)
+                    if np.any(ann_good):
+                        _, _, ann_std = sigma_clipped_stats(
+                            corrected_cutout, sigma=3.0, mask=~ann_good
+                        )
+                        annulus_std = float(ann_std)
+                except Exception:
+                    annulus_std = np.nan
+
+            if np.isfinite(annulus_std) and annulus_std > 0 and np.isfinite(ann_k) and ann_k > 0:
+                # Raise the floor requirement to satisfy the annulus sigma criterion.
+                cut_floor = max(float(cut_floor), float(ann_k) * float(annulus_std))
+
+            # Prefer to compute the statistic on background-like pixels:
+            # exclude masked sources and the explicitly excluded core.
+            finite = np.isfinite(corrected_cutout)
+            good = finite & (~source_mask)
+            if not np.any(good):
+                good = finite
+
+            if np.any(good):
+                if floor_stat == "min":
+                    stat_val = float(np.min(corrected_cutout[good]))
+                else:
+                    stat_val = float(np.nanmedian(corrected_cutout[good]))
+
+                if np.isfinite(stat_val) and stat_val < cut_floor:
+                    lift = cut_floor - stat_val
+                    corrected_cutout = corrected_cutout + lift
+                    bkg_surface_local = bkg_surface_local - lift
+                    cutout_nonneg_lift = float(lift)
+                    self.logger.info(
+                        "Local background: adding a bias of +%.6g to the local cutout residual "
+                        "(and -%.6g to the local background surface) to enforce %s >= %.6g. "
+                        "Annulus_std=%.6g, annulus_k=%.3g.",
+                        lift,
+                        lift,
+                        floor_stat,
+                        cut_floor,
+                        float(annulus_std) if np.isfinite(annulus_std) else np.nan,
+                        float(ann_k) if np.isfinite(ann_k) else np.nan,
+                    )
+                    self.logger.info(
+                        "Local background: subtracted cutout %s=%.6g; "
+                        "raised cutout by %.6g so %s >= %.6g on %d pixels.",
+                        floor_stat,
+                        stat_val,
+                        lift,
+                        floor_stat,
+                        cut_floor,
+                        int(np.sum(good)),
+                    )
+        else:
+            # Make it unambiguous in logs when the DC bias/lift is disabled.
+            try:
+                self.logger.info(
+                    "Local background: DC bias/lift disabled (background.local_nonnegative_target_offset=%r).",
+                    nn_enabled_cfg,
+                )
+            except Exception:
+                pass
         image_sub = image.copy()
         image_sub[y_min:y_max, x_min:x_max] = corrected_cutout
 
@@ -1625,7 +1755,13 @@ class BackgroundSubtractor:
                 source_mask,
             )
 
-        return image_sub, bkg_surface_local, bkg_rms_full
+        nn_meta = {
+            "lift": float(cutout_nonneg_lift),
+            # Always return the box so callers can consistently reuse the same
+            # local-fit cutout for target photometry / limiting magnitude.
+            "box": (int(y_min), int(y_max), int(x_min), int(x_max)),
+        }
+        return image_sub, bkg_surface_local, bkg_rms_full, nn_meta
 
     # =========================================================================
     # Diagnostic plots

@@ -134,9 +134,12 @@ def _measure_worker(args):
         if error is not None:
             ap_err_pix = ap_mask.get_values(error)
 
-        # Remove NaNs and exact zeros (flagged bad pixels).
-        ap_pix = ap_pix[np.isfinite(ap_pix) & (ap_pix != 0.0)]
-        bkg_pix = bkg_pix[np.isfinite(bkg_pix) & (bkg_pix != 0.0)]
+        # Remove NaNs/infs. Do NOT discard exact zeros here: difference images
+        # and locally background-subtracted stamps can legitimately contain 0-valued
+        # pixels, and `Aperture.measure()` already maps 0.0 -> NaN upstream when
+        # zeros are used as an explicit bad-pixel flag in the input image.
+        ap_pix = ap_pix[np.isfinite(ap_pix)]
+        bkg_pix = bkg_pix[np.isfinite(bkg_pix)]
 
         if ap_pix.size == 0 or bkg_pix.size == 0:
             return {"idx": i, "fail_reason": "empty_pixels"}
@@ -161,13 +164,13 @@ def _measure_worker(args):
         if not np.isfinite(raw_aperture_sum):
             return {"idx": i, "fail_reason": "aperture_sum_invalid"}
 
-        # Use effective aperture area from mask when available (subpixel consistency).
-        try:
-            effective_area = float(np.sum(ap_mask.data))
-            if effective_area <= 0 or not np.isfinite(effective_area):
-                effective_area = area
-        except Exception:
-            effective_area = area
+        # IMPORTANT: `photutils.aperture_photometry` (used upstream) integrates
+        # flux with an exact aperture model by default (fractional edge pixels).
+        # The background subtraction must therefore use the same *geometric*
+        # area (pi*r^2), not the integer pixel count from a "center" mask.
+        # Using mask-summed area here can under-subtract background and inflate
+        # fluxes (and breaks "quiet site" selection for injections).
+        effective_area = float(area)
         aperture_bkg = bkg_value_used * effective_area
         aperture_sum = raw_aperture_sum - aperture_bkg
 
@@ -659,10 +662,14 @@ class Aperture:
         annuli_obj = CircularAnnulus(positions, r_in=annulusIN, r_out=annulusOUT)
 
         phot = aperture_photometry(image_e, apertures_obj, error=error).to_pandas()
-        aperture_masks = [
-            ap.to_mask(method="exact", subpixels=15) for ap in apertures_obj
-        ]
-        annulus_masks = [an.to_mask(method="exact", subpixels=15) for an in annuli_obj]
+        # Use unweighted (center) pixel inclusion for consistency across the pipeline.
+        # This avoids fractional-weight median biases and makes AP/PSF background
+        # conventions comparable on difference images.
+        aperture_masks = [ap.to_mask(method="center") for ap in apertures_obj]
+        # Background estimation should use *unweighted* annulus pixels. Using the
+        # "exact" (fractional) masks scales edge pixels by <1 and biases the
+        # annulus median low, which then mis-subtracts sky and confuses diagnostics.
+        annulus_masks = [an.to_mask(method="center") for an in annuli_obj]
 
         n_jobs = _resolve_n_jobs(n_jobs, half_cpus=True)
 
@@ -879,6 +886,41 @@ class Aperture:
         ax_right.fill_betweenx(
             y_range, hy - hy_err, hy + hy_err, color="dodgerblue", alpha=0.3, step="mid"
         )
+
+        # Background level (from annulus median) for reference.
+        # Note: the plotted profiles are mean cuts through the stamp and include
+        # the source, so they will not sit on the background line near the PSF.
+        # This line reflects the local annulus-median background used for AP.
+        try:
+            ann = CircularAnnulus((cx, cy), r_in=float(annulusIN), r_out=float(annulusOUT))
+            # Match the measurement path: use unweighted annulus pixels.
+            ann_mask = ann.to_mask(method="center")
+            bkg_pix = ann_mask.get_values(image)
+            # Match `Aperture.measure()` behavior: it treats exact zeros in the
+            # image as bad-pixel flags by mapping them to NaN upstream.
+            bkg_pix = bkg_pix[np.isfinite(bkg_pix) & (bkg_pix != 0.0)]
+            if bkg_pix.size > 0:
+                bkg_level_raw = float(np.median(bkg_pix))
+                enforce_nn = bool(
+                    (self.input_yaml.get("photometry") or {}).get(
+                        "enforce_nonnegative_local_background", True
+                    )
+                )
+                bkg_level_used = (
+                    max(bkg_level_raw, 0.0) if (enforce_nn and np.isfinite(bkg_level_raw)) else bkg_level_raw
+                )
+
+                kw_bkg_used = dict(color="#FFA500", lw=0.9, ls="--", alpha=0.95)
+                ax_bottom.axhline(bkg_level_used, **kw_bkg_used)
+                ax_right.axvline(bkg_level_used, **kw_bkg_used)
+                # If flooring is enabled and changed the value, show the raw level too.
+                if enforce_nn and np.isfinite(bkg_level_raw) and bkg_level_raw < 0:
+                    kw_bkg_raw = dict(color="#FFA500", lw=0.7, ls=":", alpha=0.8)
+                    ax_bottom.axhline(bkg_level_raw, **kw_bkg_raw)
+                    ax_right.axvline(bkg_level_raw, **kw_bkg_raw)
+                
+        except Exception:
+            pass
 
         ax_bottom.set_xlabel("X position (pixels)")
         ax_bottom.set_ylabel(r"Counts [$e^-$]")

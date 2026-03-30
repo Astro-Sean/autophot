@@ -311,8 +311,13 @@ default_input:
     inject_max_radius_fwhm: 6.0 # float --- Maximum injection radius from the transient (in FWHM units) when searching for quiet injection sites.
     initial_guess_n_samples: 24 # int --- Number of annulus probe positions used to estimate the injected-limit initial instrumental magnitude.
     initial_guess_mag_percentile: 75.0 # float --- Faint-side percentile of annulus instrumental magnitudes used for injected-limit initial guess.
+    initial_guess_sigma_mult: 5.0 # float --- Initial injected-limit guess uses flux ~= (this * sigma_sky * sqrt(Npix)) from annulus probe measurements; converted to instrumental magnitude.
     scale_growth_factor: 1.5 # float --- If no quiet injection sites are found, multiply runtime `scale` by this factor and retry (up to scale_growth_max_px).
     scale_growth_max_px: 600 # int --- Maximum runtime `scale` (pixels) allowed during limiting-magnitude quiet-site retries.
+    injection_n_sites: 5 # int --- Number of candidate injection sites around the target used for injection/recovery trials (more = smoother completeness curve; slower).
+    injection_jitter_repetitions: 5 # int --- Sub-pixel jitter repetitions per site per magnitude (more = smoother completeness curve; slower).
+    completeness_plot_span_mag: 0.8 # float --- Half-span (mag) around the adopted limit used for the completeness plot sampling range (smaller = fewer bins far from transition).
+    completeness_plot_nmags: 9 # int --- Number of magnitudes sampled across completeness_plot_span_mag for the completeness bar chart.
     n_jobs: 1 # int --- Worker processes for injection/recovery and background-limit trials (per-image). 1 = serial; >1 can speed up Monte Carlo trials.
 
   alignment:
@@ -407,6 +412,12 @@ default_input:
     local_exclude_percentile: 95.0 # float --- Percentile threshold to exclude brightest pixels from background fit.
     local_sigma_clip: 3.0 # float --- Sigma clipping threshold for background statistics.
     local_sigma_clip_maxiters: 10 # int --- Maximum sigma-clipping iterations.
+    local_nonnegative_target_offset: True # bool --- If True, after local subtraction in the cutout, add a uniform constant to the residual (and subtract the same from the returned local surface) so a chosen cutout statistic meets a floor (see local_cutout_floor_stat/local_cutout_min_value). This is a robustness hack for difference images. The pipeline removes this constant again for AP/PSF/limiting-magnitude measurements to avoid biasing fluxes.
+    local_cutout_floor_stat: median # str --- Which statistic to floor in the locally subtracted cutout: "median" (recommended; allows some negatives) or "min" (forces all finite pixels >= floor; stronger bias).
+    local_cutout_min_value: 0.0 # float --- Floor value for the chosen statistic in the locally subtracted cutout. Use 0.0 for nonnegative median; small positive if you truly require >0.
+    local_cutout_annulus_sigma_mult: 5.0 # float --- Additional requirement: raise the local cutout floor so the background-like median is >= (this * annulus_std), where annulus_std is sigma-clipped std in an annulus around the target on the locally subtracted cutout.
+    local_cutout_annulus_in_scale_fwhm: 3.0 # float --- Inner radius for the annulus_std estimate, in units of FWHM (pixels). The effective inner radius is max(exclude_inner_radius, this*FWHM).
+    local_cutout_annulus_width_scale_fwhm: 2.0 # float --- Width of the annulus used for annulus_std estimate, in units of FWHM (pixels).
 
   zeropoint:
     min_source_no: 3 # int --- Minimum number of sources required for color-term fitting.

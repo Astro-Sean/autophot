@@ -3862,21 +3862,85 @@ def run_photometry():
                     e,
                 )
 
+        # Optional uniform DC lift in the local subtract box (see `background:` YAML).
+        # We also reuse the *same* local-fit cutout for target AP, target PSF,
+        # and injected limiting magnitude so these measurements are consistent.
+        local_cutout_nonneg_lift = 0.0
+        local_cutout_box = None
         if input_yaml["photometry"].get("remove_local_surface", 3):
+            # Ensure the local-cutout DC lift is enabled (shifted-mean mode).
+            try:
+                if "background" not in input_yaml or input_yaml["background"] is None:
+                    input_yaml["background"] = {}
+                input_yaml["background"]["local_nonnegative_target_offset"] = True
+            except Exception:
+                pass
             bg_remover = BackgroundSubtractor(input_yaml)
             # Use a slightly larger exclusion radius around the target so that
             # extended host light is not pulled into the local background model.
-            image, bkg_map, background_rms = bg_remover.remove_local_surface(
+            image, bkg_map, background_rms, nn_meta = bg_remover.remove_local_surface(
                 image,
                 x0=bg_target_x_pix,
                 y0=bg_target_y_pix,
                 box_half_size=int(25 * ImageFWHM),
                 fwhm_pixels=ImageFWHM,
-                exclude_inner_radius=2.5 * ImageFWHM,
+                exclude_inner_radius=None,
             )
+            try:
+                local_cutout_nonneg_lift = float(nn_meta.get("lift", 0.0) or 0.0)
+                local_cutout_box = nn_meta.get("box")
+            except Exception:
+                local_cutout_nonneg_lift = 0.0
+                local_cutout_box = None
         # remove_local_surface signature:
         # image, x0, y0, box_half_size=100, fwhm_pixels=None,
         # exclude_inner_radius=8, dilate_factor=2.0
+
+        # -------------------------------------------------------------------------
+        # Build a shared target cutout for AP / PSF / limiting magnitude
+        # -------------------------------------------------------------------------
+        target_cutout = None
+        target_cutout_rms = None
+        cutout_x0 = 0
+        cutout_y0 = 0
+        cutout_target_x = float(bg_target_x_pix)
+        cutout_target_y = float(bg_target_y_pix)
+        try:
+            if local_cutout_box is not None:
+                y0b, y1b, x0b, x1b = [int(v) for v in local_cutout_box]
+                cutout_y0, cutout_x0 = int(y0b), int(x0b)
+                target_cutout = np.asarray(image[y0b:y1b, x0b:x1b], dtype=float)
+                # Background RMS cutout (if available) so error models match.
+                if background_rms is not None and np.ndim(background_rms) == 2:
+                    target_cutout_rms = np.asarray(
+                        background_rms[y0b:y1b, x0b:x1b], dtype=float
+                    )
+                cutout_target_x = float(bg_target_x_pix) - float(x0b)
+                cutout_target_y = float(bg_target_y_pix) - float(y0b)
+        except Exception:
+            target_cutout = None
+            target_cutout_rms = None
+
+        # If a uniform DC lift was applied to make the cutout background nonnegative,
+        # keep it in place for measurements so the *mean level* is shifted positive.
+        # Flux remains unbiased because both AP and PSF subtract a local background
+        # estimated from an annulus (the constant cancels), but Poisson terms avoid
+        # pathological negative-count regimes in some noise models.
+        if (
+            target_cutout is not None
+            and np.isfinite(local_cutout_nonneg_lift)
+            and float(local_cutout_nonneg_lift) != 0.0
+        ):
+            logging.info(
+                "Target cutout: keeping uniform bias level %.6g in measurement image (shifted mean enabled).",
+                float(local_cutout_nonneg_lift),
+            )
+
+        # Fallback: if local cutout wasn't built, use full image as before.
+        image_for_target = target_cutout if target_cutout is not None else image
+        background_rms_for_target = (
+            target_cutout_rms if target_cutout_rms is not None else background_rms
+        )
 
         # =============================================================================
         # Targeted Photometry
@@ -3891,10 +3955,12 @@ def run_photometry():
         detection_limit = input_yaml["photometry"].get("detection_limit", 3)
 
         # Prepares initial target coordinates.
+        # Run target AP/PSF on the shared cutout when available.
+        # We'll shift fitted positions back to full-image pixels afterwards.
         TargetPosition = pd.DataFrame(
             {
-                "x_pix": [target_x_pix],
-                "y_pix": [target_y_pix],
+                "x_pix": [cutout_target_x if target_cutout is not None else target_x_pix],
+                "y_pix": [cutout_target_y if target_cutout is not None else target_y_pix],
             }
         )
         logging.info(
@@ -3909,15 +3975,42 @@ def run_photometry():
         # Performs aperture photometry at the refined position.
         AperturePhotometry = Aperture(
             input_yaml=input_yaml,
-            image=image,
+            image=image_for_target,
         )
-        TargetPosition = AperturePhotometry.measure(
-            sources=TargetPosition,
-            plot=True,
-            saveTarget=True,
-            background_rms=background_rms,
-            n_jobs=input_yaml.get('n_jobs',1),
-        )
+        # IMPORTANT: on difference images (and after our local-surface correction/bias),
+        # the local sky in the annulus can legitimately be negative. The default
+        # aperture path floors negative annulus medians to 0 (to protect Poisson
+        # noise models), which will overestimate flux and can disagree with PSF.
+        # For the target cutout photometry we want to subtract the annulus median
+        # as measured (even if negative) to stay consistent with the local model.
+        _old_enforce_nn = None
+        try:
+            _old_enforce_nn = bool(
+                (input_yaml.get("photometry") or {}).get(
+                    "enforce_nonnegative_local_background", True
+                )
+            )
+            if "photometry" not in input_yaml or input_yaml["photometry"] is None:
+                input_yaml["photometry"] = {}
+            input_yaml["photometry"]["enforce_nonnegative_local_background"] = False
+            logging.info(
+                "Target AP: subtracting annulus median as measured (allowing negative local background)."
+            )
+            TargetPosition = AperturePhotometry.measure(
+                sources=TargetPosition,
+                plot=True,
+                saveTarget=True,
+                background_rms=background_rms_for_target,
+                n_jobs=input_yaml.get("n_jobs", 1),
+            )
+        finally:
+            if _old_enforce_nn is not None:
+                try:
+                    input_yaml["photometry"]["enforce_nonnegative_local_background"] = bool(
+                        _old_enforce_nn
+                    )
+                except Exception:
+                    pass
         if np.isfinite(lpi_extra_flux_err) and "flux_AP_err" in TargetPosition.columns:
             try:
                 old = float(TargetPosition["flux_AP_err"].iloc[0])
@@ -3966,7 +4059,7 @@ def run_photometry():
         # Performs PSF fitting on the target position if aperture photometry is not required.
         if not do_aperture_ONLY:
             TargetPosition = PSF(
-                image=image,
+                image=image_for_target,
                 input_yaml=input_yaml,
             ).fit(
                 epsf_model=epsf_model,
@@ -3974,8 +4067,38 @@ def run_photometry():
                 plotTarget=True,
                 forcePhotometry=perform_ForcePhotometry,
                 is_target_fit=True,
-                background_rms=background_rms,
+                background_rms=background_rms_for_target,
             )
+
+        # Debug: log the background levels each method used (helps diagnose
+        # large AP-vs-PSF flux offsets on difference images with biasing).
+        try:
+            ap_bkg_cols = ["local_bkg_raw", "local_bkg_used", "sky_bkg_total", "noiseSky"]
+            psf_bkg_cols = ["local_background", "local_bkg", "background", "bkg"]
+            parts = []
+            for c in ap_bkg_cols:
+                if c in TargetPosition.columns and np.isfinite(TargetPosition[c].iloc[0]):
+                    parts.append(f"{c}={float(TargetPosition[c].iloc[0]):.6g}")
+            for c in psf_bkg_cols:
+                if c in TargetPosition.columns and np.isfinite(TargetPosition[c].iloc[0]):
+                    parts.append(f"{c}={float(TargetPosition[c].iloc[0]):.6g}")
+            if parts:
+                logging.info("Target background debug: %s", "  ".join(parts))
+        except Exception:
+            pass
+
+        # If we used a cutout for the target fit, shift results back to full-image pixels
+        # so downstream logging/output stays consistent.
+        if target_cutout is not None:
+            try:
+                for col in ("x_pix", "y_pix", "x_fit", "y_fit"):
+                    if col in TargetPosition.columns and np.isfinite(TargetPosition[col].iloc[0]):
+                        if col.startswith("x"):
+                            TargetPosition.loc[TargetPosition.index[0], col] = float(TargetPosition[col].iloc[0]) + float(cutout_x0)
+                        else:
+                            TargetPosition.loc[TargetPosition.index[0], col] = float(TargetPosition[col].iloc[0]) + float(cutout_y0)
+            except Exception:
+                pass
 
             if "flags" in TargetPosition:
                 from photutils.psf import decode_psf_flags
@@ -4368,8 +4491,16 @@ def run_photometry():
                 # Creates an instance of the limits class.
                 getDetectionLimits = Limits(input_yaml=input_yaml)
                 try:
-                    # Gets the expanded cutout of the image.
-                    expandedCutout = getDetectionLimits.get_cutout(image=image)
+                    # Use the same shared target cutout used for target AP/PSF (bias kept).
+                    image_for_limiting = target_cutout if target_cutout is not None else image
+                    # If we already have the local-fit cutout, don't re-cut it again
+                    # (Limits.get_cutout uses input_yaml target pixel coords which are
+                    # full-frame and will be out-of-bounds on the cutout array).
+                    if target_cutout is not None:
+                        expandedCutout = np.asarray(target_cutout, dtype=float)
+                    else:
+                        # Gets the expanded cutout of the image.
+                        expandedCutout = getDetectionLimits.get_cutout(image=image_for_limiting)
                     if expandedCutout is None:
                         logging.warning(
                             "getCutout returned None; skipping detection limits."
@@ -4436,21 +4567,56 @@ def run_photometry():
                                 float(beta_limit),
                                 "off" if detection_snr_limit is None else str(detection_snr_limit),
                             )
-                            InjectedLimit = getDetectionLimits.get_injected_limit(
-                                image,
-                                initialGuess=initial_guess,
-                                detection_limit=detection_snr_limit,
-                                detection_cutoff=beta_limit,
-                                position=(
+                            # For consistency, run injection directly on the same image
+                            # passed above (full frame or shared target cutout).
+                            # If we are using the cutout, the injection position must
+                            # be in cutout coordinates (centre near the target).
+                            if target_cutout is not None:
+                                lim_pos = (float(cutout_target_x), float(cutout_target_y))
+                                lim_rms = background_rms_for_target
+                            else:
+                                lim_pos = (
                                     TargetPosition["x_fit"].iloc[0],
                                     TargetPosition["y_fit"].iloc[0],
-                                ),
-                                epsf_model=epsf_model,
-                                background_rms=background_rms,
-                                zeropoint=zeropoint,
-                                plot=True,
-                                n_jobs=lim_n_jobs,
-                            )
+                                )
+                                lim_rms = background_rms
+
+                            # Keep limiting-magnitude recovery consistent with target AP:
+                            # allow negative annulus medians (do not floor to 0) during
+                            # injection/recovery measurements.
+                            _old_enforce_nn_lim = None
+                            try:
+                                _old_enforce_nn_lim = bool(
+                                    (input_yaml.get("photometry") or {}).get(
+                                        "enforce_nonnegative_local_background", True
+                                    )
+                                )
+                                if "photometry" not in input_yaml or input_yaml["photometry"] is None:
+                                    input_yaml["photometry"] = {}
+                                input_yaml["photometry"]["enforce_nonnegative_local_background"] = False
+                                InjectedLimit = getDetectionLimits.get_injected_limit(
+                                    image_for_limiting,
+                                    initialGuess=initial_guess,
+                                    detection_limit=detection_snr_limit,
+                                    detection_cutoff=beta_limit,
+                                    position=lim_pos,
+                                    epsf_model=epsf_model,
+                                    background_rms=lim_rms,
+                                    zeropoint=zeropoint,
+                                    plot=True,
+                                    n_jobs=lim_n_jobs,
+                                    # When we pass the shared local target cutout, treat it as
+                                    # the working image directly (no further Cutout2D extraction).
+                                    precutout=bool(target_cutout is not None),
+                                )
+                            finally:
+                                if _old_enforce_nn_lim is not None:
+                                    try:
+                                        input_yaml["photometry"][
+                                            "enforce_nonnegative_local_background"
+                                        ] = bool(_old_enforce_nn_lim)
+                                    except Exception:
+                                        pass
                             # The injected limiting magnitude search uses
                             # aperture-based recovery (beta_aperture), so for
                             # consistency we also store aperture-based beta for

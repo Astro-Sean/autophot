@@ -41,7 +41,7 @@ from astropy.stats import sigma_clipped_stats, mad_std
 from astropy.nddata import Cutout2D
 from astropy.visualization import ZScaleInterval, ImageNormalize
 from photutils.detection import DAOStarFinder
-from photutils.aperture import CircularAperture
+from photutils.aperture import CircularAperture, CircularAnnulus
 
 from functions import log_warning_from_exception
 
@@ -170,6 +170,10 @@ def _injection_worker(args):
                     epsf_model.evaluate(x=gx, y=gy, flux=1.0, x_0=x0i, y_0=y0i),
                     dtype=float,
                 )
+                # Fit both PSF flux and a constant background level in the stamp:
+                # data ~= flux * psf1 + bkg. This correctly handles any local mean
+                # shift (including the uniform "bias") without forcing background=0
+                # or relying on an annulus estimate.
                 if background_rms is not None:
                     rms = np.asarray(background_rms[y1:y2, x1:x2], dtype=float)
                     var = np.maximum(rms * rms, 1e-30)
@@ -181,11 +185,19 @@ def _injection_worker(args):
                 ok = np.isfinite(data) & np.isfinite(psf1) & np.isfinite(var) & (var > 0)
                 if int(np.count_nonzero(ok)) >= 10:
                     w = 1.0 / var[ok]
-                    num = float(np.sum(psf1[ok] * data[ok] * w))
-                    den = float(np.sum((psf1[ok] ** 2) * w))
-                    if np.isfinite(den) and den > 0:
-                        flux_hat = num / den
-                        flux_err = float(np.sqrt(1.0 / den))
+                    a = np.vstack([psf1[ok].ravel(), np.ones(int(np.count_nonzero(ok)))])  # (2, N)
+                    # Weighted normal equations: (A W A^T)^{-1} A W y
+                    aw = a * w  # broadcast weights across rows
+                    m = aw @ a.T  # 2x2
+                    b = aw @ data[ok].ravel()  # 2,
+                    try:
+                        cov = np.linalg.inv(m)
+                    except Exception:
+                        cov = None
+                    if cov is not None and np.all(np.isfinite(cov)):
+                        theta = cov @ b  # (flux, bkg)
+                        flux_hat = float(theta[0])
+                        flux_err = float(np.sqrt(max(cov[0, 0], 0.0)))
                         if np.isfinite(flux_err) and flux_err > 0:
                             snr_val = flux_hat / flux_err
             except Exception:
@@ -212,6 +224,11 @@ def _injection_worker(args):
 
                 stamp = np.asarray(new_img[y1:y2, x1:x2], dtype=float)
                 gx, gy = np.meshgrid(np.arange(stamp.shape[1]), np.arange(stamp.shape[0]))
+
+                # For EMCEE recovery we do not force background=0. The MCMC fitter
+                # uses an uncertainty model; background offsets are handled via the
+                # local background treatment already applied in Aperture-based beta
+                # and via the PSF flux posterior.
 
                 # Local RMS if available.
                 rms_stamp = None
@@ -357,7 +374,26 @@ class Limits:
             mag_factor = self.input_yaml["limiting_magnitude"]["inject_source_location"]
 
             half = int(np.ceil(mag_factor * fwhm + scale))
-            cutout = Cutout2D(image, position=(tx, ty), size=(2 * half, 2 * half))
+            # If `image` is already a cutout (e.g. the shared target cutout),
+            # the configured full-frame scale can request a region larger than
+            # the provided array. Clamp so Cutout2D never expands beyond bounds.
+            try:
+                ny, nx = int(image.shape[0]), int(image.shape[1])
+                max_half = int(max(1, min(ny, nx) // 2 - 1))
+                half = int(min(max_half, max(1, half)))
+            except Exception:
+                half = int(max(1, half))
+            # Allow partial cutouts when the requested box exceeds the image bounds.
+            # This matters when callers pass an already-extracted local cutout into
+            # limiting-magnitude routines (target_cutout); in that case full-frame
+            # scale parameters can request a larger region than the provided array.
+            cutout = Cutout2D(
+                image,
+                position=(tx, ty),
+                size=(2 * half, 2 * half),
+                mode="partial",
+                fill_value=np.nan,
+            )
             return cutout.data
 
         except Exception as exc:
@@ -435,6 +471,7 @@ class Limits:
         subtraction_ready: bool = False,
         zeropoint: float = None,
         n_jobs: int = None,
+        precutout: bool = False,
     ) -> float:
         """
         Bracket-and-bisect search for the limiting magnitude by injecting
@@ -500,8 +537,12 @@ class Limits:
                 initialGuess = -5.0
 
             # =================================================================
-            # Extract cutouts (science + RMS). For injected limits we may need to
-            # grow the cutout if we cannot find "quiet" injection sites.
+            # Extract cutouts (science + RMS).
+            #
+            # If `precutout=True`, the caller has already provided the cutout
+            # to operate on (e.g. the shared local target cutout). In that case
+            # we must NOT call get_cutout() again, since it uses full-frame scale
+            # parameters and can shrink/pad the provided array.
             # =================================================================
             lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
             growth_factor = float(lim_cfg.get("scale_growth_factor", 1.5))
@@ -527,7 +568,17 @@ class Limits:
                         rms = np.abs(np.asarray(rms, dtype=float))
                 return img, rms
 
-            cutout_img, cutout_rms = _extract_cutouts(scale_used)
+            if bool(precutout):
+                cutout_img = np.asarray(cutout, dtype=float)
+                cutout_rms = (
+                    None
+                    if background_rms is None
+                    else np.abs(np.asarray(background_rms, dtype=float))
+                )
+                # In precutout mode, treat `position` as already in cutout coordinates.
+                # We still recenter internally below to the extracted cutout centre.
+            else:
+                cutout_img, cutout_rms = _extract_cutouts(scale_used)
             if cutout_img is None and growth_factor > 1:
                 # Try a slightly larger cutout if the initial one fails.
                 for _ in range(2):
@@ -535,6 +586,8 @@ class Limits:
                         float(growth_max),
                         max(scale_used + 1.0, scale_used * growth_factor),
                     )
+                    if bool(precutout):
+                        break
                     cutout_img, cutout_rms = _extract_cutouts(scale_used)
                     if cutout_img is not None:
                         break
@@ -558,6 +611,14 @@ class Limits:
                 use_annulus_guess = True
             if use_annulus_guess:
                 try:
+                    # Prefer an S/N-based guess tied to the local background scatter:
+                    # flux_guess ~= k * sigma_sky * sqrt(Npix).
+                    # This is more stable than using a percentile of random annulus mags,
+                    # especially when the background mean is shifted (bias) but scatter is unchanged.
+                    try:
+                        guess_k = float(lim_cfg.get("initial_guess_sigma_mult", 5.0))
+                    except Exception:
+                        guess_k = 5.0
                     probe_n = int((lim_cfg.get("initial_guess_n_samples", 24)))
                     probe_n = max(8, min(probe_n, 72))
                     probe_r = (
@@ -575,25 +636,28 @@ class Limits:
                         background_rms=background_rms,
                         verbose=0,
                     )
-                    mags = np.asarray(probe_meas.get("mag", np.array([])), dtype=float)
-                    mags = mags[np.isfinite(mags)]
-                    if mags.size >= 5:
-                        # Use a faint-side percentile as a rough limit-like seed.
-                        initialGuess = float(
-                            np.nanpercentile(
-                                mags,
-                                float(lim_cfg.get("initial_guess_mag_percentile", 75.0)),
+                    sigma = np.asarray(probe_meas.get("noiseSky", np.array([])), dtype=float)
+                    area = np.asarray(probe_meas.get("area", np.array([])), dtype=float)
+                    ok = np.isfinite(sigma) & (sigma > 0) & np.isfinite(area) & (area > 0)
+                    if int(np.count_nonzero(ok)) >= 5 and np.isfinite(guess_k) and guess_k > 0:
+                        sigma_med = float(np.nanmedian(sigma[ok]))
+                        area_med = float(np.nanmedian(area[ok]))
+                        flux_guess = float(guess_k) * sigma_med * float(np.sqrt(area_med))
+                        if np.isfinite(flux_guess) and flux_guess > 0:
+                            initialGuess = float(mag(flux_guess))
+                            logger.info(
+                                "Injected limiting magnitude: initial guess from %.1f*sigma*sqrt(Npix) = %.2f "
+                                "(sigma=%.3g, Npix=%.1f, N=%d)",
+                                float(guess_k),
+                                float(initialGuess),
+                                float(sigma_med),
+                                float(area_med),
+                                int(np.count_nonzero(ok)),
                             )
-                        )
-                        logger.info(
-                            "Injected limiting magnitude: initial guess from annulus mags = %.2f (N=%d)",
-                            float(initialGuess),
-                            int(mags.size),
-                        )
                     else:
                         logger.info(
-                            "Injected limiting magnitude: annulus initial-guess fallback unavailable (N=%d finite mags); using %.2f",
-                            int(mags.size),
+                            "Injected limiting magnitude: sigma-based initial guess unavailable (N=%d); using %.2f",
+                            int(np.count_nonzero(ok)),
                             float(initialGuess),
                         )
                 except Exception as exc:
@@ -693,7 +757,12 @@ class Limits:
             # Beta is computed using the canonical n=3 aperture formalism so that
             # beta thresholds are comparable across runs (beta=0.5 ~ S/N~3).
             beta_n = 3.0
-            sourceNum = 10
+            # Monte Carlo settings for injection/recovery.
+            # Too few sites/jitters makes the completeness curve look jagged.
+            sourceNum = int(lim_cfg.get("injection_n_sites", 30))
+            sourceNum = max(8, min(sourceNum, 200))
+            redo_default = int(lim_cfg.get("injection_jitter_repetitions", 5))
+            redo_default = max(1, min(redo_default, 20))
             distance_factor = 1.0
             injection_df = pd.DataFrame()
 
@@ -860,11 +929,13 @@ class Limits:
             # =================================================================
             rng = self._rng
 
-            def run_trials_at_mag(m: float, redo: int = 3, pool=None, *, return_flags: bool = False):
+            def run_trials_at_mag(m: float, redo: int = None, pool=None, *, return_flags: bool = False):
                 """
                 Inject at *m* at all sites with *redo* sub-pixel jitter
                 repetitions and return (mean_detection_rate, beta_array[, det_flags]).
                 """
+                redo = int(redo_default if redo is None else redo)
+                redo = max(1, min(redo, 50))
                 dx = rng.random((n_sites, redo)) - 0.5
                 dy = rng.random((n_sites, redo)) - 0.5
                 F = flux_for_mag(m)
@@ -1026,15 +1097,30 @@ class Limits:
 
                 # ---- Plot completeness curve (still inside pool context) -----
                 if plot:
-                    m_lo = (m_bright if np.isfinite(m_bright) else initialGuess) - 1.0
-                    m_hi = (m_faint if np.isfinite(m_faint) else initialGuess) + 1.0
-                    sample_mags = np.linspace(m_lo, m_hi, 11)
+                    try:
+                        span = float(lim_cfg.get("completeness_plot_span_mag", 0.8))
+                    except Exception:
+                        span = 0.8
+                    span = max(0.3, min(span, 2.5))
+                    try:
+                        nm = int(lim_cfg.get("completeness_plot_nmags", 9))
+                    except Exception:
+                        nm = 9
+                    nm = max(5, min(nm, 21))
+                    m_c = float(inject_lmag) if np.isfinite(inject_lmag) else float(initialGuess)
+                    sample_mags = np.linspace(m_c - span, m_c + span, nm)
 
                     completeness_groups, medians = [], []
                     for m in sample_mags:
-                        _, betas = run_trials_at_mag(m, pool=pool)
-                        completeness_groups.append(betas)
-                        medians.append(np.mean(betas >= DETECTION_BETA_THRESH))
+                        # For plotting completeness, use the actual detection flags
+                        # (det = beta>=thresh and optional SNR gate), not the beta values.
+                        _, _betas, det_flags = run_trials_at_mag(
+                            m, pool=pool, return_flags=True
+                        )
+                        completeness_groups.append(
+                            np.asarray(det_flags, dtype=float)
+                        )
+                        medians.append(float(np.mean(det_flags)))
 
                     self._plot_completeness(
                         sample_mags,
@@ -1047,6 +1133,8 @@ class Limits:
                         DETECTION_BETA_THRESH,
                         zeropoint,
                     )
+
+                    # Detection-limit demo plot removed by request.
 
                 # Optional: EMCEE diagnostic plot for one representative injected trial.
                 if (
@@ -1340,7 +1428,7 @@ class Limits:
             ax.set_ylabel("Recovery fraction")
             ax.set_ylim(-0.05, 1.05)
             ax.invert_xaxis()
-            ax.legend(loc="lower right", fontsize=7, frameon=False)
+            ax.legend(loc="upper left", fontsize=7, frameon=False)
             fig.tight_layout()
             fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor="white")
             plt.close(fig)
@@ -1398,20 +1486,35 @@ class Limits:
         plt.ioff()
         fig, ax = plt.subplots(figsize=set_size(540, 1))
 
-        # Box plots for per-trial beta distributions at each sampled magnitude.
-        for pos, group in zip(mags_sorted, groups_sorted):
-            ax.boxplot(
-                group,
-                positions=[pos],
-                widths=0.15,
-                showfliers=False,
-                patch_artist=False,
-                manage_ticks=False,
-                boxprops=dict(linewidth=0.6, color="#4D4D4D"),
-                whiskerprops=dict(linewidth=0.6, color="#4D4D4D"),
-                capprops=dict(linewidth=0.6, color="#4D4D4D"),
-                medianprops=dict(linewidth=0.8, color="#FF0000"),
-            )
+        # Bar chart of recovery fraction (what the solver actually uses).
+        # The previous boxplot-of-0/1 outcomes was visually confusing and
+        # looked "wrong" even when the recovery fractions were fine.
+        widths = 0.15
+        n_trials = np.array([max(1, len(g)) for g in groups_sorted], dtype=float)
+        p = np.clip(medians_sorted, 0.0, 1.0)
+        # Binomial standard error (normal approx) for visual guidance.
+        p_err = np.sqrt(np.maximum(p * (1.0 - p) / n_trials, 0.0))
+
+        ax.bar(
+            mags_sorted,
+            p,
+            width=widths,
+            color="#B0C4DE",
+            edgecolor="#4D4D4D",
+            linewidth=0.6,
+            label="Sampled recovery",
+            zorder=2,
+        )
+        ax.errorbar(
+            mags_sorted,
+            p,
+            yerr=p_err,
+            fmt="none",
+            ecolor="#4D4D4D",
+            elinewidth=0.6,
+            capsize=2,
+            zorder=3,
+        )
 
         # Bracket and bisect search trajectories.
         if bracket_steps:
@@ -1419,7 +1522,7 @@ class Limits:
             ax.plot(
                 bm,
                 bc,
-                "o-",
+                "-",
                 ms=3.5,
                 lw=0.8,
                 color="#0000FF",
@@ -1430,7 +1533,7 @@ class Limits:
             ax.plot(
                 bm,
                 bc,
-                "s--",
+                "--",
                 ms=3.5,
                 lw=0.8,
                 color="#00AA00",
@@ -1440,12 +1543,12 @@ class Limits:
         # Reference lines.
         ax.axhline(0.5, color="0.7", lw=0.5, ls="--", zorder=0)
         ax.text(
-            0.98,
+            0.02,
             0.5,
             "50%",
             transform=ax.get_yaxis_transform(),
             va="bottom",
-            ha="right",
+            ha="left",
             color="0.5",
         )
 
@@ -1470,11 +1573,11 @@ class Limits:
                 label="Adopted limit",
             )
 
-        ax.set_xlabel("Injected ePSF instrumental magnitude")
-        ax.set_ylabel(f"Recovery fraction (beta >= {float(DETECTION_BETA_THRESH):.2g})")
+        ax.set_xlabel("Injected ePSF brightness [mag]")
+        ax.set_ylabel("Recovery fraction")
         ax.set_ylim(-0.05, 1.05)
         ax.invert_xaxis()
-        ax.legend(loc="lower right", fontsize=7, frameon=False)
+        ax.legend(loc="upper left", fontsize=7, frameon=False)
 
         # Optional apparent-magnitude secondary axis.
         if zeropoint is not None:
@@ -1485,7 +1588,7 @@ class Limits:
                     lambda m: m - zeropoint,
                 ),
             )
-            secax.set_xlabel("Apparent magnitude")
+            secax.set_xlabel("Apparent brightness [mag]")
             secax.invert_xaxis()
 
         fig.tight_layout()

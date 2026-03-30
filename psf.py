@@ -2565,8 +2565,17 @@ class PSF:
         def _psf_fit(mask, inner_r, outer_r, fit_shape, fitter, use_emcee_this_tier):
             if not np.any(mask):
                 return None, None
-
-            localbkg = LocalBackground(inner_r, outer_r, bkg_estimator=MMMBackground())
+            # For the target, keep the PSF local background estimator aligned with
+            # aperture photometry (annulus median). MMM can behave differently on
+            # structured difference-image residuals and produce large AP-vs-PSF flux offsets.
+            if bool(is_target_fit):
+                localbkg = LocalBackground(
+                    float(inner_r), float(outer_r), bkg_estimator=MedianBackground()
+                )
+            else:
+                localbkg = LocalBackground(
+                    float(inner_r), float(outer_r), bkg_estimator=MMMBackground()
+                )
             xy_bounds_this = _effective_xy_bounds_for_shape(fit_shape)
 
             if not iterative:
@@ -2929,7 +2938,34 @@ class PSF:
         phot_cfg = self.input_yaml.get("photometry", {}) or {}
         crowded_field = bool(phot_cfg.get("crowded_field", False))
 
-        if crowded_field:
+        # Target-only: force PSF local background annulus to match the aperture
+        # photometry annulus definition, so AP and PSF subtract the same sky level.
+        # (Aperture.measure uses these radii and a median estimator.)
+        if bool(is_target_fit):
+            try:
+                ap_size = float(phot_cfg.get("aperture_radius", aperture_radius))
+            except Exception:
+                ap_size = float(aperture_radius)
+            if crowded_field:
+                annulusIN = float(np.ceil(ap_size + 0.35 * fwhm))
+                annulusOUT = float(np.ceil(annulusIN + 0.65 * fwhm))
+            else:
+                annulusIN = float(np.ceil(ap_size + 0.5 * fwhm))
+                annulusOUT = float(np.ceil(annulusIN + 1.0 * fwhm))
+            # Apply to all tiers.
+            bright_inner = annulusIN
+            bright_outer = annulusOUT
+            faint_inner = annulusIN
+            faint_outer = annulusOUT
+            vf_inner = annulusIN
+            vf_outer = annulusOUT
+            log.info(
+                "Target PSF: using aperture-matched local background annulus (r_in=%.2f px, r_out=%.2f px, estimator=median).",
+                float(annulusIN),
+                float(annulusOUT),
+            )
+
+        elif crowded_field:
             bright_inner = aperture_radius + 4.0 * fwhm
             bright_outer = bright_inner + 2.0 * fwhm
             faint_inner = aperture_radius + 3.0 * fwhm

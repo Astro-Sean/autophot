@@ -174,6 +174,74 @@ class FitsInfo:
             )
 
         self.logger.info(f"Initialized: {len(self.flist)} files")
+        # Global (cross-instrument) filter mapping cache. This prevents repetitive
+        # prompts when scanning large heterogeneous datasets.
+        self._global_filter_map: dict[str, str] = {}
+
+    # -------------------------------------------------------------------------
+    # Filter mapping helpers
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _norm_filter_token(token: str) -> str:
+        """Normalize a FITS filter token for robust matching."""
+        t = str(token).strip()
+        t = t.replace(" ", "").replace("-", "_")
+        return t.lower()
+
+    def _resolve_standard_band(self, token: str) -> Optional[str]:
+        """
+        Heuristic mapping for common nonstandard filter tokens.
+
+        Returns a standard band name (as present in self.available_filters) or None.
+        """
+        t = self._norm_filter_token(token)
+        if not t:
+            return None
+
+        # Common survey-style suffixes (ZTF: gp/rp/ip; also generic *_p).
+        if t in {"gp", "rp", "ip", "zp", "up"}:
+            base = t[0]
+            return base if base in self.available_filters else None
+
+        # Tokens like g782/r784/i705/z623 -> leading band letter.
+        if len(t) >= 2 and t[0] in "ugriz" and any(ch.isdigit() for ch in t[1:]):
+            return t[0] if t[0] in self.available_filters else None
+
+        # Things like V_HIGH, B_HIGH, I_BESS, Z_SPECIAL -> leading alpha run.
+        m = re.match(r"^([a-z]+)", t)
+        if m:
+            lead = m.group(1)
+            # Prefer exact available filter (case-insensitive).
+            for b in self.available_filters:
+                if b.lower() == lead:
+                    return b
+            # Single-letter UBVRI style.
+            if len(lead) == 1:
+                for b in self.available_filters:
+                    if b.lower() == lead:
+                        return b
+        return None
+
+    def _get_global_filter_map(self, db: dict) -> dict:
+        """Return the mutable global filter map stored in the telescope DB."""
+        if not isinstance(db, dict):
+            return {}
+        gm = db.get("_global_filter_map", None)
+        if not isinstance(gm, dict):
+            db["_global_filter_map"] = {}
+            gm = db["_global_filter_map"]
+        return gm
+
+    def _remember_mapping(self, db: dict, header_value: str, std_filter: str) -> None:
+        """Store mapping in global cache (normalized + raw)."""
+        gm = self._get_global_filter_map(db)
+        raw = self._norm_filter_token(header_value)
+        if raw:
+            gm[raw] = str(std_filter)
+        # Also store a simplified token (strip digits/underscores) to catch families.
+        simp = re.sub(r"[^a-z]", "", raw)
+        if simp:
+            gm[simp] = str(std_filter)
 
     def ask_question(
         self,
@@ -513,16 +581,62 @@ class FitsInfo:
             f"\n  Standard bands:  {opts_str}\n"
             f"\n  Map {header_value!r} to [{default}]: "
         )
+        # First, check global cache and heuristics to avoid repeated prompting.
+        try:
+            db = self._load_db()
+        except Exception:
+            db = {}
+        gm = self._get_global_filter_map(db)
+        hv_norm = self._norm_filter_token(header_value)
+        if hv_norm in gm:
+            mapped = str(gm[hv_norm]).strip()
+            self.logger.info("Auto-mapped filter %r -> %r (global cache).", header_value, mapped)
+            return mapped
+        simp = re.sub(r"[^a-z]", "", hv_norm)
+        if simp in gm:
+            mapped = str(gm[simp]).strip()
+            self.logger.info(
+                "Auto-mapped filter %r -> %r (global cache; simplified token=%r).",
+                header_value,
+                mapped,
+                simp,
+            )
+            return mapped
+        guessed = self._resolve_standard_band(header_value)
+        if guessed is not None:
+            self.logger.info("Auto-mapped filter %r -> %r (heuristic).", header_value, guessed)
+            try:
+                self._remember_mapping(db, header_value, guessed)
+                self._save_db(db)
+            except Exception:
+                pass
+            return guessed
+
         while True:
             ans = input(prompt).strip().lower() or default
             print(f"  Selected: {ans}")
             if ans == default:
+                try:
+                    self._remember_mapping(db, header_value, default)
+                    self._save_db(db)
+                except Exception:
+                    pass
                 return default
             if ans in self.available_filters:
+                try:
+                    self._remember_mapping(db, header_value, ans)
+                    self._save_db(db)
+                except Exception:
+                    pass
                 return ans
             # Allow exact match ignoring case
             for b in self.available_filters:
                 if b.lower() == ans:
+                    try:
+                        self._remember_mapping(db, header_value, b)
+                        self._save_db(db)
+                    except Exception:
+                        pass
                     return b
             print(f"  Invalid. Choose one of {opts_str}, or '{default}'.")
 
