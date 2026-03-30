@@ -1199,7 +1199,7 @@ def generate_photometry_table(
 # =============================================================================
 
 
-def check_detection_plots(output_file, method="PSF"):
+def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, beta_limit: float = 0.5):
     """Copy target plots into detections/nondetections folders by filter.
 
     Args:
@@ -1249,7 +1249,59 @@ def check_detection_plots(output_file, method="PSF"):
     log = logging.getLogger(__name__)
 
     def _row_detection_state(row_obj) -> bool:
-        """Best-effort detection classification for one photometry row."""
+        """
+        Best-effort detection classification for one photometry row.
+
+        Prefer an explicit is_detection/detected flag when present, but override
+        it when the row contains enough photometric fields to recompute the
+        detection rule (guards against stale/missing columns in large runs).
+        """
+        # If we have enough information, recompute detection state using the
+        # same logic as plot_lightcurve() (SNR gate + optional beta).
+        try:
+            # beta: do not let missing beta veto detections
+            beta = row_obj.get("beta", np.nan)
+            try:
+                beta = float(beta)
+            except Exception:
+                beta = np.nan
+            beta_ok = (not np.isfinite(beta)) or (beta > float(beta_limit))
+
+            method_u = str(method).upper()
+            snr_val = np.nan
+            if method_u == "PSF":
+                for k in ("snr_psf", "SNR_PSF"):
+                    if k in row_obj and pd.notna(row_obj.get(k)):
+                        snr_val = float(row_obj.get(k))
+                        break
+                if not np.isfinite(snr_val):
+                    # flux-based fallback
+                    fp = row_obj.get("flux_psf", row_obj.get("flux_PSF", np.nan))
+                    fe = row_obj.get("flux_psf_err", row_obj.get("flux_PSF_err", np.nan))
+                    fp = float(fp) if pd.notna(fp) else np.nan
+                    fe = float(fe) if pd.notna(fe) else np.nan
+                    if np.isfinite(fp) and np.isfinite(fe) and fe > 0:
+                        snr_val = fp / fe
+            else:
+                for k in ("snr_ap", "SNR_AP", "snr", "SNR"):
+                    if k in row_obj and pd.notna(row_obj.get(k)):
+                        snr_val = float(row_obj.get(k))
+                        break
+                if not np.isfinite(snr_val):
+                    fa = row_obj.get("flux_ap", row_obj.get("flux_AP", np.nan))
+                    fe = row_obj.get("flux_ap_err", row_obj.get("flux_AP_err", np.nan))
+                    fa = float(fa) if pd.notna(fa) else np.nan
+                    fe = float(fe) if pd.notna(fe) else np.nan
+                    if np.isfinite(fa) and np.isfinite(fe) and fe > 0:
+                        snr_val = fa / fe
+
+            if np.isfinite(snr_val):
+                detected_by_snr = snr_val >= float(snr_limit)
+                return bool(detected_by_snr and beta_ok)
+        except Exception:
+            pass
+
+        # Fall back to explicit flags when present.
         for k in ("is_detection", "detected", "is_detected"):
             if k in row_obj and pd.notna(row_obj.get(k)):
                 v = row_obj.get(k)

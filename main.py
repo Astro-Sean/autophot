@@ -4714,6 +4714,28 @@ def run_photometry():
             "etime": time.time() - start,
         }
 
+        # Provide lowercase aliases for downstream tools (e.g. lightcurve.py) that
+        # expect snake_case columns.
+        try:
+            output["snr_ap"] = float(output.get("SNR_AP", np.nan))
+        except Exception:
+            output["snr_ap"] = np.nan
+        try:
+            output["snr_psf"] = float(output.get("SNR_PSF", np.nan))
+        except Exception:
+            output["snr_psf"] = np.nan
+        try:
+            if "flux_AP" in TargetPosition.columns:
+                output["flux_ap"] = float(TargetPosition.at[idx, "flux_AP"])
+            if "flux_AP_err" in TargetPosition.columns:
+                output["flux_ap_err"] = float(TargetPosition.at[idx, "flux_AP_err"])
+            if "flux_PSF" in TargetPosition.columns:
+                output["flux_psf"] = float(TargetPosition.at[idx, "flux_PSF"])
+            if "flux_PSF_err" in TargetPosition.columns:
+                output["flux_psf_err"] = float(TargetPosition.at[idx, "flux_PSF_err"])
+        except Exception:
+            pass
+
         # Converts pixel coordinates to world coordinates.
         output.update(
             {
