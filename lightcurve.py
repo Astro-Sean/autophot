@@ -481,10 +481,10 @@ def plot_lightcurve(
         has_inverted = False
         inverted_col = None
         
-        # First check if _inverted_fit flag exists and is True for any rows
-        if "_inverted_fit" in data.columns:
+        # First check if _inverted_fit flag exists and is True for any rows in df (not data)
+        if "_inverted_fit" in df.columns:
             # Convert to boolean explicitly (handle string 'True', numeric 1.0, or actual True)
-            inv_fit_values = data["_inverted_fit"]
+            inv_fit_values = df["_inverted_fit"]
             if inv_fit_values.dtype == object:
                 # String values like "True" or "False"
                 has_inverted = np.any(inv_fit_values == "True")
@@ -495,18 +495,18 @@ def plot_lightcurve(
                 # Boolean or numeric values
                 has_inverted = np.any(inv_fit_values.fillna(False).astype(bool))
         
-        # Also check for inst_inverted column as fallback
+        # Also check for inst_inverted column as fallback (in df, not data)
         if not has_inverted:
-            inverted_col = "inst_inverted" if "inst_inverted" in data.columns else None
+            inverted_col = "inst_inverted" if "inst_inverted" in df.columns else None
             if inverted_col is None:
                 # Try lowercase variant
-                inverted_col = "inst_inverted" if "inst_inverted" in data.columns else None
-            has_inverted = inverted_col is not None and np.any(np.isfinite(data[inverted_col]))
+                inverted_col = "inst_inverted" if "inst_inverted" in df.columns else None
+            has_inverted = inverted_col is not None and np.any(np.isfinite(df[inverted_col]))
         
         if has_inverted:
             # Inverted detection: has _inverted_fit=True OR finite inst_inverted but not detected normally
-            if "_inverted_fit" in data.columns:
-                inv_fit_values = data["_inverted_fit"]
+            if "_inverted_fit" in df.columns:
+                inv_fit_values = df["_inverted_fit"]
                 if inv_fit_values.dtype == object:
                     inv_flag = inv_fit_values == "True"
                 elif inv_fit_values.dtype in (np.float64, np.float32, np.int64, np.int32):
@@ -514,12 +514,12 @@ def plot_lightcurve(
                 else:
                     inv_flag = inv_fit_values.fillna(False).astype(bool)
             else:
-                inv_flag = np.zeros(len(data), dtype=bool)
+                inv_flag = np.zeros(len(df), dtype=bool)
             
-            if inverted_col and inverted_col in data.columns:
-                inv_finite = np.isfinite(data[inverted_col])
+            if inverted_col and inverted_col in df.columns:
+                inv_finite = np.isfinite(df[inverted_col])
             else:
-                inv_finite = np.zeros(len(data), dtype=bool)
+                inv_finite = np.zeros(len(df), dtype=bool)
                 
             # Inverted-only: either has the flag OR has finite inverted magnitude
             inverted_only = inv_flag | (inv_finite & ~detected)
