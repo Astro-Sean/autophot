@@ -4834,6 +4834,8 @@ def run_photometry():
             
             # Add inverted fit parameters if inverted fit was used
             if "_inverted_fit" in TargetPosition.columns and TargetPosition.at[idx, "_inverted_fit"]:
+                # Add the flag itself to output so lightcurve can detect it
+                output["_inverted_fit"] = True
                 # Original normal fit values (before replacement)
                 if "flux_PSF_inverted" in TargetPosition.columns:
                     output["flux_psf_inverted"] = float(TargetPosition.at[idx, "flux_PSF_inverted"])
