@@ -466,11 +466,14 @@ def plot_lightcurve(
         
         # First check if _inverted_fit flag exists and is True for any rows
         if "_inverted_fit" in data.columns:
-            # Convert to boolean explicitly (handle string 'True' or actual True)
+            # Convert to boolean explicitly (handle string 'True', numeric 1.0, or actual True)
             inv_fit_values = data["_inverted_fit"]
             if inv_fit_values.dtype == object:
                 # String values like "True" or "False"
                 has_inverted = np.any(inv_fit_values == "True")
+            elif inv_fit_values.dtype in (np.float64, np.float32, np.int64, np.int32):
+                # Numeric values (1.0 or 0.0 from float_format)
+                has_inverted = np.any(inv_fit_values == 1.0)
             else:
                 # Boolean or numeric values
                 has_inverted = np.any(inv_fit_values.fillna(False).astype(bool))
@@ -489,6 +492,8 @@ def plot_lightcurve(
                 inv_fit_values = data["_inverted_fit"]
                 if inv_fit_values.dtype == object:
                     inv_flag = inv_fit_values == "True"
+                elif inv_fit_values.dtype in (np.float64, np.float32, np.int64, np.int32):
+                    inv_flag = inv_fit_values == 1.0
                 else:
                     inv_flag = inv_fit_values.fillna(False).astype(bool)
             else:
@@ -563,6 +568,9 @@ def plot_lightcurve(
                 if inv_fit_values.dtype == object:
                     # String values like "True" or "False"
                     inv_fit_mask = inv_fit_values == "True"
+                elif inv_fit_values.dtype in (np.float64, np.float32, np.int64, np.int32):
+                    # Numeric values (1.0 or 0.0 from float_format)
+                    inv_fit_mask = inv_fit_values == 1.0
                 else:
                     # Boolean or numeric values
                     inv_fit_mask = inv_fit_values.fillna(False).astype(bool)
