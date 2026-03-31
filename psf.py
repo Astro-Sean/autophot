@@ -2401,7 +2401,11 @@ class PSF:
         ndimage_inverted = None
         if inverted_image is not None:
             # Use external inverted image provided by main.py
-            ndimage_inverted = inverted_image
+            # Wrap it in NDData with same units/uncertainty as main image
+            if isinstance(inverted_image, np.ndarray):
+                ndimage_inverted = _nddata_clone(ndimage, data=inverted_image)
+            else:
+                ndimage_inverted = inverted_image
             log.info("Target PSF: using external inverted image from main.py for negative PSF detection.")
         elif check_inverted:
             try:
