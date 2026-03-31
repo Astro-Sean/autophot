@@ -498,11 +498,13 @@ def plot_lightcurve(
         detects = df[normal_detected]
         inv_detects = df[inverted_only] if has_inverted else pd.DataFrame()
         nondetects = df[~detected & ~inverted_only]
-        num_detect += len(detects)
+        num_detect += len(detects) + len(inv_detects)  # Count both normal and inverted detections
         num_nondetect += len(nondetects)
 
         if return_detections and not detects.empty:
             detections_list.append(detects)
+        if return_detections and not inv_detects.empty:
+            detections_list.append(inv_detects)
         if return_detections and not nondetects.empty:
             nondetections_list.append(nondetects)
 
@@ -542,11 +544,12 @@ def plot_lightcurve(
         # Plot inverted-only detections with hatched/striped pattern
         # Use inst_inverted column for magnitude if available
         inv_mag_col = "inst_inverted" if "inst_inverted" in inv_detects.columns else inverted_col
+        inv_err_col = "inst_inverted_err" if "inst_inverted_err" in inv_detects.columns else None
         if has_inverted and not inv_detects.empty and inv_mag_col and inv_mag_col in inv_detects.columns:
             ax.errorbar(
                 inv_detects.mjd - reference_epoch,
                 inv_detects[inv_mag_col],
-                yerr=inv_detects[err_col] if err_col in inv_detects.columns else None,
+                yerr=inv_detects[inv_err_col] if inv_err_col and inv_err_col in inv_detects.columns else None,
                 color=c,
                 ecolor=c,
                 markerfacecolor=c,
