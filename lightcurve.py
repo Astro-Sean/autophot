@@ -559,17 +559,19 @@ def plot_lightcurve(
                 zorder=2,
             )
             # Overlay scatter markers with diagonal stripes
+            # Use square marker ('s') which is rendered as a patch so hatch works
             sc = ax.scatter(
                 inv_detects.mjd - reference_epoch,
                 inv_detects[inv_mag_col],
-                s=80,  # marker size
+                s=100,  # slightly larger marker size for visibility
                 c=c,   # face color
+                marker='s',  # square marker (patch) so hatch works
                 edgecolors='black',
                 linewidth=0.8,
                 zorder=3,  # markers on top of error bars
                 label=f"{leg_label}^INV" if leg_label else "^INV",
             )
-            # Add diagonal stripes
+            # Add diagonal stripes - works with square markers
             sc.set_hatch('////')
 
         if show_limits and not nondetects.empty:
