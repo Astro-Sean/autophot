@@ -3262,7 +3262,6 @@ class PSF:
             "flux_PSF_err_inverted",
             "inst_inverted",
             "inst_inverted_err",
-            "_inverted_fit",
         ):
             if col not in updated.columns:
                 updated[col] = np.nan
@@ -3289,6 +3288,9 @@ class PSF:
         
         # Copy _inverted_fit flag from combined (marks which sources used inverted fit)
         if "_inverted_fit" in combined.columns:
+            # Ensure column exists as boolean type
+            if "_inverted_fit" not in updated.columns:
+                updated["_inverted_fit"] = False
             updated.iloc[row_pos, updated.columns.get_indexer(["_inverted_fit"])] = (
                 combined["_inverted_fit"].to_numpy()
             )
