@@ -4866,6 +4866,25 @@ def run_photometry():
                     output["local_bkg_raw_inverted"] = float(TargetPosition.at[idx, "local_bkg_raw_inverted"])
                 if "local_bkg_used_inverted" in TargetPosition.columns:
                     output["local_bkg_used_inverted"] = float(TargetPosition.at[idx, "local_bkg_used_inverted"])
+                # Inverted PSF fit parameters
+                if "x_fit_inverted" in TargetPosition.columns:
+                    output["x_fit_inverted"] = float(TargetPosition.at[idx, "x_fit_inverted"])
+                if "y_fit_inverted" in TargetPosition.columns:
+                    output["y_fit_inverted"] = float(TargetPosition.at[idx, "y_fit_inverted"])
+                if "x_fit_err_inverted" in TargetPosition.columns:
+                    output["x_fit_err_inverted"] = float(TargetPosition.at[idx, "x_fit_err_inverted"])
+                if "y_fit_err_inverted" in TargetPosition.columns:
+                    output["y_fit_err_inverted"] = float(TargetPosition.at[idx, "y_fit_err_inverted"])
+                if "cfit_inverted" in TargetPosition.columns:
+                    output["cfit_inverted"] = float(TargetPosition.at[idx, "cfit_inverted"])
+                if "qfit_inverted" in TargetPosition.columns:
+                    output["qfit_inverted"] = float(TargetPosition.at[idx, "qfit_inverted"])
+                if "reduced_chi2_inverted" in TargetPosition.columns:
+                    output["reduced_chi2_inverted"] = float(TargetPosition.at[idx, "reduced_chi2_inverted"])
+                if "flags_inverted" in TargetPosition.columns:
+                    output["flags_inverted"] = int(TargetPosition.at[idx, "flags_inverted"])
+                if "fwhm_psf_inverted" in TargetPosition.columns:
+                    output["fwhm_psf_inverted"] = float(TargetPosition.at[idx, "fwhm_psf_inverted"])
         except Exception:
             pass
 

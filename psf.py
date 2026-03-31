@@ -3318,6 +3318,32 @@ class PSF:
                     / np.abs(updated.loc[valid_inv_flux, "flux_PSF_inverted"])
                 )
                 updated["inst_inverted_err"] = mag_err_inv
+            # Add other inverted PSF parameters with _inverted suffix
+            # Get inverted fit values from combined_inv
+            x_fit_inv = self._first_present(combined_inv, ["x_fit", "xcenter_fit", "x_0_fit"])
+            y_fit_inv = self._first_present(combined_inv, ["y_fit", "ycenter_fit", "y_0_fit"])
+            x_err_inv = self._first_present(combined_inv, ["x_fit_err", "x_err", "xcenter_fit_err"])
+            y_err_inv = self._first_present(combined_inv, ["y_fit_err", "y_err", "ycenter_fit_err"])
+            cfit_inv = self._first_present(combined_inv, ["cfit"])
+            qfit_inv = self._first_present(combined_inv, ["qfit"])
+            chi2_inv = self._first_present(combined_inv, ["reduced_chi2", "chi2_red"])
+            flags_inv = np.asarray(combined_inv.get("flags", 0), int)
+            # Create columns if they don't exist
+            for col in ["x_fit_inverted", "y_fit_inverted", "x_fit_err_inverted", "y_fit_err_inverted",
+                        "cfit_inverted", "qfit_inverted", "reduced_chi2_inverted", "flags_inverted", "fwhm_psf_inverted"]:
+                if col not in updated.columns:
+                    updated[col] = np.nan
+            # Store inverted values
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(["x_fit_inverted"])] = x_fit_inv
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(["y_fit_inverted"])] = y_fit_inv
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(["x_fit_err_inverted"])] = x_err_inv
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(["y_fit_err_inverted"])] = y_err_inv
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(["cfit_inverted"])] = cfit_inv
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(["qfit_inverted"])] = qfit_inv
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(["reduced_chi2_inverted"])] = chi2_inv
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(["flags_inverted"])] = flags_inv
+            # FWHM for inverted fit is same as normal fit (PSF shape doesn't change)
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(["fwhm_psf_inverted"])] = fwhm
             log.info("Inverted PSF fit: measured %d sources with negative PSF detection.", len(idx_out_inv))
 
         with np.errstate(divide="ignore", invalid="ignore"):
