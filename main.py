@@ -4855,6 +4855,17 @@ def run_photometry():
                     ap_err = float(TargetPosition.at[idx, "flux_AP_err"])
                     if ap_err > 0 and np.isfinite(ap_err):
                         output["snr_ap_inverted"] = np.abs(ap_flux) / ap_err
+                # Inverted aperture photometry parameters (from Stage 2)
+                if "flux_AP_inverted" in TargetPosition.columns:
+                    output["flux_ap_inverted"] = float(TargetPosition.at[idx, "flux_AP_inverted"])
+                if "flux_AP_err_inverted" in TargetPosition.columns:
+                    output["flux_ap_err_inverted"] = float(TargetPosition.at[idx, "flux_AP_err_inverted"])
+                if "SNR_AP_inverted" in TargetPosition.columns:
+                    output["snr_ap_inverted_stage2"] = float(TargetPosition.at[idx, "SNR_AP_inverted"])
+                if "local_bkg_raw_inverted" in TargetPosition.columns:
+                    output["local_bkg_raw_inverted"] = float(TargetPosition.at[idx, "local_bkg_raw_inverted"])
+                if "local_bkg_used_inverted" in TargetPosition.columns:
+                    output["local_bkg_used_inverted"] = float(TargetPosition.at[idx, "local_bkg_used_inverted"])
         except Exception:
             pass
 
