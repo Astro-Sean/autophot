@@ -589,7 +589,7 @@ def plot_lightcurve(
             is_apparent = band_inv_mag_col is not None
             if not is_apparent and zp_col in inv_detects.columns:
                 # Convert instrumental to apparent
-                inv_detects["inv_apparent_mag"] = inv_detects[inv_mag_col] + inv_detects[zp_col]
+                inv_detects["inv_apparent_mag"] = inv_detects[inv_mag_col] + inv_detects[zp_col] + band_offset
                 if inv_err_col and inv_err_col in inv_detects.columns:
                     inv_detects["inv_apparent_mag_err"] = inv_detects[inv_err_col]
                 else:
@@ -599,6 +599,9 @@ def plot_lightcurve(
             else:
                 plot_mag_col = inv_mag_col
                 plot_err_col = inv_err_col
+                # Apply band offset to inverted apparent magnitude if it's already apparent
+                if is_apparent and plot_mag_col in inv_detects.columns:
+                    inv_detects[plot_mag_col] = inv_detects[plot_mag_col] + band_offset
         if has_inverted and not inv_detects.empty and inv_mag_col and inv_mag_col in inv_detects.columns:
             # Split inverted detections: those with _inverted_fit flag vs those without
             if "_inverted_fit" in inv_detects.columns:
@@ -817,9 +820,9 @@ def plot_lightcurve(
                 if fcol is not None
                 else pd.DataFrame()
             )
-            d1["mag"] = d1[col1]
+            d1["mag"] = d1[col1] + d1[zp1]
             d1["err"] = d1[err1]
-            d2["mag"] = d2[col2]
+            d2["mag"] = d2[col2] + d2[zp2]
             d2["err"] = d2[err2]
             d1["lmag"] = d1["lmag"] + d1[zp1]
             d2["lmag"] = d2["lmag"] + d2[zp2]
@@ -1136,27 +1139,47 @@ def generate_photometry_table(
         nondetects = data[~detected & ~inverted_only].copy()
 
         if not detects.empty:
+            # Convert instrumental magnitude to apparent magnitude for the table
             detects = detects.assign(
                 Filter=band,
                 Limit="-",
                 MJD=detects["mjd"].round(3),
                 Date=Time(detects["mjd"], format="mjd").iso,
-                Mag=detects[col].round(3),
+                Mag=(detects[col] + detects[zp_col]).round(3),
                 Error=detects[err_col].round(3),
             )[["MJD", "Date", "Mag", "Error", "Filter", "Limit"]]
             phot_table.append(detects)
 
         if not inv_detects.empty:
             inv_err_col = err_col if err_col in inv_detects.columns else None
-            # Use inst_inverted column for magnitude
-            inv_mag_col = "inst_inverted" if "inst_inverted" in inv_detects.columns else inverted_col
+            # Check for band-specific inverted apparent magnitude first
+            band_inv_mag_col = f"{band}_{method}_inverted" if f"{band}_{method}_inverted" in inv_detects.columns else None
+            band_inv_err_col = f"{band}_{method}_err_inverted" if f"{band}_{method}_err_inverted" in inv_detects.columns else None
+            
+            # Use band-specific inverted apparent magnitude if available, otherwise convert instrumental
+            if band_inv_mag_col and band_inv_mag_col in inv_detects.columns:
+                inv_mag_col = band_inv_mag_col
+                inv_err_col = band_inv_err_col
+                is_apparent = True
+            else:
+                inv_mag_col = "inst_inverted" if "inst_inverted" in inv_detects.columns else inverted_col
+                inv_err_col = "inst_inverted_err" if "inst_inverted_err" in inv_detects.columns else None
+                is_apparent = False
+            
             if inv_mag_col and inv_mag_col in inv_detects.columns:
+                if is_apparent:
+                    # Already apparent magnitude
+                    mag_value = inv_detects[inv_mag_col]
+                else:
+                    # Convert instrumental to apparent
+                    mag_value = inv_detects[inv_mag_col] + inv_detects[zp_col]
+                
                 inv_detects = inv_detects.assign(
                     Filter=band,
                     Limit="^INV",
                     MJD=inv_detects["mjd"].round(3),
                     Date=Time(inv_detects["mjd"], format="mjd").iso,
-                    Mag=inv_detects[inv_mag_col].round(3),
+                    Mag=mag_value.round(3),
                     Error=inv_detects[inv_err_col].round(3) if inv_err_col else "-",
                 )[["MJD", "Date", "Mag", "Error", "Filter", "Limit"]]
                 phot_table.append(inv_detects)
