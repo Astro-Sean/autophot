@@ -4125,23 +4125,28 @@ def run_photometry():
                             logging.info(f"Target fitting issues: {issues}")
 
         # logging.info(TargetPosition.columns)
+        # Check if inverted PSF fit was used
+        inverted_tag = ""
+        if "_inverted_fit" in TargetPosition.columns and TargetPosition["_inverted_fit"].iloc[0]:
+            inverted_tag = " [inverted]"
+
         # When MCMC is used, LSQ quality metrics (reduced_chi2, cfit, qfit) may be NaN.
         # Only log them when they are present and finite.
         if "reduced_chi2" in TargetPosition:
             reduced_chi2_value = TargetPosition["reduced_chi2"].iloc[0]
             if np.isfinite(reduced_chi2_value):
-                logging.info(f"Target reduced chi2: {reduced_chi2_value:.1e}")
+                logging.info(f"Target reduced chi2{inverted_tag}: {reduced_chi2_value:.1e}")
 
         if "cfit" in TargetPosition:
             cfit_value = TargetPosition["cfit"].iloc[0]
             if np.isfinite(cfit_value):
-                logging.info(f"Target cfit: {cfit_value:.1e}")
+                logging.info(f"Target cfit{inverted_tag}: {cfit_value:.1e}")
 
         if "qfit" in TargetPosition:
             qfit_value = TargetPosition["qfit"].iloc[0]
             if np.isfinite(qfit_value):
                 logging.info(
-                    f"Target qfit: {qfit_value:.1e} (qfit of zero indicates a good fit)"
+                    f"Target qfit{inverted_tag}: {qfit_value:.1e} (qfit of zero indicates a good fit)"
                 )
 
         # =============================================================================
@@ -4163,7 +4168,7 @@ def run_photometry():
             get_LimitingMagnitude = True
         else:
             logging.info(
-                f"Transient fitted position: x = {TargetPosition['x_fit'].iloc[0]:.3f} +/- {TargetPosition['x_fit_err'].iloc[0]:.3f}, "
+                f"Transient fitted position{inverted_tag}: x = {TargetPosition['x_fit'].iloc[0]:.3f} +/- {TargetPosition['x_fit_err'].iloc[0]:.3f}, "
                 f"y = {TargetPosition['y_fit'].iloc[0]:.3f} +/- {TargetPosition['y_fit_err'].iloc[0]:.3f}"
             )
 
@@ -4300,7 +4305,7 @@ def run_photometry():
                 else np.nan
             )
             if np.isfinite(snr_psf):
-                logging.info(f"Target SNR (PSF): {snr_psf:.1f}")
+                logging.info(f"Target SNR (PSF){inverted_tag}: {snr_psf:.1f}")
         logging.info(
             f"Target threshold: {TargetPosition['threshold'].iloc[0]:.1f} x background standard deviation"
         )
@@ -4444,17 +4449,19 @@ def run_photometry():
                 cal_err_col = f"{input_yaml['imageFilter']}_{method}_err"
 
                 logging.info(
-                    "Instrumental %s %s-band magnitude: %.3f +/- %.3f [mag]",
+                    "Instrumental %s %s%s-band magnitude: %.3f +/- %.3f [mag]",
                     method,
                     input_yaml["imageFilter"],
+                    inverted_tag if method == "PSF" else "",
                     TargetPosition.at[idx, inst_col],
                     TargetPosition.at[idx, inst_err_col],
                 )
 
                 logging.info(
-                    "Calibrated %s %s-band magnitude: %.3f +/- %.3f [mag]",
+                    "Calibrated %s %s%s-band magnitude: %.3f +/- %.3f [mag]",
                     method,
                     input_yaml["imageFilter"],
+                    inverted_tag if method == "PSF" else "",
                     TargetPosition.at[idx, cal_mag_col],
                     TargetPosition.at[idx, cal_err_col],
                 )
