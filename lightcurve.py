@@ -612,19 +612,22 @@ def plot_lightcurve(
                     inv_with_fit[inv_mag_col],
                     s=100,  # slightly larger marker size for visibility
                     c=c,   # face color
-                    marker='o',  # square marker (patch) so hatch works
+                    marker='s',  # square marker (patch) so hatch works
                     edgecolors='black',
                     linewidth=0.8,
                     zorder=3,  # markers on top of error bars
-                    label=f"{leg_label}",
                 )
-                # Add diagonal stripes - only for inverted PSF fits
+                # Add diagonal stripes - only for inverted PSF fits (white hatch)
                 sc.set_hatch('////')
+                sc.set_edgecolor('white')
+                # Add label manually without marker in legend
+                ax.scatter([], [], s=100, c=c, marker='s', edgecolors='white', 
+                         linewidth=0.8, label=f"{leg_label}^INV" if leg_label else "^INV")
             else:
                 # Add label even if no hatched points (all inverted detections are ^INV)
                 if not inv_normal.empty:
                     ax.scatter([], [], s=80, c=c, marker='o', edgecolors='black', 
-                             linewidth=0.8, label=f"{leg_label}")
+                             linewidth=0.8, label=f"{leg_label}^INV" if leg_label else "^INV")
 
         if show_limits and not nondetects.empty:
             has_limits_plotted = True
