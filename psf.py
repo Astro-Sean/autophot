@@ -3197,7 +3197,7 @@ class PSF:
                 new_path = os.path.join(write_dir, f"PSF_Target_{base}_inverted.png")
                 if os.path.exists(old_path):
                     os.rename(old_path, new_path)
-                    log.info(f"Saved inverted PSF fit plot: {new_path}")
+                    # log.info(f"Saved inverted PSF fit plot: {new_path}")
             except Exception as exc:
                 log.info(f"Inverted fit plotting failed: {exc}")
 
@@ -3262,6 +3262,7 @@ class PSF:
             "flux_PSF_err_inverted",
             "inst_inverted",
             "inst_inverted_err",
+            "_inverted_fit",
         ):
             if col not in updated.columns:
                 updated[col] = np.nan
@@ -3285,6 +3286,12 @@ class PSF:
             updated.iloc[row_pos, updated.columns.get_indexer([col])] = df_out[
                 col
             ].to_numpy()
+        
+        # Copy _inverted_fit flag from combined (marks which sources used inverted fit)
+        if "_inverted_fit" in combined.columns:
+            updated.iloc[row_pos, updated.columns.get_indexer(["_inverted_fit"])] = (
+                combined["_inverted_fit"].to_numpy()
+            )
 
         # Populate inverted flux columns if available
         if combined_inv is not None:
