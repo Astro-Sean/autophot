@@ -118,6 +118,7 @@ default_input:
 
     # MCMC (emcee) tuning for PSF fits.
     perform_emcee_fitting_s2n: 0 # float --- If >0, run emcee PSF/MAG fitting when source S/N is below this value.
+    check_inverted_image: False # bool --- If True, also fit target on image multiplied by -1 to detect negative PSF dips (fading sources in template subtraction).
     aperture_n_jobs: 1 # int --- Worker processes for aperture photometry loops (per-image). 1 = serial; >1 can speed up large source lists.
     emcee_nwalkers: 20 # int --- Number of emcee walkers.
     emcee_nsteps: 5000 # int --- Total emcee steps (per walker).

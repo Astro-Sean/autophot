@@ -55,7 +55,7 @@ from astropy.modeling.fitting import TRFLSQFitter, SLSQPLSQFitter
 # ---------------------------------------------------------------------------
 # Photutils
 # ---------------------------------------------------------------------------
-from photutils.background import LocalBackground, MedianBackground, MMMBackground
+from photutils.background import LocalBackground, MedianBackground
 from photutils.centroids import centroid_com, centroid_2dg, centroid_sources
 from photutils.psf import (
     EPSFBuilder,
@@ -2394,6 +2394,19 @@ class PSF:
             background_rms=background_rms,
         )
 
+        # Optional: create inverted image for detecting negative PSF dips (fading sources)
+        check_inverted = bool(is_target_fit and phot_cfg.get("check_inverted_image", False))
+        ndimage_inverted = None
+        if check_inverted:
+            try:
+                inv_data = -1.0 * np.array(ndimage.data, dtype=float, copy=True)
+                ndimage_inverted = _nddata_clone(ndimage, data=inv_data)
+                log.info("Target PSF: will also fit on inverted image (negative PSF detection enabled).")
+            except Exception as exc:
+                log_warning_from_exception(log, "Failed to create inverted image for PSF fitting", exc)
+                ndimage_inverted = None
+                check_inverted = False
+
         if sources is None or len(sources) == 0:
             log.info("No sources supplied to PSF fit; returning unchanged.")
             return sources
@@ -2562,24 +2575,20 @@ class PSF:
         # Background: photutils subtracts per-source local background (annulus inner_r..outer_r)
         # from each fit-shape cutout before fitting the PSF, so the model is fit to
         # (data - local_bkg). NDData uncertainty includes background_rms in the noise model.
-        def _psf_fit(mask, inner_r, outer_r, fit_shape, fitter, use_emcee_this_tier):
+        def _psf_fit(mask, inner_r, outer_r, fit_shape, fitter, use_emcee_this_tier, nd_override=None):
             if not np.any(mask):
                 return None, None
             # For the target, keep the PSF local background estimator aligned with
             # aperture photometry (annulus median). MMM can behave differently on
             # structured difference-image residuals and produce large AP-vs-PSF flux offsets.
-            if bool(is_target_fit):
-                localbkg = LocalBackground(
-                    float(inner_r), float(outer_r), bkg_estimator=MedianBackground()
-                )
-            else:
-                localbkg = LocalBackground(
-                    float(inner_r), float(outer_r), bkg_estimator=MMMBackground()
-                )
+            # Using MedianBackground consistently across all tiers for robust sky estimation.
+            localbkg = LocalBackground(
+                float(inner_r), float(outer_r), bkg_estimator=MedianBackground()
+            )
             xy_bounds_this = _effective_xy_bounds_for_shape(fit_shape)
 
             if not iterative:
-                nd_for_fit = ndimage
+                nd_for_fit = nd_override if nd_override is not None else ndimage
 
                 # Optional: LPI-style structured background infill for the transient PSF fit.
                 # Target-only (single source) to keep runtime bounded.
@@ -2973,12 +2982,12 @@ class PSF:
             vf_inner = aperture_radius + 3.0 * fwhm
             vf_outer = vf_inner + 2.0 * fwhm
         else:
-            bright_inner = aperture_radius + 3.0 * fwhm
-            bright_outer = aperture_radius + 6.0 * fwhm
-            faint_inner = aperture_radius + 2.0 * fwhm
-            faint_outer = aperture_radius + 5.0 * fwhm
-            vf_inner = aperture_radius + 2.0 * fwhm
-            vf_outer = aperture_radius + 5.0 * fwhm
+            bright_inner = aperture_radius + 6.0 * fwhm
+            bright_outer = aperture_radius + 9.0 * fwhm
+            faint_inner = aperture_radius + 5.0 * fwhm
+            faint_outer = aperture_radius + 8.0 * fwhm
+            vf_inner = aperture_radius + 5.0 * fwhm
+            vf_outer = aperture_radius + 8.0 * fwhm
 
         for mask, inner_r, outer_r, fshape, label in [
             (bright_mask, bright_inner, bright_outer, fit_shape_bright, "bright"),
@@ -3010,6 +3019,128 @@ class PSF:
         combined = pd.concat(results)
         idx_out = np.asarray(combined["idx"], int)
 
+        x_fit = self._first_present(combined, ["x_fit", "xcenter_fit", "x_0_fit"])
+        y_fit = self._first_present(combined, ["y_fit", "ycenter_fit", "y_0_fit"])
+        x_err = self._first_present(combined, ["x_fit_err", "x_err", "xcenter_fit_err"])
+        y_err = self._first_present(combined, ["y_fit_err", "y_err", "ycenter_fit_err"])
+        flux_fit = self._first_present(combined, ["flux_fit", "flux"], unit=u.electron)
+        flux_err = self._first_present(
+            combined, ["flux_fit_err", "flux_err", "flux_uncertainty"], unit=u.electron
+        )
+
+        # Check which fits have negative/problematic flux and need inverted retry
+        # For target-only fits with check_inverted enabled
+        needs_inverted_retry = np.zeros(len(combined), dtype=bool)
+        if check_inverted and ndimage_inverted is not None and is_target_fit:
+            # Identify bad fits: non-finite flux, negative flux, or flagged
+            flux_arr = np.asarray(flux_fit)
+            flags_arr = np.asarray(combined.get("flags", 0))
+            bad_flux = ~np.isfinite(flux_arr) | (flux_arr <= 0)
+            bad_flags = flags_arr != 0
+            needs_inverted_retry = bad_flux | bad_flags
+            if np.any(needs_inverted_retry):
+                log.info(
+                    "Target PSF: %d/%d fits have negative/problematic flux; retrying on inverted image.",
+                    int(np.sum(needs_inverted_retry)),
+                    len(combined)
+                )
+
+        # ---- Inverted image fit (fallback for negative/problematic PSF) ------
+        results_inverted = []
+        if check_inverted and ndimage_inverted is not None and np.any(needs_inverted_retry):
+            # Get masks for sources needing retry per tier
+            retry_mask_bright = bright_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
+            retry_mask_faint = faint_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
+            retry_mask_vfaint = vfaint_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
+            
+            for mask, inner_r, outer_r, fshape, label in [
+                (retry_mask_bright, bright_inner, bright_outer, fit_shape_bright, "bright"),
+                (retry_mask_faint, faint_inner, faint_outer, fit_shape_faint, "faint"),
+                (retry_mask_vfaint, vf_inner, vf_outer, fit_shape_vfaint, "very faint"),
+            ]:
+                if np.any(mask):
+                    use_emcee_this = use_emcee_for_tier(label)
+                    tier_fitter = (
+                        emcee_fitter
+                        if use_emcee_this and emcee_fitter is not None
+                        else lsq_fitter
+                    )
+                    log.info("Fitting %d %s sources on inverted image (fallback)...", int(mask.sum()), label)
+                    res_inv, _ = _psf_fit(
+                        mask, inner_r, outer_r, fshape, tier_fitter, use_emcee_this, nd_override=ndimage_inverted
+                    )
+                    if res_inv is not None:
+                        results_inverted.append(res_inv)
+
+        # Process inverted results and replace bad normal fits where inverted succeeded
+        combined_inv = None
+        if results_inverted:
+            combined_inv = pd.concat(results_inverted)
+            idx_out_inv = np.asarray(combined_inv["idx"], int)
+            flux_fit_inv = self._first_present(combined_inv, ["flux_fit", "flux"], unit=u.electron)
+            
+            # Only use inverted results where inverted flux is positive and finite
+            inv_flux_arr = np.asarray(flux_fit_inv)
+            inv_good = np.isfinite(inv_flux_arr) & (inv_flux_arr > 0)
+            idx_out_inv_good = idx_out_inv[inv_good]
+            
+            if len(idx_out_inv_good) > 0:
+                log.info(
+                    "Inverted PSF fit succeeded for %d/%d retry sources.",
+                    len(idx_out_inv_good),
+                    len(idx_out_inv)
+                )
+                # Replace the bad normal fits with inverted results
+                # Get the rows in combined_inv that succeeded
+                inv_good_mask = np.isin(idx_out_inv, idx_out_inv_good)
+                combined_inv_good = combined_inv.iloc[inv_good_mask].copy()
+                
+                # Map from idx to position in combined
+                idx_to_pos = {idx: i for i, idx in enumerate(idx_out)}
+                
+                # For each good inverted result, copy values to combined
+                for _, inv_row in combined_inv_good.iterrows():
+                    idx_val = inv_row["idx"]
+                    if idx_val in idx_to_pos:
+                        pos = idx_to_pos[idx_val]
+                        # Mark as inverted fit
+                        combined.iloc[pos, combined.columns.get_loc("_inverted_fit") if "_inverted_fit" in combined.columns else -1] = True
+                        # Copy inverted fit values (they'll be negated later)
+                        for col in ["x_fit", "xcenter_fit", "x_0_fit"]:
+                            if col in inv_row and col in combined.columns:
+                                combined.iloc[pos, combined.columns.get_loc(col)] = inv_row[col]
+                                break
+                        for col in ["y_fit", "ycenter_fit", "y_0_fit"]:
+                            if col in inv_row and col in combined.columns:
+                                combined.iloc[pos, combined.columns.get_loc(col)] = inv_row[col]
+                                break
+                        for col in ["flux_fit", "flux"]:
+                            if col in inv_row and col in combined.columns:
+                                combined.iloc[pos, combined.columns.get_loc(col)] = -1.0 * inv_row[col]  # Negative flux
+                                break
+                        for col in ["flux_fit_err", "flux_err", "flux_uncertainty"]:
+                            if col in inv_row and col in combined.columns:
+                                combined.iloc[pos, combined.columns.get_loc(col)] = inv_row[col]
+                                break
+                        for col in ["x_fit_err", "x_err", "xcenter_fit_err"]:
+                            if col in inv_row and col in combined.columns:
+                                combined.iloc[pos, combined.columns.get_loc(col)] = inv_row[col]
+                                break
+                        for col in ["y_fit_err", "y_err", "ycenter_fit_err"]:
+                            if col in inv_row and col in combined.columns:
+                                combined.iloc[pos, combined.columns.get_loc(col)] = inv_row[col]
+                                break
+                        if "flags" in inv_row and "flags" in combined.columns:
+                            combined.iloc[pos, combined.columns.get_loc("flags")] = inv_row["flags"]
+                        for col in ["cfit", "qfit", "reduced_chi2", "chi2_red"]:
+                            if col in inv_row and col in combined.columns:
+                                combined.iloc[pos, combined.columns.get_loc(col)] = inv_row[col]
+                                break
+            else:
+                log.info("Inverted PSF fit did not improve any sources.")
+
+        # Now process the final results (potentially with inverted replacements)
+        # Extract values from combined (which may have been modified with _inverted_fit flags)
         x_fit = self._first_present(combined, ["x_fit", "xcenter_fit", "x_0_fit"])
         y_fit = self._first_present(combined, ["y_fit", "ycenter_fit", "y_0_fit"])
         x_err = self._first_present(combined, ["x_fit_err", "x_err", "xcenter_fit_err"])
@@ -3059,6 +3190,10 @@ class PSF:
             "qfit",
             "reduced_chi2",
             "fwhm_psf",
+            "flux_PSF_inverted",
+            "flux_PSF_err_inverted",
+            "inst_inverted",
+            "inst_inverted_err",
         ):
             if col not in updated.columns:
                 updated[col] = np.nan
@@ -3082,6 +3217,40 @@ class PSF:
             updated.iloc[row_pos, updated.columns.get_indexer([col])] = df_out[
                 col
             ].to_numpy()
+
+        # Populate inverted flux columns if available
+        if combined_inv is not None:
+            idx_out_inv = np.asarray(combined_inv["idx"], int)
+            flux_fit_inv = self._first_present(combined_inv, ["flux_fit", "flux"], unit=u.electron)
+            flux_err_inv = self._first_present(
+                combined_inv, ["flux_fit_err", "flux_err", "flux_uncertainty"], unit=u.electron
+            )
+            # Enforce positive fitted fluxes for inverted image
+            with np.errstate(invalid="ignore"):
+                flux_fit_inv = np.clip(flux_fit_inv, 1e-6, np.inf)
+                flux_err_inv = np.where(np.isfinite(flux_err_inv), flux_err_inv, np.nan)
+            # Flux in e/s (negative sign because this was measured on inverted image)
+            flux_fit_inv_arr = np.asarray(flux_fit_inv, float)
+            flux_err_inv_arr = np.asarray(flux_err_inv, float)
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(["flux_PSF_inverted"])] = (
+                -1.0 * flux_fit_inv_arr / exposure_time
+            )
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(["flux_PSF_err_inverted"])] = (
+                flux_err_inv_arr / exposure_time
+            )
+            # Compute inverted instrumental magnitudes (negative flux = fading source)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                valid_inv_flux = (updated["flux_PSF_inverted"] < 0) & np.isfinite(updated["flux_PSF_inverted"])
+                updated.loc[valid_inv_flux, "inst_inverted"] = -2.5 * np.log10(
+                    np.abs(updated.loc[valid_inv_flux, "flux_PSF_inverted"])
+                )
+                mag_err_inv = np.full(len(updated), np.nan)
+                mag_err_inv[valid_inv_flux] = (2.5 / np.log(10.0)) * (
+                    updated.loc[valid_inv_flux, "flux_PSF_err_inverted"]
+                    / np.abs(updated.loc[valid_inv_flux, "flux_PSF_inverted"])
+                )
+                updated["inst_inverted_err"] = mag_err_inv
+            log.info("Inverted PSF fit: measured %d sources with negative PSF detection.", len(idx_out_inv))
 
         with np.errstate(divide="ignore", invalid="ignore"):
             inst_col = f"inst_{image_filter}_PSF"

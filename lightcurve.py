@@ -177,14 +177,13 @@ def _compute_detection_mask(
     method: str,
     *,
     snr_limit: float,
-    beta_limit: float,
     use_SNR_limit: bool,
 ) -> np.ndarray:
     """
     Compute detection mask used consistently across lightcurve products.
 
     Detection rule:
-    - SNR cut (if use_SNR_limit) or mag < lmag (otherwise), both with beta cut.
+    - SNR cut (if use_SNR_limit) or mag < lmag (otherwise).
     """
     mag = pd.to_numeric(df[mag_col], errors="coerce").to_numpy(dtype=float, copy=False)
     err = pd.to_numeric(df[err_col], errors="coerce").to_numpy(dtype=float, copy=False)
@@ -239,25 +238,15 @@ def _compute_detection_mask(
         # Still compute SNR for completeness, but detection uses lmag branch below.
         snr = _snr_from_magerr(err)
 
-    if "beta" in df.columns:
-        beta = pd.to_numeric(df["beta"], errors="coerce").to_numpy(dtype=float, copy=False)
-        # Beta is not guaranteed to be defined for all rows (and may refer to
-        # injection/recovery diagnostics rather than the target measurement).
-        # Do not let missing beta values veto detections.
-        beta_ok = (~np.isfinite(beta)) | (beta > float(beta_limit))
-    else:
-        beta_ok = np.ones(len(df), dtype=bool)
-
     if use_SNR_limit:
         detected = (
             np.isfinite(mag)
             & np.isfinite(err)
             & np.isfinite(snr)
             & (snr >= float(snr_limit))
-            & beta_ok
         )
     else:
-        detected = np.isfinite(mag) & np.isfinite(err) & (mag < lmag) & beta_ok
+        detected = np.isfinite(mag) & np.isfinite(err) & (mag < lmag)
 
     return np.asarray(detected, dtype=bool)
 
@@ -468,12 +457,29 @@ def plot_lightcurve(
             err_col,
             method,
             snr_limit=float(snr_limit),
-            beta_limit=float(beta_limit),
             use_SNR_limit=bool(use_SNR_limit),
         )
 
-        detects = df[detected]
-        nondetects = df[~detected]
+        # Check for inverted-only detections (detected in inverted image but not normal)
+        inverted_col = f"{col}_inverted" if f"{col}_inverted" in df.columns else None
+        if inverted_col is None:
+            # Try lowercase variant
+            inverted_col = f"{col.lower()}_inverted" if f"{col.lower()}_inverted" in df.columns else None
+        has_inverted = inverted_col is not None and np.any(np.isfinite(df[inverted_col]))
+        
+        if has_inverted:
+            # Inverted detection: has finite inverted magnitude but not detected normally
+            inv_finite = np.isfinite(df[inverted_col])
+            inverted_only = inv_finite & ~detected
+            # Normal detection: detected normally and not an inverted-only source
+            normal_detected = detected & ~inverted_only
+        else:
+            inverted_only = np.zeros(len(df), dtype=bool)
+            normal_detected = detected
+
+        detects = df[normal_detected]
+        inv_detects = df[inverted_only] if has_inverted else pd.DataFrame()
+        nondetects = df[~detected & ~inverted_only]
         num_detect += len(detects)
         num_nondetect += len(nondetects)
 
@@ -513,6 +519,29 @@ def plot_lightcurve(
                 markersize=5,
                 zorder=2,
                 label=leg_label,
+            )
+
+        # Plot inverted-only detections with hatched/striped pattern
+        if has_inverted and not inv_detects.empty:
+            ax.errorbar(
+                inv_detects.mjd - reference_epoch,
+                inv_detects[inverted_col],
+                yerr=inv_detects[err_col] if err_col in inv_detects.columns else None,
+                color=c,
+                ecolor=c,
+                markerfacecolor=c,
+                markeredgecolor="black",
+                markeredgewidth=0.8,
+                ls="",
+                capsize=2,
+                capthick=0.8,
+                elinewidth=1,
+                marker="o",
+                markersize=5,
+                zorder=2,
+                label=f"{leg_label}^INV" if leg_label else "^INV",
+                fillstyle='top',
+                markerfacecoloralt='white',
             )
 
         if show_limits and not nondetects.empty:
@@ -726,43 +755,29 @@ def plot_lightcurve(
                     out=np.zeros_like(d2["mag"]),
                     where=d2["err"] > 0,
                 )
-            if "beta" in d1.columns:
-                b1 = pd.to_numeric(d1["beta"], errors="coerce").to_numpy(dtype=float, copy=False)
-                beta_ok1 = (~np.isfinite(b1)) | (b1 > float(beta_limit))
-            else:
-                beta_ok1 = np.ones(len(d1), dtype=bool)
-            if "beta" in d2.columns:
-                b2 = pd.to_numeric(d2["beta"], errors="coerce").to_numpy(dtype=float, copy=False)
-                beta_ok2 = (~np.isfinite(b2)) | (b2 > float(beta_limit))
-            else:
-                beta_ok2 = np.ones(len(d2), dtype=bool)
             if use_SNR_limit:
                 d1["det"] = (
                     np.isfinite(d1["mag"])
                     & np.isfinite(d1["err"])
                     & np.isfinite(snr1)
                     & (snr1 >= snr_limit)
-                    & beta_ok1
                 )
                 d2["det"] = (
                     np.isfinite(d2["mag"])
                     & np.isfinite(d2["err"])
                     & np.isfinite(snr2)
                     & (snr2 >= snr_limit)
-                    & beta_ok2
                 )
             else:
                 d1["det"] = (
                     np.isfinite(d1["mag"])
                     & np.isfinite(d1["err"])
                     & (d1["mag"] < d1["lmag"])
-                    & beta_ok1
                 )
                 d2["det"] = (
                     np.isfinite(d2["mag"])
                     & np.isfinite(d2["err"])
                     & (d2["mag"] < d2["lmag"])
-                    & beta_ok2
                 )
             d1 = d1.sort_values("mjd")
             d2 = d2.sort_values("mjd")
@@ -958,12 +973,26 @@ def generate_photometry_table(
             err_col,
             method,
             snr_limit=float(snr_limit),
-            beta_limit=float(beta_limit),
             use_SNR_limit=bool(use_SNR_limit),
         )
 
-        detects = data[detected].copy()
-        nondetects = data[~detected].copy()
+        # Check for inverted-only detections
+        inverted_col = f"{col}_inverted" if f"{col}_inverted" in data.columns else None
+        if inverted_col is None:
+            inverted_col = f"{col.lower()}_inverted" if f"{col.lower()}_inverted" in data.columns else None
+        has_inverted = inverted_col is not None and np.any(np.isfinite(data[inverted_col]))
+        
+        if has_inverted:
+            inv_finite = np.isfinite(data[inverted_col])
+            inverted_only = inv_finite & ~detected
+            normal_detected = detected & ~inverted_only
+        else:
+            inverted_only = np.zeros(len(data), dtype=bool)
+            normal_detected = detected
+
+        detects = data[normal_detected].copy()
+        inv_detects = data[inverted_only].copy() if has_inverted else pd.DataFrame()
+        nondetects = data[~detected & ~inverted_only].copy()
 
         if not detects.empty:
             detects = detects.assign(
@@ -975,6 +1004,18 @@ def generate_photometry_table(
                 Error=detects[err_col].round(3),
             )[["MJD", "Date", "Mag", "Error", "Filter", "Limit"]]
             phot_table.append(detects)
+
+        if not inv_detects.empty:
+            inv_err_col = err_col if err_col in inv_detects.columns else None
+            inv_detects = inv_detects.assign(
+                Filter=band,
+                Limit="^INV",
+                MJD=inv_detects["mjd"].round(3),
+                Date=Time(inv_detects["mjd"], format="mjd").iso,
+                Mag=inv_detects[inverted_col].round(3),
+                Error=inv_detects[inv_err_col].round(3) if inv_err_col else "-",
+            )[["MJD", "Date", "Mag", "Error", "Filter", "Limit"]]
+            phot_table.append(inv_detects)
 
         if not nondetects.empty:
             nondetects = nondetects.assign(
@@ -1087,43 +1128,29 @@ def generate_photometry_table(
                     out=np.zeros_like(d2["mag"]),
                     where=d2["err"] > 0,
                 )
-            beta_ok1 = (
-                (d1["beta"] > beta_limit)
-                if "beta" in d1.columns
-                else np.ones(len(d1), dtype=bool)
-            )
-            beta_ok2 = (
-                (d2["beta"] > beta_limit)
-                if "beta" in d2.columns
-                else np.ones(len(d2), dtype=bool)
-            )
             if use_SNR_limit:
                 d1["det"] = (
                     np.isfinite(d1["mag"])
                     & np.isfinite(d1["err"])
                     & np.isfinite(snr1)
                     & (snr1 >= snr_limit)
-                    & beta_ok1
                 )
                 d2["det"] = (
                     np.isfinite(d2["mag"])
                     & np.isfinite(d2["err"])
                     & np.isfinite(snr2)
                     & (snr2 >= snr_limit)
-                    & beta_ok2
                 )
             else:
                 d1["det"] = (
                     np.isfinite(d1["mag"])
                     & np.isfinite(d1["err"])
                     & (d1["mag"] < d1["lmag"])
-                    & beta_ok1
                 )
                 d2["det"] = (
                     np.isfinite(d2["mag"])
                     & np.isfinite(d2["err"])
                     & (d2["mag"] < d2["lmag"])
-                    & beta_ok2
                 )
             d1 = d1.sort_values("mjd")
             d2 = d2.sort_values("mjd")
@@ -1259,13 +1286,12 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
         # If we have enough information, recompute detection state using the
         # same logic as plot_lightcurve() (SNR gate + optional beta).
         try:
-            # beta: do not let missing beta veto detections
+            # beta: do not let missing/low beta veto detections with good SNR
             beta = row_obj.get("beta", np.nan)
             try:
                 beta = float(beta)
             except Exception:
                 beta = np.nan
-            beta_ok = (not np.isfinite(beta)) or (beta > float(beta_limit))
 
             method_u = str(method).upper()
             snr_val = np.nan
@@ -1294,6 +1320,13 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
                     fe = float(fe) if pd.notna(fe) else np.nan
                     if np.isfinite(fa) and np.isfinite(fe) and fe > 0:
                         snr_val = fa / fe
+
+            # Now compute beta_ok after snr_val is known
+            beta_available = np.isfinite(beta)
+            # Beta is informational for detection classification. For actual
+            # photometric detection, SNR is the primary criterion. A source with
+            # SNR >= limit is a detection regardless of beta value.
+            beta_ok = (not beta_available) or (beta > float(beta_limit)) or (snr_val >= float(snr_limit))
 
             if np.isfinite(snr_val):
                 detected_by_snr = snr_val >= float(snr_limit)

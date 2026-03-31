@@ -4814,10 +4814,34 @@ def run_photometry():
         # Converts the output dictionary to a string.
         output_str = dict_to_string_with_hashtag(output)
 
-        # Opens the file in write mode to add the output string first.
+        # Write calibration file with zeropoint and sequence star information
+        # Build zeropoint info dictionary
+        zp_info = {"# Zeropoint Information": {}}
+        for method in image_zeropoint.keys():
+            if method in image_zeropoint:
+                zp_info["# Zeropoint Information"][method] = {
+                    "zeropoint": image_zeropoint[method].get("zeropoint", np.nan),
+                    "zeropoint_error": image_zeropoint[method].get("zeropoint_error", np.nan),
+                }
+                # Add color term if available
+                if "color_term" in image_zeropoint[method]:
+                    zp_info["# Zeropoint Information"][method]["color_term"] = image_zeropoint[method].get("color_term")
+                    zp_info["# Zeropoint Information"][method]["color_term_error"] = image_zeropoint[method].get("color_term_error")
+
+        zp_str = dict_to_string_with_hashtag(zp_info)
+
+        # Opens the file in write mode to add the output string and zeropoint info.
         with open(calibration_file, "w") as file:
             file.write("# Output dictionary")
             file.write(output_str + "")
+            file.write("\n# Zeropoint and calibration information")
+            file.write(zp_str + "")
+
+        # Append sequence star catalog (CatalogSources) if available
+        if CatalogSources is not None and not CatalogSources.empty:
+            with open(calibration_file, "a") as file:
+                file.write("\n# Sequence star catalog used for calibration\n")
+                CatalogSources.to_csv(file, index=False, float_format="%.6f")
 
         # Redoes the sources if enabled.
         if input_yaml["photometry"].get("redo_sources", False):

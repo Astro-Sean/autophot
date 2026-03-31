@@ -2,25 +2,29 @@
 
 [![Anaconda Version](https://anaconda.org/astro-sean/autophot/badges/version.svg)](https://anaconda.org/astro-sean/autophot)
 [![Latest Release Date](https://anaconda.org/astro-sean/autophot/badges/latest_release_date.svg)](https://anaconda.org/astro-sean/autophot)
-[![Latest Release Relative Date](https://anaconda.org/astro-sean/autophot/badges/latest_release_relative_date.svg)](https://anaconda.org/astro-sean/autophot)
+[![Latest Release Relative Date](https://anaconda.org/astro-sean/autophot/badges/latest_release_date.svg)](https://anaconda.org/astro-sean/autophot)
 [![License](https://anaconda.org/astro-sean/autophot/badges/license.svg)](https://anaconda.org/astro-sean/autophot)
 [![Downloads](https://anaconda.org/astro-sean/autophot/badges/downloads.svg)](https://anaconda.org/astro-sean/autophot)
 
-# AutoPhOT
+# AutoPhOT: Automated Photometry Of Transients
 
-The AUTOmated Photometry Of Transients (AutoPhOT) pipeline, built on Photutils and Astropy, provides a comprehensive photometric solution for transients and variable sources, offering aperture/PSF photometry, catalogue calibration, WCS solving, and optional template subtraction.
+**AutoPhOT** is a comprehensive photometric pipeline built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/). It provides automated aperture and PSF photometry for transients and variable sources, including catalogue calibration, WCS solving, and optional template subtraction.
 
-
-Project links:
-- Conda: [https://anaconda.org/channels/astro-sean/packages/autophot/overview](https://anaconda.org/channels/astro-sean/packages/autophot/overview)
-- Paper: [https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B)
-
+## Quick Links
+- **Conda Package**: [https://anaconda.org/astro-sean/autophot](https://anaconda.org/astro-sean/autophot)
+- **Paper**: [A&A 667, A62 (2022)](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B)
+- **Issues**: [GitHub Issues](https://github.com/Astro-Sean/autophot/issues)
 
 > [!NOTE]
-> I am the sole developer and maintainer of AutoPhOT and also a full-time researcher at MPE.
-> Please open issues on GitHub and I will do my best to resolve them.
+> I am the sole developer and maintainer of AutoPhOT and also a full-time researcher at MPE. Please open issues on GitHub and I will do my best to resolve them.
 
-## Installation (Conda)
+---
+
+
+
+## Installation
+
+### Conda (Recommended)
 
 ```bash
 conda create -n autophot python=3.11 -y
@@ -35,16 +39,40 @@ python -c "from autophot import AutomatedPhotometry; print('AutoPhOT import OK')
 autophot-main -h
 ```
 
-## Optional External Tools
+---
+
+## Quick Start
+
+```python
+from autophot import AutomatedPhotometry
+
+# Load default configuration
+config = AutomatedPhotometry.load()
+
+# Set basic parameters
+config["fits_dir"] = "/path/to/your/images"
+config["target_name"] = "SN2024A"
+config["target_ra"] = 123.456789
+config["target_dec"] = -12.345678
+
+# Run photometry
+output_file = AutomatedPhotometry.run_photometry(default_input=config)
+print(f"Results saved to: {output_file}")
+```
+
+---
+
+## Optional Dependencies
 
 ### Astrometry.net (`solve-field`)
 
+For WCS solving when FITS headers lack astrometry:
+
 ```bash
 conda install -c conda-forge astrometry-net
-solve-field --help
 ```
 
-### Astromatic tools (SExtractor/SCAMP/SWarp)
+### Astromatic Suite (SExtractor, SCAMP, SWarp)
 
 ```bash
 conda install -c conda-forge astromatic-source-extractor astromatic-scamp astromatic-swarp
@@ -52,31 +80,193 @@ conda install -c conda-forge astromatic-source-extractor astromatic-scamp astrom
 
 ### HOTPANTS
 
+For template subtraction with the `hotpants` method:
+
 ```bash
 conda install -c conda-forge cfitsio make gcc
 git clone https://github.com/acbecker/hotpants
-cd hotpants
-make
+cd hotpants && make
 ```
 
-## Driver Script Example (Sanitized)
+---
 
-The script below follows your requested workflow style while avoiding sensitive paths/tokens.
+## Detection Logic
 
-## Listing all parameters
+AutoPhOT classifies sources as detections or upper limits based on **Signal-to-Noise Ratio (SNR)**.
 
-For a full list of configuration parameters and defaults:
+### Detection Criteria
+
+A source is classified as a **detection** when:
+- `SNR >= snr_limit` (default: 3)
+- Magnitude and error are finite
+
+A source is an **upper limit** (non-detection) when:
+- `SNR < snr_limit`
+- Magnitude is fainter than limiting magnitude (`mag > lmag`)
+
+### Key Points
+
+- **SNR is the primary detection metric** - beta values from injection experiments are not used for target detection
+- Low S/N sources visible in subtraction images will be correctly classified as detections if `SNR >= 3`
+- The `snr_limit` parameter controls detection sensitivity (default: 3.0)
+
+### Setting Detection Threshold
+
+```python
+# Stricter detection (higher confidence)
+config["photometry"]["detection_limit"] = 5  # SNR >= 5
+
+# More permissive (for faint transients)
+config["photometry"]["detection_limit"] = 3  # SNR >= 3
+```
+
+---
+
+## Output Products
+
+### Per-Image Outputs
+
+For each processed image, AutoPhOT creates:
+- `OUTPUT_<image>.csv` - Photometry results (magnitudes, errors, SNR)
+- `CALIB_<image>.csv` - Calibration diagnostics
+- `PSFSources_*.csv` - PSF model stars used
+- `targetPSF_*.png` or `PSF_Target_*.png` - Diagnostic plots
+
+### Columns in Output CSV
+
+| Column | Description |
+|--------|-------------|
+| `*_PSF` / `*_AP` | Calibrated magnitude (PSF or aperture) |
+| `*_PSF_err` / `*_AP_err` | Magnitude uncertainty |
+| `SNR` / `snr_psf` / `snr_ap` | Signal-to-noise ratio |
+| `zp_*` | Zero point magnitude |
+| `lmag` | Limiting magnitude |
+| `fwhm` | FWHM in arcsec |
+| `background` | Background level (ADU) |
+| `background_rms` | Background noise (ADU) |
+
+### Post-Processing Products
+
+```python
+from lightcurve import plot_lightcurve, generate_photometry_table
+
+# Lightcurve plot with detections and limits
+plot_lightcurve(output_file, snr_limit=3, method="PSF")
+
+# ASCII photometry table
+# Output: lightcurve_PSF.dat with columns:
+# MJD, Date, Mag, Error, Filter, Limit
+generate_photometry_table(output_file, snr_limit=3, method="PSF")
+```
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| Images ignored | Check FITS headers have `TELESCOP`, `INSTRUME`, and `FILTER` |
+| No catalogs found | Set `catalog.use_catalog` for your filters |
+| Template subtraction fails | Ensure templates are in `templates/<filter>_template/` |
+| Poor photometry | Check `fwhm` and `background_rms` values in outputs |
+
+### Environment Variables
+
+For TNS lookups and catalog access, set these (do not hard-code):
+
+```bash
+export MASTCASJOBS_WSID="..."
+export MASTCASJOBS_PWD="..."
+export TNS_BOT_ID="..."
+export TNS_BOT_NAME="..."
+export TNS_BOT_API="..."
+```
+
+---
+
+## Photometry Methods
+
+### PSF Photometry (Recommended)
+
+- Best for point sources (supernovae, variable stars)
+- Uses empirical PSF from field stars
+- Configurable via `perform_emcee_fitting_s2n`
+
+### Aperture Photometry
+
+- Best for extended sources
+- Configurable aperture sizes based on FWHM
+
+---
+
+## Example Usage
+
+### Complete Driver Script
+
+```python
+#!/usr/bin/env python3
+"""
+Example AutoPhOT driver script.
+"""
+import os
+from autophot import AutomatedPhotometry, prepare_template_directory
+
+# Load default configuration
+config = AutomatedPhotometry.load()
+config["nCPU"] = 4  # Parallel processing
+
+# Paths
+config["outdir_name"] = "REDUCED"
+config["wdir"] = "/path/to/working/directory"
+config["fits_dir"] = "/path/to/images"
+
+# Target coordinates
+config["target_name"] = "SN2024A"
+config["target_ra"] = 123.456789
+config["target_dec"] = -12.345678
+
+# Photometric catalogs by filter
+config["catalog"]["use_catalog"] = {
+    "griz": "refcat",
+    "u": "gaia", 
+    "UBVRI": "apass",
+}
+
+# Processing options
+config["cosmic_rays"]["remove_cmrays"] = False
+config["wcs"]["redo_wcs"] = True
+
+# Enable template subtraction
+config["template_subtraction"]["do_subtraction"] = True
+config["template_subtraction"]["method"] = "sfft"
+
+# Create template directories
+prepare_template_directory(
+    fits_dir=config["fits_dir"],
+    include_legacy_p_folders=False,
+    confirm_before_continue=True,
+)
+
+# Run photometry
+output = AutomatedPhotometry.run_photometry(default_input=config, do_photometry=True)
+
+# Generate plots and tables
+from lightcurve import plot_lightcurve, generate_photometry_table
+plot_lightcurve(output, snr_limit=3, method="PSF")
+generate_photometry_table(output, snr_limit=3, method="PSF")
+```
+
+### Listing All Parameters
 
 ```python
 from autophot import list_parameters
-
 list_parameters()
 ```
 
-Note: many of the most important values (eg `fwhm`, `gain`, `exposure_time`, `imageFilter`) are **updated on a per-image basis** from FITS headers and runtime measurements. Use the `PER-IMG` column in the listing to identify these.
-
-> [!NOTE]
-> FITS images require the TELESCOP and INSTRUME header keywords (otherwise they will be ignored), as well as a keyword giving the image bandpass (e.g., FILTER).
+> [!IMPORTANT]
+> FITS images **must** have `TELESCOP` and `INSTRUME` header keywords, plus a bandpass keyword (e.g., `FILTER`). Images without these will be ignored.
 
 
 ```python
@@ -123,30 +313,10 @@ def main() -> int:
     }
 
     # Optional: Gaia + custom throughput curves ("gaia_custom")
-    # - Set one or more mapping entries to "gaia_custom"
-    # - Provide `catalog.transmission_curve_map` with matching band keys (e.g. g/r/i)
-    # AutoPhOT will build/reuse a Gaia curve-map catalog and route those bands
-    # through the `custom` backend automatically.
-    #
-    # autophot_input["catalog"]["use_catalog"] = {
-    #     "gri": "gaia_custom",
-    #     "zJHK": "refcat",
-    #     "u": "gaia",
-    #     "UBVRI": "apass",
-    # }
-    # autophot_input["catalog"]["transmission_curve_map"] = {
-    #     "g": "/path/to/throughputs/g.dat",
-    #     "r": "/path/to/throughputs/r.dat",
-    #     "i": "/path/to/throughputs/i.dat",
-    # }
+    # autophot_input["catalog"]["use_catalog"] = {"gri": "gaia_custom", ...}
+    # autophot_input["catalog"]["transmission_curve_map"] = {"g": "path/to/g.dat", ...}
 
     # Optional credentials from environment (do not hard-code secrets):
-    # TNS credentials are only needed if you want TNS lookups from target_name.
-    # export MASTCASJOBS_WSID="..."
-    # export MASTCASJOBS_PWD="..."
-    # export TNS_BOT_ID="..."
-    # export TNS_BOT_NAME="..."
-    # export TNS_BOT_API="..."
     if os.getenv("MASTCASJOBS_WSID"):
         autophot_input["catalog"]["MASTcasjobs_wsid"] = os.getenv("MASTCASJOBS_WSID")
     if os.getenv("MASTCASJOBS_PWD"):
@@ -177,7 +347,7 @@ def main() -> int:
     # Create template folder structure and ask before continuing.
     prepare_template_directory(
         fits_dir=autophot_input["fits_dir"],
-        include_legacy_p_folders=False,  # create only *_template by default
+        include_legacy_p_folders=False,
         confirm_before_continue=True,
     )
 
@@ -226,17 +396,19 @@ Notes:
 - Legacy `rp_template` naming is still supported by the pipeline if needed.
 - Keep paths and credentials sanitized in public scripts.
 
+---
+
 ## Citation
 
 If you use AutoPhOT in your research, please cite:
-- ADS: [https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B)
+
+> Brennan, S. J., & Fraser, M. 2022, A&A, 667, A62
 
 ```bibtex
 @ARTICLE{2022A&A...667A..62B,
        author = {{Brennan}, S.~J. and {Fraser}, M.},
        title = "{The AUTOmated Photometry Of Transients pipeline (AutoPhOT)}",
       journal = {\aap},
-     keywords = {techniques: photometric, techniques: image processing, methods: data analysis, Astrophysics - Instrumentation and Methods for Astrophysics, Astrophysics - High Energy Astrophysical Phenomena},
          year = 2022,
         month = nov,
        volume = {667},
@@ -246,7 +418,7 @@ If you use AutoPhOT in your research, please cite:
 archivePrefix = {arXiv},
        eprint = {2201.02635},
  primaryClass = {astro-ph.IM},
-       adsurl = {https://ui.adsabs.harvard.edu/abs/2022A&A...667A..62B},
+       adsurl = {https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B},
       adsnote = {Provided by the SAO/NASA Astrophysics Data System}
 }
 ```
