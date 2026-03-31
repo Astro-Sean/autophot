@@ -4963,15 +4963,20 @@ def run_photometry():
                         output["flux_psf_err_inverted"] = float(TargetPosition.at[idx, "flux_PSF_err_inverted"])
                     if "inst_inverted" in TargetPosition.columns:
                         output["inst_inverted"] = float(TargetPosition.at[idx, "inst_inverted"])
+                        # Add band-specific instrumental magnitude for inverted fit
+                        output[f"{inst_prefix}_inverted"] = float(TargetPosition.at[idx, "inst_inverted"])
                     if "inst_inverted_err" in TargetPosition.columns:
                         output["inst_inverted_err"] = float(TargetPosition.at[idx, "inst_inverted_err"])
+                        # Add band-specific instrumental magnitude error for inverted fit
+                        output[f"{inst_prefix}_err_inverted"] = float(TargetPosition.at[idx, "inst_inverted_err"])
                     # Add calibrated magnitude for inverted fit
                     try:
                         if "inst_inverted" in TargetPosition.columns and "PSF" in image_zeropoint:
                             inv_inst = float(TargetPosition.at[idx, "inst_inverted"])
                             zp = image_zeropoint["PSF"]["zeropoint"]
+                            zp_err = image_zeropoint["PSF"]["zeropoint_error"]
                             output[f"{prefix}_inverted"] = inv_inst + zp
-                            output[f"{prefix}_inverted_err"] = float(TargetPosition.at[idx, "inst_inverted_err"]) + image_zeropoint["PSF"]["zeropoint_error"]
+                            output[f"{prefix}_inverted_err"] = float(TargetPosition.at[idx, "inst_inverted_err"]) + zp_err
                     except Exception:
                         pass
 

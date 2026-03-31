@@ -355,6 +355,7 @@ def plot_lightcurve(
         Resolve the (mag, err, zp) column names for a band/method.
         Supports both legacy lowercased columns (e.g. g_psf) and case-preserving
         columns (e.g. g_PSF / R_PSF) without conflating r and R when both exist.
+        Also supports inverted counterparts (e.g. g_psf_inverted).
         """
         # Prefer exact-case first, then lowercase legacy.
         cand = [
@@ -365,7 +366,20 @@ def plot_lightcurve(
                 f"zp_{band}_{method}".lower(),
             ),
         ]
+        # Also check for inverted versions
+        cand_inv = [
+            (f"{band}_{method}_inverted", f"{band}_{method}_err_inverted", f"zp_{band}_{method}"),
+            (
+                f"{band}_{method}_inverted".lower(),
+                f"{band}_{method}_err_inverted".lower(),
+                f"zp_{band}_{method}".lower(),
+            ),
+        ]
         for trip in cand:
+            if all(c in cols for c in trip):
+                return trip
+        # Check for inverted version if normal not found
+        for trip in cand_inv:
             if all(c in cols for c in trip):
                 return trip
         return None
