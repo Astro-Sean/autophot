@@ -4079,15 +4079,16 @@ def run_photometry():
                     bkg_median = float(np.nanmedian(image_data))
                     logging.info(f"Using global median background for inversion: {bkg_median:.3f}")
                 
-                # Get image data for inversion
+                # Get image data for inversion - convert to electrons like psf.py does
+                gain = float(input_yaml.get("gain", 1.0))
                 if target_cutout is not None:
-                    image_data = np.array(target_cutout, dtype=float, copy=True)
+                    image_data = np.array(target_cutout, dtype=float, copy=True) * gain
                 else:
-                    image_data = np.array(image, dtype=float, copy=True)
+                    image_data = np.array(image, dtype=float, copy=True) * gain
                 
                 # Subtract 2x background and take absolute value
                 # This flips negative PSF dips to positive peaks while keeping background at zero
-                inv_data = np.abs(image_data - 2.0 * bkg_median)
+                inv_data = np.abs(image_data - 2.0 * bkg_median * gain)
                 inverted_image = inv_data
                 logging.info("Created inverted image for negative PSF detection (subtract 2xbkg, abs).")
             except Exception as exc:
