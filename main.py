@@ -4056,6 +4056,27 @@ def run_photometry():
                 fit_bound_arcsec,
             )
 
+        # Stage 1: Create inverted image for negative PSF detection if enabled
+        inverted_image = None
+        phot_cfg = input_yaml.get("photometry", {}) or {}
+        check_inverted = phot_cfg.get("check_inverted_image", False)
+        if check_inverted:
+            try:
+                # Estimate background level from the image
+                if target_cutout is not None:
+                    image_data = np.array(target_cutout, dtype=float, copy=True)
+                else:
+                    image_data = np.array(image, dtype=float, copy=True)
+                bkg_median = float(np.nanmedian(image_data))
+                # Subtract 2x background and take absolute value
+                # This flips negative PSF dips to positive peaks while keeping background at zero
+                inv_data = np.abs(image_data - 2.0 * bkg_median)
+                inverted_image = inv_data
+                logging.info("Created inverted image for negative PSF detection (subtract 2xbkg, abs).")
+            except Exception as exc:
+                logging.warning(f"Failed to create inverted image: {exc}")
+                inverted_image = None
+
         # Performs PSF fitting on the target position if aperture photometry is not required.
         if not do_aperture_ONLY:
             TargetPosition = PSF(
@@ -4068,6 +4089,7 @@ def run_photometry():
                 forcePhotometry=perform_ForcePhotometry,
                 is_target_fit=True,
                 background_rms=background_rms_for_target,
+                inverted_image=inverted_image,
             )
 
         # Debug: log the background levels each method used (helps diagnose
@@ -4129,6 +4151,40 @@ def run_photometry():
         inverted_tag = ""
         if "_inverted_fit" in TargetPosition.columns and TargetPosition["_inverted_fit"].iloc[0]:
             inverted_tag = " [inverted]"
+
+        # Stage 2: If inverted fit was used, run aperture photometry on inverted image
+        if "_inverted_fit" in TargetPosition.columns and TargetPosition["_inverted_fit"].iloc[0]:
+            if inverted_image is not None:
+                try:
+                    logging.info("Running aperture photometry on inverted image for inverted detection.")
+                    # Create aperture photometry instance for inverted image
+                    AperturePhotometryInverted = Aperture(
+                        input_yaml=input_yaml,
+                        image=inverted_image,
+                    )
+                    # Measure on inverted image
+                    TargetPositionInverted = TargetPosition.copy()
+                    TargetPositionInverted = AperturePhotometryInverted.measure(
+                        sources=TargetPositionInverted,
+                        plot=True,
+                        saveTarget=True,
+                        background_rms=background_rms_for_target,
+                        n_jobs=input_yaml.get("n_jobs", 1),
+                    )
+                    # Store inverted aperture results with _inverted suffix
+                    if "flux_AP" in TargetPositionInverted.columns:
+                        TargetPosition["flux_AP_inverted"] = TargetPositionInverted["flux_AP"]
+                    if "flux_AP_err" in TargetPositionInverted.columns:
+                        TargetPosition["flux_AP_err_inverted"] = TargetPositionInverted["flux_AP_err"]
+                    if "SNR" in TargetPositionInverted.columns:
+                        TargetPosition["SNR_inverted"] = TargetPositionInverted["SNR"]
+                    if "local_bkg" in TargetPositionInverted.columns:
+                        TargetPosition["local_bkg_inverted"] = TargetPositionInverted["local_bkg"]
+                    if "sky_bkg_total" in TargetPositionInverted.columns:
+                        TargetPosition["sky_bkg_total_inverted"] = TargetPositionInverted["sky_bkg_total"]
+                    logging.info("Aperture photometry on inverted image completed.")
+                except Exception as exc:
+                    logging.warning(f"Aperture photometry on inverted image failed: {exc}")
 
         # When MCMC is used, LSQ quality metrics (reduced_chi2, cfit, qfit) may be NaN.
         # Only log them when they are present and finite.

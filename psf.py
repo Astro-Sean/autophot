@@ -2162,6 +2162,7 @@ class PSF:
         background_rms=None,
         xy_bounds=None,
         iterative: bool = False,
+        inverted_image=None,  # Optional: external inverted image from main.py
     ) -> pd.DataFrame:
         """
         Tiered-SNR PSF photometry with optional MCMC error propagation.
@@ -2395,9 +2396,14 @@ class PSF:
         )
 
         # Optional: create inverted image for detecting negative PSF dips (fading sources)
+        # OR use external inverted image passed from main.py
         check_inverted = bool(is_target_fit and phot_cfg.get("check_inverted_image", False))
         ndimage_inverted = None
-        if check_inverted:
+        if inverted_image is not None:
+            # Use external inverted image provided by main.py
+            ndimage_inverted = inverted_image
+            log.info("Target PSF: using external inverted image from main.py for negative PSF detection.")
+        elif check_inverted:
             try:
                 # Estimate background level from the image
                 image_data = np.array(ndimage.data, dtype=float, copy=True)

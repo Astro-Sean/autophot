@@ -1385,7 +1385,30 @@ class Zeropoint:
             )
             x, y, x_err, y_err = x[finite], y[finite], x_err[finite], y_err[finite]
 
+            # Filter extreme color sources if configured
             zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
+            extreme_color_sigma = zp_cfg.get("extreme_color_sigma", None)
+            if extreme_color_sigma is not None:
+                try:
+                    extreme_color_sigma = float(extreme_color_sigma)
+                    if extreme_color_sigma > 0 and len(x) > 10:
+                        # Sigma-clip in color space to remove extreme colors
+                        color_clipped = sigma_clip(x, sigma=extreme_color_sigma, maxiters=5)
+                        n_extreme = np.sum(color_clipped.mask)
+                        if n_extreme > 0:
+                            logger.info(
+                                f"fit_color_term: removing {n_extreme} extreme color sources "
+                                f"(beyond {extreme_color_sigma} sigma in color space)"
+                            )
+                            x, y, x_err, y_err = (
+                                x[~color_clipped.mask],
+                                y[~color_clipped.mask],
+                                x_err[~color_clipped.mask],
+                                y_err[~color_clipped.mask],
+                            )
+                except Exception as exc:
+                    logger.warning(f"fit_color_term: extreme color filtering failed: {exc}")
+
             min_sources = int(zp_cfg.get("min_source_no", 1))
             if min_sources < 1:
                 min_sources = 1
