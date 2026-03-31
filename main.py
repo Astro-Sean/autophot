@@ -4300,7 +4300,7 @@ def run_photometry():
             flux_psf = float(TargetPosition["flux_PSF"].iloc[0])
             flux_psf_err = float(TargetPosition["flux_PSF_err"].iloc[0])
             snr_psf = (
-                flux_psf / flux_psf_err
+                np.abs(flux_psf) / flux_psf_err  # Use absolute flux for SNR (significance is always positive)
                 if flux_psf_err > 0 and np.isfinite(flux_psf_err)
                 else np.nan
             )
@@ -4690,7 +4690,7 @@ def run_photometry():
             "SNR_AP": float(TargetPosition.at[idx, "SNR"]),
             "SNR_PSF": (
                 float(
-                    TargetPosition.at[idx, "flux_PSF"]
+                    np.abs(TargetPosition.at[idx, "flux_PSF"])  # Use absolute flux for SNR
                     / TargetPosition.at[idx, "flux_PSF_err"]
                 )
                 if not do_aperture_ONLY
