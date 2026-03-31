@@ -541,31 +541,36 @@ def plot_lightcurve(
                 label=leg_label,
             )
 
-        # Plot inverted-only detections with hatched/striped pattern
+        # Plot inverted-only detections with diagonal hatch pattern
         # Use inst_inverted column for magnitude if available
         inv_mag_col = "inst_inverted" if "inst_inverted" in inv_detects.columns else inverted_col
         inv_err_col = "inst_inverted_err" if "inst_inverted_err" in inv_detects.columns else None
         if has_inverted and not inv_detects.empty and inv_mag_col and inv_mag_col in inv_detects.columns:
+            # Plot errorbars without markers first
             ax.errorbar(
                 inv_detects.mjd - reference_epoch,
                 inv_detects[inv_mag_col],
                 yerr=inv_detects[inv_err_col] if inv_err_col and inv_err_col in inv_detects.columns else None,
-                color=c,
+                fmt='none',  # no markers here
                 ecolor=c,
-                markerfacecolor=c,
-                markeredgecolor="black",
-                markeredgewidth=0.8,
-                ls="",
                 capsize=2,
                 capthick=0.8,
                 elinewidth=1,
-                marker="o",
-                markersize=5,
                 zorder=2,
-                label=f"{leg_label}^INV" if leg_label else "^INV",
-                fillstyle='top',
-                markerfacecoloralt='white',
             )
+            # Overlay scatter markers with diagonal stripes
+            sc = ax.scatter(
+                inv_detects.mjd - reference_epoch,
+                inv_detects[inv_mag_col],
+                s=80,  # marker size
+                c=c,   # face color
+                edgecolors='black',
+                linewidth=0.8,
+                zorder=3,  # markers on top of error bars
+                label=f"{leg_label}^INV" if leg_label else "^INV",
+            )
+            # Add diagonal stripes
+            sc.set_hatch('////')
 
         if show_limits and not nondetects.empty:
             has_limits_plotted = True

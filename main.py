@@ -4292,6 +4292,17 @@ def run_photometry():
         # Logs the measured SNR and target detectability (aperture and PSF when available).
         snr_ap = float(TargetPosition["SNR"].iloc[0])
         logging.info(f"Target SNR (aperture): {snr_ap:.1f}")
+        
+        # If inverted fit was used, also log the inverted SNR for aperture
+        if "_inverted_fit" in TargetPosition.columns and TargetPosition["_inverted_fit"].iloc[0]:
+            # Compute inverted aperture SNR from absolute flux
+            if "flux_AP" in TargetPosition.columns and "flux_AP_err" in TargetPosition.columns:
+                ap_flux = float(TargetPosition["flux_AP"].iloc[0])
+                ap_err = float(TargetPosition["flux_AP_err"].iloc[0])
+                if ap_err > 0 and np.isfinite(ap_err):
+                    snr_ap_inverted = np.abs(ap_flux) / ap_err
+                    logging.info(f"Target SNR (aperture) [inverted]: {snr_ap_inverted:.1f}")
+        
         if (
             not do_aperture_ONLY
             and "flux_PSF" in TargetPosition.columns
@@ -4752,12 +4763,18 @@ def run_photometry():
                     output["inst_inverted"] = float(TargetPosition.at[idx, "inst_inverted"])
                 if "inst_inverted_err" in TargetPosition.columns:
                     output["inst_inverted_err"] = float(TargetPosition.at[idx, "inst_inverted_err"])
-                # Inverted fit SNR
+                # Inverted fit SNR for PSF
                 if "flux_PSF_inverted" in TargetPosition.columns and "flux_PSF_err_inverted" in TargetPosition.columns:
                     inv_flux = float(TargetPosition.at[idx, "flux_PSF_inverted"])
                     inv_err = float(TargetPosition.at[idx, "flux_PSF_err_inverted"])
                     if inv_err > 0 and np.isfinite(inv_err):
                         output["snr_psf_inverted"] = np.abs(inv_flux) / inv_err
+                # Inverted fit SNR for aperture (from absolute flux)
+                if "flux_AP" in TargetPosition.columns and "flux_AP_err" in TargetPosition.columns:
+                    ap_flux = float(TargetPosition.at[idx, "flux_AP"])
+                    ap_err = float(TargetPosition.at[idx, "flux_AP_err"])
+                    if ap_err > 0 and np.isfinite(ap_err):
+                        output["snr_ap_inverted"] = np.abs(ap_flux) / ap_err
         except Exception:
             pass
 
