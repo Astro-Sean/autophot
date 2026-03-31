@@ -459,16 +459,19 @@ def plot_lightcurve(
         col, err_col, zp_col = triplet
         df = data[np.isfinite(data[zp_col])].copy()
         df.sort_values(by="mjd", inplace=True)
+        # Convert instrumental magnitude to apparent magnitude
         df["lmag"] = df["lmag"] + df[zp_col]
+        df["apparent_mag"] = df[col] + df[zp_col]
+        df["apparent_mag_err"] = df[err_col]
 
         band_offset = (idx - mid_idx) * offset
-        df[col] = df[col] + band_offset
+        df["apparent_mag"] = df["apparent_mag"] + band_offset
         df["lmag"] = df["lmag"] + band_offset
 
         detected = _compute_detection_mask(
             df,
-            col,
-            err_col,
+            "apparent_mag",
+            "apparent_mag_err",
             method,
             snr_limit=float(snr_limit),
             use_SNR_limit=bool(use_SNR_limit),
@@ -554,8 +557,8 @@ def plot_lightcurve(
         if not detects.empty:
             ax.errorbar(
                 detects.mjd - reference_epoch,
-                detects[col],
-                yerr=detects[err_col],
+                detects["apparent_mag"],
+                yerr=detects["apparent_mag_err"],
                 color=c,
                 ecolor=c,
                 markerfacecolor=c,
@@ -572,9 +575,30 @@ def plot_lightcurve(
             )
 
         # Plot inverted-only detections with diagonal hatch pattern
-        # Use inst_inverted column for magnitude if available
-        inv_mag_col = "inst_inverted" if "inst_inverted" in inv_detects.columns else inverted_col
-        inv_err_col = "inst_inverted_err" if "inst_inverted_err" in inv_detects.columns else None
+        # Check for band-specific inverted apparent magnitude first (e.g., g_psf_inverted)
+        band_inv_mag_col = f"{band}_{method}_inverted" if f"{band}_{method}_inverted" in inv_detects.columns else None
+        band_inv_err_col = f"{band}_{method}_err_inverted" if f"{band}_{method}_err_inverted" in inv_detects.columns else None
+        
+        # Fallback to generic inst_inverted if band-specific not available
+        inv_mag_col = band_inv_mag_col if band_inv_mag_col else ("inst_inverted" if "inst_inverted" in inv_detects.columns else inverted_col)
+        inv_err_col = band_inv_err_col if band_inv_err_col else ("inst_inverted_err" if "inst_inverted_err" in inv_detects.columns else None)
+        
+        # If using instrumental magnitude, convert to apparent by adding zeropoint
+        if inv_mag_col and inv_mag_col in inv_detects.columns:
+            # Check if this is already an apparent magnitude (band-specific inverted column)
+            is_apparent = band_inv_mag_col is not None
+            if not is_apparent and zp_col in inv_detects.columns:
+                # Convert instrumental to apparent
+                inv_detects["inv_apparent_mag"] = inv_detects[inv_mag_col] + inv_detects[zp_col]
+                if inv_err_col and inv_err_col in inv_detects.columns:
+                    inv_detects["inv_apparent_mag_err"] = inv_detects[inv_err_col]
+                else:
+                    inv_detects["inv_apparent_mag_err"] = np.nan
+                plot_mag_col = "inv_apparent_mag"
+                plot_err_col = "inv_apparent_mag_err"
+            else:
+                plot_mag_col = inv_mag_col
+                plot_err_col = inv_err_col
         if has_inverted and not inv_detects.empty and inv_mag_col and inv_mag_col in inv_detects.columns:
             # Split inverted detections: those with _inverted_fit flag vs those without
             if "_inverted_fit" in inv_detects.columns:
@@ -594,8 +618,8 @@ def plot_lightcurve(
             # Plot errorbars without markers first (for all inverted detections)
             ax.errorbar(
                 inv_detects.mjd - reference_epoch,
-                inv_detects[inv_mag_col],
-                yerr=inv_detects[inv_err_col] if inv_err_col and inv_err_col in inv_detects.columns else None,
+                inv_detects[plot_mag_col],
+                yerr=inv_detects[plot_err_col] if plot_err_col and plot_err_col in inv_detects.columns else None,
                 fmt='none',  # no markers here
                 ecolor=c,
                 capsize=2,
@@ -609,7 +633,7 @@ def plot_lightcurve(
             if not inv_normal.empty:
                 ax.scatter(
                     inv_normal.mjd - reference_epoch,
-                    inv_normal[inv_mag_col],
+                    inv_normal[plot_mag_col],
                     s=80,
                     c=c,
                     marker='o',  # normal circular marker
@@ -623,7 +647,7 @@ def plot_lightcurve(
             if not inv_with_fit.empty:
                 sc = ax.scatter(
                     inv_with_fit.mjd - reference_epoch,
-                    inv_with_fit[inv_mag_col],
+                    inv_with_fit[plot_mag_col],
                     s=100,  # slightly larger marker size for visibility
                     c=c,   # face color
                     marker='s',  # square marker (patch) so hatch works
