@@ -560,15 +560,15 @@ def plot_lightcurve(
         else:
             leg_label = band
         
-        # For normal detections, use apparent_mag
-        df.loc[normal_detected, "plot_mag"] = df.loc[normal_detected, "apparent_mag"]
-        df.loc[normal_detected, "plot_err"] = df.loc[normal_detected, "apparent_mag_err"]
-        
         # Initialize plot_mag and plot_err for all rows to avoid KeyError
         # This ensures the columns exist even if there are no detections
         if "plot_mag" not in df.columns:
             df["plot_mag"] = df["apparent_mag"]
             df["plot_err"] = df["apparent_mag_err"]
+        
+        # For normal detections, use apparent_mag
+        df.loc[normal_detected, "plot_mag"] = df.loc[normal_detected, "apparent_mag"]
+        df.loc[normal_detected, "plot_err"] = df.loc[normal_detected, "apparent_mag_err"]
         
         # Prepare magnitude columns for inverted-only detections
         if has_inverted and np.any(inverted_only):
