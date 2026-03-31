@@ -4062,12 +4062,29 @@ def run_photometry():
         check_inverted = phot_cfg.get("check_inverted_image", False)
         if check_inverted:
             try:
-                # Estimate background level from the image
+                # Use the local background measured from aperture annulus
+                # This is more accurate than global median for the target region
+                if "local_bkg_raw" in TargetPosition.columns and np.isfinite(TargetPosition["local_bkg_raw"].iloc[0]):
+                    bkg_median = float(TargetPosition["local_bkg_raw"].iloc[0])
+                    logging.info(f"Using aperture annulus background for inversion: {bkg_median:.3f}")
+                elif "local_bkg_used" in TargetPosition.columns and np.isfinite(TargetPosition["local_bkg_used"].iloc[0]):
+                    bkg_median = float(TargetPosition["local_bkg_used"].iloc[0])
+                    logging.info(f"Using aperture annulus background (used) for inversion: {bkg_median:.3f}")
+                else:
+                    # Fallback to global median if local background not available
+                    if target_cutout is not None:
+                        image_data = np.array(target_cutout, dtype=float, copy=True)
+                    else:
+                        image_data = np.array(image, dtype=float, copy=True)
+                    bkg_median = float(np.nanmedian(image_data))
+                    logging.info(f"Using global median background for inversion: {bkg_median:.3f}")
+                
+                # Get image data for inversion
                 if target_cutout is not None:
                     image_data = np.array(target_cutout, dtype=float, copy=True)
                 else:
                     image_data = np.array(image, dtype=float, copy=True)
-                bkg_median = float(np.nanmedian(image_data))
+                
                 # Subtract 2x background and take absolute value
                 # This flips negative PSF dips to positive peaks while keeping background at zero
                 inv_data = np.abs(image_data - 2.0 * bkg_median)
