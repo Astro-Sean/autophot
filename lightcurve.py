@@ -466,7 +466,14 @@ def plot_lightcurve(
         
         # First check if _inverted_fit flag exists and is True for any rows
         if "_inverted_fit" in data.columns:
-            has_inverted = np.any(data["_inverted_fit"].fillna(False).astype(bool))
+            # Convert to boolean explicitly (handle string 'True' or actual True)
+            inv_fit_values = data["_inverted_fit"]
+            if inv_fit_values.dtype == object:
+                # String values like "True" or "False"
+                has_inverted = np.any(inv_fit_values == "True")
+            else:
+                # Boolean or numeric values
+                has_inverted = np.any(inv_fit_values.fillna(False).astype(bool))
         
         # Also check for inst_inverted column as fallback
         if not has_inverted:
@@ -479,7 +486,11 @@ def plot_lightcurve(
         if has_inverted:
             # Inverted detection: has _inverted_fit=True OR finite inst_inverted but not detected normally
             if "_inverted_fit" in data.columns:
-                inv_flag = data["_inverted_fit"].fillna(False).astype(bool)
+                inv_fit_values = data["_inverted_fit"]
+                if inv_fit_values.dtype == object:
+                    inv_flag = inv_fit_values == "True"
+                else:
+                    inv_flag = inv_fit_values.fillna(False).astype(bool)
             else:
                 inv_flag = np.zeros(len(data), dtype=bool)
             
@@ -547,8 +558,16 @@ def plot_lightcurve(
         inv_err_col = "inst_inverted_err" if "inst_inverted_err" in inv_detects.columns else None
         if has_inverted and not inv_detects.empty and inv_mag_col and inv_mag_col in inv_detects.columns:
             # Split inverted detections: those with _inverted_fit flag vs those without
-            inv_fit_mask = inv_detects["_inverted_fit"] if "_inverted_fit" in inv_detects.columns else pd.Series(False, index=inv_detects.index)
-            inv_fit_mask = inv_fit_mask.fillna(False).astype(bool)
+            if "_inverted_fit" in inv_detects.columns:
+                inv_fit_values = inv_detects["_inverted_fit"]
+                if inv_fit_values.dtype == object:
+                    # String values like "True" or "False"
+                    inv_fit_mask = inv_fit_values == "True"
+                else:
+                    # Boolean or numeric values
+                    inv_fit_mask = inv_fit_values.fillna(False).astype(bool)
+            else:
+                inv_fit_mask = pd.Series(False, index=inv_detects.index)
             
             # Plot errorbars without markers first (for all inverted detections)
             ax.errorbar(
@@ -585,11 +604,11 @@ def plot_lightcurve(
                     inv_with_fit[inv_mag_col],
                     s=100,  # slightly larger marker size for visibility
                     c=c,   # face color
-                    marker='s',  # square marker (patch) so hatch works
+                    marker='o',  # square marker (patch) so hatch works
                     edgecolors='black',
                     linewidth=0.8,
                     zorder=3,  # markers on top of error bars
-                    label=f"{leg_label}^INV" if leg_label else "^INV",
+                    label=f"{leg_label}",
                 )
                 # Add diagonal stripes - only for inverted PSF fits
                 sc.set_hatch('////')
@@ -597,7 +616,7 @@ def plot_lightcurve(
                 # Add label even if no hatched points (all inverted detections are ^INV)
                 if not inv_normal.empty:
                     ax.scatter([], [], s=80, c=c, marker='o', edgecolors='black', 
-                             linewidth=0.8, label=f"{leg_label}^INV" if leg_label else "^INV")
+                             linewidth=0.8, label=f"{leg_label}")
 
         if show_limits and not nondetects.empty:
             has_limits_plotted = True
