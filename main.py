@@ -4177,11 +4177,17 @@ def run_photometry():
                     if "flux_AP_err" in TargetPositionInverted.columns:
                         TargetPosition["flux_AP_err_inverted"] = TargetPositionInverted["flux_AP_err"]
                     if "SNR" in TargetPositionInverted.columns:
-                        TargetPosition["SNR_inverted"] = TargetPositionInverted["SNR"]
-                    if "local_bkg" in TargetPositionInverted.columns:
-                        TargetPosition["local_bkg_inverted"] = TargetPositionInverted["local_bkg"]
+                        TargetPosition["SNR_AP_inverted"] = TargetPositionInverted["SNR"]
+                    if "local_bkg_raw" in TargetPositionInverted.columns:
+                        TargetPosition["local_bkg_raw_inverted"] = TargetPositionInverted["local_bkg_raw"]
+                    if "local_bkg_used" in TargetPositionInverted.columns:
+                        TargetPosition["local_bkg_used_inverted"] = TargetPositionInverted["local_bkg_used"]
                     if "sky_bkg_total" in TargetPositionInverted.columns:
                         TargetPosition["sky_bkg_total_inverted"] = TargetPositionInverted["sky_bkg_total"]
+                    if "sky_bkg_total_flux" in TargetPositionInverted.columns:
+                        TargetPosition["sky_bkg_total_flux_inverted"] = TargetPositionInverted["sky_bkg_total_flux"]
+                    if "noiseSky" in TargetPositionInverted.columns:
+                        TargetPosition["noiseSky_inverted"] = TargetPositionInverted["noiseSky"]
                     logging.info("Aperture photometry on inverted image completed.")
                 except Exception as exc:
                     logging.warning(f"Aperture photometry on inverted image failed: {exc}")
