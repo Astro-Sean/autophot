@@ -460,12 +460,12 @@ def plot_lightcurve(
         df = data[np.isfinite(data[zp_col])].copy()
         df.sort_values(by="mjd", inplace=True)
         # Convert instrumental magnitude to apparent magnitude
-        df["lmag"] = df["lmag"] + df[zp_col]
         df["apparent_mag"] = df[col] + df[zp_col]
         df["apparent_mag_err"] = df[err_col]
 
         band_offset = (idx - mid_idx) * offset
         df["apparent_mag"] = df["apparent_mag"] + band_offset
+        # lmag is the limit magnitude and should NOT have zeropoint added
         df["lmag"] = df["lmag"] + band_offset
 
         detected = _compute_detection_mask(
@@ -824,8 +824,9 @@ def plot_lightcurve(
             d1["err"] = d1[err1]
             d2["mag"] = d2[col2] + d2[zp2]
             d2["err"] = d2[err2]
-            d1["lmag"] = d1["lmag"] + d1[zp1]
-            d2["lmag"] = d2["lmag"] + d2[zp2]
+            # lmag is the limit magnitude and should NOT have zeropoint added
+            # d1["lmag"] = d1["lmag"] + d1[zp1]
+            # d2["lmag"] = d2["lmag"] + d2[zp2]
             if use_SNR_limit:
                 if method == "PSF" and "snr_psf" in d1.columns:
                     snr1 = np.asarray(d1["snr_psf"], dtype=float)
@@ -1090,9 +1091,8 @@ def generate_photometry_table(
             data["beta"] = pd.to_numeric(data["beta"], errors="coerce")
         if "lmag" not in data.columns:
             data["lmag"] = np.nan
-        data["lmag"] = pd.to_numeric(data["lmag"], errors="coerce") + data[
-            zp_col
-        ]
+        # lmag is the limit magnitude and should NOT have zeropoint added
+        data["lmag"] = pd.to_numeric(data["lmag"], errors="coerce")
         detected = _compute_detection_mask(
             data,
             col,
