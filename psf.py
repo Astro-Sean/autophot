@@ -3052,6 +3052,7 @@ class PSF:
 
         # ---- Inverted image fit (fallback for negative/problematic PSF) ------
         results_inverted = []
+        psfphot_inverted = None  # Store the psfphot object from inverted fit
         if check_inverted and ndimage_inverted is not None and np.any(needs_inverted_retry):
             # Get masks for sources needing retry per tier
             retry_mask_bright = bright_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
@@ -3071,11 +3072,14 @@ class PSF:
                         else lsq_fitter
                     )
                     log.info("Fitting %d %s sources on inverted image (fallback)...", int(mask.sum()), label)
-                    res_inv, _ = _psf_fit(
+                    res_inv, psfphot_inv = _psf_fit(
                         mask, inner_r, outer_r, fshape, tier_fitter, use_emcee_this, nd_override=ndimage_inverted
                     )
                     if res_inv is not None:
                         results_inverted.append(res_inv)
+                        # Store the psfphot object from the last successful inverted fit for plotting
+                        if psfphot_inv is not None:
+                            psfphot_inverted = psfphot_inv
 
         # Process inverted results and replace bad normal fits where inverted succeeded
         combined_inv = None
@@ -3166,11 +3170,11 @@ class PSF:
                                 inv_plot_sources.at[idx_val, "y_fit"] = inv_row[col]
                                 break
                 
-                # Plot with inverted image data
+                # Plot with inverted image data and the fitted PSF model
                 self.plot(
                     inv_plot_sources,
                     ndimage_inverted,
-                    None,  # No psfphot for inverted plot
+                    psfphot_inverted,  # Pass the psfphot from inverted fit to show residual+model
                     plotTarget=True,
                     scale=scale,
                     aperture_radius=aperture_radius,
@@ -3309,12 +3313,15 @@ class PSF:
         with np.errstate(divide="ignore", invalid="ignore"):
             inst_col = f"inst_{image_filter}_PSF"
             inst_err_col = f"inst_{image_filter}_PSF_err"
-            updated[inst_col] = -2.5 * np.log10(updated["flux_PSF"])
-            valid_flux = (updated["flux_PSF"] > 0) & np.isfinite(updated["flux_PSF"])
+            # For inverted fits, use absolute flux for magnitude calculation
+            flux_for_mag = np.where(inverted_fit_mask, np.abs(updated["flux_PSF"]), updated["flux_PSF"])
+            updated[inst_col] = -2.5 * np.log10(flux_for_mag)
+            # Valid flux: positive for normal, any non-zero finite for inverted
+            valid_flux = np.isfinite(updated["flux_PSF"]) & (updated["flux_PSF"] != 0)
             mag_err = np.full(len(updated), np.nan)
             mag_err[valid_flux] = (2.5 / np.log(10.0)) * (
                 updated.loc[valid_flux, "flux_PSF_err"]
-                / updated.loc[valid_flux, "flux_PSF"]
+                / np.abs(updated.loc[valid_flux, "flux_PSF"])
             )
             updated[inst_err_col] = mag_err
 

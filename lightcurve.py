@@ -460,18 +460,36 @@ def plot_lightcurve(
             use_SNR_limit=bool(use_SNR_limit),
         )
 
-        # Check for inverted-only detections (detected in inverted image but not normal)
-        inverted_col = f"{col}_inverted" if f"{col}_inverted" in df.columns else None
-        if inverted_col is None:
-            # Try lowercase variant
-            inverted_col = f"{col.lower()}_inverted" if f"{col.lower()}_inverted" in df.columns else None
-        has_inverted = inverted_col is not None and np.any(np.isfinite(df[inverted_col]))
+        # Check for inverted-only detections using _inverted_fit flag or inst_inverted column
+        has_inverted = False
+        inverted_col = None
+        
+        # First check if _inverted_fit flag exists and is True for any rows
+        if "_inverted_fit" in data.columns:
+            has_inverted = np.any(data["_inverted_fit"].fillna(False).astype(bool))
+        
+        # Also check for inst_inverted column as fallback
+        if not has_inverted:
+            inverted_col = "inst_inverted" if "inst_inverted" in data.columns else None
+            if inverted_col is None:
+                # Try lowercase variant
+                inverted_col = "inst_inverted" if "inst_inverted" in data.columns else None
+            has_inverted = inverted_col is not None and np.any(np.isfinite(data[inverted_col]))
         
         if has_inverted:
-            # Inverted detection: has finite inverted magnitude but not detected normally
-            inv_finite = np.isfinite(df[inverted_col])
-            inverted_only = inv_finite & ~detected
-            # Normal detection: detected normally and not an inverted-only source
+            # Inverted detection: has _inverted_fit=True OR finite inst_inverted but not detected normally
+            if "_inverted_fit" in data.columns:
+                inv_flag = data["_inverted_fit"].fillna(False).astype(bool)
+            else:
+                inv_flag = np.zeros(len(data), dtype=bool)
+            
+            if inverted_col and inverted_col in data.columns:
+                inv_finite = np.isfinite(data[inverted_col])
+            else:
+                inv_finite = np.zeros(len(data), dtype=bool)
+                
+            # Inverted-only: either has the flag OR has finite inverted magnitude
+            inverted_only = inv_flag | (inv_finite & ~detected)
             normal_detected = detected & ~inverted_only
         else:
             inverted_only = np.zeros(len(df), dtype=bool)
@@ -522,10 +540,12 @@ def plot_lightcurve(
             )
 
         # Plot inverted-only detections with hatched/striped pattern
-        if has_inverted and not inv_detects.empty:
+        # Use inst_inverted column for magnitude if available
+        inv_mag_col = "inst_inverted" if "inst_inverted" in inv_detects.columns else inverted_col
+        if has_inverted and not inv_detects.empty and inv_mag_col and inv_mag_col in inv_detects.columns:
             ax.errorbar(
                 inv_detects.mjd - reference_epoch,
-                inv_detects[inverted_col],
+                inv_detects[inv_mag_col],
                 yerr=inv_detects[err_col] if err_col in inv_detects.columns else None,
                 color=c,
                 ecolor=c,
@@ -976,15 +996,33 @@ def generate_photometry_table(
             use_SNR_limit=bool(use_SNR_limit),
         )
 
-        # Check for inverted-only detections
-        inverted_col = f"{col}_inverted" if f"{col}_inverted" in data.columns else None
-        if inverted_col is None:
-            inverted_col = f"{col.lower()}_inverted" if f"{col.lower()}_inverted" in data.columns else None
-        has_inverted = inverted_col is not None and np.any(np.isfinite(data[inverted_col]))
+        # Check for inverted-only detections using _inverted_fit flag or inst_inverted column
+        has_inverted = False
+        inverted_col = None
+        
+        # First check if _inverted_fit flag exists and is True for any rows
+        if "_inverted_fit" in data.columns:
+            has_inverted = np.any(data["_inverted_fit"].fillna(False).astype(bool))
+        
+        # Also check for inst_inverted column as fallback
+        if not has_inverted:
+            inverted_col = "inst_inverted" if "inst_inverted" in data.columns else None
+            has_inverted = inverted_col is not None and np.any(np.isfinite(data[inverted_col]))
         
         if has_inverted:
-            inv_finite = np.isfinite(data[inverted_col])
-            inverted_only = inv_finite & ~detected
+            # Inverted detection: has _inverted_fit=True OR finite inst_inverted but not detected normally
+            if "_inverted_fit" in data.columns:
+                inv_flag = data["_inverted_fit"].fillna(False).astype(bool)
+            else:
+                inv_flag = np.zeros(len(data), dtype=bool)
+            
+            if inverted_col and inverted_col in data.columns:
+                inv_finite = np.isfinite(data[inverted_col])
+            else:
+                inv_finite = np.zeros(len(data), dtype=bool)
+                
+            # Inverted-only: either has the flag OR has finite inverted magnitude
+            inverted_only = inv_flag | (inv_finite & ~detected)
             normal_detected = detected & ~inverted_only
         else:
             inverted_only = np.zeros(len(data), dtype=bool)
@@ -1007,15 +1045,18 @@ def generate_photometry_table(
 
         if not inv_detects.empty:
             inv_err_col = err_col if err_col in inv_detects.columns else None
-            inv_detects = inv_detects.assign(
-                Filter=band,
-                Limit="^INV",
-                MJD=inv_detects["mjd"].round(3),
-                Date=Time(inv_detects["mjd"], format="mjd").iso,
-                Mag=inv_detects[inverted_col].round(3),
-                Error=inv_detects[inv_err_col].round(3) if inv_err_col else "-",
-            )[["MJD", "Date", "Mag", "Error", "Filter", "Limit"]]
-            phot_table.append(inv_detects)
+            # Use inst_inverted column for magnitude
+            inv_mag_col = "inst_inverted" if "inst_inverted" in inv_detects.columns else inverted_col
+            if inv_mag_col and inv_mag_col in inv_detects.columns:
+                inv_detects = inv_detects.assign(
+                    Filter=band,
+                    Limit="^INV",
+                    MJD=inv_detects["mjd"].round(3),
+                    Date=Time(inv_detects["mjd"], format="mjd").iso,
+                    Mag=inv_detects[inv_mag_col].round(3),
+                    Error=inv_detects[inv_err_col].round(3) if inv_err_col else "-",
+                )[["MJD", "Date", "Mag", "Error", "Filter", "Limit"]]
+                phot_table.append(inv_detects)
 
         if not nondetects.empty:
             nondetects = nondetects.assign(
