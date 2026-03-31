@@ -622,12 +622,12 @@ def plot_lightcurve(
                 sc.set_edgecolor('white')
                 # Add label manually without marker in legend
                 ax.scatter([], [], s=100, c=c, marker='s', edgecolors='white', 
-                         linewidth=0.8, label=f"{leg_label}^INV" if leg_label else "^INV")
+                         linewidth=0.8, label=leg_label if leg_label else "")
             else:
-                # Add label even if no hatched points (all inverted detections are ^INV)
+                # Add label even if no hatched points
                 if not inv_normal.empty:
                     ax.scatter([], [], s=80, c=c, marker='o', edgecolors='black', 
-                             linewidth=0.8, label=f"{leg_label}^INV" if leg_label else "^INV")
+                             linewidth=0.8, label=leg_label if leg_label else "")
 
         if show_limits and not nondetects.empty:
             has_limits_plotted = True
