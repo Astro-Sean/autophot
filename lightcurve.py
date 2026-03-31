@@ -546,7 +546,11 @@ def plot_lightcurve(
         inv_mag_col = "inst_inverted" if "inst_inverted" in inv_detects.columns else inverted_col
         inv_err_col = "inst_inverted_err" if "inst_inverted_err" in inv_detects.columns else None
         if has_inverted and not inv_detects.empty and inv_mag_col and inv_mag_col in inv_detects.columns:
-            # Plot errorbars without markers first
+            # Split inverted detections: those with _inverted_fit flag vs those without
+            inv_fit_mask = inv_detects["_inverted_fit"] if "_inverted_fit" in inv_detects.columns else pd.Series(False, index=inv_detects.index)
+            inv_fit_mask = inv_fit_mask.fillna(False).astype(bool)
+            
+            # Plot errorbars without markers first (for all inverted detections)
             ax.errorbar(
                 inv_detects.mjd - reference_epoch,
                 inv_detects[inv_mag_col],
@@ -558,21 +562,42 @@ def plot_lightcurve(
                 elinewidth=1,
                 zorder=2,
             )
-            # Overlay scatter markers with diagonal stripes
-            # Use square marker ('s') which is rendered as a patch so hatch works
-            sc = ax.scatter(
-                inv_detects.mjd - reference_epoch,
-                inv_detects[inv_mag_col],
-                s=100,  # slightly larger marker size for visibility
-                c=c,   # face color
-                marker='s',  # square marker (patch) so hatch works
-                edgecolors='black',
-                linewidth=0.8,
-                zorder=3,  # markers on top of error bars
-                label=f"{leg_label}^INV" if leg_label else "^INV",
-            )
-            # Add diagonal stripes - works with square markers
-            sc.set_hatch('////')
+            
+            # Inverted detections that did NOT use inverted PSF fit (no hatch)
+            inv_normal = inv_detects[~inv_fit_mask]
+            if not inv_normal.empty:
+                ax.scatter(
+                    inv_normal.mjd - reference_epoch,
+                    inv_normal[inv_mag_col],
+                    s=80,
+                    c=c,
+                    marker='o',  # normal circular marker
+                    edgecolors='black',
+                    linewidth=0.8,
+                    zorder=3,
+                )
+            
+            # Inverted detections that DID use inverted PSF fit (with hatch)
+            inv_with_fit = inv_detects[inv_fit_mask]
+            if not inv_with_fit.empty:
+                sc = ax.scatter(
+                    inv_with_fit.mjd - reference_epoch,
+                    inv_with_fit[inv_mag_col],
+                    s=100,  # slightly larger marker size for visibility
+                    c=c,   # face color
+                    marker='s',  # square marker (patch) so hatch works
+                    edgecolors='black',
+                    linewidth=0.8,
+                    zorder=3,  # markers on top of error bars
+                    label=f"{leg_label}^INV" if leg_label else "^INV",
+                )
+                # Add diagonal stripes - only for inverted PSF fits
+                sc.set_hatch('////')
+            else:
+                # Add label even if no hatched points (all inverted detections are ^INV)
+                if not inv_normal.empty:
+                    ax.scatter([], [], s=80, c=c, marker='o', edgecolors='black', 
+                             linewidth=0.8, label=f"{leg_label}^INV" if leg_label else "^INV")
 
         if show_limits and not nondetects.empty:
             has_limits_plotted = True
