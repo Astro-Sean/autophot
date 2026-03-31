@@ -2399,9 +2399,14 @@ class PSF:
         ndimage_inverted = None
         if check_inverted:
             try:
-                inv_data = -1.0 * np.array(ndimage.data, dtype=float, copy=True)
+                # Estimate background level from the image
+                image_data = np.array(ndimage.data, dtype=float, copy=True)
+                bkg_median = float(np.nanmedian(image_data))
+                # Subtract 2x background and take absolute value
+                # This flips negative PSF dips to positive peaks while keeping background at zero
+                inv_data = np.abs(image_data - 2.0 * bkg_median)
                 ndimage_inverted = _nddata_clone(ndimage, data=inv_data)
-                log.info("Target PSF: will also fit on inverted image (negative PSF detection enabled).")
+                log.info("Target PSF: will also fit on inverted image (subtract 2xbkg, abs) for negative PSF detection.")
             except Exception as exc:
                 log_warning_from_exception(log, "Failed to create inverted image for PSF fitting", exc)
                 ndimage_inverted = None
@@ -2956,11 +2961,11 @@ class PSF:
             except Exception:
                 ap_size = float(aperture_radius)
             if crowded_field:
-                annulusIN = float(np.ceil(ap_size + 0.35 * fwhm))
-                annulusOUT = float(np.ceil(annulusIN + 0.65 * fwhm))
+                annulusIN = float(np.ceil(ap_size + 1.0 * fwhm))
+                annulusOUT = float(np.ceil(annulusIN + 2.0 * fwhm))
             else:
-                annulusIN = float(np.ceil(ap_size + 0.5 * fwhm))
-                annulusOUT = float(np.ceil(annulusIN + 1.0 * fwhm))
+                annulusIN = float(np.ceil(ap_size + 1.5 * fwhm))
+                annulusOUT = float(np.ceil(annulusIN + 3.0 * fwhm))
             # Apply to all tiers.
             bright_inner = annulusIN
             bright_outer = annulusOUT
@@ -3098,13 +3103,17 @@ class PSF:
                 # Map from idx to position in combined
                 idx_to_pos = {idx: i for i, idx in enumerate(idx_out)}
                 
+                # Ensure _inverted_fit column exists as boolean type
+                if "_inverted_fit" not in combined.columns:
+                    combined["_inverted_fit"] = False
+                
                 # For each good inverted result, copy values to combined
                 for _, inv_row in combined_inv_good.iterrows():
                     idx_val = inv_row["idx"]
                     if idx_val in idx_to_pos:
                         pos = idx_to_pos[idx_val]
                         # Mark as inverted fit
-                        combined.iloc[pos, combined.columns.get_loc("_inverted_fit") if "_inverted_fit" in combined.columns else -1] = True
+                        combined.iloc[pos, combined.columns.get_loc("_inverted_fit")] = True
                         # Copy inverted fit values (they'll be negated later)
                         for col in ["x_fit", "xcenter_fit", "x_0_fit"]:
                             if col in inv_row and col in combined.columns:
@@ -3139,6 +3148,45 @@ class PSF:
             else:
                 log.info("Inverted PSF fit did not improve any sources.")
 
+        # Plot inverted fit results if any succeeded and plotTarget is enabled
+        if plotTarget and combined_inv is not None and len(idx_out_inv_good) > 0:
+            try:
+                # Create a copy of sources with inverted fit results for plotting
+                inv_plot_sources = sources.copy()
+                # Update with inverted fit positions
+                for _, inv_row in combined_inv_good.iterrows():
+                    idx_val = inv_row["idx"]
+                    if idx_val < len(inv_plot_sources):
+                        for col in ["x_fit", "xcenter_fit", "x_0_fit"]:
+                            if col in inv_row:
+                                inv_plot_sources.at[idx_val, "x_fit"] = inv_row[col]
+                                break
+                        for col in ["y_fit", "ycenter_fit", "y_0_fit"]:
+                            if col in inv_row:
+                                inv_plot_sources.at[idx_val, "y_fit"] = inv_row[col]
+                                break
+                
+                # Plot with inverted image data
+                self.plot(
+                    inv_plot_sources,
+                    ndimage_inverted,
+                    None,  # No psfphot for inverted plot
+                    plotTarget=True,
+                    scale=scale,
+                    aperture_radius=aperture_radius,
+                )
+                # Rename the output file to indicate it's the inverted fit
+                fpath = self.input_yaml["fpath"]
+                base = os.path.splitext(os.path.basename(fpath))[0]
+                write_dir = os.path.dirname(fpath)
+                old_path = os.path.join(write_dir, f"PSF_Target_{base}.png")
+                new_path = os.path.join(write_dir, f"PSF_Target_{base}_inverted.png")
+                if os.path.exists(old_path):
+                    os.rename(old_path, new_path)
+                    log.info(f"Saved inverted PSF fit plot: {new_path}")
+            except Exception as exc:
+                log.info(f"Inverted fit plotting failed: {exc}")
+
         # Now process the final results (potentially with inverted replacements)
         # Extract values from combined (which may have been modified with _inverted_fit flags)
         x_fit = self._first_present(combined, ["x_fit", "xcenter_fit", "x_0_fit"])
@@ -3150,11 +3198,17 @@ class PSF:
             combined, ["flux_fit_err", "flux_err", "flux_uncertainty"], unit=u.electron
         )
 
+        # Check which fits came from inverted image (these should keep negative flux)
+        inverted_fit_mask = np.asarray(combined.get("_inverted_fit", False), bool)
+
         # Enforce positive fitted fluxes: negative solutions are unphysical for
         # a positive PSF and indicate overfitting or local background issues.
         # Clip at a tiny floor and propagate to errors.
+        # EXCEPTION: preserve negative flux for inverted fits (fading sources)
         with np.errstate(invalid="ignore"):
-            flux_fit = np.clip(flux_fit, 1e-6, np.inf)
+            flux_fit_clipped = np.clip(flux_fit, 1e-6, np.inf)
+            # For inverted fits, use the original negative flux; for normal fits, use clipped
+            flux_fit = np.where(inverted_fit_mask, flux_fit, flux_fit_clipped)
             flux_err = np.where(np.isfinite(flux_err), flux_err, np.nan)
         cfit_out = self._first_present(combined, ["cfit"])
         qfit_out = self._first_present(combined, ["qfit"])

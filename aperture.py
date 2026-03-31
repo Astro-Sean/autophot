@@ -587,12 +587,13 @@ class Aperture:
             )
         )
         if crowded:
-            # Tighter annulus for crowded fields: smaller gap and width to avoid neighboring sources.
-            annulusIN = float(np.ceil(ap_size + 0.35 * fwhm))
-            annulusOUT = float(np.ceil(annulusIN + 0.65 * fwhm))
+            # Larger annulus to avoid PSF wing contamination (matching PSF background annulus)
+            annulusIN = float(np.ceil(ap_size + 1.0 * fwhm))
+            annulusOUT = float(np.ceil(annulusIN + 2.0 * fwhm))
         else:
-            annulusIN = float(np.ceil(ap_size + 0.5 * fwhm))
-            annulusOUT = float(np.ceil(annulusIN + 1.0 * fwhm))
+            # Larger annulus to avoid PSF wing contamination (matching PSF background annulus)
+            annulusIN = float(np.ceil(ap_size + 1.5 * fwhm))
+            annulusOUT = float(np.ceil(annulusIN + 3.0 * fwhm))
         area = np.pi * ap_size**2
 
         image_e = self.image * gain
