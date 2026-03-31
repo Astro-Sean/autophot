@@ -473,6 +473,10 @@ def plot_lightcurve(
         df["apparent_mag"] = df["apparent_mag"] + band_offset
         # lmag is the limit magnitude and should NOT have zeropoint added
         df["lmag"] = df["lmag"] + band_offset
+        
+        # Initialize plot_mag and plot_err for this band's df
+        df["plot_mag"] = df["apparent_mag"]
+        df["plot_err"] = df["apparent_mag_err"]
 
         detected = _compute_detection_mask(
             df,
@@ -559,12 +563,6 @@ def plot_lightcurve(
             )
         else:
             leg_label = band
-        
-        # Initialize plot_mag and plot_err for all rows to avoid KeyError
-        # This ensures the columns exist even if there are no detections
-        if "plot_mag" not in df.columns:
-            df["plot_mag"] = df["apparent_mag"]
-            df["plot_err"] = df["apparent_mag_err"]
         
         # For normal detections, use apparent_mag
         df.loc[normal_detected, "plot_mag"] = df.loc[normal_detected, "apparent_mag"]
