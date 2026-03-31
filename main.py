@@ -4740,6 +4740,24 @@ def run_photometry():
                 output["flux_psf"] = float(TargetPosition.at[idx, "flux_PSF"])
             if "flux_PSF_err" in TargetPosition.columns:
                 output["flux_psf_err"] = float(TargetPosition.at[idx, "flux_PSF_err"])
+            
+            # Add inverted fit parameters if inverted fit was used
+            if "_inverted_fit" in TargetPosition.columns and TargetPosition.at[idx, "_inverted_fit"]:
+                # Original normal fit values (before replacement)
+                if "flux_PSF_inverted" in TargetPosition.columns:
+                    output["flux_psf_inverted"] = float(TargetPosition.at[idx, "flux_PSF_inverted"])
+                if "flux_PSF_err_inverted" in TargetPosition.columns:
+                    output["flux_psf_err_inverted"] = float(TargetPosition.at[idx, "flux_PSF_err_inverted"])
+                if "inst_inverted" in TargetPosition.columns:
+                    output["inst_inverted"] = float(TargetPosition.at[idx, "inst_inverted"])
+                if "inst_inverted_err" in TargetPosition.columns:
+                    output["inst_inverted_err"] = float(TargetPosition.at[idx, "inst_inverted_err"])
+                # Inverted fit SNR
+                if "flux_PSF_inverted" in TargetPosition.columns and "flux_PSF_err_inverted" in TargetPosition.columns:
+                    inv_flux = float(TargetPosition.at[idx, "flux_PSF_inverted"])
+                    inv_err = float(TargetPosition.at[idx, "flux_PSF_err_inverted"])
+                    if inv_err > 0 and np.isfinite(inv_err):
+                        output["snr_psf_inverted"] = np.abs(inv_flux) / inv_err
         except Exception:
             pass
 
@@ -4807,6 +4825,26 @@ def run_photometry():
                         f"{prefix}_err": TargetPosition.at[idx, f"{prefix}_err"],
                     }
                 )
+                # Add inverted versions for PSF if inverted fit was used
+                if method == "PSF" and "_inverted_fit" in TargetPosition.columns and TargetPosition.at[idx, "_inverted_fit"]:
+                    # Add inverted flux and magnitude columns
+                    if "flux_PSF_inverted" in TargetPosition.columns:
+                        output["flux_psf_inverted"] = float(TargetPosition.at[idx, "flux_PSF_inverted"])
+                    if "flux_PSF_err_inverted" in TargetPosition.columns:
+                        output["flux_psf_err_inverted"] = float(TargetPosition.at[idx, "flux_PSF_err_inverted"])
+                    if "inst_inverted" in TargetPosition.columns:
+                        output["inst_inverted"] = float(TargetPosition.at[idx, "inst_inverted"])
+                    if "inst_inverted_err" in TargetPosition.columns:
+                        output["inst_inverted_err"] = float(TargetPosition.at[idx, "inst_inverted_err"])
+                    # Add calibrated magnitude for inverted fit
+                    try:
+                        if "inst_inverted" in TargetPosition.columns and "PSF" in image_zeropoint:
+                            inv_inst = float(TargetPosition.at[idx, "inst_inverted"])
+                            zp = image_zeropoint["PSF"]["zeropoint"]
+                            output[f"{prefix}_inverted"] = inv_inst + zp
+                            output[f"{prefix}_inverted_err"] = float(TargetPosition.at[idx, "inst_inverted_err"]) + image_zeropoint["PSF"]["zeropoint_error"]
+                    except Exception:
+                        pass
 
         # Normalise column headers to lowercase for consistent downstream use (lightcurve, etc.).
         output_normalised = {str(k).strip().lower(): v for k, v in output.items()}
