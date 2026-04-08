@@ -931,24 +931,23 @@ class Prepare:
                             fits_filter = band
                         break
 
-            # Normalize raw filter name for catalog matching (instrument_prefix + band -> band)
-            if filter_name not in available_filters and filter_name != "no_filter":
-                candidates = [str(filter_name).strip()]
-                normalized = candidates[0].lower()
-                for sep in ("_", "-"):
-                    if sep in normalized:
-                        candidates.append(normalized.split(sep)[-1])
-                for cand in candidates:
-                    norm_cand = normalize_photometric_filter_name(cand)
-                    if norm_cand in available_filters:
-                        filter_name = norm_cand
-                        break
-
             # Apply catalog and user filter constraints
             if (
                 filter_name not in available_filters
                 and not prepare_templates
             ):
+                # Provide clear debugging information
+                if filter_name != "no_filter":
+                    self.logger.info(
+                        "Filter %s not available in catalog (available: %s) for %s",
+                        filter_name,
+                        ", ".join(sorted(available_filters)),
+                        os.path.basename(name),
+                    )
+                    self.logger.info(
+                        "To fix this, add filter mapping to telescope.yml or use a different catalog"
+                    )
+                
                 files_removed += 1
                 filters_removed += 1
                 filter_unavailable.append(filter_name)

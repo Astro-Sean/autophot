@@ -30,7 +30,7 @@ requirements:
     - corner
   run:
     - python >=3.9
-    - astroalign ==2.6.1
+    - astroalign >=2.6.0,<2.7.0
     - astropy ==6.1.6
     - astroquery ==0.4.7
     - astromatic-source-extractor

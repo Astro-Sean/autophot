@@ -1,0 +1,69 @@
+# AutoPHOT Telescope Configuration Example
+# This file demonstrates how to explicitly configure filter mappings
+# for different telescopes and instruments.
+
+# Place this file in your working directory as "telescope.yml"
+
+# Nordic Optical Telescope (NOT) configuration
+NOT:
+  default:
+    ALFOSC:
+      filter_key_0: FILTER
+      # Explicit filter mappings - map instrument filter names to catalog bands
+      b_bes: B      # Bessel B filter -> APASS B band
+      v_bes: V      # Bessel V filter -> APASS V band
+      r_sdss: r     # SDSS r filter -> Pan-STARRS r band
+      i_sdss: i     # SDSS i filter -> Pan-STARRS i band
+      g_sdss: g     # SDSS g filter -> Pan-STARRS g band
+      z_sdss: z     # SDSS z filter -> Pan-STARRS z band
+      # Standard mappings for completeness
+      B: B
+      V: V
+      g: g
+      r: r
+      i: i
+      z: z
+    # Add other NOT instruments if needed
+    MOSCA:
+      filter_key_0: FILTER
+      b_bes: B
+      v_bes: V
+      r_sdss: r
+      i_sdss: i
+      g_sdss: g
+      z_sdss: z
+
+# Pan-STARRS (template telescope) configuration
+Pan-STARRS:
+  default:
+    GPC1:
+      filter_key_0: FILTER
+      # PS1 uses standard SDSS filter names
+      g: g
+      r: r
+      i: i
+      z: z
+      y: y
+
+# Example of another telescope configuration
+LCOGT:
+  default:
+    fs03:
+      filter_key_0: FILTER
+      # LCOGT uses SDSS filters
+      u: u
+      g: g
+      r: r
+      i: i
+      z: z
+      B: B
+      V: V
+      R: r  # Map R to r for catalog compatibility
+      I: i  # Map I to i for catalog compatibility
+
+# Notes:
+# 1. filter_key_0 specifies which FITS header contains the filter name
+# 2. The mappings are: "instrument_filter_name": "catalog_band_name"
+# 3. Catalog band names must match what's available in your chosen catalog
+# 4. Use the prepare.py check to see what filters are available in your catalog
+# 5. The "default" key is a convention for standard instrument configurations

@@ -268,6 +268,9 @@ def normalize_photometric_filter_name(filter_name):
 
     Accepted bands are restricted to UBVRI, ugriz, and JHK families.
     Non-photometric fields (RA/DEC/name and *_err columns) return None.
+    
+    This function only handles basic case normalization and common aliases.
+    Telescope-specific filter mappings should be defined in telescope.yml.
     """
     if filter_name is None:
         return None
@@ -295,6 +298,11 @@ def normalize_photometric_filter_name(filter_name):
         "j": "J",
         "h": "H",
         "k": "K",
+        # Additional common variations
+        "clear": None,
+        "open": None,
+        "luminance": None,
+        "white": None,
     }
     return aliases.get(token_l)
 
