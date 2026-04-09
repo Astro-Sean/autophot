@@ -99,62 +99,8 @@ git clone https://github.com/acbecker/hotpants
 cd hotpants && make
 ```
 
----
 
-## Detection Logic
 
-AutoPhOT classifies sources as detections or upper limits based on **Signal-to-Noise Ratio (SNR)**.
-
-### Detection Criteria
-
-A source is classified as a **detection** when:
-- `SNR >= snr_limit` (default: 3)
-- Magnitude and error are finite
-
-A source is an **upper limit** (non-detection) when:
-- `SNR < snr_limit`
-- Magnitude is fainter than limiting magnitude (`mag > lmag`)
-
-### Key Points
-
-- **SNR is the primary detection metric** - beta values from injection experiments are not used for target detection
-- Low S/N sources visible in subtraction images will be correctly classified as detections if `SNR >= 3`
-- The `snr_limit` parameter controls detection sensitivity (default: 3.0)
-
-### Setting Detection Threshold
-
-```python
-# Stricter detection (higher confidence)
-config["photometry"]["detection_limit"] = 5  # SNR >= 5
-
-# More permissive (for faint transients)
-config["photometry"]["detection_limit"] = 3  # SNR >= 3
-```
-
----
-
-## Output Products
-
-### Per-Image Outputs
-
-For each processed image, AutoPhOT creates:
-- `OUTPUT_<image>.csv` - Photometry results (magnitudes, errors, SNR)
-- `CALIB_<image>.csv` - Calibration diagnostics
-- `PSFSources_*.csv` - PSF model stars used
-- `targetPSF_*.png` or `PSF_Target_*.png` - Diagnostic plots
-
-### Columns in Output CSV
-
-| Column | Description |
-|--------|-------------|
-| `*_PSF` / `*_AP` | Calibrated magnitude (PSF or aperture) |
-| `*_PSF_err` / `*_AP_err` | Magnitude uncertainty |
-| `SNR` / `snr_psf` / `snr_ap` | Signal-to-noise ratio |
-| `zp_*` | Zero point magnitude |
-| `lmag` | Limiting magnitude |
-| `fwhm` | FWHM in arcsec |
-| `background` | Background level (ADU) |
-| `background_rms` | Background noise (ADU) |
 
 ### Post-Processing Products
 
@@ -172,20 +118,10 @@ generate_photometry_table(output_file, snr_limit=3, method="PSF")
 
 ---
 
-## Troubleshooting
-
-### Common Issues
-
-| Issue | Solution |
-|-------|----------|
-| Images ignored | Check FITS headers have `TELESCOP`, `INSTRUME`, and `FILTER` |
-| No catalogs found | Set `catalog.use_catalog` for your filters |
-| Template subtraction fails | Ensure templates are in `templates/<filter>_template/` |
-| Poor photometry | Check `fwhm` and `background_rms` values in outputs |
 
 ### Environment Variables
 
-For TNS lookups and catalog access, set these (do not hard-code):
+For TNS lookups and catalog access (i.e. for RefCAT2), set these (do not hard-code):
 
 ```bash
 export MASTCASJOBS_WSID="..."
@@ -197,22 +133,13 @@ export TNS_BOT_API="..."
 
 ---
 
-## Photometry Methods
-
-### PSF Photometry (Recommended)
-
-- Best for point sources (supernovae, variable stars)
-- Uses empirical PSF from field stars
-- Configurable via `perform_emcee_fitting_s2n`
-
-### Aperture Photometry
-
-- Best for extended sources
-- Configurable aperture sizes based on FWHM
-
----
 
 ## Example Usage
+
+
+> [!IMPORTANT]
+> FITS images **must** have `TELESCOP` and `INSTRUME` header keywords, plus a bandpass keyword (e.g., `FILTER`). Images without these will be ignored.
+
 
 ### Complete Driver Script
 
@@ -276,9 +203,6 @@ from autophot import list_parameters
 list_parameters()
 ```
 
-> [!IMPORTANT]
-> FITS images **must** have `TELESCOP` and `INSTRUME` header keywords, plus a bandpass keyword (e.g., `FILTER`). Images without these will be ignored.
-
 
 ```python
 #!/usr/bin/env python3
@@ -327,7 +251,7 @@ def main() -> int:
     # autophot_input["catalog"]["use_catalog"] = {"gri": "gaia_custom", ...}
     # autophot_input["catalog"]["transmission_curve_map"] = {"g": "path/to/g.dat", ...}
 
-    # Optional credentials from environment (do not hard-code secrets):
+    # Optional credentials from environment (do not hard-code secret keys):
     if os.getenv("MASTCASJOBS_WSID"):
         autophot_input["catalog"]["MASTcasjobs_wsid"] = os.getenv("MASTCASJOBS_WSID")
     if os.getenv("MASTCASJOBS_PWD"):

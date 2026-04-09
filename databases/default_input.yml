@@ -55,7 +55,7 @@ default_input:
     enforce_nonnegative_local_background: True # bool --- If True, clamp annulus-estimated local background to >=0 before subtraction (prevents flux inflation when local sky is negative from over-subtraction/miscalibration).
     apply_aperture_correction: False # bool --- If True, apply aperture correction from PSF stars to aperture mags.
     plot_aperture_correction: False # bool --- If True, save the aperture-correction diagnostic plot (curve of growth).
-    apply_colorterms: False # bool --- If True, measure and apply color term corrections to catalog sources during calibration.
+    apply_colorterms: True # bool --- If True, measure and apply color term corrections to catalog sources during calibration.
     aperture_radius: null # float|null --- Explicit aperture radius (pixels). If null, computed from `fwhm` (typically max(1.5*FWHM, 2.0)).
     psf_oversample: 1 # int --- Oversampling factor for PSF modelling/fitting grids.
     psf_init_moffat_beta: 4.765 # float --- Moffat beta for initial ePSF kernel (4.765 ~ atmospheric-turbulence-like PSF; lower values add stronger wings).
