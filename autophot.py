@@ -1240,8 +1240,10 @@ class AutomatedPhotometry:
                 if target_ra is None or target_dec is None:
                     # If coordinates are not set explicitly, try TNS lookup
                     # using target_name before failing curve-map catalog build.
+                    # Create a temporary Prepare instance for TNS lookup
                     try:
-                        tns_coords = prepare_db.check_tns()
+                        temp_prepare = Prepare(default_input=default_input)
+                        tns_coords = temp_prepare.check_tns()
                         default_input.update(
                             {
                                 "target_ra": tns_coords["radeg"],
@@ -1256,7 +1258,8 @@ class AutomatedPhotometry:
                             "Resolved target coordinates from TNS for gaia_custom build: "
                             f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}"
                         )
-                    except Exception:
+                    except Exception as e:
+                        _log(f"TNS lookup failed: {e}")
                         pass
                 if target_ra is None or target_dec is None:
                     raise ValueError(
@@ -1514,6 +1517,11 @@ class AutomatedPhotometry:
                     if download_kind is True:
                         download_kind = "panstarrs"
 
+                    logger.info(
+                        "Downloading templates for science image filters: %s",
+                        ", ".join(sorted(required_filters)) if required_filters else "None"
+                    )
+
                     if download_kind == "panstarrs":
                         _log(border_msg("Downloading template images from Pan-STARRS"))
                         from templates import download_panstarrs_template
@@ -1524,9 +1532,10 @@ class AutomatedPhotometry:
                                 dec=default_input["target_dec"],
                                 size=size_default,
                                 template_folder=template_folder,
-                                f=f,
+                                band=f,
                             )
                     elif download_kind == "sdss":
+                        _log(border_msg("Downloading template images from SDSS"))
                         from templates import download_sdss_template
 
                         for f in required_filters:
@@ -1538,6 +1547,7 @@ class AutomatedPhotometry:
                                 f=f,
                             )
                     elif download_kind == "legacy":
+                        _log(border_msg("Downloading template images from Legacy Surveys"))
                         from templates import download_legacy_template
 
                         for f in required_filters:
@@ -1549,6 +1559,7 @@ class AutomatedPhotometry:
                                 band=f,
                             )
                     elif download_kind == "2mass":
+                        _log(border_msg("Downloading template images from 2MASS"))
                         from templates import download_2mass_template
 
                         for f in required_filters:
@@ -1563,8 +1574,16 @@ class AutomatedPhotometry:
                 # Discover and validate template files if subtraction is enabled
                 template_file_list = []
                 if ts_cfg.get("do_subtraction", False):
+                    # Only prepare templates for filters actually needed by science images
+                    # This avoids unnecessary template preparation for unused filters
+                    template_required_filters = required_filters
+                    logger = logging.getLogger(__name__)
+                    logger.info(
+                        "Looking for templates for science image filters: %s",
+                        ", ".join(sorted(template_required_filters)) if template_required_filters else "None"
+                    )
                     template_file_list = prepare_db.find_templates(
-                        required_filters=required_filters
+                        required_filters=template_required_filters
                     )
                     template_file_list = prepare_db.check_files(
                         flist=template_file_list, template_files=True

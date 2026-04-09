@@ -2119,11 +2119,16 @@ NNW
             ):
                 sci_data = sci_hdul[0].data.astype(np.float32)
                 ref_data = ref_hdul[0].data.astype(np.float32)
+            # Track if we rebin and the scale factor
+            rebin_scale = 1.0
             if sci_data.size > 5e6:
                 from astropy.nddata import block_reduce
 
                 sci_data = block_reduce(sci_data, block_size=(4, 4), func=np.mean)
                 ref_data = block_reduce(ref_data, block_size=(4, 4), func=np.mean)
+                rebin_scale = 0.25  # Coordinates must be scaled by 1/4
+                logging.info(f"Rebinned images by 4x for display, coordinates will be scaled by {rebin_scale}")
+            
             fig, (ax1, ax2) = plt.subplots(
                 1, 2, figsize=figsize, constrained_layout=True
             )
@@ -2167,11 +2172,20 @@ NNW
                     return f"{chr(65 + (i // 26) - 1)}{chr(65 + (i % 26))}"
 
             sci_positions = []
+            sci_h, sci_w = sci_data.shape
             for i, row in enumerate(sci_cat[:max_sources]):
-
                 if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames:
                     x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
-                    x_0based, y_0based = x - 1, y - 1
+                    # Scale coordinates if image was rebinned, then convert to 0-based
+                    x_scaled = x * rebin_scale
+                    y_scaled = y * rebin_scale
+                    x_0based, y_0based = x_scaled - 1, y_scaled - 1
+                    
+                    # Validate coordinates are within image bounds
+                    if not (0 <= x_0based < sci_w and 0 <= y_0based < sci_h):
+                        logging.debug(f"Science source {i} out of bounds: ({x_0based:.1f}, {y_0based:.1f}) vs image ({sci_w}, {sci_h})")
+                        continue
+                    
                     sci_positions.append((x_0based, y_0based))
                     color = (
                         matched_circle_color
@@ -2180,7 +2194,7 @@ NNW
                     )
                     circle = Circle(
                         (x_0based, y_0based),
-                        circle_radius_sci,
+                        circle_radius_sci * rebin_scale,  # Scale circle radius too
                         facecolor=circle_color,
                         alpha=circle_alpha,
                         edgecolor=color,
@@ -2189,18 +2203,29 @@ NNW
                     ax1.add_patch(circle)
                     ax1.text(
                         x_0based,
-                        y_0based - circle_radius_sci - 2,
+                        y_0based - circle_radius_sci * rebin_scale - 2,
                         int_to_label(i),
                         color=label_color,
                         fontsize=label_fontsize,
                         ha="center",
                         va="top",
                     )
+            
             ref_positions = []
+            ref_h, ref_w = ref_data.shape
             for i, row in enumerate(ref_cat[:max_sources]):
                 if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames:
                     x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
-                    x_0based, y_0based = x - 1, y - 1
+                    # Scale coordinates if image was rebinned, then convert to 0-based
+                    x_scaled = x * rebin_scale
+                    y_scaled = y * rebin_scale
+                    x_0based, y_0based = x_scaled - 1, y_scaled - 1
+                    
+                    # Validate coordinates are within image bounds
+                    if not (0 <= x_0based < ref_w and 0 <= y_0based < ref_h):
+                        logging.debug(f"Reference source {i} out of bounds: ({x_0based:.1f}, {y_0based:.1f}) vs image ({ref_w}, {ref_h})")
+                        continue
+                    
                     ref_positions.append((x_0based, y_0based))
                     color = (
                         matched_circle_color
@@ -2209,7 +2234,7 @@ NNW
                     )
                     circle = Circle(
                         (x_0based, y_0based),
-                        circle_radius_ref,
+                        circle_radius_ref * rebin_scale,  # Scale circle radius too
                         facecolor=circle_color,
                         alpha=circle_alpha,
                         edgecolor=color,
@@ -2218,13 +2243,15 @@ NNW
                     ax2.add_patch(circle)
                     ax2.text(
                         x_0based,
-                        y_0based - circle_radius_ref - 2,
+                        y_0based - circle_radius_ref * rebin_scale - 2,
                         int_to_label(i),
                         color=label_color,
                         fontsize=label_fontsize,
                         ha="center",
                         va="top",
                     )
+            
+            logging.info(f"Plotted {len(sci_positions)} science and {len(ref_positions)} reference sources within image bounds")
             # `constrained_layout=True` keeps colorbars and labels from
             # overlapping, so no additional tight_layout is needed.
             plt.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor="white")

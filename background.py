@@ -1303,6 +1303,7 @@ class BackgroundSubtractor:
             f"Global stats - mean {gmean:.3e}  median {gmed:.3e}  std {gstd:.3e}"
         )
 
+        
         # ---- Background estimation (with built-in retry chain) ----
         success, bkg_surface, bkg_rms, bkg_median = self._estimate_background(
             image,

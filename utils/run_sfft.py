@@ -407,9 +407,10 @@ def run_sfft() -> Optional[int]:
 
     masked_sources = parse_xy_list(args.masked_sources)
     matching_sources = parse_xy_list(args.matching_sources)
-
+    # matching_sources = None
     if masked_sources is not None:
         log_info(f"Masked sources: {masked_sources.shape[0]}")
+        
 
     if matching_sources is not None and matching_sources.shape[0] > 0:
         log_info(f"Matching sources (prior): {matching_sources.shape[0]}")
@@ -716,9 +717,9 @@ def run_sfft() -> Optional[int]:
 
     ONLY_FLAGS = parse_only_flags(args.only_flags)
 
-    COARSE_VAR_REJECTION = True
+    COARSE_VAR_REJECTION = False
     CVREJ_MAGD_THRESH = float(args.cvrej_magd_thresh)
-    ELABO_VAR_REJECTION = True
+    ELABO_VAR_REJECTION = False
     EVREJ_RATIO_THREH = float(args.evrej_ratio_thresh)
     EVREJ_SAFE_MAGDEV = float(args.evrej_safe_magdev)
     PAC_RATIO_THRESH = float(args.pac_ratio_thresh)
@@ -840,7 +841,7 @@ def run_sfft() -> Optional[int]:
                 KerPolyOrder=kernel_poly_order,
                 BGPolyOrder=bg_poly_order,
                 ConstPhotRatio=constant_phot_ratio,
-                MaskSatContam=True,
+                MaskSatContam=False,
                 GAIN_KEY=GAIN_KEY,
                 SATUR_KEY=SATUR_KEY,
                 BACK_TYPE="MANUAL",
@@ -946,7 +947,7 @@ def run_sfft() -> Optional[int]:
                     DETECT_MINAREA=detect_minarea,
                     DETECT_MAXAREA=detect_maxarea,
                     DEBLEND_MINCONT=DEBLEND_MINCON,
-                    MaskSatContam=True,
+                    MaskSatContam=False,
                     ConstPhotRatio=constant_phot_ratio,
                     GAIN_KEY=GAIN_KEY,
                     SATUR_KEY=SATUR_KEY,
@@ -999,7 +1000,7 @@ def run_sfft() -> Optional[int]:
                     DETECT_MINAREA=detect_minarea,
                     DETECT_MAXAREA=detect_maxarea,
                     DEBLEND_MINCONT=DEBLEND_MINCON,
-                    MaskSatContam=True,
+                    MaskSatContam=False,
                     ConstPhotRatio=constant_phot_ratio,
                     GAIN_KEY=GAIN_KEY,
                     SATUR_KEY=SATUR_KEY,

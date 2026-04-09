@@ -367,9 +367,51 @@ class Prepare:
                     fname,
                 )
                 sys.exit(1)
-            available_filters = [
-                f for f in catalog_input.keys() if f in custom_table.columns
-            ]
+            # Dynamic filter discovery: accept any filter that exists in custom catalog
+            # This enables completely arbitrary filter names
+            available_filters = []
+            
+            # First, add standard filters from catalog_input
+            for f in catalog_input.keys():
+                if f in custom_table.columns:
+                    available_filters.append(f)
+            
+            # Then, discover additional filters from custom catalog columns
+            # Look for columns that might be photometric (have corresponding _err columns)
+            for col in custom_table.columns:
+                col_str = str(col).strip()
+                # Skip non-photometric columns
+                if col_str in ['ra', 'dec', 'RA', 'DEC', 'name', 'objname', 'id', 'ID']:
+                    continue
+                # Skip error columns
+                if col_str.endswith('_err') or col_str.endswith('err'):
+                    continue
+                # Skip if already added
+                if col_str in available_filters:
+                    continue
+                # Check if this looks like a photometric filter (has corresponding error column)
+                err_col_candidates = [f"{col_str}_err", f"{col_str}err", f"{col_str}_ERROR", f"{col_str}ERROR"]
+                has_error_col = any(err_col in custom_table.columns for err_col in err_col_candidates)
+                
+                if has_error_col:
+                    available_filters.append(col_str)
+                    self.logger.info(
+                        "Discovered dynamic filter '%s' from custom catalog (has error column)",
+                        col_str
+                    )
+                else:
+                    # Even without error column, include if it has numeric data
+                    try:
+                        # Check if column contains numeric data
+                        numeric_data = pd.to_numeric(custom_table[col_str], errors='coerce')
+                        if numeric_data.notna().sum() > 0:  # Has some valid numeric data
+                            available_filters.append(col_str)
+                            self.logger.info(
+                                "Discovered dynamic filter '%s' from custom catalog (numeric data)",
+                                col_str
+                            )
+                    except Exception:
+                        pass
         else:
             if isinstance(selected_catalog, dict):
                 available_filters = []
@@ -397,7 +439,7 @@ class Prepare:
         if self.input_yaml["catalog"].get("include_IR_sequence_data", False):
             available_filters += ["J", "H", "K"]
         available_filters, dropped_filters = sanitize_photometric_filters(
-            available_filters
+            available_filters, available_filters=available_filters
         )
         if dropped_filters:
             self.logger.info(
@@ -739,7 +781,7 @@ class Prepare:
         filters_removed = 0
         filters_not_selected = 0
         available_filters, dropped_available = sanitize_photometric_filters(
-            available_filters
+            available_filters, available_filters=available_filters
         )
         if dropped_available:
             self.logger.info(
@@ -750,7 +792,7 @@ class Prepare:
         selected_filters = []
         if selected_filters_cfg and selected_filters_cfg[0] is not None:
             selected_filters, dropped_selected = sanitize_photometric_filters(
-                selected_filters_cfg
+                selected_filters_cfg, available_filters=available_filters
             )
             if dropped_selected:
                 self.logger.warning(
@@ -888,7 +930,15 @@ class Prepare:
                     )
                 else:
                     fits_filter = headinfo.get(header_key, "no_filter")
-                    filter_name = str(mapping.get(str(fits_filter), fits_filter))
+                    # Case-insensitive lookup for filter mapping
+                    fits_filter_str = str(fits_filter)
+                    filter_name = fits_filter_str  # Default to raw value
+                    for key, value in mapping.items():
+                        if key.startswith("filter_key_"):
+                            continue  # Skip metadata keys
+                        if str(key).lower() == fits_filter_str.lower():
+                            filter_name = str(value)
+                            break
             else:
                 # Fallback: try common header names directly
                 candidate_keys = ["FILTER", "FILTER1", "FILTER2"]
@@ -902,56 +952,80 @@ class Prepare:
             # e.g. .../gp_template/... -> g, .../K_template/... -> K, .../zp_template/... -> z, .../B_template/... -> B
             if filter_name == "no_filter" and "templates" in os.path.normpath(name):
                 norm = os.path.normpath(name)
-                template_patterns = (
-                    "u_template",
-                    "g_template",
-                    "r_template",
-                    "i_template",
-                    "z_template",
-                    "gp_template",
-                    "rp_template",
-                    "ip_template",
-                    "up_template",
-                    "zp_template",
-                    "J_template",
-                    "H_template",
-                    "K_template",
-                    "B_template",
-                    "V_template",
-                    "R_template",
-                    "I_template",
+                # Standard template patterns
+                standard_patterns = (
+                    "u_template", "g_template", "r_template", "i_template", "z_template",
+                    "gp_template", "rp_template", "ip_template", "up_template", "zp_template",
+                    "J_template", "H_template", "K_template",
+                    "B_template", "V_template", "R_template", "I_template",
+                    "Y_template", "w_template", "y_template",
                 )
-                for folder_band in template_patterns:
+                
+                # Check standard patterns first
+                for folder_band in standard_patterns:
                     if folder_band in norm:
-                        band = folder_band.split("_")[0].replace(
-                            "p", ""
-                        )  # gp -> g, zp -> z, B -> B, etc.
+                        band = folder_band.split("_")[0].replace("p", "")
                         if band in available_filters:
                             filter_name = band
                             fits_filter = band
                         break
+                
+                # If no standard pattern matched, try dynamic patterns
+                if filter_name == "no_filter" and available_filters:
+                    # Create dynamic template patterns from available filters
+                    for avail_filter in available_filters:
+                        if f"{avail_filter}_template" in norm:
+                            filter_name = avail_filter
+                            fits_filter = avail_filter
+                            self.logger.info(
+                                "Discovered dynamic template pattern '%s_template' for %s",
+                                avail_filter, os.path.basename(name)
+                            )
+                            break
 
             # Apply catalog and user filter constraints
+            # Dynamic filter validation: accept any filter that can be normalized
+            # using the available_filters list, enabling completely custom filter names
+            normalized_filter = None
+            if filter_name != "no_filter":
+                normalized_filter = normalize_photometric_filter_name(
+                    filter_name, 
+                    available_filters=available_filters
+                )
+            
             if (
-                filter_name not in available_filters
+                normalized_filter is None 
+                and filter_name != "no_filter"
                 and not prepare_templates
             ):
-                # Provide clear debugging information
-                if filter_name != "no_filter":
-                    self.logger.info(
-                        "Filter %s not available in catalog (available: %s) for %s",
-                        filter_name,
-                        ", ".join(sorted(available_filters)),
-                        os.path.basename(name),
-                    )
-                    self.logger.info(
-                        "To fix this, add filter mapping to telescope.yml or use a different catalog"
-                    )
+                # Filter could not be normalized with available filters
+                self.logger.info(
+                    "Filter %s could not be matched to catalog filters (available: %s) for %s",
+                    filter_name,
+                    ", ".join(sorted(available_filters)),
+                    os.path.basename(name),
+                )
+                self.logger.info(
+                    "Solutions: 1) Add filter to custom catalog, 2) Use Gaia custom catalog with transmission curves, 3) Check telescope.yml mapping"
+                )
                 
                 files_removed += 1
                 filters_removed += 1
                 filter_unavailable.append(filter_name)
                 continue
+            
+            # Update filter_name to the normalized version
+            if normalized_filter is not None:
+                filter_name = normalized_filter
+                # Only log normalization for significant changes, not for common cases
+                if (filter_name != str(fits_filter) and 
+                    not (str(fits_filter).endswith('.00000') and filter_name == str(fits_filter).split('.')[0])):
+                    self.logger.debug(
+                        "Auto-normalized filter %s -> %s for %s",
+                        str(fits_filter),
+                        filter_name,
+                        os.path.basename(name),
+                    )
 
             if (
                 self.input_yaml["select_filter"]
@@ -1037,17 +1111,45 @@ class Prepare:
 
         # Load default filters if none provided
         if not required_filters:
-            base_filepath = os.path.dirname(os.path.abspath(__file__))
-            base_database = os.path.join(base_filepath, "databases")
-            filters_yml = "filters.yml"
-            required_filters = (
-                AutophotYaml(os.path.join(base_database, filters_yml))
-                .load()["default_dmag"]
-                .keys()
-            )
+            # For dynamic filter system, use available filters from catalog
+            # This ensures templates work with transmission curves
+            try:
+                available_filters = self.check_catalog()
+                if available_filters:
+                    required_filters = available_filters
+                    self.logger.info(
+                        "Using available catalog filters for template search: %s",
+                        ", ".join(sorted(required_filters))
+                    )
+                else:
+                    # Fallback to default filters
+                    base_filepath = os.path.dirname(os.path.abspath(__file__))
+                    base_database = os.path.join(base_filepath, "databases")
+                    filters_yml = "filters.yml"
+                    required_filters = (
+                        AutophotYaml(os.path.join(base_database, filters_yml))
+                        .load()["default_dmag"]
+                        .keys()
+                    )
+            except Exception:
+                # Fallback to default filters if catalog check fails
+                base_filepath = os.path.dirname(os.path.abspath(__file__))
+                base_database = os.path.join(base_filepath, "databases")
+                filters_yml = "filters.yml"
+                required_filters = (
+                    AutophotYaml(os.path.join(base_database, filters_yml))
+                    .load()["default_dmag"]
+                    .keys()
+                )
 
         raw_filters = [str(f).strip() for f in required_filters if str(f).strip()]
-        required_filters, dropped_required = sanitize_photometric_filters(raw_filters)
+        # For template lookup, use available_filters if available to support dynamic filters
+        try:
+            template_available_filters = self.check_catalog()
+            required_filters, dropped_required = sanitize_photometric_filters(raw_filters, available_filters=template_available_filters)
+        except Exception:
+            # Fallback to default behavior if catalog check fails
+            required_filters, dropped_required = sanitize_photometric_filters(raw_filters)
         if dropped_required:
             self.logger.info(
                 "Template lookup: ignored %d unsupported/non-filter keys.",

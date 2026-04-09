@@ -149,6 +149,34 @@ def _normalize_photometry_columns(df):
     return df
 
 
+def _inverted_fit_series_to_bool(series: pd.Series) -> pd.Series:
+    """Parse ``_inverted_fit`` column to real booleans (CSV / mixed types safe).
+
+    Do not use ``Series.astype(bool)`` on object columns: non-empty strings
+    including the literal ``\"False\"`` would become True.
+    """
+    if series is None or len(series) == 0:
+        return pd.Series(dtype=bool)
+    out = np.zeros(len(series), dtype=bool)
+    idx = series.index
+    for i, v in enumerate(series.to_numpy()):
+        if pd.isna(v):
+            continue
+        if isinstance(v, (bool, np.bool_)):
+            out[i] = bool(v)
+        elif isinstance(v, (np.integer, int)):
+            out[i] = v != 0
+        elif isinstance(v, (np.floating, float)):
+            fv = float(v)
+            out[i] = np.isfinite(fv) and fv != 0.0
+        elif isinstance(v, str):
+            t = v.strip().lower()
+            out[i] = t in ("1", "true", "t", "yes", "y")
+        else:
+            out[i] = bool(v)
+    return pd.Series(out, index=idx)
+
+
 def _resolve_band_triplet(cols, band: str, method: str):
     """
     Resolve the (mag, err, zp) column names for a band/method.
@@ -168,6 +196,15 @@ def _resolve_band_triplet(cols, band: str, method: str):
         if all(c in cols for c in trip):
             return trip
     return None
+
+
+def _lmag_to_apparent(df: pd.DataFrame, zp_col: str) -> pd.Series:
+    """Convert pipeline ``lmag`` (instrumental) to apparent using band zeropoint."""
+    if "lmag" not in df.columns:
+        return pd.Series(np.nan, index=df.index, dtype=float)
+    li = pd.to_numeric(df["lmag"], errors="coerce")
+    zp = pd.to_numeric(df[zp_col], errors="coerce")
+    return li + zp
 
 
 def _compute_detection_mask(
@@ -447,6 +484,8 @@ def plot_lightcurve(
     nondetections_list = [] if return_detections else None
     bands_in_data = bands_in_data[::-1]
     has_limits_plotted = False
+    plotted_inverted_hatch = False
+    plotted_positive_flux_marker = False
     mid_idx = (
         len(bands_in_data) - 1
     ) // 2  # reference band (offset 0) is the middle one
@@ -471,8 +510,11 @@ def plot_lightcurve(
 
         band_offset = (idx - mid_idx) * offset
         df["apparent_mag"] = df["apparent_mag"] + band_offset
-        # lmag is the limit magnitude and should NOT have zeropoint added
-        df["lmag"] = df["lmag"] + band_offset
+        # lmag in photometry CSV is instrumental (see main.py); convert to apparent
+        # so upper-limit points match the detection magnitude scale on the plot.
+        if "lmag" not in df.columns:
+            df["lmag"] = np.nan
+        df["lmag"] = _lmag_to_apparent(df, zp_col) + band_offset
         
         # Initialize plot_mag and plot_err for this band's df
         df["plot_mag"] = df["apparent_mag"]
@@ -486,61 +528,47 @@ def plot_lightcurve(
             snr_limit=float(snr_limit),
             use_SNR_limit=bool(use_SNR_limit),
         )
+        detected_s = pd.Series(detected, index=df.index, dtype=bool)
 
         # Check for inverted-only detections using _inverted_fit flag or inst_inverted column
         has_inverted = False
         inverted_col = None
-        
-        # First check if _inverted_fit flag exists and is True for any rows in df (not data)
+
         if "_inverted_fit" in df.columns:
-            # Convert to boolean explicitly (handle string 'True', numeric 1.0, or actual True)
-            inv_fit_values = df["_inverted_fit"]
-            if inv_fit_values.dtype == object:
-                # String values like "True" or "False"
-                has_inverted = np.any(inv_fit_values == "True")
-            elif inv_fit_values.dtype in (np.float64, np.float32, np.int64, np.int32):
-                # Numeric values (1.0 or 0.0 from float_format)
-                has_inverted = np.any(inv_fit_values == 1.0)
-            else:
-                # Boolean or numeric values
-                has_inverted = np.any(inv_fit_values.fillna(False).astype(bool))
-        
-        # Also check for inst_inverted column as fallback (in df, not data)
+            inv_flag = _inverted_fit_series_to_bool(df["_inverted_fit"])
+            has_inverted = bool(inv_flag.any())
+        else:
+            inv_flag = pd.Series(False, index=df.index)
+
         if not has_inverted:
             inverted_col = "inst_inverted" if "inst_inverted" in df.columns else None
-            if inverted_col is None:
-                # Try lowercase variant
-                inverted_col = "inst_inverted" if "inst_inverted" in df.columns else None
-            has_inverted = inverted_col is not None and np.any(np.isfinite(df[inverted_col]))
-        
+            has_inverted = inverted_col is not None and np.any(
+                np.isfinite(pd.to_numeric(df[inverted_col], errors="coerce"))
+            )
+
         if has_inverted:
-            # Inverted detection: has _inverted_fit=True OR finite inst_inverted but not detected normally
-            if "_inverted_fit" in df.columns:
-                inv_fit_values = df["_inverted_fit"]
-                if inv_fit_values.dtype == object:
-                    inv_flag = inv_fit_values == "True"
-                elif inv_fit_values.dtype in (np.float64, np.float32, np.int64, np.int32):
-                    inv_flag = inv_fit_values == 1.0
-                else:
-                    inv_flag = inv_fit_values.fillna(False).astype(bool)
-            else:
-                inv_flag = np.zeros(len(df), dtype=bool)
-            
+            if "_inverted_fit" not in df.columns:
+                inv_flag = pd.Series(False, index=df.index)
+            if inverted_col is None and "inst_inverted" in df.columns:
+                inverted_col = "inst_inverted"
             if inverted_col and inverted_col in df.columns:
-                inv_finite = np.isfinite(df[inverted_col])
+                inv_finite = np.isfinite(
+                    pd.to_numeric(df[inverted_col], errors="coerce").to_numpy(dtype=float)
+                )
             else:
                 inv_finite = np.zeros(len(df), dtype=bool)
-                
-            # Inverted-only: either has the flag OR has finite inverted magnitude
-            inverted_only = inv_flag | (inv_finite & ~detected)
-            normal_detected = detected & ~inverted_only
+            inv_finite = pd.Series(inv_finite, index=df.index)
+            # Rows recovered on the inverted image: pipeline flag, or finite inverted mag
+            # without a normal detection (oversubtraction / transient in template).
+            inverted_only = inv_flag | (inv_finite & ~detected_s)
+            normal_detected = detected_s & ~inverted_only
         else:
-            inverted_only = np.zeros(len(df), dtype=bool)
-            normal_detected = detected
+            inverted_only = pd.Series(False, index=df.index)
+            normal_detected = detected_s
 
         # Combine normal detections and inverted-only detections for plotting
         all_detects = df[normal_detected | inverted_only]
-        nondetects = df[~detected & ~inverted_only]
+        nondetects = df[~detected_s & ~inverted_only]
         
         num_detect += len(all_detects)  # Count all detections
         num_nondetect += len(nondetects)
@@ -612,24 +640,20 @@ def plot_lightcurve(
         
         # Now plot markers, applying hatch style row by row for inverted fits
         if not all_detects.empty:
-            # Check which rows used inverted fit
             if "_inverted_fit" in all_detects.columns:
-                inv_fit_values = all_detects["_inverted_fit"]
-                if inv_fit_values.dtype == object:
-                    inv_fit_mask = inv_fit_values == "True"
-                elif inv_fit_values.dtype in (np.float64, np.float32, np.int64, np.int32):
-                    inv_fit_mask = inv_fit_values == 1.0
-                else:
-                    inv_fit_mask = inv_fit_values.fillna(False).astype(bool)
+                inv_fit_mask = _inverted_fit_series_to_bool(all_detects["_inverted_fit"])
             else:
                 inv_fit_mask = pd.Series(False, index=all_detects.index)
-            
-            # Also mark inverted-only detections as needing hatch
-            inv_fit_mask = inv_fit_mask | inverted_only
-            
+            # Align inverted_only (full-band df index) to plotted rows — required for
+            # correct hatch assignment (avoids index misalignment with | on Series).
+            inv_row_mask = inverted_only.reindex(all_detects.index, fill_value=False)
+            inv_row_mask = inv_row_mask.fillna(False).astype(bool)
+            inv_fit_mask = inv_fit_mask | inv_row_mask
+
             # Plot normal detections (no hatch)
             normal_detects = all_detects[~inv_fit_mask]
             if not normal_detects.empty:
+                plotted_positive_flux_marker = True
                 ax.scatter(
                     normal_detects.mjd - reference_epoch,
                     normal_detects["plot_mag"],
@@ -645,6 +669,7 @@ def plot_lightcurve(
             # Plot inverted detections with hatch
             inv_detects = all_detects[inv_fit_mask]
             if not inv_detects.empty:
+                plotted_inverted_hatch = True
                 sc = ax.scatter(
                     inv_detects.mjd - reference_epoch,
                     inv_detects["plot_mag"],
@@ -731,8 +756,25 @@ def plot_lightcurve(
 
     # Legend: filter symbols; optionally add limit legend entry once
     from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
 
     handles, labels = curve_axes[0].get_legend_handles_labels()
+    # Inverted-only runs: explain hatched marker on the main legend. When both
+    # normal and inverted points exist, the separate flux legend replaces this.
+    if (
+        plotted_inverted_hatch
+        and not (plotted_positive_flux_marker and plotted_inverted_hatch)
+        and "Inverted-image PSF" not in labels
+    ):
+        inv_patch = Patch(
+            facecolor="0.55",
+            edgecolor="white",
+            hatch="////",
+            linewidth=0.8,
+            label="Inverted-image PSF",
+        )
+        handles.append(inv_patch)
+        labels.append("Inverted-image PSF")
     if show_limits and has_limits_plotted and "Upper limit" not in labels:
         limit_handle = Line2D(
             [0],
@@ -768,7 +810,8 @@ def plot_lightcurve(
         labels = list(labels[:-1]) + ["", labels[-1], ""]
         ncol = 3
 
-    curve_axes[0].legend(
+    ax0 = curve_axes[0]
+    leg_main = ax0.legend(
         handles,
         labels,
         loc="best",
@@ -777,10 +820,42 @@ def plot_lightcurve(
         edgecolor="black",
         ncol=ncol,
     )
+    ax0.add_artist(leg_main)
+
+    # Second legend: flux sign only, same marker geometry as the lightcurve points.
+    if plotted_positive_flux_marker and plotted_inverted_hatch:
+        _fc = "0.45"
+        h_pos = ax0.scatter(
+            [],
+            [],
+            s=80,
+            marker="o",
+            facecolors=_fc,
+            edgecolors="black",
+            linewidths=0.8,
+        )
+        h_neg = ax0.scatter(
+            [],
+            [],
+            s=100,
+            marker="s",
+            facecolors=_fc,
+            edgecolors="white",
+            linewidths=0.8,
+        )
+        h_neg.set_hatch("////")
+        ax0.legend(
+            [h_pos, h_neg],
+            ["Positive flux", "Negative flux"],
+            loc="lower right",
+            frameon=True,
+            framealpha=0.95,
+            edgecolor="black",
+        )
 
     # No plot titles; keep the legend/axis labels only.
 
-    curve_axes[0].invert_yaxis()
+    ax0.invert_yaxis()
 
     # ---------- Colour evolution panel (same-night pairs only) ----------
     if plot_color and color_ax is not None and "filter" in data.columns:
@@ -817,9 +892,12 @@ def plot_lightcurve(
             d1["err"] = d1[err1]
             d2["mag"] = d2[col2] + d2[zp2] if col2.startswith('inst_') else d2[col2]
             d2["err"] = d2[err2]
-            # lmag is the limit magnitude and should NOT have zeropoint added
-            # d1["lmag"] = d1["lmag"] + d1[zp1]
-            # d2["lmag"] = d2["lmag"] + d2[zp2]
+            if "lmag" not in d1.columns:
+                d1["lmag"] = np.nan
+            if "lmag" not in d2.columns:
+                d2["lmag"] = np.nan
+            d1["lmag"] = _lmag_to_apparent(d1, zp1)
+            d2["lmag"] = _lmag_to_apparent(d2, zp2)
             if use_SNR_limit:
                 if method == "PSF" and "snr_psf" in d1.columns:
                     snr1 = np.asarray(d1["snr_psf"], dtype=float)
@@ -1084,52 +1162,60 @@ def generate_photometry_table(
             data["beta"] = pd.to_numeric(data["beta"], errors="coerce")
         if "lmag" not in data.columns:
             data["lmag"] = np.nan
-        # lmag is the limit magnitude and should NOT have zeropoint added
-        data["lmag"] = pd.to_numeric(data["lmag"], errors="coerce")
+        lmag_inst = pd.to_numeric(data["lmag"], errors="coerce")
+        zp_num = pd.to_numeric(data[zp_col], errors="coerce")
+        # Pipeline stores lmag in instrumental system; detection cut uses apparent mags.
+        data["lmag"] = lmag_inst + zp_num
+        if col.startswith("inst_"):
+            data["__app_mag_det__"] = pd.to_numeric(data[col], errors="coerce") + zp_num
+            _det_mag_col = "__app_mag_det__"
+        else:
+            _det_mag_col = col
         detected = _compute_detection_mask(
             data,
-            col,
+            _det_mag_col,
             err_col,
             method,
             snr_limit=float(snr_limit),
             use_SNR_limit=bool(use_SNR_limit),
         )
+        detected_s = pd.Series(detected, index=data.index, dtype=bool)
 
         # Check for inverted-only detections using _inverted_fit flag or inst_inverted column
         has_inverted = False
         inverted_col = None
-        
-        # First check if _inverted_fit flag exists and is True for any rows
+
         if "_inverted_fit" in data.columns:
-            has_inverted = np.any(data["_inverted_fit"].fillna(False).astype(bool))
-        
-        # Also check for inst_inverted column as fallback
+            inv_flag = _inverted_fit_series_to_bool(data["_inverted_fit"])
+            has_inverted = bool(inv_flag.any())
+        else:
+            inv_flag = pd.Series(False, index=data.index)
+
         if not has_inverted:
             inverted_col = "inst_inverted" if "inst_inverted" in data.columns else None
-            has_inverted = inverted_col is not None and np.any(np.isfinite(data[inverted_col]))
-        
+            has_inverted = inverted_col is not None and np.any(
+                np.isfinite(pd.to_numeric(data[inverted_col], errors="coerce"))
+            )
+
         if has_inverted:
-            # Inverted detection: has _inverted_fit=True OR finite inst_inverted but not detected normally
-            if "_inverted_fit" in data.columns:
-                inv_flag = data["_inverted_fit"].fillna(False).astype(bool)
-            else:
-                inv_flag = np.zeros(len(data), dtype=bool)
-            
+            if inverted_col is None and "inst_inverted" in data.columns:
+                inverted_col = "inst_inverted"
             if inverted_col and inverted_col in data.columns:
-                inv_finite = np.isfinite(data[inverted_col])
+                inv_finite = np.isfinite(
+                    pd.to_numeric(data[inverted_col], errors="coerce").to_numpy(dtype=float)
+                )
             else:
                 inv_finite = np.zeros(len(data), dtype=bool)
-                
-            # Inverted-only: either has the flag OR has finite inverted magnitude
-            inverted_only = inv_flag | (inv_finite & ~detected)
-            normal_detected = detected & ~inverted_only
+            inv_finite = pd.Series(inv_finite, index=data.index)
+            inverted_only = inv_flag | (inv_finite & ~detected_s)
+            normal_detected = detected_s & ~inverted_only
         else:
-            inverted_only = np.zeros(len(data), dtype=bool)
-            normal_detected = detected
+            inverted_only = pd.Series(False, index=data.index)
+            normal_detected = detected_s
 
         detects = data[normal_detected].copy()
         inv_detects = data[inverted_only].copy() if has_inverted else pd.DataFrame()
-        nondetects = data[~detected & ~inverted_only].copy()
+        nondetects = data[~detected_s & ~inverted_only].copy()
 
         if not detects.empty:
             # Check if col is already an apparent magnitude (has zeropoint applied)
@@ -1175,13 +1261,20 @@ def generate_photometry_table(
                     # Convert instrumental to apparent
                     mag_value = inv_detects[inv_mag_col] + inv_detects[zp_col]
                 
+                _err_s = (
+                    pd.to_numeric(inv_detects[inv_err_col], errors="coerce").round(3)
+                    if inv_err_col and inv_err_col in inv_detects.columns
+                    else pd.Series(np.nan, index=inv_detects.index, dtype=float)
+                )
                 inv_detects = inv_detects.assign(
                     Filter=band,
-                    Limit="^INV",
+                    Limit=pd.to_numeric(inv_detects["lmag"], errors="coerce").round(
+                        3
+                    ),
                     MJD=inv_detects["mjd"].round(3),
                     Date=Time(inv_detects["mjd"], format="mjd").iso,
                     Mag=mag_value.round(3),
-                    Error=inv_detects[inv_err_col].round(3) if inv_err_col else "-",
+                    Error=_err_s,
                 )[["MJD", "Date", "Mag", "Error", "Filter", "Limit"]]
                 phot_table.append(inv_detects)
 
@@ -1190,9 +1283,9 @@ def generate_photometry_table(
                 Filter=band,
                 MJD=nondetects["mjd"].round(3),
                 Date=Time(nondetects["mjd"], format="mjd").iso,
-                Mag="-",
-                Error="-",
-                Limit=nondetects["lmag"].round(3),
+                Mag=pd.Series(np.nan, index=nondetects.index, dtype=float),
+                Error=pd.Series(np.nan, index=nondetects.index, dtype=float),
+                Limit=pd.to_numeric(nondetects["lmag"], errors="coerce").round(3),
             )[["MJD", "Date", "Mag", "Error", "Filter", "Limit"]]
             phot_table.append(nondetects)
 
@@ -1209,7 +1302,8 @@ def generate_photometry_table(
 
     save_path = os.path.dirname(output_file)
     fname = os.path.join(save_path, f"lightcurve_{method}.dat")
-    out_phot.to_csv(fname, index=False)
+    # Uniform numeric formatting; non-detections use NaN for Mag/Error (written as empty or "-")
+    out_phot.to_csv(fname, index=False, float_format="%.3f", na_rep="-")
 
     # ---------- Colour evolution table (same-night pairs) ----------
     color_table_path = None
@@ -1235,12 +1329,16 @@ def generate_photometry_table(
             ].copy()
             if d1.empty or d2.empty:
                 continue
-            d1["mag"] = d1[col1]
+            if "lmag" not in d1.columns:
+                d1["lmag"] = np.nan
+            if "lmag" not in d2.columns:
+                d2["lmag"] = np.nan
+            d1["mag"] = d1[col1] + d1[zp1] if col1.startswith("inst_") else d1[col1]
             d1["err"] = d1[err1]
-            d1["lmag"] = d1["lmag"] + d1[zp1]
-            d2["mag"] = d2[col2]
+            d1["lmag"] = _lmag_to_apparent(d1, zp1)
+            d2["mag"] = d2[col2] + d2[zp2] if col2.startswith("inst_") else d2[col2]
             d2["err"] = d2[err2]
-            d2["lmag"] = d2["lmag"] + d2[zp2]
+            d2["lmag"] = _lmag_to_apparent(d2, zp2)
             if use_SNR_limit:
                 if method == "PSF" and "snr_psf" in d1.columns:
                     snr1 = np.asarray(d1["snr_psf"], dtype=float)
@@ -1382,7 +1480,9 @@ def generate_photometry_table(
             color_table_path = os.path.join(
                 save_path, f"lightcurve_{method}_colors.dat"
             )
-            color_df.to_csv(color_table_path, index=False)
+            color_df.to_csv(
+                color_table_path, index=False, float_format="%.3f", na_rep="-"
+            )
 
     return out_phot
 

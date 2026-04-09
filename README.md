@@ -26,10 +26,21 @@
 
 ### Conda (Recommended)
 
+**Important**: AutoPHOT requires the `conda-forge` channel for dependency resolution.
+
 ```bash
-conda create -n autophot python=3.11 -y
+# Method 1: Install with conda-forge (recommended)
+conda install -c conda-forge -c astro-juanlu autophot
+
+# Method 2: Add conda-forge permanently
+conda config --add channels conda-forge
+conda config --set channel_priority strict
+conda install -c astro-juanlu autophot
+
+# Method 3: Create dedicated environment
+conda create -n autophot -c conda-forge python=3.11
 conda activate autophot
-conda install astro-sean::autophot
+conda install -c astro-juanlu autophot
 ```
 
 Verify installation:

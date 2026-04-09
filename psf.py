@@ -3043,22 +3043,25 @@ class PSF:
             combined, ["flux_fit_err", "flux_err", "flux_uncertainty"], unit=u.electron
         )
 
-        # Check which fits have negative/problematic flux and need inverted retry
+        # Check which fits have significant negative SNR and need inverted retry
         # For target-only fits with check_inverted enabled
+        # Only retry for SNR <= -3 (significant negative detection, not just small negative noise)
         needs_inverted_retry = np.zeros(len(combined), dtype=bool)
         if check_inverted and ndimage_inverted is not None and is_target_fit:
-            # Identify bad fits: non-finite flux, negative flux, or flagged
-            flux_arr = np.asarray(flux_fit)
-            flags_arr = np.asarray(combined.get("flags", 0))
-            bad_flux = ~np.isfinite(flux_arr) | (flux_arr <= 0)
-            bad_flags = flags_arr != 0
-            needs_inverted_retry = bad_flux | bad_flags
-            if np.any(needs_inverted_retry):
-                log.info(
-                    "Target PSF: %d/%d fits have negative/problematic flux; retrying on inverted image.",
-                    int(np.sum(needs_inverted_retry)),
-                    len(combined)
-                )
+            # Check SNR from sources using idx_out mapping
+            if "SNR" in sources.columns:
+                snr_arr = np.asarray(sources["SNR"].iloc[idx_out], float)
+                # Trigger for significant negative SNR (<= -3), small negatives (-3 < SNR < 0) are okay
+                significant_negative = np.isfinite(snr_arr) & (snr_arr <= -3)
+                needs_inverted_retry = significant_negative
+                if np.any(needs_inverted_retry):
+                    log.info(
+                        "Target PSF: %d/%d fits have SNR <= -3; retrying on inverted image.",
+                        int(np.sum(needs_inverted_retry)),
+                        len(combined)
+                    )
+            else:
+                log.warning("check_inverted enabled but SNR not in sources; cannot determine inverted retry candidates.")
 
         # ---- Inverted image fit (fallback for negative/problematic PSF) ------
         results_inverted = []
@@ -3093,6 +3096,11 @@ class PSF:
 
         # Process inverted results and replace bad normal fits where inverted succeeded
         combined_inv = None
+        idx_out_inv_good = np.array([], dtype=int)
+        # Snapshot of difference-image PSF fit (e-) before inverted overwrite; set when invert succeeds
+        snap_flux_e = snap_flux_err_e = None
+        snap_x = snap_y = snap_xe = snap_ye = None
+        snap_cfit = snap_qfit = snap_chi2 = snap_flags = None
         if results_inverted:
             combined_inv = pd.concat(results_inverted)
             idx_out_inv = np.asarray(combined_inv["idx"], int)
@@ -3116,6 +3124,48 @@ class PSF:
                 
                 # Map from idx to position in combined
                 idx_to_pos = {idx: i for i, idx in enumerate(idx_out)}
+                
+                # Preserve difference-image (normal) PSF parameters before they are overwritten
+                # so outputs can report both negative/oversubtracted diff flux and inverted-image fit.
+                snap_flux_e = np.asarray(
+                    self._first_present(combined, ["flux_fit", "flux"], unit=u.electron),
+                    dtype=float,
+                ).copy()
+                snap_flux_err_e = np.asarray(
+                    self._first_present(
+                        combined,
+                        ["flux_fit_err", "flux_err", "flux_uncertainty"],
+                        unit=u.electron,
+                    ),
+                    dtype=float,
+                ).copy()
+                snap_x = np.asarray(
+                    self._first_present(combined, ["x_fit", "xcenter_fit", "x_0_fit"]),
+                    dtype=float,
+                ).copy()
+                snap_y = np.asarray(
+                    self._first_present(combined, ["y_fit", "ycenter_fit", "y_0_fit"]),
+                    dtype=float,
+                ).copy()
+                snap_xe = np.asarray(
+                    self._first_present(
+                        combined, ["x_fit_err", "x_err", "xcenter_fit_err"]
+                    ),
+                    dtype=float,
+                ).copy()
+                snap_ye = np.asarray(
+                    self._first_present(
+                        combined, ["y_fit_err", "y_err", "ycenter_fit_err"]
+                    ),
+                    dtype=float,
+                ).copy()
+                snap_cfit = np.asarray(self._first_present(combined, ["cfit"]), dtype=float).copy()
+                snap_qfit = np.asarray(self._first_present(combined, ["qfit"]), dtype=float).copy()
+                snap_chi2 = np.asarray(
+                    self._first_present(combined, ["reduced_chi2", "chi2_red"]),
+                    dtype=float,
+                ).copy()
+                snap_flags = np.asarray(combined.get("flags", 0), dtype=int).copy()
                 
                 # Ensure _inverted_fit column exists as boolean type
                 if "_inverted_fit" not in combined.columns:
@@ -3253,6 +3303,16 @@ class PSF:
             "y_fit_err",
             "flux_PSF",
             "flux_PSF_err",
+            "flux_PSF_normal",
+            "flux_PSF_err_normal",
+            "x_fit_normal",
+            "y_fit_normal",
+            "x_fit_err_normal",
+            "y_fit_err_normal",
+            "cfit_normal",
+            "qfit_normal",
+            "reduced_chi2_normal",
+            "flags_normal",
             "flags",
             "cfit",
             "qfit",
@@ -3280,6 +3340,26 @@ class PSF:
         updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF_err"])] = (
             df_out["flux_err_e"].to_numpy() / exposure_time
         )
+
+        # Copy difference-image PSF snapshot for rows where inverted fit replaced the primary
+        if snap_flux_e is not None:
+            inv_mask_final = np.asarray(combined.get("_inverted_fit", False), bool)
+            for i, si in enumerate(idx_out):
+                if not inv_mask_final[i]:
+                    continue
+                si = int(si)
+                if si not in updated.index:
+                    continue
+                updated.at[si, "flux_PSF_normal"] = snap_flux_e[i] / exposure_time
+                updated.at[si, "flux_PSF_err_normal"] = snap_flux_err_e[i] / exposure_time
+                updated.at[si, "x_fit_normal"] = snap_x[i]
+                updated.at[si, "y_fit_normal"] = snap_y[i]
+                updated.at[si, "x_fit_err_normal"] = snap_xe[i]
+                updated.at[si, "y_fit_err_normal"] = snap_ye[i]
+                updated.at[si, "cfit_normal"] = snap_cfit[i]
+                updated.at[si, "qfit_normal"] = snap_qfit[i]
+                updated.at[si, "reduced_chi2_normal"] = snap_chi2[i]
+                updated.at[si, "flags_normal"] = int(snap_flags[i])
 
         for col in ("flags", "cfit", "qfit", "reduced_chi2"):
             updated.iloc[row_pos, updated.columns.get_indexer([col])] = df_out[
@@ -3369,6 +3449,27 @@ class PSF:
                 / np.abs(updated.loc[valid_flux, "flux_PSF"])
             )
             updated[inst_err_col] = mag_err
+            # Instrumental mag from difference-image PSF before invert (|F|); only filled when invert replaced fit
+            inst_normal = f"inst_{image_filter}_PSF_normal"
+            inst_normal_err = f"inst_{image_filter}_PSF_normal_err"
+            updated[inst_normal] = np.nan
+            updated[inst_normal_err] = np.nan
+            fn = pd.to_numeric(updated["flux_PSF_normal"], errors="coerce").to_numpy(
+                dtype=float, copy=False
+            )
+            fe = pd.to_numeric(updated["flux_PSF_err_normal"], errors="coerce").to_numpy(
+                dtype=float, copy=False
+            )
+            absf = np.abs(fn)
+            ok_mag = np.isfinite(fn) & np.isfinite(absf) & (absf > 0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                m_n = np.full(len(updated), np.nan, dtype=float)
+                m_n[ok_mag] = -2.5 * np.log10(absf[ok_mag])
+            updated[inst_normal] = m_n
+            mag_en = np.full(len(updated), np.nan, dtype=float)
+            ok_e = ok_mag & np.isfinite(fe) & (fe > 0)
+            mag_en[ok_e] = (2.5 / np.log(10.0)) * (fe[ok_e] / absf[ok_e])
+            updated[inst_normal_err] = mag_en
 
         log.info(f"Fitted {len(updated)} sources in {time.perf_counter() - t0:.2f}s")
 

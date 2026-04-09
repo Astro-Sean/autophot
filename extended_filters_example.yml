@@ -1,0 +1,97 @@
+# AutoPHOT Configuration Example for Non-Standard Filters (w and Y bands)
+# This demonstrates the most robust way to handle extended filter sets
+
+# Basic settings
+global_verbose_level: 1
+outdir_name: REDUCED
+wdir: .
+restart: True
+target_name: SN_2025aico_extended
+target_ra: 172.318125
+target_dec: 20.585611
+
+# Filter selection - include extended filters
+select_filter: False
+selected_filters: []
+
+# Catalog configuration for extended filter support
+catalog:
+  # Option 1: Use per-filter catalog mapping for optimal coverage
+  use_catalog:
+    "UBVRI": "apass"           # APASS for Johnson-Cousins filters
+    "ugriz": "pan_starrs"      # Pan-STARRS for SDSS filters
+    "JHK": "2mass"             # 2MASS for near-IR filters
+    "Y": "gaia_custom"         # Gaia with custom transmission curves for Y band
+    "w": "custom"              # Custom catalog for w band (user-provided)
+    "default": "gaia"          # Fallback to Gaia
+  
+  # Option 2: Use Gaia custom catalog with transmission curves
+  # Uncomment this section and comment out use_catalog above
+  # use_catalog: "gaia_custom"
+  # transmission_curve_map:
+  #   Y: "transmission_curves/Y_band.dat"
+  #   w: "transmission_curves/w_band.dat"
+  # curve_map_svo:
+  #   Y: "Paranal/HAWKI.Y"
+  #   w: "LCOGT/SDSS.w"  # Example SVO filter ID
+  
+  catalog_radius: 0.25
+  gaia_xp_radius_deg: 0.1667
+  gaia_xp_max_sources: 5000
+  gaia_curve_map_max_sources: 100
+  gaia_curve_map_order_by: distance
+
+# Custom catalog configuration (for w band or other non-standard filters)
+# catalog:
+#   use_catalog: "custom"
+#   catalog_custom_fpath: "my_custom_catalog.csv"
+#   # Custom catalog should have columns: ra, dec, Y, Y_err, w, w_err, etc.
+
+# Template subtraction settings
+template_subtraction:
+  prepare_templates: False
+  use_templates: True
+
+# WCS settings
+wcs:
+  solve_field: True
+  scamp_refine: True
+  TNS_BOT_ID: null
+  TNS_BOT_NAME: null
+  TNS_BOT_API: null
+
+# Photometry settings
+photometry:
+  aperture_n_jobs: 1
+  method: "aperture"
+
+# Plotting settings
+plot:
+  save_plots: True
+  plot_format: "png"
+
+# Notes on extended filter support:
+# 1. Y and w bands are now fully supported in the core filter definitions
+# 2. They have proper color terms, effective wavelengths, and plotting colors
+# 3. Custom catalogs can include these filters with standard naming
+# 4. Gaia transmission curves can be used for synthetic photometry
+# 5. The extended filter group "grizjhkYw" can be used in configurations
+
+# Example telescope.yml entries for extended filters:
+# NOT:
+#   default:
+#     ALFOSC:
+#       filter_key_0: FILTER
+#       Y: Y
+#       w: w
+#       # ... other filter mappings
+
+# Example transmission curve file format (for Gaia custom catalog):
+# wavelength_nm  throughput
+# 4000           0.0
+# 4500           0.1
+# 5000           0.8
+# 5500           1.0
+# 6000           0.9
+# 6500           0.3
+# 7000           0.0

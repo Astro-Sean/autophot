@@ -188,6 +188,7 @@ SUPPORTED_FILTER_GROUPS = {
     "UBVRI": tuple("UBVRI"),
     "ugriz": tuple("ugriz"),
     "JHK": tuple("JHK"),
+    "extended": tuple("Yw"),  # Extended filters (Y-band, w-band)
 }
 
 SUPPORTED_PHOTOMETRIC_FILTERS = tuple(
@@ -219,6 +220,8 @@ def get_supported_photometric_filters() -> tuple:
 _COMPOSITE_FILTER_GROUP_KEYS = {
     "grizjhk": tuple("grizJHK"),  # g,r,i,z,J,H,K (matches common refcat / Pan-STARRS+2MASS style maps)
     "ugrizjhk": tuple("ugrizJHK"),  # u,g,r,i,z,J,H,K
+    "grizjhkYw": tuple("grizJHKYw"),  # g,r,i,z,J,H,K,Y,w (extended filter set)
+    "ugrizjhkYw": tuple("ugrizJHKYw"),  # u,g,r,i,z,J,H,K,Y,w (extended filter set)
 }
 
 
@@ -262,15 +265,29 @@ def parse_supported_filter_group_key(group_key):
     return None
 
 
-def normalize_photometric_filter_name(filter_name):
+def normalize_photometric_filter_name(filter_name, available_filters=None):
     """
     Normalize a filter token to a supported photometric band.
-
-    Accepted bands are restricted to UBVRI, ugriz, and JHK families.
+    
+    This function is now dynamic and accepts any filter name that is either:
+    1. A standard photometric filter (UBVRI, ugriz, JHK families)
+    2. Present in the available_filters list (from custom catalogs)
+    3. A common alias of standard filters
+    
     Non-photometric fields (RA/DEC/name and *_err columns) return None.
     
-    This function only handles basic case normalization and common aliases.
-    Telescope-specific filter mappings should be defined in telescope.yml.
+    Parameters
+    ----------
+    filter_name : str
+        The filter name to normalize
+    available_filters : list or tuple, optional
+        List of available filters from catalogs. If provided, allows any filter
+        name present in this list, enabling completely dynamic filter support.
+    
+    Returns
+    -------
+    str or None
+        Normalized filter name or None for non-photometric fields
     """
     if filter_name is None:
         return None
@@ -282,9 +299,24 @@ def normalize_photometric_filter_name(filter_name):
     if token in NON_PHOTOMETRIC_FILTER_KEYS or token.lower().endswith("_err"):
         return None
 
+    # If available_filters is provided, accept any filter present there
+    if available_filters is not None:
+        available_set = set(str(f).strip() for f in available_filters)
+        # Exact match first
+        if token in available_set:
+            return token
+        # Case-insensitive match
+        if token.lower() in {f.lower() for f in available_set}:
+            # Return the exact case from available_filters
+            for f in available_set:
+                if f.lower() == token.lower():
+                    return f
+    
+    # Standard photometric filters
     if token in SUPPORTED_PHOTOMETRIC_FILTERS:
         return token
 
+    # Common aliases for standard filters
     token_l = token.lower()
     aliases = {
         "up": "u",
@@ -304,12 +336,37 @@ def normalize_photometric_filter_name(filter_name):
         "luminance": None,
         "white": None,
     }
-    return aliases.get(token_l)
+    
+    result = aliases.get(token_l)
+    if result is not None:
+        return result
+    
+    # If available_filters is provided, try to find close matches
+    if available_filters is not None:
+        import difflib
+        close_matches = difflib.get_close_matches(token, list(available_set), n=1, cutoff=0.8)
+        if close_matches:
+            return close_matches[0]
+        
+        # For custom catalogs, accept the original token if it's in the available filters
+        # This is the key change that allows arbitrary filter names
+        if token in available_set:
+            return token
+    
+    return None
 
 
-def sanitize_photometric_filters(filters):
+def sanitize_photometric_filters(filters, available_filters=None):
     """
     Keep only supported photometric filters while preserving order.
+
+    Parameters
+    ----------
+    filters : list
+        List of filter names to sanitize
+    available_filters : list, optional
+        List of available filters from catalogs. If provided, allows
+        arbitrary filter names present in this list.
 
     Returns
     -------
@@ -323,7 +380,7 @@ def sanitize_photometric_filters(filters):
     seen = set()
     dropped = []
     for raw in filters or []:
-        norm = normalize_photometric_filter_name(raw)
+        norm = normalize_photometric_filter_name(raw, available_filters=available_filters)
         if norm is None:
             dropped.append(str(raw))
             continue
@@ -895,7 +952,7 @@ def get_instrument_config(telescope_data, telescope, instrument):
 
 def load_telescope_config(wdir):
     """
-    Load telescope.yml and merge with built-in defaults.
+    Load telescope.yml from wdir and merge with built-in defaults.
     Images must have TELESCOP and INSTRUME header keywords; telescope.yml lists
     all supported telescopes/instruments. User config overrides built-in.
     Returns merged dict keyed by TELESCOP then INSTRUME.
@@ -903,13 +960,7 @@ def load_telescope_config(wdir):
     logger = logging.getLogger(__name__)
     out = copy.deepcopy(BUILTIN_TELESCOPE_DEFAULTS)
 
-    # Merge order (lowest -> highest precedence):
-    # 1) BUILTIN_TELESCOPE_DEFAULTS (code)
-    # 2) repo-shipped autophot_db/telescope.yml (if present)
-    # 3) user wdir/telescope.yml (if present)
-    repo_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "autophot_db", "telescope.yml"
-    )
+    # Only load from wdir telescope.yml (wdir-specific configuration)
     user_path = os.path.join(wdir, "telescope.yml")
     loaded_sources = []
 
@@ -954,14 +1005,12 @@ def load_telescope_config(wdir):
             base_out[tele] = base
         return base_out
 
-    out = _deep_merge_into(out, _safe_load_yaml(repo_path))
     out = _deep_merge_into(out, _safe_load_yaml(user_path))
     if loaded_sources:
         logger.info("telescope.yml loaded from: %s", " (merged) ".join(loaded_sources))
     else:
         logger.info(
-            "telescope.yml: using built-in defaults only (no file found at %r or %r)",
-            repo_path,
+            "telescope.yml: using built-in defaults only (no file found at %r)",
             user_path,
         )
     return out
@@ -1280,14 +1329,81 @@ def get_image_and_header(fpath):
     try:
         with fits.open(fpath, ignore_missing_end=True) as hdul:
             hdul.verify("silentfix+ignore")
-            # Image: prefer 'sci' extension, else primary (match get_image).
+            # Enhanced HDU selection for better FITS file support
+            image = None
+            best_hdu_idx = None
+            
+            # Strategy 1: Try 'sci' extension first (Hubble convention)
             try:
-                image = np.asarray(hdul["sci"].data).copy()
+                sci_data = hdul["sci"].data
+                if sci_data is not None and hasattr(sci_data, 'shape') and len(sci_data.shape) >= 2:
+                    image = np.asarray(sci_data).copy()
+                    best_hdu_idx = hdul.index_of("sci")
+                    print(f"Using 'sci' extension (HDU {best_hdu_idx}) with shape {image.shape}")
             except (KeyError, TypeError):
-                image = np.asarray(hdul[0].data).copy()
-            if len(image.shape) != 2:
+                pass
+            
+            # Strategy 2: If no 'sci' extension, find best HDU with 2D+ data
+            if image is None:
+                candidates = []
+                for i, hdu in enumerate(hdul):
+                    if hdu.data is not None:
+                        try:
+                            test_image = np.asarray(hdu.data)
+                            if hasattr(test_image, 'shape') and len(test_image.shape) >= 2:
+                                # Prefer larger images and Primary/Image HDUs
+                                score = 0
+                                if isinstance(hdu, fits.PrimaryHDU):
+                                    score += 10
+                                elif isinstance(hdu, fits.ImageHDU):
+                                    score += 5
+                                score += np.log10(test_image.size) if test_image.size > 0 else 0
+                                candidates.append((score, i, test_image))
+                        except Exception:
+                            continue
+                
+                if candidates:
+                    # Sort by score and take the best candidate
+                    candidates.sort(reverse=True)
+                    best_score, best_idx, best_image = candidates[0]
+                    image = best_image.copy()
+                    best_hdu_idx = best_idx
+                    print(f"Selected HDU {best_idx} (score={best_score:.1f}) with shape {image.shape}")
+            
+            # Strategy 3: Last resort - try primary HDU
+            if image is None and len(hdul) > 0:
+                primary_data = hdul[0].data
+                if primary_data is not None:
+                    try:
+                        test_image = np.asarray(primary_data)
+                        if hasattr(test_image, 'shape'):
+                            print(f"Using primary HDU as fallback with shape {getattr(test_image, 'shape', 'no shape')}")
+                            image = test_image.copy()
+                            best_hdu_idx = 0
+                    except Exception as e:
+                        print(f"Error with primary HDU: {e}")
+            
+            # Final validation and error handling
+            if image is None:
+                # Print detailed HDU information for debugging
+                print("HDU structure analysis:")
+                for i, hdu in enumerate(hdul):
+                    data_info = f"shape={getattr(hdu.data, 'shape', 'None')}" if hdu.data is not None else "None"
+                    print(f"  HDU {i}: {hdu.__class__.__name__}, name='{hdu.name}', data={data_info}")
+                raise Exception(f"No valid 2D+ image data found in FITS file: {os.path.basename(fpath)}")
+            
+            # Handle multi-dimensional data by taking first 2D slice
+            if hasattr(image, 'shape') and len(image.shape) > 2:
                 base = os.path.basename(fpath)
-                raise Exception(f"Warning: {base} is not a 2D array.")
+                print(f"Warning: {base} has {len(image.shape)}D data, taking first 2D slice")
+                original_shape = image.shape
+                while len(image.shape) > 2:
+                    image = image[0]
+                image = image.copy()
+                print(f"  Reshaped from {original_shape} to {image.shape}")
+            elif not hasattr(image, 'shape') or len(image.shape) < 2:
+                base = os.path.basename(fpath)
+                raise Exception(f"Warning: {base} is not a 2D array (found {getattr(image, 'shape', 'no shape')} data).")
 
             # Header: first HDU with TELESCOP, else primary (match get_header).
             def has_telescop(header):

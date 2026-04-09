@@ -82,6 +82,20 @@ class Plot:
             zscale = ZScaleInterval()
 
             images = {"Image": image, "Reference": ref, "Difference": diff}
+            
+            # Store dimensions for each image
+            image_dims = {}
+            
+            # Debug: Log image shapes and data quality
+            for key, img_data in images.items():
+                finite_frac = np.sum(np.isfinite(img_data)) / img_data.size * 100
+                img_h, img_w = img_data.shape
+                image_dims[key] = (img_w, img_h)  # (width, height)
+                logger.info(
+                    f"subtraction_check: {key} shape={img_data.shape}, "
+                    f"finite={finite_frac:.1f}%, "
+                    f"range=[{np.nanmin(img_data):.2e}, {np.nanmax(img_data):.2e}]"
+                )
 
             # Compute vmin, vmax per image using zscale with percentile cleaning
             vmins = {}
@@ -155,14 +169,53 @@ class Plot:
                     )
                 else:
                     half_size = square_size / 2
-                    for ax in axes:  # Only first two panels (Image and Reference)
-                        for x_pix, y_pix in zip(
+                    valid_markers_total = 0
+                    skipped_markers_total = 0
+                    
+                    # Debug: Log coordinate and image info
+                    x_vals = matching_sources[x_col].values
+                    y_vals = matching_sources[y_col].values
+                    logger.info(
+                        f"subtraction_check: Using columns ({x_col}, {y_col}) for {len(matching_sources)} sources"
+                    )
+                    logger.info(
+                        f"subtraction_check: Coordinate ranges: "
+                        f"X=[{np.nanmin(x_vals):.1f}, {np.nanmax(x_vals):.1f}], "
+                        f"Y=[{np.nanmin(y_vals):.1f}, {np.nanmax(y_vals):.1f}]"
+                    )
+                    
+                    # Map axes to panel names for correct dimension lookup
+                    panel_names = ["Image", "Reference", "Difference"]
+                    
+                    for panel_idx, ax in enumerate(axes[:2]):  # Only first two panels
+                        panel_name = panel_names[panel_idx]
+                        panel_width, panel_height = image_dims[panel_name]
+                        valid_markers = 0
+                        skipped_markers = 0
+                        out_of_bounds = 0
+                        non_finite = 0
+                        
+                        for idx, (x_pix, y_pix) in enumerate(zip(
                             matching_sources[x_col], matching_sources[y_col]
-                        ):
-                            x_pix -= 1
-                            y_pix -= 1
+                        )):
+                            # Skip invalid coordinates
+                            if not (np.isfinite(x_pix) and np.isfinite(y_pix)):
+                                non_finite += 1
+                                skipped_markers += 1
+                                continue
+                                
+                            # Convert to 0-indexed if needed (FITS is 1-indexed)
+                            x_plot = float(x_pix) - 1 if x_pix > 0 else float(x_pix)
+                            y_plot = float(y_pix) - 1 if y_pix > 0 else float(y_pix)
+                            
+                            # Check if coordinates are within THIS panel's image bounds
+                            if not (0 <= x_plot < panel_width and 0 <= y_plot < panel_height):
+                                out_of_bounds += 1
+                                skipped_markers += 1
+                                continue
+                            
                             rect = patches.Rectangle(
-                                (x_pix - half_size, y_pix - half_size),
+                                (x_plot - half_size, y_plot - half_size),
                                 square_size,
                                 square_size,
                                 linewidth=0.5,
@@ -171,18 +224,51 @@ class Plot:
                                 alpha=0.5,
                             )
                             ax.add_patch(rect)
+                            valid_markers += 1
+                        
+                        valid_markers_total += valid_markers
+                        skipped_markers_total += skipped_markers
+                        
+                        if skipped_markers > 0:
+                            logger.info(
+                                f"subtraction_check: {panel_name} panel - plotted {valid_markers} markers, "
+                                f"skipped {skipped_markers} ({non_finite} non-finite, {out_of_bounds} out-of-bounds). "
+                                f"Panel dims: {panel_width}x{panel_height}"
+                            )
+                    
+                    if skipped_markers_total > 0:
+                        logger.info(
+                            f"subtraction_check: Total - plotted {valid_markers_total} markers, "
+                            f"skipped {skipped_markers_total} across all panels"
+                        )
 
             # Plot variable sources as red "x" and annotate with otype
             if masked_sources is not None and len(masked_sources) > 0:
                 cross_len = square_size / 4  # Length of each arm of the cross
+                skipped_masked = 0
                 for x, y, otype, name in zip(
                     masked_sources["x_pix"],
                     masked_sources["y_pix"],
                     masked_sources["OTYPE_opt"],
                     masked_sources["MAIN_ID"],
                 ):
-                    x -= 1
-                    y -= 1
+                    # Skip invalid coordinates
+                    if not (np.isfinite(x) and np.isfinite(y)):
+                        skipped_masked += 1
+                        continue
+                    
+                    # Convert to 0-indexed if needed
+                    x_plot = float(x) - 1 if x > 0 else float(x)
+                    y_plot = float(y) - 1 if y > 0 else float(y)
+                    
+                    # Check if coordinates are within image bounds
+                    if not (0 <= x_plot < img_width and 0 <= y_plot < img_height):
+                        skipped_masked += 1
+                        continue
+                    
+                    x = x_plot
+                    y = y_plot
+                    
                     if "SN*" in otype:
                         otype = name
                         circle = mpatches.Circle(

@@ -43,7 +43,7 @@ from scipy.odr import ODR, Model, RealData
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import border_msg, snr_err, set_size, calculate_bins
+from functions import border_msg, snr_err, set_size, calculate_bins, normalize_photometric_filter_name
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -206,6 +206,10 @@ class Zeropoint:
                     "has_color_term": False,
                 }
             return zp_params
+        # Normalize filter name for consistency with catalog handling
+        use_filter_norm = normalize_photometric_filter_name(use_filter)
+        # Use normalized name if available, otherwise use original
+        use_filter = use_filter_norm if use_filter_norm is not None else use_filter
         # Optional aperture correction (AP -> total flux) in magnitudes.
         # Only applied when apply_aperture_correction is True; otherwise stored for use later.
         ap_corr_mag = float(self.input_yaml.get("aperture_correction", 0.0) or 0.0)
@@ -219,6 +223,14 @@ class Zeropoint:
         for flux_type in ["AP", "PSF"]:
             fcol = f"flux_{flux_type}"
             if fcol not in catalog.columns:
+                zp_params[flux_type] = {
+                    "zeropoint": np.nan,
+                    "zeropoint_error": np.nan,
+                    "has_color_term": False,
+                }
+                continue
+
+            if use_filter not in catalog.columns:
                 zp_params[flux_type] = {
                     "zeropoint": np.nan,
                     "zeropoint_error": np.nan,
@@ -425,6 +437,11 @@ class Zeropoint:
 
         try:
             filter_col = self.input_yaml.get("imageFilter")
+            # Normalize filter name for consistency with catalog handling
+            filter_col_norm = normalize_photometric_filter_name(filter_col)
+            # Use normalized name if available, otherwise use original
+            filter_col = filter_col_norm if filter_col_norm is not None else filter_col
+            
             if not filter_col:
                 logger.warning(
                     "No input_yaml.imageFilter provided; skipping sequence-star clean filter."
@@ -558,6 +575,11 @@ class Zeropoint:
         output_zp = {}
 
         image_filter = self.input_yaml["imageFilter"]
+        # Normalize filter name for consistency with catalog handling
+        image_filter_norm = normalize_photometric_filter_name(image_filter)
+        # Use normalized name if available, otherwise use original
+        image_filter = image_filter_norm if image_filter_norm is not None else image_filter
+        
         mag_col = sources[image_filter]
         mag_err_col = sources[f"{image_filter}_err"]
 
@@ -789,6 +811,10 @@ class Zeropoint:
             base_name = os.path.splitext(os.path.basename(fpath))[0] or "zeropoint"
             write_dir = os.path.dirname(fpath) or "."
             use_filter = self.input_yaml.get("imageFilter")
+            # Normalize filter name for consistency with catalog handling
+            use_filter_norm = normalize_photometric_filter_name(use_filter)
+            # Use normalized name if available, otherwise use original
+            use_filter = use_filter_norm if use_filter_norm is not None else use_filter
 
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
@@ -1037,6 +1063,10 @@ class Zeropoint:
                 base_name = os.path.splitext(os.path.basename(fpath))[0] or "zeropoint"
                 write_dir = os.path.dirname(fpath) or "."
                 use_filter = self.input_yaml.get("imageFilter")
+                # Normalize filter name for consistency with catalog handling
+                use_filter_norm = normalize_photometric_filter_name(use_filter)
+                # Use normalized name if available, otherwise use original
+                use_filter = use_filter_norm if use_filter_norm is not None else use_filter
                 if not use_filter:
                     raise ValueError("Missing 'imageFilter' in input YAML.")
 
@@ -1050,7 +1080,9 @@ class Zeropoint:
                 ]
                 missing = [c for c in required if c not in catalog.columns]
                 if missing:
-                    raise KeyError(f"Missing columns: {missing}")
+                    # If filter columns are missing, go directly to fallback
+                    zp_params = self._fallback_zeropoint(catalog, use_filter)
+                    return catalog, zp_params
 
                 try:
                     color1, color2 = self.get_color_term_for_filter(use_filter)
@@ -1336,6 +1368,10 @@ class Zeropoint:
                 return None, None
 
             use_filter = self.input_yaml.get("imageFilter")
+            # Normalize filter name for consistency with catalog handling
+            use_filter_norm = normalize_photometric_filter_name(use_filter)
+            # Use normalized name if available, otherwise use original
+            use_filter = use_filter_norm if use_filter_norm is not None else use_filter
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
 

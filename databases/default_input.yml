@@ -55,6 +55,7 @@ default_input:
     enforce_nonnegative_local_background: True # bool --- If True, clamp annulus-estimated local background to >=0 before subtraction (prevents flux inflation when local sky is negative from over-subtraction/miscalibration).
     apply_aperture_correction: False # bool --- If True, apply aperture correction from PSF stars to aperture mags.
     plot_aperture_correction: False # bool --- If True, save the aperture-correction diagnostic plot (curve of growth).
+    apply_colorterms: False # bool --- If True, measure and apply color term corrections to catalog sources during calibration.
     aperture_radius: null # float|null --- Explicit aperture radius (pixels). If null, computed from `fwhm` (typically max(1.5*FWHM, 2.0)).
     psf_oversample: 1 # int --- Oversampling factor for PSF modelling/fitting grids.
     psf_init_moffat_beta: 4.765 # float --- Moffat beta for initial ePSF kernel (4.765 ~ atmospheric-turbulence-like PSF; lower values add stronger wings).
@@ -148,11 +149,11 @@ default_input:
     crowded_auto_background_rms_min: null # float|null --- Crowded-field trigger: minimum background RMS (optional).
 
     redo_wcs: True # bool --- If True, solve/refresh WCS even if a WCS exists in the header.
-    projection_type: TPV # str --- WCS projection/distortion mode: TPV (default: solve-field + SCAMP) or SIP (solve-field only).
+    projection_type: SIP # str --- WCS projection/distortion mode: TPV (default: solve-field + SCAMP) or SIP (solve-field only).
     allow_fallback_to_existing_on_solve_fail: False # bool --- If False, require a fresh solve when redo_wcs=True (no silent fallback to original header WCS).
     apply_solved_to_fits: True # bool --- If True, write solved WCS back into the FITS header on disk.
     solve_field_exe_loc: solve-field # str --- `solve-field` executable name/path (defaults to `solve-field` on PATH).
-    solve_field_tweak_order: 3 # int --- solve-field SIP tweak order to use (single-value mode).
+    solve_field_tweak_order: 4 # int --- solve-field SIP tweak order to use (single-value mode).
     prefer_scamp_tpv_after_solve: True # bool --- After solve-field succeeds, prefer SCAMP WCS (TPV/PV distortion) when available.
     # If True, preserve input non-linear distortion keywords (PV/SIP) when
     # merging solve-field WCS. Set False to fully replace distortion terms.

@@ -68,6 +68,58 @@ for _env in (
 
 
 # =============================================================================
+# Utility Functions
+# =============================================================================
+def _heuristic_filter_mapping(raw_filter: str) -> str:
+    """
+    Telescope-blind heuristic to map raw filter names to standard catalog bands.
+    
+    Examples:
+        gp_astrodon_2018 -> g
+        rp -> r
+        ip -> i
+        zp -> z
+        Sloan_g -> g
+    """
+    import re
+    f = str(raw_filter).strip().lower().replace(" ", "").replace("-", "_")
+    
+    # Standard survey-style suffixes (ZTF, Pan-STARRS style)
+    if f in {"gp", "rp", "ip", "zp", "up", "wp"}:
+        return f[0]  # gp -> g, rp -> r, etc.
+    
+    # Tokens with underscores like gp_astrodon_2018, rp_cousins, sloan_g, etc.
+    # Check first part for band indicators
+    if "_" in f:
+        first_part = f.split("_")[0]
+        # Direct band match in first part
+        if first_part in {"u", "g", "r", "i", "z", "y", "w", "b", "v", "j", "h", "k"}:
+            return first_part
+        # Check for trailing p (e.g., gp -> g)
+        if len(first_part) == 2 and first_part[1] == "p" and first_part[0] in "ugrizyw":
+            return first_part[0]
+    
+    # Check for trailing p (e.g., gp -> g)
+    if len(f) == 2 and f[1] == "p" and f[0] in "ugrizyw":
+        return f[0]
+    
+    # Tokens like g782/r784/i705/z623 -> leading band letter + digits
+    if len(f) >= 2 and f[0] in "ugrizy" and any(ch.isdigit() for ch in f[1:]):
+        return f[0]
+    
+    # Direct match for single-letter bands
+    if f in {"u", "g", "r", "i", "z", "y", "w", "b", "v", "j", "h", "k"}:
+        return f
+    
+    # Check if it starts with a valid band letter
+    if f and f[0] in "ugrizyw":
+        return f[0]
+    
+    # Default: return the original filter name
+    return raw_filter
+
+
+# =============================================================================
 # Main Function: run_photometry
 # =============================================================================
 def run_photometry():
@@ -287,6 +339,23 @@ def run_photometry():
     ap_n_jobs = max(1, ap_n_jobs)
     lim_n_jobs = int((input_yaml.get("limiting_magnitude") or {}).get("n_jobs", 1))
     lim_n_jobs = max(1, lim_n_jobs)
+
+    #  Validate Target Information
+    # Check that at least one of target_name, target_ra, or target_dec is provided.
+    # If all are missing, raise a warning and stop the code.
+    target_name = input_yaml.get("target_name")
+    target_ra = input_yaml.get("target_ra")
+    target_dec = input_yaml.get("target_dec")
+
+    if target_name is None and target_ra is None and target_dec is None:
+        logging.getLogger(__name__).warning(
+            "No target information provided: target_name, target_ra, and target_dec are all missing. "
+            "Please provide at least one of these parameters to proceed."
+        )
+        raise SystemExit(
+            "ERROR: Missing target information. "
+            "Please set at least one of: target_name, target_ra, or target_dec in your configuration."
+        )
 
     #  Helper Function: Update Target Pixel Coordinates
     # Updates the target's pixel coordinates after any changes to the WCS.
@@ -579,7 +648,7 @@ def run_photometry():
 
         if np.issubdtype(image.dtype, np.integer):
             image = image.astype(float)
-            fits.writeto(fpath, image, header, overwrite=True)
+            fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
 
         #  Extract Instrument, Telescope, and Filter metadata
         telescope_key = "TELESCOP"
@@ -628,7 +697,40 @@ def run_photometry():
                     filt = filt_candidate
 
             # Persist inferred keywords back into the template file
-            fits.writeto(fpath, image, header, overwrite=True)
+            # Fix header card ordering and ensure NAXIS values are valid
+            try:
+                # Ensure NAXIS values are set correctly from image shape first
+                header['NAXIS'] = 2
+                header['NAXIS1'] = image.shape[1]
+                header['NAXIS2'] = image.shape[0]
+                
+                # Remove any None or invalid NAXIS values that could cause issues
+                for key in ['NAXIS', 'NAXIS1', 'NAXIS2', 'NAXIS3', 'NAXIS4']:
+                    if key in header:
+                        val = header[key]
+                        if val is None or not isinstance(val, int):
+                            if key == 'NAXIS':
+                                header[key] = 2
+                            elif key == 'NAXIS1':
+                                header[key] = image.shape[1]
+                            elif key == 'NAXIS2':
+                                header[key] = image.shape[0]
+                            else:
+                                del header[key]
+                
+                fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+            except Exception as e:
+                logging.warning(f"Header write failed: {e}, using minimal header")
+                # Create minimal header with just essential info
+                minimal_header = fits.Header()
+                minimal_header['NAXIS'] = 2
+                minimal_header['NAXIS1'] = image.shape[1]
+                minimal_header['NAXIS2'] = image.shape[0]
+                # Copy essential WCS keywords if they exist
+                for wcs_key in ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2', 'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2', 'CTYPE1', 'CTYPE2']:
+                    if wcs_key in header:
+                        minimal_header[wcs_key] = header[wcs_key]
+                fits.writeto(fpath, image, minimal_header, overwrite=True, output_verify='silentfix+ignore')
 
         if not telescope or str(telescope).strip() == "":
             raise ValueError(
@@ -649,35 +751,24 @@ def run_photometry():
             telescope_data, telescope, instrument
         )
         if telescope_config is None:
-            if is_template:
-                # Templates may not have a corresponding entry in telescope.yml.
-                # Use generic defaults and rely primarily on WCS for pixel scale.
-                logging.warning(
-                    "Template image %s has no telescope.yml entry for (%s, %s); "
-                    "using generic defaults.",
-                    fpath,
-                    telescope,
-                    instrument,
-                )
-                telescope_config = {
-                    "Name": f"{telescope}+{instrument}",
-                    "gain": "GAIN",
-                    "saturate": "SATURATE",
-                    "readnoise": "RDNOISE",
-                    "airmass": "AIRMASS",
-                    "mjd": "MJD-OBS",
-                    "date": "DATE-OBS",
-                    "exptime": "EXPTIME",
-                }
-            else:
-                logging.error(
-                    "No configuration found for telescope %s, instrument %s.",
-                    telescope,
-                    instrument,
-                )
-                raise ValueError(
-                    f"No configuration found for telescope: {telescope}, instrument: {instrument}"
-                )
+            # Use generic defaults for any telescope - no telescope.yml entry required
+            # This makes the pipeline completely blind to telescope identity
+            logging.info(
+                "No telescope.yml entry for %s+%s; using generic defaults.",
+                telescope,
+                instrument,
+            )
+            telescope_config = {
+                "Name": f"{telescope}+{instrument}",
+                "gain": "GAIN",
+                "saturate": "SATURATE",
+                "readnoise": "RDNOISE",
+                "airmass": "AIRMASS",
+                "mjd": "MJD-OBS",
+                "date": "DATE-OBS",
+                "exptime": "EXPTIME",
+                "filter_key_0": "FILTER",
+            }
 
         #  Handle Modified Julian Date (MJD)
         # Try telescope.yml mjd keyword, then common alternates, then date conversion.
@@ -740,7 +831,7 @@ def run_photometry():
                 "Applying gain %.1e to image (low median %.1e).", gain, image_median
             )
             image = image * gain
-            fits.writeto(fpath, image, header, overwrite=True)
+            fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
             gain = 1
             logging.warning("Gain reset to 1 after application.")
 
@@ -762,6 +853,16 @@ def run_photometry():
             # No usable saturation keyword provided; assume effectively no hard
             # saturation so downstream masks do not classify the entire frame
             # as saturated.
+            saturate = np.inf
+
+        # Validate saturate is a valid numeric type
+        try:
+            saturate = float(saturate)
+        except (TypeError, ValueError):
+            logging.warning(
+                f"SATURATE keyword has invalid value '{saturate}' (not a number); "
+                f"falling back to no saturation limit."
+            )
             saturate = np.inf
 
         input_yaml["saturate"] = saturate
@@ -921,32 +1022,28 @@ def run_photometry():
                     instrument
                 ][filter_header_key]
                 raw_filter = str(header[input_yaml["filter_key"]]).strip()
-                # Use telescope.yml mapping (e.g. Z_SPECIAL -> z); try exact, then case variants
-                mapping = telescope_data[telescope][instrument_key][instrument]
-                _meta = {
-                    "Name",
-                    "filter_key_0",
-                    "mjd",
-                    "date",
-                    "gain",
-                    "saturate",
-                    "readnoise",
-                    "airmass",
-                    "exptime",
-                    "pixel_scale",
-                }
-                imageFilter = mapping.get(raw_filter)
+                # Use telescope.yml mapping if available; otherwise use heuristics
+                imageFilter = None
+                if telescope in telescope_data and instrument_key in telescope_data.get(telescope, {}):
+                    mapping = telescope_data[telescope][instrument_key].get(instrument, {})
+                    _meta = {
+                        "Name", "filter_key_0", "mjd", "date", "gain",
+                        "saturate", "readnoise", "airmass", "exptime", "pixel_scale",
+                    }
+                    imageFilter = mapping.get(raw_filter)
+                    if imageFilter is None:
+                        for k, v in mapping.items():
+                            if k not in _meta and isinstance(v, str) and k.strip().upper() == raw_filter.strip().upper():
+                                imageFilter = v
+                                break
+                
+                # Telescope-blind: if no mapping found, use heuristic to derive filter
                 if imageFilter is None:
-                    for k, v in mapping.items():
-                        if (
-                            k not in _meta
-                            and isinstance(v, str)
-                            and k.strip().upper() == raw_filter.strip().upper()
-                        ):
-                            imageFilter = v
-                            break
-                if imageFilter is None:
-                    imageFilter = raw_filter
+                    imageFilter = _heuristic_filter_mapping(raw_filter)
+                    if imageFilter != raw_filter:
+                        logging.info(
+                            f"Filter '{raw_filter}' mapped to '{imageFilter}' via heuristic (no telescope.yml entry)"
+                        )
             else:
                 # Fallback: no mapping found; use a common header key directly when present
                 for fk in ("FILTER", "FILTER1", "FILTER2"):
@@ -1153,7 +1250,7 @@ def run_photometry():
         #  Replace Non-Finite Values
         # Replaces non-finite values in the image with a very small number.
         # image[~np.isfinite(image)] = 1e-30
-        fits.writeto(fpath, image, header, overwrite=True)
+        fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
 
         #  Image Trimming
         # Trims the image to a specified size centered on the target.
@@ -1165,28 +1262,55 @@ def run_photometry():
                         f"Trimming {base_filename} to {trim_image} arcmin box centered on target"
                     )
                 )
-                # Use in-memory image and header (already loaded; no need to re-open file).
                 imageWCS = get_wcs(header)
-                # Creates a cutout of the image centered on the target coordinates.
-                cutout = Cutout2D(
-                    image.astype(float),
-                    target_coords,
-                    (trim_image * u.arcmin * 2),  # Convert to arcmin (box size)
-                    wcs=imageWCS,
-                    mode="partial",
-                    fill_value=1e-30,
-                )
-                # Updates the image and header with the trimmed values.
+                
+                # Check if WCS is valid for celestial coordinates
+                if imageWCS is None or not hasattr(imageWCS, 'celestial') or imageWCS.celestial is None:
+                    logging.warning("WCS is not suitable for celestial coordinates, using pixel-based trimming")
+                    # Fall back to pixel-based trimming using target pixel coords
+                    if 'target_x_pix' in input_yaml and 'target_y_pix' in input_yaml:
+                        center_x = input_yaml['target_x_pix']
+                        center_y = input_yaml['target_y_pix']
+                    else:
+                        # Use image center as fallback
+                        center_x, center_y = image.shape[1] // 2, image.shape[0] // 2
+                    
+                    # Calculate trim size in pixels (assume 1 arcsec/pixel if no scale)
+                    pixel_scale = input_yaml.get("pixel_scale", 1.0)  # arcsec/pixel
+                    if not np.isfinite(pixel_scale):
+                        pixel_scale = 1.0
+                    trim_pixels = int((trim_image * 60) / pixel_scale)  # Convert arcmin to pixels
+                    
+                    # Create pixel-based cutout
+                    from astropy.nddata import Cutout2D
+                    cutout = Cutout2D(
+                        image.astype(float),
+                        position=(center_x, center_y),
+                        size=(trim_pixels, trim_pixels),
+                        mode="partial",
+                        fill_value=0.0,
+                    )
+                else:
+                    # Use WCS-based cutout
+                    cutout = Cutout2D(
+                        image.astype(float),
+                        target_coords,
+                        (trim_image * u.arcmin * 2),  # Convert to arcmin (box size)
+                        wcs=imageWCS,
+                        mode="partial",
+                        fill_value=0.0,
+                    )
+                
+                # Update image and header with cutout data
                 image = cutout.data
-                header.update(cutout.wcs.to_header(relax=True), relax=True)
-                # Updates the WCS values after trimming.
-                imageWCS = get_wcs(header)
+                if cutout.wcs is not None:
+                    header.update(cutout.wcs.to_header(relax=True))
+                
                 # Writes the modified image and header back to the FITS file.
-                fits.writeto(fpath, image, header, overwrite=True)
+                fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
                 logging.info(f"New image shape after trimming: {image.shape}")
             except Exception as e:
-                log_exception(e)
-                logging.info("Could not trim image; ignoring the operation.")
+                logging.warning(f"Could not trim image: {e}; ignoring the operation.")
 
         # =============================================================================
         # Image Recropping (if needed)
@@ -1232,7 +1356,7 @@ def run_photometry():
                 header.update(imageWCS.to_header(relax=True), relax=True)
 
                 # Writes the modified image and header back to the FITS file.
-                fits.writeto(fpath, image, header, overwrite=True)
+                fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
                 logging.info(f"New image shape after recropping: {image.shape}")
 
             # Use the in-memory image/header (already updated) to refresh YAML
@@ -1439,7 +1563,7 @@ def run_photometry():
                 logging.info("Plate solve successful")
                 if apply_solved_to_fits:
                     header = updated_header
-                    fits.writeto(fpath, image, header, overwrite=True)
+                    fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
                     logging.info("Updated header written to file after WCS update")
                     wcs_updated = True
                 else:
@@ -1630,11 +1754,11 @@ def run_photometry():
             header["saturate"] = float(saturate_sub)
 
         # Writes the modified image and header back to the file.
-        fits.writeto(fpath, image, header, overwrite=True)
+        fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
         # Save the background_rms array with '.weight' inserted before the suffix
         base, ext = os.path.splitext(fpath)
         weight_fpath = f"{base}.weight{ext}"
-        fits.writeto(weight_fpath, background_rms, header, overwrite=True)
+        fits.writeto(weight_fpath, background_rms, header, overwrite=True, output_verify='silentfix+ignore')
         del background_surface
         # Keep using in-memory image, header (no reload needed)
 
@@ -1943,7 +2067,7 @@ def run_photometry():
         # Save the background_rms array with '.weight' inserted before the suffix
         base, ext = os.path.splitext(fpath)
         weight_fpath = f"{base}.weight{ext}"
-        fits.writeto(weight_fpath, background_rms, header, overwrite=True)
+        fits.writeto(weight_fpath, background_rms, header, overwrite=True, output_verify='silentfix+ignore')
 
         target_x_pix, target_y_pix = update_target_pixel_coords(
             input_yaml, imageWCS, index
@@ -2685,13 +2809,26 @@ def run_photometry():
         except Exception:
             use_custom_throughputs = False
 
+        # Check if color term correction is enabled
+        photo_cfg = input_yaml.get("photometry", {})
+        apply_colorterms = bool(photo_cfg.get("apply_colorterms", False))
+
         if use_custom_throughputs:
             logging.info(
                 "Using Gaia custom catalog via catalog.transmission_curve_map (custom throughputs); "
                 "disabling zeropoint color correction."
             )
             ImageColorTerm, ImageColorTermError = None, None
+        elif not apply_colorterms:
+            logging.info(
+                "Color term correction disabled (photometry.apply_colorterms=False)."
+            )
+            ImageColorTerm, ImageColorTermError = None, None
         else:
+            logging.info(
+                "Color term correction enabled (photometry.apply_colorterms=True); "
+                "measuring and applying color term corrections to catalog sources."
+            )
             ImageColorTerm, ImageColorTermError = GetZeropoint.fit_color_term(
                 catalog=CatalogSources
             )
@@ -2760,7 +2897,7 @@ def run_photometry():
         header["RDNOISE"] = readnoise
 
         # Writes the modified image and header back to the FITS file.
-        fits.writeto(fpath, image, header, overwrite=True)
+        fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
 
         # =============================================================================
         # Template Preparation
@@ -3212,7 +3349,7 @@ def run_photometry():
 
                 #  NEW: Centroid Check for Each Source
                 # Define a tolerance for positional alignment (e.g., 1 pixels)
-                POSITION_TOLERANCE = 1
+                POSITION_TOLERANCE = 3
 
                 # Centroid each source in the template image
                 template_sources["x_centroid"] = np.nan
@@ -4397,6 +4534,26 @@ def run_photometry():
             )
             if np.isfinite(snr_psf):
                 logging.info(f"Target SNR (PSF){inverted_tag}: {snr_psf:.1f}")
+            # Difference-image PSF before inverted replacement (negative flux = oversubtraction dip)
+            if (
+                "_inverted_fit" in TargetPosition.columns
+                and TargetPosition["_inverted_fit"].iloc[0]
+                and "flux_PSF_normal" in TargetPosition.columns
+            ):
+                fn = float(TargetPosition["flux_PSF_normal"].iloc[0])
+                fne = float(TargetPosition["flux_PSF_err_normal"].iloc[0])
+                if np.isfinite(fn) and np.isfinite(fne) and fne > 0:
+                    logging.info(
+                        "Target PSF on difference image (pre-invert): flux=%.4g +/- %.4g e/s, SNR=%.1f",
+                        fn,
+                        fne,
+                        np.abs(fn) / fne,
+                    )
+                elif np.isfinite(fn):
+                    logging.info(
+                        "Target PSF on difference image (pre-invert): flux=%.4g e/s",
+                        fn,
+                    )
         logging.info(
             f"Target threshold: {TargetPosition['threshold'].iloc[0]:.1f} x background standard deviation"
         )
@@ -4836,7 +4993,40 @@ def run_photometry():
             if "_inverted_fit" in TargetPosition.columns and TargetPosition.at[idx, "_inverted_fit"]:
                 # Add the flag itself to output so lightcurve can detect it
                 output["_inverted_fit"] = True
-                # Original normal fit values (before replacement)
+                # Difference-image (normal) PSF fit preserved before inverted overwrite
+                if "flux_PSF_normal" in TargetPosition.columns:
+                    output["flux_psf_normal"] = float(
+                        TargetPosition.at[idx, "flux_PSF_normal"]
+                    )
+                if "flux_PSF_err_normal" in TargetPosition.columns:
+                    output["flux_psf_err_normal"] = float(
+                        TargetPosition.at[idx, "flux_PSF_err_normal"]
+                    )
+                if "flux_PSF_normal" in TargetPosition.columns and "flux_PSF_err_normal" in TargetPosition.columns:
+                    fn = float(TargetPosition.at[idx, "flux_PSF_normal"])
+                    fne = float(TargetPosition.at[idx, "flux_PSF_err_normal"])
+                    if fne > 0 and np.isfinite(fne):
+                        output["snr_psf_normal"] = float(np.abs(fn) / fne)
+                for _nk, _tk in (
+                    ("x_fit_normal", "x_fit_normal"),
+                    ("y_fit_normal", "y_fit_normal"),
+                    ("x_fit_err_normal", "x_fit_err_normal"),
+                    ("y_fit_err_normal", "y_fit_err_normal"),
+                    ("cfit_normal", "cfit_normal"),
+                    ("qfit_normal", "qfit_normal"),
+                    ("reduced_chi2_normal", "reduced_chi2_normal"),
+                    ("flags_normal", "flags_normal"),
+                ):
+                    if _tk in TargetPosition.columns:
+                        v = TargetPosition.at[idx, _tk]
+                        output[_nk] = int(v) if _nk == "flags_normal" and pd.notna(v) else float(v)
+                _flt = input_yaml["imageFilter"]
+                _inst_n = f"inst_{_flt}_PSF_normal"
+                _inst_ne = f"inst_{_flt}_PSF_normal_err"
+                if _inst_n in TargetPosition.columns:
+                    output[_inst_n.lower()] = float(TargetPosition.at[idx, _inst_n])
+                if _inst_ne in TargetPosition.columns:
+                    output[_inst_ne.lower()] = float(TargetPosition.at[idx, _inst_ne])
                 if "flux_PSF_inverted" in TargetPosition.columns:
                     output["flux_psf_inverted"] = float(TargetPosition.at[idx, "flux_PSF_inverted"])
                 if "flux_PSF_err_inverted" in TargetPosition.columns:
@@ -4977,6 +5167,22 @@ def run_photometry():
                             zp_err = image_zeropoint["PSF"]["zeropoint_error"]
                             output[f"{prefix}_inverted"] = inv_inst + zp
                             output[f"{prefix}_inverted_err"] = float(TargetPosition.at[idx, "inst_inverted_err"]) + zp_err
+                    except Exception:
+                        pass
+                    # Calibrated mag from difference-image PSF (pre-invert), same zeropoint as PSF
+                    try:
+                        inst_n_col = f"inst_{image_filter}_PSF_normal"
+                        inst_ne_col = f"inst_{image_filter}_PSF_normal_err"
+                        if inst_n_col in TargetPosition.columns and "PSF" in image_zeropoint:
+                            n_inst = float(TargetPosition.at[idx, inst_n_col])
+                            if np.isfinite(n_inst):
+                                zp = image_zeropoint["PSF"]["zeropoint"]
+                                zp_err = image_zeropoint["PSF"]["zeropoint_error"]
+                                output[f"{prefix}_normal"] = n_inst + zp
+                                if inst_ne_col in TargetPosition.columns:
+                                    n_e = float(TargetPosition.at[idx, inst_ne_col])
+                                    if np.isfinite(n_e):
+                                        output[f"{prefix}_normal_err"] = n_e + zp_err
                     except Exception:
                         pass
 

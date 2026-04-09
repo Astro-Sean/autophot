@@ -8,6 +8,10 @@ package:
 source:
   path: ../..
 
+# IMPORTANT: This package requires conda-forge channel
+# Install with: conda install -c conda-forge -c astro-juanlu autophot
+# Or add conda-forge to your channels: conda config --add channels conda-forge
+
 build:
   noarch: python
   # Increment when re-publishing the same package version to Anaconda (avoids 409 conflict).

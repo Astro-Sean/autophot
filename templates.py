@@ -229,7 +229,7 @@ RNG = np.random.default_rng(seed=42)
 NO_DATA_SENTINEL = 1e-30
 
 # Supported PanSTARRS filter names
-PANSTARRS_FILTERS = frozenset({"g", "r", "i", "z"})
+PANSTARRS_FILTERS = frozenset({"g", "r", "i", "z",'y','w'})
 
 # Valid 2MASS band identifiers (case-insensitive input, stored upper)
 TWOMASS_VALID_BANDS = frozenset({"J", "H", "KS", "K"})
@@ -789,7 +789,7 @@ def download_panstarrs_template(
             return None
 
         # Step 3: prepare output path
-        sub_folder = Path(template_folder) / f"{band}p_template"
+        sub_folder = Path(template_folder) / f"{band}_template"
         sub_folder.mkdir(parents=True, exist_ok=True)
         template_fpath = sub_folder / f"panstarrs_{band}_band_template.fits"
 
@@ -878,7 +878,7 @@ def download_sdss_template(
         logger.info("Band '%s' not available in SDSS [ugriz]; skipping.", band)
         return None
 
-    sub_folder = Path(template_folder) / f"{band}p_template"
+    sub_folder = Path(template_folder) / f"{band}_template"
     sub_folder.mkdir(parents=True, exist_ok=True)
     template_fpath = sub_folder / f"sdss_{band}_band_template.fits"
 
@@ -1082,10 +1082,10 @@ def download_legacy_template(
         logger.info("Band '%s' not available in Legacy Survey [gri]; skipping.", band)
         return None
 
-    # Path for requested band; subfolders must match find_templates (gp_template, etc.)
+    # Path for requested band; subfolders must match find_templates (g_template, etc.)
     template_base = Path(template_folder)
     template_base.mkdir(parents=True, exist_ok=True)
-    out_path = template_base / f"{band}p_template" / f"legacy_{band}_band_template.fits"
+    out_path = template_base / f"{band}_template" / f"legacy_{band}_band_template.fits"
 
     if out_path.exists():
         logger.info("Legacy template already exists at %s - skipping", out_path)
@@ -1218,7 +1218,7 @@ def download_legacy_template(
             continue
         if idx >= data.shape[0]:
             continue
-        sub_folder = template_base / f"{b}p_template"
+        sub_folder = template_base / f"{b}_template"
         sub_folder.mkdir(parents=True, exist_ok=True)
         band_path = sub_folder / f"legacy_{b}_band_template.fits"
 
@@ -1819,9 +1819,11 @@ class Templates:
         use_filter = str(use_filter).strip()
 
         # Prefer modern naming for ugriz, keep legacy *p_template as fallback.
+        # Also check cross-legacy: rp -> r_template and r -> rp_template for Pan-STARRS/Sloan compatibility
         dir_labels = [f"{use_filter}_template"]
         if use_filter in {"u", "g", "r", "i", "z"}:
             dir_labels.append(f"{use_filter}p_template")
+
 
         candidate_dirs = [fits_root / d for d in dir_labels]
         logger.info(
@@ -1844,7 +1846,7 @@ class Templates:
                 logger.info("No template files found in %s", template_dir)
                 continue
             result = str(candidates[0])
-            if template_dir.name.endswith("p_template"):
+            if template_dir.name.endswith("_template"):
                 logger.info(
                     "Template filepath (legacy folder): %s",
                     result,
