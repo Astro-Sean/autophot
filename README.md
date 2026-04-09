@@ -30,17 +30,17 @@
 
 ```bash
 # Method 1: Install with conda-forge (recommended)
-conda install -c conda-forge -c astro-juanlu autophot
+conda install -c conda-forge -c astro-sean autophot
 
 # Method 2: Add conda-forge permanently
 conda config --add channels conda-forge
 conda config --set channel_priority strict
-conda install -c astro-juanlu autophot
+conda install -c astro-sean autophot
 
 # Method 3: Create dedicated environment
-conda create -n autophot -c conda-forge python=3.11
+conda create -n autophot -c conda-forge -c astro-sean python=3.11
 conda activate autophot
-conda install -c astro-juanlu autophot
+conda install -c astro-sean autophot
 ```
 
 Verify installation:
