@@ -309,31 +309,48 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
         if ty_0idx > y_max:
             y_max = min(image_data.shape[0] - 1, int(ty_0idx) + buffer_pixels)
     
-    # Perform trim
-    trimmed_data = image_data[y_min:y_max+1, x_min:x_max+1]
+    # Perform trim using Cutout2D for proper WCS handling
+    from astropy.nddata import Cutout2D
     
-    # Update header with new WCS
-    trimmed_header = header.copy()
-    
+    # Create WCS from header
     try:
-        wcs = WCS(trimmed_header)
-        # Update CRPIX to account for offset
-        if 'CRPIX1' in trimmed_header:
-            trimmed_header['CRPIX1'] -= x_min
-        if 'CRPIX2' in trimmed_header:
-            trimmed_header['CRPIX2'] -= y_min
-        
-        # Update NAXIS
+        wcs = WCS(header)
+        has_valid_wcs = wcs.has_celestial
+    except Exception:
+        has_valid_wcs = False
+        wcs = None
+    
+    # Calculate cutout position (center of valid region)
+    cutout_x = (x_min + x_max + 1) / 2.0
+    cutout_y = (y_min + y_max + 1) / 2.0
+    cutout_size = (y_max - y_min + 1, x_max - x_min + 1)
+    
+    if has_valid_wcs and wcs is not None:
+        # Use Cutout2D for proper WCS handling
+        cutout = Cutout2D(
+            image_data,
+            position=(cutout_x, cutout_y),
+            size=cutout_size,
+            wcs=wcs,
+            mode='trim'
+        )
+        trimmed_data = cutout.data
+        trimmed_wcs = cutout.wcs
+        # Convert WCS back to header
+        trimmed_header = trimmed_wcs.to_header()
+        # Copy non-WCS keywords from original header
+        for key in header:
+            if key not in trimmed_header and not key.startswith(('CRPIX', 'CRVAL', 'CDELT', 'CTYPE', 'CD1_', 'CD2_', 'PC1_', 'PC2_', 'NAXIS')):
+                trimmed_header[key] = header[key]
+    else:
+        # No valid WCS - just slice the data
+        trimmed_data = image_data[y_min:y_max+1, x_min:x_max+1]
+        trimmed_header = header.copy()
         trimmed_header['NAXIS1'] = trimmed_data.shape[1]
         trimmed_header['NAXIS2'] = trimmed_data.shape[0]
-        
-        # Store trim info in history
-        trimmed_header.add_history(f'Trimmed: removed NaN boundaries [{x_min}:{x_max+1},{y_min}:{y_max+1}]')
-    except Exception as wcs_exc:
-        # If WCS update fails, just update basic header info
-        trimmed_header['NAXIS1'] = trimmed_data.shape[1]
-        trimmed_header['NAXIS2'] = trimmed_data.shape[0]
-        trimmed_header.add_history(f'Trimmed: removed NaN boundaries (WCS update failed)')
+    
+    # Store trim info in history
+    trimmed_header.add_history(f'Trimmed: removed NaN boundaries [{x_min}:{x_max+1},{y_min}:{y_max+1}]')
     
     trim_info = {
         "trimmed": True,
