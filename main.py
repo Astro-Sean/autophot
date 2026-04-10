@@ -1590,6 +1590,7 @@ def run_photometry():
             temp_image = get_image(fpath)
             nan_mask = np.isnan(temp_image)
             if np.any(nan_mask):
+                from scipy.spatial import cKDTree
                 masked_pixels = np.argwhere(nan_mask)
                 tree = cKDTree(masked_pixels)
                 source_coords = FWHMSources[["x_pix", "y_pix"]].values
@@ -3519,6 +3520,7 @@ def run_photometry():
                 logging.info("Image contains no nan regions ")
                 excluded_sources = FWHMSources.iloc[[]]  # Empty DataFrame
             else:
+                from scipy.spatial import cKDTree
                 tree = cKDTree(masked_pixels)
                 source_coords = matched_df[["x_pix", "y_pix"]].values
                 # Query the tree for the minimum distance to any masked pixel for each source
