@@ -633,11 +633,11 @@ class Find_FWHM:
                     data, x=xgrid, y=ygrid, params=params, nan_policy="omit"
                 )
                 return {
-                    "fwhmx": result.params["fwhmx"].value,
-                    "fwhmy": result.params["fwhmy"].value,
+                    "fwhmx": result.params["sigmax"].value * SQRT2LOG2,
+                    "fwhmy": result.params["sigmay"].value * SQRT2LOG2,
                     "xfit": result.params["centerx"].value,
                     "yfit": result.params["centery"].value,
-                    "amplitude": result.params["height"].value,
+                    "amplitude": result.params["amplitude"].value,
                     "success": True,
                 }
         except Exception as e:
@@ -741,7 +741,7 @@ class Find_FWHM:
             cfg = getattr(self, "input_yaml", {}) or {}
             src_cfg = cfg.get("source_detection", {}) or {}
             scale_multiplier = float(
-                src_cfg.get("scale_multiplier", src_cfg.get("scale_multipler", 5.0))
+                src_cfg.get("scale_multiplier", src_cfg.get("scale_multiplier", 5.0))
             )
             saturate = float(cfg.get("saturate", 65000.0))
 
@@ -853,7 +853,7 @@ class Find_FWHM:
             )
             tbl = finder(smooth, mask=mask)
             if tbl is None or len(tbl) == 0:
-                self.logger.info("No sources in first pass", "warning")
+                self.logger.warning("No sources in first pass")
                 self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
                 return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
@@ -862,7 +862,7 @@ class Find_FWHM:
             # --- Cleaning: saturation and edge ---
             df = df[df["peak"] < 0.98 * saturate]
             if len(df) == 0:
-                self.logger.info("All detections saturated", "warning")
+                self.logger.warning("All detections saturated")
                 self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
                 return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
@@ -875,6 +875,32 @@ class Find_FWHM:
             ]
 
             if not no_clean:
+                # --- Cleaning: mask proximity ---
+                # Exclude sources within X FWHM of masked regions (chip gaps, bad pixels, etc.)
+                mask_buffer_fwhm = src_cfg.get("mask_buffer_fwhm", 2.0)
+                if mask is not None and mask_buffer_fwhm > 0 and len(df) > 0:
+                    from scipy import ndimage
+                    # Dilate mask by buffer distance (in pixels)
+                    buffer_px = int(mask_buffer_fwhm * fwhm_fp)
+                    dilated_mask = ndimage.binary_dilation(mask, iterations=buffer_px)
+                    
+                    # Check if sources are in dilated mask region
+                    source_coords = np.round(df[["xcentroid", "ycentroid"]].values).astype(int)
+                    # Clip to image bounds
+                    source_coords[:, 0] = np.clip(source_coords[:, 0], 0, dilated_mask.shape[1] - 1)
+                    source_coords[:, 1] = np.clip(source_coords[:, 1], 0, dilated_mask.shape[0] - 1)
+                    
+                    # Check which sources are near masked regions
+                    near_mask = dilated_mask[source_coords[:, 1], source_coords[:, 0]]
+                    n_near_mask = near_mask.sum()
+                    
+                    if n_near_mask > 0:
+                        self.logger.info(
+                            f"Removing {int(n_near_mask)} sources within {mask_buffer_fwhm} FWHM "
+                            f"of masked/chip gap regions"
+                        )
+                        df = df[~near_mask]
+
                 # --- Cleaning: crowding ---
                 min_sep_pix = max(5.0, 2.5 * fwhm_fp)
                 df = self._crowding_filter(df, min_sep_pix=min_sep_pix)
@@ -884,7 +910,7 @@ class Find_FWHM:
                     df = self._clip_column(df, col, sigma=5.0, maxiters=5)
 
             if len(df) == 0:
-                self.logger.info("All detections rejected by cleaning", "warning")
+                self.logger.warning("All detections rejected by cleaning")
                 self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
                 return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
@@ -908,14 +934,14 @@ class Find_FWHM:
             if not no_clean:
                 df = df[np.isfinite(df["fwhm"])]
                 if len(df) == 0:
-                    self.logger.info("No finite FWHM fits", "warning")
+                    self.logger.warning("No finite FWHM fits")
                     self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
                     return np.nan, pd.DataFrame(), float(max(scale, default_scale))
                 df = self._clip_column(df, "fwhm", sigma=5.0, maxiters=8)
                 df = df[df["s2n"] >= 3.0]
 
             if len(df) == 0:
-                self.logger.info("No sources after final quality cuts", "warning")
+                self.logger.warning("No sources after final quality cuts")
                 self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
                 return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
@@ -932,7 +958,7 @@ class Find_FWHM:
             return fwhm_global, df.reset_index(drop=True), scale_out
 
         except Exception as e:
-            self.logger.info(f"Error in measure_image: {e!r}", "error")
+            self.logger.error(f"Error in measure_image: {e!r}")
             self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
             return float("nan"), pd.DataFrame(), float("nan")
 
