@@ -119,6 +119,114 @@ def _heuristic_filter_mapping(raw_filter: str) -> str:
     return raw_filter
 
 
+def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffer_pixels=10):
+    """
+    Trim image to remove NaN boundary regions while ensuring target remains in image.
+    
+    Parameters
+    ----------
+    image_data : np.ndarray
+        2D image array (can contain NaNs)
+    header : fits.Header
+        FITS header to update with new WCS after trimming
+    target_x, target_y : float, optional
+        Target position in pixels (1-indexed, typical FITS convention)
+    buffer_pixels : int
+        Minimum buffer around valid data region
+    
+    Returns
+    -------
+    trimmed_data : np.ndarray
+        Image with NaN boundaries removed
+    trimmed_header : fits.Header
+        Updated header with corrected WCS
+    trim_info : dict
+        Information about trimming performed
+    """
+    import numpy as np
+    from astropy.wcs import WCS
+    
+    # Find valid (non-NaN) pixels
+    valid_mask = ~np.isnan(image_data)
+    
+    # If no NaNs or all NaNs, return as-is
+    if not np.any(valid_mask) or np.all(valid_mask):
+        return image_data, header, {"trimmed": False}
+    
+    # Find valid region bounds
+    rows_with_valid = np.any(valid_mask, axis=1)
+    cols_with_valid = np.any(valid_mask, axis=0)
+    
+    if not np.any(rows_with_valid) or not np.any(cols_with_valid):
+        return image_data, header, {"trimmed": False}
+    
+    y_min, y_max = np.where(rows_with_valid)[0][[0, -1]]
+    x_min, x_max = np.where(cols_with_valid)[0][[0, -1]]
+    
+    # Add buffer
+    y_min = max(0, y_min - buffer_pixels)
+    y_max = min(image_data.shape[0] - 1, y_max + buffer_pixels)
+    x_min = max(0, x_min - buffer_pixels)
+    x_max = min(image_data.shape[1] - 1, x_max + buffer_pixels)
+    
+    # Check if target is included (if provided)
+    if target_x is not None and target_y is not None:
+        # Convert to 0-indexed for array checking
+        tx_0idx, ty_0idx = target_x - 1, target_y - 1
+        
+        # Expand bounds to include target if needed
+        if tx_0idx < x_min:
+            x_min = max(0, int(tx_0idx) - buffer_pixels)
+        if tx_0idx > x_max:
+            x_max = min(image_data.shape[1] - 1, int(tx_0idx) + buffer_pixels)
+        if ty_0idx < y_min:
+            y_min = max(0, int(ty_0idx) - buffer_pixels)
+        if ty_0idx > y_max:
+            y_max = min(image_data.shape[0] - 1, int(ty_0idx) + buffer_pixels)
+    
+    # Perform trim
+    trimmed_data = image_data[y_min:y_max+1, x_min:x_max+1]
+    
+    # Update header with new WCS
+    trimmed_header = header.copy()
+    
+    try:
+        wcs = WCS(trimmed_header)
+        # Update CRPIX to account for offset
+        if 'CRPIX1' in trimmed_header:
+            trimmed_header['CRPIX1'] -= x_min
+        if 'CRPIX2' in trimmed_header:
+            trimmed_header['CRPIX2'] -= y_min
+        
+        # Update NAXIS
+        trimmed_header['NAXIS1'] = trimmed_data.shape[1]
+        trimmed_header['NAXIS2'] = trimmed_data.shape[0]
+        
+        # Remove WCS cards that might cause issues
+        for key in ['CD1_1', 'CD1_2', 'CD2_1', 'CD2_2']:
+            if key in trimmed_header:
+                del trimmed_header[key]
+        
+        # Store trim info in history
+        trimmed_header.add_history(f'Trimmed: removed NaN boundaries [{x_min}:{x_max+1},{y_min}:{y_max+1}]')
+    except Exception as wcs_exc:
+        # If WCS update fails, just update basic header info
+        trimmed_header['NAXIS1'] = trimmed_data.shape[1]
+        trimmed_header['NAXIS2'] = trimmed_data.shape[0]
+        trimmed_header.add_history(f'Trimmed: removed NaN boundaries (WCS update failed)')
+    
+    trim_info = {
+        "trimmed": True,
+        "x_slice": (x_min, x_max + 1),
+        "y_slice": (y_min, y_max + 1),
+        "original_shape": image_data.shape,
+        "trimmed_shape": trimmed_data.shape,
+        "target_preserved": target_x is not None and target_y is not None
+    }
+    
+    return trimmed_data, trimmed_header, trim_info
+
+
 # =============================================================================
 # Main Function: run_photometry
 # =============================================================================
@@ -835,6 +943,46 @@ def run_photometry():
             gain = 1
             logging.warning("Gain reset to 1 after application.")
 
+        #  Trim NaN Boundaries (BEFORE WCS check so WCS is correct)
+        # Automatically removes large NaN regions at image edges while keeping target
+        trim_nan_edges = input_yaml["preprocessing"].get("trim_nan_edges", True)
+        if trim_nan_edges:
+            try:
+                # Get target pixel coordinates to ensure target stays in image
+                target_x, target_y = None, None
+                if "target_ra" in input_yaml and "target_dec" in input_yaml:
+                    try:
+                        from astropy.wcs import WCS
+                        wcs = WCS(header)
+                        if wcs.has_celestial:
+                            target_x, target_y = wcs.all_world2pix(
+                                float(input_yaml["target_ra"]),
+                                float(input_yaml["target_dec"]),
+                                0
+                            )
+                            target_x, target_y = float(target_x), float(target_y)
+                            logging.info(
+                                f"Target position for NaN trimming: ({target_x:.1f}, {target_y:.1f})"
+                            )
+                    except Exception as wcs_exc:
+                        logging.warning(f"Could not get target pixel coords for trimming: {wcs_exc}")
+                
+                buffer = input_yaml["preprocessing"].get("nan_trim_buffer", 10)
+                image, header, trim_info = _trim_nan_boundaries(
+                    image, header, target_x=target_x, target_y=target_y, buffer_pixels=buffer
+                )
+                if trim_info["trimmed"]:
+                    logging.info(
+                        f"Trimmed NaN boundaries: {trim_info['original_shape']} -> {trim_info['trimmed_shape']}"
+                    )
+                    fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+            except Exception as trim_exc:
+                logging.warning(f"NaN boundary trimming failed: {trim_exc}")
+
+        #  Keep NaN values as NaN - chip gaps handled by background estimator
+        #  which properly ignores NaN regions during background modeling
+        fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+
         #  Handle Saturation (telescope.yml may use saturate: not_given_by_user)
         # Priority:
         #   1) telescope.yml explicit keyword if valid and present in header
@@ -1067,7 +1215,8 @@ def run_photometry():
         try:
             with SuppressStdout():
                 imageWCS = get_wcs(header)  # WCS values, may raise if no valid WCS
-                xy_pixel_scales = WCS.utils.proj_plane_pixel_scales(imageWCS)
+                from astropy.wcs.utils import proj_plane_pixel_scales
+                xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
                 if xy_pixel_scales is not None and len(xy_pixel_scales) > 0:
                     pixel_scale_candidate = (
                         float(xy_pixel_scales[0]) * 3600.0
@@ -1247,15 +1396,36 @@ def run_photometry():
         # =============================================================================
         # Image Preprocessing
         # =============================================================================
-        #  Replace Non-Finite Values
-        # Replaces non-finite values in the image with a very small number.
-        # image[~np.isfinite(image)] = 1e-30
-        fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
 
         #  Image Trimming
         # Trims the image to a specified size centered on the target.
         trim_image = input_yaml["preprocessing"].get("trim_image", 0)
-        if trim_image > 0:
+        do_trim = trim_image > 0
+        
+        if do_trim:
+            # Check if requested trim size is larger than image
+            try:
+                pixel_scale = float(input_yaml.get("pixel_scale", 1.0))  # arcsec/pixel
+            except (ValueError, TypeError):
+                pixel_scale = 1.0
+            if not np.isfinite(pixel_scale) or pixel_scale <= 0:
+                pixel_scale = 1.0
+            
+            # Estimate image size in arcmin
+            image_width_arcmin = image.shape[1] * pixel_scale / 60.0
+            image_height_arcmin = image.shape[0] * pixel_scale / 60.0
+            min_image_dim_arcmin = min(image_width_arcmin, image_height_arcmin)
+            
+            # If trim_image is larger than image, skip trimming
+            if trim_image >= min_image_dim_arcmin:
+                logging.warning(
+                    f"Requested trim size ({trim_image} arcmin) is larger than image "
+                    f"({image_width_arcmin:.1f} x {image_height_arcmin:.1f} arcmin). "
+                    f"Skipping trim operation."
+                )
+                do_trim = False
+        
+        if do_trim:
             try:
                 logging.info(
                     border_msg(
@@ -1276,8 +1446,11 @@ def run_photometry():
                         center_x, center_y = image.shape[1] // 2, image.shape[0] // 2
                     
                     # Calculate trim size in pixels (assume 1 arcsec/pixel if no scale)
-                    pixel_scale = input_yaml.get("pixel_scale", 1.0)  # arcsec/pixel
-                    if not np.isfinite(pixel_scale):
+                    try:
+                        pixel_scale = float(input_yaml.get("pixel_scale", 1.0))  # arcsec/pixel
+                    except (ValueError, TypeError):
+                        pixel_scale = 1.0
+                    if not np.isfinite(pixel_scale) or pixel_scale <= 0:
                         pixel_scale = 1.0
                     trim_pixels = int((trim_image * 60) / pixel_scale)  # Convert arcmin to pixels
                     
@@ -1366,6 +1539,26 @@ def run_photometry():
         except Exception as e:
             log_exception(e)
             logging.info("Could not recrop the image; operation ignored.")
+
+        # Refresh WCS and target pixel coordinates after all trimming
+        # This ensures catalog lookup uses correct coordinates for trimmed image
+        try:
+            imageWCS = get_wcs(header)
+            if imageWCS is not None and hasattr(imageWCS, 'celestial') and imageWCS.celestial is not None:
+                if "target_ra" in input_yaml and "target_dec" in input_yaml:
+                    target_ra = float(input_yaml["target_ra"])
+                    target_dec = float(input_yaml["target_dec"])
+                    target_x_pix, target_y_pix = imageWCS.all_world2pix(
+                        target_ra, target_dec, 0
+                    )
+                    input_yaml["target_x_pix"] = float(target_x_pix)
+                    input_yaml["target_y_pix"] = float(target_y_pix)
+                    logging.info(
+                        f"Target pixel coordinates refreshed after trimming: "
+                        f"({target_x_pix:.1f}, {target_y_pix:.1f})"
+                    )
+        except Exception as wcs_refresh_exc:
+            logging.warning(f"Could not refresh target coordinates after trimming: {wcs_refresh_exc}")
 
         # =============================================================================
         #   Run SExtractor
@@ -1569,8 +1762,9 @@ def run_photometry():
                 else:
                     # Use solved WCS only to update pixel_scale in YAML; leave FITS header unchanged for better subtraction
                     try:
+                        from astropy.wcs.utils import proj_plane_pixel_scales
                         _solved_wcs = get_wcs(updated_header)
-                        _xy = WCS.utils.proj_plane_pixel_scales(_solved_wcs)
+                        _xy = proj_plane_pixel_scales(_solved_wcs)
                         input_yaml["pixel_scale"] = float(_xy[0] * 3600)
                         logging.info(
                             "apply_solved_to_fits=False: keeping original WCS in FITS; updated pixel_scale in config only"
@@ -1582,7 +1776,8 @@ def run_photometry():
         imageWCS = get_wcs(header)
 
         # Gets the pixel scale in arcseconds.
-        xy_pixel_scales = WCS.utils.proj_plane_pixel_scales(imageWCS)
+        from astropy.wcs.utils import proj_plane_pixel_scales
+        xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
         pixel_scale = xy_pixel_scales[0] * 3600
 
         # Sets the range for which the PSF model can move around.
@@ -1769,7 +1964,8 @@ def run_photometry():
         #  Get Target Pixel Location
         # Gets the target pixel location using the WCS.
         imageWCS = get_wcs(header)  # WCS values
-        xy_pixel_scales = WCS.utils.proj_plane_pixel_scales(imageWCS)
+        from astropy.wcs.utils import proj_plane_pixel_scales
+        xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
         pixel_scale = xy_pixel_scales[0] * 3600
 
         # Set Target Coordinates
@@ -2182,9 +2378,10 @@ def run_photometry():
 
         # Adaptive crowded-field detection (source density + background coverage)
         try:
+            from astropy.wcs.utils import proj_plane_pixel_scales
             ny, nx = image.shape[0], image.shape[1]
             pixel_scale_arcsec = float(
-                WCS.utils.proj_plane_pixel_scales(imageWCS)[0] * 3600.0
+                proj_plane_pixel_scales(imageWCS)[0] * 3600.0
             )
         except Exception:
             pixel_scale_arcsec = 0.3
@@ -2787,6 +2984,20 @@ def run_photometry():
         Calibrate_Catalog = Catalog(input_yaml=input_yaml)
         GetZeropoint = Zeropoint(input_yaml=input_yaml)
         CatalogSources = GetZeropoint.clean(sources=CatalogSources)
+
+        # Check linearity of catalog sources before fitting zeropoint
+        # This filters out non-linear/saturated catalog sources
+        if CatalogSources is not None and len(CatalogSources) > 0:
+            try:
+                CatalogSources, linearity_params, saturation_range = Calibrate_Catalog.check_saturation_range(
+                    CatalogSources
+                )
+                logging.info(
+                    f"Catalog linearity check: {linearity_params.get('n_inliers', 0)} linear sources, "
+                    f"ZP={linearity_params.get('intercept', 0):.3f} +/- {linearity_params.get('intercept_error', 0):.3f}"
+                )
+            except Exception as linearity_exc:
+                logging.warning(f"Catalog linearity check failed: {linearity_exc}, proceeding with all sources")
 
         # When using a Gaia custom catalog built from user transmission curves
         # (catalog.transmission_curve_map / custom throughputs), the catalog photometric system
