@@ -142,8 +142,6 @@ def _injection_worker(args):
             npix=float(mres["area"].iloc[0]),
         )
         det_beta = beta_p >= DETECTION_BETA_THRESH
-        if snr_limit is None:
-            return det_beta, beta_p
 
         # Detection SNR gate: either aperture SNR (legacy) or PSF-fit SNR.
         method = str(recovery_method).strip().upper() if recovery_method is not None else "AP"
@@ -289,8 +287,19 @@ def _injection_worker(args):
             except Exception:
                 return False, beta_p
 
-        det_snr = np.isfinite(snr_val) and (snr_val >= float(snr_limit))
-        return (det_beta and det_snr), beta_p
+        # For PSF method, use snr_limit if set, otherwise default to 3 sigma
+        # For AP method, only apply SNR gate if snr_limit is explicitly set
+        if method == "PSF":
+            effective_snr_limit = float(snr_limit) if snr_limit is not None else 3.0
+            det_snr = np.isfinite(snr_val) and (snr_val >= effective_snr_limit)
+            return (det_beta and det_snr), beta_p
+        else:
+            # AP method: only check SNR if snr_limit is set
+            if snr_limit is not None:
+                det_snr = np.isfinite(snr_val) and (snr_val >= float(snr_limit))
+                return (det_beta and det_snr), beta_p
+            else:
+                return det_beta, beta_p
 
     except Exception:
         return False, 0.0

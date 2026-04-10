@@ -68,7 +68,7 @@ apass:
   i: !!str       i'mag
   i_err: !!str   e_i'mag
 
-pan_starrs:
+panstarrs:
   name: !!str   objName
   RA: !!str        raMean
   DEC: !!str       decMean

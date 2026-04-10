@@ -326,10 +326,6 @@ if __name__ == "__main__":
    - Put one usable template per filter in `fits_dir/templates/<filter>_template/`.
 4. Run photometry.
 
-Notes:
-- Modern folder names are preferred: `r_template`, `g_template`, etc.
-- Legacy `rp_template` naming is still supported by the pipeline if needed.
-- Keep paths and credentials sanitized in public scripts.
 
 ---
 

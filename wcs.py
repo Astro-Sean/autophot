@@ -185,26 +185,63 @@ def table_to_ldac(table, header=None, writeto=None) -> fits.HDUList:
     return hdulist
 
 
-def get_wcs(header: fits.Header) -> WCS:
+def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
     """
     Create a WCS object from a FITS header, handling SIP if present.
     Returns a 2D celestial WCS so it is safe for reproject and other 2D image operations.
 
     Args:
         header (fits.Header): FITS header.
+        silent (bool): If True, suppress warnings during WCS creation.
 
     Returns:
-        WCS: 2D celestial WCS object.
+        WCS: 2D celestial WCS object, or None if invalid.
     """
-    header = _normalize_projection_codes(header, inplace=False)
-    with warnings.catch_warnings():
-        with silence_astropy_wcs_info():
-            wcs = WCS(header, fix=True, relax=True)
-    # Ensure 2D celestial WCS so reproject and callers get consistent pixel grid
-    naxis = getattr(wcs.wcs, "naxis", 2)
-    if naxis > 2:
-        wcs = wcs.celestial
-    return wcs
+    if header is None:
+        return None
+        
+    try:
+        header = _normalize_projection_codes(header, inplace=False)
+        
+        # Check for basic WCS keywords
+        required = ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2']
+        missing = [k for k in required if k not in header]
+        if missing:
+            logger.debug(f"WCS creation failed: missing keywords {missing}")
+            return None
+            
+        with warnings.catch_warnings():
+            if silent:
+                warnings.simplefilter("ignore")
+            with silence_astropy_wcs_info():
+                wcs = WCS(header, fix=True, relax=True)
+                
+        # Validate WCS has celestial component
+        if not wcs.has_celestial:
+            logger.debug("WCS has no celestial component")
+            return None
+            
+        # Ensure 2D celestial WCS so reproject and callers get consistent pixel grid
+        naxis = getattr(wcs.wcs, "naxis", 2)
+        if naxis > 2:
+            wcs = wcs.celestial
+            
+        # Test transformation
+        try:
+            test_x, test_y = float(header['CRPIX1']), float(header['CRPIX2'])
+            test_world = wcs.pixel_to_world(test_x, test_y)
+            if test_world is None:
+                logger.debug("WCS transformation test failed")
+                return None
+        except Exception as e:
+            logger.debug(f"WCS transformation test failed: {e}")
+            return None
+            
+        return wcs
+        
+    except Exception as e:
+        logger.debug(f"WCS creation failed: {e}")
+        return None
 
 
 def _normalize_projection_codes(

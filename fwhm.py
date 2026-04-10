@@ -741,7 +741,7 @@ class Find_FWHM:
             cfg = getattr(self, "input_yaml", {}) or {}
             src_cfg = cfg.get("source_detection", {}) or {}
             scale_multiplier = float(
-                src_cfg.get("scale_multiplier", src_cfg.get("scale_multiplier", 5.0))
+                src_cfg.get("scale_multiplier", src_cfg.get("scale_multipler", 5.0))
             )
             saturate = float(cfg.get("saturate", 65000.0))
 

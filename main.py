@@ -140,6 +140,61 @@ from background import BackgroundSubtractor
 # =============================================================================
 # Utility Functions
 # =============================================================================
+
+def _safe_wcs_from_header(header, silent=True):
+    """
+    Safely extract WCS from a FITS header with validation.
+    
+    Handles multiple header sources and validates WCS before returning.
+    Returns None if WCS is missing, invalid, or has no celestial component.
+    
+    Parameters
+    ----------
+    header : astropy.io.fits.Header or dict-like
+        FITS header to extract WCS from
+    silent : bool
+        If True, suppress warnings about invalid WCS
+        
+    Returns
+    -------
+    wcs : astropy.wcs.WCS or None
+        Valid WCS object with celestial coordinates, or None if invalid
+    """
+    from astropy.wcs import WCS
+    
+    if header is None:
+        return None
+    
+    try:
+        # Suppress astropy warnings if requested
+        ctx = SuppressStdout() if silent else contextlib.nullcontext()
+        with ctx:
+            wcs = WCS(header)
+            
+        # Check if WCS has valid celestial component
+        if not hasattr(wcs, 'has_celestial') or not wcs.has_celestial:
+            return None
+            
+        # Additional validation: check for required WCS keywords
+        required_keys = ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2']
+        if not all(k in header for k in required_keys):
+            return None
+            
+        # Validate by attempting a simple transformation
+        try:
+            test_pix = (float(header['CRPIX1']), float(header['CRPIX2']))
+            test_world = wcs.pixel_to_world(*test_pix)
+            if test_world is None or not hasattr(test_world, 'ra') or not hasattr(test_world, 'dec'):
+                return None
+        except Exception:
+            return None
+            
+        return wcs
+        
+    except Exception:
+        return None
+
+
 def _heuristic_filter_mapping(raw_filter: str) -> str:
     """
     Telescope-blind heuristic to map raw filter names to standard catalog bands.
@@ -271,11 +326,6 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
         # Update NAXIS
         trimmed_header['NAXIS1'] = trimmed_data.shape[1]
         trimmed_header['NAXIS2'] = trimmed_data.shape[0]
-        
-        # Remove WCS cards that might cause issues
-        for key in ['CD1_1', 'CD1_2', 'CD2_1', 'CD2_2']:
-            if key in trimmed_header:
-                del trimmed_header[key]
         
         # Store trim info in history
         trimmed_header.add_history(f'Trimmed: removed NaN boundaries [{x_min}:{x_max+1},{y_min}:{y_max+1}]')
@@ -980,6 +1030,27 @@ def run_photometry():
                         f"Trimmed NaN boundaries: {trim_info['original_shape']} -> {trim_info['trimmed_shape']}"
                     )
                     fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+                    
+                    # Refresh WCS and recalculate target pixel coordinates
+                    # The header WCS has changed (CRPIX updated), so target coords must be refreshed
+                    try:
+                        new_wcs = _safe_wcs_from_header(header, silent=True)
+                        if new_wcs is not None and "target_ra" in input_yaml and "target_dec" in input_yaml:
+                            new_target_x, new_target_y = new_wcs.all_world2pix(
+                                float(input_yaml["target_ra"]),
+                                float(input_yaml["target_dec"]),
+                                0
+                            )
+                            input_yaml["target_x_pix"] = float(new_target_x)
+                            input_yaml["target_y_pix"] = float(new_target_y)
+                            logging.info(
+                                f"Target pixel coordinates updated after trimming: "
+                                f"({new_target_x:.1f}, {new_target_y:.1f})"
+                            )
+                        elif new_wcs is None:
+                            logging.warning("WCS not available after trimming; cannot refresh target coordinates")
+                    except Exception as wcs_refresh_exc:
+                        logging.warning(f"Could not refresh target coordinates after trimming: {wcs_refresh_exc}")
             except Exception as trim_exc:
                 logging.warning(f"NaN boundary trimming failed: {trim_exc}")
 
@@ -1219,13 +1290,20 @@ def run_photometry():
         try:
             with SuppressStdout():
                 imageWCS = get_wcs(header)  # WCS values, may raise if no valid WCS
-                xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
-                if xy_pixel_scales is not None and len(xy_pixel_scales) > 0:
-                    pixel_scale_candidate = (
-                        float(xy_pixel_scales[0]) * 3600.0
-                    )  # arcsec/pixel
-                else:
+                if imageWCS is None:
+                    # Debug: show what WCS keywords are present
+                    wcs_keys = [k for k in header.keys() if k.startswith(('CRPIX', 'CRVAL', 'CDELT', 'CTYPE', 'CD1_', 'CD2_', 'PC1_', 'PC2_', 'PV'))]
+                    logging.debug(f"WCS keywords in header: {wcs_keys}")
+                    logging.debug(f"CTYPE1/CTYPE2: {header.get('CTYPE1', 'N/A')}, {header.get('CTYPE2', 'N/A')}")
                     pixel_scale_candidate = np.nan
+                else:
+                    xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
+                    if xy_pixel_scales is not None and len(xy_pixel_scales) > 0:
+                        pixel_scale_candidate = (
+                            float(xy_pixel_scales[0]) * 3600.0
+                        )  # arcsec/pixel
+                    else:
+                        pixel_scale_candidate = np.nan
         except Exception as e:
             log_exception(e)
             pixel_scale_candidate = np.nan
@@ -1458,7 +1536,6 @@ def run_photometry():
                     trim_pixels = int((trim_image * 60) / pixel_scale)  # Convert arcmin to pixels
                     
                     # Create pixel-based cutout
-                    from astropy.nddata import Cutout2D
                     cutout = Cutout2D(
                         image.astype(float),
                         position=(center_x, center_y),

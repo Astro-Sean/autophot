@@ -165,7 +165,7 @@ class Catalog:
         ):
             raise ValueError(
                 "No catalog selected. Set `default_input.catalog.use_catalog` in your YAML "
-                "(e.g. 'gaia', 'pan_starrs', 'sdss', 'apass', '2mass', 'legacy', 'refcat', 'custom', or 'gaia_custom')."
+                "(e.g. 'gaia', 'panstarrs'/'pan_starrs', 'sdss', 'apass', '2mass', 'legacy', 'refcat', 'custom', or 'gaia_custom')."
             )
         return str(catalogName).strip()
 
@@ -250,17 +250,39 @@ class Catalog:
                 list(catalog_choice.keys()),
             )
             return None
+        # Normalize scalar catalog names for backward compatibility
+        if isinstance(catalog_choice, str):
+            catalog_choice = self._normalize_catalog_name(catalog_choice)
         return catalog_choice
 
     @staticmethod
     def _catalog_len(obj) -> int:
-        """Best-effort length for DataFrame/Table/list-like results."""
+        """Best-effort length for DataFrame/Table-like results."""
         if obj is None:
             return 0
         try:
             return int(len(obj))
         except Exception:
             return 0
+
+    @staticmethod
+    def _normalize_catalog_name(catalog_name: str) -> str:
+        """
+        Normalize catalog name aliases to canonical form.
+        
+        Accepts 'panstarrs' (no underscore) and converts to 'pan_starrs'.
+        This ensures backward compatibility with both naming conventions.
+        """
+        if not catalog_name:
+            return catalog_name
+        name = str(catalog_name).strip().lower()
+        # Map common aliases to canonical names
+        aliases = {
+            "panstarrs": "pan_starrs",
+            "pan-starrs": "pan_starrs",
+            "ps1": "pan_starrs",
+        }
+        return aliases.get(name, catalog_name)
 
     def _require_nonempty_catalog(
         self, selectedCatalog, catalogName: str, target_coords, radius_arcmin: float
@@ -686,7 +708,7 @@ class Catalog:
         target_coords : SkyCoord
             SkyCoord object with the RA and DEC of the target.
         catalogName : str
-            Name of the catalog to fetch ('refcat', 'gaia', 'apass', '2mass', 'sdss', 'skymapper', 'pan_starrs', 'custom').
+            Name of the catalog to fetch ('refcat', 'gaia', 'apass', '2mass', 'sdss', 'skymapper', 'panstarrs'/'pan_starrs', 'custom').
         radius : float, optional
             Search radius around the target in degrees (default is 15).
         target_name : str, optional
@@ -1012,10 +1034,55 @@ class Catalog:
                     logger.info(
                         f"Downloading reference sources from {catalogName.upper()}"
                     )
-                    selectedCatalog = Catalogs.query_region(
-                        target_coords, radius=0.1 * u.deg, catalog="Panstarrs"
-                    ).to_pandas()
-                    selectedCatalog = selectedCatalog.replace(-999, np.nan)
+                    # Use direct API request to handle string "None" values properly
+                    try:
+                        import requests
+                        
+                        ra = float(target_coords.ra.degree)
+                        dec = float(target_coords.dec.degree)
+                        radius_deg = 0.1
+                        
+                        # Direct MAST API call for Pan-STARRS
+                        url = "https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/ps1/search"
+                        params = {
+                            "ra": ra,
+                            "dec": dec,
+                            "radius": radius_deg,
+                            "pagesize": 10000,
+                            "format": "json"
+                        }
+                        
+                        response = requests.get(url, params=params, timeout=60)
+                        response.raise_for_status()
+                        data = response.json()
+                        
+                        if not data:
+                            selectedCatalog = pd.DataFrame()
+                        else:
+                            # Convert to DataFrame, handling None strings
+                            selectedCatalog = pd.DataFrame(data)
+                            # Replace all forms of None/null with np.nan
+                            for col in selectedCatalog.columns:
+                                if selectedCatalog[col].dtype == object:
+                                    selectedCatalog[col] = selectedCatalog[col].replace(
+                                        ['None', 'none', 'NONE', 'null', 'NULL', 'nan', 'NaN'], np.nan
+                                    )
+                            # Convert numeric columns
+                            for col in selectedCatalog.columns:
+                                if col not in ['objName', 'objAltName1', 'objAltName2', 'objAltName3']:
+                                    try:
+                                        selectedCatalog[col] = pd.to_numeric(selectedCatalog[col], errors='coerce')
+                                    except Exception:
+                                        pass
+                            
+                        logger.info(f"Retrieved {len(selectedCatalog)} Pan-STARRS sources")
+                        
+                    except Exception as api_exc:
+                        logger.warning(f"Direct Pan-STARRS API failed ({api_exc}), using empty catalog")
+                        selectedCatalog = pd.DataFrame()
+                    
+                    # Replace all common null representations
+                    selectedCatalog = selectedCatalog.replace([-999, -999.0, "None", "none", "NONE", "null", "NULL"], np.nan)
                     columns = [
                         "raMean",
                         "decMean",
@@ -1885,9 +1952,12 @@ class Catalog:
                 base_estimator = ConstrainedSlopeRegressor(
                     slope_constraint=1.0, slope_tolerance=0
                 )
+                # Adaptive residual threshold based on data scatter
+                initial_mad = np.median(np.abs(catalog_mag_linear - np.median(catalog_mag_linear)))
+                ransac_residual_threshold = max(3.0 * initial_mad, 0.15)  # At least 0.15 mag
                 ransac = RANSACRegressor(
                     estimator=base_estimator,
-                    residual_threshold=0.2,
+                    residual_threshold=ransac_residual_threshold,
                     max_trials=500,
                     min_samples=0.33,
                 )
@@ -1968,32 +2038,34 @@ class Catalog:
             if fit_line:
                 predicted = fit_line(inst_mag_linear)
                 residuals = catalog_mag_linear - predicted
-                outlier_mask = np.abs(residuals) > 0.25
+                # Use RANSAC inlier mask for plotting consistency
+                ransac_inliers = ransac.inlier_mask_ if hasattr(ransac, 'inlier_mask_') else np.ones(len(inst_mag_linear), dtype=bool)
+                ransac_outliers = ~ransac_inliers
                 ax1.errorbar(
-                    inst_mag_linear[outlier_mask],
-                    catalog_mag_linear[outlier_mask],
-                    yerr=catalog_mag_err_linear[outlier_mask],
-                    xerr=inst_mag_err_linear[outlier_mask],
+                    inst_mag_linear[ransac_outliers],
+                    catalog_mag_linear[ransac_outliers],
+                    yerr=catalog_mag_err_linear[ransac_outliers],
+                    xerr=inst_mag_err_linear[ransac_outliers],
                     fmt="o",
                     color="#FF0000",
                     markersize=2.2,
                     capsize=0,
                     elinewidth=0.4,
                     linestyle="None",
-                    label=f"Outliers [{np.sum(outlier_mask)}]",
+                    label=f"Outliers [{np.sum(ransac_outliers)}]",
                 )
                 ax1.errorbar(
-                    inst_mag_linear[inlier_mask],
-                    catalog_mag_linear[inlier_mask],
-                    yerr=catalog_mag_err_linear[inlier_mask],
-                    xerr=inst_mag_err_linear[inlier_mask],
+                    inst_mag_linear[ransac_inliers],
+                    catalog_mag_linear[ransac_inliers],
+                    yerr=catalog_mag_err_linear[ransac_inliers],
+                    xerr=inst_mag_err_linear[ransac_inliers],
                     fmt="o",
                     color="blue",
                     markersize=2.2,
                     capsize=0,
                     elinewidth=0.4,
                     linestyle="None",
-                    label=f"Inliers [{np.sum(inlier_mask)}]",
+                    label=f"Inliers [{np.sum(ransac_inliers)}]",
                 )
                 x_range = np.linspace(inst_mag.min(), inst_mag.max(), 100)
                 ax1.plot(
@@ -2036,9 +2108,137 @@ class Catalog:
             fig.savefig(save_path, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
 
-            # Filter clean catalog by inliers
+            # Robust selection: find continuous linear region with tight scatter requirement
             if fit_line:
-                clean_catalog = clean_catalog[inlier_mask]
+                # Get inlier sources from RANSAC
+                inlier_catalog = clean_catalog[inlier_mask].copy()
+                inlier_flux = flux[inlier_mask]
+                inlier_inst_mag = inst_mag_linear[inlier_mask]
+                
+                if len(inlier_catalog) > 5:
+                    # Calculate residuals for all inliers
+                    predicted_mag = fit_line(inlier_inst_mag.reshape(-1, 1))
+                    residuals = catalog_mag_linear[inlier_mask] - predicted_mag
+                    
+                    # Sort by flux (bright to faint - smaller mag = brighter)
+                    sort_idx = np.argsort(inlier_flux)[::-1]  # Bright first
+                    sorted_flux = inlier_flux[sort_idx]
+                    sorted_residuals = residuals[sort_idx]
+                    sorted_mag = inlier_inst_mag[sort_idx]
+                    
+                    # TIGHT residual threshold: use 2-sigma instead of 3-sigma for stricter selection
+                    # Calculate from central 50% of sources (most linear region)
+                    central_start = len(sorted_residuals) // 4
+                    central_end = 3 * len(sorted_residuals) // 4
+                    central_residuals = sorted_residuals[central_start:central_end]
+                    
+                    if len(central_residuals) > 3:
+                        median_resid = np.median(central_residuals)
+                        mad_residual = np.median(np.abs(central_residuals - median_resid))
+                        # Tighter threshold: 2.0 * MAD (was 3.0) or 0.05 mag (was 0.1)
+                        residual_threshold = max(2.0 * mad_residual, 0.05)
+                    else:
+                        residual_threshold = 0.1
+                    
+                    # Find bright end: cut where residuals exceed threshold (saturation/non-linear)
+                    bright_cut_idx = 0
+                    for i in range(len(sorted_residuals)):
+                        if np.abs(sorted_residuals[i]) > residual_threshold:
+                            bright_cut_idx = i + 1  # Cut this and brighter
+                        else:
+                            break
+                    
+                    # Find faint end: detect where scatter systematically increases
+                    # Use smaller window for tighter control, and require multiple consecutive windows
+                    window_size = max(3, len(sorted_residuals) // 15)  # Smaller window
+                    faint_cut_idx = len(sorted_residuals)
+                    
+                    # Track consecutive high-scatter windows
+                    high_scatter_count = 0
+                    required_consecutive = 2  # Require 2 consecutive windows with high scatter
+                    
+                    for i in range(window_size, len(sorted_residuals) - window_size):
+                        window_residuals = sorted_residuals[i-window_size:i+window_size]
+                        window_mad = np.median(np.abs(window_residuals - np.median(window_residuals)))
+                        
+                        # If local scatter exceeds 1.5x central scatter, mark as high scatter
+                        if window_mad > 1.5 * mad_residual:
+                            high_scatter_count += 1
+                            if high_scatter_count >= required_consecutive:
+                                faint_cut_idx = i - window_size  # Cut before this region
+                                break
+                        else:
+                            high_scatter_count = 0  # Reset if scatter drops
+                    
+                    # Additional faint cut: ensure we're not using sources with large individual residuals
+                    # Scan from faint end and find where residuals become acceptable
+                    for i in range(len(sorted_residuals) - 1, faint_cut_idx - 1, -1):
+                        if np.abs(sorted_residuals[i]) > 1.5 * residual_threshold:
+                            faint_cut_idx = i  # Cut this and fainter
+                        else:
+                            break
+                    
+                    # Apply flux range cuts (bright_cut_idx to faint_cut_idx)
+                    if bright_cut_idx > 0 or faint_cut_idx < len(sorted_flux):
+                        min_linear_flux = sorted_flux[min(faint_cut_idx, len(sorted_flux)-1)]
+                        max_linear_flux = sorted_flux[bright_cut_idx] if bright_cut_idx < len(sorted_flux) else sorted_flux[0]
+                        
+                        # Ensure we have a valid range
+                        if min_linear_flux < max_linear_flux:
+                            # Create mask for continuous linear region
+                            linear_flux_mask = (flux >= min_linear_flux) & (flux <= max_linear_flux)
+                            
+                            # Apply tight residual threshold to remove individual outliers
+                            all_residuals = catalog_mag_linear - fit_line(inst_mag_linear.reshape(-1, 1))
+                            linear_residual_mask = np.abs(all_residuals) < residual_threshold
+                            
+                            # Combined mask: must be in flux range AND have good residual
+                            final_linear_mask = linear_flux_mask & linear_residual_mask
+                            
+                            n_bright_cut = np.sum(flux > max_linear_flux)
+                            n_faint_cut = np.sum(flux < min_linear_flux)
+                            n_outlier_cut = np.sum(linear_flux_mask & ~linear_residual_mask)
+                            n_selected = np.sum(final_linear_mask)
+                            
+                            logger.info(
+                                f"Robust linear selection: flux range {min_linear_flux:.1f} - {max_linear_flux:.1f}, "
+                                f"residual thresh {residual_threshold:.3f} mag, "
+                                f"cut {n_bright_cut} bright + {n_faint_cut} faint + {n_outlier_cut} outlier, "
+                                f"kept {n_selected} sources"
+                            )
+                            
+                            if n_selected > 0:
+                                clean_catalog = clean_catalog[final_linear_mask]
+                                # Update saturation range from final selection
+                                saturation_range = [
+                                    np.percentile(clean_catalog["flux_AP"].values, 0.5),
+                                    np.percentile(clean_catalog["flux_AP"].values, 99.5)
+                                ]
+                            else:
+                                # No sources passed tight criteria, fall back to central region only
+                                central_flux_mask = (flux >= sorted_flux[central_end]) & (flux <= sorted_flux[central_start])
+                                if np.sum(central_flux_mask) > 0:
+                                    clean_catalog = clean_catalog[central_flux_mask]
+                                    logger.warning(f"No sources passed tight criteria, using central {len(clean_catalog)} sources")
+                                else:
+                                    clean_catalog = inlier_catalog
+                                    logger.warning(f"No sources passed tight criteria, using all {len(clean_catalog)} inliers")
+                        else:
+                            # Invalid range, use central region
+                            central_flux_mask = (flux >= sorted_flux[central_end]) & (flux <= sorted_flux[central_start])
+                            if np.sum(central_flux_mask) > 0:
+                                clean_catalog = clean_catalog[central_flux_mask]
+                    else:
+                        # No cuts needed but still apply tight residual filter
+                        tight_residual_mask = np.abs(residuals) < residual_threshold
+                        n_tight_outliers = (~tight_residual_mask).sum()
+                        if n_tight_outliers > 0:
+                            logger.info(f"Applying tight residual filter: removed {n_tight_outliers} sources")
+                        clean_catalog = inlier_catalog[tight_residual_mask]
+                else:
+                    # Too few sources for robust selection
+                    clean_catalog = inlier_catalog
+                    logger.warning(f"Only {len(inlier_catalog)} inliers, skipping robust selection")
 
             logger.info(f"Returning {len(clean_catalog)} linear sources")
             return clean_catalog, fit_params, saturation_range

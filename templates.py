@@ -1542,6 +1542,95 @@ class Templates:
 
         return center_y, center_x, top, bottom, left, right
 
+    @staticmethod
+    def _trim_nan_boundaries(image_data, header, buffer_pixels=10):
+        """
+        Trim image to remove NaN boundary regions.
+        
+        Parameters
+        ----------
+        image_data : np.ndarray
+            2D image array (can contain NaNs)
+        header : fits.Header
+            FITS header to update with new WCS after trimming
+        buffer_pixels : int
+            Minimum buffer around valid data region
+        
+        Returns
+        -------
+        trimmed_data : np.ndarray
+            Image with NaN boundaries removed
+        trimmed_header : fits.Header
+            Updated header with corrected WCS
+        trim_info : dict
+            Information about trimming performed
+        """
+        from astropy.wcs import WCS
+        
+        # Find valid (non-NaN) pixels
+        valid_mask = ~np.isnan(image_data)
+        
+        # If no NaNs or all NaNs, return as-is
+        if not np.any(valid_mask) or np.all(valid_mask):
+            return image_data, header, {"trimmed": False}
+        
+        # Find valid region bounds
+        rows_with_valid = np.any(valid_mask, axis=1)
+        cols_with_valid = np.any(valid_mask, axis=0)
+        
+        if not np.any(rows_with_valid) or not np.any(cols_with_valid):
+            return image_data, header, {"trimmed": False}
+        
+        y_min, y_max = np.where(rows_with_valid)[0][[0, -1]]
+        x_min, x_max = np.where(cols_with_valid)[0][[0, -1]]
+        
+        # Add buffer
+        y_min = max(0, y_min - buffer_pixels)
+        y_max = min(image_data.shape[0] - 1, y_max + buffer_pixels)
+        x_min = max(0, x_min - buffer_pixels)
+        x_max = min(image_data.shape[1] - 1, x_max + buffer_pixels)
+        
+        # Perform trim
+        trimmed_data = image_data[y_min:y_max+1, x_min:x_max+1]
+        
+        # Update header with new WCS
+        trimmed_header = header.copy()
+        
+        try:
+            wcs = WCS(trimmed_header)
+            # Update CRPIX to account for offset
+            if 'CRPIX1' in trimmed_header:
+                trimmed_header['CRPIX1'] -= x_min
+            if 'CRPIX2' in trimmed_header:
+                trimmed_header['CRPIX2'] -= y_min
+            
+            # Update NAXIS
+            trimmed_header['NAXIS1'] = trimmed_data.shape[1]
+            trimmed_header['NAXIS2'] = trimmed_data.shape[0]
+            
+            # Remove WCS cards that might cause issues
+            for key in ['CD1_1', 'CD1_2', 'CD2_1', 'CD2_2']:
+                if key in trimmed_header:
+                    del trimmed_header[key]
+            
+            # Store trim info in history
+            trimmed_header.add_history(f'Trimmed: removed NaN boundaries [{x_min}:{x_max+1},{y_min}:{y_max+1}]')
+        except Exception as wcs_exc:
+            # If WCS update fails, just update basic header info
+            trimmed_header['NAXIS1'] = trimmed_data.shape[1]
+            trimmed_header['NAXIS2'] = trimmed_data.shape[0]
+            trimmed_header.add_history(f'Trimmed: removed NaN boundaries (WCS update failed)')
+        
+        trim_info = {
+            "trimmed": True,
+            "x_slice": (x_min, x_max + 1),
+            "y_slice": (y_min, y_max + 1),
+            "original_shape": image_data.shape,
+            "trimmed_shape": trimmed_data.shape
+        }
+        
+        return trimmed_data, trimmed_header, trim_info
+
     def find_bright_sources(
         self,
         header: fits.Header,

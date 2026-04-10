@@ -1405,20 +1405,29 @@ def get_image_and_header(fpath):
                 base = os.path.basename(fpath)
                 raise Exception(f"Warning: {base} is not a 2D array (found {getattr(image, 'shape', 'no shape')} data).")
 
-            # Header: first HDU with TELESCOP, else primary (match get_header).
+            # Header: use the header from the same HDU that contains the image data
+            # to ensure WCS keywords are preserved. Merge with TELESCOP header if different.
             def has_telescop(header):
                 return any(k.upper() == "TELESCOP" for k in header.keys())
-
-            if has_telescop(hdul[0].header):
-                headinfo = hdul[0].header.copy()
-            else:
-                headinfo = None
-                for i in range(1, len(hdul)):
+            
+            # Start with header from the HDU containing the image data
+            headinfo = hdul[best_hdu_idx].header.copy()
+            
+            # If the image HDU doesn't have TELESCOP, try to find it in other HDUs
+            if not has_telescop(headinfo):
+                for i in range(len(hdul)):
                     if has_telescop(hdul[i].header):
-                        headinfo = hdul[i].header.copy()
+                        # Copy TELESCOP and related instrument keywords
+                        telescop_header = hdul[i].header
+                        for key in telescop_header.keys():
+                            if key not in headinfo and (
+                                key.upper() in ['TELESCOP', 'INSTRUME', 'FILTER', 
+                                               'EXPTIME', 'MJD-OBS', 'DATE-OBS',
+                                               'GAIN', 'RDNOISE', 'SATURATE']
+                            ):
+                                headinfo[key] = telescop_header[key]
                         break
-                if headinfo is None:
-                    headinfo = hdul[0].header.copy()
+            
             return image, headinfo
     except KeyError as e:
         raise Exception(f"KeyError: The required header keyword was not found: {e}")

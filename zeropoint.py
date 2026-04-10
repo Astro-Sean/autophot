@@ -1445,9 +1445,22 @@ class Zeropoint:
                 except Exception as exc:
                     logger.warning(f"fit_color_term: extreme color filtering failed: {exc}")
 
-            min_sources = int(zp_cfg.get("min_source_no", 1))
-            if min_sources < 1:
-                min_sources = 1
+            # 1. Pre-RANSAC sigma clipping to remove extreme outliers
+            try:
+                ols_slope_pre = np.polyfit(x, y, 1)[0]
+                ols_intercept_pre = np.median(y - ols_slope_pre * x)
+                ols_resid_pre = y - (ols_slope_pre * x + ols_intercept_pre)
+                pre_clip = sigma_clip(ols_resid_pre, sigma=5, maxiters=3, masked=True)
+                n_pre_outliers = np.sum(pre_clip.mask)
+                if n_pre_outliers > 0:
+                    logger.info(f"fit_color_term: pre-RANSAC clipping removed {n_pre_outliers} extreme outliers")
+                    x, y, x_err, y_err = x[~pre_clip.mask], y[~pre_clip.mask], x_err[~pre_clip.mask], y_err[~pre_clip.mask]
+            except Exception as exc:
+                logger.debug(f"fit_color_term: pre-RANSAC clipping skipped: {exc}")
+
+            min_sources = int(zp_cfg.get("min_source_no", 3))  # Increased default from 1 to 3
+            if min_sources < 3:
+                min_sources = 3
             min_color_range = 0.05  # mag
             if len(x) < min_sources:
                 logger.warning(
@@ -1461,12 +1474,36 @@ class Zeropoint:
                 )
                 return 0.0, np.nan
 
-            # Adaptive RANSAC residual threshold from initial OLS residuals.
+            # 7. Stratified color sampling - ensure adequate coverage across color range
+            try:
+                color_percentiles = np.percentile(x, [0, 25, 50, 75, 100])
+                bin_counts = []
+                for i in range(len(color_percentiles) - 1):
+                    lo, hi = color_percentiles[i], color_percentiles[i+1]
+                    if i == len(color_percentiles) - 2:  # Last bin includes upper edge
+                        count = np.sum((x >= lo) & (x <= hi))
+                    else:
+                        count = np.sum((x >= lo) & (x < hi))
+                    bin_counts.append(count)
+                min_per_bin = min(bin_counts)
+                if min_per_bin < 3:
+                    logger.warning(
+                        f"fit_color_term: poor color coverage (min {min_per_bin} sources per quartile). "
+                        "Results may be unreliable."
+                    )
+            except Exception as exc:
+                logger.debug(f"fit_color_term: stratified sampling check skipped: {exc}")
+
+            # 6. Adaptive RANSAC residual threshold - scales with photometric uncertainty
             try:
                 ols_slope = np.polyfit(x, y, 1)[0]
                 ols_resid = y - (ols_slope * x + np.median(y - ols_slope * x))
                 mad_resid = median_abs_deviation(ols_resid, scale="normal")
-                residual_threshold = float(np.clip(2.5 * mad_resid, 0.05, 0.35))
+                median_y_err = np.median(y_err)
+                # Scale threshold with measurement uncertainty
+                residual_threshold = float(np.clip(
+                    max(2.5 * mad_resid, 2.0 * median_y_err), 0.03, 0.5
+                ))
             except Exception:
                 residual_threshold = 0.1
 
@@ -1506,29 +1543,75 @@ class Zeropoint:
                     best_inlier_mask = inlier_mask
                     best_estimator = ransac.estimator_
 
+            # 3. Huber Regression fallback when RANSAC finds too few inliers
             if best_inlier_mask is None or best_n_inliers < 4:
-                logger.warning("fit_color_term: RANSAC found no usable inlier set.")
-                return 0.0, np.nan
-
-            inlier_mask = best_inlier_mask
-            ransac_slope = best_estimator.slope_
-            ransac_intercept = best_estimator.intercept_
+                logger.warning("fit_color_term: RANSAC found no usable inlier set, trying Huber regression...")
+                try:
+                    from sklearn.linear_model import HuberRegressor
+                    huber = HuberRegressor(epsilon=2.0, max_iter=100, alpha=0.0)
+                    sample_weights = 1.0 / (y_err**2 + 1e-12)
+                    huber.fit(x[:, None], y, sample_weight=sample_weights)
+                    ransac_slope = float(huber.coef_[0])
+                    ransac_intercept = float(huber.intercept_)
+                    # Huber provides its own outlier mask via support_
+                    inlier_mask = huber.support_
+                    best_n_inliers = np.sum(inlier_mask)
+                    logger.info(f"fit_color_term: Huber regression found {best_n_inliers} inliers")
+                    if best_n_inliers < 5:
+                        logger.warning("fit_color_term: Huber also found too few inliers, returning zero slope.")
+                        return 0.0, np.nan
+                except Exception as huber_exc:
+                    logger.warning(f"fit_color_term: Huber fallback failed: {huber_exc}")
+                    return 0.0, np.nan
+            else:
+                inlier_mask = best_inlier_mask
+                ransac_slope = best_estimator.slope_
+                ransac_intercept = best_estimator.intercept_
 
             if best_n_inliers < min_inliers:
-                # Fallback: sigma-clip residuals and use all remaining points.
-                pred = ransac_slope * x + ransac_intercept
-                resid = y - pred
-                clipped = sigma_clip(resid, sigma=3, maxiters=5)
-                inlier_mask = ~clipped.mask
-                if np.sum(inlier_mask) >= 5:
-                    ransac_slope = float(
-                        np.polyfit(x[inlier_mask], y[inlier_mask], 1)[0]
-                    )
-                    ransac_intercept = float(
-                        np.median(y[inlier_mask] - ransac_slope * x[inlier_mask])
-                    )
-                else:
-                    inlier_mask = best_inlier_mask
+                # Fallback: try Huber regression when RANSAC inliers < 25%
+                logger.warning(f"fit_color_term: RANSAC inliers {best_n_inliers} < {min_inliers} ({int(100*min_inlier_frac)}%), trying Huber...")
+                try:
+                    from sklearn.linear_model import HuberRegressor
+                    huber = HuberRegressor(epsilon=2.0, max_iter=100, alpha=0.0)
+                    sample_weights = 1.0 / (y_err**2 + 1e-12)
+                    huber.fit(x[:, None], y, sample_weight=sample_weights)
+                    ransac_slope = float(huber.coef_[0])
+                    ransac_intercept = float(huber.intercept_)
+                    inlier_mask = huber.support_
+                    huber_inliers = np.sum(inlier_mask)
+                    logger.info(f"fit_color_term: Huber found {huber_inliers} inliers vs {best_n_inliers} from RANSAC")
+                    if huber_inliers < 5:
+                        # Last resort: sigma-clip residuals
+                        pred = ransac_slope * x + ransac_intercept
+                        resid = y - pred
+                        clipped = sigma_clip(resid, sigma=3, maxiters=5)
+                        inlier_mask = ~clipped.mask
+                        if np.sum(inlier_mask) >= 5:
+                            ransac_slope = float(
+                                np.polyfit(x[inlier_mask], y[inlier_mask], 1)[0]
+                            )
+                            ransac_intercept = float(
+                                np.median(y[inlier_mask] - ransac_slope * x[inlier_mask])
+                            )
+                        else:
+                            inlier_mask = best_inlier_mask
+                except Exception as huber_exc2:
+                    logger.debug(f"fit_color_term: Huber secondary fallback failed: {huber_exc2}")
+                    # Sigma-clip fallback
+                    pred = ransac_slope * x + ransac_intercept
+                    resid = y - pred
+                    clipped = sigma_clip(resid, sigma=3, maxiters=5)
+                    inlier_mask = ~clipped.mask
+                    if np.sum(inlier_mask) >= 5:
+                        ransac_slope = float(
+                            np.polyfit(x[inlier_mask], y[inlier_mask], 1)[0]
+                        )
+                        ransac_intercept = float(
+                            np.median(y[inlier_mask] - ransac_slope * x[inlier_mask])
+                        )
+                    else:
+                        inlier_mask = best_inlier_mask
 
             xi, yi = x[inlier_mask], y[inlier_mask]
             xe, ye = x_err[inlier_mask], y_err[inlier_mask]
@@ -1542,32 +1625,91 @@ class Zeropoint:
             ).run()
 
             color_term = float(odr_out.beta[0])
+            
+            # Robust error estimation: combine ODR covariance with bootstrap
+            def _bootstrap_slope_error(x, y, x_err, y_err, n_bootstrap=200, seed=42):
+                """Bootstrap error estimation accounting for all uncertainty sources."""
+                rng = np.random.RandomState(seed)
+                slopes = []
+                n = len(x)
+                for _ in range(n_bootstrap):
+                    # Resample with replacement
+                    idx = rng.choice(n, n, replace=True)
+                    x_b, y_b = x[idx], y[idx]
+                    x_e, y_e = x_err[idx], y_err[idx]
+                    # Add noise proportional to measurement errors
+                    x_b = x_b + rng.normal(0, x_e)
+                    y_b = y_b + rng.normal(0, y_e)
+                    try:
+                        slope = np.polyfit(x_b, y_b, 1)[0]
+                        if np.isfinite(slope):
+                            slopes.append(slope)
+                    except Exception:
+                        continue
+                if len(slopes) < 50:
+                    return np.nan
+                return np.std(slopes)
+            
+            # Try ODR covariance first
+            color_term_error = np.nan
             if odr_out.cov_beta is not None and np.all(np.isfinite(odr_out.cov_beta)):
                 cov00 = odr_out.cov_beta[0, 0]
                 if cov00 > 0:
                     color_term_error = float(np.sqrt(cov00))
-                else:
-                    color_term_error = np.nan
-            else:
-                color_term_error = np.nan
-
-            # Fallback if ODR did not converge or covariance invalid.
+            
+            # Fallback to bootstrap if ODR failed or bootstrap is larger
             odr_ok = (
                 getattr(odr_out, "stopreason", None) is not None
                 and getattr(odr_out, "info", None) is not None
                 and odr_out.info <= 4
                 and np.isfinite(color_term)
+                and np.isfinite(color_term_error)
             )
+            
             if not odr_ok or not np.isfinite(color_term_error):
                 color_term = ransac_slope
+            
+            # Always compute bootstrap error for robustness
+            try:
+                bootstrap_err = _bootstrap_slope_error(xi, yi, xe, ye)
+                if np.isfinite(bootstrap_err):
+                    if not np.isfinite(color_term_error) or bootstrap_err > color_term_error:
+                        logger.info(f"fit_color_term: using bootstrap error {bootstrap_err:.4f} vs ODR {color_term_error:.4f}")
+                        color_term_error = bootstrap_err
+            except Exception as boot_exc:
+                logger.debug(f"fit_color_term: bootstrap error failed: {boot_exc}")
+            
+            # Final fallback if still no valid error
+            if not np.isfinite(color_term_error):
                 resid_in = yi - (ransac_slope * xi + ransac_intercept)
                 color_term_error = float(
-                    mad_std(resid_in) / np.sqrt(max(1, n_in - 2))
+                    1.4826 * np.median(np.abs(resid_in - np.median(resid_in))) / np.sqrt(max(1, n_in - 2))
                     if n_in > 2
                     else np.nan
                 )
-                if not np.isfinite(color_term_error) or color_term_error <= 0:
-                    color_term_error = 0.2
+            
+            # Scale by reduced chi-squared to account for model imperfections
+            if np.isfinite(color_term_error) and n_in > 2:
+                predicted = color_term * xi + (odr_out.beta[1] if odr_ok else ransac_intercept)
+                residuals = yi - predicted
+                chi2 = np.sum((residuals / np.sqrt(ye**2 + (color_term * xe)**2 + 1e-12))**2)
+                dof = max(1, n_in - 2)
+                reduced_chi2 = chi2 / dof
+                # Scale error if model doesn't fit well (reduced chi2 > 1)
+                if reduced_chi2 > 1.5:
+                    scale_factor = np.sqrt(reduced_chi2)
+                    color_term_error *= scale_factor
+                    logger.info(f"fit_color_term: scaled error by {scale_factor:.2f} due to reduced chi2={reduced_chi2:.2f}")
+            
+            # Apply systematic floor (minimum realistic uncertainty)
+            systematic_floor = 0.015  # 1.5% slope uncertainty floor
+            if np.isfinite(color_term_error):
+                color_term_error = max(color_term_error, systematic_floor)
+            else:
+                color_term_error = 0.2  # Large default if everything failed
+            
+            if not np.isfinite(color_term_error) or color_term_error <= 0:
+                color_term_error = 0.2
 
             # Sanity: reject physically unreasonable colour terms.
             max_slope = 2.0
