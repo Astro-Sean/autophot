@@ -1327,13 +1327,8 @@ NNW
             base_ref = Path(reference_image).stem
             ext_ref = Path(reference_image).suffix
             aligned_reference_fpath = output_dir / f"{base_ref}{ext_ref}"
-            fits.writeto(
-                str(aligned_reference_fpath),
-                aligned_ref.astype(np.float32),
-                out_header,
-                overwrite=True,
-                output_verify="silentfix+ignore",
-            )
+            from functions import safe_fits_write
+            safe_fits_write(str(aligned_reference_fpath), aligned_ref, out_header)
             self.logger.info("Alignment via WCS reproject succeeded.")
             return {
                 "science_aligned": science_image,
@@ -1355,8 +1350,8 @@ NNW
         )
         if result is not None and result.get("reference_aligned"):
             return result
-        self.logger.info("Falling back to AstroAlign.")
-        return self._align_fallback_reproject_then_astroalign(
+        self.logger.info("Reproject failed. Falling back to AstroAlign.")
+        return self.align_with_astroalign(
             science_image, reference_image, output_dir
         )
 
@@ -1408,8 +1403,8 @@ NNW
                     data = hdul[0].data
                     if not isinstance(data, np.ndarray):
                         data = np.array(data)
-                    data[~np.isfinite(data)] = 1e-30
-                    data[data == 0] = 1e-30
+                    # Preserve NaNs (chip gaps) instead of replacing with sentinel
+                    data[~np.isfinite(data)] = np.nan
                     hdul[0].data = data
                     hdul.flush()
 
@@ -1580,13 +1575,8 @@ NNW
             aligned_ref_img[~footprint.astype(bool)] = 1e-30
 
             def _save_aligned_image(data, header, output_path):
-                fits.writeto(
-                    output_path,
-                    data.astype(np.float32),
-                    header,
-                    overwrite=True,
-                    output_verify="silentfix+ignore",
-                )
+                from functions import safe_fits_write
+                safe_fits_write(output_path, data, header)
 
             base_ref = os.path.splitext(os.path.basename(reference_image))[0]
             ext_ref = os.path.splitext(reference_image)[1]

@@ -145,13 +145,8 @@ def main(root, recursive=False):
                 fix_panstarrs_header(combined)
 
                 tmp_path = f.with_suffix(f.suffix + ".tmp")
-                fits.writeto(
-                    tmp_path,
-                    primary_data,
-                    combined,
-                    overwrite=True,
-                    output_verify="ignore",
-                )
+                from functions import safe_fits_write
+                safe_fits_write(str(tmp_path), primary_data, combined, output_verify="ignore")
             tmp_path.replace(f)
             print(f"  OK: {f.name}.")
         except Exception as e:

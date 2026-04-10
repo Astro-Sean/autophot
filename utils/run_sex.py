@@ -170,7 +170,8 @@ def _write_fits_array_to_file(array: np.ndarray, path: Path) -> None:
         array (np.ndarray): 2D array to write.
         path (Path): Destination path for the FITS file.
     """
-    fits.writeto(path, array, overwrite=True)
+    from functions import safe_fits_write
+    safe_fits_write(str(path), array, fits.Header())
 
 
 # =============================================================================

@@ -870,6 +870,7 @@ def run_sfft() -> Optional[int]:
             # ECP may write FITS_DIFF itself; if we have diff_image and file missing, write it
             if diff_image is not None and FITS_DIFF and not os.path.isfile(FITS_DIFF):
                 try:
+                    from functions import safe_fits_write
                     with fits.open(FITS_SCI, mode="readonly") as hdl:
                         hdu = hdl[0].copy()
                         # SFFT uses (ny, nx) row-major; FITS is (nx, ny) in header
@@ -878,7 +879,8 @@ def run_sfft() -> Optional[int]:
                             if diff_image.shape[0] != hdu.data.T.shape[0]
                             else diff_image
                         )
-                        hdu.writeto(FITS_DIFF, overwrite=True)
+                        # Use safe_fits_write to preserve NaNs
+                        safe_fits_write(FITS_DIFF, hdu.data, hdu.header)
                 except Exception as e:
                     log_info(f"Warning: Could not write ECP diff to {FITS_DIFF}: {e}")
             # Optional: write a minimal matching-sources CSV from ECP catalog if present
@@ -1107,9 +1109,11 @@ def run_sfft() -> Optional[int]:
                         out_dir,
                         f"{os.path.basename(fits_path).replace('.fits', '')}.fittedPix.fits",
                     )
+                    from functions import safe_fits_write
                     with fits.open(fits_path, mode="readonly") as hdl:
                         hdl[0].data = pix_a_vis.T
-                        hdl.writeto(out_path, overwrite=True)
+                        # Use safe_fits_write to preserve NaNs
+                        safe_fits_write(out_path, hdl[0].data, hdl[0].header)
                 except Exception as e:
                     log_info(f"Warning: Failed to save fitted-pixel for {label}: {e}")
 

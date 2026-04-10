@@ -2525,11 +2525,11 @@ class Catalog:
             position = (float(x), float(y))
             try:
                 cutout = Cutout2D(
-                    image, position=position, size=scale, mode="partial", fill_value=0
+                    image, position=position, size=scale, mode="partial", fill_value=np.nan
                 )
-                cutout_data = np.nan_to_num(cutout.data, nan=0.0)
-                total_flux = np.max(cutout_data)
-                if total_flux > 0:
+                cutout_data = cutout.data
+                total_flux = np.nanmax(cutout_data)
+                if np.isfinite(total_flux) and total_flux > 0:
                     normalized_cutout = norm(cutout_data / total_flux)
 
                     # Calculate all metrics

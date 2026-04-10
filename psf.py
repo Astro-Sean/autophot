@@ -277,7 +277,7 @@ def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None)
 
     flux = np.array(data, dtype=float, copy=True)
     if mask is not None:
-        flux = np.where(mask, 0.0, flux)
+        flux = np.where(mask, np.nan, flux)
 
     finite = np.isfinite(flux)
     if not np.any(finite):
@@ -285,7 +285,7 @@ def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None)
 
     offset = float(np.nanmin(flux[finite]))
     flux = flux - offset
-    flux[~np.isfinite(flux)] = 0.0
+    flux[~np.isfinite(flux)] = np.nan
     flux[flux < 0] = 0.0
 
     total = float(np.sum(flux))
@@ -1440,9 +1440,9 @@ class PSF:
 
             # Image preprocessing.
             img = np.array(self.image, float)
-            img[~np.isfinite(img)] = np.nanmedian(img)
+            # Preserve NaNs (chip gaps) instead of replacing with median
             if mask is not None and mask.shape == img.shape:
-                img[mask.astype(bool)] = np.nanmedian(img)
+                img[mask.astype(bool)] = np.nan
 
             # Use a PSF-shape-aware centroiding choice: for clearly
             # undersampled data, a 2-D Gaussian centroid is generally more
@@ -1834,9 +1834,8 @@ class PSF:
                 )
 
             save_path = os.path.join(write_dir, f"{filename_prefix}_{base}.fits")
-            fits.PrimaryHDU(np.asarray(epsf.data, float)).writeto(
-                save_path, overwrite=True
-            )
+            from functions import safe_fits_write
+            safe_fits_write(save_path, np.asarray(epsf.data, float), fits.Header())
             self._create_psf_visualization(
                 fitted_stars,
                 epsf,
@@ -1881,7 +1880,8 @@ class PSF:
                 return None
             if not np.isfinite(data).all():
                 data = data.copy()
-                data[~np.isfinite(data)] = 0.0
+                # Preserve NaNs instead of replacing with 0
+                data[~np.isfinite(data)] = np.nan
 
             # Display limits.
             if use_zscale:

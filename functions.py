@@ -622,8 +622,10 @@ def calculate_bins(x, percentiles=[25, 75]):
 
 def save_to_fits(data, output_filename):
     try:
+        # Use float32 to preserve NaNs (chip gaps) - integer dtypes cannot represent NaN
+        data_to_write = data.astype(np.float32) if data.dtype.kind != 'f' else data
         # Create a PrimaryHDU object with the data
-        hdu = fits.PrimaryHDU(data)
+        hdu = fits.PrimaryHDU(data_to_write)
 
         # Create an HDU list and append the PrimaryHDU
         hdulist = fits.HDUList([hdu])
@@ -1338,6 +1340,9 @@ def get_image_and_header(fpath):
                 sci_data = hdul["sci"].data
                 if sci_data is not None and hasattr(sci_data, 'shape') and len(sci_data.shape) >= 2:
                     image = np.asarray(sci_data).copy()
+                    # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+                    if image.dtype.kind != 'f':
+                        image = image.astype(np.float32)
                     best_hdu_idx = hdul.index_of("sci")
                     print(f"Using 'sci' extension (HDU {best_hdu_idx}) with shape {image.shape}")
             except (KeyError, TypeError):
@@ -1367,6 +1372,9 @@ def get_image_and_header(fpath):
                     candidates.sort(reverse=True)
                     best_score, best_idx, best_image = candidates[0]
                     image = best_image.copy()
+                    # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+                    if image.dtype.kind != 'f':
+                        image = image.astype(np.float32)
                     best_hdu_idx = best_idx
                     print(f"Selected HDU {best_idx} (score={best_score:.1f}) with shape {image.shape}")
             
@@ -1379,6 +1387,9 @@ def get_image_and_header(fpath):
                         if hasattr(test_image, 'shape'):
                             print(f"Using primary HDU as fallback with shape {getattr(test_image, 'shape', 'no shape')}")
                             image = test_image.copy()
+                            # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+                            if image.dtype.kind != 'f':
+                                image = image.astype(np.float32)
                             best_hdu_idx = 0
                     except Exception as e:
                         print(f"Error with primary HDU: {e}")
@@ -1457,6 +1468,11 @@ def get_image(fpath):
     except Exception:
         # If 'sci' extension fails, try getting image from the primary HDU
         image = fits.getdata(fpath)
+
+    # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+    # Integer dtypes cannot represent NaN values, so we convert to float32
+    if image.dtype.kind != 'f':
+        image = image.astype(np.float32)
 
     # Check if the image data is a 2D array
     if len(image.shape) != 2:
@@ -1850,46 +1866,41 @@ def remove_wcs_from_header(header):
 
 
 def convert_ra_dec_to_hms_dms(ra_deg, dec_deg):
-
     # Create a SkyCoord object using RA and DEC in degrees
     coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="fk5", equinox="J2000")
-
     # Convert to the required format
     ra_str = coord.ra.to_string(unit=u.hour, sep=":", precision=1)
     dec_str = coord.dec.to_string(sep=":", precision=1, alwayssign=True)
-
     return f"{ra_str}, {dec_str}"
 
 
 def gaussian(gridx, gridy, x0, y0, sky, A, sigma):
     """
-     2D gaussian function given by:
+    2D gaussian function given by:
 
     .. math::
 
     G = A \\times e^{-\\frac{(x-x_o)^2 - (y-y_0)^2}{2\\times \\sigma^2}} + sky
 
-     where *G* is the 2D gaussian function, *A* is the amplitude, *x* and *y* are the linear
-     range of the function, :math:`x_0` and :math:`y_0` are the centers of the function,
-     :math:`\\sigma` is the standard deviation, and *sky* is the amplitude offset of the function
+    where *G* is the 2D gaussian function, *A* is the amplitude, *x* and *y* are the linear
+    range of the function, :math:`x_0` and :math:`y_0` are the centers of the function,
+    :math:`\\sigma` is the standard deviation, and *sky* is the amplitude offset of the function
 
-     :param image: 2 dimensional grid to map Gaussian onto
-     :type image: 2D array
-     :param x0: x-center of gaussian function
-     :type x0: float
-     :param y0: y-center of gaussian function
-     :type y0: float
-     :param sky: sky/offset of gaussian function
-     :type sky: float
-     :param A: Amplitude of gaussian function
-     :type A: float
-     :param image_params: Dictionary containing the key *sigma* with corresponding value
-     :type image_params: dict
-     :return: 2D gaussian function with the same shape as image input
-     :rtype: 2D array
-
+    :param image: 2 dimensional grid to map Gaussian onto
+    :type image: 2D array
+    :param x0: x-center of gaussian function
+    :type x0: float
+    :param y0: y-center of gaussian function
+    :type y0: float
+    :param sky: sky/offset of gaussian function
+    :type sky: float
+    :param A: Amplitude of gaussian function
+    :type A: float
+    :param image_params: Dictionary containing the key *sigma* with corresponding value
+    :type image_params: dict
+    :return: 2D gaussian function with the same shape as image input
+    :rtype: 2D array
     """
-
     from numpy import exp, array
 
     x = gridx
@@ -2274,3 +2285,28 @@ def dict_to_string_with_hashtag(dictionary, float_format="%.3f"):
             value = float_format % value
         result += f"#{key}: {value}\n"
     return result
+
+
+def safe_fits_write(fpath: str, image: np.ndarray, header: fits.Header, overwrite: bool = True, output_verify: str = "silentfix+ignore") -> None:
+    """
+    Write image and header to FITS file, preserving NaNs (chip gaps) by using float32 dtype.
+
+    Integer dtypes cannot represent NaN values, so this function converts integer images
+    to float32 before writing to ensure chip gaps and corrupted data regions are preserved.
+
+    Parameters
+    ----------
+    fpath : str
+        Path to output FITS file.
+    image : np.ndarray
+        Image data array.
+    header : fits.Header
+        FITS header.
+    overwrite : bool, optional
+        Overwrite existing file (default: True).
+    output_verify : str, optional
+        astropy.io.fits output verification mode (default: "silentfix+ignore").
+    """
+    # Use float32 to preserve NaNs (chip gaps) - integer dtypes cannot represent NaN
+    image_to_write = image.astype(np.float32) if image.dtype.kind != 'f' else image
+    fits.writeto(fpath, image_to_write, header, overwrite=overwrite, output_verify=output_verify)

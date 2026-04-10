@@ -451,13 +451,8 @@ def write_fits(
     overwrite: bool = True,
 ) -> None:
     """Write *data* and *header* to a FITS file with silent verification."""
-    fits.writeto(
-        fpath,
-        data,
-        header,
-        overwrite=overwrite,
-        output_verify="silentfix+ignore",
-    )
+    from functions import safe_fits_write
+    safe_fits_write(fpath, data, header, overwrite=overwrite)
 
 
 def flux_to_mag(
@@ -1232,13 +1227,7 @@ def download_legacy_template(
             del band_header["NAXIS3"]
 
         try:
-            fits.writeto(
-                str(band_path),
-                band_data,
-                band_header,
-                overwrite=True,
-                output_verify="silentfix+ignore",
-            )
+            safe_fits_write(str(band_path), band_data, band_header)
             saved.append(b)
 
         except Exception:
@@ -2215,13 +2204,8 @@ class Templates:
                         )
 
                     fp_mask = footprint.astype(bool)
-                    aligned = np.nan_to_num(
-                        aligned,
-                        nan=NO_DATA_SENTINEL,
-                        posinf=NO_DATA_SENTINEL,
-                        neginf=NO_DATA_SENTINEL,
-                    )
-                    aligned[~fp_mask] = NO_DATA_SENTINEL
+                    # Keep NaNs as NaNs for chip gaps, only mask non-footprint areas
+                    aligned[~fp_mask] = np.nan
 
                     # Optional subpixel refinement to reduce residual misalignment
                     if (
@@ -2235,7 +2219,7 @@ class Templates:
                                 dtype=bool,
                             )
                             mov_valid = np.asarray(
-                                (aligned != NO_DATA_SENTINEL) & np.isfinite(aligned),
+                                np.isfinite(aligned),
                                 dtype=bool,
                             )
                             if np.sum(ref_valid) > 100 and np.sum(mov_valid) > 100:
@@ -2268,12 +2252,7 @@ class Templates:
                                         mode="constant",
                                         cval=np.nan,
                                     )
-                                    aligned = np.nan_to_num(
-                                        aligned,
-                                        nan=NO_DATA_SENTINEL,
-                                        posinf=NO_DATA_SENTINEL,
-                                        neginf=NO_DATA_SENTINEL,
-                                    )
+                                    # Keep NaNs preserved for chip gaps
                                     logger.info(
                                         "Reproject subpixel refinement applied: shift (row, col) = (%.3f, %.3f)",
                                         float(subpix_shift[0]),
@@ -2514,7 +2493,7 @@ class Templates:
                 size=(height, width),
                 wcs=imageWCS,
                 mode="partial",
-                fill_value=NO_DATA_SENTINEL,
+                fill_value=np.nan,
             )
             imageWCS = WCS(cutout.wcs.to_header(relax=True), relax=True)
             scienceHeader.update(imageWCS.to_header(relax=True), relax=True)
@@ -2583,7 +2562,7 @@ class Templates:
                 size,
                 wcs=imageWCS,
                 mode="trim",
-                fill_value=NO_DATA_SENTINEL,
+                fill_value=np.nan,
             )
             scienceImage = scienceCutout.data
             imageWCS = WCS(scienceCutout.wcs.to_header(relax=True), relax=True)
@@ -2595,16 +2574,14 @@ class Templates:
                 size,
                 wcs=templateWCS,
                 mode="trim",
-                fill_value=NO_DATA_SENTINEL,
+                fill_value=np.nan,
             )
             templateImage = templateCutout.data
             templateWCS = WCS(templateCutout.wcs.to_header(relax=True), relax=True)
             templateHeader.update(templateWCS.to_header(relax=True), relax=True)
 
-            # Mark shared invalid regions
-            mask = (templateImage == NO_DATA_SENTINEL) | (
-                scienceImage == NO_DATA_SENTINEL
-            )
+            # Mark shared invalid regions (NaNs from chip gaps or out-of-bounds)
+            mask = np.isnan(templateImage) | np.isnan(scienceImage)
             templateImage[mask] = np.nan
             scienceImage[mask] = np.nan
 
@@ -2679,8 +2656,7 @@ class Templates:
         """
         Symmetrically zero-pad *psf* to *target_shape*.
 
-        The padding value is NO_DATA_SENTINEL rather than zero to avoid
-        division-by-zero issues in Fourier-domain subtraction methods.
+        The padding value is NaN to preserve chip gaps and invalid regions.
         """
         dy = target_shape[0] - psf.shape[0]
         dx = target_shape[1] - psf.shape[1]
@@ -2688,7 +2664,7 @@ class Templates:
             (dy // 2, dy - dy // 2),
             (dx // 2, dx - dx // 2),
         )
-        return np.pad(psf, pad_width, mode="constant", constant_values=NO_DATA_SENTINEL)
+        return np.pad(psf, pad_width, mode="constant", constant_values=np.nan)
 
     @staticmethod
     def determine_kernel_order(

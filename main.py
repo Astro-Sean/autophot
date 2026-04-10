@@ -122,6 +122,7 @@ from functions import (
     odd,
     ColoredLevelFormatter,
     LogMessageNormalizeFilter,
+    safe_fits_write,
 )
 from limits import Limits
 from plot import Plot
@@ -827,7 +828,7 @@ def run_photometry():
 
         if np.issubdtype(image.dtype, np.integer):
             image = image.astype(float)
-            fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+            safe_fits_write(fpath, image, header)
 
         #  Extract Instrument, Telescope, and Filter metadata
         telescope_key = "TELESCOP"
@@ -897,7 +898,7 @@ def run_photometry():
                             else:
                                 del header[key]
                 
-                fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+                safe_fits_write(fpath, image, header)
             except Exception as e:
                 logging.warning(f"Header write failed: {e}, using minimal header")
                 # Create minimal header with just essential info
@@ -909,7 +910,7 @@ def run_photometry():
                 for wcs_key in ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2', 'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2', 'CTYPE1', 'CTYPE2']:
                     if wcs_key in header:
                         minimal_header[wcs_key] = header[wcs_key]
-                fits.writeto(fpath, image, minimal_header, overwrite=True, output_verify='silentfix+ignore')
+                safe_fits_write(fpath, image, minimal_header)
 
         if not telescope or str(telescope).strip() == "":
             raise ValueError(
@@ -1010,7 +1011,7 @@ def run_photometry():
                 "Applying gain %.1e to image (low median %.1e).", gain, image_median
             )
             image = image * gain
-            fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+            safe_fits_write(fpath, image, header)
             gain = 1
             logging.warning("Gain reset to 1 after application.")
 
@@ -1046,7 +1047,7 @@ def run_photometry():
                     logging.info(
                         f"Trimmed NaN boundaries: {trim_info['original_shape']} -> {trim_info['trimmed_shape']}"
                     )
-                    fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+                    safe_fits_write(fpath, image, header)
                     
                     # Refresh WCS and recalculate target pixel coordinates
                     # The header WCS has changed (CRPIX updated), so target coords must be refreshed
@@ -1073,7 +1074,7 @@ def run_photometry():
 
         #  Keep NaN values as NaN - chip gaps handled by background estimator
         #  which properly ignores NaN regions during background modeling
-        fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+        safe_fits_write(fpath, image, header)
 
         #  Handle Saturation (telescope.yml may use saturate: not_given_by_user)
         # Priority:
@@ -1558,7 +1559,7 @@ def run_photometry():
                         position=(center_x, center_y),
                         size=(trim_pixels, trim_pixels),
                         mode="partial",
-                        fill_value=0.0,
+                        fill_value=np.nan,
                     )
                 else:
                     # Use WCS-based cutout
@@ -1568,7 +1569,7 @@ def run_photometry():
                         (trim_image * u.arcmin * 2),  # Convert to arcmin (box size)
                         wcs=imageWCS,
                         mode="partial",
-                        fill_value=0.0,
+                        fill_value=np.nan,
                     )
                 
                 # Update image and header with cutout data
@@ -1577,7 +1578,7 @@ def run_photometry():
                     header.update(cutout.wcs.to_header(relax=True))
                 
                 # Writes the modified image and header back to the FITS file.
-                fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+                safe_fits_write(fpath, image, header)
                 logging.info(f"New image shape after trimming: {image.shape}")
             except Exception as e:
                 logging.warning(f"Could not trim image: {e}; ignoring the operation.")
@@ -1617,7 +1618,7 @@ def run_photometry():
                     size,
                     wcs=imageWCS,
                     mode="partial",
-                    fill_value=1e-30,
+                    fill_value=np.nan,
                 )
 
                 # Updates the image and WCS with the cutout values.
@@ -1626,7 +1627,7 @@ def run_photometry():
                 header.update(imageWCS.to_header(relax=True), relax=True)
 
                 # Writes the modified image and header back to the FITS file.
-                fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+                safe_fits_write(fpath, image, header)
                 logging.info(f"New image shape after recropping: {image.shape}")
 
             # Use the in-memory image/header (already updated) to refresh YAML
@@ -1656,6 +1657,34 @@ def run_photometry():
                     )
         except Exception as wcs_refresh_exc:
             logging.warning(f"Could not refresh target coordinates after trimming: {wcs_refresh_exc}")
+
+        # =============================================================================
+        #   Check if target is in NaN region (chip gap)
+        # =============================================================================
+        if "target_x_pix" in input_yaml and "target_y_pix" in input_yaml:
+            try:
+                # Reload image to check target pixel value
+                check_image = get_image(fpath)
+                tx = int(round(float(input_yaml["target_x_pix"])))
+                ty = int(round(float(input_yaml["target_y_pix"])))
+                
+                # Check bounds and NaN
+                if (0 <= ty < check_image.shape[0] and 0 <= tx < check_image.shape[1]):
+                    if np.isnan(check_image[ty, tx]):
+                        logging.error(
+                            f"Target pixel ({tx}, {ty}) is NaN (chip gap). "
+                            f"Skipping image {os.path.basename(fpath)}."
+                        )
+                        return
+                else:
+                    logging.error(
+                        f"Target pixel ({tx}, {ty}) is outside image bounds "
+                        f"({check_image.shape[1]}, {check_image.shape[0]}). "
+                        f"Skipping image {os.path.basename(fpath)}."
+                    )
+                    return
+            except Exception as check_exc:
+                logging.warning(f"Could not check target pixel value: {check_exc}")
 
         # =============================================================================
         #   Run SExtractor
@@ -1874,7 +1903,7 @@ def run_photometry():
                 logging.info("Plate solve successful")
                 if apply_solved_to_fits:
                     header = updated_header
-                    fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+                    safe_fits_write(fpath, image, header)
                     logging.info("Updated header written to file after WCS update")
                     wcs_updated = True
                 else:
@@ -2065,11 +2094,11 @@ def run_photometry():
             header["saturate"] = float(saturate_sub)
 
         # Writes the modified image and header back to the file.
-        fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+        safe_fits_write(fpath, image, header)
         # Save the background_rms array with '.weight' inserted before the suffix
         base, ext = os.path.splitext(fpath)
         weight_fpath = f"{base}.weight{ext}"
-        fits.writeto(weight_fpath, background_rms, header, overwrite=True, output_verify='silentfix+ignore')
+        safe_fits_write(weight_fpath, background_rms, header)
         del background_surface
         # Keep using in-memory image, header (no reload needed)
 
@@ -2378,7 +2407,7 @@ def run_photometry():
         # Save the background_rms array with '.weight' inserted before the suffix
         base, ext = os.path.splitext(fpath)
         weight_fpath = f"{base}.weight{ext}"
-        fits.writeto(weight_fpath, background_rms, header, overwrite=True, output_verify='silentfix+ignore')
+        safe_fits_write(weight_fpath, background_rms, header)
 
         target_x_pix, target_y_pix = update_target_pixel_coords(
             input_yaml, imageWCS, index
@@ -3222,7 +3251,7 @@ def run_photometry():
         header["RDNOISE"] = readnoise
 
         # Writes the modified image and header back to the FITS file.
-        fits.writeto(fpath, image, header, overwrite=True, output_verify='silentfix+ignore')
+        safe_fits_write(fpath, image, header)
 
         # =============================================================================
         # Template Preparation
@@ -3245,11 +3274,10 @@ def run_photometry():
 
             # If the weight map exists, save it with the new basename
             if os.path.exists(weight_fpath):
-                fits.writeto(
+                safe_fits_write(
                     os.path.join(cur_dir, newWeightBasename),
                     get_image(weight_fpath),
                     get_header(weight_fpath),
-                    overwrite=True,
                 )
                 logging.getLogger(__name__).debug(
                     "Weight map written: %s",
@@ -3266,12 +3294,7 @@ def run_photometry():
             )
 
             # Writes the modified image and header to the new FITS file.
-            fits.writeto(
-                os.path.join(cur_dir, newBasename),
-                image,
-                header,
-                overwrite=True,
-            )
+            safe_fits_write(os.path.join(cur_dir, newBasename), image, header)
             logging.info(f"\n\nEnd of {imageFilter} template calibration\n\n")
             return 1
 
@@ -3339,7 +3362,7 @@ def run_photometry():
                         size=(ny, nx),
                         wcs=science_wcs,
                         mode="partial",
-                        fill_value=1e-30,
+                        fill_value=np.nan,
                     )
                     science_header.update(science_cutout.wcs.to_header(relax=True), relax=True)
                     # Loads the template image.
@@ -3353,22 +3376,12 @@ def run_photometry():
                         size=(ny, nx),
                         wcs=template_wcs,
                         mode="partial",
-                        fill_value=1e-30,
+                        fill_value=np.nan,
                     )
                     template_header.update(template_cutout.wcs.to_header(relax=True), relax=True)
                     # Saves the results.
-                    fits.writeto(
-                        fpath,
-                        science_cutout.data.astype(science_image.dtype),
-                        header=science_header,
-                        overwrite=True,
-                    )
-                    fits.writeto(
-                        templateFpath,
-                        template_cutout.data.astype(template_image.dtype),
-                        header=template_header,
-                        overwrite=True,
-                    )
+                    safe_fits_write(fpath, science_cutout.data, science_header)
+                    safe_fits_write(templateFpath, template_cutout.data, template_header)
                     # Logs the cutout information.
                     logging.info(
                         f"Cutout aligned using sky center: RA={center_coord.ra.deg:.3f}, Dec={center_coord.dec.deg:.3f}"
@@ -5198,32 +5211,28 @@ def run_photometry():
                                         ] = bool(_old_enforce_nn_lim)
                                     except Exception:
                                         pass
-                            # The injected limiting magnitude search uses
-                            # aperture-based recovery (beta_aperture), so for
-                            # consistency we also store aperture-based beta for
-                            # this target when an injected limit was computed.
-                            if np.isfinite(InjectedLimit):
-                                try:
-                                    target_beta = float(
-                                        beta_aperture(
-                                            n=detection_limit,
-                                            flux_aperture=float(
-                                                TargetPosition["flux_AP"].iloc[0]
-                                            ),
-                                            sigma=float(
-                                                TargetPosition["noiseSky"].iloc[0]
-                                            ),
-                                            npix=float(
-                                                TargetPosition["area"].iloc[0]
-                                            ),
-                                        )
+                        # The injected limiting magnitude search uses
+                        # aperture-based recovery (beta_aperture), so for
+                        # consistency we also store aperture-based beta for
+                        # this target when an injected limit was computed.
+                        if np.isfinite(InjectedLimit):
+                            try:
+                                target_beta = float(
+                                    beta_aperture(
+                                        n=detection_limit,
+                                        flux_aperture=float(
+                                            TargetPosition["flux_AP"].iloc[0]
+                                        ),
+                                        sigma=float(
+                                            TargetPosition["noiseSky"].iloc[0]
+                                        ),
+                                        npix=float(
+                                            TargetPosition["area"].iloc[0]
+                                        ),
                                     )
-                                except Exception:
-                                    pass
-                        else:
-                            TargetPosition["flux_PSF"] = [np.nan]
-                            TargetPosition["flux_PSF_err"] = [np.nan]
-                            InjectedLimit = np.nan
+                                )
+                            except Exception:
+                                pass
                 except Exception as e:
                     log_exception(e)
                     InjectedLimit = np.nan

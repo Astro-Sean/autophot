@@ -28,6 +28,7 @@ import astropy.units as u
 from astropy.coordinates import SkyCoord
 from astropy.wcs.utils import fit_wcs_from_points
 from astropy.table import Table
+from functions import safe_fits_write
 
 # --- Local Imports (optional) ---
 try:
@@ -181,6 +182,11 @@ def table_to_ldac(table, header=None, writeto=None) -> fits.HDUList:
     data_hdu.header["EXTNAME"] = "LDAC_OBJECTS"
     hdulist = fits.HDUList([primary_hdu, header_hdu, data_hdu])
     if writeto is not None:
+        # This is catalog data, not image data, so NaN preservation is not critical
+        # But use safe_fits_write for consistency
+        from astropy.io import fits
+        # For multi-extension HDULists, we need to use hdulist.writeto directly
+        # safe_fits_write is for single image + header
         hdulist.writeto(writeto, overwrite=True)
     return hdulist
 
@@ -1696,13 +1702,7 @@ class WCSSolver:
                         pass
                 seed_header["NAXIS1"] = self.image.shape[1]
                 seed_header["NAXIS2"] = self.image.shape[0]
-                fits.writeto(
-                    seed_fpath,
-                    self.image,
-                    seed_header,
-                    overwrite=True,
-                    output_verify="ignore",
-                )
+                safe_fits_write(seed_fpath, self.image, seed_header, output_verify="ignore")
 
                 # Run SCAMP on the seeded temporary image.
                 seeded_solver = WCSSolver(
@@ -2661,13 +2661,7 @@ class WCSSolver:
                     try:
                         self.header["NAXIS1"] = self.image.shape[1]
                         self.header["NAXIS2"] = self.image.shape[0]
-                        fits.writeto(
-                            self.fpath,
-                            self.image,
-                            self.header,
-                            overwrite=True,
-                            output_verify="ignore",
-                        )
+                        safe_fits_write(self.fpath, self.image, self.header, output_verify="ignore")
                         # Cleanup solve artifacts even when keeping input WCS.
                         for pattern in [".rdls", ".solved", ".xyls", ".axy", ".match", ".corr"]:
                             for f in glob.glob(os.path.join(dirname, f"*{pattern}")):
@@ -2921,11 +2915,7 @@ class WCSSolver:
                             logger, "Could not validate merged WCS", ev
                         )
 
-                fits.writeto(
-                    self.fpath,
-                    self.image,
-                    self.header,
-                    overwrite=True,
+                safe_fits_write(self.fpath, self.image, self.header,
                     output_verify="ignore",
                 )
                 # Final cleanup of heavy solve-field artifacts once diagnostics

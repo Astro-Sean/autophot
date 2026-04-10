@@ -1037,12 +1037,11 @@ class BackgroundSubtractor:
                 bkg_rms = np.asarray(bkg.background_rms, dtype=float)
                 rms_median = np.nanmedian(bkg_rms)
                 rms_floor = max(rms_median * 0.5, 1e-30)
-                bkg_rms = np.clip(
-                    np.nan_to_num(
-                        bkg_rms, nan=rms_median * 0.1, posinf=1e10, neginf=0.0
-                    ),
-                    rms_floor,
-                    None,
+                # Preserve NaNs for chip gaps, only clip finite values
+                bkg_rms = np.where(
+                    np.isfinite(bkg_rms),
+                    np.clip(bkg_rms, rms_floor, None),
+                    np.nan
                 )
 
                 # Use the raw Background2D background map without any
@@ -1197,7 +1196,7 @@ class BackgroundSubtractor:
 
         # ---- Saturation mask (NEW) ----
         sat_mask = self._make_saturation_mask(
-            np.nan_to_num(image, nan=0.0), self.config["saturate"]
+            image, self.config["saturate"]
         )
         # ---- Saturation streak / bleed mask (avoid regions from saturated stars) ----
         bleed_half = int(self.config.get("saturate_streak_bleed_half_length", 100))
@@ -1206,7 +1205,7 @@ class BackgroundSubtractor:
         streak_flux_frac = float(self.config.get("saturate_streak_flux_frac", 0.08))
         if bleed_half > 0:
             streak_mask = self._make_saturation_streak_mask(
-                np.nan_to_num(image, nan=0.0),
+                image,
                 self.config["saturate"],
                 saturate_frac=0.90,
                 bleed_half_length=bleed_half,
@@ -1227,7 +1226,7 @@ class BackgroundSubtractor:
             )
             trail_min_area = int(self.config.get("satellite_trail_min_area_px", 100))
             trail_mask = self._make_satellite_trail_mask(
-                np.nan_to_num(image, nan=0.0),
+                image,
                 n_sigma=trail_n_sigma,
                 min_length_px=trail_min_length,
                 min_aspect_ratio=trail_min_aspect,
@@ -1342,7 +1341,7 @@ class BackgroundSubtractor:
                 raw_sig = cfg_bkg.get("global_mask_edge_flatten_sigma_px", None)
                 sig = float(raw_sig) if raw_sig is not None else (float(r_flat) / 2.0)
                 sig = max(0.8, float(sig))
-                num = gaussian_filter(np.nan_to_num(bkg_u, nan=0.0), sigma=sig, mode="nearest")
+                num = gaussian_filter(bkg_u, sigma=sig, mode="nearest")
                 den = gaussian_filter(w, sigma=sig, mode="nearest")
                 smooth = num / np.maximum(den, 1e-12)
 
@@ -1358,6 +1357,8 @@ class BackgroundSubtractor:
         )
 
         # ---- Subtract background ----
+        # Ensure background surface preserves NaNs from original image (chip gaps)
+        bkg_surface = np.where(np.isnan(image), np.nan, bkg_surface)
         sub = image - bkg_surface
         self.config["saturate"] = self._check_saturation(
             bkg_median, self.config["saturate"]
@@ -1604,6 +1605,8 @@ class BackgroundSubtractor:
 
         # ---- Subtract locally and insert back ----
         bkg_surface_local = np.asarray(bkg_surface_local, dtype=float)
+        # Ensure background surface preserves NaNs from cutout (chip gaps)
+        bkg_surface_local = np.where(np.isnan(cutout), np.nan, bkg_surface_local)
         corrected_cutout = np.asarray(cutout, dtype=float) - bkg_surface_local
 
         # ---- Optional: raise corrected cutout to a floor statistic ----
