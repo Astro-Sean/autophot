@@ -1575,12 +1575,32 @@ def run_photometry():
         except Exception as e:
             log_exception(e, "SEXtractor failed - trying pythonic source detection")
 
+            # Load image for pythonic detection
+            image = get_image(fpath)
+
             # Measures the image FWHM, isolated sources, and scale.
             ImageFWHM, FWHMSources, scale = Find_FWHM(
                 input_yaml=input_yaml
             ).measure_image(
                 image=image,
             )
+
+        # Filter sources near NaN/masked regions to improve FWHM accuracy
+        if FWHMSources is not None and len(FWHMSources) > 0:
+            temp_image = get_image(fpath)
+            nan_mask = np.isnan(temp_image)
+            if np.any(nan_mask):
+                masked_pixels = np.argwhere(nan_mask)
+                tree = cKDTree(masked_pixels)
+                source_coords = FWHMSources[["x_pix", "y_pix"]].values
+                min_distances, _ = tree.query(source_coords, k=1, distance_upper_bound=2 * ImageFWHM)
+                n_before = len(FWHMSources)
+                FWHMSources = FWHMSources[min_distances > 2 * ImageFWHM]
+                n_excluded = n_before - len(FWHMSources)
+                if n_excluded > 0:
+                    logging.info(
+                        f"Excluded {n_excluded} sources within 2xFWHM of NaN/masked regions for FWHM calculation"
+                    )
 
         # =============================================================================
         # Measuring the background statistics (don't remove it)
