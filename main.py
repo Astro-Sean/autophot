@@ -63,6 +63,76 @@ for _env in (
 ):
     os.environ[_env] = "1"
 
+# =============================================================================
+# Imports
+# =============================================================================
+
+# Standard Library
+import argparse
+import datetime
+import logging
+import re
+import shutil
+import time
+import uuid
+import warnings
+from collections import OrderedDict
+from pathlib import Path
+
+# Third-Party Libraries
+import numpy as np
+import pandas as pd
+import yaml
+from astropy.coordinates import SkyCoord
+from astropy.io import fits
+from astropy.nddata.utils import Cutout2D
+from astropy.stats import sigma_clipped_stats
+from astropy.time import Time
+import astropy.wcs as WCS
+from astropy import units as u
+from astropy.utils.exceptions import AstropyWarning
+from astropy.wcs.utils import proj_plane_pixel_scales
+from photutils.centroids import centroid_com, centroid_2dg, centroid_sources
+from scipy.spatial import cKDTree
+from scipy.cluster.hierarchy import fclusterdata
+
+# Local Modules
+from aperture import Aperture
+from catalog import Catalog
+from cosmic import RemoveCosmicRays
+from fwhm import Find_FWHM
+from functions import (
+    AutophotYaml,
+    border_msg,
+    convert_to_mjd_astropy,
+    get_instrument_config,
+    load_telescope_config,
+    dict_to_string_with_hashtag,
+    get_header,
+    get_image,
+    get_image_and_header,
+    pix_dist,
+    quadrature_add,
+    SuppressStdout,
+    beta_aperture,
+    beta_psf,
+    flux_upper_limit,
+    log_exception,
+    log_warning_from_exception,
+    odd,
+    ColoredLevelFormatter,
+    LogMessageNormalizeFilter,
+)
+from limits import Limits
+from plot import Plot
+from psf import PSF
+from templates import Templates
+from utils import run_IDC
+from utils.run_sex import SExtractorWrapper
+from wcs import WCSSolver, get_wcs
+from zeropoint import Zeropoint
+from background import BackgroundSubtractor
+
 
 # TODO: add trimming if the template image is smaller than the science image
 
@@ -338,72 +408,6 @@ def run_photometry():
     prepare_template = (
         args.prepare_template
     )  # If True, run in template-preparation mode
-
-    import time
-
-    import datetime
-    import logging
-    import shutil
-
-    import uuid
-    import warnings
-    from collections import OrderedDict
-    from pathlib import Path
-
-    # Scientific libraries for astronomical data processing.
-    import numpy as np
-    import pandas as pd
-    import yaml
-    from astropy.coordinates import SkyCoord
-    from astropy.io import fits
-    from astropy.nddata.utils import Cutout2D
-    from astropy.stats import sigma_clipped_stats
-    from astropy.time import Time
-    import astropy.wcs as WCS
-    from astropy import units as u
-    from astropy.utils.exceptions import AstropyWarning
-    from photutils.centroids import centroid_com, centroid_2dg, centroid_sources
-    from scipy.spatial import cKDTree
-
-    # Custom modules for specific photometry tasks.
-    from aperture import Aperture
-    from catalog import Catalog
-    from fwhm import Find_FWHM
-    from functions import (
-        AutophotYaml,
-        border_msg,
-        convert_to_mjd_astropy,
-        get_instrument_config,
-        load_telescope_config,
-        dict_to_string_with_hashtag,
-        get_header,
-        get_image,
-        get_image_and_header,
-        pix_dist,
-        quadrature_add,
-        SuppressStdout,
-        beta_aperture,
-        beta_psf,
-        flux_upper_limit,
-        log_exception,
-        log_warning_from_exception,
-        odd,
-        ColoredLevelFormatter,
-        LogMessageNormalizeFilter,
-    )
-    from limits import Limits
-    from plot import Plot
-    from psf import PSF
-    from templates import Templates
-    from wcs import WCSSolver, get_wcs
-    from zeropoint import Zeropoint
-    from background import BackgroundSubtractor
-    from utils import run_IDC
-
-    from cosmic import RemoveCosmicRays
-    from utils.run_sex import SExtractorWrapper
-
-    from scipy.cluster.hierarchy import fclusterdata
 
     """
     Perform photometry operations.
@@ -1215,7 +1219,6 @@ def run_photometry():
         try:
             with SuppressStdout():
                 imageWCS = get_wcs(header)  # WCS values, may raise if no valid WCS
-                from astropy.wcs.utils import proj_plane_pixel_scales
                 xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
                 if xy_pixel_scales is not None and len(xy_pixel_scales) > 0:
                     pixel_scale_candidate = (
@@ -1762,7 +1765,6 @@ def run_photometry():
                 else:
                     # Use solved WCS only to update pixel_scale in YAML; leave FITS header unchanged for better subtraction
                     try:
-                        from astropy.wcs.utils import proj_plane_pixel_scales
                         _solved_wcs = get_wcs(updated_header)
                         _xy = proj_plane_pixel_scales(_solved_wcs)
                         input_yaml["pixel_scale"] = float(_xy[0] * 3600)
@@ -1776,7 +1778,6 @@ def run_photometry():
         imageWCS = get_wcs(header)
 
         # Gets the pixel scale in arcseconds.
-        from astropy.wcs.utils import proj_plane_pixel_scales
         xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
         pixel_scale = xy_pixel_scales[0] * 3600
 
@@ -1964,7 +1965,6 @@ def run_photometry():
         #  Get Target Pixel Location
         # Gets the target pixel location using the WCS.
         imageWCS = get_wcs(header)  # WCS values
-        from astropy.wcs.utils import proj_plane_pixel_scales
         xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
         pixel_scale = xy_pixel_scales[0] * 3600
 
@@ -2378,7 +2378,6 @@ def run_photometry():
 
         # Adaptive crowded-field detection (source density + background coverage)
         try:
-            from astropy.wcs.utils import proj_plane_pixel_scales
             ny, nx = image.shape[0], image.shape[1]
             pixel_scale_arcsec = float(
                 proj_plane_pixel_scales(imageWCS)[0] * 3600.0
