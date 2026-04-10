@@ -127,6 +127,9 @@ def main(root, recursive=False):
             with fits.open(f, mode="readonly", do_not_scale_image_data=True) as hdul:
                 primary_header = hdul[0].header.copy()
                 primary_data = hdul[0].data
+                # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+                if primary_data is not None and primary_data.dtype.kind != 'f':
+                    primary_data = primary_data.astype(np.float32)
                 if primary_data is None and len(hdul) > 1:
                     for i in range(1, len(hdul)):
                         if (

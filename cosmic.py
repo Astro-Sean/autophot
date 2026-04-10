@@ -260,6 +260,9 @@ class RemoveCosmicRays:
         """
         self.logger.info("Starting cosmic ray removal")
 
+        # Preserve NaNs (chip gaps) before cosmic ray removal
+        nan_mask = np.isnan(self.image)
+
         # --- Convert image to float32 ---
         self.image = self.image.astype(np.float32)
 
@@ -402,6 +405,8 @@ class RemoveCosmicRays:
             )
 
             # --- Return the cleaned image and processed mask ---
+            # Restore NaNs (chip gaps) after cosmic ray removal
+            clean_image[nan_mask] = np.nan
             return clean_image, processed_mask
 
         # --- Error Handling ---

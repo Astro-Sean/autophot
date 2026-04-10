@@ -124,6 +124,9 @@ def create_image_mask(filename, layers=["CR"]):
     with fits.open(filename) as hdul:
         # Iterate through each HDU (Header Data Unit)
         imgs = hdul[0].data
+        # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+        if imgs.dtype.kind != 'f':
+            imgs = imgs.astype(np.float32)
 
     selected_layers = [maximask_masks[i] for i in layers]
 

@@ -287,14 +287,14 @@ def _injection_worker(args):
             except Exception:
                 return False, beta_p
 
-        # For PSF method, use snr_limit if set, otherwise default to 3 sigma
-        # For AP method, only apply SNR gate if snr_limit is explicitly set
+        # For PSF method, use PSF-fit SNR for detection (not beta aperture)
+        # For AP method, use beta aperture detection
         if method == "PSF":
             effective_snr_limit = float(snr_limit) if snr_limit is not None else 3.0
             det_snr = np.isfinite(snr_val) and (snr_val >= effective_snr_limit)
-            return (det_beta and det_snr), beta_p
+            return det_snr, beta_p
         else:
-            # AP method: only check SNR if snr_limit is set
+            # AP method: use beta detection, optionally with SNR gate if snr_limit is set
             if snr_limit is not None:
                 det_snr = np.isfinite(snr_val) and (snr_val >= float(snr_limit))
                 return (det_beta and det_snr), beta_p

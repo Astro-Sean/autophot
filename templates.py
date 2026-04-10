@@ -429,6 +429,9 @@ def read_fits(
         hdul[0].verify("silentfix+ignore")
         data = hdul[0].data
         header = hdul[0].header.copy()
+        # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+        if data is not None and data.dtype.kind != 'f':
+            data = data.astype(np.float32)
         # ESO multi-extension FITS often have empty primary (NAXIS=0); use first HDU with data
         if data is None and len(hdul) > 1:
             for i in range(1, len(hdul)):

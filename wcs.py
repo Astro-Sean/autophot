@@ -409,7 +409,7 @@ def _extract_match_points_from_solve_field(
                             y_val = vals[yi]
                             try:
                                 ra_pred, dec_pred = initial_wcs.all_pix2world(
-                                    [[x_val]], [[y_val]], 1
+                                    [[x_val]], [[y_val]], 0
                                 )
                             except Exception:
                                 continue
@@ -568,15 +568,15 @@ def _choose_xy_shift_for_fit_wcs(
     try:
         sky_true = SkyCoord(ra=ra_m * u.deg, dec=dec_m * u.deg, frame="icrs")
 
-        # Assume x/y are FITS-like (1-based) for all_pix2world origin=1
-        ra1, dec1 = initial_wcs.all_pix2world(x_m, y_m, 1)
+        # Assume x/y are FITS-like (1-based) for all_pix2world origin=0
+        ra1, dec1 = initial_wcs.all_pix2world(x_m, y_m, 0)
         sky1 = SkyCoord(ra=np.asarray(ra1) * u.deg, dec=np.asarray(dec1) * u.deg, frame="icrs")
         med_sep_1based = float(np.nanmedian(sky1.separation(sky_true).to(u.arcsec).value))
 
         # Assume x/y are 0-based -> convert to FITS-like by +1
         x0 = x_m + 1.0
         y0 = y_m + 1.0
-        ra0, dec0 = initial_wcs.all_pix2world(x0, y0, 1)
+        ra0, dec0 = initial_wcs.all_pix2world(x0, y0, 0)
         sky0 = SkyCoord(ra=np.asarray(ra0) * u.deg, dec=np.asarray(dec0) * u.deg, frame="icrs")
         med_sep_0based = float(np.nanmedian(sky0.separation(sky_true).to(u.arcsec).value))
 
@@ -601,7 +601,7 @@ def _wcs_match_separation_stats_arcsec(
     Compute robust angular-separation stats (median, p95) for matched points.
     """
     sky_true = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
-    ra_p, dec_p = wcs_obj.all_pix2world(x_pix, y_pix, 1)
+    ra_p, dec_p = wcs_obj.all_pix2world(x_pix, y_pix, 0)
     sky_pred = SkyCoord(
         ra=np.asarray(ra_p) * u.deg, dec=np.asarray(dec_p) * u.deg, frame="icrs"
     )
@@ -641,14 +641,33 @@ def _best_wcs_match_separation_stats_arcsec(
     return np.nan, np.nan, 0.0
 
 
-def _safe_world_to_pixel_values(
-    wcs_obj: WCS, ra_deg: np.ndarray, dec_deg: np.ndarray
+def wcs_world_to_pixel(
+    wcs_obj: WCS, ra_deg: np.ndarray, dec_deg: np.ndarray, *, origin: int = 0
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Convert sky coordinates to pixel coordinates robustly.
+    Convert sky coordinates to pixel coordinates robustly with consistent origin.
 
-    If vectorized inversion fails (common for some distorted points), fall back to
-    per-point conversion and return NaN for failed coordinates.
+    Parameters:
+    -----------
+    wcs_obj : WCS
+        WCS object to use for conversion
+    ra_deg : np.ndarray
+        Right ascension in degrees
+    dec_deg : np.ndarray
+        Declination in degrees
+    origin : int, optional
+        Origin convention: 0 for 0-based (numpy), 1 for 1-based (FITS). Default is 0.
+
+    Returns:
+    --------
+    tuple[np.ndarray, np.ndarray]
+        (x_pixel, y_pixel) coordinates in the specified origin convention
+
+    Notes:
+    ------
+    - If vectorized inversion fails (common for some distorted points), falls back to
+      per-point conversion and returns NaN for failed coordinates.
+    - This is the unified function for all WCS world-to-pixel conversions.
     """
     ra_arr = np.asarray(ra_deg, dtype=float)
     dec_arr = np.asarray(dec_deg, dtype=float)
@@ -658,7 +677,7 @@ def _safe_world_to_pixel_values(
     ra_arr = ra_arr[:n]
     dec_arr = dec_arr[:n]
     try:
-        x_pix, y_pix = wcs_obj.all_world2pix(ra_arr, dec_arr, 1)
+        x_pix, y_pix = wcs_obj.all_world2pix(ra_arr, dec_arr, origin)
         return np.asarray(x_pix, dtype=float), np.asarray(y_pix, dtype=float)
     except Exception:
         x_out = np.full(n, np.nan, dtype=float)
@@ -668,13 +687,24 @@ def _safe_world_to_pixel_values(
                 x_i, y_i = wcs_obj.all_world2pix(
                     np.array([ra_arr[i]], dtype=float),
                     np.array([dec_arr[i]], dtype=float),
-                    1,
+                    origin,
                 )
                 x_out[i] = float(np.asarray(x_i, dtype=float)[0])
                 y_out[i] = float(np.asarray(y_i, dtype=float)[0])
             except Exception:
                 continue
         return x_out, y_out
+
+
+def _safe_world_to_pixel_values(
+    wcs_obj: WCS, ra_deg: np.ndarray, dec_deg: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Convert sky coordinates to pixel coordinates robustly (legacy wrapper).
+
+    Deprecated: Use wcs_world_to_pixel instead.
+    """
+    return wcs_world_to_pixel(wcs_obj, ra_deg, dec_deg, origin=0)
 
 
 def _build_scamp_optimization_trials(
@@ -756,7 +786,7 @@ def _estimate_crpix_linear_nudge_from_matches(
     ra_arr = ra_arr[:n]
     dec_arr = dec_arr[:n]
 
-    x_pred, y_pred = _safe_world_to_pixel_values(wcs_obj, ra_arr, dec_arr)
+    x_pred, y_pred = wcs_world_to_pixel(wcs_obj, ra_arr, dec_arr, origin=0)
     if len(x_pred) != n or len(y_pred) != n:
         return None
 
@@ -887,7 +917,7 @@ def _filter_points_against_initial_wcs(
     Returns filtered arrays, number removed, and pre-filter med/p95 residuals.
     """
     sky_true = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
-    ra_p, dec_p = initial_wcs.all_pix2world(x_pix, y_pix, 1)
+    ra_p, dec_p = initial_wcs.all_pix2world(x_pix, y_pix, 0)
     sky_pred = SkyCoord(
         ra=np.asarray(ra_p) * u.deg, dec=np.asarray(dec_p) * u.deg, frame="icrs"
     )
@@ -937,7 +967,11 @@ def load_background_std(background_std) -> np.ndarray:
         return None
     if isinstance(background_std, str):
         with fits.open(background_std) as hdul:
-            return hdul[0].data
+            data = hdul[0].data
+            # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+            if data.dtype.kind != 'f':
+                data = data.astype(np.float32)
+            return data
     if isinstance(background_std, np.ndarray):
         return background_std
     raise TypeError(
@@ -2878,7 +2912,7 @@ class WCSSolver:
                             tmp_wcs = get_wcs(self.header)
                             crpix1 = float(self.header["CRPIX1"])
                             crpix2 = float(self.header["CRPIX2"])
-                            rd = tmp_wcs.all_pix2world([[crpix1]], [[crpix2]], 1)
+                            rd = tmp_wcs.all_pix2world([[crpix1]], [[crpix2]], 0)
                             self.header["CRPIX1"] = crpix1 + crpix_offset
                             self.header["CRPIX2"] = crpix2 + crpix_offset
                             self.header["CRVAL1"] = float(rd[0].flat[0])

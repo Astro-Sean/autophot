@@ -448,7 +448,11 @@ def run_sfft() -> Optional[int]:
     # --- Load Headers (Once) ---
     def get_fits_info(fits_path: str) -> Tuple[fits.Header, np.ndarray]:
         with fits.open(fits_path) as hdul:
-            return hdul[0].header, hdul[0].data
+            data = hdul[0].data
+            # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+            if data.dtype.kind != 'f':
+                data = data.astype(np.float32)
+            return hdul[0].header, data
 
     hdr_sci, data_sci = get_fits_info(FITS_SCI)
     hdr_ref, data_ref = get_fits_info(FITS_REF)

@@ -122,7 +122,7 @@ class ImageDistortionCorrector:
         "WRITE_XML": "Y",
         "VERBOSE_TYPE": "LOG",
         "BLANK_BADPIXELS": "Y",
-        "FILL_VALUE": "0.0",
+        "FILL_VALUE": "NAN",
         "CELESTIAL_TYPE": "NATIVE",
         "PROJECTION_TYPE": "TAN",
         "FSCALASTRO_TYPE": "NONE",
@@ -425,6 +425,9 @@ NNW
         """Heuristic saturation estimate for SExtractor SATUR_LEVEL."""
         with fits.open(fits_path) as hdul:
             data = hdul[0].data
+            # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+            if data.dtype.kind != 'f':
+                data = data.astype(np.float32)
             if np.issubdtype(data.dtype, np.integer):
                 max_possible = np.iinfo(data.dtype).max
                 if np.nanmax(data) >= 0.99 * max_possible:
@@ -749,7 +752,7 @@ NNW
                 sci_pix_scale = WCS.utils.proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
                 ref_pix_scale = WCS.utils.proj_plane_pixel_scales(ref_wcs)[0] * 3600.0
                 ra_arr, dec_arr = sci_wcs.all_pix2world(
-                    [sci_shape[1] / 2], [sci_shape[0] / 2], 1
+                    [sci_shape[1] / 2], [sci_shape[0] / 2], 0
                 )
                 center_ra, center_dec = float(ra_arr[0]), float(dec_arr[0])
                 science_skip_resample = (
@@ -1299,11 +1302,17 @@ NNW
                 sci_header = h_sci[0].header
                 if sci_data is None or sci_data.size == 0:
                     return None
+                # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+                if sci_data.dtype.kind != 'f':
+                    sci_data = sci_data.astype(np.float32)
             with fits.open(reference_image, mode="readonly") as h_ref:
                 ref_data = h_ref[0].data
                 ref_header = h_ref[0].header
                 if ref_data is None or ref_data.size == 0:
                     return None
+                # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+                if ref_data.dtype.kind != 'f':
+                    ref_data = ref_data.astype(np.float32)
             sci_wcs = get_wcs(sci_header)
             ref_wcs = get_wcs(ref_header)
             if sci_wcs is None or ref_wcs is None:
@@ -1569,10 +1578,11 @@ NNW
                     )
             if not use_aafitrans:
                 aligned_ref_img, footprint = aa.apply_transform(tform, ref_img, sci_img)
+            # Preserve NaNs (chip gaps) instead of replacing with sentinel
             aligned_ref_img = np.nan_to_num(
-                aligned_ref_img, nan=1e-30, posinf=1e-30, neginf=1e-30
+                aligned_ref_img, nan=np.nan, posinf=np.nan, neginf=np.nan
             )
-            aligned_ref_img[~footprint.astype(bool)] = 1e-30
+            aligned_ref_img[~footprint.astype(bool)] = np.nan
 
             def _save_aligned_image(data, header, output_path):
                 from functions import safe_fits_write

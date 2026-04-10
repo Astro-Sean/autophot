@@ -184,7 +184,8 @@ def _safe_wcs_from_header(header, silent=True):
         # Validate by attempting a simple transformation
         try:
             test_pix = (float(header['CRPIX1']), float(header['CRPIX2']))
-            test_world = wcs.pixel_to_world(*test_pix)
+            # CRPIX values are 1-based (FITS standard), so use origin=1
+            test_world = wcs.pixel_to_world(*test_pix, origin=1)
             if test_world is None or not hasattr(test_world, 'ra') or not hasattr(test_world, 'dec'):
                 return None
         except Exception:
@@ -2054,8 +2055,9 @@ def run_photometry():
                 f"TNS position check for {input_yaml.get('target_name', 'Transient')}"
             )
         )
+        # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
         target_x_expected, target_y_expected = imageWCS.all_world2pix(
-            input_yaml["target_ra"], input_yaml["target_dec"], index
+            input_yaml["target_ra"], input_yaml["target_dec"], 0
         )
         logging.info(
             f"TNS RA/Dec: {input_yaml['target_ra']:.6f}, {input_yaml['target_dec']:.6f}"
@@ -2128,7 +2130,8 @@ def run_photometry():
             if input_yaml["target_ra"] is None and input_yaml["target_dec"] is None:
                 # Use image center when no target information is provided.
                 center_pix = (image.shape[1] / 2, image.shape[0] / 2)
-                center = imageWCS.all_pix2world([center_pix[0]], [center_pix[1]], index)
+                # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
+                center = imageWCS.all_pix2world([center_pix[0]], [center_pix[1]], 0)
                 target_coords = SkyCoord(
                     center[0][0],
                     center[1][0],
@@ -2684,10 +2687,11 @@ def run_photometry():
         )
 
         # Converts pixel coordinates of isolated sources to world coordinates.
+        # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
         IsolatedSources["RA"], IsolatedSources["DEC"] = imageWCS.all_pix2world(
             IsolatedSources.x_pix.values,
             IsolatedSources.y_pix.values,
-            index,
+            0,
         )
 
         # Creates SkyCoord objects for sources and target.
@@ -2957,10 +2961,11 @@ def run_photometry():
         # =============================================================================
         #  Convert Pixel Coordinates to World Coordinates
         # Converts pixel coordinates of isolated sources to world coordinates.
+        # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
         ra_IsolatedSources, dec_IsolatedSources = imageWCS.all_pix2world(
             IsolatedSources.x_pix.values,
             IsolatedSources.y_pix.values,
-            index,
+            0,
         )
 
         # Calculates the distance of each isolated source from the target.
@@ -3010,12 +3015,13 @@ def run_photometry():
                     & np.isfinite(psf_sources_orig["y_pix"].to_numpy(dtype=float))
                 )
                 psf_sources_orig = psf_sources_orig.loc[finite_xy].copy()
+                # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
                 ra_pool, dec_pool = imageWCS.all_pix2world(
                     psf_sources_orig["x_pix"].to_numpy(dtype=float),
                     psf_sources_orig["y_pix"].to_numpy(dtype=float),
-                    index,
+                    0,
                 )
-                x_orig, y_orig = wcs_orig.all_world2pix(ra_pool, dec_pool, index)
+                x_orig, y_orig = wcs_orig.all_world2pix(ra_pool, dec_pool, 0)
                 psf_sources_orig["x_pix"] = x_orig
                 psf_sources_orig["y_pix"] = y_orig
                 h_orig, w_orig = image_orig.shape
@@ -3341,8 +3347,9 @@ def run_photometry():
                     ny, nx = science_image.shape
                     science_center_pix = (nx / 2, ny / 2)
                     # Converts the center pixel to sky coordinates.
+                    # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
                     science_center_world = science_wcs.all_pix2world(
-                        *science_center_pix, index
+                        *science_center_pix, 0
                     )
                     center_coord = SkyCoord(
                         ra=science_center_world[0],
@@ -3772,10 +3779,11 @@ def run_photometry():
 
                 # Converts pixel coordinates back to world coordinates and attaches to the table.
                 if not MatchingSources.empty:
+                    # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
                     ra_vals, dec_vals = imageWCS.all_pix2world(
                         MatchingSources["x_pix"].values,
                         MatchingSources["y_pix"].values,
-                        index,
+                        0,
                     )
                     MatchingSources["RA"] = ra_vals
                     MatchingSources["DEC"] = dec_vals
@@ -4798,10 +4806,11 @@ def run_photometry():
         )
 
         # Converts pixel coordinates to world coordinates.
+        # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
         extracted_position = imageWCS.all_pix2world(
             TargetPosition["x_fit"].iloc[0],
             TargetPosition["y_fit"].iloc[0],
-            index,
+            0,
         )
 
         # Creates a SkyCoord object for the extracted position.
@@ -4927,13 +4936,16 @@ def run_photometry():
                 equinox="J2000",
             )
             # Builds sky coordinates for (xpix + xpix_err, ypix) and (xpix, ypix + ypix_err).
+            # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
             sky_dx = imageWCS.pixel_to_world(
                 TargetPosition["x_fit"].iloc[0] + TargetPosition["x_fit_err"].iloc[0],
                 TargetPosition["y_fit"].iloc[0],
+                origin=0
             )
             sky_dy = imageWCS.pixel_to_world(
                 TargetPosition["x_fit"].iloc[0],
                 TargetPosition["y_fit"].iloc[0] + TargetPosition["y_fit_err"].iloc[0],
+                origin=0
             )
             # Calculates separations in arcseconds.
             ra_err = sky_center.separation(sky_dx).arcsecond
@@ -4949,11 +4961,12 @@ def run_photometry():
             logging.info("\tFitting uncertainty: N/A (fit did not converge)")
 
         # Calculates the offset in arcseconds (including direction).
+        # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
         expected_sky = imageWCS.pixel_to_world(
-            input_yaml["target_x_pix"], input_yaml["target_y_pix"]
+            input_yaml["target_x_pix"], input_yaml["target_y_pix"], origin=0
         )
         fitted_sky = imageWCS.pixel_to_world(
-            TargetPosition["x_fit"].iloc[0], TargetPosition["y_fit"].iloc[0]
+            TargetPosition["x_fit"].iloc[0], TargetPosition["y_fit"].iloc[0], origin=0
         )
 
         # Calculates RA and Dec offsets with proper cos(dec) correction.
@@ -5601,10 +5614,11 @@ def run_photometry():
                 background_rms=background_rms,
             )
             # Converts pixel coordinates back to world coordinates.
+            # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
             ra_IsolatedSources, dec_IsolatedSources = imageWCS.all_pix2world(
                 IsolatedSources["x_pix"].values,
                 IsolatedSources["y_pix"].values,
-                index,
+                0,
             )
             # Adds the RA and DEC columns to the IsolatedSources DataFrame.
             IsolatedSources["RA"] = ra_IsolatedSources

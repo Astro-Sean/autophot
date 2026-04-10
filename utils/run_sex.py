@@ -810,6 +810,9 @@ class SExtractorWrapper:
                 hdu0 = hdul[0]
                 header = hdu0.header
                 image_data = hdu0.data
+                # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
+                if image_data.dtype.kind != 'f':
+                    image_data = image_data.astype(np.float32)
             gain = float(header.get(gain_key, 1.0))
             saturation = float(header.get(satur_key, 1e7))
 

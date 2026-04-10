@@ -286,7 +286,8 @@ def centroid_com_with_error(data, mask=None, error=None, xpeak=None, ypeak=None)
     offset = float(np.nanmin(flux[finite]))
     flux = flux - offset
     flux[~np.isfinite(flux)] = np.nan
-    flux[flux < 0] = 0.0
+    # Preserve NaNs instead of setting to 0.0
+    flux[flux < 0] = np.nan
 
     total = float(np.sum(flux))
     if total <= 0:
@@ -1065,7 +1066,8 @@ class PSF:
         for st in epsfstars:
             d = st.data.copy()
             d -= np.nanmin(d)
-            d[d < 0] = 0.0
+            # Preserve NaNs instead of setting to 0.0
+            d[d < 0] = np.nan
             spectra.append(self.compute_power_spectrum(d))
 
         spectra = np.array(spectra, dtype=float)
