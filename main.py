@@ -1634,6 +1634,9 @@ def run_photometry():
 
                 # Trim NaN boundaries created by Cutout2D (fill_value=np.nan)
                 # This must happen before background subtraction
+                # Calculate center of trimmed image for target preservation
+                center_x = image.shape[1] / 2.0
+                center_y = image.shape[0] / 2.0
                 buffer = input_yaml["preprocessing"].get("nan_trim_buffer", 10)
                 image, header, trim_info = _trim_nan_boundaries(
                     image, header, target_x=center_x, target_y=center_y, buffer_pixels=buffer
