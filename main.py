@@ -249,7 +249,7 @@ def _heuristic_filter_mapping(raw_filter: str) -> str:
 def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffer_pixels=10):
     """
     Trim image to remove NaN boundary regions while ensuring target remains in image.
-    
+
     Parameters
     ----------
     image_data : np.ndarray
@@ -260,7 +260,7 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
         Target position in pixels (1-indexed, typical FITS convention)
     buffer_pixels : int
         Minimum buffer around valid data region
-    
+
     Returns
     -------
     trimmed_data : np.ndarray
@@ -272,44 +272,63 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
     """
     import numpy as np
     from astropy.wcs import WCS
-    
+
+    logging.info(f"NaN boundary trimming: image shape {image_data.shape}")
+    nan_count = np.sum(np.isnan(image_data))
+    total_pixels = image_data.size
+    logging.info(f"NaN boundary trimming: {nan_count}/{total_pixels} pixels are NaN ({100*nan_count/total_pixels:.1f}%)")
+
     # Find valid (non-NaN) pixels
     valid_mask = ~np.isnan(image_data)
-    
+
     # If no NaNs or all NaNs, return as-is
     if not np.any(valid_mask) or np.all(valid_mask):
+        logging.info(f"NaN boundary trimming: skipped (all NaNs: {not np.any(valid_mask)}, no NaNs: {np.all(valid_mask)})")
         return image_data, header, {"trimmed": False}
-    
+
     # Find valid region bounds
     rows_with_valid = np.any(valid_mask, axis=1)
     cols_with_valid = np.any(valid_mask, axis=0)
-    
+
     if not np.any(rows_with_valid) or not np.any(cols_with_valid):
+        logging.info(f"NaN boundary trimming: skipped (no valid rows: {not np.any(rows_with_valid)}, no valid cols: {not np.any(cols_with_valid)})")
         return image_data, header, {"trimmed": False}
-    
+
     y_min, y_max = np.where(rows_with_valid)[0][[0, -1]]
     x_min, x_max = np.where(cols_with_valid)[0][[0, -1]]
+
+    logging.info(f"NaN boundary trimming: valid region bounds x=[{x_min},{x_max}], y=[{y_min},{y_max}]")
     
     # Add buffer
     y_min = max(0, y_min - buffer_pixels)
     y_max = min(image_data.shape[0] - 1, y_max + buffer_pixels)
     x_min = max(0, x_min - buffer_pixels)
     x_max = min(image_data.shape[1] - 1, x_max + buffer_pixels)
-    
+
+    logging.info(f"NaN boundary trimming: after buffer x=[{x_min},{x_max}], y=[{y_min},{y_max}]")
+
     # Check if target is included (if provided)
     if target_x is not None and target_y is not None:
         # Convert to 0-indexed for array checking
         tx_0idx, ty_0idx = target_x - 1, target_y - 1
-        
+        logging.info(f"NaN boundary trimming: target position (0-indexed) x={tx_0idx:.1f}, y={ty_0idx:.1f}")
+
         # Expand bounds to include target if needed
         if tx_0idx < x_min:
+            logging.info(f"NaN boundary trimming: expanding x_min to include target")
             x_min = max(0, int(tx_0idx) - buffer_pixels)
         if tx_0idx > x_max:
+            logging.info(f"NaN boundary trimming: expanding x_max to include target")
             x_max = min(image_data.shape[1] - 1, int(tx_0idx) + buffer_pixels)
         if ty_0idx < y_min:
+            logging.info(f"NaN boundary trimming: expanding y_min to include target")
             y_min = max(0, int(ty_0idx) - buffer_pixels)
         if ty_0idx > y_max:
+            logging.info(f"NaN boundary trimming: expanding y_max to include target")
             y_max = min(image_data.shape[0] - 1, int(ty_0idx) + buffer_pixels)
+
+    logging.info(f"NaN boundary trimming: final bounds x=[{x_min},{x_max}], y=[{y_min},{y_max}]")
+    logging.info(f"NaN boundary trimming: original shape {image_data.shape}, will trim to ({y_max - y_min + 1}, {x_max - x_min + 1})")
     
     # Perform trim using Cutout2D for proper WCS handling
     from astropy.nddata import Cutout2D
