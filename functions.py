@@ -2307,6 +2307,16 @@ def safe_fits_write(fpath: str, image: np.ndarray, header: fits.Header, overwrit
     output_verify : str, optional
         astropy.io.fits output verification mode (default: "silentfix+ignore").
     """
+    # Sanitize header to remove non-ASCII characters
+    sanitized_header = fits.Header()
+    for key, value in header.items():
+        if isinstance(value, str):
+            # Remove non-ASCII characters from string values
+            sanitized_value = ''.join(char if ord(char) < 128 else '?' for char in str(value))
+            sanitized_header[key] = sanitized_value
+        else:
+            sanitized_header[key] = value
+
     # Use float32 to preserve NaNs (chip gaps) - integer dtypes cannot represent NaN
     image_to_write = image.astype(np.float32) if image.dtype.kind != 'f' else image
-    fits.writeto(fpath, image_to_write, header, overwrite=overwrite, output_verify=output_verify)
+    fits.writeto(fpath, image_to_write, sanitized_header, overwrite=overwrite, output_verify=output_verify)
