@@ -3898,36 +3898,6 @@ class Templates:
                     float(diff_median),
                 )
 
-            # Trim NaN boundaries from difference image (NaNs introduced by SWarp alignment)
-            try:
-                from main import _trim_nan_boundaries
-                import numpy as np
-
-                # Check if difference image has NaN boundaries
-                nan_count = np.sum(np.isnan(diff_data))
-                total_pixels = diff_data.size
-                if nan_count > 0:
-                    logger.info(
-                        f"Trimming NaN boundaries from difference image: {nan_count}/{total_pixels} pixels are NaN ({100*nan_count/total_pixels:.1f}%)"
-                    )
-                    # Get target position for trimming (use center if not available)
-                    target_x, target_y = None, None
-                    if self.input_yaml.get("target_x_pix") and self.input_yaml.get("target_y_pix"):
-                        target_x = self.input_yaml["target_x_pix"]
-                        target_y = self.input_yaml["target_y_pix"]
-
-                    buffer = self.input_yaml.get("preprocessing", {}).get("nan_trim_buffer", 10)
-                    diff_data, diff_header, trim_info = _trim_nan_boundaries(
-                        diff_data, diff_header, target_x=target_x, target_y=target_y, buffer_pixels=buffer
-                    )
-                    if trim_info["trimmed"]:
-                        logger.info(
-                            f"Trimmed NaN boundaries from difference image: {trim_info['original_shape']} -> {trim_info['trimmed_shape']}"
-                        )
-                        write_fits(differenceFpath, diff_data, diff_header)
-            except Exception as trim_exc:
-                logger.warning(f"NaN boundary trimming on difference image failed: {trim_exc}")
-
             elapsed = time.time() - t0
             logger.info("Image subtraction completed in %.1f s", elapsed)
 

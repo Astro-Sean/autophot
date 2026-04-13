@@ -1627,10 +1627,22 @@ def run_photometry():
                 image = cutout.data
                 if cutout.wcs is not None:
                     header.update(cutout.wcs.to_header(relax=True))
-                
+
                 # Writes the modified image and header back to the FITS file.
                 safe_fits_write(fpath, image, header)
                 logging.info(f"New image shape after trimming: {image.shape}")
+
+                # Trim NaN boundaries created by Cutout2D (fill_value=np.nan)
+                # This must happen before background subtraction
+                buffer = input_yaml["preprocessing"].get("nan_trim_buffer", 10)
+                image, header, trim_info = _trim_nan_boundaries(
+                    image, header, target_x=center_x, target_y=center_y, buffer_pixels=buffer
+                )
+                if trim_info["trimmed"]:
+                    logging.info(
+                        f"Trimmed NaN boundaries after 5 arcmin cutout: {trim_info['original_shape']} -> {trim_info['trimmed_shape']}"
+                    )
+                    safe_fits_write(fpath, image, header)
             except Exception as e:
                 logging.warning(f"Could not trim image: {e}; ignoring the operation.")
 
