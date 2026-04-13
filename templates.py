@@ -239,7 +239,7 @@ TWOMASS_MAX_SIZE_ARCMIN = 15
 DEFAULT_SIGMA_CLIP = 3.0
 
 # Default FWHM padding multiplier for masking around bright / saturated sources
-DEFAULT_FWHM_PADDING_MULTIPLIER = 5
+DEFAULT_FWHM_PADDING_MULTIPLIER = 3
 
 
 # =============================================================================
@@ -1830,13 +1830,13 @@ class Templates:
                 npixels_det = max_npixels
 
             # Adaptive threshold based on image statistics
-            threshold = 5.0 * image_std + image_median
+            threshold = 3.0 * image_std + image_median
             if not np.isfinite(threshold):
                 logger.warning("create_image_mask: threshold is NaN; using percentile-based threshold.")
                 threshold = np.percentile(finite_data, 95)
             if threshold <= image_median:
-                logger.warning(f"create_image_mask: threshold {threshold} <= median {image_median}; using 3*std.")
-                threshold = 3.0 * image_std + image_median
+                logger.warning(f"create_image_mask: threshold {threshold} <= median {image_median}; using 2*std.")
+                threshold = 2.0 * image_std + image_median
 
             # --- Source detection via segmentation ---
             # Handle NaN values in data for detection
