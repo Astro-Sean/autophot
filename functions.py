@@ -2310,22 +2310,32 @@ def safe_fits_write(fpath: str, image: np.ndarray, header: fits.Header, overwrit
     # Sanitize header to remove non-ASCII characters
     sanitized_header = fits.Header()
     for key, value in header.items():
-        if isinstance(value, str):
-            # Remove non-ASCII characters from string values
-            sanitized_value = ''.join(char if ord(char) < 128 else '?' for char in str(value))
-            sanitized_header[key] = sanitized_value
-        elif isinstance(value, (list, tuple)):
-            # Handle list values (e.g., HISTORY comments)
-            sanitized_list = []
-            for item in value:
-                if isinstance(item, str):
-                    sanitized_list.append(''.join(char if ord(char) < 128 else '?' for char in item))
-                else:
-                    sanitized_list.append(item)
-            sanitized_header[key] = sanitized_list
-        else:
-            sanitized_header[key] = value
+        try:
+            if isinstance(value, str):
+                # Remove non-ASCII characters from string values
+                sanitized_value = ''.join(char if ord(char) < 128 else '?' for char in str(value))
+                sanitized_header[key] = sanitized_value
+            elif isinstance(value, (list, tuple)):
+                # Handle list values (e.g., HISTORY comments)
+                sanitized_list = []
+                for item in value:
+                    if isinstance(item, str):
+                        sanitized_list.append(''.join(char if ord(char) < 128 else '?' for char in item))
+                    else:
+                        sanitized_list.append(item)
+                sanitized_header[key] = sanitized_list
+            else:
+                sanitized_header[key] = value
+        except (UnicodeEncodeError, ValueError):
+            # Skip problematic header cards
+            continue
 
     # Use float32 to preserve NaNs (chip gaps) - integer dtypes cannot represent NaN
     image_to_write = image.astype(np.float32) if image.dtype.kind != 'f' else image
-    fits.writeto(fpath, image_to_write, sanitized_header, overwrite=overwrite, output_verify=output_verify)
+
+    # Try writing with sanitized header, fall back to more lenient mode if it fails
+    try:
+        fits.writeto(fpath, image_to_write, sanitized_header, overwrite=overwrite, output_verify=output_verify)
+    except (UnicodeEncodeError, ValueError) as e:
+        # If sanitization failed, try with even more lenient verification
+        fits.writeto(fpath, image_to_write, sanitized_header, overwrite=overwrite, output_verify="fix")
