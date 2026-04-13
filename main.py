@@ -359,14 +359,34 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
         trimmed_wcs = cutout.wcs
         # Convert WCS back to header
         trimmed_header = trimmed_wcs.to_header()
-        # Copy non-WCS keywords from original header
+        # Copy non-WCS keywords from original header (sanitize to remove non-ASCII)
         for key in header:
             if key not in trimmed_header and not key.startswith(('CRPIX', 'CRVAL', 'CDELT', 'CTYPE', 'CD1_', 'CD2_', 'PC1_', 'PC2_', 'NAXIS')):
-                trimmed_header[key] = header[key]
+                try:
+                    value = header[key]
+                    if isinstance(value, str):
+                        # Sanitize string values
+                        sanitized_value = ''.join(char if ord(char) < 128 else '?' for char in str(value))
+                        trimmed_header[key] = sanitized_value
+                    else:
+                        trimmed_header[key] = value
+                except (UnicodeEncodeError, ValueError):
+                    # Skip problematic header cards
+                    continue
     else:
         # No valid WCS - just slice the data
         trimmed_data = image_data[y_min:y_max+1, x_min:x_max+1]
-        trimmed_header = header.copy()
+        # Sanitize header when copying
+        trimmed_header = fits.Header()
+        for key, value in header.items():
+            try:
+                if isinstance(value, str):
+                    sanitized_value = ''.join(char if ord(char) < 128 else '?' for char in str(value))
+                    trimmed_header[key] = sanitized_value
+                else:
+                    trimmed_header[key] = value
+            except (UnicodeEncodeError, ValueError):
+                continue
         trimmed_header['NAXIS1'] = trimmed_data.shape[1]
         trimmed_header['NAXIS2'] = trimmed_data.shape[0]
     
