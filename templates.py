@@ -3732,15 +3732,17 @@ class Templates:
             ).astype(np.int32)
 
             # Segmentation-based source masks
+            # Template: less aggressive masking (no large source removal, smaller padding)
             template_seg_mask, template_seg_centers = self.create_image_mask(
                 templateImage,
                 sat_lvl=template_saturate,
                 fwhm=template_fwhm,
                 create_source_mask=False,
                 ignore_position=target_location,
-                remove_large_sources=True,
-                padding=int(DEFAULT_FWHM_PADDING_MULTIPLIER * template_fwhm),
+                remove_large_sources=False,  # Don't remove large sources in template
+                padding=int(2 * template_fwhm),  # Smaller padding for template
             )
+            # Science: more aggressive masking (remove large sources, normal padding)
             science_seg_mask, science_seg_centers = self.create_image_mask(
                 scienceImage,
                 sat_lvl=science_saturate,
