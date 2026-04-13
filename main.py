@@ -4195,6 +4195,7 @@ def run_photometry():
                     stamp_loc=stamp_loc,
                     scienceNoise=weight_fpath,
                     templateNoise=template_weight_path,
+                    background_defects_mask=defects_mask,
                 )
                 if fpath is None:
                     logging.warning(

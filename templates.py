@@ -3399,6 +3399,7 @@ class Templates:
         stamp_loc: Optional[str] = None,
         scienceNoise: Optional[str] = None,
         templateNoise: Optional[str] = None,
+        background_defects_mask: Optional[np.ndarray] = None,
     ) -> Tuple[
         Optional[str], Optional[np.ndarray], Optional[List[Tuple[float, float]]]
     ]:
@@ -3753,7 +3754,7 @@ class Templates:
                 padding=int(DEFAULT_FWHM_PADDING_MULTIPLIER * science_fwhm),
             )
 
-            # Combined mask: NaN/invalid (essential) + segmentation-based source masks
+            # Combined mask: NaN/invalid (essential) + segmentation-based source masks + background defects
             mask_essential = np.clip(
                 science_mask_nans + template_mask_nans,
                 0,
@@ -3764,6 +3765,20 @@ class Templates:
                 0,
                 1,
             ).astype(bool)
+
+            # Include background defects mask if provided (saturation streaks, satellite trails, etc.)
+            if background_defects_mask is not None:
+                background_defects_mask = background_defects_mask.astype(bool)
+                # Resize background defects mask to match current image shape if needed
+                if background_defects_mask.shape != scienceImage.shape:
+                    # If shapes don't match, skip the background defects mask
+                    logger.warning(
+                        f"Background defects mask shape {background_defects_mask.shape} doesn't match science image shape {scienceImage.shape}; skipping background defects mask."
+                    )
+                else:
+                    mask_essential = mask_essential | background_defects_mask
+                    logger.info("Included background defects mask (saturation streaks, satellite trails) in universal mask.")
+
             universal_mask_full = (mask_essential | mask_sources).astype(np.int32)
 
             # Dynamic mask cap: if the full mask would leave too few good pixels for
