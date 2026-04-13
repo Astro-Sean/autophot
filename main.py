@@ -314,18 +314,42 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
         logging.info(f"NaN boundary trimming: target position (0-indexed) x={tx_0idx:.1f}, y={ty_0idx:.1f}")
 
         # Expand bounds to include target if needed
+        expanded = False
         if tx_0idx < x_min:
             logging.info(f"NaN boundary trimming: expanding x_min to include target")
             x_min = max(0, int(tx_0idx) - buffer_pixels)
+            expanded = True
         if tx_0idx > x_max:
             logging.info(f"NaN boundary trimming: expanding x_max to include target")
             x_max = min(image_data.shape[1] - 1, int(tx_0idx) + buffer_pixels)
+            expanded = True
         if ty_0idx < y_min:
             logging.info(f"NaN boundary trimming: expanding y_min to include target")
             y_min = max(0, int(ty_0idx) - buffer_pixels)
+            expanded = True
         if ty_0idx > y_max:
             logging.info(f"NaN boundary trimming: expanding y_max to include target")
             y_max = min(image_data.shape[0] - 1, int(ty_0idx) + buffer_pixels)
+            expanded = True
+
+        # Final verification: ensure target is within bounds
+        if not (x_min <= tx_0idx <= x_max and y_min <= ty_0idx <= y_max):
+            logging.warning(
+                f"NaN boundary trimming: target at ({tx_0idx:.1f}, {ty_0idx:.1f}) is outside final bounds x=[{x_min},{x_max}], y=[{y_min},{y_max}]"
+            )
+            # Force include target by expanding bounds
+            x_min = min(x_min, int(tx_0idx) - buffer_pixels)
+            x_max = max(x_max, int(tx_0idx) + buffer_pixels)
+            y_min = min(y_min, int(ty_0idx) - buffer_pixels)
+            y_max = max(y_max, int(ty_0idx) + buffer_pixels)
+            # Clamp to image bounds
+            x_min = max(0, x_min)
+            x_max = min(image_data.shape[1] - 1, x_max)
+            y_min = max(0, y_min)
+            y_max = min(image_data.shape[0] - 1, y_max)
+            logging.warning(f"NaN boundary trimming: forced bounds to include target: x=[{x_min},{x_max}], y=[{y_min},{y_max}]")
+        elif expanded:
+            logging.info(f"NaN boundary trimming: successfully expanded bounds to include target")
 
     logging.info(f"NaN boundary trimming: final bounds x=[{x_min},{x_max}], y=[{y_min},{y_max}]")
     logging.info(f"NaN boundary trimming: original shape {image_data.shape}, will trim to ({y_max - y_min + 1}, {x_max - x_min + 1})")
