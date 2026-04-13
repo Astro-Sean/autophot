@@ -372,6 +372,37 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
 def run_photometry():
 
     # ---------------------------------------------------------------------
+    # Check for optional Astromatic tools
+    # ---------------------------------------------------------------------
+    import shutil
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Check which tools are available
+    sextractor_exe = shutil.which("sex")
+    scamp_exe = shutil.which("scamp")
+    swarp_exe = shutil.which("swarp")
+
+    missing_tools = []
+    if not sextractor_exe:
+        missing_tools.append("SExtractor (sex)")
+    if not scamp_exe:
+        missing_tools.append("SCAMP")
+    if not swarp_exe:
+        missing_tools.append("SWarp")
+
+    if missing_tools:
+        logger.warning(
+            "Optional Astromatic tools not found on PATH: %s. "
+            "These are only required for advanced features (SCAMP for TPV distortion, "
+            "SWarp for image resampling). The pipeline will fall back to alternative methods "
+            "(astrometry.net for WCS, AstroAlign/Reproject for template alignment). "
+            "To install: conda install -c conda-forge astromatic-source-extractor "
+            "astromatic-scamp astromatic-swarp",
+            ", ".join(missing_tools)
+        )
+
+    # ---------------------------------------------------------------------
     # CLI parsing (must happen before heavy imports)
     # ---------------------------------------------------------------------
     import argparse
