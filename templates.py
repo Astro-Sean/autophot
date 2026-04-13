@@ -1752,16 +1752,64 @@ class Templates:
         mask = np.zeros(data.shape, dtype=np.int32)
 
         try:
+            # --- Input validation ---
+            # Validate image size
+            if data.shape[0] < fwhm or data.shape[1] < fwhm:
+                logger.warning(
+                    f"create_image_mask: image shape {data.shape} is smaller than FWHM {fwhm}; returning empty mask."
+                )
+                return mask, masked_centres
+
+            # Validate and sanitize parameters
+            fwhm = int(fwhm)
+            if fwhm <= 0:
+                logger.warning(f"create_image_mask: invalid FWHM {fwhm}; setting to default 5.")
+                fwhm = 5
+            if sat_lvl <= 0:
+                logger.warning(f"create_image_mask: invalid sat_lvl {sat_lvl}; setting to 2^16.")
+                sat_lvl = 2**16
+            padding = int(padding)
+            if padding < 0:
+                logger.warning(f"create_image_mask: invalid padding {padding}; setting to 0.")
+                padding = 0
+
+            # Handle NaN values in input data
+            nan_mask = ~np.isfinite(data)
+            nan_fraction = np.sum(nan_mask) / data.size
+            if nan_fraction > 0.9:
+                logger.warning(
+                    f"create_image_mask: image has {100*nan_fraction:.1f}% NaNs; returning empty mask."
+                )
+                return mask, masked_centres
+            elif nan_fraction > 0.5:
+                logger.warning(
+                    f"create_image_mask: image has {100*nan_fraction:.1f}% NaNs; mask may be unreliable."
+                )
+
             # --- Background statistics ---
+            # Use only finite pixels for statistics
+            finite_data = data[np.isfinite(data)]
+            if len(finite_data) == 0:
+                logger.warning("create_image_mask: no finite pixels in image; returning empty mask.")
+                return mask, masked_centres
+
             _, image_median, image_std = sigma_clipped_stats(
-                data,
+                finite_data,
                 sigma=DEFAULT_SIGMA_CLIP,
                 cenfunc=np.nanmedian,
                 stdfunc="mad_std",
             )
 
+            # Validate statistics
+            if not np.isfinite(image_std) or image_std <= 0:
+                logger.warning(
+                    f"create_image_mask: invalid image_std {image_std}; setting to robust estimate."
+                )
+                image_std = np.nanstd(finite_data)
+                if not np.isfinite(image_std) or image_std <= 0:
+                    image_std = 1.0  # Fallback to reasonable default
+
             # Ensure FWHM is even (required by kernel builder)
-            fwhm = int(fwhm)
             if fwhm % 2 != 0:
                 fwhm += 1
 
@@ -1776,15 +1824,32 @@ class Templates:
                     float(npixels_det_raw),
                 )
                 npixels_det = 5
+            # Clamp npixels to reasonable fraction of image
+            max_npixels = min(100, data.shape[0] * data.shape[1] // 100)
+            if npixels_det > max_npixels:
+                npixels_det = max_npixels
+
+            # Adaptive threshold based on image statistics
             threshold = 5.0 * image_std + image_median
+            if not np.isfinite(threshold):
+                logger.warning("create_image_mask: threshold is NaN; using percentile-based threshold.")
+                threshold = np.percentile(finite_data, 95)
+            if threshold <= image_median:
+                logger.warning(f"create_image_mask: threshold {threshold} <= median {image_median}; using 3*std.")
+                threshold = 3.0 * image_std + image_median
 
             # --- Source detection via segmentation ---
-            seg = detect_sources(data, threshold, npixels=npixels_det)
+            # Handle NaN values in data for detection
+            data_for_detection = data.copy()
+            data_for_detection[~np.isfinite(data_for_detection)] = image_median
+
+            seg = detect_sources(data_for_detection, threshold, npixels=npixels_det)
             if seg is None:
                 logger.warning(
                     "create_image_mask: detect_sources returned None; returning empty mask."
                 )
                 return mask, masked_centres
+
             # Photutils >= 1.1 expects a SegmentationImage for SourceCatalog;
             # older versions may return a plain array, so normalise here.
             if not isinstance(seg, SegmentationImage):
@@ -1795,22 +1860,41 @@ class Templates:
                     )
                 seg = SegmentationImage(seg_arr)
 
-            cat = SourceCatalog(data, seg, localbkg_width=15 * fwhm)
+            # Check if any sources were detected
+            if seg.nlabels == 0:
+                logger.warning("create_image_mask: no sources detected; returning empty mask.")
+                return mask, masked_centres
+
+            cat = SourceCatalog(data_for_detection, seg, localbkg_width=15 * fwhm)
             tbl = cat.to_table().to_pandas()
+
+            # Check if source catalog is empty
+            if len(tbl) == 0:
+                logger.warning("create_image_mask: source catalog is empty; returning empty mask.")
+                return mask, masked_centres
 
             # Flag categories
             is_saturated = tbl["max_value"] > sat_lvl
             is_negative = tbl["max_value"] < 0
 
             if remove_large_sources:
-                clipped = sigma_clip(tbl["area"], sigma=10, maxiters=10)
-                is_large = clipped.mask
+                # Handle case where all areas are the same (sigma_clip will fail)
+                if len(tbl["area"]) > 1 and np.std(tbl["area"]) > 0:
+                    clipped = sigma_clip(tbl["area"], sigma=10, maxiters=10)
+                    is_large = clipped.mask
+                else:
+                    is_large = np.zeros(len(tbl), dtype=bool)
                 tbl = tbl[is_saturated | is_negative | is_large]
             else:
                 tbl = tbl[is_saturated | is_negative]
 
+            # Check if all sources were filtered out
+            if len(tbl) == 0:
+                logger.warning("create_image_mask: all sources filtered out; returning empty mask.")
+                return mask, masked_centres
+
             # --- Mask bright-catalog overlaps ---
-            if bright_sources is not None:
+            if bright_sources is not None and len(bright_sources) > 0:
                 for _, src in tbl.iterrows():
                     cx = (src["bbox_xmin"] + src["bbox_xmax"]) / 2
                     cy = (src["bbox_ymin"] + src["bbox_ymax"]) / 2
@@ -1850,13 +1934,22 @@ class Templates:
                     invalid_bbox_count += 1
                     continue
 
-                rect = RectangularAperture((cx, cy), w=w, h=h, theta=0)
-                rect_img = rect.to_mask().to_image(shape=mask.shape)
-                if rect_img is None:
+                # Clamp aperture to image bounds
+                cx_clamped = np.clip(cx, 0, mask.shape[1] - 1)
+                cy_clamped = np.clip(cy, 0, mask.shape[0] - 1)
+
+                try:
+                    rect = RectangularAperture((cx_clamped, cy_clamped), w=w, h=h, theta=0)
+                    rect_img = rect.to_mask().to_image(shape=mask.shape)
+                    if rect_img is None:
+                        invalid_bbox_count += 1
+                        continue
+                    mask += rect_img.astype(np.int32)
+                    masked_centres.append((cx_clamped, cy_clamped))
+                except Exception as e:
+                    logger.warning(f"create_image_mask: failed to create aperture for source at ({cx}, {cy}): {e}")
                     invalid_bbox_count += 1
                     continue
-                mask += rect_img.astype(np.int32)
-                masked_centres.append((cx, cy))
 
             if invalid_bbox_count > 0:
                 logger.warning(
