@@ -3771,7 +3771,7 @@ class Templates:
             # (NaN/invalid) mask so that source masks are effectively excluded.
             ts_cfg_early = self.input_yaml.get("template_subtraction", {})
             max_masked_frac = float(
-                ts_cfg_early.get("subtraction_max_masked_fraction", 0.90)
+                ts_cfg_early.get("subtraction_max_masked_fraction", 0.95)
             )
             total_pix = universal_mask_full.size
             full_masked_frac = (
