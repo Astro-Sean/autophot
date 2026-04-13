@@ -1954,12 +1954,12 @@ class Catalog:
                 )
                 # Adaptive residual threshold based on data scatter
                 initial_mad = np.median(np.abs(catalog_mag_linear - np.median(catalog_mag_linear)))
-                ransac_residual_threshold = max(3.0 * initial_mad, 0.15)  # At least 0.15 mag
+                ransac_residual_threshold = max(2.5 * initial_mad, 0.08)  # Tighter threshold for better outlier rejection
                 ransac = RANSACRegressor(
                     estimator=base_estimator,
                     residual_threshold=ransac_residual_threshold,
-                    max_trials=500,
-                    min_samples=0.33,
+                    max_trials=1000,  # More trials for better convergence
+                    min_samples=0.25,  # Require fewer samples for more robust fit
                 )
                 X = inst_mag_linear.reshape(-1, 1)
                 y = catalog_mag_linear
