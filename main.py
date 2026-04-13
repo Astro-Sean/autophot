@@ -184,9 +184,9 @@ def _safe_wcs_from_header(header, silent=True):
         # Validate by attempting a simple transformation
         try:
             test_pix = (float(header['CRPIX1']), float(header['CRPIX2']))
-            # CRPIX values are 1-based (FITS standard), so use origin=1
-            test_world = wcs.pixel_to_world(*test_pix, origin=1)
-            if test_world is None or not hasattr(test_world, 'ra') or not hasattr(test_world, 'dec'):
+            # CRPIX values are 1-based (FITS standard), so use all_pix2world with origin=1
+            test_world = wcs.all_pix2world([test_pix[0]], [test_pix[1]], 1)
+            if test_world is None or len(test_world[0]) == 0:
                 return None
         except Exception:
             return None
@@ -4936,16 +4936,14 @@ def run_photometry():
                 equinox="J2000",
             )
             # Builds sky coordinates for (xpix + xpix_err, ypix) and (xpix, ypix + ypix_err).
-            # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
+            # pixel_to_world uses 0-based indexing by default (matching numpy arrays)
             sky_dx = imageWCS.pixel_to_world(
                 TargetPosition["x_fit"].iloc[0] + TargetPosition["x_fit_err"].iloc[0],
                 TargetPosition["y_fit"].iloc[0],
-                origin=0
             )
             sky_dy = imageWCS.pixel_to_world(
                 TargetPosition["x_fit"].iloc[0],
                 TargetPosition["y_fit"].iloc[0] + TargetPosition["y_fit_err"].iloc[0],
-                origin=0
             )
             # Calculates separations in arcseconds.
             ra_err = sky_center.separation(sky_dx).arcsecond
@@ -4961,12 +4959,12 @@ def run_photometry():
             logging.info("\tFitting uncertainty: N/A (fit did not converge)")
 
         # Calculates the offset in arcseconds (including direction).
-        # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
+        # pixel_to_world uses 0-based indexing by default (matching numpy arrays)
         expected_sky = imageWCS.pixel_to_world(
-            input_yaml["target_x_pix"], input_yaml["target_y_pix"], origin=0
+            input_yaml["target_x_pix"], input_yaml["target_y_pix"]
         )
         fitted_sky = imageWCS.pixel_to_world(
-            TargetPosition["x_fit"].iloc[0], TargetPosition["y_fit"].iloc[0], origin=0
+            TargetPosition["x_fit"].iloc[0], TargetPosition["y_fit"].iloc[0]
         )
 
         # Calculates RA and Dec offsets with proper cos(dec) correction.
