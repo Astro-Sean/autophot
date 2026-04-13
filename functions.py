@@ -2314,6 +2314,15 @@ def safe_fits_write(fpath: str, image: np.ndarray, header: fits.Header, overwrit
             # Remove non-ASCII characters from string values
             sanitized_value = ''.join(char if ord(char) < 128 else '?' for char in str(value))
             sanitized_header[key] = sanitized_value
+        elif isinstance(value, (list, tuple)):
+            # Handle list values (e.g., HISTORY comments)
+            sanitized_list = []
+            for item in value:
+                if isinstance(item, str):
+                    sanitized_list.append(''.join(char if ord(char) < 128 else '?' for char in item))
+                else:
+                    sanitized_list.append(item)
+            sanitized_header[key] = sanitized_list
         else:
             sanitized_header[key] = value
 
