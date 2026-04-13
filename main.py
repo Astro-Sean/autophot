@@ -1637,15 +1637,19 @@ def run_photometry():
                 # Calculate center of trimmed image for target preservation
                 center_x = image.shape[1] / 2.0
                 center_y = image.shape[0] / 2.0
+                logging.info(f"Attempting NaN boundary trimming after 5 arcmin cutout: center=({center_x:.1f}, {center_y:.1f})")
                 buffer = input_yaml["preprocessing"].get("nan_trim_buffer", 10)
                 image, header, trim_info = _trim_nan_boundaries(
                     image, header, target_x=center_x, target_y=center_y, buffer_pixels=buffer
                 )
+                logging.info(f"NaN boundary trimming result: trimmed={trim_info['trimmed']}, trim_info={trim_info}")
                 if trim_info["trimmed"]:
                     logging.info(
                         f"Trimmed NaN boundaries after 5 arcmin cutout: {trim_info['original_shape']} -> {trim_info['trimmed_shape']}"
                     )
                     safe_fits_write(fpath, image, header)
+                else:
+                    logging.warning("NaN boundary trimming returned trimmed=False - no NaNs removed")
             except Exception as e:
                 logging.warning(f"Could not trim image: {e}; ignoring the operation.")
 
