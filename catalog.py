@@ -1954,12 +1954,12 @@ class Catalog:
                 )
                 # Adaptive residual threshold based on data scatter
                 initial_mad = np.median(np.abs(catalog_mag_linear - np.median(catalog_mag_linear)))
-                ransac_residual_threshold = max(2.5 * initial_mad, 0.08)  # Tighter threshold for better outlier rejection
+                ransac_residual_threshold = max(2.0 * initial_mad, 0.05)  # Much tighter threshold for better outlier rejection
                 ransac = RANSACRegressor(
                     estimator=base_estimator,
                     residual_threshold=ransac_residual_threshold,
-                    max_trials=1000,  # More trials for better convergence
-                    min_samples=0.25,  # Require fewer samples for more robust fit
+                    max_trials=2000,  # More trials for better convergence
+                    min_samples=0.20,  # Require fewer samples for more robust fit
                 )
                 X = inst_mag_linear.reshape(-1, 1)
                 y = catalog_mag_linear
@@ -1967,6 +1967,21 @@ class Catalog:
                 slope = ransac.estimator_.slope_
                 intercept = ransac.estimator_.intercept_
                 inlier_mask = ransac.inlier_mask_
+
+                # Post-RANSAC sigma clipping to remove remaining outliers
+                if np.sum(inlier_mask) > 5:
+                    inlier_X = X[inlier_mask]
+                    inlier_y = y[inlier_mask]
+                    residuals = inlier_y - (slope * inlier_X.flatten() + intercept)
+                    # Apply sigma clipping on residuals
+                    from scipy.stats import sigmaclip
+                    clipped_residuals, low, high = sigmaclip(residuals, sigma=2.5, maxiters=5)
+                    # Keep only points within sigma-clipped range
+                    residual_mask = (residuals >= low) & (residuals <= high)
+                    inlier_mask[inlier_mask] = residual_mask
+                    n_sigma_outliers = np.sum(~residual_mask)
+                    if n_sigma_outliers > 0:
+                        logger.info(f"Post-RANSAC sigma clipping removed {n_sigma_outliers} additional outliers")
 
                 # Calculate intercept error
                 inlier_X = X[inlier_mask]
