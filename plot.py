@@ -672,7 +672,7 @@ class Plot:
                 image,
                 origin="lower",
                 aspect="auto",
-                cmap="bone",
+                cmap="gray",
                 interpolation=None,
                 norm=norm,
             )
@@ -731,20 +731,21 @@ class Plot:
             circle = Circle(
                 (self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"]),
                 radius,
-                edgecolor="#FF0000",
+                edgecolor="#FF6600",
                 facecolor="none",
                 zorder=4,
-                lw=0.5,
+                lw=1.0,
             )
             ax1.add_patch(circle)
             ax1.text(
                 self.input_yaml["target_x_pix"],
                 self.input_yaml["target_y_pix"] + radius + 2,
                 self.input_yaml["target_name"],
-                color="#FF0000",
-                fontsize=3,
+                color="#FF6600",
+                fontsize=4,
                 ha="center",
                 va="bottom",
+                fontweight="bold",
             )
 
             # Plot PSF sources as a clean, consistent marker layer
@@ -752,10 +753,10 @@ class Plot:
                 ax1.scatter(
                     psfSources["x_pix"],
                     psfSources["y_pix"],
-                    s=max(8, 0.6 * scale),
+                    s=max(10, 0.8 * scale),
                     marker="+",
-                    linewidths=0.5,
-                    color="#00AA00",
+                    linewidths=0.8,
+                    color="#00CCFF",
                     label="PSF sources",
                     zorder=1,
                 )
@@ -773,11 +774,11 @@ class Plot:
                         lower_left,
                         square_size,
                         square_size,
-                        edgecolor="#0000FF",
+                        edgecolor="#FF00FF",
                         facecolor="none",
                         label="Reference Sources",
                         zorder=1,
-                        lw=0.5,
+                        lw=0.8,
                     )
                     ax1.add_patch(square)
 
@@ -791,7 +792,7 @@ class Plot:
                     norm_fwhm = Normalize(
                         vmin=np.nanmin(fwhm_values), vmax=np.nanmax(fwhm_values)
                     )
-                    cmap = plt.get_cmap("plasma")  # Choose a colormap
+                    cmap = plt.get_cmap("viridis")  # Colorblind-friendly colormap
 
                     # Create a ScalarMappable for the colorbar
                     sm = ScalarMappable(norm=norm_fwhm, cmap=cmap)
@@ -811,19 +812,19 @@ class Plot:
                             facecolor="none",
                             label="FWHM Sources",
                             zorder=2,
-                            lw=0.5,
+                            lw=0.8,
                             ls="-",
                         )
                         ax1.add_patch(circle)
 
                     # Add colorbar
-                    cbar = fig.colorbar(sm, ax=ax1, pad=0.0, aspect=40)
-                    cbar.set_label("FWHM (pixels)", fontsize=6)
-                    cbar.ax.tick_params(labelsize=5)
+                    cbar = fig.colorbar(sm, ax=ax1, pad=0.02, aspect=40)
+                    cbar.set_label("FWHM (pixels)", fontsize=7)
+                    cbar.ax.tick_params(labelsize=6)
 
             # from matplotlib.patches import Rectangle
 
-            # Plot variable sources as red "x" and annotate with otype
+            # Plot variable sources as yellow "x" and annotate with otype
             if variable_sources is not None:
 
                 if len(variable_sources) > 0:
@@ -841,20 +842,20 @@ class Plot:
                         if not (np.isfinite(x) and np.isfinite(y)):
                             continue
 
-                        # Draw "x" as two lines rotated 45 degrees (magenta for strong contrast)
+                        # Draw "x" as two lines rotated 45 degrees (yellow for distinct visibility)
                         ax1.plot(
                             [x - cross_len, x + cross_len],
                             [y - cross_len, y + cross_len],
-                            color="#FF0000",
-                            lw=0.5,
-                            zorder=2,
+                            color="#FFFF00",
+                            lw=1.0,
+                            zorder=3,
                         )
                         ax1.plot(
                             [x - cross_len, x + cross_len],
                             [y + cross_len, y - cross_len],
-                            color="#FF0000",
-                            lw=0.5,
-                            zorder=2,
+                            color="#FFFF00",
+                            lw=1.0,
+                            zorder=3,
                         )
 
                         if "SN*" in otype:
@@ -869,9 +870,9 @@ class Plot:
                             ),  # offset down in display (pixels)
                             ha="center",
                             va="bottom",
-                            fontsize=3,
-                            color="#FF0000",
-                            zorder=3,
+                            fontsize=4,
+                            color="#FFFF00",
+                            zorder=4,
                         )
 
             # Optional: distortion/residual vectors (catalog -> detected/FWHM sources).
@@ -927,9 +928,9 @@ class Plot:
                             angles="xy",
                             scale_units="xy",
                             scale=1.0,
-                            color="#00FFFF",
+                            color="#00FF00",
                             alpha=0.65,
-                            width=0.0018,
+                            width=0.0020,
                             zorder=5,
                         )
                         distortion_rms = float(np.sqrt(np.mean(u * u + v * v)))
@@ -942,9 +943,9 @@ class Plot:
             if mask is not None:
                 from matplotlib import colors
 
-                # Red overlay for masked regions.
-                mask_cmap = colors.ListedColormap(["none", "#FF0000"])
-                ax1.imshow(mask, cmap=mask_cmap, alpha=0.5, origin="lower")
+                # Orange overlay for masked regions (distinct from target source).
+                mask_cmap = colors.ListedColormap(["none", "#FF9900"])
+                ax1.imshow(mask, cmap=mask_cmap, alpha=0.4, origin="lower")
 
             # Optional colorbar for distortion grid-map magnitude.
             if distortion_grid_artist is not None:
@@ -983,12 +984,17 @@ class Plot:
             leg = ax1.legend(
                 by_label.values(),
                 by_label.keys(),
-                loc="lower center",
-                bbox_to_anchor=(0.5, 1.0),
-                ncol=4,
-                frameon=False,
-                columnspacing=1.5,
-                fontsize=3,
+                loc="upper right",
+                bbox_to_anchor=(0.98, 0.98),
+                ncol=1,
+                frameon=True,
+                framealpha=0.9,
+                edgecolor="black",
+                facecolor="white",
+                columnspacing=1.0,
+                fontsize=5,
+                handlelength=1.5,
+                handletextpad=0.5,
             )
 
             # Finalize figure layout

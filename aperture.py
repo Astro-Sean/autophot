@@ -575,9 +575,9 @@ class Aperture:
 
         # ---- Configuration -------------------------------------------------
         fwhm = self.input_yaml["fwhm"]
-        gain = gain or self.input_yaml.get("gain", 1.0)
-        exposure_time = exposure_time or self.input_yaml.get("exposure_time", 30.0)
-        read_noise = read_noise or self.input_yaml.get("read_noise", 0.0)
+        gain = float(gain or self.input_yaml.get("gain", 1.0))
+        exposure_time = float(exposure_time or self.input_yaml.get("exposure_time", 30.0))
+        read_noise = float(read_noise or self.input_yaml.get("read_noise", 0.0))
         ap_size = ap_size or self.input_yaml["photometry"]["aperture_radius"]
 
         crowded = self.input_yaml.get("photometry", {}).get("crowded_field", False)
@@ -1638,9 +1638,10 @@ class Aperture:
         if fwhm is None or ap_size is None:
             raise ValueError("fwhm and ap_size are required.")
 
+        gain = self.input_yaml.get("gain", 1.0)
         radii = np.arange(0.05, max_radius, 0.1) * fwhm
         error = (
-            calc_total_error(image, background_rms, effective_gain=1)
+            calc_total_error(image, background_rms, effective_gain=gain)
             if background_rms is not None
             else None
         )

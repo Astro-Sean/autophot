@@ -1101,14 +1101,19 @@ def run_photometry():
         low_median_threshold = 1e-6
         high_gain_threshold = 1e6
 
-        if image_median < low_median_threshold and gain > high_gain_threshold:
-            logging.warning(
-                "Applying gain %.1e to image (low median %.1e).", gain, image_median
-            )
-            image = image * gain
-            safe_fits_write(fpath, image, header)
-            gain = 1
-            logging.warning("Gain reset to 1 after application.")
+        # DISABLED: Gain correction removed for consistency
+        # The image should remain in ADU and gain should only be applied
+        # internally within photometry functions (e.g., aperture.py line 599)
+        # This ensures consistent handling across all photometry operations
+        # and avoids ambiguity about whether the image is in ADU or electrons.
+        # if image_median < low_median_threshold and gain > high_gain_threshold:
+        #     logging.warning(
+        #         "Applying gain %.1e to image (low median %.1e).", gain, image_median
+        #     )
+        #     image = image * gain
+        #     safe_fits_write(fpath, image, header)
+        #     gain = 1
+        #     logging.warning("Gain reset to 1 after application.")
 
         #  Trim NaN Boundaries (BEFORE WCS check so WCS is correct)
         # Automatically removes large NaN regions at image edges while keeping target
@@ -3296,6 +3301,8 @@ def run_photometry():
                 "disabling zeropoint color correction."
             )
             ImageColorTerm, ImageColorTermError = None, None
+            color_coeffs, color_coeff_errors = None, None
+            n_segments = 1
         elif not apply_colorterms:
             logging.info(
                 "Color term correction disabled (photometry.apply_colorterms=False)."
