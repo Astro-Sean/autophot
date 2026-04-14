@@ -4203,6 +4203,13 @@ class Templates:
                     match_str = _serialize_xy_pairs(run_matching)
                 excl_str = _serialize_xy_pairs(run_excluded)
 
+                # Check if SFFT internal rejection should be disabled
+                disable_sfft_rejection = _as_bool(
+                    ts_sub.get("disable_sfft_rejection", False), False
+                )
+                if disable_sfft_rejection:
+                    logger.info("SFFT internal source rejection DISABLED (using pre-processed matching sources only)")
+
                 cmd_local = [
                     sys.executable,
                     str(script),
@@ -4226,6 +4233,8 @@ class Templates:
                     "true" if const_phot_ratio else "false",
                     "-matching_sources",
                     match_str,
+                    "-disable_sfft_rejection",
+                    "true" if disable_sfft_rejection else "false",
                     "-kernel_half_width",
                     str(scale),
                     "-forceconv",

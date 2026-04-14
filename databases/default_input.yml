@@ -56,6 +56,8 @@ default_input:
     apply_aperture_correction: False # bool --- If True, apply aperture correction from PSF stars to aperture mags.
     plot_aperture_correction: False # bool --- If True, save the aperture-correction diagnostic plot (curve of growth).
     apply_colorterms: True # bool --- If True, measure and apply color term corrections to catalog sources during calibration.
+    color_term_poly_order: 1 # int --- Polynomial order for color term fitting: 1 for linear, 2 for quadratic.
+    color_term_n_segments: 1 # int --- Number of segments for piecewise linear fitting: 1 for single line, 2 for two segments with breakpoint, etc. Overrides poly_order if > 1.
     aperture_radius: null # float|null --- Explicit aperture radius (pixels). If null, computed from `fwhm` (typically max(1.5*FWHM, 2.0)).
     psf_oversample: 1 # int --- Oversampling factor for PSF modelling/fitting grids.
     psf_init_moffat_beta: 4.765 # float --- Moffat beta for initial ePSF kernel (4.765 ~ atmospheric-turbulence-like PSF; lower values add stronger wings).

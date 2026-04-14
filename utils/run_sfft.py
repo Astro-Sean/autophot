@@ -371,6 +371,12 @@ def run_sfft() -> Optional[int]:
         default="false",
         help="If true and crowded mode with bg_order=0, override to bg_order=2.",
     )
+    parser.add_argument(
+        "-disable_sfft_rejection",
+        type=str,
+        default="false",
+        help="If true, disable SFFT's internal source rejection (coarse, elaborate, post-anomaly checks) to preserve pre-processed matching sources.",
+    )
     args = parser.parse_args()
 
     # --- Parse Coordinate Lists ---
@@ -721,7 +727,18 @@ def run_sfft() -> Optional[int]:
 
     ONLY_FLAGS = parse_only_flags(args.only_flags)
 
-    COARSE_VAR_REJECTION = False
+    # Check if SFFT internal rejection should be disabled
+    disable_sfft_rejection = _parse_bool_str(
+        "disable_sfft_rejection",
+        getattr(args, "disable_sfft_rejection", "false"),
+    )
+    if disable_sfft_rejection:
+        log_info("SFFT internal source rejection DISABLED (using pre-processed matching sources only)")
+        COARSE_VAR_REJECTION = False
+        ELABO_VAR_REJECTION = False
+        PAC_RATIO_THRESH = float('inf')  # Disable post-anomaly check
+    else:
+        COARSE_VAR_REJECTION = False
     CVREJ_MAGD_THRESH = float(args.cvrej_magd_thresh)
     ELABO_VAR_REJECTION = False
     EVREJ_RATIO_THREH = float(args.evrej_ratio_thresh)

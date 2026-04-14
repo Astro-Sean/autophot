@@ -3254,9 +3254,13 @@ def run_photometry():
                 CatalogSources, linearity_params, saturation_range = Calibrate_Catalog.check_saturation_range(
                     CatalogSources
                 )
+                intercept = linearity_params.get('intercept', 0)
+                intercept_err = linearity_params.get('intercept_error', 0)
+                intercept_str = f"{intercept:.3f}" if np.isfinite(intercept) else "N/A"
+                intercept_err_str = f"{intercept_err:.3f}" if np.isfinite(intercept_err) else "N/A"
                 logging.info(
                     f"Catalog linearity check: {linearity_params.get('n_inliers', 0)} linear sources, "
-                    f"ZP={linearity_params.get('intercept', 0):.3f} +/- {linearity_params.get('intercept_error', 0):.3f}"
+                    f"ZP={intercept_str} +/- {intercept_err_str}"
                 )
             except Exception as linearity_exc:
                 logging.warning(f"Catalog linearity check failed: {linearity_exc}, proceeding with all sources")
@@ -3297,17 +3301,46 @@ def run_photometry():
                 "Color term correction disabled (photometry.apply_colorterms=False)."
             )
             ImageColorTerm, ImageColorTermError = None, None
+            color_coeffs, color_coeff_errors = None, None
+            n_segments = 1
         else:
             logging.info(
                 "Color term correction enabled (photometry.apply_colorterms=True); "
                 "measuring and applying color term corrections to catalog sources."
             )
-            ImageColorTerm, ImageColorTermError = GetZeropoint.fit_color_term(
+            phot_cfg = input_yaml.get("photometry", {}) or {}
+            n_segments = int(phot_cfg.get("color_term_n_segments", 1))
+
+            color_coeffs, color_coeff_errors = GetZeropoint.fit_color_term(
                 catalog=CatalogSources
             )
-            # Treat non-finite fitted slopes as "no color correction".
-            if ImageColorTerm is None or not np.isfinite(ImageColorTerm):
-                ImageColorTerm, ImageColorTermError = None, None
+            # Treat non-finite coefficients as "no color correction".
+            # Handle piecewise linear format: ((breakpoint,), (slope1, slope2), intercept)
+            def has_non_finite(coeffs):
+                """Check if any coefficient value is non-finite, handling nested tuples."""
+                if coeffs is None:
+                    return True
+                # Flatten nested tuples and check each value
+                def flatten(t):
+                    if isinstance(t, tuple):
+                        for item in t:
+                            yield from flatten(item)
+                    else:
+                        yield t
+                return any(not np.isfinite(v) for v in flatten(coeffs))
+
+            if has_non_finite(color_coeffs):
+                color_coeffs, color_coeff_errors = None, None
+                n_segments = 1  # Fallback to no color term
+            else:
+                # Extract slope for backwards compatibility with existing code
+                if n_segments > 1:
+                    # Piecewise linear: slopes are in coefficients[1]
+                    ImageColorTerm = color_coeffs[1][0]  # First slope
+                    ImageColorTermError = color_coeff_errors[1][0] if color_coeff_errors is not None else None
+                else:
+                    ImageColorTerm = color_coeffs[1] if len(color_coeffs) == 2 else color_coeffs[1]
+                    ImageColorTermError = color_coeff_errors[1] if color_coeff_errors is not None else None
 
         # Gets the zeropoint and plots the histogram.
         # CatalogSources, image_zeropoint = GetZeropoint.fit_zeropoint(catalog=CatalogSources,
@@ -3316,10 +3349,13 @@ def run_photometry():
         #                                                    )
 
         # Gets the zeropoint and plots the histogram.
+        fit_mode = "piecewise" if n_segments > 1 else "polynomial"
         CatalogSources, image_zeropoint = GetZeropoint.estimate_zeropoint(
             catalog=CatalogSources,
-            fixed_color_slope=ImageColorTerm,
-            fixed_color_slope_err=ImageColorTermError,
+            fixed_color_coeffs=color_coeffs,
+            fixed_color_coeff_errors=color_coeff_errors,
+            fit_mode=fit_mode,
+            n_segments=n_segments,
         )
 
         # Updates the header with the zeropoint values.
@@ -3348,13 +3384,39 @@ def run_photometry():
                 header[f"ZP_{m}_e"] = "unknown"
 
         if len(variable_sources) > 0:
-            xpix_variable_sources, ypix_variable_sources = imageWCS.all_world2pix(
-                variable_sources["RA"].values,
-                variable_sources["DEC"].values,
-                index,
-            )
-            variable_sources["x_pix"] = xpix_variable_sources
-            variable_sources["y_pix"] = ypix_variable_sources
+            try:
+                xpix_variable_sources, ypix_variable_sources = imageWCS.all_world2pix(
+                    variable_sources["RA"].values,
+                    variable_sources["DEC"].values,
+                    index,
+                )
+                variable_sources["x_pix"] = xpix_variable_sources
+                variable_sources["y_pix"] = ypix_variable_sources
+            except Exception as e:
+                logging.warning(
+                    f"WCS coordinate conversion failed for variable sources: {e}. "
+                    "Filtering out sources that failed conversion."
+                )
+                # Try converting sources one by one to identify which ones fail
+                valid_indices = []
+                xpix_list = []
+                ypix_list = []
+                for i, (ra, dec) in enumerate(zip(variable_sources["RA"].values, variable_sources["DEC"].values)):
+                    try:
+                        xpix, ypix = imageWCS.all_world2pix([ra], [dec], index)
+                        xpix_list.append(xpix[0])
+                        ypix_list.append(ypix[0])
+                        valid_indices.append(i)
+                    except Exception:
+                        continue
+                if len(valid_indices) > 0:
+                    variable_sources = variable_sources.iloc[valid_indices].copy()
+                    variable_sources["x_pix"] = xpix_list
+                    variable_sources["y_pix"] = ypix_list
+                    logging.info(f"Retained {len(valid_indices)}/{len(variable_sources)} variable sources after WCS conversion")
+                else:
+                    logging.warning("All variable sources failed WCS conversion, using empty list")
+                    variable_sources = pd.DataFrame(columns=variable_sources.columns)
         # Plots the source check.
         Plot(input_yaml=input_yaml).source_check(
             image=image,
