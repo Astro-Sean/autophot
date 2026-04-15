@@ -243,7 +243,7 @@ class Find_FWHM:
                 label="Segment COMs",
                 s=50,
             )
-            ax.legend()
+            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
             fpath = self.input_yaml["fpath"]
             write_dir = self.input_yaml["write_dir"]
             base = os.path.basename(fpath).split(".")[0]
@@ -475,8 +475,10 @@ class Find_FWHM:
 
             # --- Diagnostic plot (small markers, minimal overlap) ---
             try:
+                from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
                 plt.ioff()
-                fig, ax = plt.subplots(figsize=set_size(540, aspect=1.2))
+                fig, ax = plt.subplots(figsize=set_size(340, 1))
+                plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
                 # All quality-cut sources (faint background)
                 ax.errorbar(
                     df["m_inst"],
@@ -484,13 +486,12 @@ class Find_FWHM:
                     xerr=df.get("m_inst_err", None),
                     yerr=df.get("m_peak_err", None),
                     fmt="o",
-                    ms=1.8,
-                    color="lightgray",
-                    alpha=0.25,
-                    lw=0.3,
+                    ms=get_marker_size('medium'),
+                    color=get_color('all_sources'),
+                    alpha=get_alpha('light'),
                     capsize=0,
                     elinewidth=0.4,
-                    label=f"All ({len(df)})",
+                    label=f"All sources [{len(df)}]",
                 )
                 # Selected linear inliers - small outlined markers to reduce overlap
                 ax.errorbar(
@@ -499,14 +500,14 @@ class Find_FWHM:
                     xerr=df_lin.get("m_inst_err", None),
                     yerr=df_lin.get("m_peak_err", None),
                     fmt="o",
-                    ms=2.8,
+                    ms=get_marker_size('medium'),
                     mfc="none",
-                    mec="#00AA00",
-                    ecolor="#00AA00",
-                    elinewidth=0.4,
+                    mec=get_color('inliers'),
+                    ecolor=get_color('inliers'),
+                    alpha=get_alpha('dark'),
                     capsize=0,
-                    alpha=0.85,
-                    label=f"Selected inliers ({len(df_lin)})",
+                    elinewidth=0.4,
+                    label=f"Inliers [{len(df_lin)}]",
                 )
                 # Rejected
                 ax.errorbar(
@@ -515,16 +516,26 @@ class Find_FWHM:
                     xerr=df_out.get("m_inst_err", None),
                     yerr=df_out.get("m_peak_err", None),
                     fmt="x",
-                    ms=2.2,
-                    color="#FF0000",
-                    alpha=0.5,
-                    lw=0.5,
+                    ms=get_marker_size('medium'),
+                    color=get_color('outliers'),
+                    alpha=get_alpha('medium'),
+                    lw=get_line_width('thin'),
                     capsize=0,
                     elinewidth=0.4,
-                    label=f"Rejected ({len(df_out)})",
+                    label=f"Outliers [{len(df_out)}]",
                 )
                 xx = np.linspace(np.nanmin(df["m_inst"]), np.nanmax(df["m_inst"]), 200)
-                ax.plot(xx, xx + b, "k--", lw=1.0, label=f"m_peak = m_inst + {b:.3f}")
+                yy = xx + b
+                ax.plot(xx, yy, color=get_color('fit'), linestyle="--", lw=get_line_width('medium'), label=f"Fit: m_peak = m_inst + {b:.3f}")
+                # Add shaded error region
+                intercept_error = fit_params.get("intercept_error", 0.0)
+                ax.fill_between(
+                    xx,
+                    yy - intercept_error,
+                    yy + intercept_error,
+                    color=get_color('error_region'),
+                    alpha=get_alpha('light'),
+                )
                 ax.set_xlabel(
                     r"Instrumental magnitude [$-2.5 \log_{10}(\mathrm{Flux})$]"
                 )
@@ -534,7 +545,7 @@ class Find_FWHM:
                 ax.invert_xaxis()
                 ax.invert_yaxis()
                 ax.grid(alpha=0.3, ls="--", lw=0.6)
-                ax.legend(frameon=False, fontsize=8)
+                ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8, ncol=2)
                 if write_dir:
                     fpath = self.input_yaml["fpath"]
                     write_dir = self.input_yaml["write_dir"]

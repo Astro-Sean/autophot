@@ -1974,10 +1974,9 @@ class Catalog:
                     inlier_y = y[inlier_mask]
                     residuals = inlier_y - (slope * inlier_X.flatten() + intercept)
                     # Apply sigma clipping on residuals
-                    from scipy.stats import sigmaclip
-                    clipped_residuals, low, high = sigmaclip(residuals, sigma=2.5, maxiters=5)
+                    clipped = sigma_clip(residuals, sigma=2.5, maxiters=5)
                     # Keep only points within sigma-clipped range
-                    residual_mask = (residuals >= low) & (residuals <= high)
+                    residual_mask = ~clipped.mask
                     inlier_mask[inlier_mask] = residual_mask
                     n_sigma_outliers = np.sum(~residual_mask)
                     if n_sigma_outliers > 0:
@@ -2036,34 +2035,40 @@ class Catalog:
                 plt.style.use(_style)
             plt.ioff()
             fig, ax1 = plt.subplots(figsize=set_size(340, 1))
+            plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
+            # Import centralized plotting utilities for consistent formatting
+            from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
+
             ax1.errorbar(
                 inst_mag,
                 catalog_mag,
                 yerr=catalog_mag_err,
                 fmt="o",
-                alpha=0.35,
-                color="black",
-                markersize=2.2,
+                alpha=get_alpha('medium'),
+                color=get_color('all_sources'),
+                markersize=get_marker_size('medium'),
                 capsize=0,
                 elinewidth=0.4,
                 linestyle="None",
-                label=f"All Sources [{len(inst_mag)}]",
+                label=f"All sources [{len(inst_mag)}]",
             )
 
             if fit_line:
                 predicted = fit_line(inst_mag_linear)
                 residuals = catalog_mag_linear - predicted
                 # Use RANSAC inlier mask for plotting consistency
-                ransac_inliers = ransac.inlier_mask_ if hasattr(ransac, 'inlier_mask_') else np.ones(len(inst_mag_linear), dtype=bool)
+                ransac_inliers = inlier_mask if 'inlier_mask' in locals() else np.ones(len(inst_mag_linear), dtype=bool)
                 ransac_outliers = ~ransac_inliers
                 ax1.errorbar(
                     inst_mag_linear[ransac_outliers],
                     catalog_mag_linear[ransac_outliers],
                     yerr=catalog_mag_err_linear[ransac_outliers],
                     xerr=inst_mag_err_linear[ransac_outliers],
-                    fmt="o",
-                    color="#FF0000",
-                    markersize=2.2,
+                    fmt="x",
+                    color=get_color('outliers'),
+                    markersize=get_marker_size('medium'),
+                    alpha=get_alpha('medium'),
+                    lw=get_line_width('thin'),
                     capsize=0,
                     elinewidth=0.4,
                     linestyle="None",
@@ -2075,20 +2080,35 @@ class Catalog:
                     yerr=catalog_mag_err_linear[ransac_inliers],
                     xerr=inst_mag_err_linear[ransac_inliers],
                     fmt="o",
-                    color="blue",
-                    markersize=2.2,
+                    markersize=get_marker_size('medium'),
+                    mfc="none",
+                    mec=get_color('inliers'),
+                    ecolor=get_color('inliers'),
+                    alpha=get_alpha('dark'),
                     capsize=0,
                     elinewidth=0.4,
                     linestyle="None",
                     label=f"Inliers [{np.sum(ransac_inliers)}]",
                 )
-                x_range = np.linspace(inst_mag.min(), inst_mag.max(), 100)
+                x_range = np.linspace(inst_mag_linear[ransac_inliers].min(), inst_mag_linear[ransac_inliers].max(), 100)
+                y_fit = fit_line(x_range)
                 ax1.plot(
                     x_range,
-                    fit_line(x_range),
-                    color="black",
+                    y_fit,
+                    color=get_color('fit'),
                     linestyle="--",
+                    lw=get_line_width('thick'),
+                    zorder=10,
                     label=f"Fit: y = {slope:.3f}x + {intercept:.2f} +/- {intercept_error:.2f}",
+                )
+                # Add shaded error region
+                ax1.fill_between(
+                    x_range,
+                    y_fit - intercept_error,
+                    y_fit + intercept_error,
+                    color=get_color('error_region'),
+                    alpha=get_alpha('light'),
+                    label=f"Fit error (+/- {intercept_error:.2f})",
                 )
 
                 # Add vertical lines showing linearity range in instrumental magnitude
@@ -2115,7 +2135,7 @@ class Catalog:
             ax1.set_ylabel(f"Catalog {use_filter} Band [mag]")
             ax1.invert_yaxis()
             ax1.invert_xaxis()
-            ax1.legend(frameon=False)
+            ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2)
             ax1.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
             save_path = os.path.join(
                 write_dir, f"Saturation_{base_name}.png"
@@ -2150,10 +2170,10 @@ class Catalog:
                     if len(central_residuals) > 3:
                         median_resid = np.median(central_residuals)
                         mad_residual = np.median(np.abs(central_residuals - median_resid))
-                        # Tighter threshold: 2.0 * MAD (was 3.0) or 0.05 mag (was 0.1)
-                        residual_threshold = max(2.0 * mad_residual, 0.05)
+                        # Relaxed threshold: 3.0 * MAD or 0.1 mag to fit majority of points better
+                        residual_threshold = float(np.maximum(3.0 * mad_residual, 0.1))
                     else:
-                        residual_threshold = 0.1
+                        residual_threshold = 0.15
                     
                     # Find bright end: cut where residuals exceed threshold (saturation/non-linear)
                     bright_cut_idx = 0
@@ -2175,9 +2195,9 @@ class Catalog:
                     for i in range(window_size, len(sorted_residuals) - window_size):
                         window_residuals = sorted_residuals[i-window_size:i+window_size]
                         window_mad = np.median(np.abs(window_residuals - np.median(window_residuals)))
-                        
-                        # If local scatter exceeds 1.5x central scatter, mark as high scatter
-                        if window_mad > 1.5 * mad_residual:
+
+                        # If local scatter exceeds 2.0x central scatter, mark as high scatter (relaxed from 1.5x)
+                        if window_mad > 2.0 * mad_residual:
                             high_scatter_count += 1
                             if high_scatter_count >= required_consecutive:
                                 faint_cut_idx = i - window_size  # Cut before this region
@@ -2717,7 +2737,7 @@ class Catalog:
             )
             ax_right.set_xlabel("Radius [pixels]")
             ax_right.set_ylabel("Normalized Flux")
-            ax_right.legend(loc="upper right", frameon=False)
+            ax_right.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
             ax_right.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
             ax_right.ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))
             pos = ax_right.get_position()

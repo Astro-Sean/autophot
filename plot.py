@@ -727,11 +727,14 @@ class Plot:
                 except Exception:
                     pass
 
+            # Import plotting utilities for divergent colors
+            from plotting_utils import get_divergent_color
+
             # Plot the target source as a circle
             circle = Circle(
                 (self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"]),
                 radius,
-                edgecolor="#FF6600",
+                edgecolor=get_divergent_color('target'),
                 facecolor="none",
                 zorder=4,
                 lw=1.0,
@@ -741,7 +744,7 @@ class Plot:
                 self.input_yaml["target_x_pix"],
                 self.input_yaml["target_y_pix"] + radius + 2,
                 self.input_yaml["target_name"],
-                color="#FF6600",
+                color=get_divergent_color('target'),
                 fontsize=4,
                 ha="center",
                 va="bottom",
@@ -756,7 +759,7 @@ class Plot:
                     s=max(10, 0.8 * scale),
                     marker="+",
                     linewidths=0.8,
-                    color="#00CCFF",
+                    color=get_divergent_color('psf'),
                     label="PSF sources",
                     zorder=1,
                 )
@@ -774,7 +777,7 @@ class Plot:
                         lower_left,
                         square_size,
                         square_size,
-                        edgecolor="#FF00FF",
+                        edgecolor=get_divergent_color('reference'),
                         facecolor="none",
                         label="Reference Sources",
                         zorder=1,
@@ -792,7 +795,7 @@ class Plot:
                     norm_fwhm = Normalize(
                         vmin=np.nanmin(fwhm_values), vmax=np.nanmax(fwhm_values)
                     )
-                    cmap = plt.get_cmap("viridis")  # Colorblind-friendly colormap
+                    cmap = plt.get_cmap("RdBu_r")  # Divergent colormap (blue=low, red=high)
 
                     # Create a ScalarMappable for the colorbar
                     sm = ScalarMappable(norm=norm_fwhm, cmap=cmap)
@@ -842,18 +845,18 @@ class Plot:
                         if not (np.isfinite(x) and np.isfinite(y)):
                             continue
 
-                        # Draw "x" as two lines rotated 45 degrees (yellow for distinct visibility)
+                        # Draw "x" as two lines rotated 45 degrees (divergent color for distinct visibility)
                         ax1.plot(
                             [x - cross_len, x + cross_len],
                             [y - cross_len, y + cross_len],
-                            color="#FFFF00",
+                            color=get_divergent_color('cross'),
                             lw=1.0,
                             zorder=3,
                         )
                         ax1.plot(
                             [x - cross_len, x + cross_len],
                             [y + cross_len, y - cross_len],
-                            color="#FFFF00",
+                            color=get_divergent_color('cross'),
                             lw=1.0,
                             zorder=3,
                         )
@@ -871,7 +874,7 @@ class Plot:
                             ha="center",
                             va="bottom",
                             fontsize=4,
-                            color="#FFFF00",
+                            color=get_divergent_color('cross'),
                             zorder=4,
                         )
 
@@ -928,7 +931,7 @@ class Plot:
                             angles="xy",
                             scale_units="xy",
                             scale=1.0,
-                            color="#00FF00",
+                            color=get_divergent_color('positive'),
                             alpha=0.65,
                             width=0.0020,
                             zorder=5,
@@ -984,15 +987,9 @@ class Plot:
             leg = ax1.legend(
                 by_label.values(),
                 by_label.keys(),
-                loc="upper right",
-                bbox_to_anchor=(0.98, 0.98),
-                ncol=1,
-                frameon=True,
-                framealpha=0.9,
-                edgecolor="black",
-                facecolor="white",
-                columnspacing=1.0,
-                fontsize=5,
+                loc="lower center",
+                bbox_to_anchor=(0.5, 1.0),
+                frameon=False,
                 handlelength=1.5,
                 handletextpad=0.5,
             )
@@ -1004,11 +1001,11 @@ class Plot:
             # Save figure
             if not subtracted:
                 save_loc = os.path.join(
-                    write_dir, "Sourcecheck_" + base + ".png"
+                    write_dir, "SourceCheck_" + base + ".png"
                 )
             else:
                 save_loc = os.path.join(
-                    write_dir, "Subtracted_Sourcecheck_" + base + ".png"
+                    write_dir, "Subtracted_SourceCheck_" + base + ".png"
                 )
 
             fig.savefig(
@@ -1237,10 +1234,11 @@ class Plot:
         ax1.legend(
             by_label.values(),
             by_label.keys(),
-            bbox_to_anchor=[0.5, 1],
             loc="lower center",
+            bbox_to_anchor=(0.5, 1.0),
             frameon=False,
-            ncols=ncols,
+            handlelength=1.5,
+            handletextpad=0.5,
         )
 
         plt.show()

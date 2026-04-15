@@ -216,7 +216,7 @@ def save_lpi_diagnostic_plot(
     ax[5].set_xlabel("r [px]")
     ax[5].set_ylabel("value")
     ax[5].set_title("Radial scatter")
-    ax[5].legend(frameon=False, fontsize=8)
+    ax[5].legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8)
 
     for a in ax:
         a.set_xticks([])

@@ -313,6 +313,7 @@ default_input:
     injection_strategy: ring_quiet # str --- Local-only injection placement near transient: "ring_quiet" (default; fixed-radius ring), or "annulus_random" (random points inside [inject_min_radius_fwhm, inject_max_radius_fwhm]).
     inject_min_radius_fwhm: 2.0 # float --- Minimum injection radius from the transient (in FWHM units). Prevents injecting on top of the transient.
     inject_max_radius_fwhm: 6.0 # float --- Maximum injection radius from the transient (in FWHM units) when searching for quiet injection sites.
+    inject_use_quiet_sites: true # bool --- If true, select only "quiet" sites (below detection threshold) for injection. If false, use all injection sites regardless of detection probability, which provides more representative limiting magnitude for the target location.
     initial_guess_n_samples: 24 # int --- Number of annulus probe positions used to estimate the injected-limit initial instrumental magnitude.
     initial_guess_mag_percentile: 75.0 # float --- Faint-side percentile of annulus instrumental magnitudes used for injected-limit initial guess.
     initial_guess_sigma_mult: 5.0 # float --- Initial injected-limit guess uses flux ~= (this * sigma_sky * sqrt(Npix)) from annulus probe measurements; converted to instrumental magnitude.
@@ -362,8 +363,10 @@ default_input:
     sfft_crowded_auto: False # bool --- Auto-enable SFFT crowded-field tuning based on source density heuristics.
     sfft_crowded_min_sources: 500 # int --- Crowded-field trigger: minimum number of detected sources for SFFT tuning.
     sfft_crowded_min_density: 100 # float --- Crowded-field trigger: minimum sources per area (pipeline-specific units).
+    sfft_bg_order: 0 # int --- SFFT background spatial polynomial order (0=constant). Input images are assumed background-subtracted.
     sfft_back_size: 128 # int --- SExtractor BACK_SIZE used by SFFT source selection/background estimation.
     sfft_back_filtersize: 6 # int --- SExtractor BACK_FILTERSIZE used by SFFT background smoothing.
+    sfft_backphototype: LOCAL # str --- SExtractor BACKPHOTO_TYPE for source photometry background: LOCAL or GLOBAL.
 
     crowded_field: False # bool --- Global crowded-field flag for subtraction/source selection heuristics.
     sextractor_crowded: False # bool --- Use crowded-field SExtractor settings for subtraction/source selection (if supported).

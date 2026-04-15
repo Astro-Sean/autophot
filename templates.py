@@ -2305,7 +2305,7 @@ class Templates:
 
                     # Optional subpixel refinement to reduce residual misalignment
                     if (
-                        align_cfg.get("reproject_subpixel_refine", False)
+                        align_cfg.get("reproject_subpixel_refine", True)
                         and phase_cross_correlation is not None
                     ):
                         try:
@@ -3013,8 +3013,8 @@ class Templates:
             if len(y) >= 4:
                 try:
                     base_est = ConstrainedSlopeRegressor(
-                        enforce=params.enforce_slope_constraint,
-                        fixed_slope=1.0 if params.fix_slope_to_one else None,
+                        enforce=True,
+                        fixed_slope=1.0,
                     )
                     ransac = RANSACRegressor(
                         estimator=base_est,
@@ -3171,9 +3171,11 @@ class Templates:
         """Save a diagnostic magnitude-comparison plot to disk."""
         from matplotlib import pyplot as plt
         from functions import set_size
+        from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
 
         plt.ioff()
         fig, ax = plt.subplots(figsize=set_size(340, 1))
+        plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
 
         # All matched sources (faint, small markers to reduce overlap)
         ax.errorbar(
@@ -3182,12 +3184,12 @@ class Templates:
             xerr=mag_err_all,
             yerr=mag_err_all,
             fmt="o",
-            color="lightgray",
-            alpha=0.25,
-            markersize=1.8,
+            color=get_color('all_sources'),
+            alpha=get_alpha('light'),
+            markersize=get_marker_size('medium'),
             capsize=0,
             elinewidth=0.4,
-            label="All",
+            label=f"All sources [{len(full)}]",
         )
         # Robust candidates (before final inlier mask)
         ax.errorbar(
@@ -3196,12 +3198,12 @@ class Templates:
             xerr=mag_err_robust,
             yerr=mag_err_robust,
             fmt="o",
-            color="steelblue",
-            alpha=0.5,
-            markersize=2.2,
+            color=get_color('robust'),
+            alpha=get_alpha('medium'),
+            markersize=get_marker_size('medium'),
             capsize=0,
             elinewidth=0.4,
-            label="Robust",
+            label=f"Robust [{len(robust)}]",
         )
         # Final selected inliers - small outlined markers
         sel = robust["is_inlier"].to_numpy(bool)
@@ -3211,14 +3213,14 @@ class Templates:
             xerr=mag_err_robust[sel],
             yerr=mag_err_robust[sel],
             fmt="o",
-            markersize=2.8,
+            markersize=get_marker_size('medium'),
             mfc="none",
-            mec="#00AA00",
-            ecolor="#00AA00",
+            mec=get_color('inliers'),
+            ecolor=get_color('inliers'),
             elinewidth=0.4,
             capsize=0,
-            alpha=0.9,
-            label="Selected inliers",
+            alpha=get_alpha('dark'),
+            label=f"Inliers [{np.sum(sel)}]",
         )
         # Rejected robust points
         rej = ~sel
@@ -3228,24 +3230,39 @@ class Templates:
             xerr=mag_err_robust[rej],
             yerr=mag_err_robust[rej],
             fmt="x",
-            color="#FF0000",
-            alpha=0.5,
-            markersize=2.2,
+            color=get_color('outliers'),
+            alpha=get_alpha('medium'),
+            lw=get_line_width('thin'),
+            markersize=get_marker_size('medium'),
             capsize=0,
             elinewidth=0.4,
-            label="Rejected",
+            label=f"Outliers [{np.sum(rej)}]",
         )
         xx = np.linspace(mag_img_robust.min(), mag_img_robust.max(), 100)
-        ax.plot(xx, slope * xx + intercept, "b--", lw=0.5, label="Fit")
+        yy = slope * xx + intercept
+        ax.plot(xx, yy, color=get_color('inliers'), linestyle="--", lw=get_line_width('thin'), label=f"Fit: slope={slope:.3f}, intercept={intercept:.3f}")
+        # Add shaded error region (calculate from residuals)
+        if sel.sum() > 0:
+            residuals = robust.loc[sel, "mag_tpl"].values - (slope * robust.loc[sel, "mag_img"].values + intercept)
+            residual_std = np.std(residuals)
+            n_points = sel.sum()
+            intercept_error = residual_std / np.sqrt(n_points)
+            ax.fill_between(
+                xx,
+                yy - intercept_error,
+                yy + intercept_error,
+                color=get_color('inliers'),
+                alpha=get_alpha('light'),
+            )
         ax.set(xlabel="Science mag", ylabel="Template mag")
-        ax.legend(frameon=False, fontsize="small")
+        ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize="small", ncol=2)
         ax.grid(alpha=0.3)
         ax.invert_xaxis()
         ax.invert_yaxis()
 
         base = Path(self.input_yaml["fpath"]).stem
         out = (
-            Path(self.input_yaml["fpath"]).parent / f"flux_comparison_{base}.png"
+            Path(self.input_yaml["fpath"]).parent / f"Flux_Comparison_{base}.png"
         )
         fig.savefig(str(out), bbox_inches="tight", dpi=150)
         plt.close(fig)
@@ -4203,13 +4220,6 @@ class Templates:
                     match_str = _serialize_xy_pairs(run_matching)
                 excl_str = _serialize_xy_pairs(run_excluded)
 
-                # Check if SFFT internal rejection should be disabled
-                disable_sfft_rejection = _as_bool(
-                    ts_sub.get("disable_sfft_rejection", False), False
-                )
-                if disable_sfft_rejection:
-                    logger.info("SFFT internal source rejection DISABLED (using pre-processed matching sources only)")
-
                 cmd_local = [
                     sys.executable,
                     str(script),
@@ -4233,8 +4243,6 @@ class Templates:
                     "true" if const_phot_ratio else "false",
                     "-matching_sources",
                     match_str,
-                    "-disable_sfft_rejection",
-                    "true" if disable_sfft_rejection else "false",
                     "-kernel_half_width",
                     str(scale),
                     "-forceconv",
@@ -4252,10 +4260,13 @@ class Templates:
                 # Optional: finer background mesh for SExtractor/SFFT.
                 back_size = ts_sub.get("sfft_back_size", None)
                 back_filt = ts_sub.get("sfft_back_filtersize", None)
+                back_phototype = ts_sub.get("sfft_backphototype", "LOCAL")
                 if back_size is not None:
                     cmd_local += ["-back_size", str(int(back_size))]
                 if back_filt is not None:
                     cmd_local += ["-back_filtersize", str(int(back_filt))]
+                if back_phototype is not None:
+                    cmd_local += ["-backphototype", str(back_phototype).upper()]
 
                 # Robust SFFT source rejection controls.
                 only_flags_cfg = ts_sub.get("sfft_only_flags", [0, 1, 2])

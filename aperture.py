@@ -932,7 +932,7 @@ class Aperture:
         ax_right.set_ylim(ax_main.get_ylim())
 
         label = base if saveTarget else index
-        save_name = os.path.join(write_dir, f"aperture_{label}.png")
+        save_name = os.path.join(write_dir, f"Aperture_{label}.png")
         fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
         plt.close(fig)
 
@@ -1534,7 +1534,7 @@ class Aperture:
             ax1.axvline(optimum_radius, color="black", ls="--", label="Final optimum")
             ax1.set_ylabel("Normalized Flux")
             plt.setp(ax1.get_xticklabels(), visible=False)
-            ax1.legend(loc="lower right", fontsize=8)
+            ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8)
 
             per_source = (
                 sources.loc[list(kept_set), "optimum_radius"].values
@@ -1567,16 +1567,7 @@ class Aperture:
                         label="Selected",
                         zorder=1,
                     )
-                if len(other) > 0:
-                    ax2.hist(
-                        other,
-                        bins=bins,
-                        facecolor="tab:red",
-                        alpha=0.4,
-                        label="Rejected",
-                        zorder=0,
-                    )
-                ax2.legend(loc="upper right", fontsize=7)
+                ax2.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=7)
 
             ax2.axvline(optimum_radius, color="black", ls="--", label="Final")
             ax2.set_xlabel("Aperture Radius [FWHM]")
@@ -1692,10 +1683,10 @@ class Aperture:
             )
             ax.set_xlabel("Aperture Correction [mag]")
             ax.set_ylabel("Frequency")
-            ax.legend(frameon=False)
+            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
             fig.tight_layout()
             png_path = os.path.join(
-                write_dir, f"aperture_correction_{base_name}.png"
+                write_dir, f"Aperture_Correction_{base_name}.png"
             )
             fig.savefig(
                 png_path,

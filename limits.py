@@ -413,29 +413,6 @@ class Limits:
     # PSF helpers
     # -----------------------------------------------------------------------
 
-    def _normalize_psf(self, epsf_model, shape: tuple):
-        """
-        Ensure the PSF model integrates to unity over *shape* pixels.
-
-        Parameters
-        ----------
-        epsf_model : photutils ePSF model
-        shape      : (height, width)
-
-        Returns
-        -------
-        epsf_model  (modified in-place and returned for convenience)
-        """
-        grid = np.meshgrid(np.arange(shape[1]), np.arange(shape[0]))
-        centre = shape[0] // 2
-        psf_data = epsf_model.evaluate(
-            x=grid[0], y=grid[1], flux=1.0, x_0=centre, y_0=centre
-        )
-        total = np.nansum(psf_data)
-        if not np.isclose(total, 1.0, rtol=0.01):
-            epsf_model.flux = 1.0 / total
-        return epsf_model
-
     @staticmethod
     def _downsample_psf(psf_os: np.ndarray, oversampling: int) -> np.ndarray:
         """
@@ -715,7 +692,6 @@ class Limits:
                 if oversampling > 1
                 else psf_os
             )
-            psf_unit = psf_unit / np.nansum(psf_unit)  # exact unit normalisation
 
             psf_ap = Aperture(input_yaml=self.input_yaml, image=psf_unit)
             psf_meas = psf_ap.measure(
@@ -750,10 +726,14 @@ class Limits:
             if not np.isfinite(completeness_target):
                 completeness_target = 0.5
 
+            # Option to disable quiet site selection for more representative limiting magnitude
+            use_quiet_sites = bool(lim_cfg.get("inject_use_quiet_sites", True))
+
             logger.info(
-                "Injected limiting magnitude: recovery_method=%s, completeness_target=%.2f",
+                "Injected limiting magnitude: recovery_method=%s, completeness_target=%.2f, use_quiet_sites=%s",
                 str(recovery_method),
                 float(completeness_target),
+                str(use_quiet_sites),
             )
             completeness_solver = str(lim_cfg.get("completeness_solver", "bisect")).strip().lower()
             if completeness_solver not in {"bisect", "logistic_emcee"}:
@@ -820,7 +800,11 @@ class Limits:
                 )
                 # "Quiet" sites: choose positions with detection probability below
                 # the same cutoff used later to define what counts as a detection.
-                injection_df = df[p_det < DETECTION_BETA_THRESH].copy()
+                # If disabled, use all sites for more representative limiting magnitude.
+                if use_quiet_sites:
+                    injection_df = df[p_det < DETECTION_BETA_THRESH].copy()
+                else:
+                    injection_df = df.copy()
 
                 if len(injection_df) > 0:
                     break
@@ -835,6 +819,7 @@ class Limits:
             # search. This helps when the local cutout is dominated by host structure.
             if (
                 len(injection_df) == 0
+                and use_quiet_sites
                 and growth_factor > 1
                 and scale_used < float(growth_max)
             ):
@@ -876,11 +861,11 @@ class Limits:
                             yran = [p[1] for p in pts]
                             df = pd.DataFrame({"x_pix": xran, "y_pix": yran})
 
-                        ini_ap = Aperture(input_yaml=self.input_yaml, image=cutout)
+                        ini_ap = Aperture(input_yaml=self.input_yaml, image=cutout_img)
                         df = ini_ap.measure(
                             sources=df,
                             plot=False,
-                            background_rms=background_rms,
+                            background_rms=cutout_rms,
                             verbose=0,
                         )
                         p_det = df.apply(
@@ -892,7 +877,10 @@ class Limits:
                             ),
                             axis=1,
                         )
-                        injection_df = df[p_det < DETECTION_BETA_THRESH].copy()
+                        if use_quiet_sites:
+                            injection_df = df[p_det < DETECTION_BETA_THRESH].copy()
+                        else:
+                            injection_df = df.copy()
                         if len(injection_df) > 0:
                             break
                         distance_factor = min(2.0, distance_factor * 1.5)
@@ -1437,7 +1425,7 @@ class Limits:
             ax.set_ylabel("Recovery fraction")
             ax.set_ylim(-0.05, 1.05)
             ax.invert_xaxis()
-            ax.legend(loc="upper left", fontsize=7, frameon=False)
+            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), fontsize=7, frameon=False)
             fig.tight_layout()
             fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor="white")
             plt.close(fig)
@@ -1581,12 +1569,6 @@ class Limits:
                 ls="--",
                 label="Adopted limit",
             )
-
-        ax.set_xlabel("Injected ePSF brightness [mag]")
-        ax.set_ylabel("Recovery fraction")
-        ax.set_ylim(-0.05, 1.05)
-        ax.invert_xaxis()
-        ax.legend(loc="upper left", fontsize=7, frameon=False)
 
         # Optional apparent-magnitude secondary axis.
         if zeropoint is not None:

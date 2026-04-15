@@ -1058,11 +1058,11 @@ def plot_lightcurve(
                     ls="",
                     zorder=2,
                 )
-        color_ax.legend(loc="best", frameon=True, framealpha=0.95)
+        color_ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
         color_ax.invert_yaxis()
     # fig.tight_layout()
 
-    outname = f'lightcurve_{method}_{"single" if single_plot else "subplots"}.{format}'
+    outname = f'LightCurve_{method}_{"single" if single_plot else "subplots"}.{format}'
     outpath = os.path.join(save_path, outname)
     save_kw = dict(dpi=dpi) if format.lower() != "pdf" else {}
     plt.savefig(outpath, **save_kw, bbox_inches="tight")

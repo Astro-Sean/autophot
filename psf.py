@@ -3854,7 +3854,7 @@ class PSF:
             for _ax, _ax_R, _ax_B in ax_list:
                 _ax_B.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
                 _ax_R.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
-            ax1.legend(loc="upper right", frameon=False, labelcolor="w")
+            ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, labelcolor="w")
             save_name_png = (
                 f"PSF_Target_{base}.png" if plotTarget else f"PSF_Subtractions_{base}.png"
             )

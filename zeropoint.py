@@ -356,13 +356,30 @@ class Zeropoint:
             mask1 = color_diff <= bp
             mask2 = color_diff > bp
 
-            # Segment 1 correction
-            delta_corr[mask1] = delta_mag[mask1] - slope1 * color_diff[mask1]
-            color_corr_err[mask1] = np.abs(slope1) * sigma_color[mask1]
+            # Extract slope errors if available
+            if color_coeff_errors is not None:
+                bp_errs, slope_errs, intercept_err = color_coeff_errors
+                slope1_err, slope2_err = slope_errs
+            else:
+                slope1_err, slope2_err = None, None
 
-            # Segment 2 correction (account for continuity)
+            # Segment 1 correction with error propagation
+            delta_corr[mask1] = delta_mag[mask1] - slope1 * color_diff[mask1]
+            term_color_measure1 = np.abs(slope1) * sigma_color[mask1]
+            if slope1_err is not None:
+                term_color_slope1 = np.abs(slope1_err) * np.abs(color_diff[mask1])
+                color_corr_err[mask1] = np.sqrt(term_color_measure1**2 + term_color_slope1**2)
+            else:
+                color_corr_err[mask1] = term_color_measure1
+
+            # Segment 2 correction (account for continuity) with error propagation
             delta_corr[mask2] = delta_mag[mask2] - (slope2 * color_diff[mask2] + (slope1 - slope2) * bp)
-            color_corr_err[mask2] = np.abs(slope2) * sigma_color[mask2]
+            term_color_measure2 = np.abs(slope2) * sigma_color[mask2]
+            if slope2_err is not None:
+                term_color_slope2 = np.abs(slope2_err) * np.abs(color_diff[mask2])
+                color_corr_err[mask2] = np.sqrt(term_color_measure2**2 + term_color_slope2**2)
+            else:
+                color_corr_err[mask2] = term_color_measure2
         elif len(fixed_color_coeffs) == 2:
             # Linear color term: delta_corr = delta_mag - slope * color_diff
             intercept, slope = fixed_color_coeffs
@@ -973,6 +990,7 @@ class Zeropoint:
                     weights,
                     x_err=inst_mag_err,
                     y_err=yerr,
+                    max_trials=max_trials,
                     ransac_min_samples=ransac_min_samples,
                     random_state=random_state,
                 )
@@ -1036,7 +1054,7 @@ class Zeropoint:
                 sig_y = np.full_like(xs, zp_std)
                 ax.plot(xs, ys, "--", color=colors[flux_type], label=msg)
                 ax.fill_between(
-                    xs, ys - sig_y, ys + sig_y, color=colors[flux_type], alpha=0.2
+                    xs, ys - sig_y, ys + sig_y, color=colors[flux_type], alpha=get_alpha('light')
                 )
 
                 global_xmins.append(xs[0])
@@ -1072,7 +1090,7 @@ class Zeropoint:
             ax.set_xlabel(rf"$m_\mathrm{{inst,{use_filter}}}$ [mag]")
             ax.set_ylabel(y_label)
             ax.grid(True, ls="--", alpha=0.5)
-            ax.legend(ncol=2, loc="upper left", frameon=False)
+            ax.legend(ncol=2, loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
 
             fig.savefig(
                 os.path.join(write_dir, f"Zeropoint_{base_name}.png"),
@@ -1427,7 +1445,7 @@ class Zeropoint:
                 ax_hist.set_xlabel("Zeropoint [mag]")
                 ax_hist.set_ylabel("Density")
                 ax_hist.grid(True, ls="--", alpha=0.3, zorder=0)
-                ax_hist.legend(loc="best", frameon=False)
+                ax_hist.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol = 2)
                 for patch in ax_hist.patches:
                     patch.set_zorder(3)
 
@@ -1473,7 +1491,7 @@ class Zeropoint:
     # Public: colour-term fit
     # -----------------------------------------------------------------------
 
-    def _plot_piecewise_color_term(self, xi, yi, xe, ye, coefficients, coefficient_errors, n_segments, color1, color2, use_filter, inlier_mask=None, output_dir=None):
+    def _plot_piecewise_color_term(self, xi, yi, xe, ye, coefficients, coefficient_errors, n_segments, color1, color2, use_filter, inlier_mask=None, overall_method="RANSAC", output_dir=None):
         """Generate color term plot for piecewise linear fitting."""
         import matplotlib.pyplot as plt
         from matplotlib.gridspec import GridSpec
@@ -1508,18 +1526,6 @@ class Zeropoint:
                 lw=0.5,
                 label="Inliers",
             )
-            # Plot outliers
-            out_mask = ~inlier_mask
-            if out_mask.any():
-                ax1.scatter(
-                    xi[out_mask],
-                    yi[out_mask],
-                    s=30,
-                    marker="x",
-                    alpha=0.4,
-                    color=okabe_orange,
-                    label="Outliers",
-                )
         else:
             ax1.errorbar(
                 xi,
@@ -1543,13 +1549,36 @@ class Zeropoint:
             bp = breakpoints[0]
             slope1, slope2 = slopes
 
+            # Get coefficient errors for shading
+            if coefficient_errors is not None and len(coefficient_errors) == 3:
+                bp_err = coefficient_errors[0][0] if coefficient_errors[0] else 0.0
+                slope1_err = coefficient_errors[1][0] if len(coefficient_errors[1]) > 0 else 0.0
+                slope2_err = coefficient_errors[1][1] if len(coefficient_errors[1]) > 1 else 0.0
+                intercept_err = coefficient_errors[2] if coefficient_errors[2] else 0.0
+            else:
+                bp_err = slope1_err = slope2_err = intercept_err = 0.0
+
             # Plot two line segments
             y_plot = np.zeros_like(x_plot)
+            y_plot_upper = np.zeros_like(x_plot)
+            y_plot_lower = np.zeros_like(x_plot)
             mask1 = x_plot <= bp
             mask2 = x_plot > bp
             y_plot[mask1] = intercept + slope1 * x_plot[mask1]
             y_plot[mask2] = (intercept + slope1 * bp) + slope2 * (x_plot[mask2] - bp)
-            label_text = f"Piecewise: bp={bp:.3f}, slope1={slope1:.3f}, slope2={slope2:.3f}"
+
+            # Calculate error bands (propagate slope and intercept errors)
+            y_err_upper = np.zeros_like(x_plot)
+            y_err_lower = np.zeros_like(x_plot)
+            y_err_upper[mask1] = intercept_err + slope1_err * x_plot[mask1]
+            y_err_lower[mask1] = intercept_err + slope1_err * x_plot[mask1]
+            y_err_upper[mask2] = (intercept_err + slope1_err * bp) + slope2_err * (x_plot[mask2] - bp)
+            y_err_lower[mask2] = (intercept_err + slope1_err * bp) + slope2_err * (x_plot[mask2] - bp)
+
+            y_plot_upper = y_plot + np.abs(y_err_upper)
+            y_plot_lower = y_plot - np.abs(y_err_lower)
+
+            label_text = f"Piecewise {overall_method}: bp={bp:.3f}, slope1={slope1:.3f}, slope2={slope2:.3f}"
 
             ax1.plot(
                 x_plot,
@@ -1559,6 +1588,15 @@ class Zeropoint:
                 lw=1.0,
                 label=label_text,
             )
+            # Add error shading
+            ax1.fill_between(
+                x_plot,
+                y_plot_lower,
+                y_plot_upper,
+                color=okabe_orange,
+                alpha=get_alpha('light'),
+                label="Error band",
+            )
             ax1.axvline(bp, color="gray", linestyle=":", alpha=0.5, label=f"Breakpoint: {bp:.3f}")
 
         ax1.set_xlim(xi.min() - 0.1 * np.ptp(xi), xi.max() + 0.1 * np.ptp(xi))
@@ -1567,7 +1605,7 @@ class Zeropoint:
             rf"$m_\mathrm{{cal,{color1}}} - m_\mathrm{{inst,{use_filter}}}$ [mag]"
         )
         ax1.grid(True, alpha=0.3)
-        ax1.legend(loc="best", frameon=False, fontsize=8)
+        ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8, ncol=2)
 
         # Bottom panel: color corrected data
         if n_segments == 2:
@@ -1645,7 +1683,21 @@ class Zeropoint:
         ax2.set_xlabel(rf"$m_\mathrm{{cal,{color1}}} - m_\mathrm{{cal,{color2}}}$ [mag]")
         ax2.set_ylabel("Corrected [mag]")
         ax2.grid(True, alpha=0.3)
-        ax2.legend(loc="best", frameon=False, fontsize=8)
+        ax2.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8, ncol=2)
+
+        # Set y-limits to center on median with +/- 5*std of inliers
+        if inlier_mask is not None:
+            median_val = np.median(yi_corrected[inlier_mask])
+            std_val = np.std(yi_corrected[inlier_mask])
+            y_min = median_val - 5 * std_val
+            y_max = median_val + 5 * std_val
+            ax2.set_ylim(y_min, y_max)
+        else:
+            median_val = np.median(yi_corrected)
+            std_val = np.std(yi_corrected)
+            y_min = median_val - 5 * std_val
+            y_max = median_val + 5 * std_val
+            ax2.set_ylim(y_min, y_max)
 
         # Save plot to same directory as input file (per-image output folder)
         fpath = self.input_yaml.get("fpath", "")
@@ -1661,7 +1713,7 @@ class Zeropoint:
 
     def _fit_piecewise_linear(self, x, y, x_err, y_err, n_segments):
         """
-        Fit piecewise linear color term with n segments using RANSAC for outlier rejection.
+        Fit piecewise linear color term with n segments using RANSAC regression for outlier rejection.
 
         For n segments, there are n-1 breakpoints. Each segment is a linear fit.
         Segments are continuous at breakpoints.
@@ -1677,7 +1729,6 @@ class Zeropoint:
             inlier_mask: boolean array indicating which points are inliers
         """
         from scipy.optimize import minimize_scalar
-        from sklearn.linear_model import RANSACRegressor
 
         # Sort data by x
         sort_idx = np.argsort(x)
@@ -1688,14 +1739,21 @@ class Zeropoint:
 
         # For n=2 segments, find optimal single breakpoint
         if n_segments == 2:
-            # Search for optimal breakpoint in middle 80% of data range
+            # Check minimum data requirements
+            if len(x) < 8:
+                logger.warning(f"fit_color_term: insufficient data ({len(x)} points) for piecewise fitting, falling back to linear")
+                slope, intercept = np.polyfit(x, y, 1)
+                slope_err = np.std(y - (slope * x + intercept)) / np.sqrt(len(x))
+                return ((), (slope,), intercept), ((), (slope_err,), slope_err), np.ones(len(x), dtype=bool), "linear"
+
+            # Search for optimal breakpoint using grid search on full data
             x_min, x_max = x_sorted.min(), x_sorted.max()
             x_range = x_max - x_min
-            search_min = x_min + 0.1 * x_range
-            search_max = x_max - 0.1 * x_range
+            search_min = x_min + 0.05 * x_range
+            search_max = x_max - 0.05 * x_range
 
             def objective(bp):
-                """Objective function: weighted residual sum of squares"""
+                """Objective function: weighted residual sum of squares (no continuity penalty)"""
                 # Fit two segments
                 mask1 = x_sorted <= bp
                 mask2 = x_sorted > bp
@@ -1705,88 +1763,152 @@ class Zeropoint:
 
                 # Segment 1
                 x1, y1, ye1 = x_sorted[mask1], y_sorted[mask1], y_err_sorted[mask1]
-                slope1, intercept1 = np.polyfit(x1, y1, 1)
-                resid1 = y1 - (slope1 * x1 + intercept1)
-                chi2_1 = np.sum((resid1 / ye1)**2)
+                try:
+                    slope1, intercept1 = np.polyfit(x1, y1, 1)
+                    resid1 = y1 - (slope1 * x1 + intercept1)
+                    chi2_1 = np.sum((resid1 / ye1)**2)
+                except Exception:
+                    return 1e10
 
                 # Segment 2
                 x2, y2, ye2 = x_sorted[mask2], y_sorted[mask2], y_err_sorted[mask2]
-                slope2, intercept2 = np.polyfit(x2, y2, 1)
-                resid2 = y2 - (slope2 * x2 + intercept2)
-                chi2_2 = np.sum((resid2 / ye2)**2)
+                try:
+                    slope2, intercept2 = np.polyfit(x2, y2, 1)
+                    resid2 = y2 - (slope2 * x2 + intercept2)
+                    chi2_2 = np.sum((resid2 / ye2)**2)
+                except Exception:
+                    return 1e10
 
-                # Continuity penalty: segments should meet at breakpoint
-                y1_at_bp = slope1 * bp + intercept1
-                y2_at_bp = slope2 * bp + intercept2
-                # Use mean of combined error arrays
-                combined_ye = np.concatenate([ye1, ye2])
-                continuity_penalty = (y1_at_bp - y2_at_bp)**2 / np.mean(combined_ye**2)
+                # No continuity penalty - allow segments to be independent
+                return chi2_1 + chi2_2
 
-                return chi2_1 + chi2_2 + 100 * continuity_penalty
+            # Try grid search for robust breakpoint finding
+            try:
+                # Test 50 candidate breakpoints evenly spaced
+                bp_candidates = np.linspace(search_min, search_max, 50)
+                best_bp = bp_candidates[0]
+                best_score = 1e10
 
-            # Optimize breakpoint location
-            result = minimize_scalar(objective, bounds=(search_min, search_max), method='bounded')
-            optimal_bp = result.x
+                for bp in bp_candidates:
+                    score = objective(bp)
+                    if score < best_score:
+                        best_score = score
+                        best_bp = bp
 
-            # Apply RANSAC to each segment separately for outlier rejection
+                optimal_bp = best_bp
+                logger.info(f"fit_color_term: grid search found optimal breakpoint at {optimal_bp:.3f}")
+            except Exception as exc:
+                logger.warning(f"fit_color_term: breakpoint optimization failed ({exc}), falling back to linear")
+                slope, intercept = np.polyfit(x, y, 1)
+                slope_err = np.std(y - (slope * x + intercept)) / np.sqrt(len(x))
+                return ((), (slope,), intercept), ((), (slope_err,), slope_err), np.ones(len(x), dtype=bool), "linear"
+
+            # Apply RANSAC regression to each segment separately for outlier rejection
             mask1 = x_sorted <= optimal_bp
             mask2 = x_sorted > optimal_bp
 
-            # Segment 1 RANSAC
+            # Segment 1 RANSAC regression
             x1, y1 = x_sorted[mask1], y_sorted[mask1]
+            ye1 = y_err_sorted[mask1]
+            method1 = "none"
             if len(x1) >= 4:
-                ransac1 = RANSACRegressor(
-                    min_samples=2,
-                    residual_threshold=3.0 * np.std(y1),
-                    max_trials=1000,
-                    random_state=42
-                )
-                X1 = x1.reshape(-1, 1)
-                ransac1.fit(X1, y1)
-                inlier_mask1 = ransac1.inlier_mask_
-                x1_clean = x1[inlier_mask1]
-                y1_clean = y1[inlier_mask1]
-                slope1, intercept1 = ransac1.estimator_.coef_[0], ransac1.estimator_.intercept_
-                logger.info(f"fit_color_term: segment 1 RANSAC: {np.sum(inlier_mask1)}/{len(x1)} inliers")
+                try:
+                    ransac1 = RANSACRegressor(
+                        PenalisedSlopeRegressor(
+                            slope_constraint=0.0,
+                            slope_tolerance=0.5,
+                            penalty_weight=100.0,
+                        ),
+                        residual_threshold=0.1,
+                        max_trials=1000,
+                        min_samples=max(2, int(0.2 * len(x1))),
+                        random_state=42,
+                    )
+                    X1 = x1.reshape(-1, 1)
+                    ransac1.fit(X1, y1)
+                    inlier_mask1 = ransac1.inlier_mask_
+                    x1_clean = x1[inlier_mask1]
+                    y1_clean = y1[inlier_mask1]
+                    slope1, intercept1 = ransac1.estimator_.slope_, ransac1.estimator_.intercept_
+                    method1 = "RANSAC"
+                    logger.info(f"fit_color_term: segment 1 RANSAC: {np.sum(inlier_mask1)}/{len(x1)} inliers")
+                except Exception:
+                    logger.warning("fit_color_term: segment 1 RANSAC failed, using polyfit")
+                    x1_clean, y1_clean = x1, y1
+                    slope1, intercept1 = np.polyfit(x1, y1, 1)
+                    inlier_mask1 = np.ones(len(x1), dtype=bool)
+                    method1 = "polyfit"
             else:
                 x1_clean, y1_clean = x1, y1
                 slope1, intercept1 = np.polyfit(x1, y1, 1)
                 inlier_mask1 = np.ones(len(x1), dtype=bool)
+                method1 = "polyfit"
 
-            # Segment 2 RANSAC
+            # Segment 2 RANSAC regression
             x2, y2 = x_sorted[mask2], y_sorted[mask2]
+            ye2 = y_err_sorted[mask2]
+            method2 = "none"
             if len(x2) >= 4:
-                ransac2 = RANSACRegressor(
-                    min_samples=2,
-                    residual_threshold=3.0 * np.std(y2),
-                    max_trials=1000,
-                    random_state=42
-                )
-                X2 = x2.reshape(-1, 1)
-                ransac2.fit(X2, y2)
-                inlier_mask2 = ransac2.inlier_mask_
-                x2_clean = x2[inlier_mask2]
-                y2_clean = y2[inlier_mask2]
-                slope2, intercept2 = ransac2.estimator_.coef_[0], ransac2.estimator_.intercept_
-                logger.info(f"fit_color_term: segment 2 RANSAC: {np.sum(inlier_mask2)}/{len(x2)} inliers")
+                try:
+                    ransac2 = RANSACRegressor(
+                        PenalisedSlopeRegressor(
+                            slope_constraint=0.0,
+                            slope_tolerance=0.5,
+                            penalty_weight=100.0,
+                        ),
+                        residual_threshold=0.1,
+                        max_trials=1000,
+                        min_samples=max(2, int(0.2 * len(x2))),
+                        random_state=42,
+                    )
+                    X2 = x2.reshape(-1, 1)
+                    ransac2.fit(X2, y2)
+                    inlier_mask2 = ransac2.inlier_mask_
+                    x2_clean = x2[inlier_mask2]
+                    y2_clean = y2[inlier_mask2]
+                    slope2, intercept2 = ransac2.estimator_.slope_, ransac2.estimator_.intercept_
+                    method2 = "RANSAC"
+                    logger.info(f"fit_color_term: segment 2 RANSAC: {np.sum(inlier_mask2)}/{len(x2)} inliers")
+                except Exception:
+                    logger.warning("fit_color_term: segment 2 RANSAC failed, using polyfit")
+                    x2_clean, y2_clean = x2, y2
+                    slope2, intercept2 = np.polyfit(x2, y2, 1)
+                    inlier_mask2 = np.ones(len(x2), dtype=bool)
+                    method2 = "polyfit"
             else:
                 x2_clean, y2_clean = x2, y2
                 slope2, intercept2 = np.polyfit(x2, y2, 1)
                 inlier_mask2 = np.ones(len(x2), dtype=bool)
+                method2 = "polyfit"
 
-            # Enforce continuity: adjust intercept2 so segments meet at breakpoint
-            y1_at_bp = slope1 * optimal_bp + intercept1
-            intercept2 = y1_at_bp - slope2 * optimal_bp
+            # Check if we have enough inliers
+            if len(x1_clean) < 2 or len(x2_clean) < 2:
+                logger.warning(f"fit_color_term: insufficient inliers (seg1: {len(x1_clean)}, seg2: {len(x2_clean)}), falling back to linear")
+                slope, intercept = np.polyfit(x, y, 1)
+                slope_err = np.std(y - (slope * x + intercept)) / np.sqrt(len(x))
+                return ((), (slope,), intercept), ((), (slope_err,), slope_err), np.ones(len(x), dtype=bool), "linear"
 
+            # Do NOT enforce continuity - let segments be independent
+            # This allows each segment to fit its data without artificial constraints
             coefficients = ((optimal_bp,), (slope1, slope2), intercept1)
 
-            # Simple error estimates
-            slope1_err = np.std(y1_clean - (slope1 * x1_clean + intercept1)) / np.sqrt(len(x1_clean)) if len(x1_clean) > 0 else 0.0
-            slope2_err = np.std(y2_clean - (slope2 * x2_clean + intercept2)) / np.sqrt(len(x2_clean)) if len(x2_clean) > 0 else 0.0
+            # Error estimates based on RANSAC fit residuals
+            if len(x1_clean) > 1:
+                residuals1 = y1_clean - (slope1 * x1_clean + intercept1)
+                slope1_err = np.std(residuals1) / np.sqrt(len(x1_clean))
+            else:
+                slope1_err = 0.0
+
+            if len(x2_clean) > 1:
+                residuals2 = y2_clean - (slope2 * x2_clean + intercept2)
+                slope2_err = np.std(residuals2) / np.sqrt(len(x2_clean))
+            else:
+                slope2_err = 0.0
+
             bp_err = x_range * 0.05  # Rough estimate: 5% of range
             coefficient_errors = ((bp_err,), (slope1_err, slope2_err), slope1_err)
 
-            # Combine inlier masks back to original sorted order
+            # Combine inlier masks from segment-specific RANSAC
             combined_inlier_mask_sorted = np.zeros(len(x_sorted), dtype=bool)
             combined_inlier_mask_sorted[mask1] = inlier_mask1
             combined_inlier_mask_sorted[mask2] = inlier_mask2
@@ -1794,23 +1916,26 @@ class Zeropoint:
             inlier_mask = np.zeros(len(x), dtype=bool)
             inlier_mask[sort_idx] = combined_inlier_mask_sorted
 
+            # Determine overall method (use segment with more points as primary)
+            overall_method = method1 if len(x1) >= len(x2) else method2
+
             logger.info(
                 f"fit_color_term: piecewise linear: breakpoint={optimal_bp:.3f}, "
-                f"slope1={slope1:.4f}, slope2={slope2:.4f}, intercept={intercept1:.4f}"
+                f"slope1={slope1:.4f} ({method1}), slope2={slope2:.4f} ({method2}), intercept={intercept1:.4f}"
             )
 
-            return coefficients, coefficient_errors, inlier_mask
+            return coefficients, coefficient_errors, inlier_mask, overall_method
         else:
             # For n > 2, fall back to linear (not implemented yet)
             logger.warning(f"fit_color_term: n_segments={n_segments} not yet implemented, falling back to linear")
             slope, intercept = np.polyfit(x, y, 1)
             slope_err = np.std(y - (slope * x + intercept)) / np.sqrt(len(x))
-            return ((), (slope,), intercept), ((), (slope_err,), slope_err), np.ones(len(x), dtype=bool)
+            return ((), (slope,), intercept), ((), (slope_err,), slope_err), np.ones(len(x), dtype=bool), "linear"
 
     def fit_color_term(self, catalog: pd.DataFrame):
         """
         Fit the colour term c in ZP(m_inst) = a + c*(col1 - col2) via
-        RANSAC (outlier rejection) followed by ODR (error-in-variables
+        RANSAC regression (robust outlier rejection) followed by ODR (error-in-variables
         refinement on inliers). Can also fit quadratic: a + b*x + c*x^2,
         or piecewise linear with n segments.
 
@@ -1896,6 +2021,17 @@ class Zeropoint:
                 & (flux_ap > 0)
             )
             x, y, x_err, y_err = x[finite], y[finite], x_err[finite], y_err[finite]
+            flux_ap, flux_err = flux_ap[finite], flux_err[finite]
+
+            # Filter by S/N >= 5
+            snr = flux_ap / flux_err
+            snr_mask = snr >= 5
+            n_before_snr = len(x)
+            x, y, x_err, y_err = x[snr_mask], y[snr_mask], x_err[snr_mask], y_err[snr_mask]
+            flux_ap, flux_err = flux_ap[snr_mask], flux_err[snr_mask]
+            n_after_snr = len(x)
+            if n_before_snr - n_after_snr > 0:
+                logger.info(f"fit_color_term: removed {n_before_snr - n_after_snr} sources with S/N < 5")
 
             # Log color distribution for diagnostics
             logger.info(
@@ -1911,7 +2047,7 @@ class Zeropoint:
             # Branch based on fitting mode
             if fit_mode == "piecewise":
                 # Piecewise linear fitting with n segments
-                coefficients, coefficient_errors, inlier_mask = self._fit_piecewise_linear(
+                coefficients, coefficient_errors, inlier_mask, overall_method = self._fit_piecewise_linear(
                     x, y, x_err, y_err, n_segments
                 )
                 # For piecewise, use inlier_mask from RANSAC
@@ -1920,7 +2056,7 @@ class Zeropoint:
                 x_range = float(np.ptp(x))
 
                 # Plot for piecewise linear (save to same directory as input file)
-                self._plot_piecewise_color_term(xi, yi, xe, ye, coefficients, coefficient_errors, n_segments, color1, color2, use_filter, inlier_mask)
+                self._plot_piecewise_color_term(xi, yi, xe, ye, coefficients, coefficient_errors, n_segments, color1, color2, use_filter, inlier_mask, overall_method)
 
                 # Return after plotting
                 return coefficients, coefficient_errors
@@ -1996,178 +2132,95 @@ class Zeropoint:
             except Exception as exc:
                 logger.debug(f"fit_color_term: stratified sampling check skipped: {exc}")
 
-            # 6. Adaptive RANSAC residual threshold - scales with photometric uncertainty
-            try:
-                if poly_order == 1:
-                    ols_slope = np.polyfit(x, y, 1)[0]
-                    ols_resid = y - (ols_slope * x + np.median(y - ols_slope * x))
-                else:
-                    poly_coeffs = np.polyfit(x, y, 2)
-                    ols_resid = y - (poly_coeffs[0] * x**2 + poly_coeffs[1] * x + poly_coeffs[2])
-                mad_resid = median_abs_deviation(ols_resid, scale="normal")
-                median_y_err = np.median(y_err)
-                # Scale threshold with measurement uncertainty
-                residual_threshold = float(np.clip(
-                    max(2.5 * mad_resid, 2.0 * median_y_err), 0.03, 0.5
-                ))
-            except Exception:
-                residual_threshold = 0.1
-
+            # 6. RANSAC regression for robust outlier rejection
             # For polynomial fitting, use polynomial features
             if poly_order == 1:
                 X_poly = x[:, None]
-                base_estimator = PenalisedSlopeRegressor(
-                    slope_constraint=0.0,
-                    slope_tolerance=1.0,
-                    penalty_weight=0.0,
-                )
             else:
                 X_poly = np.column_stack([x**2, x])
-                from sklearn.linear_model import LinearRegression
-                base_estimator = LinearRegression()
+
+            # RANSAC loop for polynomial fitting
+            inlier_mask = None
+            n_inliers = 0
+
+            # Density-based downsampling to avoid cluster bias
+            # If data has dense clusters, downsample them to prevent RANSAC from being biased
+            try:
+                if len(x) > 100:  # Only apply downsampling if we have enough points
+                    # Calculate local density using distance to nearest neighbor
+                    from scipy.spatial import KDTree
+                    kdtree = KDTree(x[:, None])
+                    distances, _ = kdtree.query(x[:, None], k=2)  # Get distance to 2nd nearest neighbor (self is 1st)
+                    local_density = 1.0 / (distances[:, 1] + 1e-10)
+                    
+                    # Identify dense regions (density > 75th percentile)
+                    density_threshold = np.percentile(local_density, 75)
+                    dense_mask = local_density > density_threshold
+                    
+                    if np.sum(dense_mask) > 10:  # If we have enough dense points
+                        # Downsample dense regions to 50% of their original size
+                        dense_indices = np.where(dense_mask)[0]
+                        keep_dense = np.random.choice(dense_indices, size=len(dense_indices)//2, replace=False)
+                        sparse_indices = np.where(~dense_mask)[0]
+                        
+                        # Combine downsampled dense points with all sparse points
+                        downsample_indices = np.concatenate([keep_dense, sparse_indices])
+                        x_orig, y_orig, x_err_orig, y_err_orig = x.copy(), y.copy(), x_err.copy(), y_err.copy()
+                        x, y, x_err, y_err = x_orig[downsample_indices], y_orig[downsample_indices], x_err_orig[downsample_indices], y_err_orig[downsample_indices]
+                        X_poly = np.column_stack([x**2, x]) if poly_order != 1 else x[:, None]
+                        logger.info(f"fit_color_term: downsampled {len(dense_indices)} dense points to {len(keep_dense)} to avoid cluster bias")
+            except Exception as exc:
+                logger.debug(f"fit_color_term: density downsampling skipped: {exc}")
+
+            # Single seed for speed (was 5 seeds)
+            ransac = RANSACRegressor(
+                PenalisedSlopeRegressor(
+                    slope_constraint=0.0,
+                    slope_tolerance=0.5,
+                    penalty_weight=100.0,
+                ),
+                residual_threshold=0.15,  # Increased from 0.1 to prevent overfitting
+                max_trials=500,  # Reduced from 2000 for speed
+                min_samples=max(10, int(0.5 * len(x))),  # Increased from 20% to 50% to prevent overfitting
+                random_state=42,
+            )
+            ransac.fit(X_poly, y)
+            inlier_mask = ransac.inlier_mask_
+            n_inliers = np.sum(inlier_mask)
+
+            if inlier_mask is None or n_inliers < 5:
+                logger.warning("fit_color_term: RANSAC failed to find sufficient inliers, using all points")
+                inlier_mask = np.ones(len(x), dtype=bool)
+                n_inliers = len(x)
+
+            logger.info(f"fit_color_term: RANSAC found {n_inliers} inliers")
 
             min_inlier_frac = 0.25
             min_inliers = max(5, int(len(x) * min_inlier_frac))
-            ransac_seeds = [42, 0, 123, 456, 789]
-            best_inlier_mask = None
-            best_n_inliers = -1
-            best_med_abs_resid = np.inf
-            best_estimator = None
 
-            for seed in ransac_seeds:
-                ransac = RANSACRegressor(
-                    base_estimator,
-                    residual_threshold=residual_threshold,
-                    max_trials=4000,
-                    min_samples=min(4, len(x) - 1),
-                    random_state=seed,
-                )
-                ransac.fit(X_poly, y)
-                inlier_mask = ransac.inlier_mask_
-                n_in = int(np.sum(inlier_mask))
-                if n_in < 4:
-                    continue
-                resid = y - ransac.predict(X_poly)
-                med_abs = float(np.median(np.abs(resid[inlier_mask])))
-                if n_in > best_n_inliers or (
-                    n_in == best_n_inliers and med_abs < best_med_abs_resid
-                ):
-                    best_n_inliers = n_in
-                    best_med_abs_resid = med_abs
-                    best_inlier_mask = inlier_mask
-                    best_estimator = ransac.estimator_
-
-            # 3. Huber Regression fallback when RANSAC finds too few inliers
-            if best_inlier_mask is None or best_n_inliers < 4:
-                logger.warning("fit_color_term: RANSAC found no usable inlier set, trying Huber regression...")
-                try:
-                    from sklearn.linear_model import HuberRegressor
-                    huber = HuberRegressor(epsilon=2.0, max_iter=100, alpha=0.0)
-                    sample_weights = 1.0 / (y_err**2 + 1e-12)
-                    huber.fit(X_poly, y, sample_weight=sample_weights)
-                    if poly_order == 1:
-                        ransac_slope = float(huber.coef_[0])
-                        ransac_intercept = float(huber.intercept_)
-                        ransac_quad = 0.0
-                    else:
-                        ransac_quad = float(huber.coef_[0])
-                        ransac_slope = float(huber.coef_[1])
-                        ransac_intercept = float(huber.intercept_)
-                    # Huber provides its own outlier mask via support_
-                    inlier_mask = huber.support_
-                    best_n_inliers = np.sum(inlier_mask)
-                    logger.info(f"fit_color_term: Huber regression found {best_n_inliers} inliers")
-                    if best_n_inliers < 5:
-                        logger.warning("fit_color_term: Huber also found too few inliers, returning zero coefficients.")
-                        return (0.0, 0.0) if poly_order == 1 else (0.0, 0.0, 0.0)
-                except Exception as huber_exc:
-                    logger.warning(f"fit_color_term: Huber fallback failed: {huber_exc}")
-                    return (0.0, 0.0) if poly_order == 1 else (0.0, 0.0, 0.0)
-            else:
-                inlier_mask = best_inlier_mask
-                if poly_order == 1:
-                    ransac_slope = best_estimator.slope_
-                    ransac_intercept = best_estimator.intercept_
-                    ransac_quad = 0.0
+            if n_inliers < min_inliers:
+                logger.warning(f"fit_color_term: RANSAC inliers {n_inliers} < {min_inliers} ({int(100*min_inlier_frac)}%), using sigma-clip fallback")
+                # Sigma-clip fallback
+                r0 = y - np.average(y, weights=1.0 / (y_err**2 + 1e-12))
+                mad = np.nanmedian(np.abs(r0)) * 1.4826 + 1e-12
+                clipped = sigma_clip(r0, sigma=3 * mad, maxiters=5)
+                inlier_mask = ~clipped.mask
+                if np.sum(inlier_mask) >= 5:
+                    n_inliers = np.sum(inlier_mask)
                 else:
-                    ransac_quad = float(best_estimator.coef_[0])
-                    ransac_slope = float(best_estimator.coef_[1])
-                    ransac_intercept = float(best_estimator.intercept_)
-
-            if best_n_inliers < min_inliers:
-                # Fallback: try Huber regression when RANSAC inliers < 25%
-                logger.warning(f"fit_color_term: RANSAC inliers {best_n_inliers} < {min_inliers} ({int(100*min_inlier_frac)}%), trying Huber...")
-                try:
-                    from sklearn.linear_model import HuberRegressor
-                    huber = HuberRegressor(epsilon=2.0, max_iter=100, alpha=0.0)
-                    sample_weights = 1.0 / (y_err**2 + 1e-12)
-                    huber.fit(X_poly, y, sample_weight=sample_weights)
-                    if poly_order == 1:
-                        ransac_slope = float(huber.coef_[0])
-                        ransac_intercept = float(huber.intercept_)
-                        ransac_quad = 0.0
-                    else:
-                        ransac_quad = float(huber.coef_[0])
-                        ransac_slope = float(huber.coef_[1])
-                        ransac_intercept = float(huber.intercept_)
-                    inlier_mask = huber.support_
-                    huber_inliers = np.sum(inlier_mask)
-                    logger.info(f"fit_color_term: Huber found {huber_inliers} inliers vs {best_n_inliers} from RANSAC")
-                    if huber_inliers < 5:
-                        # Last resort: sigma-clip residuals
-                        if poly_order == 1:
-                            pred = ransac_slope * x + ransac_intercept
-                        else:
-                            pred = ransac_quad * x**2 + ransac_slope * x + ransac_intercept
-                        resid = y - pred
-                        clipped = sigma_clip(resid, sigma=3, maxiters=5)
-                        inlier_mask = ~clipped.mask
-                        if np.sum(inlier_mask) >= 5:
-                            if poly_order == 1:
-                                ransac_slope = float(
-                                    np.polyfit(x[inlier_mask], y[inlier_mask], 1)[0]
-                                )
-                                ransac_intercept = float(
-                                    np.median(y[inlier_mask] - ransac_slope * x[inlier_mask])
-                                )
-                                ransac_quad = 0.0
-                            else:
-                                poly_coeffs = np.polyfit(x[inlier_mask], y[inlier_mask], 2)
-                                ransac_quad = float(poly_coeffs[0])
-                                ransac_slope = float(poly_coeffs[1])
-                                ransac_intercept = float(poly_coeffs[2])
-                        else:
-                            inlier_mask = best_inlier_mask
-                except Exception as huber_exc2:
-                    logger.debug(f"fit_color_term: Huber secondary fallback failed: {huber_exc2}")
-                    # Sigma-clip fallback
-                    if poly_order == 1:
-                        pred = ransac_slope * x + ransac_intercept
-                    else:
-                        pred = ransac_quad * x**2 + ransac_slope * x + ransac_intercept
-                    resid = y - pred
-                    clipped = sigma_clip(resid, sigma=3, maxiters=5)
-                    inlier_mask = ~clipped.mask
-                    if np.sum(inlier_mask) >= 5:
-                        if poly_order == 1:
-                            ransac_slope = float(
-                                np.polyfit(x[inlier_mask], y[inlier_mask], 1)[0]
-                            )
-                            ransac_intercept = float(
-                                np.median(y[inlier_mask] - ransac_slope * x[inlier_mask])
-                            )
-                            ransac_quad = 0.0
-                        else:
-                            poly_coeffs = np.polyfit(x[inlier_mask], y[inlier_mask], 2)
-                            ransac_quad = float(poly_coeffs[0])
-                            ransac_slope = float(poly_coeffs[1])
-                            ransac_intercept = float(poly_coeffs[2])
-                    else:
-                        inlier_mask = best_inlier_mask
+                    logger.warning("fit_color_term: sigma-clip also found too few inliers, using all points")
+                    inlier_mask = np.ones(len(x), dtype=bool)
 
             xi, yi = x[inlier_mask], y[inlier_mask]
             xe, ye = x_err[inlier_mask], y_err[inlier_mask]
             n_in = int(np.sum(inlier_mask))
+
+            # Initial fit on inliers for ODR initialization
+            if poly_order == 1:
+                initial_slope, initial_intercept = np.polyfit(xi, yi, 1)
+            else:
+                quad_coeffs = np.polyfit(xi, yi, 2)
+                initial_quad, initial_slope, initial_intercept = quad_coeffs
 
             # ODR for error-in-variables refinement.
             if poly_order == 1:
@@ -2175,7 +2228,7 @@ class Zeropoint:
                 odr_out = ODR(
                     RealData(xi, yi, sx=xe, sy=ye),
                     Model(lambda B, x: B[0] * x + B[1]),
-                    beta0=[ransac_slope, ransac_intercept],
+                    beta0=[initial_slope, initial_intercept],
                 ).run()
                 coefficients = (float(odr_out.beta[1]), float(odr_out.beta[0]))  # (intercept, slope)
                 # Estimate errors from covariance matrix
@@ -2258,37 +2311,39 @@ class Zeropoint:
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(340, 2.0), sharex=True)
             plt.subplots_adjust(hspace=0.35, top=0.95, bottom=0.1, left=0.15, right=0.95)
 
-            # Okabe-Ito palette for consistent, colorblind-friendly plots.
-            okabe_blue = "#0000FF"
-            okabe_orange = "#FF0000"
+            # Import centralized plotting utilities for consistent formatting
+            from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
 
-            # Top panel: uncorrected data
+            # Okabe-Ito palette for consistent, colorblind-friendly plots.
+            okabe_blue = get_color('inliers')
+            okabe_orange = get_color('outliers')
+            okabe_gray = get_color('all_sources')
+
+            # Top panel: uncorrected data - show full distribution first (without error bars)
+            ax1.scatter(
+                x,
+                y,
+                s=get_marker_size('small')**2,
+                color=okabe_gray,
+                alpha=0.3,
+                label=f"All points [{len(x)}]",
+            )
+
+            # Top panel: uncorrected data - show cleaned distribution (inliers)
             ax1.errorbar(
                 xi,
                 yi,
                 xerr=xe,
                 yerr=ye,
                 fmt="o",
-                ms=4,
+                ms=get_marker_size('medium'),
                 color=okabe_blue,
-                ecolor="lightgrey",
+                ecolor=okabe_blue,
                 alpha=0.8,
-                capsize=2,
-                lw=0.5,
-                label="Inliers",
+                capsize=1,
+                lw=get_line_width('thin') * 0.5,
+                label=f"Inliers [{np.sum(inlier_mask)}]",
             )
-
-            out_mask = ~inlier_mask
-            if out_mask.any():
-                ax1.scatter(
-                    x[out_mask],
-                    y[out_mask],
-                    s=30,
-                    marker="x",
-                    alpha=0.4,
-                    color=okabe_orange,
-                    label="Outliers",
-                )
 
             x_plot = np.linspace(xi.min() * 0.95, xi.max() * 1.05, 200)
             if fit_mode == "piecewise" and n_segments == 2:
@@ -2316,7 +2371,7 @@ class Zeropoint:
                 y_plot,
                 color=okabe_orange,
                 linestyle="--",
-                lw=0.5,
+                lw=get_line_width('thin'),
                 label=label_text,
             )
 
@@ -2333,7 +2388,7 @@ class Zeropoint:
                 rf"$m_\mathrm{{cal,{color1}}} - m_\mathrm{{inst,{use_filter}}}$ [mag]"
             )
             ax1.grid(True, alpha=0.3)
-            ax1.legend(loc="best", frameon=False)
+            ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2)
 
             # Bottom panel: color corrected data (should be flat)
             if fit_mode == "piecewise" and n_segments == 2:
@@ -2363,57 +2418,61 @@ class Zeropoint:
                 ye_corrected = np.sqrt(ye**2 + ((2 * plot_quad * xi + plot_slope) * xe)**2)
             std_uncorrected = float(median_abs_deviation(yi, nan_policy="omit"))
             std_corrected = float(median_abs_deviation(yi_corrected, nan_policy="omit"))
-            
+
+            # Calculate corrected values for all points
+            if fit_mode == "piecewise" and n_segments == 2:
+                breakpoints, slopes, intercept = coefficients
+                bp = breakpoints[0]
+                slope1, slope2 = slopes
+
+                y_corrected_all = np.zeros_like(y)
+
+                mask1_all = x <= bp
+                mask2_all = x > bp
+
+                # Segment 1 correction for all points
+                y_corrected_all[mask1_all] = y[mask1_all] - slope1 * x[mask1_all]
+
+                # Segment 2 correction for all points
+                y_corrected_all[mask2_all] = y[mask2_all] - (slope2 * x[mask2_all] + (slope1 - slope2) * bp)
+            elif poly_order == 1:
+                y_corrected_all = y - plot_slope * x
+            else:
+                y_corrected_all = y - (plot_quad * x**2 + plot_slope * x)
+
+            # Bottom panel: color corrected data - show full distribution first (without error bars for all points)
+            ax2.scatter(
+                x,
+                y_corrected_all,
+                s=get_marker_size('small')**2,
+                color=okabe_gray,
+                alpha=0.3,
+                label=f"All points (corrected) [{len(x)}]",
+            )
+
+            # Bottom panel: color corrected data - show cleaned distribution (inliers)
             ax2.errorbar(
                 xi,
                 yi_corrected,
                 xerr=xe,
                 yerr=ye_corrected,
                 fmt="o",
-                ms=4,
-                color="green",
-                ecolor="lightgreen",
-                alpha=0.6,
-                capsize=2,
-                lw=0.5,
-                label=f"Inliers (corrected) [std={std_corrected:.3f}]",
+                ms=get_marker_size('medium'),
+                color=okabe_blue,
+                ecolor=okabe_blue,
+                alpha=0.8,
+                capsize=1,
+                lw=get_line_width('thin') * 0.5,
+                label=f"Inliers (corrected) [{np.sum(inlier_mask)}]",
             )
-
-            if out_mask.any():
-                if fit_mode == "piecewise" and n_segments == 2:
-                    breakpoints, slopes, intercept = coefficients
-                    bp = breakpoints[0]
-                    slope1, slope2 = slopes
-
-                    x_out = x[out_mask]
-                    y_out_corrected = np.zeros_like(y[out_mask])
-
-                    mask1 = x_out <= bp
-                    mask2 = x_out > bp
-
-                    y_out_corrected[mask1] = y[out_mask][mask1] - slope1 * x_out[mask1]
-                    y_out_corrected[mask2] = y[out_mask][mask2] - (slope2 * x_out[mask2] + (slope1 - slope2) * bp)
-                elif poly_order == 1:
-                    y_out_corrected = y[out_mask] - plot_slope * x[out_mask]
-                else:
-                    y_out_corrected = y[out_mask] - (plot_quad * x[out_mask]**2 + plot_slope * x[out_mask])
-                ax2.scatter(
-                    x[out_mask],
-                    y_out_corrected,
-                    s=30,
-                    marker="x",
-                    alpha=0.4,
-                    color="darkgreen",
-                    label="Outliers (corrected)",
-                )
 
             y_plot_corrected = np.full_like(x_plot, plot_intercept)
             ax2.plot(
                 x_plot,
                 y_plot_corrected,
-                color="green",
+                color=get_color('robust'),
                 linestyle="-",
-                lw=1.0,
+                lw=get_line_width('medium'),
                 label=f"Flat (intercept={plot_intercept:.3f})",
             )
 
@@ -2425,7 +2484,7 @@ class Zeropoint:
                 rf"Corrected $m_\mathrm{{cal,{color1}}} - m_\mathrm{{inst,{use_filter}}}$ [mag]"
             )
             ax2.grid(True, alpha=0.3)
-            ax2.legend(loc="best", frameon=False)
+            ax2.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2)
 
             fpath = self.input_yaml.get("fpath", "")
             base_name = os.path.splitext(os.path.basename(fpath))[0] or "color_term"
