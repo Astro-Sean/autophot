@@ -96,57 +96,7 @@ def _disk_structuring_element(r: int) -> np.ndarray:
     return (x * x + y * y) <= r * r
 
 
-# ---------------------------------------------------------------------------
-# Constant-region mask for source filtering (chip gaps, dead areas, flat borders)
-# ---------------------------------------------------------------------------
-def _constant_region_mask(
-    image: np.ndarray,
-    box: int = 5,
-    variance_threshold: float | None = None,
-    dilate_pixels: int = 2,
-) -> np.ndarray | None:
-    """
-    Build a boolean mask of pixels lying in constant-value regions (e.g. chip
-    gaps, dead columns, constant borders). Used to reject spurious sources
-    detected there.
-
-    Parameters
-    ----------
-    image : np.ndarray
-        2D image (float).
-    box : int
-        Side length of the window used to compute local variance (default 5).
-    variance_threshold : float or None
-        Pixels with local variance <= this are considered constant. If None,
-        use a small fraction of the image's robust std.
-    dilate_pixels : int
-        Radius (in pixels) to dilate the constant region so edges are excluded
-        (default 2).
-
-    Returns
-    -------
-    np.ndarray or None
-        Boolean mask same shape as image (True = bad/constant region), or None
-        if image is not 2D.
-    """
-    image = np.asarray(image, dtype=float)
-    if image.ndim != 2:
-        return None
-    # Ensure odd box
-    box = max(3, int(box)) | 1
-    # Local variance: E[X^2] - E[X]^2 over box (NaN propagates in uniform_filter)
-    mean = uniform_filter(image, size=box, mode="constant", cval=np.nan)
-    mean_sq = uniform_filter(image * image, size=box, mode="constant", cval=np.nan)
-    local_var = mean_sq - mean * mean
-    finite = np.isfinite(image)
-    if variance_threshold is None:
-        global_std = np.nanstd(image)
-        variance_threshold = (max(global_std, 1e-10) * 1e-6) ** 2
-    constant = (local_var <= variance_threshold) & finite
-    if dilate_pixels > 0:
-        r = int(dilate_pixels)
-        constant = binary_dilation(constant, structure=_disk_structuring_element(r))
-    return constant
+# Removed dead code _constant_region_mask function - was never used in the codebase
 
 
 # =============================================================================
@@ -522,7 +472,8 @@ class BackgroundSubtractor:
                             )
                             residual = image - float(gmed)
                     else:
-                        _, gmed, _ = sigma_clipped_stats(residual, sigma=3.0, mask=mask)
+                        # Use nanmedian for faster iteration (sigma_clipped_stats is expensive on large images)
+                        gmed = float(np.nanmedian(residual[~mask & np.isfinite(residual)]))
                         residual = image - float(gmed)
 
             except Exception as exc:
@@ -648,9 +599,14 @@ class BackgroundSubtractor:
         half = max(1, int(bleed_half_length))
         # Flux threshold for "still on streak" - lower to catch fainter tails
         sigma = float(np.nanstd(image)) if np.isfinite(np.nanstd(image)) else 0.0
-        flux_thresh = float(np.nanmedian(image)) + 1.5 * sigma
-        flux_thresh = max(flux_thresh, streak_flux_frac * saturate)
-        flux_thresh = min(flux_thresh, 0.35 * saturate)
+        background_level = float(np.nanmedian(image)) + 1.5 * sigma
+        min_thresh = streak_flux_frac * saturate   # must be above this to be a streak
+        max_thresh = 0.35 * saturate               # cap to avoid masking whole bright image
+        flux_thresh = float(np.clip(background_level, min_thresh, max_thresh))
+        
+        # Log when clamping occurs for debugging
+        if background_level > max_thresh:
+            self.logger.debug("flux_thresh clamped to %.2e (background too bright)", max_thresh)
 
         struct = np.ones((3, 3), dtype=int)
         labels, n_comp = ndi_label(sat_core, structure=struct)
@@ -760,7 +716,8 @@ class BackgroundSubtractor:
         img = np.asarray(image, dtype=float)
         ny, nx = img.shape
         med = float(np.nanmedian(img))
-        sig = float(np.nanstd(img)) if np.isfinite(np.nanstd(img)) else 0.0
+        # Use mad_std for robust scatter estimation (less sensitive to bright sources)
+        sig = float(mad_std(img[np.isfinite(img)])) if np.any(np.isfinite(img)) else 0.0
         if sig <= 0:
             return np.zeros_like(img, dtype=bool)
         thresh = med + n_sigma * sig
@@ -995,8 +952,9 @@ class BackgroundSubtractor:
         # Fallback 1: double the box size (fewer, larger boxes = more robust).
         big = (box_size[0] * 2) | 1
         attempts.append(((big, big), max(3, filter_size), mask))
-        # Fallback 2: no mask + large boxes (last resort before flat).
-        attempts.append(((big, big), 3, None))
+        # Fallback 2: minimal mask (NaN/saturation only) + large boxes (last resort before flat).
+        nan_only_mask = ~np.isfinite(image) if image is not None else None
+        attempts.append(((big, big), 3, nan_only_mask))
 
         cfg_bkg = (
             (self.config.get("background", {}) or {})
@@ -1392,6 +1350,7 @@ class BackgroundSubtractor:
         exclude_inner_radius: float = None,
         dilate_factor: float = 1,  # balanced: masks wings without over-masking
         plot: bool = True,
+        precomputed_rms: np.ndarray | None = None,  # Optional pre-computed RMS map
     ):
         """
         Fit and subtract a local 2-D background surface around a target.
@@ -1741,12 +1700,15 @@ class BackgroundSubtractor:
             dilate_factor=1.5,
             n_iterations=2,
         )
-        box_size_full, filter_size_full, _ = self._compute_box_sizes(
-            image, full_mask, fwhm_pixels
-        )
-        _, _, bkg_rms_full, _ = self._estimate_background(
-            image, full_mask, box_size_full, filter_size_full
-        )
+        if precomputed_rms is not None:
+            bkg_rms_full = precomputed_rms
+        else:
+            box_size_full, filter_size_full, _ = self._compute_box_sizes(
+                image, full_mask, fwhm_pixels
+            )
+            _, _, bkg_rms_full, _ = self._estimate_background(
+                image, full_mask, box_size_full, filter_size_full
+            )
 
         if plot:
             # For plotting, show only the conservative source mask (target

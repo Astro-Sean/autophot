@@ -53,6 +53,7 @@ Target:
 # Safeguard: force BLAS/OpenMP to 1 thread before any scientific imports (avoids exhausting
 # process/thread limits when using multiprocessing on HPC; OpenBLAS often defaults to 128).
 import os
+import contextlib
 
 for _env in (
     "OPENBLAS_NUM_THREADS",
@@ -78,6 +79,10 @@ import uuid
 import warnings
 from collections import OrderedDict
 from pathlib import Path
+
+# Set matplotlib to use non-interactive backend to prevent Wayland/Qt display issues
+import matplotlib
+matplotlib.use('Agg')
 
 # Third-Party Libraries
 import numpy as np
@@ -1238,18 +1243,7 @@ def run_photometry():
         #          Populate Output Dictionary
         # =============================================================================
 
-        # Populates the output dictionary with basic metadata.
-        output = OrderedDict(
-            {
-                "fname": fpath,
-                "telescope": telescope_config["Name"],
-                "TELESCOP": telescope,
-                "INSTRUME": instrument_key,
-                "instrument": instrument,
-                "mjd": date_mjd,
-                "airmass": airmass,
-            }
-        )
+        # Removed dead code - first output = OrderedDict assignment was completely replaced later
 
         #  Update Input YAML with Instrument Metadata
         # Updates the input YAML with instrument metadata.
@@ -2101,7 +2095,9 @@ def run_photometry():
             )
             # Converts sky coordinates to pixel coordinates using WCS.
             try:
-                x_pix, y_pix = imageWCS.world_to_pixel(coords)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    x_pix, y_pix = imageWCS.world_to_pixel(coords)
             except Exception as exc:
                 log_warning_from_exception(
                     logging.getLogger(),
@@ -2118,7 +2114,9 @@ def run_photometry():
                     )
                 ):
                     try:
-                        xi, yi = imageWCS.all_world2pix(float(ra_deg), float(dec_deg), 0)
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            xi, yi = imageWCS.all_world2pix(float(ra_deg), float(dec_deg), 0)
                         if np.isfinite(xi) and np.isfinite(yi):
                             x_pix[i] = float(xi)
                             y_pix[i] = float(yi)
@@ -2612,14 +2610,16 @@ def run_photometry():
                 weight_path=weight_fpath,
                 crowded=sex_crowded,
             )
-            ImageFWHM, FWHMSources, scale = SExtractorWrapper(config=input_yaml).run(
-                fpath,
-                pixel_scale=pixel_scale,
-                masked_sources=variable_sources,
-                weight_path=weight_fpath,
-                use_FWHM=ImageFWHM,
-                crowded=sex_crowded,
-            )
+            # Only run refined SExtractor call if first call succeeded
+            if np.isfinite(ImageFWHM):
+                ImageFWHM, FWHMSources, scale = SExtractorWrapper(config=input_yaml).run(
+                    fpath,
+                    pixel_scale=pixel_scale,
+                    masked_sources=variable_sources,
+                    weight_path=weight_fpath,
+                    use_FWHM=ImageFWHM,
+                    crowded=sex_crowded,
+                )
         except Exception as e:
             log_exception(e, "Issue with SExtractor")
 
@@ -3217,11 +3217,12 @@ def run_photometry():
         if not do_aperture_ONLY or prepare_template:
             if PSFSources is not None:
                 roundness = PSFSources["roundness"]
+                from astropy.stats import mad_std
                 mean_roundness, median_roundness, std_roundness = sigma_clipped_stats(
                     roundness,
                     sigma=3.0,
                     cenfunc=np.nanmedian,
-                    stdfunc="mad_std",
+                    stdfunc=mad_std,
                 )
                 logging.info(
                     f"PSF sources roundness: {mean_roundness:.2f} +/- {std_roundness:.2f}"
@@ -4572,8 +4573,33 @@ def run_photometry():
         cutout_y0 = 0
         cutout_target_x = float(bg_target_x_pix)
         cutout_target_y = float(bg_target_y_pix)
+
+        # Create Limits instance for get_cutout method
+        from limits import Limits
+        getDetectionLimits = Limits(input_yaml=input_yaml)
+
         try:
-            if local_cutout_box is not None:
+            # Use get_cutout to create target cutout (ensures consistency with limiting magnitude test)
+            # Pass the background-subtracted image
+            target_cutout = getDetectionLimits.get_cutout(image=image)
+            if target_cutout is not None:
+                # Extract corresponding background RMS region
+                if background_rms is not None and np.ndim(background_rms) == 2:
+                    # Use get_cutout on background_rms as well
+                    target_cutout_rms = getDetectionLimits.get_cutout(image=background_rms)
+                    if target_cutout_rms is not None:
+                        target_cutout_rms = np.abs(np.asarray(target_cutout_rms, dtype=float))
+                # Target position is center of cutout (set by get_cutout)
+                cutout_target_x = float(target_cutout.shape[1] / 2.0)
+                cutout_target_y = float(target_cutout.shape[0] / 2.0)
+        except Exception as e:
+            logging.warning(f"get_cutout failed for target cutout: {e}, falling back to direct slicing")
+            target_cutout = None
+            target_cutout_rms = None
+
+        # Fallback to direct slicing if get_cutout failed
+        if target_cutout is None and local_cutout_box is not None:
+            try:
                 y0b, y1b, x0b, x1b = [int(v) for v in local_cutout_box]
                 cutout_y0, cutout_x0 = int(y0b), int(x0b)
                 target_cutout = np.asarray(image[y0b:y1b, x0b:x1b], dtype=float)
@@ -4584,9 +4610,9 @@ def run_photometry():
                     )
                 cutout_target_x = float(bg_target_x_pix) - float(x0b)
                 cutout_target_y = float(bg_target_y_pix) - float(y0b)
-        except Exception:
-            target_cutout = None
-            target_cutout_rms = None
+            except Exception:
+                target_cutout = None
+                target_cutout_rms = None
 
         # If a uniform DC lift was applied to make the cutout background nonnegative,
         # keep it in place for measurements so the *mean level* is shifted positive.
@@ -5276,11 +5302,10 @@ def run_photometry():
                 logging.info(
                     border_msg("Getting detection limits for transient neighborhood")
                 )
-                # Creates an instance of the limits class.
-                getDetectionLimits = Limits(input_yaml=input_yaml)
+                # Limits instance already created earlier for get_cutout
                 try:
-                    # Use the same shared target cutout used for target AP/PSF (bias kept).
-                    image_for_limiting = target_cutout if target_cutout is not None else image
+                    # Use the full image for PSF calibration to avoid coordinate conversion issues
+                    image_for_limiting = image  # Always use full image, not cutout
                     # If we already have the local-fit cutout, don't re-cut it again
                     # (Limits.get_cutout uses input_yaml target pixel coords which are
                     # full-frame and will be out-of-bounds on the cutout array).
@@ -5355,19 +5380,14 @@ def run_photometry():
                                 float(beta_limit),
                                 "off" if detection_snr_limit is None else str(detection_snr_limit),
                             )
-                            # For consistency, run injection directly on the same image
-                            # passed above (full frame or shared target cutout).
-                            # If we are using the cutout, the injection position must
-                            # be in cutout coordinates (centre near the target).
-                            if target_cutout is not None:
-                                lim_pos = (float(cutout_target_x), float(cutout_target_y))
-                                lim_rms = background_rms_for_target
-                            else:
-                                lim_pos = (
-                                    TargetPosition["x_fit"].iloc[0],
-                                    TargetPosition["y_fit"].iloc[0],
-                                )
-                                lim_rms = background_rms
+                            # For consistency, run injection directly on the full image
+                            # Always use target position in full image coordinates from input_yaml
+                            # (not the fitted position which may be in cutout coordinates)
+                            lim_pos = (
+                                float(input_yaml["target_x_pix"]),
+                                float(input_yaml["target_y_pix"]),
+                            )
+                            lim_rms = background_rms
 
                             # Keep limiting-magnitude recovery consistent with target AP:
                             # allow negative annulus medians (do not floor to 0) during
@@ -5383,7 +5403,7 @@ def run_photometry():
                                     input_yaml["photometry"] = {}
                                 input_yaml["photometry"]["enforce_nonnegative_local_background"] = False
                                 InjectedLimit = getDetectionLimits.get_injected_limit(
-                                    image_for_limiting,
+                                    image,  # Pass full image instead of cutout
                                     initialGuess=initial_guess,
                                     detection_limit=detection_snr_limit,
                                     detection_cutoff=beta_limit,
@@ -5393,9 +5413,7 @@ def run_photometry():
                                     zeropoint=zeropoint,
                                     plot=True,
                                     n_jobs=lim_n_jobs,
-                                    # When we pass the shared local target cutout, treat it as
-                                    # the working image directly (no further Cutout2D extraction).
-                                    precutout=bool(target_cutout is not None),
+                                    image_zeropoint=image_zeropoint,
                                 )
                             finally:
                                 if _old_enforce_nn_lim is not None:

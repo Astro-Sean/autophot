@@ -373,12 +373,12 @@ class FitsInfo:
 
     def ask_for_keyword(self, keyword, header, fname="", expected_units=None):
         """
-        Interactive keyword selection with smart matching.
+        Non-interactive keyword selection with smart matching.
 
         Strategy:
         1. Exact alias matches (fastest)
         2. Fuzzy matching backup
-        3. Manual entry fallback
+        3. Auto-select first reasonable option
 
         Args:
             keyword (str): Target keyword name (ex: 'Date')
@@ -390,23 +390,19 @@ class FitsInfo:
             str: Selected header keyword name
         """
         keys = list(header.keys())
-        print(f"\nKeyword '{keyword}' (file: {fname})")
 
         auto_k = auto_accept_header_key(header, keyword)
         if auto_k is not None:
             self.logger.info(
                 "Using header key %r for %s (auto_accept)", auto_k, keyword
             )
-            print(f"Using {auto_k}: {header[auto_k]}")
             return auto_k
 
         # Step 1: Exact aliases (most reliable)
         aliases = KEYWORD_ALIASES.get(keyword, [])
         exact = list(dict.fromkeys([k for k in aliases if k in keys]))
-        if exact:
-            print(f"Exact match: {', '.join(exact[:3])}")
         if len(exact) == 1:
-            print(f"Using: {exact[0]}")
+            self.logger.info(f"Auto-selected exact match for {keyword}: {exact[0]}")
             return exact[0]
 
         # Step 2: Fuzzy matching
@@ -414,82 +410,20 @@ class FitsInfo:
         candidates = list(set(exact + fuzzy))[:8]
 
         if candidates:
-            print("  # | KEY            | VALUE")
-            print("  " + "-" * 33)
-            kw_dict = {i + 1: k for i, k in enumerate(candidates)}
-            for i, k in kw_dict.items():
-                header_value = (
-                    str(header[k])[:20] + "..."
-                    if len(str(header[k])) > 20
-                    else str(header[k])
-                )
-                print(f"  [{i}] {k:<15} | {header_value}")
-            print(f"\n  [a] List all header keywords")
-            print(f"  [n] Not given / null")
+            # Auto-select first candidate
+            selected = candidates[0]
+            self.logger.info(f"Auto-selected keyword for {keyword}: {selected}")
+            return selected
 
-            sel_raw = self.ask_question(f"Select {keyword}", "1", str, ignore_word="skip")
-            sel = sel_raw.strip().lower()
-            
-            # Handle special options
-            if sel == "skip":
-                pass  # Fall through to show all keywords
-            elif sel == "a":
-                # User wants to see all keywords - fall through to Step 3
-                pass
-            elif sel == "n":
-                return "not_given_by_user"
-            else:
-                # Try to parse as number
-                try:
-                    sel_num = float(sel)
-                    if sel_num in kw_dict:
-                        return kw_dict[sel_num]
-                except ValueError:
-                    pass
-                # Invalid - fall through to show all keywords
+        # Fallback: search for keyword containing the target name
+        for key in keys:
+            if keyword.lower() in key.lower():
+                self.logger.info(f"Fallback auto-selected keyword for {keyword}: {key}")
+                return key
 
-        # Step 3: Show all header keywords for selection (or if 'a' was selected)
-        print(f"\n  No matching keywords found for '{keyword}'.")
-        print(f"  Expected aliases: {', '.join(aliases[:4])}")
-        print(f"\n  Available header keywords in this file:")
-        print("  # | KEY            | VALUE")
-        print("  " + "-" * 33)
-        all_keys = sorted(keys)
-        kw_dict = {i + 1: k for i, k in enumerate(all_keys)}
-        for i, k in kw_dict.items():
-            header_value = (
-                str(header[k])[:20] + "..."
-                if len(str(header[k])) > 20
-                else str(header[k])
-            )
-            print(f"  [{i}] {k:<15} | {header_value}")
-        
-        print(f"\n  [n] Not given / null")
-        print(f"  Or enter '{keyword}' manually")
-        sel_raw = self.ask_question(
-            f"Select {keyword} by number", 
-            "1", 
-            str, 
-            ignore_word="skip"
-        )
-        sel = sel_raw.strip().lower()
-        
-        if sel == "skip":
-            return "not_given_by_user"
-        elif sel == "n":
-            return "not_given_by_user"
-        else:
-            # Try to parse as number
-            try:
-                sel_num = float(sel)
-                if sel_num in kw_dict:
-                    return kw_dict[sel_num]
-            except ValueError:
-                pass
-        
-        # If invalid or manual entry requested
-        key = self.ask_question(f"Enter '{keyword}' key manually", "ignored", str)
-        return "not_given_by_user" if key == "ignored" else key
+        # Last resort: return None
+        self.logger.warning(f"Could not find suitable keyword for {keyword}")
+        return None
 
     def check(self):
         """
@@ -568,15 +502,14 @@ class FitsInfo:
             for inst_key, insts in inst_groups.items():
                 for inst_name in insts:
                     entry = db[tele]["INSTRUME"].get(inst_name)
-                    if not entry:  # New instrument - prompt for setup
+                    if not entry:  # New instrument - auto-setup with defaults
                         entry = {}
                         db[tele]["INSTRUME"][inst_name] = entry
-                        
-                        # Prompt for telescope/instrument label
-                        entry["Name"] = self.ask_question(
-                            f"Label '{tele}+{inst_name}'", f"{tele}+{inst_name}"
-                        )
-                        
+
+                        # Auto-generate telescope/instrument label
+                        entry["Name"] = f"{tele}+{inst_name}"
+                        self.logger.info(f"Auto-created instrument entry: {entry['Name']}")
+
                         # Try to derive pixel scale from WCS
                         ps_default = 0.4
                         sample_file = None
@@ -596,14 +529,14 @@ class FitsInfo:
                             ):
                                 sample_file = fname
                                 break
-                        
+
                         if sample_file is not None:
                             try:
                                 from functions import get_header as ap_get_header
                                 from wcs import get_wcs as ap_get_wcs
                                 import astropy.wcs as WCS_mod
                                 import numpy as np_mod
-                                
+
                                 hdr0 = ap_get_header(sample_file)
                                 wcs_obj = ap_get_wcs(hdr0)
                                 xy_scales = WCS_mod.utils.proj_plane_pixel_scales(wcs_obj)
@@ -611,27 +544,15 @@ class FitsInfo:
                                     cand = float(xy_scales[0]) * 3600.0
                                     if np_mod.isfinite(cand) and 0 < cand <= 5:
                                         ps_default = cand
+                                        self.logger.info(f"Auto-derived pixel scale from WCS: {ps_default:.3f} arcsec/pix")
                             except Exception:
                                 ps_default = 0.4
-                        
-                        ps = self.ask_question(
-                            "Pixel scale (arcsec/pix)",
-                            ps_default,
-                            float,
-                            ignore_word="skip",
-                        )
-                        entry["pixel_scale"] = None if ps == "skip" else float(ps)
+
+                        entry["pixel_scale"] = ps_default
                         entry["filter_key_0"] = "FILTER"
-                        
-                        # Extract optional keywords using first valid file
-                        if correct_files:
-                            h = get_header(correct_files[0])
-                            for opt, info in OPTIONAL_KEYWORDS.items():
-                                label = info["label"]
-                                if label not in entry:
-                                    entry[label] = self.ask_for_keyword(
-                                        opt, h, os.path.basename(correct_files[0]), info["units"]
-                                    )
+
+                        # Skip optional keyword extraction (non-interactive)
+                        self.logger.info("Skipping optional keyword extraction (non-interactive mode)")
 
         # PHASE 3: FILTER KEYWORDS FOR ALL VALID FILES (skip files without TELESCOP/INSTRUME, e.g. templates)
         self.logger.info(border_msg(f"Filters ({len(correct_files)} files)"))
@@ -672,8 +593,15 @@ class FitsInfo:
                 if fval_raw in self.available_filters:
                     entry[fval_raw] = fval_raw
                 else:
-                    std_filter = self._ask_filter_mapping(fval_raw)
-                    entry[fval_raw] = std_filter
+                    # Non-interactive: use heuristic to map filter
+                    std_filter = self._resolve_standard_band(fval_raw)
+                    if std_filter is not None:
+                        entry[fval_raw] = std_filter
+                        self.logger.info(f"Auto-mapped filter {fval_raw} -> {std_filter}")
+                    else:
+                        # Fallback: use the raw value as-is
+                        entry[fval_raw] = fval_raw
+                        self.logger.warning(f"Could not auto-map filter {fval_raw}, using as-is")
 
         # SAVE DATABASE
         self._save_db(db)
@@ -831,9 +759,10 @@ class FitsInfo:
         """
         Select best filter keyword from header.
 
-        Priority: FILTER -->existing filter_key_N -->new search
+        Priority: FILTER -->existing filter_key_N -->auto-search
         Skips 'open'/'clear' filters.
         Dynamically adds new filter_key_{N+1} entries.
+        Non-interactive: auto-selects first reasonable filter key.
 
         Args:
             header (dict): FITS header
@@ -849,22 +778,54 @@ class FitsInfo:
                 if fval not in AVOID_FILTERS:
                     return fk
 
-        # Search and register new filter key
-        new_key = self.ask_for_keyword("filter", header)
-        next_n = (
-            max(
-                [
-                    int(re.search(r"filter_key_(\d+)", k).group(1))
-                    for k in entry
-                    if "filter_key_" in k
-                ]
-                + [0]
-            )
-            + 1
-        )
-        new_fk = f"filter_key_{next_n}"
-        entry[new_fk] = new_key
-        return new_key
+        # Auto-search for filter keyword (non-interactive)
+        # Look for keywords containing "filter" or "FPA.FILTER"
+        for key in header.keys():
+            key_lower = key.lower()
+            if "filter" in key_lower and key not in fkeys:
+                fval = str(header[key]).strip().lower().replace(" ", "")
+                if fval not in AVOID_FILTERS:
+                    # Register this new filter key
+                    next_n = (
+                        max(
+                            [
+                                int(re.search(r"filter_key_(\d+)", k).group(1))
+                                for k in entry
+                                if "filter_key_" in k
+                            ]
+                            + [0]
+                        )
+                        + 1
+                    )
+                    new_fk = f"filter_key_{next_n}"
+                    entry[new_fk] = key
+                    self.logger.info(f"Auto-selected filter key: {key} -> {new_fk}")
+                    return key
+
+        # Fallback: use first key that looks like a filter
+        for key in header.keys():
+            fval = str(header[key]).strip().lower().replace(" ", "")
+            if fval and fval not in AVOID_FILTERS and len(fval) <= 10:
+                # Register this new filter key
+                next_n = (
+                    max(
+                        [
+                            int(re.search(r"filter_key_(\d+)", k).group(1))
+                            for k in entry
+                            if "filter_key_" in k
+                        ]
+                        + [0]
+                    )
+                    + 1
+                )
+                new_fk = f"filter_key_{next_n}"
+                entry[new_fk] = key
+                self.logger.info(f"Fallback auto-selected filter key: {key} -> {new_fk}")
+                return key
+
+        # Last resort: use FILTER as default
+        self.logger.warning("No suitable filter key found, using 'FILTER' as default")
+        return "FILTER"
 
     def _load_db(self):
         """Load existing telescope.yml from wdir or return empty dict.

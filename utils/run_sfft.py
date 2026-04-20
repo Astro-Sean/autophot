@@ -19,14 +19,6 @@ import sys
 import time
 import warnings
 
-# Ensure repo root is on sys.path when run as a standalone script.
-# This avoids `ModuleNotFoundError: No module named 'functions'` when the
-# current working directory is not the project root.
-_script_dir = os.path.dirname(os.path.abspath(__file__))
-_repo_root = os.path.abspath(os.path.join(_script_dir, ".."))
-if _repo_root not in sys.path:
-    sys.path.insert(0, _repo_root)
-
 from functions import ColoredLevelFormatter, LogMessageNormalizeFilter, set_size
 
 # Limit BLAS/OpenMP threads before any scientific imports (avoids libgomp
@@ -39,15 +31,8 @@ for _env in (
     "NUMEXPR_NUM_THREADS",
 ):
     os.environ.setdefault(_env, "1")
-# Optional: pin this process to a single CPU (Linux) so SFFT uses one process, one core.
-try:
-    _pid = os.getpid()
-    _aff = os.sched_getaffinity(_pid)
-    if _aff:
-        _one = {next(iter(_aff))}
-        os.sched_setaffinity(_pid, _one)
-except (AttributeError, OSError):
-    pass
+# Thread-count limits are applied via env vars above; affinity pinning is left
+# to the scheduler / HPC job manager.
 
 import numpy as np
 import pandas as pd
@@ -371,6 +356,18 @@ def run_sfft() -> Optional[int]:
         default="false",
         help="If true and crowded mode with bg_order=0, override to bg_order=2.",
     )
+    parser.add_argument(
+        "-coarse_var_rejection",
+        type=str,
+        default="false",
+        help="Enable SFFT coarse variable-star rejection (true/false).",
+    )
+    parser.add_argument(
+        "-elabo_var_rejection",
+        type=str,
+        default="false",
+        help="Enable SFFT elaborate variable-star rejection (true/false).",
+    )
     args = parser.parse_args()
 
     # --- Parse Coordinate Lists ---
@@ -400,6 +397,13 @@ def run_sfft() -> Optional[int]:
                     )
             if coords_array.ndim != 2 or coords_array.shape[1] != 2:
                 raise ValueError("Must be a list of [x, y] pairs.")
+            if not np.all(np.isfinite(coords_array)):
+                n_bad = int(np.sum(~np.isfinite(coords_array).all(axis=1)))
+                log_info(
+                    f"Warning: {n_bad} coordinate pairs contain non-finite values in '{s}'; "
+                    "they will be removed during validation."
+                )
+                # Don't reject here; _sanitize_xy_sources will clean them
             return coords_array
         except Exception as e:
             log_info(f"Warning: Could not parse list '{s}': {e}. Ignoring.")
@@ -410,7 +414,8 @@ def run_sfft() -> Optional[int]:
     # matching_sources = None
     if masked_sources is not None:
         log_info(f"Masked sources: {masked_sources.shape[0]}")
-        
+    else:
+        log_info("No masked sources provided.")
 
     if matching_sources is not None and matching_sources.shape[0] > 0:
         log_info(f"Matching sources (prior): {matching_sources.shape[0]}")
@@ -447,12 +452,10 @@ def run_sfft() -> Optional[int]:
 
     # --- Load Headers (Once) ---
     def get_fits_info(fits_path: str) -> Tuple[fits.Header, np.ndarray]:
-        with fits.open(fits_path) as hdul:
-            data = hdul[0].data
-            # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
-            if data.dtype.kind != 'f':
-                data = data.astype(np.float32)
-            return hdul[0].header, data
+        with fits.open(fits_path, memmap=False) as hdul:
+            header = hdul[0].header.copy()
+            data = np.array(hdul[0].data, dtype=np.float32)
+            return header, data
 
     hdr_sci, data_sci = get_fits_info(FITS_SCI)
     hdr_ref, data_ref = get_fits_info(FITS_REF)
@@ -516,20 +519,26 @@ def run_sfft() -> Optional[int]:
     ) -> None:
         if gain is None and saturate is None:
             return
-        with fits.open(fits_path, mode="update") as hdul:
-            h = hdul[0].header
-            if gain is not None:
-                gval = float(gain)
-                h["GAIN"] = gval
-                h.comments["GAIN"] = "Gain (e/ADU) provided by autophot for SFFT"
-                log_info(f"{label}: set GAIN = {gval}")
-            if saturate is not None:
-                sval = float(saturate) if np.isfinite(saturate) else SATURATE_FALLBACK
-                h["SATURATE"] = sval
-                h.comments["SATURATE"] = (
-                    "Effective saturation (ADU) after autophot background handling for SFFT"
-                )
-                log_info(f"{label}: set SATURATE = {sval}")
+        try:
+            with fits.open(fits_path, mode="update") as hdul:
+                h = hdul[0].header
+                if gain is not None:
+                    gval = float(gain)
+                    h["GAIN"] = gval
+                    h.comments["GAIN"] = "Gain (e/ADU) provided by autophot for SFFT"
+                    log_info(f"{label}: set GAIN = {gval}")
+                if saturate is not None:
+                    sval = float(saturate) if np.isfinite(saturate) else SATURATE_FALLBACK
+                    h["SATURATE"] = sval
+                    h.comments["SATURATE"] = (
+                        "Effective saturation (ADU) after autophot background handling for SFFT"
+                    )
+                    log_info(f"{label}: set SATURATE = {sval}")
+        except Exception as e:
+            log_info(
+                f"Warning: Could not write GAIN/SATURATE to {label} FITS header: {e}. "
+                "SFFT will rely on header values already present."
+            )
 
     def _float_or_default(input_value, default: float) -> float:
         if input_value is None:
@@ -594,14 +603,10 @@ def run_sfft() -> Optional[int]:
     # to fit both science and template PSFs (user requirement). HOTPANTS uses 1.5*FWHM;
     # slightly larger kernel here can improve SFFT stability.
     if float(args.kernel_half_width) == 0:
-        kernel_half_width = int(_odd(max(5, np.ceil(FWHM * 2))))
+        kernel_half_width = _odd(max(5, int(np.ceil(FWHM * 2))))
         log_info(f"Auto kernel half-width: 2 * FWHM = {kernel_half_width} px")
     else:
         kernel_half_width = float(args.kernel_half_width)
-
-    if kernel_half_width % 2 == 0:
-        kernel_half_width += 1
-        log_info(f"Adjusted kernel half width to odd: {kernel_half_width:.1f} px")
 
     # Clamp auto/manual width to SFFT limits before any downstream use.
     k_lo, k_hi = KerHWLimit
@@ -609,18 +614,17 @@ def run_sfft() -> Optional[int]:
         log_info(
             f"Kernel half width {kernel_half_width:.1f} px below limit {k_lo}; clamping."
         )
-        kernel_half_width = float(k_lo)
+        kernel_half_width = k_lo
     if kernel_half_width > k_hi:
         log_info(
             f"Kernel half width {kernel_half_width:.1f} px above limit {k_hi}; clamping."
         )
-        kernel_half_width = float(k_hi)
+        kernel_half_width = k_hi
 
-    log_info(f"Using kernel half width: {kernel_half_width:.1f} px")
-
-    # Boundary: strip where convolution is invalid. Use kernel half-width (minimal)
-    # so the output diff image is as large as possible; was 3*fwhm_max which made output narrow.
-    boundary = int(kernel_half_width)
+    # Ensure integer type throughout (SFFT expects int for GKerHW)
+    kernel_half_width = int(kernel_half_width)
+    log_info(f"Using kernel half width: {kernel_half_width} px")
+    boundary = kernel_half_width
 
     # --- SFFT Parameters ---
     # (From SFFT source: thomasvrussell/sfft, EasySparsePacket.ESP / EasyCrowdedPacket.ECP)
@@ -642,12 +646,16 @@ def run_sfft() -> Optional[int]:
     NUM_CPU_THREADS_4SUBTRACT = 1
 
     # Enforce REF convolution globally so DIFF = SCI - conv(REF).
-    # Ignore CLI override intentionally.
+    # ForceConv is always set to REF: DIFF = SCI - conv(REF) so transients retain
+    # the science PSF. CLI -forceconv is accepted for documentation but overridden.
     forceconv_arg = str(getattr(args, "forceconv", "REF")).upper().strip()
     if forceconv_arg != "REF":
         log_info(
-            f"Overriding requested ForceConv='{forceconv_arg}' -> 'REF' (enforced)."
+            f"ForceConv='{forceconv_arg}' requested but pipeline enforces 'REF' "
+            "(DIFF = SCI - conv(REF)); overriding."
         )
+    else:
+        log_info("ForceConv=REF (enforced): DIFF = SCI - conv(REF).")
     ForceConv = "REF"
     GAIN_KEY = "GAIN"
     SATUR_KEY = "SATURATE"
@@ -721,9 +729,15 @@ def run_sfft() -> Optional[int]:
 
     ONLY_FLAGS = parse_only_flags(args.only_flags)
 
-    COARSE_VAR_REJECTION = False
+    COARSE_VAR_REJECTION = _parse_bool_str(
+        "coarse_var_rejection",
+        getattr(args, "coarse_var_rejection", "false"),
+    )
     CVREJ_MAGD_THRESH = float(args.cvrej_magd_thresh)
-    ELABO_VAR_REJECTION = False
+    ELABO_VAR_REJECTION = _parse_bool_str(
+        "elabo_var_rejection",
+        getattr(args, "elabo_var_rejection", "false"),
+    )
     EVREJ_RATIO_THREH = float(args.evrej_ratio_thresh)
     EVREJ_SAFE_MAGDEV = float(args.evrej_safe_magdev)
     PAC_RATIO_THRESH = float(args.pac_ratio_thresh)
@@ -869,7 +883,9 @@ def run_sfft() -> Optional[int]:
                 VERBOSE_LEVEL=2,
             )
             # ECP returns (PixA_DIFF, SFFTPrepDict, Solution, SFFT_FSCAL_MEAN, SFFT_FSCAL_SIG)
-            diff_image = result[0] if result else None
+            if not result:
+                raise RuntimeError("Easy_CrowdedPacket.ECP returned None or empty result.")
+            diff_image = result[0]
             prep_data = result[1] if len(result) > 1 else {}
             # ECP may write FITS_DIFF itself; if we have diff_image and file missing, write it
             if diff_image is not None and FITS_DIFF and not os.path.isfile(FITS_DIFF):
@@ -877,12 +893,19 @@ def run_sfft() -> Optional[int]:
                     from functions import safe_fits_write
                     with fits.open(FITS_SCI, mode="readonly") as hdl:
                         hdu = hdl[0].copy()
-                        # SFFT uses (ny, nx) row-major; FITS is (nx, ny) in header
-                        hdu.data = (
-                            diff_image.T
-                            if diff_image.shape[0] != hdu.data.T.shape[0]
-                            else diff_image
-                        )
+                        # SFFT internally uses (ny, nx); FITS data is also (ny, nx) row-major.
+                        # Only transpose if diff_image is in (nx, ny) order.
+                        sci_ny, sci_nx = hdu.data.shape
+                        if diff_image.shape == (sci_nx, sci_ny):
+                            hdu.data = diff_image.T
+                        elif diff_image.shape == (sci_ny, sci_nx):
+                            hdu.data = diff_image
+                        else:
+                            log_info(
+                                f"Warning: diff_image shape {diff_image.shape} does not match "
+                                f"science shape {(sci_ny, sci_nx)}; writing as-is."
+                            )
+                            hdu.data = diff_image
                         # Use safe_fits_write to preserve NaNs
                         safe_fits_write(FITS_DIFF, hdu.data, hdu.header)
                 except Exception as e:
@@ -968,11 +991,11 @@ def run_sfft() -> Optional[int]:
                     COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
                     CVREJ_MAGD_THRESH=CVREJ_MAGD_THRESH,
                     ELABO_VAR_REJECTION=ELABO_VAR_REJECTION,
-                EVREJ_RATIO_THREH=EVREJ_RATIO_THREH,
-                EVREJ_SAFE_MAGDEV=EVREJ_SAFE_MAGDEV,
+                    EVREJ_RATIO_THREH=EVREJ_RATIO_THREH,
+                    EVREJ_SAFE_MAGDEV=EVREJ_SAFE_MAGDEV,
                     StarExt_iter=StarExt_iter,
                     PostAnomalyCheck=True,
-                PAC_RATIO_THRESH=PAC_RATIO_THRESH,
+                    PAC_RATIO_THRESH=PAC_RATIO_THRESH,
                     BoundarySIZE=boundary,
                 ONLY_FLAGS=ONLY_FLAGS,
                     BACKEND_4SUBTRACT=BACKEND_4SUBTRACT,
@@ -1115,9 +1138,8 @@ def run_sfft() -> Optional[int]:
                     )
                     from functions import safe_fits_write
                     with fits.open(fits_path, mode="readonly") as hdl:
-                        hdl[0].data = pix_a_vis.T
-                        # Use safe_fits_write to preserve NaNs
-                        safe_fits_write(out_path, hdl[0].data, hdl[0].header)
+                        header_copy = hdl[0].header.copy()
+                    safe_fits_write(out_path, pix_a_vis.T, header_copy)
                 except Exception as e:
                     log_info(f"Warning: Failed to save fitted-pixel for {label}: {e}")
 
@@ -1136,6 +1158,16 @@ def run_sfft() -> Optional[int]:
 
                     ast_ss = prep_data.get("SExCatalog-SubSource")
                     if ast_ss is None or len(ast_ss) == 0:
+                        return
+                    required_cols = ["MAG_REF_REF", "MAGERR_REF_REF", "MAG_REF_SCI", "MAGERR_REF_SCI"]
+                    # Handle both pandas DataFrame and astropy Table
+                    col_names = ast_ss.columns if hasattr(ast_ss, 'columns') else ast_ss.dtype.names
+                    missing_cols = [c for c in required_cols if c not in col_names]
+                    if missing_cols:
+                        log_info(
+                            f"Warning: Diagnostic plot skipped - missing columns: {missing_cols}. "
+                            "SFFT catalog schema may differ from expected version."
+                        )
                         return
                     x_data = ast_ss["MAG_REF_REF"]
                     ex_data = ast_ss["MAGERR_REF_REF"]
@@ -1205,4 +1237,11 @@ def run_sfft() -> Optional[int]:
 
 
 if __name__ == "__main__":
+    # Ensure repo root is on sys.path when run as a standalone script.
+    # This avoids `ModuleNotFoundError: No module named 'functions'` when the
+    # current working directory is not the project root.
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _repo_root = os.path.abspath(os.path.join(_script_dir, ".."))
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
     sys.exit(0 if run_sfft() else 1)

@@ -344,42 +344,45 @@ class Zeropoint:
         color_diff = c1_vals - c2_vals
         sigma_color = np.sqrt(c1_err**2 + c2_err**2)
 
-        if fit_mode == "piecewise" and n_segments == 2:
-            # Piecewise linear color term
-            breakpoints, slopes, intercept = fixed_color_coeffs
-            bp = breakpoints[0]
-            slope1, slope2 = slopes
+        if fit_mode == "piecewise":
+            # Piecewise linear color term - check fit_mode FIRST to prevent dispatch errors
+            if n_segments == 2:
+                breakpoints, slopes, intercept = fixed_color_coeffs
+                bp = breakpoints[0]
+                slope1, slope2 = slopes
 
-            delta_corr = np.zeros_like(delta_mag)
-            color_corr_err = np.zeros_like(delta_mag)
+                delta_corr = np.zeros_like(delta_mag)
+                color_corr_err = np.zeros_like(delta_mag)
 
-            mask1 = color_diff <= bp
-            mask2 = color_diff > bp
+                mask1 = color_diff <= bp
+                mask2 = color_diff > bp
 
-            # Extract slope errors if available
-            if color_coeff_errors is not None:
-                bp_errs, slope_errs, intercept_err = color_coeff_errors
-                slope1_err, slope2_err = slope_errs
+                # Extract slope errors if available
+                if color_coeff_errors is not None:
+                    bp_errs, slope_errs, intercept_err = color_coeff_errors
+                    slope1_err, slope2_err = slope_errs
+                else:
+                    slope1_err, slope2_err = None, None
+
+                # Segment 1 correction with error propagation
+                delta_corr[mask1] = delta_mag[mask1] - slope1 * color_diff[mask1]
+                term_color_measure1 = np.abs(slope1) * sigma_color[mask1]
+                if slope1_err is not None:
+                    term_color_slope1 = np.abs(slope1_err) * np.abs(color_diff[mask1])
+                    color_corr_err[mask1] = np.sqrt(term_color_measure1**2 + term_color_slope1**2)
+                else:
+                    color_corr_err[mask1] = term_color_measure1
+
+                # Segment 2 correction (account for continuity) with error propagation
+                delta_corr[mask2] = delta_mag[mask2] - (slope2 * color_diff[mask2] + (slope1 - slope2) * bp)
+                term_color_measure2 = np.abs(slope2) * sigma_color[mask2]
+                if slope2_err is not None:
+                    term_color_slope2 = np.abs(slope2_err) * np.abs(color_diff[mask2])
+                    color_corr_err[mask2] = np.sqrt(term_color_measure2**2 + term_color_slope2**2)
+                else:
+                    color_corr_err[mask2] = term_color_measure2
             else:
-                slope1_err, slope2_err = None, None
-
-            # Segment 1 correction with error propagation
-            delta_corr[mask1] = delta_mag[mask1] - slope1 * color_diff[mask1]
-            term_color_measure1 = np.abs(slope1) * sigma_color[mask1]
-            if slope1_err is not None:
-                term_color_slope1 = np.abs(slope1_err) * np.abs(color_diff[mask1])
-                color_corr_err[mask1] = np.sqrt(term_color_measure1**2 + term_color_slope1**2)
-            else:
-                color_corr_err[mask1] = term_color_measure1
-
-            # Segment 2 correction (account for continuity) with error propagation
-            delta_corr[mask2] = delta_mag[mask2] - (slope2 * color_diff[mask2] + (slope1 - slope2) * bp)
-            term_color_measure2 = np.abs(slope2) * sigma_color[mask2]
-            if slope2_err is not None:
-                term_color_slope2 = np.abs(slope2_err) * np.abs(color_diff[mask2])
-                color_corr_err[mask2] = np.sqrt(term_color_measure2**2 + term_color_slope2**2)
-            else:
-                color_corr_err[mask2] = term_color_measure2
+                raise ValueError(f"Unsupported number of segments for piecewise fitting: {n_segments}")
         elif len(fixed_color_coeffs) == 2:
             # Linear color term: delta_corr = delta_mag - slope * color_diff
             intercept, slope = fixed_color_coeffs
@@ -878,6 +881,8 @@ class Zeropoint:
         fit_mode="polynomial",
         n_segments=1,
     ):
+        # Import plotting utilities for consistent formatting
+        from plotting_utils import get_alpha
         """
         Fit ZP = m_cat - m_inst[+/-c*(c1-c2)] vs m_inst via RANSAC.
         Supports linear, quadratic, and piecewise linear color terms.
@@ -1034,19 +1039,25 @@ class Zeropoint:
                     fmt="o",
                     ms=3,
                     color=colors[flux_type],
+                    ecolor="lightgrey",
                     alpha=0.75,
                     capsize=1.5,
                     label=f"{labels[flux_type]} inliers",
                 )
                 out_mask = ~inlier_short
                 if out_mask.any():
-                    ax.scatter(
+                    ax.errorbar(
                         inst_mag[out_mask],
                         delta_mag[out_mask],
-                        s=20,
-                        marker="x",
-                        alpha=0.5,
+                        xerr=inst_mag_err[out_mask],
+                        yerr=yerr[out_mask],
+                        fmt="x",
+                        ms=3,
                         color=colors[flux_type],
+                        ecolor=colors[flux_type],
+                        alpha=0.5,
+                        capsize=0,
+                        elinewidth=0.4,
                     )
 
                 xs = np.linspace(in_x.min() - 0.5, in_x.max() + 0.5, 200)
@@ -1583,7 +1594,7 @@ class Zeropoint:
             ax1.plot(
                 x_plot,
                 y_plot,
-                color=okabe_orange,
+                color=get_color('fit'),
                 linestyle="--",
                 lw=1.0,
                 label=label_text,
@@ -1593,7 +1604,7 @@ class Zeropoint:
                 x_plot,
                 y_plot_lower,
                 y_plot_upper,
-                color=okabe_orange,
+                color=get_color('error_region'),
                 alpha=get_alpha('light'),
                 label="Error band",
             )
@@ -1640,27 +1651,27 @@ class Zeropoint:
                 fmt="o",
                 ms=4,
                 color="green",
-                ecolor="lightgreen",
-                alpha=0.6,
+                ecolor="lightgrey",
+                alpha=0.8,
                 capsize=2,
                 lw=0.5,
-                label=f"Corrected [std={std_corrected:.3f}]",
+                label=f"Corrected inliers [{np.sum(inlier_mask)}]",
             )
-            # Plot corrected outliers
-            out_mask = ~inlier_mask
-            if out_mask.any():
-                yi_out_corrected = np.zeros_like(yi[out_mask])
-                mask1_out = xi[out_mask] <= bp
-                mask2_out = xi[out_mask] > bp
-                yi_out_corrected[mask1_out] = yi[out_mask][mask1_out] - slope1 * xi[out_mask][mask1_out]
-                yi_out_corrected[mask2_out] = yi[out_mask][mask2_out] - (slope2 * xi[out_mask][mask2_out] + (slope1 - slope2) * bp)
-                ax2.scatter(
-                    xi[out_mask],
-                    yi_out_corrected,
-                    s=30,
-                    marker="x",
-                    alpha=0.4,
-                    color="darkgreen",
+            # Plot outliers (corrected) if any
+            outlier_mask = ~inlier_mask
+            if np.any(outlier_mask):
+                ax2.errorbar(
+                    xi[outlier_mask],
+                    yi_corrected[outlier_mask],
+                    xerr=xe[outlier_mask],
+                    yerr=ye_corrected[outlier_mask],
+                    fmt="x",
+                    ms=4,
+                    color="orange",
+                    ecolor="lightgrey",
+                    alpha=0.6,
+                    capsize=2,
+                    lw=0.5,
                     label="Outliers (corrected)",
                 )
         else:
@@ -1672,11 +1683,11 @@ class Zeropoint:
                 fmt="o",
                 ms=4,
                 color="green",
-                ecolor="lightgreen",
-                alpha=0.6,
+                ecolor="lightgrey",
+                alpha=0.8,
                 capsize=2,
                 lw=0.5,
-                label=f"Corrected [std={std_corrected:.3f}]",
+                label="Corrected data",
             )
 
         ax2.axhline(np.median(yi_corrected), color="gray", linestyle=":", alpha=0.5)
@@ -2160,7 +2171,9 @@ class Zeropoint:
                     if np.sum(dense_mask) > 10:  # If we have enough dense points
                         # Downsample dense regions to 50% of their original size
                         dense_indices = np.where(dense_mask)[0]
-                        keep_dense = np.random.choice(dense_indices, size=len(dense_indices)//2, replace=False)
+                        # Use seeded RNG for reproducibility
+                        rng = np.random.default_rng(42)
+                        keep_dense = rng.choice(dense_indices, size=len(dense_indices)//2, replace=False)
                         sparse_indices = np.where(~dense_mask)[0]
                         
                         # Combine downsampled dense points with all sparse points
@@ -2319,16 +2332,6 @@ class Zeropoint:
             okabe_orange = get_color('outliers')
             okabe_gray = get_color('all_sources')
 
-            # Top panel: uncorrected data - show full distribution first (without error bars)
-            ax1.scatter(
-                x,
-                y,
-                s=get_marker_size('small')**2,
-                color=okabe_gray,
-                alpha=0.3,
-                label=f"All points [{len(x)}]",
-            )
-
             # Top panel: uncorrected data - show cleaned distribution (inliers)
             ax1.errorbar(
                 xi,
@@ -2338,7 +2341,7 @@ class Zeropoint:
                 fmt="o",
                 ms=get_marker_size('medium'),
                 color=okabe_blue,
-                ecolor=okabe_blue,
+                ecolor="lightgrey",
                 alpha=0.8,
                 capsize=1,
                 lw=get_line_width('thin') * 0.5,
@@ -2369,7 +2372,7 @@ class Zeropoint:
             ax1.plot(
                 x_plot,
                 y_plot,
-                color=okabe_orange,
+                color=get_color('fit'),
                 linestyle="--",
                 lw=get_line_width('thin'),
                 label=label_text,
@@ -2419,37 +2422,6 @@ class Zeropoint:
             std_uncorrected = float(median_abs_deviation(yi, nan_policy="omit"))
             std_corrected = float(median_abs_deviation(yi_corrected, nan_policy="omit"))
 
-            # Calculate corrected values for all points
-            if fit_mode == "piecewise" and n_segments == 2:
-                breakpoints, slopes, intercept = coefficients
-                bp = breakpoints[0]
-                slope1, slope2 = slopes
-
-                y_corrected_all = np.zeros_like(y)
-
-                mask1_all = x <= bp
-                mask2_all = x > bp
-
-                # Segment 1 correction for all points
-                y_corrected_all[mask1_all] = y[mask1_all] - slope1 * x[mask1_all]
-
-                # Segment 2 correction for all points
-                y_corrected_all[mask2_all] = y[mask2_all] - (slope2 * x[mask2_all] + (slope1 - slope2) * bp)
-            elif poly_order == 1:
-                y_corrected_all = y - plot_slope * x
-            else:
-                y_corrected_all = y - (plot_quad * x**2 + plot_slope * x)
-
-            # Bottom panel: color corrected data - show full distribution first (without error bars for all points)
-            ax2.scatter(
-                x,
-                y_corrected_all,
-                s=get_marker_size('small')**2,
-                color=okabe_gray,
-                alpha=0.3,
-                label=f"All points (corrected) [{len(x)}]",
-            )
-
             # Bottom panel: color corrected data - show cleaned distribution (inliers)
             ax2.errorbar(
                 xi,
@@ -2459,7 +2431,7 @@ class Zeropoint:
                 fmt="o",
                 ms=get_marker_size('medium'),
                 color=okabe_blue,
-                ecolor=okabe_blue,
+                ecolor="lightgrey",
                 alpha=0.8,
                 capsize=1,
                 lw=get_line_width('thin') * 0.5,
@@ -2470,7 +2442,7 @@ class Zeropoint:
             ax2.plot(
                 x_plot,
                 y_plot_corrected,
-                color=get_color('robust'),
+                color=get_color('fit'),
                 linestyle="-",
                 lw=get_line_width('medium'),
                 label=f"Flat (intercept={plot_intercept:.3f})",

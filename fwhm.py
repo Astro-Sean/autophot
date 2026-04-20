@@ -178,7 +178,6 @@ class Find_FWHM:
         """
         from astropy.stats import sigma_clipped_stats
         from photutils.segmentation import SourceCatalog
-        from sklearn.metrics import pairwise_distances_argmin_min
         from astropy.visualization import ZScaleInterval, ImageNormalize
 
         mean, median, std = sigma_clipped_stats(image, sigma=3.0)
@@ -204,6 +203,7 @@ class Find_FWHM:
                 axis=-1
             )
         )
+        coordinates_df = coordinates_df.reset_index(drop=True)
         coordinates_df["is_isolated"] = True
 
         for i, src_coord in enumerate(source_coords):
@@ -454,9 +454,8 @@ class Find_FWHM:
                 )
                 return df_lin, fit_params, saturation_range
 
-            # Recompute intercept and scatter from final selected inliers
-            y_sel = df_lin["m_peak"].values - df_lin["m_inst"].values
-            b = float(np.nanmean(y_sel))
+            # Use RANSAC estimator intercept directly (robust fit), not simple mean of final inliers
+            # The bin-wise filter may unevenly remove points, making simple mean inconsistent with fit
             res_all = y - b
             res_sel = res_all[inlier_mask]
             sigma = _mad(res_sel)
@@ -479,31 +478,23 @@ class Find_FWHM:
                 plt.ioff()
                 fig, ax = plt.subplots(figsize=set_size(340, 1))
                 plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
-                # All quality-cut sources (faint background)
-                ax.errorbar(
-                    df["m_inst"],
-                    df["m_peak"],
-                    xerr=df.get("m_inst_err", None),
-                    yerr=df.get("m_peak_err", None),
-                    fmt="o",
-                    ms=get_marker_size('medium'),
-                    color=get_color('all_sources'),
-                    alpha=get_alpha('light'),
-                    capsize=0,
-                    elinewidth=0.4,
-                    label=f"All sources [{len(df)}]",
-                )
+                # Check if errors are finite before passing to errorbar
+                xerr_vals = df_lin["m_inst_err"].values if "m_inst_err" in df_lin.columns else None
+                yerr_vals = df_lin["m_peak_err"].values if "m_peak_err" in df_lin.columns else None
+                xerr = xerr_vals if xerr_vals is not None and np.any(np.isfinite(xerr_vals)) else None
+                yerr = yerr_vals if yerr_vals is not None and np.any(np.isfinite(yerr_vals)) else None
+                
                 # Selected linear inliers - small outlined markers to reduce overlap
                 ax.errorbar(
                     df_lin["m_inst"],
                     df_lin["m_peak"],
-                    xerr=df_lin.get("m_inst_err", None),
-                    yerr=df_lin.get("m_peak_err", None),
+                    xerr=xerr,
+                    yerr=yerr,
                     fmt="o",
                     ms=get_marker_size('medium'),
                     mfc="none",
                     mec=get_color('inliers'),
-                    ecolor=get_color('inliers'),
+                    ecolor="lightgrey",
                     alpha=get_alpha('dark'),
                     capsize=0,
                     elinewidth=0.4,
@@ -518,6 +509,7 @@ class Find_FWHM:
                     fmt="x",
                     ms=get_marker_size('medium'),
                     color=get_color('outliers'),
+                    ecolor="lightgrey",
                     alpha=get_alpha('medium'),
                     lw=get_line_width('thin'),
                     capsize=0,
@@ -829,7 +821,10 @@ class Find_FWHM:
                         fill_value=np.nan,
                     ).data
                     fit = self._fit_gaussian_2d(cut)
-                    fwhm_list.append(np.nanmean(fit) if fit else np.nan)
+                    if fit is not None and all(np.isfinite(v) for v in fit):
+                        fwhm_list.append(float(np.mean(fit)))
+                    else:
+                        fwhm_list.append(np.nan)
                 df["fwhm"] = np.array(fwhm_list, dtype=float)
 
                 fwhm_global = (
@@ -933,9 +928,11 @@ class Find_FWHM:
                 cut = Cutout2D(
                     image, (x0, y0), 2 * half, mode="partial", fill_value=np.nan
                 ).data
-                mean_c, med_c, std_c = sigma_clipped_stats(cut, sigma=3.0)
                 fit = self._fit_gaussian_2d(cut)
-                fwhm_meas.append(np.nanmean(fit) if fit else np.nan)
+                if fit is not None and all(np.isfinite(v) for v in fit):
+                    fwhm_meas.append(float(np.mean(fit)))
+                else:
+                    fwhm_meas.append(np.nan)
                 s2n_list.append(float(r["peak"]) / max(std, 1e-12))
             df["fwhm"] = np.asarray(fwhm_meas, dtype=float)
             df["s2n"] = np.asarray(s2n_list, dtype=float)

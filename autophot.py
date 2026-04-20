@@ -1165,7 +1165,7 @@ class AutomatedPhotometry:
                     gaia_custom_requested = True
                     gaia_custom_groups.append(str(k))
 
-        if gaia_custom_requested:
+        if gaia_custom_requested and do_photometry:
             from functions import parse_supported_filter_group_key, normalize_photometric_filter_name
 
             curve_map = catalog_cfg.get("transmission_curve_map", None)
@@ -1343,9 +1343,14 @@ class AutomatedPhotometry:
                     curve_catalog_csv,
                 )
 
-        # Initialise preparation helper and validate catalog configuration
+        # Initialise preparation helper
         prepare_db = Prepare(default_input=default_input)
-        available_filters = prepare_db.check_catalog()
+
+        # Validate catalog configuration only if doing photometry
+        # (skip checks when just recovering files and creating output table)
+        available_filters = []
+        if do_photometry:
+            available_filters = prepare_db.check_catalog()
 
         # ------------------------------------------------------------------
         # Credentials: prefer environment variables via autophot_tokens, then YAML.
@@ -1772,19 +1777,48 @@ class AutomatedPhotometry:
                                     f"[{counter + 1}/{len(file_list)}] [ERROR] Problem with file: {file}: {e} | {tb}"
                                 )
 
-        # Concatenate per-image outputs into one light curve CSV
-        reduced_loc = f"{default_input['fits_dir']}_{default_input['outdir_name']}"
-        _log(border_msg(f"Collecting reduced photometry in {reduced_loc}"))
-        output_loc = os.path.join(reduced_loc, "lightcurve_output.csv")
-        concatenate_csv_files(
-            folder_path=reduced_loc,
-            output_filename=output_loc,
-            loc_file="OUTPUT_*.csv",
-        )
-        _log(
-            f"Photometry pipeline completed in {time.perf_counter() - t0:.3f} seconds."
-        )
-        return output_loc
+            # Concatenate per-image outputs into one light curve CSV
+            reduced_loc = f"{default_input['fits_dir']}_{default_input['outdir_name']}"
+            _log(border_msg(f"Collecting reduced photometry in {reduced_loc}"))
+            output_loc = os.path.join(reduced_loc, "lightcurve_output.csv")
+            concatenate_csv_files(
+                folder_path=reduced_loc,
+                output_filename=output_loc,
+                loc_file="OUTPUT_*.csv",
+            )
+            _log(
+                f"Photometry pipeline completed in {time.perf_counter() - t0:.3f} seconds."
+            )
+            output_photometry = output_loc
+        else:
+            # do_photometry=False: recover existing files and create output table
+            _log(border_msg("Recovering existing photometry (skip reductions)"))
+
+            # Set up output directory path (same logic as when do_photometry=True)
+            work_dir = default_input.get("fits_dir") or ""
+            out_dir_name = "_" + str(default_input.get("outdir_name", "REDUCED"))
+            reduced_loc = f"{work_dir}{out_dir_name}"
+
+            # Concatenate existing per-image outputs into one light curve CSV
+            _log(border_msg(f"Collecting reduced photometry in {reduced_loc}"))
+            output_photometry = os.path.join(reduced_loc, "lightcurve_output.csv")
+
+            if os.path.exists(reduced_loc):
+                concatenate_csv_files(
+                    folder_path=reduced_loc,
+                    output_filename=output_photometry,
+                    loc_file="OUTPUT_*.csv",
+                )
+                _log(f"Output light curve: {output_photometry}")
+            else:
+                _log(f"[WARNING] Reduced directory not found: {reduced_loc}")
+                output_photometry = ""
+
+            _log(
+                f"Recovery completed in {time.perf_counter() - t0:.3f} seconds."
+            )
+
+        return output_photometry
 
 
 def main(argv: Optional[List[str]] = None) -> int:

@@ -28,11 +28,10 @@ import astropy.units as u
 from astropy.coordinates import SkyCoord
 from astropy.wcs.utils import fit_wcs_from_points
 from astropy.table import Table
-from functions import safe_fits_write
 
 # --- Local Imports (optional) ---
 try:
-    from functions import border_msg, log_warning_from_exception  # type: ignore
+    from functions import border_msg, log_warning_from_exception, safe_fits_write, remove_wcs_from_header  # type: ignore
 except (ModuleNotFoundError, ImportError):
     # Minimal fallback for environments missing the full photometry stack.
     def border_msg(message: str, *args, **kwargs) -> str:
@@ -40,6 +39,12 @@ except (ModuleNotFoundError, ImportError):
 
     def log_warning_from_exception(logger, message, exc, *, exc_info=False):
         logger.warning("%s: %s", message, exc, exc_info=exc_info)
+
+    def safe_fits_write(*args, **kwargs):
+        raise RuntimeError("safe_fits_write not available: functions module not found")
+
+    def remove_wcs_from_header(header):
+        raise RuntimeError("remove_wcs_from_header not available: functions module not found")
 
 # --- Configure Logging ---
 logging.basicConfig(
@@ -1654,7 +1659,6 @@ class WCSSolver:
             try:
                 wcs_header = fits.Header.fromtextfile(head_path)
                 wcs_header = _normalize_projection_codes(wcs_header, inplace=False)
-                from functions import remove_wcs_from_header
 
                 self.header = remove_wcs_from_header(self.header)
                 _wcs_prefixes = (
@@ -1719,7 +1723,6 @@ class WCSSolver:
             logger.info(
                 "Refining distortion with SCAMP using solve-field rough WCS seed."
             )
-            from functions import remove_wcs_from_header
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 seed_fpath = os.path.join(tmpdir, "scamp_seed.fits")
@@ -2763,8 +2766,6 @@ class WCSSolver:
                     wcs_cfg=wcs_cfg,
                     matched_points=matched_points_for_refine,
                 )
-                from functions import remove_wcs_from_header
-
                 # Remove all previous WCS from science header, then add only WCS keywords from solver.
                 # Optional behavior (option 1): preserve the *input* non-linear distortion model
                 # (e.g. instrument TPV/PV polynomials) and only update linear terms from the solver.

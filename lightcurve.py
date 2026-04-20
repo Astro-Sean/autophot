@@ -310,6 +310,7 @@ def plot_lightcurve(
     dpi=150,
     plot_color=False,
     color_match_days=0.5,
+    ls="",
 ):
     """Plot a publication-ready lightcurve with detections and limits.
 
@@ -360,6 +361,9 @@ def plot_lightcurve(
     color_match_days : float
         Max separation in days for pairing two filters as "same night" when
         computing colours (default 0.5).
+    ls : str
+        Line style for connecting detection points (default "" for no line).
+        Set to "-" for a solid line connecting points.
 
     Returns
     -------
@@ -512,9 +516,11 @@ def plot_lightcurve(
         df["apparent_mag"] = df["apparent_mag"] + band_offset
         # lmag in photometry CSV is instrumental (see main.py); convert to apparent
         # so upper-limit points match the detection magnitude scale on the plot.
+        # Note: band_offset is NOT applied to lmag as it's used for detection thresholds,
+        # not for visual plot positioning.
         if "lmag" not in df.columns:
             df["lmag"] = np.nan
-        df["lmag"] = _lmag_to_apparent(df, zp_col) + band_offset
+        df["lmag"] = _lmag_to_apparent(df, zp_col)
         
         # Initialize plot_mag and plot_err for this band's df
         df["plot_mag"] = df["apparent_mag"]
@@ -637,7 +643,21 @@ def plot_lightcurve(
                 elinewidth=1,
                 zorder=2,
             )
-        
+
+            # Optional: draw line connecting detection points
+            if ls:
+                # Sort by MJD for proper line connection
+                sorted_detects = all_detects.sort_values("mjd")
+                ax.plot(
+                    sorted_detects.mjd - reference_epoch,
+                    sorted_detects["plot_mag"],
+                    color=c,
+                    linestyle=ls,
+                    linewidth=0.8,
+                    alpha=0.6,
+                    zorder=1,
+                )
+
         # Now plot markers, applying hatch style row by row for inverted fits
         if not all_detects.empty:
             if "_inverted_fit" in all_detects.columns:
@@ -692,7 +712,7 @@ def plot_lightcurve(
             has_limits_plotted = True
             ax.errorbar(
                 nondetects.mjd - reference_epoch,
-                nondetects["lmag"],
+                nondetects["lmag"] + band_offset,
                 color=c,
                 markeredgecolor=c,
                 markerfacecolor="none",

@@ -802,6 +802,7 @@ class Aperture:
         """
         Three-panel diagnostic: main image + right / bottom flux profiles.
         """
+        logger = logging.getLogger(__name__)
         plt.ioff()
         dir_path = os.path.dirname(os.path.realpath(__file__))
         style = os.path.join(dir_path, "autophot.mplstyle")
@@ -848,6 +849,25 @@ class Aperture:
             else np.zeros_like(zoom_image)
         )
 
+        # Guard against tiny zoom regions that cause plotting errors
+        if zoom_image.shape[0] < 5 or zoom_image.shape[1] < 5:
+            logger.warning(
+                f"Zoom region too small for profile plotting: {zoom_image.shape}, skipping profiles"
+            )
+            norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
+            ax_main.imshow(
+                image, origin="lower", norm=norm, cmap="viridis", aspect="auto"
+            )
+            for radius, color, style in [
+                (ap_size, "#00AA00", "-"),
+                (annulusIN, "#FF0000", "--"),
+                (annulusOUT, "#FF0000", "--"),
+            ]:
+                ax_main.add_patch(
+                    Circle((cx, cy), radius, ec=color, fc="none", lw=0.5, ls=style)
+                )
+            return
+
         norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
         ax_main.imshow(
             image, origin="lower", norm=norm, cmap="viridis", aspect="auto"
@@ -874,8 +894,9 @@ class Aperture:
         n_rows, n_cols = zoom_error.shape[0], zoom_error.shape[1]
         hx_err = np.sqrt(np.nansum(zoom_error**2, axis=0)) / max(n_rows, 1)
         hy_err = np.sqrt(np.nansum(zoom_error**2, axis=1)) / max(n_cols, 1)
-        x_range = np.arange(x_min, x_max)
-        y_range = np.arange(y_min, y_max)
+        # Use actual zoom_image dimensions to avoid shape mismatch
+        x_range = np.arange(x_min, x_min + zoom_image.shape[1])
+        y_range = np.arange(y_min, y_min + zoom_image.shape[0])
 
         kw_step = dict(color="dodgerblue", where="mid", lw=0.5)
         ax_bottom.step(x_range, hx, **kw_step)
@@ -1529,12 +1550,13 @@ class Aperture:
                 ax1.plot(fine_r / fwhm, fine_profile, ls="--", color="black")
 
             ax1.axvline(
-                global_optimum_pre, color="black", ls=":", label="Initial global"
+                global_optimum_pre, color="black", ls=":", label=r"${:.0f}\%$".format(norm_factor*100)
             )
-            ax1.axvline(optimum_radius, color="black", ls="--", label="Final optimum")
+            ax1.axvline(optimum_radius, color="black", ls="--",label=r"${:.0f}\%$".format(aperture_norm_factor*100)
+            )
             ax1.set_ylabel("Normalized Flux")
             plt.setp(ax1.get_xticklabels(), visible=False)
-            ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8)
+            ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8,ncol = 2)
 
             per_source = (
                 sources.loc[list(kept_set), "optimum_radius"].values
@@ -1567,7 +1589,16 @@ class Aperture:
                         label="Selected",
                         zorder=1,
                     )
-                ax2.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=7)
+                if len(other) > 0:
+                    ax2.hist(
+                        other,
+                        bins=bins,
+                        facecolor="tab:red",
+                        alpha=0.5,
+                        label="Rejected",
+                        zorder=0,
+                    )
+                ax2.legend(loc="upper right", frameon=False, fontsize=7)
 
             ax2.axvline(optimum_radius, color="black", ls="--", label="Final")
             ax2.set_xlabel("Aperture Radius [FWHM]")

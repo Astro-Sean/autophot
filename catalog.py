@@ -1950,16 +1950,16 @@ class Catalog:
             # Fit with RANSAC
             if len(inst_mag_linear) > 1:
                 base_estimator = ConstrainedSlopeRegressor(
-                    slope_constraint=1.0, slope_tolerance=0
+                    slope_constraint=1.0, slope_tolerance=0  # Keep slope strictly fixed to 1
                 )
                 # Adaptive residual threshold based on data scatter
                 initial_mad = np.median(np.abs(catalog_mag_linear - np.median(catalog_mag_linear)))
-                ransac_residual_threshold = max(2.0 * initial_mad, 0.05)  # Much tighter threshold for better outlier rejection
+                ransac_residual_threshold = max(3.0 * initial_mad, 0.1)  # More lenient threshold for better fit
                 ransac = RANSACRegressor(
                     estimator=base_estimator,
                     residual_threshold=ransac_residual_threshold,
                     max_trials=2000,  # More trials for better convergence
-                    min_samples=0.20,  # Require fewer samples for more robust fit
+                    min_samples=0.25,  # Require slightly more samples for stability
                 )
                 X = inst_mag_linear.reshape(-1, 1)
                 y = catalog_mag_linear
@@ -2039,20 +2039,6 @@ class Catalog:
             # Import centralized plotting utilities for consistent formatting
             from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
 
-            ax1.errorbar(
-                inst_mag,
-                catalog_mag,
-                yerr=catalog_mag_err,
-                fmt="o",
-                alpha=get_alpha('medium'),
-                color=get_color('all_sources'),
-                markersize=get_marker_size('medium'),
-                capsize=0,
-                elinewidth=0.4,
-                linestyle="None",
-                label=f"All sources [{len(inst_mag)}]",
-            )
-
             if fit_line:
                 predicted = fit_line(inst_mag_linear)
                 residuals = catalog_mag_linear - predicted
@@ -2066,6 +2052,7 @@ class Catalog:
                     xerr=inst_mag_err_linear[ransac_outliers],
                     fmt="x",
                     color=get_color('outliers'),
+                    ecolor="lightgrey",
                     markersize=get_marker_size('medium'),
                     alpha=get_alpha('medium'),
                     lw=get_line_width('thin'),
@@ -2083,7 +2070,7 @@ class Catalog:
                     markersize=get_marker_size('medium'),
                     mfc="none",
                     mec=get_color('inliers'),
-                    ecolor=get_color('inliers'),
+                    ecolor="lightgrey",
                     alpha=get_alpha('dark'),
                     capsize=0,
                     elinewidth=0.4,
@@ -2158,7 +2145,7 @@ class Catalog:
                     # Sort by flux (bright to faint - smaller mag = brighter)
                     sort_idx = np.argsort(inlier_flux)[::-1]  # Bright first
                     sorted_flux = inlier_flux[sort_idx]
-                    sorted_residuals = residuals[sort_idx]
+                    sorted_residuals = np.asarray(residuals[sort_idx]).flatten()  # Ensure 1D
                     sorted_mag = inlier_inst_mag[sort_idx]
                     
                     # TIGHT residual threshold: use 2-sigma instead of 3-sigma for stricter selection
@@ -2178,7 +2165,8 @@ class Catalog:
                     # Find bright end: cut where residuals exceed threshold (saturation/non-linear)
                     bright_cut_idx = 0
                     for i in range(len(sorted_residuals)):
-                        if np.abs(sorted_residuals[i]) > residual_threshold:
+                        resid_val = float(sorted_residuals[i])  # Ensure scalar
+                        if np.abs(resid_val) > residual_threshold:
                             bright_cut_idx = i + 1  # Cut this and brighter
                         else:
                             break

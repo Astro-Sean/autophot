@@ -29,8 +29,9 @@ import corner
 import emcee
 from emcee import autocorr
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 from matplotlib.gridspec import GridSpec
-from matplotlib.patches import Circle, Ellipse
+from matplotlib.patches import Circle, Ellipse, Rectangle
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (needed for 3D projection)
@@ -547,6 +548,8 @@ class MCMCFitter:
         return -0.5 * np.sum(resid**2 / var + np.log(2.0 * np.pi * var))
 
     def log_posterior(self, params, model, x, y, data, weights, noise_variance):
+        # model.copy() is unnecessary for serial emcee (default) and expensive
+        # Called nwalkers * nsteps times (e.g. 50 * 5000 = 250,000 times)
         lp = self.log_prior(params, model)
         if not np.isfinite(lp):
             return -np.inf
@@ -823,6 +826,265 @@ class MCMCFitter:
         log.info(f"[MCMC] elapsed={time.time() - t0:.3f}s")
         return fitted_model
 
+# ===========================================================================
+# Poisson Likelihood Fitter (Fermilab TM-2543-AE)
+# ===========================================================================
+
+
+class PoissonLikelihoodFitter:
+    """
+    Poisson likelihood fitter for PSF photometry.
+    
+    Based on Fermilab TM-2543-AE which demonstrates that Poisson likelihood
+    fitting is superior to chi-squared methods for PSF photometry.
+    
+    The likelihood function is:
+        L = ∏ e^(-n̄_i) * n̄_i^(n_i) / n_i!
+    ln(L) = Σ [-n̄_i + ln(n̄_i) - n_i ln(n_i) + n_i]
+    
+    where n̄_i = A * P(x_i - s_x, y_i - s_y) + B
+    A = source amplitude, B = background, s_x, s_y = position
+    """
+    
+    def __init__(
+        self,
+        maxiters=20,
+        lnL_tolerance=1e-4,
+        max_step_cuts=7,
+        max_position_step=1.0,
+        max_total_position_change=3.0,
+    ):
+        self.maxiters = int(maxiters)
+        self.lnL_tolerance = float(lnL_tolerance)
+        self.max_step_cuts = int(max_step_cuts)
+        self.max_position_step = float(max_position_step)
+        self.max_total_position_change = float(max_total_position_change)
+        self.fit_info = {"iterations": 0, "final_lnL": np.nan, "converged": False}
+    
+    def _log_likelihood(self, data, model):
+        """
+        Compute Poisson log-likelihood.
+
+        ln(L) = Σ [n_i * ln(n̄_i) - n̄_i]
+        Only terms depending on model parameters matter for optimization.
+        """
+        n_i = np.asarray(data, float)
+        n_bar = np.clip(np.asarray(model, float), 1e-10, None)
+
+        # Standard Poisson log-likelihood (terms depending on parameters only)
+        lnL = np.sum(n_i * np.log(n_bar) - n_bar)
+
+        return float(lnL)
+    
+    def _compute_derivatives(self, data, model, x, y, params, param_names):
+        """
+        Compute first and second derivatives of ln(L) w.r.t. parameters.
+        
+        Following Fermilab document Appendix A:
+        ∂lnL/∂α_k = Σ (dlnL/dn̄_i) * (∂n̄_i/∂α_k)
+        ∂²lnL/∂α_l∂α_k = Σ (d²lnL/dn̄_i²) * (∂n̄_i/∂α_k) * (∂n̄_i/∂α_l)
+        
+        where dlnL/dn̄_i = -1 + 1/n̄_i
+              d²lnL/dn̄_i² = -1/n̄_i²
+        """
+        n_i = np.asarray(data, float)
+        n_bar = np.asarray(model, float)
+        n_bar = np.clip(n_bar, 1e-10, None)
+        
+        dlnL_dnbar = -1.0 + 1.0 / n_bar
+        d2lnL_dnbar2 = -1.0 / n_bar**2
+        
+        # Numerical derivatives of model w.r.t. parameters
+        epsilon = 1e-8
+        n_params = len(params)
+        dmodel_dparams = []
+        
+        try:
+            for i in range(n_params):
+                params_plus = params.copy()
+                params_plus[i] += epsilon
+                model.parameters = params_plus
+                model_plus = model(x, y)
+                dmodel_dparams.append((model_plus - model_0) / epsilon)
+        finally:
+            # Always restore original parameters, even if exception occurs
+            model.parameters = params
+        
+        # Build gradient
+        gradient = np.zeros(n_params)
+        for i in range(n_params):
+            gradient[i] = np.sum(dlnL_dnbar * dmodel_dparams[i])
+        
+        # Build Hessian (using first term only, per Fermilab document)
+        hessian = np.zeros((n_params, n_params))
+        for i in range(n_params):
+            for j in range(n_params):
+                hessian[i, j] = np.sum(d2lnL_dnbar2 * dmodel_dparams[i] * dmodel_dparams[j])
+        
+        return gradient, hessian
+    
+    def _solve_linear_system(self, gradient, hessian):
+        """
+        Solve for parameter updates using Newton-Raphson step.
+        
+        H * δα = -∇lnL
+        """
+        try:
+            delta = np.linalg.solve(hessian, -gradient)
+            return delta
+        except np.linalg.LinAlgError:
+            # Use pseudo-inverse if matrix is singular
+            delta = np.linalg.lstsq(hessian, -gradient, rcond=None)[0]
+            return delta
+    
+    def __call__(
+        self,
+        model,
+        x,
+        y,
+        data,
+        weights=None,
+        initial_params=None,
+        noise_variance=None,
+        maxiters=None,
+        inplace=None,
+        gain=1.0,
+        readnoise=0.0,
+        background_rms=None,
+        **kwargs
+    ):
+        """
+        Fit the model to data using Poisson likelihood maximization.
+        
+        Parameters
+        ----------
+        model : PSF model
+            The PSF model to fit (e.g., ImagePSF from photutils)
+        x, y : array_like
+            Pixel coordinates
+        data : array_like
+            Image data
+        weights : array_like, optional
+            Weights for each pixel
+        initial_params : array_like
+            Initial parameter values
+        noise_variance : array_like, optional
+            Noise variance (not used in Poisson likelihood)
+        
+        Returns
+        -------
+        fitted_model : The fitted model
+        """
+        import logging
+        log = logging.getLogger(__name__)
+        
+        self._data_shape = data.shape
+        
+        if initial_params is None:
+            # Use current model parameters as initial guess
+            initial_params = np.array(model.parameters, float)
+        
+        params = initial_params.copy()
+        param_names = model.param_names
+        
+        # Store original position for position change tracking
+        x_idx = param_names.index('x_0') if 'x_0' in param_names else -1
+        y_idx = param_names.index('y_0') if 'y_0' in param_names else -1
+        original_position = np.array([params[x_idx], params[y_idx]]) if x_idx >= 0 else None
+        
+        prev_lnL = -np.inf
+        converged = False
+        iteration = -1  # Initialize to handle maxiters=0 edge case
+        lnL = -np.inf   # Initialize to handle maxiters=0 edge case
+        
+        for iteration in range(self.maxiters):
+            # Evaluate model at current parameters
+            model.parameters = params
+            current_model = model(x, y)
+            
+            # Compute log-likelihood
+            lnL = self._log_likelihood(data, current_model)
+            
+            # Check convergence
+            if iteration > 0 and abs(lnL - prev_lnL) < self.lnL_tolerance:
+                converged = True
+                log.info(f"[PoissonFitter] Converged at iteration {iteration}")
+                break
+            
+            prev_lnL = lnL
+            
+            # Compute derivatives
+            gradient, hessian = self._compute_derivatives(data, current_model, x, y, params, param_names)
+            
+            # Solve for parameter update
+            delta = self._solve_linear_system(gradient, hessian)
+            
+            # Apply step with reduction if needed
+            step_reduction = 1.0
+            n_cuts = 0
+            
+            while n_cuts < self.max_step_cuts:
+                # Apply reduced step
+                trial_params = params + delta * step_reduction
+                
+                # Check position constraints
+                if original_position is not None:
+                    trial_position = np.array([trial_params[x_idx], trial_params[y_idx]])
+                    position_change = np.linalg.norm(trial_position - original_position)
+                    
+                    # Enforce maximum position change per step
+                    if position_change > self.max_position_step:
+                        # Scale down the position part of delta (work on a copy)
+                        clipped_delta = delta.copy()
+                        scale = self.max_position_step / position_change
+                        clipped_delta[x_idx] *= scale
+                        clipped_delta[y_idx] *= scale
+                        trial_params = params + clipped_delta * step_reduction
+                        position_change = np.linalg.norm(trial_params[x_idx:x_idx+2] - original_position)
+                
+                # Ensure n_bar > 0
+                model.parameters = trial_params
+                trial_model = model(x, y)
+                if np.all(trial_model > 0):
+                    # Check if likelihood increased
+                    trial_lnL = self._log_likelihood(data, trial_model)
+                    
+                    if trial_lnL > lnL:
+                        params = trial_params
+                        lnL = trial_lnL
+                        break
+                    else:
+                        # Reduce step size
+                        step_reduction *= 0.5
+                        n_cuts += 1
+                else:
+                    step_reduction *= 0.5
+                    n_cuts += 1
+            
+            if n_cuts >= self.max_step_cuts:
+                log.warning(f"[PoissonFitter] Max step cuts reached at iteration {iteration}")
+        
+        # Check total position change
+        if original_position is not None:
+            final_position = np.array([params[x_idx], params[y_idx]])
+            total_position_change = np.linalg.norm(final_position - original_position)
+            if total_position_change > self.max_total_position_change:
+                log.warning(f"[PoissonFitter] Total position change {total_position_change:.2f} exceeds limit {self.max_total_position_change}")
+        
+        # Update model with final parameters
+        model.parameters = params
+        
+        self.fit_info["iterations"] = iteration + 1
+        self.fit_info["final_lnL"] = lnL
+        self.fit_info["converged"] = converged
+        
+        if not converged:
+            log.warning(f"[PoissonFitter] Did not converge in {self.maxiters} iterations")
+        
+        log.info(f"[PoissonFitter] Final lnL: {lnL:.3f}, iterations: {iteration + 1}")
+        
+        return model
+
 
 # ===========================================================================
 # psf class
@@ -994,7 +1256,7 @@ class PSF:
             cen_box = _odd(max(7, int(np.ceil(3.0 * max(1.0, fwhm or 2.0)))))
 
             if weightmap is None:
-                weightmap = 1.0 / ndimage.uncertainty.array
+                weightmap = 1.0 / ndimage.uncertainty.array**2  # 1/variance for chi^2 fitting
 
             try:
                 x_cen, y_cen = centroid_sources(
@@ -1668,21 +1930,15 @@ class PSF:
                 size_max=smooth_max,
             )
 
-            # Use a normalization radius that is at least a configurable multiple
-            # of the PSF-build FWHM to preserve wing structure.
-            norm_scale = float(phot_cfg.get("psf_norm_radius_scale_fwhm", 2.8))
-            norm_min_px = float(phot_cfg.get("psf_norm_radius_min_pixels", 5.0))
-            aperture_radius = float(
-                max(aperture_radius, norm_scale * fwhm, norm_min_px)
-            )
+            # Use aperture_radius for PSF normalization to ensure consistent flux scale with aperture photometry.
+            # This ensures PSF and AP photometry measure flux over the same effective area.
+            norm_radius = float(aperture_radius)
 
             log.info(
-                "PSF build FWHM: input=%.2f px, used=%.2f px; normalisation radius=%.2f px (>= max[input, %.2f*FWHM, %.1f px]); oversample=x%d",
+                "PSF build FWHM: input=%.2f px, used=%.2f px; normalisation radius=%.2f px (same as photometry aperture_radius); oversample=x%d",
                 fwhm_input,
                 fwhm,
-                aperture_radius,
-                norm_scale,
-                norm_min_px,
+                norm_radius,
                 oversample,
             )
 
@@ -1709,8 +1965,7 @@ class PSF:
                     "fwhm_arcsec={fwhm_arcsec}, pixel_scale={pixel_scale}, "
                     "build_sampling_boost={build_sampling_boost:.2f}, "
                     "oversample=x{oversample}, recenter={recenter}, cen_box={cen_box}px, fit_box={fit_box}px, cutout={cutout}px\n"
-                    "  normalization: aperture_radius={aperture_radius:.2f}px, "
-                    "norm_scale={norm_scale:.2f}*FWHM, norm_min_px={norm_min_px:.1f}\n"
+                    "  normalization: aperture_radius={aperture_radius:.2f}px (same as photometry)\n"
                     "  epsf builder: sigma_clip={epsf_clip_sigma:.2f}, sigma_clip_maxiters={epsf_clip_maxiters}, "
                     "maxiters=10, smoothing_kernel=quartic\n"
                     "  fft rejection: enabled={fft_enabled}, n_sigma={fft_n_sigma:.2f}, "
@@ -1747,8 +2002,6 @@ class PSF:
                     fit_box=int(fit_boxsize),
                     cutout=int(cutout_n),
                     aperture_radius=float(aperture_radius),
-                    norm_scale=float(norm_scale),
-                    norm_min_px=float(norm_min_px),
                     epsf_clip_sigma=float(epsf_clip_sigma),
                     epsf_clip_maxiters=int(epsf_clip_maxiters),
                     fft_enabled=bool(do_fft),
@@ -1778,7 +2031,7 @@ class PSF:
                 recentering_maxiters=100,
                 fitter=EPSFFitter(fit_boxsize=fit_boxsize),
                 maxiters=10,
-                norm_radius=aperture_radius,
+                norm_radius=norm_radius,
                 sigma_clip=sigma_clip_epsf,
                 smoothing_kernel=smooth_kernel,
                 progress_bar=False,
@@ -1814,24 +2067,16 @@ class PSF:
 
             epsf, fitted_stars = epsf_builder.build_epsf(epsfstars, init_epsf=init_epsf)
 
-            # Keep the ePSF shape unchanged; only renormalize total flux to unity
-            # for consistent flux scaling across photometry and injections.
-            try:
-                arr = np.asarray(epsf.data, float)
-                s = arr.sum()
-                if s > 0:
-                    arr /= s
-                epsf.data = arr
-            except Exception:
-                # If anything goes wrong, keep the original EPSF.
-                pass
+            # EPSFBuilder already normalizes to unit sum within norm_radius.
+            # Do not apply secondary normalization as it corrupts the flux scale
+            # by dividing by total array sum (including wings outside norm_radius).
 
             if oversample > 1:
                 self.plot_oversampled_psf(
                     epsf,
                     oversample=oversample,
                     save_path=os.path.join(
-                        write_dir, f"{filename_prefix}_{base}_psf_image.png"
+                        write_dir, f"PSF_Image_{base}.png"
                     ),
                 )
 
@@ -1842,9 +2087,10 @@ class PSF:
                 fitted_stars,
                 epsf,
                 cutout_shape[0],
-                aperture_radius,
+                norm_radius,
                 write_dir,
                 f"{filename_prefix}_{base}",
+                use_log_scale=False,  # Set to True for log color scale on 2D PSF
             )
 
             return epsf, df
@@ -1865,6 +2111,7 @@ class PSF:
         cmap: str = "viridis",
         use_zscale: bool = True,
         zscale_contrast: float = 0.25,
+        use_log_scale: bool = False,
     ):
         """
         Three-panel figure: oversampled PSF image + X/Y projections.
@@ -1912,14 +2159,24 @@ class PSF:
             ny, nx = data.shape
             extent = [0, nx, 0, ny]
 
+            # Use log scale if requested (ensuring positive values for LogNorm)
+            if use_log_scale:
+                # Shift data to be positive for log scale
+                data_for_plot = data - np.nanmin(data) + 1e-10
+                norm = LogNorm(vmin=vmin - np.nanmin(data) + 1e-10, vmax=vmax - np.nanmin(data) + 1e-10)
+            else:
+                data_for_plot = data
+                norm = None
+
             im = ax.imshow(
-                data,
+                data_for_plot,
                 extent=extent,
                 origin="lower",
                 cmap=cmap,
                 interpolation="none",
-                vmin=vmin,
-                vmax=vmax,
+                norm=norm,
+                vmin=None if use_log_scale else vmin,
+                vmax=None if use_log_scale else vmax,
             )
 
             cx, cy = nx // 2, ny // 2
@@ -1972,7 +2229,7 @@ class PSF:
     # -----------------------------------------------------------------------
 
     def _create_psf_visualization(
-        self, stars, epsf, star_shape, aperture_radius, write_dir, base
+        self, stars, epsf, star_shape, aperture_radius, write_dir, base, use_log_scale=True
     ):
         """Grid of star cutouts alongside the final ePSF model."""
         num_stars = len(stars)
@@ -2057,14 +2314,26 @@ class PSF:
             ax.set_yticks([])
 
         vmin_p, vmax_p = ZScaleInterval().get_limits(psf_model)
-        norm_p = ImageNormalize(vmin=vmin_p, vmax=vmax_p)
+
+        # Use log scale if requested for 2D PSF
+        if use_log_scale:
+            # Transform to log10 scale for display
+            psf_model_plot = np.log10(np.maximum(psf_model, 1e-10))
+            vmin_p_plot = np.log10(np.maximum(vmin_p, 1e-10))
+            vmax_p_plot = np.log10(np.maximum(vmax_p, 1e-10))
+            norm_p = ImageNormalize(vmin=vmin_p_plot, vmax=vmax_p_plot)
+            title_suffix = " (log scale)"
+        else:
+            psf_model_plot = psf_model
+            norm_p = ImageNormalize(vmin=vmin_p, vmax=vmax_p)
+            title_suffix = ""
 
         # 2D ePSF image (right side, top of right subgrid)
         ax_right = fig.add_subplot(right_sub[0, 0])
         im = ax_right.imshow(
-            psf_model, origin="lower", cmap="viridis", norm=norm_p, interpolation="none"
+            psf_model_plot, origin="lower", cmap="viridis", norm=norm_p, interpolation="none"
         )
-        ax_right.set_title("2D ePSF", fontsize=8, pad=2)
+        ax_right.set_title(f"2D ePSF{title_suffix}", fontsize=8, pad=2)
         ax_right.set_xticks([])
         ax_right.set_yticks([])
         ctr = [psf_model.shape[1] / 2, psf_model.shape[0] / 2]
@@ -2185,11 +2454,15 @@ class PSF:
         exposure_time = float(self.input_yaml.get("exposure_time", 30.0))
         image_filter = self.input_yaml.get("imageFilter", "")
         scale = self.input_yaml.get("scale", 0)
+        # Use same aperture_radius as aperture photometry to ensure consistent flux scale
         aperture_radius = float(
             self.input_yaml.get("photometry", {}).get(
-                "aperture_radius", max(1.5 * fwhm, 2.0)
+                "aperture_radius"
             )
         )
+        if not np.isfinite(aperture_radius):
+            # Fallback if not configured (should match aperture.py default behavior)
+            aperture_radius = 1.5 * fwhm
         phot_cfg = self.input_yaml.get("photometry", {}) or {}
 
         undersampled_fwhm_threshold = float(
@@ -2209,6 +2482,12 @@ class PSF:
         fs_bright_scale = float(phot_cfg.get("psf_fit_shape_bright_scale_fwhm", 3.0))
         fs_faint_scale = float(phot_cfg.get("psf_fit_shape_faint_scale_fwhm", 2.5))
         fs_vfaint_scale = float(phot_cfg.get("psf_fit_shape_vfaint_scale_fwhm", 2.0))
+        
+        # Store base scales
+        base_bright_scale = fs_bright_scale
+        base_faint_scale = fs_faint_scale
+        base_vfaint_scale = fs_vfaint_scale
+        
         fit_sampling_boost = 1.0
         if fwhm <= 2.5:
             fit_sampling_boost += 0.20
@@ -2222,15 +2501,9 @@ class PSF:
         fit_sampling_boost = float(
             min(max(1.0, fit_sampling_boost), max(1.0, fit_sampling_boost_max))
         )
-        fs_bright_scale *= fit_sampling_boost
-        fs_faint_scale *= fit_sampling_boost
-        fs_vfaint_scale *= fit_sampling_boost
         target_shape_boost = float(phot_cfg.get("psf_target_fit_shape_boost", 1.5))
         if is_target_fit:
             target_shape_boost = max(1.0, target_shape_boost)
-            fs_bright_scale *= target_shape_boost
-            fs_faint_scale *= target_shape_boost
-            fs_vfaint_scale *= target_shape_boost
 
         bright_min_arcsec = float(
             phot_cfg.get("psf_fit_shape_bright_min_arcsec", 3.0)
@@ -2247,7 +2520,7 @@ class PSF:
             _odd(
                 max(
                     7,
-                    int(fs_bright_scale * fwhm),
+                    int(fs_bright_scale * fwhm * fit_sampling_boost),
                     int(np.ceil(bright_min_px)) if np.isfinite(bright_min_px) else 0,
                 )
             ),
@@ -2256,7 +2529,7 @@ class PSF:
             _odd(
                 max(
                     7,
-                    int(fs_faint_scale * fwhm),
+                    int(fs_faint_scale * fwhm * fit_sampling_boost),
                     int(np.ceil(faint_min_px)) if np.isfinite(faint_min_px) else 0,
                 )
             ),
@@ -2265,7 +2538,7 @@ class PSF:
             _odd(
                 max(
                     7,
-                    int(fs_vfaint_scale * fwhm),
+                    int(fs_vfaint_scale * fwhm * fit_sampling_boost),
                     int(np.ceil(vfaint_min_px)) if np.isfinite(vfaint_min_px) else 0,
                 )
             ),
@@ -2278,6 +2551,12 @@ class PSF:
             fit_shape_bright = (_odd(max(fit_shape_bright[0], 9)),) * 2
             fit_shape_faint = (_odd(max(fit_shape_faint[0], 9)),) * 2
             fit_shape_vfaint = (_odd(max(fit_shape_vfaint[0], 7)),) * 2
+
+        # Apply target_shape_boost when is_target_fit
+        if is_target_fit:
+            fit_shape_bright = (_odd(int(fit_shape_bright[0] * target_shape_boost)),) * 2
+            fit_shape_faint = (_odd(int(fit_shape_faint[0] * target_shape_boost)),) * 2
+            fit_shape_vfaint = (_odd(int(fit_shape_vfaint[0] * target_shape_boost)),) * 2
 
         if xy_bounds is None:
             # Default xy-bounds are configured in arcseconds and converted to pixels.
@@ -2471,11 +2750,30 @@ class PSF:
             if background_rms is not None
             else np.nanmedian(ndimage.uncertainty.array)
         )
-        area = np.pi * max(2.0, aperture_radius) ** 2
+        # Statistical Fisher matrix formalism for PSF photometry SNR
+        # SNR = fs / sigma_fs where sigma_fs^2 = 1/F_11
+        # F_11 = sum(PSF_i^2 / sigma_i^2) where sigma_i^2 = (b/g) + (Nccd/g^2) + (fs * PSF_i/g)
+        # For a normalized PSF with sum(PSF_i^2) = C, this simplifies to:
+        # sigma_fs^2 = (b/g + Nccd/g^2) / C + fs / g
+        # where C is the sum of squared PSF values over the PSF footprint
+        # We approximate C ~ 1/(pi * fwhm^2) for a normalized Gaussian-like PSF
+        gain = float(self.input_yaml.get("gain", 1.0))
+        read_noise = float(self.input_yaml.get("read_noise", 0.0))
+        fwhm = float(self.input_yaml.get("fwhm", 3.0))
+        # Approximate PSF normalization constant C ~ 1/(pi * fwhm^2)
+        psf_norm = 1.0 / (np.pi * fwhm**2)
+        # Background noise term: (b/g + Nccd/g^2) / C
+        # Convert bkgrmsval (ADU) to electrons, add read noise squared, divide by PSF norm
+        background_noise = (bkgrmsval * gain + read_noise**2) / gain / psf_norm
+        # Source photon noise term: fs / g (for normalized PSF)
+        # flux_ap is in ADU, convert to electrons then divide by gain
+        source_noise = flux_ap / gain
+        # Total variance (this gives a lower limit on SNR, as per CFHT document)
+        sigma_fs_sq = background_noise + source_noise
         snr = (
             np.asarray(sources["SNR"], float)[valid]
             if "SNR" in sources.columns
-            else flux_ap / np.sqrt(np.maximum(flux_ap, 0.0) + bkgrmsval**2 * area)
+            else flux_ap / np.sqrt(np.maximum(sigma_fs_sq, 1e-10))
         )
 
         bright_mask = snr >= 8.0
@@ -2507,7 +2805,18 @@ class PSF:
         elif is_target_fit and emcee_s2n > 0 and len(init_params) > 1:
             use_emcee_tiered = True
 
-        lsq_fitter = TRFLSQFitter()
+        # Fitter selection: Poisson likelihood (Fermilab) or traditional LSQ
+        use_poisson_fitter = bool(phot_cfg.get("use_poisson_likelihood_fitter", False))
+        if use_poisson_fitter:
+            lsq_fitter = PoissonLikelihoodFitter(
+                maxiters=int(phot_cfg.get("poisson_maxiters", 20)),
+                lnL_tolerance=float(phot_cfg.get("poisson_lnl_tolerance", 1e-4)),
+                max_step_cuts=int(phot_cfg.get("poisson_max_step_cuts", 7)),
+            )
+            log.info("Using Poisson likelihood fitter (Fermilab TM-2543-AE)")
+        else:
+            lsq_fitter = TRFLSQFitter()
+        
         emcee_fitter = None
         if use_emcee_for_all or use_emcee_tiered:
             try:
@@ -3036,14 +3345,8 @@ class PSF:
         combined = pd.concat(results)
         idx_out = np.asarray(combined["idx"], int)
 
-        x_fit = self._first_present(combined, ["x_fit", "xcenter_fit", "x_0_fit"])
-        y_fit = self._first_present(combined, ["y_fit", "ycenter_fit", "y_0_fit"])
-        x_err = self._first_present(combined, ["x_fit_err", "x_err", "xcenter_fit_err"])
-        y_err = self._first_present(combined, ["y_fit_err", "y_err", "ycenter_fit_err"])
-        flux_fit = self._first_present(combined, ["flux_fit", "flux"], unit=u.electron)
-        flux_err = self._first_present(
-            combined, ["flux_fit_err", "flux_err", "flux_uncertainty"], unit=u.electron
-        )
+        # Removed dead code - first extraction block was never used
+        # Values are re-extracted after inverted processing below
 
         # Check which fits have significant negative SNR and need inverted retry
         # For target-only fits with check_inverted enabled
@@ -3173,43 +3476,45 @@ class PSF:
                 if "_inverted_fit" not in combined.columns:
                     combined["_inverted_fit"] = False
                 
-                # For each good inverted result, copy values to combined
+                # Use .loc for robust column updates instead of fragile iloc/get_loc pattern
                 for _, inv_row in combined_inv_good.iterrows():
                     idx_val = inv_row["idx"]
-                    if idx_val in idx_to_pos:
-                        pos = idx_to_pos[idx_val]
+                    # Find the row in combined with matching idx
+                    mask = combined["idx"] == idx_val
+                    if np.any(mask):
+                        row_idx = combined[mask].index[0]
                         # Mark as inverted fit
-                        combined.iloc[pos, combined.columns.get_loc("_inverted_fit")] = True
+                        combined.loc[row_idx, "_inverted_fit"] = True
                         # Copy inverted fit values (they'll be negated later)
                         for col in ["x_fit", "xcenter_fit", "x_0_fit"]:
                             if col in inv_row and col in combined.columns:
-                                combined.iloc[pos, combined.columns.get_loc(col)] = inv_row[col]
+                                combined.loc[row_idx, col] = inv_row[col]
                                 break
                         for col in ["y_fit", "ycenter_fit", "y_0_fit"]:
                             if col in inv_row and col in combined.columns:
-                                combined.iloc[pos, combined.columns.get_loc(col)] = inv_row[col]
+                                combined.loc[row_idx, col] = inv_row[col]
                                 break
                         for col in ["flux_fit", "flux"]:
                             if col in inv_row and col in combined.columns:
-                                combined.iloc[pos, combined.columns.get_loc(col)] = -1.0 * inv_row[col]  # Negative flux
+                                combined.loc[row_idx, col] = -1.0 * inv_row[col]  # Negative flux
                                 break
                         for col in ["flux_fit_err", "flux_err", "flux_uncertainty"]:
                             if col in inv_row and col in combined.columns:
-                                combined.iloc[pos, combined.columns.get_loc(col)] = inv_row[col]
+                                combined.loc[row_idx, col] = inv_row[col]
                                 break
                         for col in ["x_fit_err", "x_err", "xcenter_fit_err"]:
                             if col in inv_row and col in combined.columns:
-                                combined.iloc[pos, combined.columns.get_loc(col)] = inv_row[col]
+                                combined.loc[row_idx, col] = inv_row[col]
                                 break
                         for col in ["y_fit_err", "y_err", "ycenter_fit_err"]:
                             if col in inv_row and col in combined.columns:
-                                combined.iloc[pos, combined.columns.get_loc(col)] = inv_row[col]
+                                combined.loc[row_idx, col] = inv_row[col]
                                 break
                         if "flags" in inv_row and "flags" in combined.columns:
-                            combined.iloc[pos, combined.columns.get_loc("flags")] = inv_row["flags"]
+                            combined.loc[row_idx, "flags"] = inv_row["flags"]
                         for col in ["cfit", "qfit", "reduced_chi2", "chi2_red"]:
                             if col in inv_row and col in combined.columns:
-                                combined.iloc[pos, combined.columns.get_loc(col)] = inv_row[col]
+                                combined.loc[row_idx, col] = inv_row[col]
                                 break
             else:
                 log.info("Inverted PSF fit did not improve any sources.")
@@ -3651,6 +3956,34 @@ class PSF:
                     label="Input position",
                     zorder=10,
                 )
+                # Add dashed box showing fitting bounds region
+                phot_cfg = self.input_yaml.get("photometry", {})
+                cfg_xy_bounds_arcsec = phot_cfg.get("fitting_xy_bounds", 3.0)
+                pixel_scale = self.input_yaml.get("pixel_scale", None)
+                if cfg_xy_bounds_arcsec is not None and pixel_scale is not None:
+                    try:
+                        cfg_xy_bounds_arcsec = float(cfg_xy_bounds_arcsec)
+                        pixel_scale = float(pixel_scale)
+                        if pixel_scale > 0:
+                            fitting_radius_px = cfg_xy_bounds_arcsec / pixel_scale
+                            for _, row in sources.iterrows():
+                                x_center = row["x_pix"]
+                                y_center = row["y_pix"]
+                                ax1.add_patch(
+                                    Rectangle(
+                                        (x_center - fitting_radius_px, y_center - fitting_radius_px),
+                                        2 * fitting_radius_px,
+                                        2 * fitting_radius_px,
+                                        edgecolor="cyan",
+                                        facecolor="none",
+                                        lw=1.0,
+                                        ls="--",
+                                        alpha=0.6,
+                                        label="Fitting bounds",
+                                    )
+                                )
+                    except Exception:
+                        pass
 
             if "x_fit" in sources and "y_fit" in sources:
                 for _, row in sources.iterrows():
@@ -3854,7 +4187,7 @@ class PSF:
             for _ax, _ax_R, _ax_B in ax_list:
                 _ax_B.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
                 _ax_R.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
-            ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, labelcolor="w")
+            ax1.legend(loc="upper left")
             save_name_png = (
                 f"PSF_Target_{base}.png" if plotTarget else f"PSF_Subtractions_{base}.png"
             )

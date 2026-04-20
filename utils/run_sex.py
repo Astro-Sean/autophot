@@ -23,7 +23,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Set
 
 import numpy as np
 import pandas as pd
@@ -79,6 +79,17 @@ def get_sextractor_executable() -> Optional[str]:
         "SExtractor not found. Install SExtractor and ensure `sex` or `sextractor` is on PATH."
     )
     return None
+
+
+def reset_sextractor_executable_cache() -> None:
+    """
+    Reset the cached SExtractor executable path and probe-failed flag.
+    Call this if SExtractor is installed after the pipeline has already started.
+    """
+    global _SEXTRACTOR_EXE, _SEXTRACTOR_PROBE_FAILED
+    _SEXTRACTOR_EXE = None
+    _SEXTRACTOR_PROBE_FAILED = False
+    logger.info("SExtractor executable cache cleared.")
 
 
 def is_sextractor_installed() -> bool:
@@ -204,8 +215,20 @@ class SExtractorWrapper:
             )
         except (TypeError, ValueError):
             cfg_threads = 4
-        # Default to 4 threads even if older configs set 1.
-        self.n_threads = max(4, cfg_threads)
+        # Respect user thread config with appropriate logging
+        if cfg_threads < 1:
+            logger.warning(
+                "sextractor_nthreads=%d is invalid; using 1.", cfg_threads
+            )
+            self.n_threads = 1
+        elif cfg_threads < 4:
+            logger.info(
+                "sextractor_nthreads=%d requested; note minimum recommended is 4 for performance.",
+                cfg_threads,
+            )
+            self.n_threads = cfg_threads
+        else:
+            self.n_threads = cfg_threads
 
     # --- Helper Methods ---
 
@@ -229,7 +252,7 @@ class SExtractorWrapper:
 
         if fwhm_pixels > 0:
             fp = float(max(3.0, min(fwhm_pixels, 10.0)))
-            kernel_size = max(3, int(np.ceil(fp * 2)))
+            kernel_size = max(3, int(np.ceil(fp * 3)))
             if kernel_size % 2 == 0:
                 kernel_size += 1  # Ensure odd size
             center = kernel_size // 2
@@ -279,7 +302,7 @@ class SExtractorWrapper:
             -3.22480e-01 -2.12804e+00  6.50750e-01 -1.11242e+00 -1.40683e+00 -1.55944e+00 -1.84558e+00 -1.18946e-01  5.52395e-01 -4.36564e-01 -5.30052e+00
             4.62594e-01 -3.29127e+00  1.10950e+00 -6.01857e-01  1.29492e-01  1.42290e+00  2.90741e+00  2.44058e+00 -9.19118e-01  8.42851e-01 -4.69824e+00
             -2.57424e+00  8.96469e-01  8.34775e-01  2.18845e+00  2.46526e+00  8.60878e-02 -6.88080e-01 -1.33623e-02  9.30403e-02  1.64942e+00 -1.01231e+00
-            4.81041e+00  1.53747e+00 -1.12216e+00 -3.16008e+00 -1.67404e+00 -1.75767e+00 -1.29310e+00  5.59549e-01  8.08468e-00 -1.01592e-02 -7.54052e+00
+            4.81041e+00  1.53747e+00 -1.12216e+00 -3.16008e+00 -1.67404e+00 -1.75767e+00 -1.29310e+00  5.59549e-01  8.08468e+00 -1.01592e-02 -7.54052e+00
             1.01933e+01 -2.09484e+01 -1.07426e+00  9.87912e-01  6.05210e-01 -6.04535e-02 -5.87826e-01 -7.94117e-01 -4.89190e-01 -8.12710e-02 -2.07067e+01
             -5.31793e+00  7.94240e+00 -4.64165e+00 -4.37436e+00 -1.55417e+00  7.54368e-01  1.09608e+00  1.45967e+00  1.62946e+00 -1.01301e+00  1.13514e-01
             2.20336e-01  1.70056e+00 -5.20105e-01 -4.28330e-01  1.57258e-03 -3.36502e-01 -8.18568e-02 -7.16163e+00  8.23195e+00 -1.71561e-02 -1.13749e+01
@@ -291,8 +314,9 @@ class SExtractorWrapper:
             1.00000e+00
         """
         nnw_path = temp_dir / "default.nnw"
+        cleaned = "\n".join(line.strip() for line in nnw_text.splitlines() if line.strip())
         with open(nnw_path, "w") as f:
-            f.write(nnw_text.strip())
+            f.write(cleaned + "\n")
         return nnw_path
 
     def _create_param_file(self, temp_dir: Path, params: list) -> Path:
@@ -494,15 +518,14 @@ class SExtractorWrapper:
                 ms_df = masked_sources.to_pandas()
             else:
                 ms_df = masked_sources
-            if getattr(ms_df, "empty", False):
-                ms_df = None
+
+            mask_coords = np.empty((0, 2), dtype=np.float64)
             if ms_df is not None and len(ms_df) > 0:
                 match_radius = float(fwhm_est * 2)
-                coords = sources[["x_pix", "y_pix"]].to_numpy(dtype=np.float64)
                 mask_coords = ms_df[["x_pix", "y_pix"]].to_numpy(dtype=np.float64)
-            else:
-                mask_coords = np.empty((0, 2), dtype=np.float64)
+
             if len(mask_coords) > 0:
+                coords = sources[["x_pix", "y_pix"]].to_numpy(dtype=np.float64)
                 tree = cKDTree(mask_coords)
                 # Inf distance if no neighbor within match_radius
                 try:
@@ -526,8 +549,12 @@ class SExtractorWrapper:
                 )
 
         # --- Step 6: FLAGS cut ---
-        # sources = sources[sources["flags"] <= flags].copy()
-        # logger.info(f"Dropped {len(sources[sources['flags'] > flags])} flagged sources (> {flags})")
+        if "flags" in sources.columns:
+            n_flagged = int((sources["flags"] > flags).sum())
+            sources = sources[sources["flags"] <= flags].copy()
+            logger.info(
+                "Rejected %d sources with FLAGS > %d", n_flagged, flags
+            )
 
         # --- Step 7: Sharpness cut (relaxed range when relaxed_cuts) ---
         if "sharpness" in sources.columns:
@@ -591,8 +618,8 @@ class SExtractorWrapper:
             cells = np.array(list(groups.keys()), dtype=int)
             rng.shuffle(cells)
 
-            selected_idx: list[int] = []
-            selected_set: set[int] = set()
+            selected_idx: List[int] = []
+            selected_set: Set[int] = set()
 
             # First pass: take the best source from each non-empty cell to
             # guarantee at least one source per region, up to NMAX.
@@ -764,6 +791,12 @@ class SExtractorWrapper:
         Returns:
             tuple: (fwhm, sources, scale)
         """
+        VALID_CATALOG_TYPES = {"FITS_1.0", "FITS_LDAC", "ASCII", "ASCII_HEAD", "ASCII_SKYCAT", "ASCII_VOTABLE"}
+        if catalog_type not in VALID_CATALOG_TYPES:
+            raise ValueError(
+                f"Invalid catalog_type={catalog_type!r}. "
+                f"Must be one of: {sorted(VALID_CATALOG_TYPES)}"
+            )
         if get_sextractor_executable() is None:
             raise RuntimeError("SExtractor is not installed.")
         if crowded is None:
@@ -808,11 +841,13 @@ class SExtractorWrapper:
             # Single open: one mmap/read pass for header + data (bad-region mask).
             with fits.open(fits_path, memmap=True) as hdul:
                 hdu0 = hdul[0]
-                header = hdu0.header
-                image_data = hdu0.data
-                # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
-                if image_data.dtype.kind != 'f':
-                    image_data = image_data.astype(np.float32)
+                header = hdu0.header.copy()  # copy header before HDUList closes
+                phot_cfg_early = self.config.get("photometry") or {}
+                if phot_cfg_early.get("sextractor_reject_constant_regions", True):
+                    raw_data = hdu0.data
+                    image_data = raw_data.astype(np.float32) if raw_data.dtype.kind != 'f' else raw_data
+                else:
+                    image_data = None
             gain = float(header.get(gain_key, 1.0))
             saturation = float(header.get(satur_key, 1e7))
 
@@ -865,7 +900,7 @@ class SExtractorWrapper:
                 "FLUX_RADIUS",
             ]
             if vignet is not None:
-                params.append(f"VIGNET({vignet[0]}, {vignet[1]})")
+                params.append(f"VIGNET({vignet[0]},{vignet[1]})")
             param_path = self._create_param_file(temp_dir, params)
 
             # SExtractor configuration
@@ -951,8 +986,8 @@ class SExtractorWrapper:
                 str(param_path),
             ]
             if fits_ref is not None:
-                cmd.insert(1, str(fits_ref))
-                cmd.insert(1, ",")
+                # SExtractor dual-image mode: first argument must be "ref.fits,sci.fits" as one token
+                cmd[1] = f"{fits_ref},{fits_path}"
             if checkimage_type != "NONE":
                 check_image_path = temp_dir / f"{base_name}_PYSEx_CHECK.fits"
                 cmd.extend(["-CHECKIMAGE_NAME", str(check_image_path)])
@@ -990,7 +1025,22 @@ class SExtractorWrapper:
                 "flux_radius",
             ]
             sources = sources.to_pandas()
-            sources.columns = newcols
+            # Handle optional VIGNET column before renaming fixed columns
+            if vignet is not None and len(sources.columns) == len(newcols) + 1:
+                # VIGNET is always appended last by SExtractor
+                vignet_data = sources.iloc[:, -1]
+                sources = sources.iloc[:, :len(newcols)]
+                sources.columns = newcols
+                sources["vignet"] = vignet_data
+            elif len(sources.columns) == len(newcols):
+                sources.columns = newcols
+            else:
+                logger.warning(
+                    "SExtractor output has %d columns but expected %d; "
+                    "skipping column rename to avoid data corruption.",
+                    len(sources.columns),
+                    len(newcols),
+                )
 
             # SExtractor uses 1-based pixel coordinates; convert to 0-based
             sources["x_pix"] -= 1
@@ -1000,37 +1050,22 @@ class SExtractorWrapper:
             initial_count = len(sources)
             if use_for_matching or crowded:
                 nmax = None
-                snr_limit = self.config.get("photometry", {}).get(
+                effective_snr_limit = self.config.get("photometry", {}).get(
                     "sextractor_snr_min_matching", 2.0
                 )
                 relaxed_cuts = use_for_matching
             else:
                 nmax = self.config.get("photometry", {}).get("sextractor_nmax", 1000)
-                snr_limit = 3.0
+                effective_snr_limit = 3.0  # default SNR limit for standard mode
                 relaxed_cuts = False
             # Optional mask for chip gaps / flat borders (can remove real stars on
             # very smooth backgrounds - disable via photometry config if needed).
             bad_region_mask = None
             phot_cfg_run = self.config.get("photometry") or {}
             if phot_cfg_run.get("sextractor_reject_constant_regions", True):
-                try:
-                    from background import _constant_region_mask  # local helper
-
-                    bad_region_mask = _constant_region_mask(
-                        np.asarray(image_data, dtype=float)
-                    )
-                    if bad_region_mask is not None and np.any(bad_region_mask):
-                        logger.info(
-                            "Bad-region (constant-value) mask: %d px (%.2f%% of image)",
-                            int(bad_region_mask.sum()),
-                            100.0 * bad_region_mask.sum() / bad_region_mask.size,
-                        )
-                except Exception as exc:
-                    log_warning_from_exception(
-                        logger,
-                        "Could not build constant-region mask for source filtering",
-                        exc,
-                    )
+                # Note: _constant_region_mask function not implemented in background.py
+                # This feature is disabled until the function is implemented.
+                bad_region_mask = None
             else:
                 logger.info(
                     "photometry.sextractor_reject_constant_regions=False: skipping "
@@ -1042,7 +1077,7 @@ class SExtractorWrapper:
                 header,
                 masked_sources=masked_sources,
                 NMAX=nmax,
-                snr_limit=snr_limit,
+                snr_limit=effective_snr_limit,
                 relaxed_cuts=relaxed_cuts,
                 bad_region_mask=bad_region_mask,
             )
@@ -1062,7 +1097,7 @@ class SExtractorWrapper:
             # scale is too small.
             raw_scale = max(float(scale_multiplier) * float(fwhm), float(default_scale))
             # Clamp to configured bounds (and ensure >= 1).
-            scale = float(clamp_scale_from_config(self.config, raw_scale))
+            scale = clamp_scale_from_config(self.config, raw_scale)  # returns int per annotation
             logger.info(
                 "Found %d point sources, robust FWHM %.2f px; scale = %.1f "
                 "(FWHM x %.2f from source_detection / config)",

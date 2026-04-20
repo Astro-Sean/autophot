@@ -348,6 +348,24 @@ class FluxMatchParams:
 # rather than being redefined inside methods on every call.
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """Coerce YAML-friendly values to bool."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("1", "true", "t", "yes", "y", "on"):
+            return True
+        if v in ("0", "false", "f", "no", "n", "off"):
+            return False
+        return default
+    return default
+
+
 def euclidean_distance(
     p1: Tuple[float, float],
     p2: Tuple[float, float],
@@ -1600,10 +1618,7 @@ class Templates:
             trimmed_header['NAXIS1'] = trimmed_data.shape[1]
             trimmed_header['NAXIS2'] = trimmed_data.shape[0]
             
-            # Remove WCS cards that might cause issues
-            for key in ['CD1_1', 'CD1_2', 'CD2_1', 'CD2_2']:
-                if key in trimmed_header:
-                    del trimmed_header[key]
+            # CD matrix stays valid after CRPIX shift - no need to delete it
             
             # Store trim info in history
             trimmed_header.add_history(f'Trimmed: removed NaN boundaries [{x_min}:{x_max+1},{y_min}:{y_max+1}]')
@@ -3177,34 +3192,6 @@ class Templates:
         fig, ax = plt.subplots(figsize=set_size(340, 1))
         plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
 
-        # All matched sources (faint, small markers to reduce overlap)
-        ax.errorbar(
-            full["mag_img"],
-            full["mag_tpl"],
-            xerr=mag_err_all,
-            yerr=mag_err_all,
-            fmt="o",
-            color=get_color('all_sources'),
-            alpha=get_alpha('light'),
-            markersize=get_marker_size('medium'),
-            capsize=0,
-            elinewidth=0.4,
-            label=f"All sources [{len(full)}]",
-        )
-        # Robust candidates (before final inlier mask)
-        ax.errorbar(
-            robust["mag_img"],
-            robust["mag_tpl"],
-            xerr=mag_err_robust,
-            yerr=mag_err_robust,
-            fmt="o",
-            color=get_color('robust'),
-            alpha=get_alpha('medium'),
-            markersize=get_marker_size('medium'),
-            capsize=0,
-            elinewidth=0.4,
-            label=f"Robust [{len(robust)}]",
-        )
         # Final selected inliers - small outlined markers
         sel = robust["is_inlier"].to_numpy(bool)
         ax.errorbar(
@@ -3216,7 +3203,7 @@ class Templates:
             markersize=get_marker_size('medium'),
             mfc="none",
             mec=get_color('inliers'),
-            ecolor=get_color('inliers'),
+            ecolor="lightgrey",
             elinewidth=0.4,
             capsize=0,
             alpha=get_alpha('dark'),
@@ -3231,6 +3218,7 @@ class Templates:
             yerr=mag_err_robust[rej],
             fmt="x",
             color=get_color('outliers'),
+            ecolor="lightgrey",
             alpha=get_alpha('medium'),
             lw=get_line_width('thin'),
             markersize=get_marker_size('medium'),
@@ -3240,7 +3228,7 @@ class Templates:
         )
         xx = np.linspace(mag_img_robust.min(), mag_img_robust.max(), 100)
         yy = slope * xx + intercept
-        ax.plot(xx, yy, color=get_color('inliers'), linestyle="--", lw=get_line_width('thin'), label=f"Fit: slope={slope:.3f}, intercept={intercept:.3f}")
+        ax.plot(xx, yy, color=get_color('fit'), linestyle="--", lw=get_line_width('thin'), label=f"Fit: slope={slope:.3f}, intercept={intercept:.3f}")
         # Add shaded error region (calculate from residuals)
         if sel.sum() > 0:
             residuals = robust.loc[sel, "mag_tpl"].values - (slope * robust.loc[sel, "mag_img"].values + intercept)
@@ -3251,7 +3239,7 @@ class Templates:
                 xx,
                 yy - intercept_error,
                 yy + intercept_error,
-                color=get_color('inliers'),
+                color=get_color('error_region'),
                 alpha=get_alpha('light'),
             )
         ax.set(xlabel="Science mag", ylabel="Template mag")
@@ -3481,21 +3469,6 @@ class Templates:
             scienceDir = Path(scienceFpath).parent
             base_name = Path(scienceFpath).name
             differenceFpath = str(scienceDir / f"diff_{base_name}")
-
-            def _as_bool(value, default: bool = False) -> bool:
-                if isinstance(value, bool):
-                    return value
-                if value is None:
-                    return default
-                if isinstance(value, (int, float)):
-                    return bool(value)
-                if isinstance(value, str):
-                    v = value.strip().lower()
-                    if v in ("1", "true", "t", "yes", "y", "on"):
-                        return True
-                    if v in ("0", "false", "f", "no", "n", "off", ""):
-                        return False
-                return default
 
             def _ensure_prepared_template_path() -> str:
                 nonlocal prepared_template_fpath, template_work_fpath
@@ -3875,8 +3848,9 @@ class Templates:
                 ny, nx = scienceImage.shape[0], scienceImage.shape[1]
                 try:
                     sci_wcs = get_wcs(scienceHeader)
+                    from astropy.wcs.utils import proj_plane_pixel_scales
                     pixel_scale_arcsec = float(
-                        WCS.utils.proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
+                        proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
                     )
                 except Exception:
                     pixel_scale_arcsec = 0.3
@@ -4101,8 +4075,8 @@ class Templates:
     def _subtract_sfft(
         self,
         scienceFpath,
-        templateFpath,
-        differenceFpath,
+        template_work_fpath,
+        outputFpath,
         mask_loc,
         scienceDir,
         base_name,
@@ -4120,21 +4094,6 @@ class Templates:
         template_saturate,
     ) -> str:
         """Attempt SFFT subtraction; return next method to try on failure."""
-        def _as_bool(value, default: bool = False) -> bool:
-            if isinstance(value, bool):
-                return value
-            if value is None:
-                return default
-            if isinstance(value, (int, float)):
-                return bool(value)
-            if isinstance(value, str):
-                v = value.strip().lower()
-                if v in ("1", "true", "t", "yes", "y", "on"):
-                    return True
-                if v in ("0", "false", "f", "no", "n", "off", ""):
-                    return False
-            return default
-
         # Use finite saturation for SFFT (FITS/MeLOn cannot use inf)
         _saturate_fallback = 1e30
         sat_sci = (
@@ -4206,7 +4165,7 @@ class Templates:
                 coords = ",".join(f"[{float(x):.3f},{float(y):.3f}]" for x, y in xy_list)
                 return f"[{coords}]"
 
-            def _build_sfft_cmd(run_excluded, run_matching):
+            def _build_sfft_cmd(run_excluded, run_matching, template_fp):
                 # If fewer than 5 pipeline-matched sources, let SFFT perform matching.
                 min_sources_for_prior = 5
                 if len(run_matching) < min_sources_for_prior:
@@ -4226,7 +4185,7 @@ class Templates:
                     "-sci",
                     str(scienceFpath),
                     "-ref",
-                    str(templateFpath),
+                    str(template_fp),
                     "-diff",
                     str(differenceFpath),
                     "-mask",
@@ -4321,7 +4280,7 @@ class Templates:
             ):
                 sfft_env[_k] = "1"
 
-            cmd = _build_sfft_cmd(current_excluded, current_matching_sources)
+            cmd = _build_sfft_cmd(current_excluded, current_matching_sources, template_work_fpath)
             with open(log_path, "w") as lf:
                 subprocess.run(
                     cmd, check=True, text=True, stdout=lf, stderr=lf, env=sfft_env
@@ -4366,7 +4325,7 @@ class Templates:
                     current_excluded = current_excluded + post_anom_xy
 
                     # Remove prior-selected matches too close to anomaly sources.
-                    if current_matching_sources:
+                    if post_anom_xy and current_matching_sources:
                         anom_arr = np.asarray(post_anom_xy, float)
                         filtered_matching = []
                         for x0, y0 in current_matching_sources:
@@ -4391,6 +4350,7 @@ class Templates:
                     cmd_retry = _build_sfft_cmd(
                         current_excluded,
                         current_matching_sources,
+                        template_work_fpath,
                     )
                     retry_log_path = scienceDir / f"sfft_{Path(base_name).stem}_postanom_retry.txt"
                     with open(retry_log_path, "w") as lf:

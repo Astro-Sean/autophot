@@ -740,10 +740,20 @@ class Plot:
                 lw=1.0,
             )
             ax1.add_patch(circle)
+            # Get target name with TNS prefix if available
+            target_name = self.input_yaml["target_name"]
+            name_prefix = self.input_yaml.get("name_prefix", "")
+            objname = self.input_yaml.get("objname", target_name)
+            # Add prefix if it exists and is not already in the name
+            if name_prefix and name_prefix.strip() and not target_name.startswith(name_prefix):
+                display_name = f"{name_prefix}{objname}"
+            else:
+                display_name = target_name
+            
             ax1.text(
                 self.input_yaml["target_x_pix"],
                 self.input_yaml["target_y_pix"] + radius + 2,
-                self.input_yaml["target_name"],
+                display_name,
                 color=get_divergent_color('target'),
                 fontsize=4,
                 ha="center",
@@ -992,6 +1002,7 @@ class Plot:
                 frameon=False,
                 handlelength=1.5,
                 handletextpad=0.5,
+                ncol = 3
             )
 
             # Finalize figure layout
@@ -1042,11 +1053,17 @@ class Plot:
         show_limits=False,
         show_details=True,
         default_size=(540, 1),
+        ls="",
     ):
         """
         Plot lightcurve with detections and optional upper limits.
         Detection = SNR >= snr_limit and (beta > beta_limit if 'beta' present).
         Non-detections are plotted as upper limits at lmag (limiting magnitude) when show_limits=True.
+
+        Parameters
+        ----------
+        ls : str
+            Line style for connecting detection points (default "" for no line).
         """
         import numpy as np
         import pandas as pd
@@ -1175,6 +1192,18 @@ class Plot:
                     marker=marker,
                     label=b,
                 )
+                # Optional: draw line connecting detection points
+                if ls:
+                    sorted_detects = detects.sort_values("mjd")
+                    ax1.plot(
+                        sorted_detects.mjd - reference_epoch,
+                        sorted_detects[band],
+                        color=cols.get(b, "k"),
+                        linestyle=ls,
+                        linewidth=0.8,
+                        alpha=0.6,
+                        zorder=0,
+                    )
             if show_limits and not nondetects.empty:
                 # Upper limits: plot at limiting magnitude (fainter than this = non-detection)
                 y_lim = (

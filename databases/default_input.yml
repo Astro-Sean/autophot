@@ -67,7 +67,7 @@ default_input:
     psf_smoothing_kernel_size_max: 9 # int --- Maximum auto smoothing-kernel size (odd; oversampled grid).
     crowded_field: False # bool --- Photometry crowded-field toggle (affects source selection/cleaning heuristics where implemented).
     redo_sources: False # bool --- If True, redo source detection/photometry even if intermediate outputs exist.
-    fitting_xy_bounds: 1.0 # float --- Allowed X/Y fitting offset bound in arcseconds; converted to pixels using image pixel_scale.
+    fitting_xy_bounds: 3.0 # float --- Allowed X/Y fitting offset bound in arcseconds; converted to pixels using image pixel_scale.
     lpi_background_for_target: False # bool --- (In development) If True, apply an LPI-style local background infill under the transient (structured background robustness). Paper: `https://iopscience.iop.org/article/10.3847/1538-4357/ac6875`
     lpi_inner_radius_scale_fwhm: 1.5 # float --- (In development) Hidden-region radius (pixels) = scale * FWHM for LPI-style infill (region treated as "behind the PSF core").
     lpi_outer_radius_scale_fwhm: 4.5 # float --- (In development) Good-pixel outer radius (pixels) = scale * FWHM for LPI-style infill conditioning region.

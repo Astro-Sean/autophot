@@ -32,8 +32,8 @@ from astropy.visualization import ZScaleInterval
 import astropy.wcs as WCS
 from matplotlib.patches import Circle
 from sklearn.base import BaseEstimator, RegressorMixin
-from sklearn.linear_model import RANSACRegressor
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
+from sklearn.linear_model import RANSACRegressor
 from scipy.optimize import minimize
 import astropy.units as u
 
@@ -92,7 +92,7 @@ class ImageDistortionCorrector:
         "SOLVE_PHOTOM": "Y",
         "REF_TIMEOUT": 60,
         "REF_SERVER": "vizier.cfa.harvard.edu",
-        "DISTORT_DEGREES": 1,
+        "DISTORT_DEGREES": None,  # Will be set from config
         "MATCH": "Y",
         "MATCH_RESOL": 0,
         "MATCH_FLIPPED": "Y",
@@ -425,11 +425,13 @@ NNW
         """Heuristic saturation estimate for SExtractor SATUR_LEVEL."""
         with fits.open(fits_path) as hdul:
             data = hdul[0].data
+            # Store original dtype for saturation check before conversion
+            original_dtype = data.dtype
             # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
             if data.dtype.kind != 'f':
                 data = data.astype(np.float32)
-            if np.issubdtype(data.dtype, np.integer):
-                max_possible = np.iinfo(data.dtype).max
+            if np.issubdtype(original_dtype, np.integer):
+                max_possible = np.iinfo(original_dtype).max
                 if np.nanmax(data) >= 0.99 * max_possible:
                     return float(max_possible)
             finite = data[np.isfinite(data)]
@@ -609,7 +611,8 @@ NNW
                     else 2.5
                 )
             else:
-                fwhm = np.nanmean(sigma_clip(cleaned["FWHM_IMAGE"], sigma=3))
+                from astropy.stats import sigma_clipped_stats
+                _, fwhm, _ = sigma_clipped_stats(cleaned["FWHM_IMAGE"], sigma=3)
             if not np.isfinite(fwhm) or fwhm <= 0:
                 fwhm = 2.5
 
@@ -674,10 +677,11 @@ NNW
         return ahead_path
 
     def _extract_wcs_and_scale(self, fits_path):
+        from astropy.wcs.utils import proj_plane_pixel_scales
         with fits.open(fits_path) as hdul:
             header = hdul[0].header
             wcs_obj = get_wcs(header)
-            pixel_scale = WCS.utils.proj_plane_pixel_scales(wcs_obj)[0] * 3600.0
+            pixel_scale = proj_plane_pixel_scales(wcs_obj)[0] * 3600.0
             return wcs_obj, pixel_scale, header
 
     # ------------------------ Align + resample via SCAMP/SWarp ------------------------
@@ -745,24 +749,20 @@ NNW
             ):
                 sci_data, sci_head = hdul[0].data, hdul[0].header
                 ref_data, ref_head = hdul_ref[0].data, hdul_ref[0].header
+                from astropy.wcs.utils import proj_plane_pixel_scales
                 sci_wcs = get_wcs(sci_head)
                 ref_wcs = get_wcs(ref_head)
                 sci_shape = sci_data.shape
                 ref_shape = ref_data.shape
-                sci_pix_scale = WCS.utils.proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
-                ref_pix_scale = WCS.utils.proj_plane_pixel_scales(ref_wcs)[0] * 3600.0
+                sci_pix_scale = proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
+                ref_pix_scale = proj_plane_pixel_scales(ref_wcs)[0] * 3600.0
                 ra_arr, dec_arr = sci_wcs.all_pix2world(
                     [sci_shape[1] / 2], [sci_shape[0] / 2], 0
                 )
                 center_ra, center_dec = float(ra_arr[0]), float(dec_arr[0])
-                science_skip_resample = (
-                    science_already_resampled
-                    or self._header_indicates_resampled(sci_head)
-                )
-                reference_skip_resample = (
-                    reference_already_resampled
-                    or self._header_indicates_resampled(ref_head)
-                )
+                # Force SWARP to always resample both images (removed skip check)
+                science_skip_resample = False
+                reference_skip_resample = False
                 reference_already_scamp = self._header_indicates_scamp(ref_head)
 
             # Extract sources
@@ -905,7 +905,7 @@ NNW
                     ref_cat_path=ref_sex["catalog_path"],
                     output_plot_path=output_dir / "matched_sources.png",
                     label_color="#FF0000",
-                    label_fontsize=10,
+                    label_fontsize=7,
                     circle_radius_sci=fwhm_sci_pix,
                     circle_radius_ref=fwhm_ref_pix,
                     matched_circle_color="#FF0000",
@@ -1598,7 +1598,11 @@ NNW
             _save_aligned_image(aligned_ref_img, out_hdr, aligned_reference_fpath)
             try:
                 if use_aafitrans:
-                    src_w = tform(matched_src)
+                    try:
+                        src_w = tform(matched_src)  # skimage Transform.__call__ works
+                    except TypeError:
+                        # Fallback for transforms without __call__
+                        src_w = tform.inverse(matched_src)
                 else:
                     src_w = aa.matrix_transform(matched_src, tform.params)
                 resid = np.sqrt(np.sum((src_w - matched_dst) ** 2, axis=1))
@@ -1876,8 +1880,14 @@ NNW
 
         stem = Path(catalog_path).stem
 
+        # Read scamp_distort_degrees from wcs config for consistency with main pipeline
+        iy = getattr(self, "input_yaml", None) or {}
+        wcs_cfg = iy.get("wcs", {}) if isinstance(iy, dict) else {}
+        distort_degrees = int(wcs_cfg.get("scamp_distort_degrees", 4))
+
         final_config = {
             **self.DEFAULT_SCAMP_CONFIG,
+            "DISTORT_DEGREES": distort_degrees,
             "ASTREF_CATALOG": "FILE" if reference_cat else "GAIA-DR3",
             "ASTREFCAT_NAME": reference_cat,
             "NTHREADS": self.default_threads,
@@ -2284,7 +2294,7 @@ NNW
     ) -> tuple[int, float]:
         """
         Build 1-to-1 matched catalogs using SNR_APER >= 3, adding MAG_APER, MAGERR_APER, and SNR_APER columns.
-        Uses RANSAC for photometric filtering and spatial downsampling if too many sources.
+        Uses RANSAC for alignment matching and spatial downsampling if too many sources.
         Prioritizes extended sources for alignment.
         Returns the number of matched sources and the match radius used.
         """
@@ -2338,6 +2348,9 @@ NNW
 
         sci_cat, sci_header = read_ldac(sci_cat_path)
         ref_cat, ref_header = read_ldac(ref_cat_path)
+
+        # Initialize intercept before conditional blocks to prevent NameError
+        intercept = None
 
         def add_mag_snr_aper(tbl: Table, use_magauto: bool = True) -> Table:
             """
@@ -2465,13 +2478,15 @@ NNW
             sci_cat_matched["MATCH_ID"] = np.array([], dtype=int)
             ref_cat_matched["MATCH_ID"] = np.array([], dtype=int)
         if len(sci_cat_matched) >= 10:
-            try:
-                sci_mag = np.array(sci_cat_matched["MAG_APER"], dtype=float)
-                ref_mag = np.array(ref_cat_matched["MAG_APER"], dtype=float)
-                valid = np.isfinite(sci_mag) & np.isfinite(ref_mag)
-                if np.sum(valid) >= 10:
-                    sci_mag_clean = sci_mag[valid]
-                    ref_mag_clean = ref_mag[valid]
+            sci_mag = np.array(sci_cat_matched["MAG_APER"], dtype=float)
+            ref_mag = np.array(ref_cat_matched["MAG_APER"], dtype=float)
+            valid = np.isfinite(sci_mag) & np.isfinite(ref_mag)
+            if np.sum(valid) >= 10:
+                sci_mag_clean = sci_mag[valid]
+                ref_mag_clean = ref_mag[valid]
+                intercept = None
+                try:
+                    # Use RANSAC for alignment matching
                     ransac = RANSACRegressor(
                         estimator=ConstrainedSlopeRegressor(
                             slope_constraint=1.0, slope_tolerance=0.0
@@ -2481,60 +2496,97 @@ NNW
                         min_samples=max(3, len(sci_mag_clean) // 3),
                     )
                     ransac.fit(ref_mag_clean.reshape(-1, 1), sci_mag_clean)
-                    if hasattr(ransac, "inlier_mask_"):
+                    intercept = ransac.estimator_.intercept_
+                    inlier_mask_clean = ransac.inlier_mask_
+
+                    if inlier_mask_clean.any():
                         inliers = np.zeros(len(sci_cat_matched), dtype=bool)
-                        inliers[valid] = ransac.inlier_mask_
+                        inliers[valid] = inlier_mask_clean
                         sci_cat_matched = sci_cat_matched[inliers]
                         ref_cat_matched = ref_cat_matched[inliers]
                         match_id = np.arange(len(sci_cat_matched), dtype=int)
                         sci_cat_matched["MATCH_ID"] = match_id
                         ref_cat_matched["MATCH_ID"] = match_id
                         self.logger.info(
-                            f"RANSAC mag filter kept {len(sci_cat_matched)} sources, zp={ransac.estimator_.intercept_:.3f} mag"
+                            f"RANSAC mag filter kept {len(sci_cat_matched)} sources, zp={intercept:.3f} mag"
                         )
-                        if len(sci_cat_matched) >= 5:
-                            from functions import set_size
+                except Exception as exc:
+                    self.logger.warning(f"RANSAC regression failed: {exc}")
+                    # Fall back to simple median filtering with more permissive threshold
+                    median_diff = np.median(sci_mag_clean - ref_mag_clean)
+                    intercept = median_diff
+                    inlier_mask_clean = np.abs((sci_mag_clean - ref_mag_clean) - median_diff) < 0.5
+                    if inlier_mask_clean.any():
+                        inliers = np.zeros(len(sci_cat_matched), dtype=bool)
+                        inliers[valid] = inlier_mask_clean
+                        sci_cat_matched = sci_cat_matched[inliers]
+                        ref_cat_matched = ref_cat_matched[inliers]
+                        match_id = np.arange(len(sci_cat_matched), dtype=int)
+                        sci_cat_matched["MATCH_ID"] = match_id
+                        ref_cat_matched["MATCH_ID"] = match_id
+                        self.logger.info(
+                            f"Median fallback kept {len(sci_cat_matched)} sources"
+                        )
 
-                            golden_ratio = (5**0.5 + 1) / 2
-                            plt.figure(
-                                figsize=set_size(340, aspect=golden_ratio)
-                            )
-                            plt.errorbar(
-                                ref_cat_matched["MAG_APER"],
-                                sci_cat_matched["MAG_APER"],
-                                xerr=ref_cat_matched["MAGERR_APER"],
-                                yerr=sci_cat_matched["MAGERR_APER"],
-                                fmt="o",
-                                c="blue",
-                                alpha=0.6,
-                                label="Inliers",
-                            )
-                            x_fit = np.linspace(
-                                np.min(ref_cat_matched["MAG_APER"]),
-                                np.max(ref_cat_matched["MAG_APER"]),
-                                100,
-                            )
-                            y_fit = ransac.estimator_.predict(x_fit.reshape(-1, 1))
-                            plt.plot(
-                                x_fit,
-                                y_fit,
-                                "k--",
-                                label=f"slope={ransac.estimator_.slope_:.3f}, intercept={ransac.estimator_.intercept_:.3f}",
-                            )
-                            plt.gca().invert_xaxis()
-                            plt.gca().invert_yaxis()
-                            plt.xlabel("Reference MAG_APER")
-                            plt.ylabel("Science MAG_APER")
-                            plt.legend()
-                            plt.grid(True)
-                            plt.savefig(
-                                sci_cat_path.replace(".cat", "_mag_fit.png"), dpi=150
-                            )
-                            plt.close()
-            except Exception as e:
-                self.logger.info(
-                    f"RANSAC failed: {e}, proceeding without photometric filtering"
-                )
+        if len(sci_cat_matched) >= 5 and intercept is not None:
+            from functions import set_size
+            from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
+
+            fig, ax = plt.subplots(figsize=set_size(340, 1))
+            plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
+            ax.errorbar(
+                ref_cat_matched["MAG_APER"],
+                sci_cat_matched["MAG_APER"],
+                xerr=ref_cat_matched["MAGERR_APER"],
+                yerr=sci_cat_matched["MAGERR_APER"],
+                fmt="o",
+                markersize=get_marker_size('medium'),
+                mfc="none",
+                mec=get_color('inliers'),
+                ecolor=get_color('inliers'),
+                alpha=get_alpha('dark'),
+                label=f"Inliers [{len(sci_cat_matched)}]",
+            )
+            x_fit = np.linspace(
+                np.min(ref_cat_matched["MAG_APER"]),
+                np.max(ref_cat_matched["MAG_APER"]),
+                100,
+            )
+            # Slope is forced to 1.0, intercept is the zeropoint
+            y_fit = x_fit + intercept
+            ax.plot(
+                x_fit,
+                y_fit,
+                color=get_color('fit'),
+                linestyle="--",
+                lw=get_line_width('medium'),
+                label=f"Fit: slope=1.000, intercept={intercept:.3f}",
+            )
+            # Add shaded error region (calculate from residuals)
+            sci_mag = np.array(sci_cat_matched["MAG_APER"], dtype=float)
+            ref_mag = np.array(ref_cat_matched["MAG_APER"], dtype=float)
+            residuals = sci_mag - (ref_mag + intercept)
+            residual_std = np.std(residuals)
+            n_points = len(sci_mag)
+            intercept_error = residual_std / np.sqrt(n_points)
+            ax.fill_between(
+                x_fit,
+                y_fit - intercept_error,
+                y_fit + intercept_error,
+                color=get_color('error_region'),
+                alpha=get_alpha('light'),
+            )
+            ax.invert_xaxis()
+            ax.invert_yaxis()
+            ax.set_xlabel("Reference MAG_APER")
+            ax.set_ylabel("Science MAG_APER")
+            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2)
+            ax.grid(True)
+            fig.savefig(
+                sci_cat_path.replace(".cat", "_Mag_Fit.png"), dpi=150
+            )
+            plt.close(fig)
+
         if len(sci_cat_matched) > nmax:
             n_bins = int(np.sqrt(nmax))
             spp = max(1, nmax // (n_bins**2))
