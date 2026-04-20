@@ -703,9 +703,9 @@ def plot_lightcurve(
                 # Add diagonal stripes - only for inverted PSF fits (white hatch)
                 sc.set_hatch('////')
                 sc.set_edgecolor('white')
-                # Add label manually without marker in legend (only if not already added)
+                # Add label manually with detection marker in legend (only if not already added)
                 if normal_detects.empty:
-                    ax.scatter([], [], s=100, c=c, marker='s', edgecolors='white', 
+                    ax.scatter([], [], s=100, c=c, marker='o', edgecolors='black',
                              linewidth=0.8, label=leg_label if leg_label else "")
 
         if show_limits and not nondetects.empty:
@@ -714,6 +714,7 @@ def plot_lightcurve(
                 nondetects.mjd - reference_epoch,
                 nondetects["lmag"] + band_offset,
                 color=c,
+                ecolor=c,
                 markeredgecolor=c,
                 markerfacecolor="none",
                 markeredgewidth=0.5,
