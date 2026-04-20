@@ -2416,7 +2416,8 @@ class Limits:
                                    color='red', fontsize=8, ha='center', va='bottom')
 
                     # Mark injected source location with aperture circle
-                    aperture_circle = Circle((inject_x, inject_y), radius=aperture_radius,
+                    # Convert to zoomed coordinates for plotting
+                    aperture_circle = Circle((inject_x - x0_zoom, inject_y - y0_zoom), radius=aperture_radius,
                                            edgecolor='navy', facecolor='none', linestyle='--', linewidth=0.5)
                     ax_inject.add_patch(aperture_circle)
                     
@@ -2501,7 +2502,7 @@ class Limits:
                         snr   = sig / noise if noise > 0 else 0.0
 
                     ax_inject.text(
-                        inject_x, inject_y + aperture_radius,
+                        inject_x - x0_zoom, inject_y - y0_zoom + aperture_radius,
                         f"S/N={snr:.1f}",
                         color="navy", fontsize=8, ha="center", va="bottom",
                     )
