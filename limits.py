@@ -2397,7 +2397,7 @@ class Limits:
 
                     # Mark transient position (center of cutout, where actual target is)
                     from matplotlib.patches import Circle
-                    transient_marker = Circle((x_center, y_center), radius=aperture_radius,
+                    transient_marker = Circle((x_center - x0_zoom, y_center - y0_zoom), radius=aperture_radius,
                                             edgecolor='red', facecolor='none', linestyle='-', linewidth=0.5)
                     ax_inject.add_patch(transient_marker)
                     # Use target_name with TNS prefix if available, otherwise use '1'
@@ -2412,7 +2412,7 @@ class Limits:
                             transient_label = target_name
                     else:
                         transient_label = '1'
-                    ax_inject.text(x_center, y_center + aperture_radius, transient_label,
+                    ax_inject.text(x_center - x0_zoom, y_center - y0_zoom + aperture_radius, transient_label,
                                    color='red', fontsize=8, ha='center', va='bottom')
 
                     # Mark injected source location with aperture circle
