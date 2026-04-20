@@ -1319,6 +1319,9 @@ class Zeropoint:
                     # Track which vmask sources survive finite filtering (full catalog length)
                     vmask_finite = np.zeros(len(clean_catalog), dtype=bool)
                     vmask_finite[np.flatnonzero(vmask)] = finite_mask
+
+                    # Final vmask tracking: start with vmask_finite and update through sigma clip
+                    vmask_sigma = vmask_finite.copy()
                     if len(delta_mag) == 0:
                         logger.warning(
                             f"{flux_type}: no finite delta_mag after masking; skipping."
@@ -1341,14 +1344,13 @@ class Zeropoint:
                     inlier_deltas = clipped.data[inlier_mask]
                     inlier_delta_err = delta_mag_err[inlier_mask]
 
-                    # Track which vmask_finite sources survive sigma clipping (full catalog length)
-                    vmask_sigma = np.zeros(len(clean_catalog), dtype=bool)
+                    # Update vmask_sigma: keep only sources that survive sigma clipping
                     vmask_sigma[np.flatnonzero(vmask_finite)] = inlier_mask
 
                     finite2 = np.isfinite(inlier_deltas) & np.isfinite(inlier_delta_err)
                     inlier_deltas = inlier_deltas[finite2]
                     inlier_delta_err = inlier_delta_err[finite2]
-                    # Update vmask_sigma to account for finite2 filtering
+                    # Update vmask_sigma: keep only sources that survive finite2 filtering
                     vmask_sigma[np.flatnonzero(vmask_finite)] = inlier_mask[finite2]
 
                     if len(inlier_deltas) == 0:
@@ -1460,13 +1462,12 @@ class Zeropoint:
                         inl_nc = clipped_nc.data[~clipped_nc.mask]
                         inl_nc = inl_nc[np.isfinite(inl_nc)]
 
-                        # Track which vmask_nc_finite sources survive sigma clipping (full catalog length)
-                        sigma_mask = ~clipped_nc.mask
-                        # Apply the final finite filter to the sigma mask
-                        final_mask = sigma_mask & np.isfinite(inl_nc)
-                        # Map back to full catalog: only sources that were in vmask_nc_finite and passed final_mask
-                        vmask_nc_sigma = np.zeros(len(clean_catalog), dtype=bool)
-                        vmask_nc_sigma[np.flatnonzero(vmask_nc_finite)] = final_mask
+                        # Final vmask tracking for no-correction: start with vmask_nc_finite
+                        vmask_nc_sigma = vmask_nc_finite.copy()
+                        # Update: keep only sources that survive sigma clipping
+                        vmask_nc_sigma[np.flatnonzero(vmask_nc_finite)] = ~clipped_nc.mask
+                        # Update: keep only sources that survive final finite filter
+                        vmask_nc_sigma[np.flatnonzero(vmask_nc_finite)] = (~clipped_nc.mask)[np.isfinite(inl_nc)]
                         n_sources_nc = int(vmask_nc_sigma.sum())
 
                         if len(inl_nc) > 0:
