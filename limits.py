@@ -164,6 +164,7 @@ def _injection_worker(args):
                 y2 = min(ny, int(np.floor(y0i)) + half + 2)
 
                 data = np.asarray(new_img[y1:y2, x1:x2], dtype=float)
+                # gx/gy and x_inj/y_inj are all in cutout-local pixel coordinates.
                 gx, gy = np.meshgrid(np.arange(x1, x2), np.arange(y1, y2))
                 psf1 = np.asarray(
                     epsf_model.evaluate(x=gx, y=gy, flux=1.0, x_0=x0i, y_0=y0i),
@@ -223,6 +224,7 @@ def _injection_worker(args):
 
                 stamp = np.asarray(new_img[y1:y2, x1:x2], dtype=float)
                 gx, gy = np.meshgrid(np.arange(stamp.shape[1]), np.arange(stamp.shape[0]))
+                # gx/gy are stamp-local coordinates (correct)
 
                 # For EMCEE recovery we do not force background=0. The MCMC fitter
                 # uses an uncertainty model; background offsets are handled via the
@@ -236,9 +238,9 @@ def _injection_worker(args):
                     rms_stamp = np.abs(rms_stamp)
 
                 model = epsf_model.copy()
-                # Place the source at injected coordinates in stamp coordinates.
-                model.x_0.value = float(x0i - x1)
-                model.y_0.value = float(y0i - y1)
+                # Place the source at injected coordinates in stamp-local coordinates.
+                model.x_0.value = float(x0i - x1)  # stamp-local
+                model.y_0.value = float(y0i - y1)  # stamp-local
                 model.flux.value = float(F_amp)
 
                 # Delta (px) bound for centroid; keep it tight since injection pos is known.
@@ -580,12 +582,10 @@ class Limits:
             cutout = cutout_img
             background_rms = cutout_rms
 
-            # Preserve original target position for PSF calibration
-            # Use cutout center for cutout-based operations
+            # Target is always at the centre of the cutout by construction.
             H, W = cutout.shape
-            cutout_center = [W / 2.0, H / 2.0]  # Target is at cutout center
-            # Keep original position (full image coordinates) for PSF calibration
-            # position remains the original target position in full image coordinates
+            cutout_cx = (W - 1) / 2.0
+            cutout_cy = (H - 1) / 2.0
 
             # Calculate optimum aperture radius if not already set
             fwhm = float(self.input_yaml.get("fwhm", 3.0))
@@ -790,7 +790,8 @@ class Limits:
             # PSF calibration: flux=1 -> what instrumental magnitude?
             # =================================================================
             # Use cutout center for PSF evaluation (grid is cutout-sized)
-            cx, cy = W / 2.0, H / 2.0
+            # Target is always at the centre of the cutout by construction.
+            cx, cy = cutout_cx, cutout_cy
             # Create pixel-resolution grid (always needed for injection)
             gridx, gridy = np.meshgrid(np.arange(W), np.arange(H))
             # Create oversampled grid for PSF evaluation
@@ -863,7 +864,7 @@ class Limits:
             
             psf_ap = Aperture(input_yaml=local_input_yaml, image=blank)
             psf_meas = psf_ap.measure(
-                pd.DataFrame({"x_pix": [cx], "y_pix": [cy]}),  # Use same centre as PSF evaluation
+                pd.DataFrame({"x_pix": [cutout_cx], "y_pix": [cutout_cy]}),  # Use same centre as PSF evaluation
                 plot=False,
                 verbose=0,
             )
@@ -1005,11 +1006,11 @@ class Limits:
                     r_min_with_jitter = r_min + 1.0  # 1px safety margin for jitter
                     theta = self._rng.random(sourceNum) * (2.0 * np.pi)
                     rr = np.sqrt(self._rng.random(sourceNum)) * (r_max - r_min_with_jitter) + r_min_with_jitter
-                    xran = cutout_center[0] + rr * np.cos(theta)
-                    yran = cutout_center[1] + rr * np.sin(theta)
+                    xran = cutout_cx + rr * np.cos(theta)
+                    yran = cutout_cy + rr * np.sin(theta)
                     df = pd.DataFrame({"x_pix": xran, "y_pix": yran})
                 else:
-                    pts = points_in_circum(inj_dist, center=[W/2.0, H/2.0], n=sourceNum)
+                    pts = points_in_circum(inj_dist, center=[cutout_cx, cutout_cy], n=sourceNum)
                     xran = [p[0] for p in pts]
                     yran = [p[1] for p in pts]
                     df = pd.DataFrame({"x_pix": xran, "y_pix": yran})
@@ -1102,9 +1103,10 @@ class Limits:
                         continue
                     cutout = cutout_img
                     background_rms = cutout_rms
-                    # Update injection_center to new cutout center (never mutate position)
+                    # Recalculate cutout centre after re-extraction
                     H, W = cutout.shape
-                    injection_center = [W / 2.0, H / 2.0]
+                    cutout_cx = (W - 1) / 2.0
+                    cutout_cy = (H - 1) / 2.0
 
                     distance_factor = 1.0
                     injection_df = pd.DataFrame()
@@ -1116,11 +1118,11 @@ class Limits:
                                 np.sqrt(self._rng.random(sourceNum)) * (r_max - r_min)
                                 + r_min
                             )
-                            xran = injection_center[0] + rr * np.cos(theta)
-                            yran = injection_center[1] + rr * np.sin(theta)
+                            xran = cutout_cx + rr * np.cos(theta)
+                            yran = cutout_cy + rr * np.sin(theta)
                             df = pd.DataFrame({"x_pix": xran, "y_pix": yran})
                         else:
-                            pts = points_in_circum(inj_dist, center=injection_center, n=sourceNum)
+                            pts = points_in_circum(inj_dist, center=[cutout_cx, cutout_cy], n=sourceNum)
                             xran = [p[0] for p in pts]
                             yran = [p[1] for p in pts]
                             df = pd.DataFrame({"x_pix": xran, "y_pix": yran})
@@ -1149,8 +1151,8 @@ class Limits:
                         # Always apply exclusion zone
                         injection_df = _exclude_target_overlap(
                             injection_df,
-                            injection_center[0],  # updated cutout center after grow
-                            injection_center[1],
+                            cutout_cx,  # updated cutout center after grow
+                            cutout_cy,
                             target_exclusion_r,
                         )
                         
@@ -1175,18 +1177,18 @@ class Limits:
                 if inj_strategy == "annulus_random":
                     theta = self._rng.random(sourceNum) * (2.0 * np.pi)
                     rr = np.sqrt(self._rng.random(sourceNum)) * (r_max - r_min) + r_min
-                    xran = cutout_center[0] + rr * np.cos(theta)
-                    yran = cutout_center[1] + rr * np.sin(theta)
+                    xran = cutout_cx + rr * np.cos(theta)
+                    yran = cutout_cy + rr * np.sin(theta)
                     injection_df = pd.DataFrame({"x_pix": xran, "y_pix": yran})
                 else:
-                    pts = points_in_circum(inj_dist, center=[W/2.0, H/2.0], n=sourceNum)
+                    pts = points_in_circum(inj_dist, center=[cutout_cx, cutout_cy], n=sourceNum)
                     injection_df = pd.DataFrame(
                         {"x_pix": [p[0] for p in pts], "y_pix": [p[1] for p in pts]}
                     )
                 
                 # Apply exclusion zone to fallback sites too
                 injection_df = _exclude_target_overlap(
-                    injection_df, W / 2.0, H / 2.0, target_exclusion_r
+                    injection_df, cutout_cx, cutout_cy, target_exclusion_r
                 )
                 
                 # Apply edge clearance to fallback sites
@@ -1212,10 +1214,10 @@ class Limits:
             # Recompute r_max and r_base after final cutout shape is known
             margin_r = float(np.ceil(fwhm_px))
             max_safe_r = min(
-                position[0] - margin_r,
-                W_final - 1 - position[0] - margin_r,
-                position[1] - margin_r,
-                H_final - 1 - position[1] - margin_r,
+                cutout_cx - margin_r,
+                W_final - 1 - cutout_cx - margin_r,
+                cutout_cy - margin_r,
+                H_final - 1 - cutout_cy - margin_r,
             )
             r_max_eff = min(r_max, max(r_min, float(max_safe_r)))
             r_base_eff = float(np.clip(r_base, r_min, r_max_eff))
@@ -1538,7 +1540,9 @@ class Limits:
 
         # Inject off-target (representative; avoid injecting on the transient).
         H, W = cutout.shape
-        x0c, y0c = float(position[0]), float(position[1])
+        # Target is always at the centre of the cutout by construction.
+        x0c = (W - 1) / 2.0
+        y0c = (H - 1) / 2.0
         fwhm_px = float(self.input_yaml.get("fwhm", 3.0))
         r_min = float(lim_cfg.get("inject_min_radius_fwhm", 2.0)) * fwhm_px
         r_base = float(lim_cfg.get("inject_source_location", 3.0)) * fwhm_px
@@ -2151,8 +2155,8 @@ class Limits:
         if epsf_model is not None and cutout is not None and position is not None and \
            np.isfinite(inject_lmag) and flux_for_mag is not None:
             ny_c, nx_c = cutout.shape
-            target_x   = nx_c / 2.0
-            target_y   = ny_c / 2.0
+            target_x   = (nx_c - 1) / 2.0
+            target_y   = (ny_c - 1) / 2.0
 
             # aperture_radius and fwhm for subpanel use
             fwhm            = float(self.input_yaml.get("fwhm", 3.0))
@@ -2269,21 +2273,9 @@ class Limits:
                     y_grid, x_grid = np.mgrid[0:ny, 0:nx]
                     logger.debug(f"Subpanel: cutout shape=({ny},{nx}), grid shape={y_grid.shape}, {x_grid.shape}")
                     
-                    # Center position in cutout coordinates
-                    # position passed to _plot_completeness is always in cutout coordinates
-                    # Convert target position from image coordinates to cutout coordinates
-                    # position is the center of the cutout in image coordinates
-                    cutout_center_x = (nx - 1) / 2.0
-                    cutout_center_y = (ny - 1) / 2.0
-                    if position is not None:
-                        # position is the center of the cutout in image coordinates
-                        # Target should be at cutout center
-                        x_center = cutout_center_x
-                        y_center = cutout_center_y
-                    else:
-                        # Fallback to cutout center
-                        x_center = cutout_center_x
-                        y_center = cutout_center_y
+                    # Target is always at cutout centre by construction.
+                    x_center = (nx - 1) / 2.0
+                    y_center = (ny - 1) / 2.0
                     
                     # Inject PSF at this magnitude
                     injected = cutout.copy()
@@ -2299,6 +2291,7 @@ class Limits:
                     # Add PSF flux to cutout at demo location
                     inject_x = demo_x
                     inject_y = demo_y
+                    # inject_x/inject_y are in cutout-local coordinates (from injection_df["x_pix"]/["y_pix"])
                     logger.info(f"Injecting PSF at cutout coordinates: ({inject_x:.1f}, {inject_y:.1f})")
 
                     # Use normalized PSF for subpanel injection (same as used for calibration)
@@ -2397,7 +2390,7 @@ class Limits:
 
                     # Mark transient position (center of cutout, where actual target is)
                     from matplotlib.patches import Circle
-                    transient_marker = Circle((x_center - x0_zoom, y_center - y0_zoom), radius=aperture_radius,
+                    transient_marker = Circle((x_center, y_center), radius=aperture_radius,
                                             edgecolor='red', facecolor='none', linestyle='-', linewidth=0.5)
                     ax_inject.add_patch(transient_marker)
                     # Use target_name with TNS prefix if available, otherwise use '1'
@@ -2412,12 +2405,12 @@ class Limits:
                             transient_label = target_name
                     else:
                         transient_label = '1'
-                    ax_inject.text(x_center - x0_zoom, y_center - y0_zoom + aperture_radius, transient_label,
+                    ax_inject.text(x_center, y_center + aperture_radius, transient_label,
                                    color='red', fontsize=8, ha='center', va='bottom')
 
                     # Mark injected source location with aperture circle
-                    # Convert to zoomed coordinates for plotting
-                    aperture_circle = Circle((inject_x - x0_zoom, inject_y - y0_zoom), radius=aperture_radius,
+                    # Circle centre is in cutout-local coordinates (imshow displays full cutout)
+                    aperture_circle = Circle((inject_x, inject_y), radius=aperture_radius,
                                            edgecolor='navy', facecolor='none', linestyle='--', linewidth=0.5)
                     ax_inject.add_patch(aperture_circle)
                     
@@ -2439,10 +2432,14 @@ class Limits:
                             y0s = max(0, int(np.floor(inj_y_z)) - half_s)
                             y1s = min(nyiz, int(np.floor(inj_y_z)) + half_s + 2)
                             data_s   = np.asarray(injected_zoom[y0s:y1s, x0s:x1s], float)
-                            # Evaluate PSF in full-cutout coords so x_0/y_0 match demo_x/demo_y
+                            # Construct stamp grid in CUTOUT-LOCAL coordinates
+                            x0s_cut = x0s + x0_zoom  # cutout-local stamp left edge
+                            x1s_cut = x1s + x0_zoom
+                            y0s_cut = y0s + y0_zoom
+                            y1s_cut = y1s + y0_zoom
                             gxs, gys = np.meshgrid(
-                                np.arange(x0s, x1s) + x0_zoom,
-                                np.arange(y0s, y1s) + y0_zoom,
+                                np.arange(x0s_cut, x1s_cut),
+                                np.arange(y0s_cut, y1s_cut),
                             )
                             psf1 = np.asarray(
                                 epsf_model.evaluate(x=gxs, y=gys, flux=1.0,
@@ -2502,7 +2499,7 @@ class Limits:
                         snr   = sig / noise if noise > 0 else 0.0
 
                     ax_inject.text(
-                        inject_x - x0_zoom, inject_y - y0_zoom + aperture_radius,
+                        inject_x, inject_y + aperture_radius,
                         f"S/N={snr:.1f}",
                         color="navy", fontsize=8, ha="center", va="bottom",
                     )
