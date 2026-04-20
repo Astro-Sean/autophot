@@ -4165,7 +4165,7 @@ class Templates:
                 coords = ",".join(f"[{float(x):.3f},{float(y):.3f}]" for x, y in xy_list)
                 return f"[{coords}]"
 
-            def _build_sfft_cmd(run_excluded, run_matching, template_fp):
+            def _build_sfft_cmd(run_excluded, run_matching, template_fp, diff_fp):
                 # If fewer than 5 pipeline-matched sources, let SFFT perform matching.
                 min_sources_for_prior = 5
                 if len(run_matching) < min_sources_for_prior:
@@ -4187,7 +4187,7 @@ class Templates:
                     "-ref",
                     str(template_fp),
                     "-diff",
-                    str(differenceFpath),
+                    str(diff_fp),
                     "-mask",
                     str(mask_loc),
                     "-masked_sources",
@@ -4280,7 +4280,7 @@ class Templates:
             ):
                 sfft_env[_k] = "1"
 
-            cmd = _build_sfft_cmd(current_excluded, current_matching_sources, template_work_fpath)
+            cmd = _build_sfft_cmd(current_excluded, current_matching_sources, template_work_fpath, outputFpath)
             with open(log_path, "w") as lf:
                 subprocess.run(
                     cmd, check=True, text=True, stdout=lf, stderr=lf, env=sfft_env
@@ -4351,6 +4351,7 @@ class Templates:
                         current_excluded,
                         current_matching_sources,
                         template_work_fpath,
+                        outputFpath,
                     )
                     retry_log_path = scienceDir / f"sfft_{Path(base_name).stem}_postanom_retry.txt"
                     with open(retry_log_path, "w") as lf:

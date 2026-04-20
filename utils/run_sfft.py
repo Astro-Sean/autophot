@@ -19,6 +19,8 @@ import sys
 import time
 import warnings
 
+# Add parent directory to path to import functions.py
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from functions import ColoredLevelFormatter, LogMessageNormalizeFilter, set_size
 
 # Limit BLAS/OpenMP threads before any scientific imports (avoids libgomp
