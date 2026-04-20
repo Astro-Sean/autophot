@@ -1415,8 +1415,9 @@ class Zeropoint:
                         inlier_deltas, bins=bin_edges, density=True
                     )
 
-                    # Show actual number of sources used for histogram (from inlier_deltas)
-                    n_histogram = len(inlier_deltas)
+                    # n_inliers = number of unique catalog sources surviving all cuts
+                    # inlier_mask is the boolean array from sigma_clip (length = vmask.sum())
+                    n_sources_used = int(inlier_mask.sum())
 
                     ax_hist.bar(
                         bin_centers,
@@ -1428,7 +1429,7 @@ class Zeropoint:
                         zorder=4,
                         label=(
                             f"{labels_base[flux_type]} (color corr., "
-                            f"N={n_histogram}, "
+                            f"N={n_sources_used}, "
                             f"ZP={zp_final:.3f}+/-{zp_err:.3f})"
                         ),
                     )
@@ -1456,6 +1457,9 @@ class Zeropoint:
                                 median_abs_deviation(inl_nc, nan_policy="omit")
                             )
 
+                            # n_sources_nc: unique sources surviving sigma-clip on uncorrected deltas
+                            n_sources_nc = int((~clipped_nc.mask).sum())
+
                             ax_hist.bar(
                                 bc_nc,
                                 ct_nc,
@@ -1467,7 +1471,7 @@ class Zeropoint:
                                 zorder=3,
                                 label=(
                                     f"{labels_base[flux_type]} (no corr., "
-                                    f"N={len(inl_nc)}, ZP={zp_nc:.3f}+/-{std_nc:.3f})"
+                                    f"N={n_sources_nc}, ZP={zp_nc:.3f}+/-{std_nc:.3f})"
                                 ),
                             )
 
