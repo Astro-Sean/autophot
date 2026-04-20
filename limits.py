@@ -2150,6 +2150,16 @@ class Limits:
         # Add injection cutout panels below main plot if data available
         if epsf_model is not None and cutout is not None and position is not None and \
            np.isfinite(inject_lmag) and flux_for_mag is not None:
+            ny_c, nx_c = cutout.shape
+            target_x   = nx_c / 2.0
+            target_y   = ny_c / 2.0
+
+            # aperture_radius and fwhm for subpanel use
+            fwhm            = float(self.input_yaml.get("fwhm", 3.0))
+            phot_cfg        = self.input_yaml.get("photometry", {})
+            aperture_radius = float(phot_cfg.get("aperture_radius", fwhm))
+            lim_cfg         = self.input_yaml.get("limiting_magnitude") or {}
+
             # Define target magnitudes for subpanel injection
             # Convert instrumental limiting magnitude to apparent magnitude
             selected_zeropoint = zeropoint if zeropoint is not None else image_zeropoint
@@ -2170,14 +2180,7 @@ class Limits:
             else:
                 # Fallback: use MAD which is robust to sources
                 background_rms_scalar = float(mad_std(cutout, ignore_nan=True))
-            
-            # Find a quiet location for injection (same for all panels)
-            # Use a fixed offset from center that should be in a quiet area
-            fwhm = float(self.input_yaml.get("fwhm", 3.0))
-            
-            # Use configured aperture radius (already calculated in get_injected_limit)
-            phot_cfg = self.input_yaml.get("photometry", {})
-            
+
             # Create normalized PSF for subpanel injection (same as used for calibration)
             # epsf_model is an ImagePSF object, access its data array
             psf_data = epsf_model.data if hasattr(epsf_model, 'data') else epsf_model
@@ -2205,79 +2208,58 @@ class Limits:
             psf_sum = np.sum(psf_unit)
             if psf_sum > 0:
                 psf_unit = psf_unit / psf_sum
-            aperture_radius = float(phot_cfg.get("aperture_radius", fwhm))
 
-            # Use a safe location from injection_df for subpanel injection
-            # Ensure minimum separation to avoid aperture overlap
-            # Scale min_separation to cutout size to prevent "no site found" on small cutouts
-            cutout_half = min(cutout.shape[0], cutout.shape[1]) / 2.0
-            min_separation = min(
-                3.0 * aperture_radius,           # at least 2 aperture radii
-                cutout_half * 0.3,               # at most 30% of cutout half-size
-            )
-            
-            # Initialize target position
-            target_x = cutout.shape[1] / 2.0  # Target at cutout center
-            target_y = cutout.shape[0] / 2.0
-            
-            # Initialize demo_x and demo_y with fallback values
-            fwhm = float(self.input_yaml.get("fwhm", 3.0))
-            inj_dist = 3.0 * fwhm  # Same distance used in limiting magnitude calculation
-            pts = points_in_circum(inj_dist, center=[target_x, target_y], n=8)  # 8 points around cutout center
-            demo_x = pts[0][0]
-            demo_y = pts[0][1]
-            
+            # ── Demo injection site selection ─────────────────────────────────────────
+            #
+            # Priority:
+            #   1. Quietest valid site from injection_df (lowest |flux_AP|).
+            #   2. Random circumference point (never always index 0 = top-right).
+            #
+            # Valid = within cutout bounds (with fwhm margin) AND at least
+            #         (2*aperture_radius + fwhm) from the transient position.
+            # ─────────────────────────────────────────────────────────────────────────
+            min_sep   = 2.0 * aperture_radius + fwhm
+            px_margin = float(np.ceil(fwhm))
+            inj_dist  = float(lim_cfg.get("inject_source_location", 3.0)) * fwhm
+
+            demo_x = demo_y = None
+
             if injection_df is not None and len(injection_df) > 0:
-                # Search for a site with sufficient separation
-                suitable_site = None
+                flux_col = "flux_AP" if "flux_AP" in injection_df.columns else None
+                scored   = []
                 for _, site in injection_df.iterrows():
-                    # injection_df positions are already in cutout coordinates
-                    site_x = site['x_pix']
-                    site_y = site['y_pix']
-                    
-                    # Check if within cutout bounds
-                    ny, nx = cutout.shape
-                    if site_x < 0 or site_x >= nx or site_y < 0 or site_y >= ny:
-                        continue  # Skip sites outside cutout bounds
-                    
-                    # Check separation from target
-                    separation = np.sqrt((site_x - target_x)**2 + (site_y - target_y)**2)
-                    if separation >= min_separation:
-                        suitable_site = site
-                        demo_x = site_x
-                        demo_y = site_y
-                        logger.info(f"Using safe location with separation={separation:.1f}px: cutout=({demo_x:.1f}, {demo_y:.1f})")
-                        break
-                
-                if suitable_site is None:
-                    # No site with sufficient separation, use the farthest available
-                    max_separation = 0
-                    for _, site in injection_df.iterrows():
-                        # injection_df positions are already in cutout coordinates
-                        site_x = site['x_pix']
-                        site_y = site['y_pix']
-                        
-                        # Check if within cutout bounds
-                        ny, nx = cutout.shape
-                        if site_x < 0 or site_x >= nx or site_y < 0 or site_y >= ny:
-                            continue  # Skip sites outside cutout bounds
-                        
-                        separation = np.sqrt((site_x - target_x)**2 + (site_y - target_y)**2)
-                        if separation > max_separation:
-                            max_separation = separation
-                            suitable_site = site
-                            demo_x = site_x
-                            demo_y = site_y
-                    
-                    if suitable_site is not None:
-                        logger.warning(
-                            f"No site with {min_separation:.1f}px separation found; "
-                            f"using farthest available at {max_separation:.1f}px: ({demo_x:.1f},{demo_y:.1f})"
-                        )
-            else:
-                # No injection_df available, using fallback circumference point
-                logger.warning(f"No safe sites available, using circumference point at ({demo_x:.1f}, {demo_y:.1f})")
-            
+                    sx, sy = float(site["x_pix"]), float(site["y_pix"])
+                    # Bounds check with margin
+                    if not (
+                        px_margin <= sx <= nx_c - 1 - px_margin
+                        and px_margin <= sy <= ny_c - 1 - px_margin
+                    ):
+                        continue
+                    # Must be far enough from the transient
+                    if float(np.hypot(sx - target_x, sy - target_y)) < min_sep:
+                        continue
+                    score = float(abs(site[flux_col])) if flux_col else 0.0
+                    scored.append((score, sx, sy))
+
+                if scored:
+                    scored.sort(key=lambda t: t[0])   # ascending → quietest first
+                    _, demo_x, demo_y = scored[0]
+                    logger.info(
+                        "Subpanel demo site (quietest): (%.1f, %.1f), |flux_AP|=%.4g",
+                        demo_x, demo_y, scored[0][0],
+                    )
+
+            if demo_x is None:
+                # Random circumference fallback – not always top-right (index 0)
+                pts     = points_in_circum(inj_dist, center=[target_x, target_y], n=8)
+                rng_idx = int(self._rng.integers(0, len(pts)))
+                demo_x  = float(np.clip(pts[rng_idx][0], px_margin, nx_c - 1 - px_margin))
+                demo_y  = float(np.clip(pts[rng_idx][1], px_margin, ny_c - 1 - px_margin))
+                logger.warning(
+                    "Subpanel demo site: fallback circumference point [%d] (%.1f, %.1f)",
+                    rng_idx, demo_x, demo_y,
+                )
+
             for i, mag_target in enumerate(mag_targets):
                 ax_inject = fig.add_subplot(gs[1, i])
                 
@@ -2393,6 +2375,10 @@ class Limits:
                         background_rms_zoom = background_rms[y0_zoom:y1_zoom, x0_zoom:x1_zoom]
                         background_rms_zoom = np.abs(np.asarray(background_rms_zoom, dtype=float))
 
+                    # Short aliases used by the S/N block
+                    x0_z, x1_z, y0_z, y1_z = x0_zoom, x1_zoom, y0_zoom, y1_zoom
+                    bkgrms_zoom = background_rms_zoom
+
                     logger.debug(
                         "Subpanel zoom: cutout=(%dx%d), target=(%.1f,%.1f), "
                         "injection=(%.1f,%.1f), inject_distance=%.1f px, zoom_radius=%.1f px, "
@@ -2435,175 +2421,107 @@ class Limits:
                     ax_inject.add_patch(aperture_circle)
                     
                     try:
-                        # Use S/N measurement matching the recovery method
                         recovery_method_upper = str(recovery_method).strip().upper()
-                        
+
+                        injected_zoom = injected[y0_zoom:y1_zoom, x0_zoom:x1_zoom]
+                        inj_x_z = inject_x - x0_zoom
+                        inj_y_z = inject_y - y0_zoom
+
                         if recovery_method_upper == "PSF":
-                            # Use PSF photometry for S/N measurement
-                            from psf import PSF
-                            # Use the zoomed region for PSF fitting to match coordinate system
-                            injected_zoom = injected[y0_zoom:y1_zoom, x0_zoom:x1_zoom]
-                            psf = PSF(input_yaml=self.input_yaml, image=injected_zoom)
-                            # Convert to zoomed coordinates
-                            inject_x_zoom = inject_x - x0_zoom
-                            inject_y_zoom = inject_y - y0_zoom
-                            # Provide a small positive flux value for PSF initialization
-                            # PSF will fit the actual flux, this is just for initialization
-                            snr_df = pd.DataFrame({
-                                "x_pix": [inject_x_zoom], 
-                                "y_pix": [inject_y_zoom], 
-                                "flux_AP": [1.0]  # Small positive flux for initialization
-                            })
-                            # PSF class uses fit method with correct parameters
-                            # Suppress verbose logging for subpanel measurements
-                            psf_logger = logging.getLogger('psf')
-                            original_level = psf_logger.level
-                            psf_logger.setLevel(logging.WARNING)  # Only show warnings/errors
-                            
-                            try:
-                                snr_meas = psf.fit(
-                                    epsf_model=epsf_model,
-                                    sources=snr_df,
-                                    plot=False,
-                                    background_rms=background_rms_zoom,
-                                )
-                            finally:
-                                psf_logger.setLevel(original_level)  # Restore original logging level
-                            
-                            # Debug: print available columns
-                            logger.debug(f"PSF measurement columns: {list(snr_meas.columns)}")
-                            
-                            if "fail_reason" in snr_meas.columns and snr_meas["fail_reason"].iloc[0]:
-                                # Measurement failed, use simple calculation
-                                signal = np.sum(injected_zoom - cutout[y0_zoom:y1_zoom, x0_zoom:x1_zoom])
-                                noise = background_rms_scalar * np.sqrt(np.pi * aperture_radius**2)
-                                snr = signal / noise if noise > 0 else 0
-                            else:
-                                # For PSF, calculate S/N using the same method as the main limiting magnitude calculation
-                                # Use the fast PSF-flux estimate function that's used in the main recovery
-                                try:
-                                    from psf import PSF
-                                    # Use the same fast S/N calculation as in the main recovery method
-                                    psf_snr = PSF.fast_snr_psf(
-                                        injected_zoom, 
-                                        inject_x_zoom, 
-                                        inject_y_zoom, 
-                                        epsf_model,
-                                        background_rms_zoom
-                                    )
-                                    snr = float(psf_snr) if np.isfinite(psf_snr) else np.nan
-                                except Exception as psf_snr_error:
-                                    logger.debug(f"Fast PSF S/N calculation failed: {psf_snr_error}")
-                                    # Fallback to manual calculation using PSF measured flux
-                                    try:
-                                        signal = float(snr_meas["flux_PSF"].iloc[0]) if "flux_PSF" in snr_meas.columns else np.nan
-                                        # Calculate noise using background RMS and PSF normalization
-                                        fwhm = float(self.input_yaml.get("fwhm", 3.0))
-                                        psf_norm = 1.0 / (np.pi * fwhm**2)  # PSF normalization constant
-                                        gain = float(self.input_yaml.get("gain", 1.0))
-                                        read_noise = float(self.input_yaml.get("read_noise", 0.0))
-                                        background_noise = (background_rms_scalar**2 / gain**2) * psf_norm
-                                        source_noise = signal / gain if np.isfinite(signal) else 0
-                                        noise = np.sqrt(background_noise + source_noise)
-                                        snr = signal / noise if noise > 0 else 0
-                                    except Exception as fallback_error:
-                                        logger.debug(f"PSF fallback calculation failed: {fallback_error}")
-                                        signal = np.sum(injected_zoom - cutout[y0_zoom:y1_zoom, x0_zoom:x1_zoom])
-                                        noise = background_rms_scalar * np.sqrt(np.pi * aperture_radius**2)
-                                        snr = signal / noise if noise > 0 else 0
-                        
-                        else:  # AP method or EMCEE (fallback to AP for S/N calculation)
-                            # Use aperture photometry for S/N measurement
-                            from aperture import Aperture
-                            injected_zoom = injected[y0_zoom:y1_zoom, x0_zoom:x1_zoom]
-                            ap = Aperture(input_yaml=self.input_yaml, image=injected_zoom)
-                            inject_x_zoom = inject_x - x0_zoom
-                            inject_y_zoom = inject_y - y0_zoom
-                            snr_df = pd.DataFrame({"x_pix": [inject_x_zoom], "y_pix": [inject_y_zoom]})
-                            snr_meas = ap.measure(
-                                sources=snr_df,
-                                plot=False,
-                                background_rms=background_rms_zoom,
-                                verbose=0,
+                            # Fast weighted-least-squares PSF S/N — same estimator as _injection_worker.
+                            phot_cfg_l = self.input_yaml.get("photometry") or {}
+                            scale_v    = float(phot_cfg_l.get("psf_fit_shape_vfaint_scale_fwhm", 2.0))
+                            half_s     = int(np.ceil(max(3.0, scale_v * fwhm)))
+                            nyiz, nxiz = injected_zoom.shape
+                            x0s = max(0, int(np.floor(inj_x_z)) - half_s)
+                            x1s = min(nxiz, int(np.floor(inj_x_z)) + half_s + 2)
+                            y0s = max(0, int(np.floor(inj_y_z)) - half_s)
+                            y1s = min(nyiz, int(np.floor(inj_y_z)) + half_s + 2)
+                            data_s   = np.asarray(injected_zoom[y0s:y1s, x0s:x1s], float)
+                            # Evaluate PSF in full-cutout coords so x_0/y_0 match demo_x/demo_y
+                            gxs, gys = np.meshgrid(
+                                np.arange(x0s, x1s) + x0_zoom,
+                                np.arange(y0s, y1s) + y0_zoom,
                             )
-
-                            if "fail_reason" in snr_meas.columns and snr_meas["fail_reason"].iloc[0]:
-                                # Measurement failed, use simple calculation
-                                signal = np.sum(injected_zoom - cutout[y0_zoom:y1_zoom, x0_zoom:x1_zoom])
-                                noise = background_rms_scalar * np.sqrt(np.pi * aperture_radius**2)
-                                snr = signal / noise if noise > 0 else 0
+                            psf1 = np.asarray(
+                                epsf_model.evaluate(x=gxs, y=gys, flux=1.0,
+                                                    x_0=inject_x, y_0=inject_y),
+                                float,
+                            )
+                            if bkgrms_zoom is not None:
+                                var_s = np.maximum(bkgrms_zoom[y0s:y1s, x0s:x1s] ** 2, 1e-30)
                             else:
-                                snr = float(snr_meas["SNR"].iloc[0])
-                                # Fallback to manual calculation if SNR is nan
-                                if not np.isfinite(snr):
-                                    signal = float(snr_meas["flux_AP"].iloc[0])
-                                    noise = float(snr_meas["noiseSky"].iloc[0])
-                                    snr = signal / noise if noise > 0 else 0
+                                sig_s = float(np.nanstd(data_s))
+                                var_s = np.full_like(data_s, max(sig_s ** 2, 1e-30))
+                            ok_s = np.isfinite(data_s) & np.isfinite(psf1) & (var_s > 0)
+                            snr  = np.nan
+                            if int(np.count_nonzero(ok_s)) >= 10:
+                                w_s  = 1.0 / var_s[ok_s]
+                                a_s  = np.vstack([psf1[ok_s].ravel(),
+                                                  np.ones(int(np.count_nonzero(ok_s)))])
+                                aw_s = a_s * w_s
+                                m_s  = aw_s @ a_s.T
+                                b_s  = aw_s @ data_s[ok_s].ravel()
+                                try:
+                                    cov_s = np.linalg.inv(m_s)
+                                except Exception:
+                                    cov_s = None
+                                if cov_s is not None and np.all(np.isfinite(cov_s)):
+                                    theta_s  = cov_s @ b_s
+                                    flux_hat = float(theta_s[0])
+                                    flux_err = float(np.sqrt(max(cov_s[0, 0], 0.0)))
+                                    if np.isfinite(flux_err) and flux_err > 0:
+                                        snr = flux_hat / flux_err
 
-                        # Add S/N label on top of circle (to one decimal place)
-                        snr_label = f'S/N={snr:.1f}'
-                        ax_inject.text(inject_x, inject_y + aperture_radius, snr_label,
-                                      color='navy', fontsize=8, ha='center', va='bottom')
-                    
-                    except Exception as e:
-                        logger.warning(f"Subpanel injection failed for mag={mag_target:.2f}: {e}")
-                        # Use simple S/N calculation as fallback
-                        signal = np.sum(injected[y0_zoom:y1_zoom, x0_zoom:x1_zoom] - cutout[y0_zoom:y1_zoom, x0_zoom:x1_zoom])
-                        noise = background_rms_scalar * np.sqrt(np.pi * aperture_radius**2)
-                        snr = signal / noise if noise > 0 else 0
-                        snr_label = f'S/N={snr:.1f}'
-                        ax_inject.text(inject_x, inject_y + aperture_radius, snr_label,
-                                      color='navy', fontsize=8, ha='center', va='bottom')
+                        else:  # AP / EMCEE → aperture photometry
+                            ap_obj   = Aperture(input_yaml=self.input_yaml, image=injected_zoom)
+                            snr_df   = pd.DataFrame({"x_pix": [inj_x_z], "y_pix": [inj_y_z]})
+                            snr_meas = ap_obj.measure(
+                                sources=snr_df, plot=False,
+                                background_rms=bkgrms_zoom, verbose=0,
+                            )
+                            snr = float(snr_meas["SNR"].iloc[0])
+                            if not np.isfinite(snr):
+                                fl  = float(snr_meas["flux_AP"].iloc[0])
+                                ns  = float(snr_meas["noiseSky"].iloc[0])
+                                snr = fl / ns if ns > 0 else 0.0
+
+                        if not np.isfinite(snr):
+                            raise ValueError("SNR not finite; using fallback")
+
+                    except Exception as snr_exc:
+                        logger.debug("Subpanel S/N fallback: %s", snr_exc)
+                        sig   = float(np.nansum(
+                            injected[y0_zoom:y1_zoom, x0_zoom:x1_zoom]
+                            - cutout[y0_zoom:y1_zoom, x0_zoom:x1_zoom]
+                        ))
+                        noise = background_rms_scalar * float(
+                            np.sqrt(np.pi * aperture_radius ** 2)
+                        )
+                        snr   = sig / noise if noise > 0 else 0.0
+
+                    ax_inject.text(
+                        inject_x, inject_y + aperture_radius,
+                        f"S/N={snr:.1f}",
+                        color="navy", fontsize=8, ha="center", va="bottom",
+                    )
                 
                     # Set title with injected magnitude
                     ax_inject.set_title(f'Injected mag = {mag_target:.2f}', fontsize=9)
                     
                     # Add apparent magnitude text in lower left corner
                     if selected_zeropoint is not None:
-                        # Use appropriate flux column based on measurement method
-                        # flux_adu is also raw counts, matching PSF flux parameter
-                        try:
-                            if recovery_method_upper == "PSF":
-                                # PSF measurements return flux_PSF column
-                                counts_aperture = float(snr_meas["flux_PSF"].iloc[0])  # same units as image data
-                            else:
-                                # AP measurements return counts_AP column
-                                counts_aperture = float(snr_meas["counts_AP"].iloc[0])  # same units as image data
-                        except KeyError:
-                            logger.warning(f"Flux column not found in snr_meas for {recovery_method_upper}, using fallback calculation")
-                            counts_aperture = np.sum(injected[y0_zoom:y1_zoom, x0_zoom:x1_zoom] - cutout[y0_zoom:y1_zoom, x0_zoom:x1_zoom])
-                        
-                        # Calculate instrumental magnitudes from raw counts
-                        # For raw counts magnitude: m = -2.5 * log10(counts / exposure_time)
-                        exposure_time = float(self.input_yaml.get("exposure_time", 1.0))
-                        if exposure_time <= 0:
-                            exposure_time = 1.0
-                        
-                        # flux_adu is the flux parameter passed to PSF evaluate
-                        # The actual injected counts = flux_adu * counts_ref
-                        # counts_aperture is the measured counts in aperture
-                        # For instrumental magnitude: m = -2.5 * log10(counts / exposure_time)
-                        inst_mag_recovered = -2.5 * np.log10(max(counts_aperture / exposure_time, 1e-30))
-                        # Injected magnitude should use actual injected counts
-                        # Use the actual summed counts that were added to the image
-                        injected_counts = float(np.sum(psf_inject))
-                        inst_mag_injected = -2.5 * np.log10(max(injected_counts / exposure_time, 1e-30))
-                        
-                        apparent_mag_recovered = inst_mag_recovered + selected_zeropoint
-                        apparent_mag_injected = inst_mag_injected + selected_zeropoint
-
-                        logger.info(
-                            f"Subpanel mag={mag_target:.2f}: flux_adu={flux_adu:.2e}, "
-                            f"counts_AP={counts_aperture:.2e}, ratio={counts_aperture/flux_adu:.3f}, "
-                            f"injected_mag={apparent_mag_injected:.2f}, recovered_mag={apparent_mag_recovered:.2f}"
+                        injected_counts  = float(np.sum(psf_inject))
+                        exposure_time    = max(1.0, float(self.input_yaml.get("exposure_time", 1.0)))
+                        inst_mag_inj     = -2.5 * np.log10(max(injected_counts / exposure_time, 1e-30))
+                        apparent_mag_inj = inst_mag_inj + selected_zeropoint
+                        ax_inject.text(
+                            0.05, 0.05,
+                            f"In: {apparent_mag_inj:.2f}",
+                            transform=ax_inject.transAxes,
+                            color="white", fontsize=7, ha="left", va="bottom",
+                            bbox=dict(boxstyle="round", facecolor="black", alpha=0.5),
                         )
-                        # Show both magnitudes stacked in bottom left
-                        mag_text = f'In: {apparent_mag_injected:.2f}\nRec: {apparent_mag_recovered:.2f}'
-                        ax_inject.text(0.05, 0.05, mag_text,
-                                      transform=ax_inject.transAxes, color='white',
-                                      fontsize=7, ha='left', va='bottom',
-                                      bbox=dict(boxstyle='round', facecolor='black', alpha=0.5),
-                                      linespacing=0.9)
                     
                     # Add colorbar
                     cbar = plt.colorbar(im, ax=ax_inject, fraction=0.046, pad=0.04)
