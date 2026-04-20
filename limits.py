@@ -1031,6 +1031,19 @@ class Limits:
                     ),
                     axis=1,
                 )
+                # Diagnostic logging for quiet point selection
+                logger.info(
+                    "Quiet point selection: n_sites=%d, p_det_range=[%.4f, %.4f], thresh=%.4f, "
+                    "flux_AP_range=[%.4e, %.4e], noiseSky_range=[%.4e, %.4e]",
+                    len(p_det),
+                    float(np.nanmin(p_det)) if len(p_det) > 0 else np.nan,
+                    float(np.nanmax(p_det)) if len(p_det) > 0 else np.nan,
+                    float(DETECTION_BETA_THRESH),
+                    float(np.nanmin(df["flux_AP"])) if "flux_AP" in df.columns and len(df) > 0 else np.nan,
+                    float(np.nanmax(df["flux_AP"])) if "flux_AP" in df.columns and len(df) > 0 else np.nan,
+                    float(np.nanmin(df["noiseSky"])) if "noiseSky" in df.columns and len(df) > 0 else np.nan,
+                    float(np.nanmax(df["noiseSky"])) if "noiseSky" in df.columns and len(df) > 0 else np.nan,
+                )
                 # "Quiet" sites: choose positions with detection probability below
                 # the same cutoff used later to define what counts as a detection.
                 # If disabled, use all sites for more representative limiting magnitude.
