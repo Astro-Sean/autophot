@@ -1854,6 +1854,15 @@ class Catalog:
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
 
+            # Filter catalog to only include sources with current image measurements
+            # This ensures we don't use accumulated sequence catalog sources from multiple observations
+            if "flux_AP" in catalog.columns:
+                catalog = catalog[catalog["flux_AP"].notna()].copy()
+                logger.info(f"Filtered catalog to {len(catalog)} sources with current image flux_AP measurements")
+            if "flux_PSF" in catalog.columns:
+                catalog = catalog[catalog["flux_PSF"].notna()].copy()
+                logger.info(f"Filtered catalog to {len(catalog)} sources with current image flux_PSF measurements")
+
             # Check for required columns
             required_columns = ["flux_AP", use_filter, f"{use_filter}_err"]
             missing_columns = [
