@@ -526,6 +526,16 @@ class Zeropoint:
             # Use normalized name if available, otherwise use original
             filter_col = filter_col_norm if filter_col_norm is not None else filter_col
             
+            # Filter catalog to only include sources with current image measurements
+            # This ensures we don't use accumulated sequence catalog sources from multiple observations
+            if sources is not None and len(sources) > 0:
+                if "flux_AP" in sources.columns:
+                    sources = sources[sources["flux_AP"].notna()].copy()
+                    logger.info(f"Filtered catalog to {len(sources)} sources with current image flux_AP measurements")
+                if "flux_PSF" in sources.columns:
+                    sources = sources[sources["flux_PSF"].notna()].copy()
+                    logger.info(f"Filtered catalog to {len(sources)} sources with current image flux_PSF measurements")
+            
             if not filter_col:
                 logger.warning(
                     "No input_yaml.imageFilter provided; skipping sequence-star clean filter."
@@ -1395,6 +1405,9 @@ class Zeropoint:
                         inlier_deltas, bins=bin_edges, density=True
                     )
 
+                    # Show actual number of sources used for histogram (from inlier_deltas)
+                    n_histogram = len(inlier_deltas)
+
                     ax_hist.bar(
                         bin_centers,
                         counts,
@@ -1405,7 +1418,7 @@ class Zeropoint:
                         zorder=4,
                         label=(
                             f"{labels_base[flux_type]} (color corr., "
-                            f"N={len(inlier_deltas)}, "
+                            f"N={n_histogram}, "
                             f"ZP={zp_final:.3f}+/-{zp_err:.3f})"
                         ),
                     )
