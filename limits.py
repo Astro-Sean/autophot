@@ -1023,11 +1023,17 @@ class Limits:
                     verbose=0,
                 )
                 p_det = df.apply(
-                    lambda row: beta_aperture(
-                        n=beta_n,
-                        flux_aperture=row["flux_AP"],
-                        sigma=row["noiseSky"],
-                        npix=row["area"],
+                    lambda row: (
+                        beta_aperture(
+                            n=beta_n,
+                            flux_aperture=row["flux_AP"],
+                            sigma=row["noiseSky"],
+                            npix=row["area"],
+                        )
+                        if (np.isfinite(row["flux_AP"]) and row["flux_AP"] > 0
+                            and np.isfinite(row["noiseSky"]) and row["noiseSky"] > 0
+                            and np.isfinite(row["area"]) and row["area"] > 0)
+                        else 0.0  # noise fluctuation → treat as quiet
                     ),
                     axis=1,
                 )
@@ -1061,9 +1067,8 @@ class Limits:
                 )
                 
                 # Add edge clearance to prevent injection sites from being too close to cutout boundaries
-                edge_margin = max(3.0 * fwhm, 2.0 * aperture_radius_local)
-                def _filter_edge_clearance(df: pd.DataFrame, 
-                                          cutout_w: float, 
+                def _filter_edge_clearance(df: pd.DataFrame,
+                                          cutout_w: float,
                                           cutout_h: float,
                                           margin: float) -> pd.DataFrame:
                     """Remove sites too close to cutout edges."""
@@ -1127,9 +1132,10 @@ class Limits:
                         inj_dist = float(np.clip(r_base * distance_factor, r_min, r_max))
                         if inj_strategy == "annulus_random":
                             theta = self._rng.random(sourceNum) * (2.0 * np.pi)
+                            r_min_with_jitter = r_min + 1.0  # 1px safety margin for jitter
                             rr = (
-                                np.sqrt(self._rng.random(sourceNum)) * (r_max - r_min)
-                                + r_min
+                                np.sqrt(self._rng.random(sourceNum)) * (r_max - r_min_with_jitter)
+                                + r_min_with_jitter
                             )
                             xran = cutout_cx + rr * np.cos(theta)
                             yran = cutout_cy + rr * np.sin(theta)
@@ -1148,11 +1154,17 @@ class Limits:
                             verbose=0,
                         )
                         p_det = df.apply(
-                            lambda row: beta_aperture(
-                                n=beta_n,
-                                flux_aperture=row["flux_AP"],
-                                sigma=row["noiseSky"],
-                                npix=row["area"],
+                            lambda row: (
+                                beta_aperture(
+                                    n=beta_n,
+                                    flux_aperture=row["flux_AP"],
+                                    sigma=row["noiseSky"],
+                                    npix=row["area"],
+                                )
+                                if (np.isfinite(row["flux_AP"]) and row["flux_AP"] > 0
+                                    and np.isfinite(row["noiseSky"]) and row["noiseSky"] > 0
+                                    and np.isfinite(row["area"]) and row["area"] > 0)
+                                else 0.0  # noise fluctuation → treat as quiet
                             ),
                             axis=1,
                         )
@@ -1162,16 +1174,18 @@ class Limits:
                             injection_df = df.copy()
                         
                         # Always apply exclusion zone
+                        _target_cx_grow = (W - 1) / 2.0
+                        _target_cy_grow = (H - 1) / 2.0
                         injection_df = _exclude_target_overlap(
                             injection_df,
-                            cutout_cx,  # updated cutout center after grow
-                            cutout_cy,
+                            _target_cx_grow,
+                            _target_cy_grow,
                             target_exclusion_r,
                         )
                         
                         # Apply edge clearance for grown cutout
                         injection_df = _filter_edge_clearance(
-                            injection_df, W * scale_used, H * scale_used, edge_margin
+                            injection_df, W, H, edge_margin
                         )
                         
                         if len(injection_df) > 0:
@@ -1198,15 +1212,17 @@ class Limits:
                     injection_df = pd.DataFrame(
                         {"x_pix": [p[0] for p in pts], "y_pix": [p[1] for p in pts]}
                     )
-                
+
                 # Apply exclusion zone to fallback sites too
                 injection_df = _exclude_target_overlap(
                     injection_df, cutout_cx, cutout_cy, target_exclusion_r
                 )
-                
+
+                # Use current cutout dimensions for edge clearance
+                H_fb, W_fb = cutout.shape  # always current
                 # Apply edge clearance to fallback sites
                 injection_df = _filter_edge_clearance(
-                    injection_df, W, H, edge_margin
+                    injection_df, W_fb, H_fb, edge_margin
                 )
                 
                 if len(injection_df) == 0:
