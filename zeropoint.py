@@ -1316,6 +1316,9 @@ class Zeropoint:
                     delta_mag_err = delta_mag_err[finite_mask]
                     delta_no_corr = delta_no_corr[finite_mask]
                     delta_no_corr_err = delta_no_corr_err[finite_mask]
+                    # Track which vmask sources survive finite filtering (full catalog length)
+                    vmask_finite = np.zeros(len(clean_catalog), dtype=bool)
+                    vmask_finite[np.flatnonzero(vmask)] = finite_mask
                     if len(delta_mag) == 0:
                         logger.warning(
                             f"{flux_type}: no finite delta_mag after masking; skipping."
@@ -1338,9 +1341,15 @@ class Zeropoint:
                     inlier_deltas = clipped.data[inlier_mask]
                     inlier_delta_err = delta_mag_err[inlier_mask]
 
+                    # Track which vmask_finite sources survive sigma clipping (full catalog length)
+                    vmask_sigma = np.zeros(len(clean_catalog), dtype=bool)
+                    vmask_sigma[np.flatnonzero(vmask_finite)] = inlier_mask
+
                     finite2 = np.isfinite(inlier_deltas) & np.isfinite(inlier_delta_err)
                     inlier_deltas = inlier_deltas[finite2]
                     inlier_delta_err = inlier_delta_err[finite2]
+                    # Update vmask_sigma to account for finite2 filtering
+                    vmask_sigma[np.flatnonzero(vmask_finite)] = inlier_mask[finite2]
 
                     if len(inlier_deltas) == 0:
                         logger.warning(
@@ -1416,8 +1425,8 @@ class Zeropoint:
                     )
 
                     # n_inliers = number of unique catalog sources surviving all cuts
-                    # inlier_mask is the boolean array from sigma_clip (length = vmask.sum())
-                    n_sources_used = int(inlier_mask.sum())
+                    # vmask_sigma tracks which catalog sources survive through all filtering steps
+                    n_sources_used = int(vmask_sigma.sum())
 
                     ax_hist.bar(
                         bin_centers,
@@ -1437,6 +1446,10 @@ class Zeropoint:
                     # ---- Histogram (without colour correction) -------------
                     if has_color_term and fixed_color_coeffs is not None:
                         dnc = delta_no_corr[np.isfinite(delta_no_corr)]
+                        # Track which vmask_finite sources are finite in delta_no_corr (full catalog length)
+                        vmask_nc_finite = np.zeros(len(clean_catalog), dtype=bool)
+                        vmask_nc_finite[np.flatnonzero(vmask_finite)] = np.isfinite(delta_no_corr)
+
                         clipped_nc = sigma_clip(
                             dnc,
                             sigma=sigma_clip_sigma,
@@ -1447,6 +1460,15 @@ class Zeropoint:
                         inl_nc = clipped_nc.data[~clipped_nc.mask]
                         inl_nc = inl_nc[np.isfinite(inl_nc)]
 
+                        # Track which vmask_nc_finite sources survive sigma clipping (full catalog length)
+                        sigma_mask = ~clipped_nc.mask
+                        # Apply the final finite filter to the sigma mask
+                        final_mask = sigma_mask & np.isfinite(inl_nc)
+                        # Map back to full catalog: only sources that were in vmask_nc_finite and passed final_mask
+                        vmask_nc_sigma = np.zeros(len(clean_catalog), dtype=bool)
+                        vmask_nc_sigma[np.flatnonzero(vmask_nc_finite)] = final_mask
+                        n_sources_nc = int(vmask_nc_sigma.sum())
+
                         if len(inl_nc) > 0:
                             be_nc = np.histogram_bin_edges(inl_nc, bins="fd")
                             bc_nc = (be_nc[:-1] + be_nc[1:]) / 2
@@ -1456,9 +1478,6 @@ class Zeropoint:
                             std_nc = float(
                                 median_abs_deviation(inl_nc, nan_policy="omit")
                             )
-
-                            # n_sources_nc: unique sources surviving sigma-clip on uncorrected deltas
-                            n_sources_nc = int((~clipped_nc.mask).sum())
 
                             ax_hist.bar(
                                 bc_nc,
