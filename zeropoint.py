@@ -44,6 +44,7 @@ from scipy.odr import ODR, Model, RealData
 # Local
 # ---------------------------------------------------------------------------
 from functions import border_msg, snr_err, set_size, calculate_bins, normalize_photometric_filter_name
+from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -123,6 +124,15 @@ class Zeropoint:
     fit_color_term()      - RANSAC + ODR colour-term fit
     weighted_average()    - inverse-variance weighted mean
     """
+
+    def _normalize_filter(self, filter_name: str) -> str:
+        """Normalize a filter name using the pipeline's canonical mapping."""
+        if not filter_name:
+            return filter_name
+        normalized = normalize_photometric_filter_name(filter_name)
+        if normalized and str(normalized).strip():
+            return str(normalized)
+        return filter_name
 
     def __init__(self, input_yaml: dict):
         self.input_yaml = input_yaml
@@ -206,10 +216,7 @@ class Zeropoint:
                     "has_color_term": False,
                 }
             return zp_params
-        # Normalize filter name for consistency with catalog handling
-        use_filter_norm = normalize_photometric_filter_name(use_filter)
-        # Use normalized name if available, otherwise use original
-        use_filter = use_filter_norm if use_filter_norm is not None else use_filter
+        use_filter = self._normalize_filter(use_filter)
         # Optional aperture correction (AP -> total flux) in magnitudes.
         # Only applied when apply_aperture_correction is True; otherwise stored for use later.
         ap_corr_mag = float(self.input_yaml.get("aperture_correction", 0.0) or 0.0)
@@ -345,7 +352,7 @@ class Zeropoint:
         sigma_color = np.sqrt(c1_err**2 + c2_err**2)
 
         if fit_mode == "piecewise":
-            # Piecewise linear color term - check fit_mode FIRST to prevent dispatch errors
+            # Piecewise linear color term
             if n_segments == 2:
                 breakpoints, slopes, intercept = fixed_color_coeffs
                 bp = breakpoints[0]
@@ -383,36 +390,43 @@ class Zeropoint:
                     color_corr_err[mask2] = term_color_measure2
             else:
                 raise ValueError(f"Unsupported number of segments for piecewise fitting: {n_segments}")
-        elif len(fixed_color_coeffs) == 2:
-            # Linear color term: delta_corr = delta_mag - slope * color_diff
-            intercept, slope = fixed_color_coeffs
-            delta_corr = delta_mag - slope * color_diff
-            
-            # Propagate errors
-            if color_coeff_errors is not None:
-                intercept_err, slope_err = color_coeff_errors
-                term_color_measure = abs(slope) * sigma_color
-                term_color_slope = abs(slope_err) * np.abs(color_diff)
-                color_corr_err = np.sqrt(term_color_measure**2 + term_color_slope**2)
+        elif fit_mode == "polynomial":
+            if len(fixed_color_coeffs) == 2:
+                # Linear color term: delta_corr = delta_mag - slope * color_diff
+                intercept, slope = fixed_color_coeffs
+                delta_corr = delta_mag - slope * color_diff
+
+                # Propagate errors
+                if color_coeff_errors is not None:
+                    intercept_err, slope_err = color_coeff_errors
+                    term_color_measure = abs(slope) * sigma_color
+                    term_color_slope = abs(slope_err) * np.abs(color_diff)
+                    color_corr_err = np.sqrt(term_color_measure**2 + term_color_slope**2)
+                else:
+                    color_corr_err = abs(slope) * sigma_color
+            elif len(fixed_color_coeffs) == 3:
+                # Quadratic color term: delta_corr = delta_mag - (quad * color_diff^2 + slope * color_diff)
+                intercept, slope, quad = fixed_color_coeffs
+                delta_corr = delta_mag - (quad * color_diff**2 + slope * color_diff)
+
+                # Propagate errors
+                if color_coeff_errors is not None:
+                    intercept_err, slope_err, quad_err = color_coeff_errors
+                    # Error propagation for quadratic: d(y)/d(color) = 2*quad*color + slope
+                    d_correction = 2 * quad * color_diff + slope
+                    term_color_measure = np.abs(d_correction) * sigma_color
+                    term_color_slope = abs(slope_err) * np.abs(color_diff)
+                    term_color_quad = abs(quad_err) * color_diff**2
+                    color_corr_err = np.sqrt(term_color_measure**2 + term_color_slope**2 + term_color_quad**2)
+                else:
+                    d_correction = 2 * quad * color_diff + slope
+                    color_corr_err = np.abs(d_correction) * sigma_color
             else:
-                color_corr_err = abs(slope) * sigma_color
+                raise ValueError(
+                    f"Unsupported number of polynomial coefficients: {len(fixed_color_coeffs)}"
+                )
         else:
-            # Quadratic color term: delta_corr = delta_mag - (quad * color_diff^2 + slope * color_diff)
-            intercept, slope, quad = fixed_color_coeffs
-            delta_corr = delta_mag - (quad * color_diff**2 + slope * color_diff)
-            
-            # Propagate errors
-            if color_coeff_errors is not None:
-                intercept_err, slope_err, quad_err = color_coeff_errors
-                # Error propagation for quadratic: d(y)/d(color) = 2*quad*color + slope
-                d_correction = 2 * quad * color_diff + slope
-                term_color_measure = np.abs(d_correction) * sigma_color
-                term_color_slope = abs(slope_err) * np.abs(color_diff)
-                term_color_quad = abs(quad_err) * color_diff**2
-                color_corr_err = np.sqrt(term_color_measure**2 + term_color_slope**2 + term_color_quad**2)
-            else:
-                d_correction = 2 * quad * color_diff + slope
-                color_corr_err = np.abs(d_correction) * sigma_color
+            raise ValueError(f"Unknown fit_mode: {fit_mode!r}")
 
         return delta_corr, color_corr_err
 
@@ -434,6 +448,12 @@ class Zeropoint:
             df = df[df["threshold"] >= threshold]
 
         err_col = f"{use_filter}_err"
+        if err_col not in df.columns:
+            logger.warning(
+                "_prepare_catalog: missing error column '%s'; cannot apply quality cuts.",
+                err_col,
+            )
+            return None
         error_mask = np.asarray(df[err_col].values, float) < 0.5
         clean = df[error_mask].copy()
 
@@ -521,20 +541,22 @@ class Zeropoint:
 
         try:
             filter_col = self.input_yaml.get("imageFilter")
-            # Normalize filter name for consistency with catalog handling
-            filter_col_norm = normalize_photometric_filter_name(filter_col)
-            # Use normalized name if available, otherwise use original
-            filter_col = filter_col_norm if filter_col_norm is not None else filter_col
+            filter_col = self._normalize_filter(filter_col)
             
             # Filter catalog to only include sources with current image measurements
             # This ensures we don't use accumulated sequence catalog sources from multiple observations
+            # Keep sources that have at least one of AP or PSF flux measurements
             if sources is not None and len(sources) > 0:
-                if "flux_AP" in sources.columns:
-                    sources = sources[sources["flux_AP"].notna()].copy()
-                    logger.info(f"Filtered catalog to {len(sources)} sources with current image flux_AP measurements")
-                if "flux_PSF" in sources.columns:
-                    sources = sources[sources["flux_PSF"].notna()].copy()
-                    logger.info(f"Filtered catalog to {len(sources)} sources with current image flux_PSF measurements")
+                has_ap = sources["flux_AP"].notna() if "flux_AP" in sources.columns else pd.Series(False, index=sources.index)
+                has_psf = sources["flux_PSF"].notna() if "flux_PSF" in sources.columns else pd.Series(False, index=sources.index)
+                has_any_flux = has_ap | has_psf
+                n_before = len(sources)
+                sources = sources[has_any_flux].copy()
+                n_after = len(sources)
+                if n_before - n_after > 0:
+                    logger.info(
+                        f"Filtered {n_before - n_after} sources with no flux measurements (AP or PSF); {n_after} remaining."
+                    )
             
             if not filter_col:
                 logger.warning(
@@ -669,10 +691,7 @@ class Zeropoint:
         output_zp = {}
 
         image_filter = self.input_yaml["imageFilter"]
-        # Normalize filter name for consistency with catalog handling
-        image_filter_norm = normalize_photometric_filter_name(image_filter)
-        # Use normalized name if available, otherwise use original
-        image_filter = image_filter_norm if image_filter_norm is not None else image_filter
+        image_filter = self._normalize_filter(image_filter)
         
         mag_col = sources[image_filter]
         mag_err_col = sources[f"{image_filter}_err"]
@@ -705,8 +724,8 @@ class Zeropoint:
                 snr = src["SNR"]
                 error_snr = snr_err(snr)
 
-                zp = mag_col.loc[src.index] - inst_mag
-                zp_err = np.sqrt(error_snr**2 + mag_err_col.loc[src.index] ** 2)
+                zp = (mag_col.loc[src.index] - inst_mag).values
+                zp_err = np.sqrt(error_snr**2 + mag_err_col.loc[src.index].values ** 2)
 
                 zp_col = f"zp_{image_filter}_{method}"
                 zp_err_col = f"{zp_col}_err"
@@ -891,8 +910,6 @@ class Zeropoint:
         fit_mode="polynomial",
         n_segments=1,
     ):
-        # Import plotting utilities for consistent formatting
-        from plotting_utils import get_alpha
         """
         Fit ZP = m_cat - m_inst[+/-c*(c1-c2)] vs m_inst via RANSAC.
         Supports linear, quadratic, and piecewise linear color terms.
@@ -923,10 +940,7 @@ class Zeropoint:
             base_name = os.path.splitext(os.path.basename(fpath))[0] or "zeropoint"
             write_dir = os.path.dirname(fpath) or "."
             use_filter = self.input_yaml.get("imageFilter")
-            # Normalize filter name for consistency with catalog handling
-            use_filter_norm = normalize_photometric_filter_name(use_filter)
-            # Use normalized name if available, otherwise use original
-            use_filter = use_filter_norm if use_filter_norm is not None else use_filter
+            use_filter = self._normalize_filter(use_filter)
 
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
@@ -1004,7 +1018,6 @@ class Zeropoint:
                     delta_mag,
                     weights,
                     x_err=inst_mag_err,
-                    y_err=yerr,
                     max_trials=max_trials,
                     ransac_min_samples=ransac_min_samples,
                     random_state=random_state,
@@ -1205,10 +1218,7 @@ class Zeropoint:
                 base_name = os.path.splitext(os.path.basename(fpath))[0] or "zeropoint"
                 write_dir = os.path.dirname(fpath) or "."
                 use_filter = self.input_yaml.get("imageFilter")
-                # Normalize filter name for consistency with catalog handling
-                use_filter_norm = normalize_photometric_filter_name(use_filter)
-                # Use normalized name if available, otherwise use original
-                use_filter = use_filter_norm if use_filter_norm is not None else use_filter
+                use_filter = self._normalize_filter(use_filter)
                 if not use_filter:
                     raise ValueError("Missing 'imageFilter' in input YAML.")
 
@@ -1322,7 +1332,7 @@ class Zeropoint:
                         sigma=sigma_clip_sigma,
                         maxiters=sigma_clip_maxiters,
                         cenfunc=np.nanmedian,
-                        stdfunc=median_abs_deviation,
+                        stdfunc=mad_std,
                     )
                     inlier_mask = ~clipped.mask
                     inlier_deltas = clipped.data[inlier_mask]
@@ -1431,7 +1441,7 @@ class Zeropoint:
                             sigma=sigma_clip_sigma,
                             maxiters=sigma_clip_maxiters,
                             cenfunc=np.nanmedian,
-                            stdfunc=median_abs_deviation,
+                            stdfunc=mad_std,
                         )
                         inl_nc = clipped_nc.data[~clipped_nc.mask]
                         inl_nc = inl_nc[np.isfinite(inl_nc)]
@@ -1519,6 +1529,7 @@ class Zeropoint:
         """Generate color term plot for piecewise linear fitting."""
         import matplotlib.pyplot as plt
         from matplotlib.gridspec import GridSpec
+        from plotting_utils import get_color, get_alpha
         import os
 
         _style = os.path.join(
@@ -1752,7 +1763,6 @@ class Zeropoint:
             coefficient_errors: corresponding errors
             inlier_mask: boolean array indicating which points are inliers
         """
-        from scipy.optimize import minimize_scalar
 
         # Sort data by x
         sort_idx = np.argsort(x)
@@ -1977,10 +1987,7 @@ class Zeropoint:
                 return None, None
 
             use_filter = self.input_yaml.get("imageFilter")
-            # Normalize filter name for consistency with catalog handling
-            use_filter_norm = normalize_photometric_filter_name(use_filter)
-            # Use normalized name if available, otherwise use original
-            use_filter = use_filter_norm if use_filter_norm is not None else use_filter
+            use_filter = self._normalize_filter(use_filter)
             if not use_filter:
                 raise ValueError("Missing 'imageFilter' in input YAML.")
 
@@ -2074,16 +2081,25 @@ class Zeropoint:
                 coefficients, coefficient_errors, inlier_mask, overall_method = self._fit_piecewise_linear(
                     x, y, x_err, y_err, n_segments
                 )
-                # For piecewise, use inlier_mask from RANSAC
-                xi, yi, xe, ye = x, y, x_err, y_err
-                n_in = np.sum(inlier_mask)
-                x_range = float(np.ptp(x))
 
-                # Plot for piecewise linear (save to same directory as input file)
-                self._plot_piecewise_color_term(xi, yi, xe, ye, coefficients, coefficient_errors, n_segments, color1, color2, use_filter, inlier_mask, overall_method)
+                # If fallback returned linear, switch to polynomial flow
+                if overall_method == "linear":
+                    logger.info(
+                        "fit_color_term: piecewise fallback returned linear fit; switching to polynomial flow."
+                    )
+                    fit_mode = "polynomial"
+                    poly_order = 1
+                else:
+                    # For piecewise, use inlier_mask from RANSAC
+                    xi, yi, xe, ye = x, y, x_err, y_err
+                    n_in = np.sum(inlier_mask)
+                    x_range = float(np.ptp(x))
 
-                # Return after plotting
-                return coefficients, coefficient_errors
+                    # Plot for piecewise linear (save to same directory as input file)
+                    self._plot_piecewise_color_term(xi, yi, xe, ye, coefficients, coefficient_errors, n_segments, color1, color2, use_filter, inlier_mask, overall_method)
+
+                    # Return after plotting
+                    return coefficients, coefficient_errors
             else:
                 # Polynomial fitting (existing logic)
                 if extreme_color_sigma is not None:
@@ -2120,9 +2136,12 @@ class Zeropoint:
             except Exception as exc:
                 logger.debug(f"fit_color_term: pre-RANSAC clipping skipped: {exc}")
 
-            min_sources = int(zp_cfg.get("min_source_no", 3))  # Increased default from 1 to 3
-            if min_sources < 3:
-                min_sources = 3
+            _min_sources_cfg = int(zp_cfg.get("min_source_no", 5))
+            min_sources = max(3, _min_sources_cfg)  # Hard floor of 3 for statistical validity
+            if _min_sources_cfg < 3:
+                logger.debug(
+                    f"fit_color_term: min_source_no={_min_sources_cfg} is below minimum (3); using 3."
+                )
             min_color_range = 0.05  # mag
             if len(x) < min_sources:
                 logger.warning(
@@ -2193,7 +2212,7 @@ class Zeropoint:
                         downsample_indices = np.concatenate([keep_dense, sparse_indices])
                         x_orig, y_orig, x_err_orig, y_err_orig = x.copy(), y.copy(), x_err.copy(), y_err.copy()
                         x, y, x_err, y_err = x_orig[downsample_indices], y_orig[downsample_indices], x_err_orig[downsample_indices], y_err_orig[downsample_indices]
-                        X_poly = np.column_stack([x**2, x]) if poly_order != 1 else x[:, None]
+                        X_poly = np.column_stack([x**2, x]) if poly_order == 2 else x[:, None]
                         logger.info(f"fit_color_term: downsampled {len(dense_indices)} dense points to {len(keep_dense)} to avoid cluster bias")
             except Exception as exc:
                 logger.debug(f"fit_color_term: density downsampling skipped: {exc}")
@@ -2228,8 +2247,13 @@ class Zeropoint:
                 logger.warning(f"fit_color_term: RANSAC inliers {n_inliers} < {min_inliers} ({int(100*min_inlier_frac)}%), using sigma-clip fallback")
                 # Sigma-clip fallback
                 r0 = y - np.average(y, weights=1.0 / (y_err**2 + 1e-12))
-                mad = np.nanmedian(np.abs(r0)) * 1.4826 + 1e-12
-                clipped = sigma_clip(r0, sigma=3 * mad, maxiters=5)
+                clipped = sigma_clip(
+                    r0,
+                    sigma=3.0,
+                    maxiters=5,
+                    cenfunc=np.nanmedian,
+                    stdfunc=mad_std,
+                )
                 inlier_mask = ~clipped.mask
                 if np.sum(inlier_mask) >= 5:
                     n_inliers = np.sum(inlier_mask)
@@ -2278,19 +2302,8 @@ class Zeropoint:
                 else:
                     coefficient_errors = (np.nan, np.nan, np.nan)
 
-
             # Log the fitted color term for debugging
-            if fit_mode == "piecewise" and n_segments == 2:
-                if len(coefficients) == 3:
-                    breakpoints, slopes, intercept = coefficients
-                    logger.info(
-                        f"fit_color_term: fitted piecewise linear: breakpoint={breakpoints[0]:.4f}, "
-                        f"slope1={slopes[0]:.4f}, slope2={slopes[1]:.4f}, intercept={intercept:.4f}, "
-                        f"n_sources={n_in}, color_range={x_range:.3f} mag"
-                    )
-                else:
-                    logger.warning(f"fit_color_term: unexpected coefficient format for piecewise: {coefficients}")
-            elif fit_mode == "polynomial" and poly_order == 1:
+            if fit_mode == "polynomial" and poly_order == 1:
                 logger.info(
                     f"fit_color_term: fitted linear color term: slope={coefficients[1]:.4f}, intercept={coefficients[0]:.4f}, "
                     f"n_inliers={n_in}, color_range={x_range:.3f} mag"
@@ -2318,15 +2331,10 @@ class Zeropoint:
                 coefficient_errors = (coefficient_errors[0], coefficient_errors[1])
                 poly_order = 1
 
-            if fit_mode == "piecewise" and n_segments == 2:
-                # Piecewise: extract for plotting
-                plot_intercept = coefficients[2]  # intercept
-                plot_slope = None  # Not used for piecewise
-                plot_quad = None  # Not used for piecewise
-            else:
-                plot_intercept = coefficients[0]
-                plot_slope = coefficients[1] if poly_order == 1 else coefficients[1]
-                plot_quad = coefficients[2] if poly_order == 2 else 0.0
+            # Extract plotting variables for polynomial fits
+            plot_intercept = coefficients[0]
+            plot_slope = coefficients[1] if poly_order == 1 else coefficients[1]
+            plot_quad = coefficients[2] if poly_order == 2 else 0.0
 
             # ---- Plot ------------------------------------------------------
             _style = os.path.join(
@@ -2336,9 +2344,6 @@ class Zeropoint:
                 plt.style.use(_style)
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(340, 2.0), sharex=True)
             plt.subplots_adjust(hspace=0.35, top=0.95, bottom=0.1, left=0.15, right=0.95)
-
-            # Import centralized plotting utilities for consistent formatting
-            from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
 
             # Okabe-Ito palette for consistent, colorblind-friendly plots.
             okabe_blue = get_color('inliers')
@@ -2362,20 +2367,7 @@ class Zeropoint:
             )
 
             x_plot = np.linspace(xi.min() * 0.95, xi.max() * 1.05, 200)
-            if fit_mode == "piecewise" and n_segments == 2:
-                # Piecewise linear with 2 segments
-                breakpoints, slopes, intercept = coefficients
-                bp = breakpoints[0]
-                slope1, slope2 = slopes
-
-                # Plot two line segments
-                y_plot = np.zeros_like(x_plot)
-                mask1 = x_plot <= bp
-                mask2 = x_plot > bp
-                y_plot[mask1] = intercept + slope1 * x_plot[mask1]
-                y_plot[mask2] = (intercept + slope1 * bp) + slope2 * (x_plot[mask2] - bp)
-                label_text = f"Piecewise: bp={bp:.3f}, slope1={slope1:.3f}, slope2={slope2:.3f}"
-            elif poly_order == 1:
+            if poly_order == 1:
                 y_plot = plot_intercept + plot_slope * x_plot
                 label_text = f"Linear: slope={plot_slope:.3f} +/- {coefficient_errors[1]:.3f}"
             else:
@@ -2407,26 +2399,7 @@ class Zeropoint:
             ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2)
 
             # Bottom panel: color corrected data (should be flat)
-            if fit_mode == "piecewise" and n_segments == 2:
-                # Piecewise linear correction
-                breakpoints, slopes, intercept = coefficients
-                bp = breakpoints[0]
-                slope1, slope2 = slopes
-
-                yi_corrected = np.zeros_like(yi)
-                ye_corrected = np.zeros_like(ye)
-
-                mask1 = xi <= bp
-                mask2 = xi > bp
-
-                # Segment 1 correction
-                yi_corrected[mask1] = yi[mask1] - slope1 * xi[mask1]
-                ye_corrected[mask1] = np.sqrt(ye[mask1]**2 + (slope1 * xe[mask1])**2)
-
-                # Segment 2 correction (account for continuity)
-                yi_corrected[mask2] = yi[mask2] - (slope2 * xi[mask2] + (slope1 - slope2) * bp)
-                ye_corrected[mask2] = np.sqrt(ye[mask2]**2 + (slope2 * xe[mask2])**2)
-            elif poly_order == 1:
+            if poly_order == 1:
                 yi_corrected = yi - plot_slope * xi
                 ye_corrected = np.sqrt(ye**2 + (plot_slope * xe)**2)
             else:
