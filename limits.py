@@ -2382,9 +2382,15 @@ class Limits:
                     )
 
                     # Display the full injected cutout, zoom with set_xlim/ylim
-                    from astropy.visualization import simple_norm
-                    norm = simple_norm(injected, 'sqrt', percent=99.5)
-                    im = ax_inject.imshow(injected, origin='lower', cmap='viridis', norm=norm)
+                    from astropy.visualization import ZScaleInterval
+                    zscale = ZScaleInterval()
+                    finite = injected[np.isfinite(injected)]
+                    if finite.size:
+                        lower, upper = np.percentile(finite, [0.5, 99.5])
+                        vmin, vmax = zscale.get_limits(np.clip(injected, lower, upper))
+                    else:
+                        vmin, vmax = np.nanmin(injected), np.nanmax(injected)
+                    im = ax_inject.imshow(injected, origin='lower', cmap='viridis', vmin=vmin, vmax=vmax)
                     ax_inject.set_xlim(x0_zoom, x1_zoom)
                     ax_inject.set_ylim(y0_zoom, y1_zoom)
 
