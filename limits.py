@@ -1345,8 +1345,7 @@ class Limits:
                             m_bright, c_bright = m_test, c_test
                             break
                         else:
-                            # Still not detected; this becomes new faint boundary
-                            m_faint, c_faint = m_bright, c_bright
+                            # Still not detected; this becomes new bright boundary (keep faint fixed)
                             m_bright, c_bright = m_test, c_test
 
                 bracketed = (c_bright >= completeness_target) and (
@@ -1381,8 +1380,8 @@ class Limits:
                                     m_bright, c_bright = m_test, c_test
                                     break
                                 else:
-                                    # Still not detected; update m_faint and continue
-                                    m_faint, c_faint = m_test, c_test
+                                    # Still not detected; this becomes new bright boundary (keep faint fixed)
+                                    m_bright, c_bright = m_test, c_test
                         bracketed = (c_bright >= completeness_target) and (
                             c_faint < completeness_target
                         )
