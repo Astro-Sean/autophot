@@ -1372,6 +1372,10 @@ class Limits:
 
                 bracket_steps.append((m_bright, c_bright, np.median(f_bright)))
 
+                # Determine target faint magnitude: 1 mag below limiting magnitude (if known)
+                # Otherwise, just use the standard bracketing logic
+                target_faint = inject_lmag - 1.0 if np.isfinite(inject_lmag) else None
+
                 for _ in range(max_steps):
                     m_test = m_faint + step if going_faint else m_bright - step
                     c_test, _, f_test = run_trials_at_mag(m_test, pool=pool)
@@ -1379,8 +1383,10 @@ class Limits:
 
                     if going_faint:
                         m_faint, c_faint = m_test, c_test
+                        # Continue stepping fainter until we reach target_faint or find undetected endpoint
                         if c_faint < completeness_target:
-                            break
+                            if target_faint is None or m_faint <= target_faint:
+                                break
                     else:
                         # When stepping brighter (looking for detected end)
                         # Keep m_faint fixed (this is the undetected endpoint)
