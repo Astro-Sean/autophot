@@ -2587,3 +2587,181 @@ class Limits:
         save_loc_png = os.path.join(write_dir, f"Completeness_{base}.png")
         fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
+
+        # ---- Plot injection recovery vs magnitude (apparent vs instrumental) ----
+        if bracket_steps or bisect_steps:
+            self._plot_injection_recovery(
+                bracket_steps,
+                bisect_steps,
+                inject_lmag,
+                zeropoint,
+                selected_zeropoint,
+                write_dir,
+                base,
+            )
+
+    def _plot_injection_recovery(
+        self,
+        bracket_steps,
+        bisect_steps,
+        inject_lmag,
+        zeropoint,
+        selected_zeropoint,
+        write_dir,
+        base,
+    ) -> None:
+        """
+        Plot apparent magnitude vs instrumental magnitude for injected sources.
+        Shows detection performance: detected sources follow a line (slope ~1),
+        non-detected sources flatten out. Also plots catalog sources for comparison.
+        """
+        import matplotlib.pyplot as plt
+        from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
+
+        logger = logging.getLogger(__name__)
+
+        # Combine bracket and bisect steps
+        all_steps = bracket_steps + bisect_steps
+        if not all_steps:
+            logger.warning("No injection steps to plot")
+            return
+
+        # Extract magnitudes and detection rates
+        inst_mags = np.array([step[0] for step in all_steps])
+        det_rates = np.array([step[1] for step in all_steps])
+
+        # Convert to apparent magnitudes
+        apparent_mags = inst_mags + selected_zeropoint
+
+        # Separate detected vs non-detected (use 50% threshold)
+        detected_mask = det_rates >= 0.5
+        detected_inst = inst_mags[detected_mask]
+        detected_apparent = apparent_mags[detected_mask]
+        nondet_inst = inst_mags[~detected_mask]
+        nondet_apparent = apparent_mags[~detected_mask]
+
+        # Get catalog sources for comparison
+        catalog = getattr(self, 'catalog', None)
+        if catalog is not None and len(catalog) > 0:
+            use_filter = self.input_yaml.get("imageFilter")
+            if use_filter and use_filter in catalog.columns and "flux_AP" in catalog.columns:
+                catalog_flux = catalog["flux_AP"].values
+                catalog_inst = -2.5 * np.log10(catalog_flux)
+                catalog_apparent = catalog[use_filter].values
+                # Filter out invalid values
+                valid_mask = np.isfinite(catalog_inst) & np.isfinite(catalog_apparent)
+                catalog_inst = catalog_inst[valid_mask]
+                catalog_apparent = catalog_apparent[valid_mask]
+            else:
+                catalog_inst = None
+                catalog_apparent = None
+        else:
+            catalog_inst = None
+            catalog_apparent = None
+
+        # Use the project-wide plotting style
+        try:
+            dir_path = os.path.dirname(os.path.realpath(__file__))
+            style_path = os.path.join(dir_path, "autophot.mplstyle")
+            if os.path.exists(style_path):
+                plt.style.use(style_path)
+        except Exception:
+            pass
+
+        plt.ioff()
+        fig, ax = plt.subplots(figsize=set_size(340, 1))
+        plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
+
+        # Plot catalog sources
+        if catalog_inst is not None and len(catalog_inst) > 0:
+            ax.scatter(
+                catalog_apparent,
+                catalog_inst,
+                s=get_marker_size('small'),
+                c=get_color('all_sources'),
+                alpha=get_alpha('medium'),
+                marker='s',
+                edgecolors='none',
+                label=f"Catalog sources [{len(catalog_inst)}]",
+                zorder=5,
+            )
+
+        # Plot detected injected sources
+        if len(detected_inst) > 0:
+            ax.scatter(
+                detected_apparent,
+                detected_inst,
+                s=get_marker_size('medium'),
+                c=get_color('inliers'),
+                alpha=get_alpha('dark'),
+                marker='o',
+                edgecolors='black',
+                linewidth=0.5,
+                label=f"Detected injected [{len(detected_inst)}]",
+                zorder=10,
+            )
+
+        # Plot non-detected injected sources
+        if len(nondet_inst) > 0:
+            ax.scatter(
+                nondet_apparent,
+                nondet_inst,
+                s=get_marker_size('medium'),
+                c=get_color('outliers'),
+                alpha=get_alpha('medium'),
+                marker='x',
+                linewidth=1.0,
+                label=f"Non-detected injected [{len(nondet_inst)}]",
+                zorder=8,
+            )
+
+        # Fit line to detected sources (should have slope ~1)
+        if len(detected_inst) > 2:
+            # Fit with slope constrained to 1 (apparent = instrumental + zeropoint)
+            slope_fit = 1.0
+            intercept_fit = selected_zeropoint
+            x_line = np.linspace(np.min(apparent_mags), np.max(apparent_mags), 100)
+            y_line = slope_fit * x_line - intercept_fit
+            ax.plot(
+                x_line,
+                y_line,
+                color=get_color('fit'),
+                linestyle="--",
+                lw=get_line_width('thick'),
+                zorder=15,
+                label=f"Expected (slope=1, ZP={intercept_fit:.2f})",
+            )
+
+        # Mark limiting magnitude
+        if np.isfinite(inject_lmag):
+            limit_apparent = inject_lmag + selected_zeropoint
+            ax.axvline(
+                x=limit_apparent,
+                color=get_color('outliers'),
+                linestyle="-.",
+                lw=get_line_width('thick'),
+                zorder=20,
+                label=f"Limiting mag: {limit_apparent:.2f}",
+            )
+            ax.axhline(
+                y=inject_lmag,
+                color=get_color('outliers'),
+                linestyle="-.",
+                lw=get_line_width('thick'),
+                zorder=20,
+            )
+
+        # Labels and styling
+        ax.set_xlabel("Apparent Magnitude [mag]", fontsize=9)
+        ax.set_ylabel("Instrumental Magnitude [mag]", fontsize=9)
+        ax.invert_xaxis()
+        ax.invert_yaxis()
+        ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2, fontsize=7)
+        ax.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
+
+        fig.tight_layout()
+        save_path = os.path.join(write_dir, f"InjectionRecovery_{base}.png")
+        fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+
+        logger.info(f"Saved injection recovery plot to {save_path}")
