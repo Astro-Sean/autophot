@@ -1791,6 +1791,9 @@ class Catalog:
                 catalog_i, catalogName=catalogName, update_names_only=True
             )
 
+            # Collect new rows to avoid repeated concat in loop
+            new_rows = []
+            
             # Loop over each entry in the current catalog
             for index, entry in catalog_i.iterrows():
                 ra = entry["RA"]
@@ -1802,12 +1805,9 @@ class Catalog:
                 )
 
                 if existing_source.empty:
-                    # Source does not exist, add a new row
+                    # Source does not exist, add to new rows list
                     new_row = {col: entry.get(col, np.nan) for col in cols}
-                    new_row_df = pd.DataFrame([new_row])
-                    output_catalog = pd.concat(
-                        [output_catalog, new_row_df], ignore_index=True
-                    )
+                    new_rows.append(new_row)
                 else:
                     # Source exists, update the row with missing filter data
                     index = existing_source.index[0]
@@ -1816,6 +1816,13 @@ class Catalog:
                             output_catalog.at[index, filter_name]
                         ):
                             output_catalog.at[index, filter_name] = entry[filter_name]
+            
+            # Concatenate all new rows at once for performance
+            if new_rows:
+                new_rows_df = pd.DataFrame(new_rows)
+                output_catalog = pd.concat(
+                    [output_catalog, new_rows_df], ignore_index=True
+                )
 
         # Final output catalog is ready
         output_catalog.to_csv(fpath, index=False, float_format="%.6f")
