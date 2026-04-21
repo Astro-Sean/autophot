@@ -1642,7 +1642,8 @@ class Catalog:
 
     def find_source(self, ra, dec, catalog, tolerance=3.0):
         """
-        Find sources in the catalog that match the given RA and DEC within a specified tolerance.
+        Find sources in the catalog that match the given RA and DEC
+        within a specified tolerance using vectorized operations.
 
         Parameters:
         -----------
@@ -1660,32 +1661,22 @@ class Catalog:
         pd.DataFrame
             DataFrame containing matching sources.
         """
-        from astropy.coordinates import SkyCoord
-        from astropy import units as u
-        import numpy as np
+        if catalog.empty:
+            return catalog
 
-        # Convert the RA, Dec of the input source to a SkyCoord object
-        target_coord = SkyCoord(ra=ra * u.degree, dec=dec * u.degree)
+        # Vectorized angular separation using small-angle approximation
+        # (valid for separations << 1 degree, which tolerance in arcsec guarantees)
+        dec_rad = np.radians(dec)
+        ra_vals = catalog["RA"].values
+        dec_vals = catalog["DEC"].values
 
-        # Prepare an empty list to store matching indices
-        matching_indices = []
+        delta_ra = (ra_vals - ra) * np.cos(dec_rad)   # arcsec-equivalent in degrees
+        delta_dec = dec_vals - dec
+        separation_deg = np.sqrt(delta_ra**2 + delta_dec**2)
+        separation_arcsec = separation_deg * 3600.0
 
-        # Loop over each entry in the catalog
-        for i in range(len(catalog)):
-            # Get the RA and DEC of the current catalog entry
-            catalog_coord = SkyCoord(
-                ra=catalog["RA"][i] * u.degree, dec=catalog["DEC"][i] * u.degree
-            )
-
-            # Calculate the angular separation between the target and the catalog entry
-            separation = target_coord.separation(catalog_coord)
-
-            # If the separation is within the tolerance (in arcseconds), store the index
-            if separation.arcsecond <= tolerance:
-                matching_indices.append(i)
-
-        # Return the filtered catalog based on the matching indices
-        return catalog[np.array(matching_indices)]
+        match_mask = separation_arcsec <= tolerance
+        return catalog[match_mask]
 
     # =========================================================================
     # METHOD: build_complete_catalog
@@ -1825,36 +1816,6 @@ class Catalog:
                             output_catalog.at[index, filter_name]
                         ):
                             output_catalog.at[index, filter_name] = entry[filter_name]
-
-        # Remove duplicate entries based on RA and DEC
-        # Use a small tolerance (1 arcsecond) to account for coordinate differences
-        if len(output_catalog) > 0:
-            from astropy.coordinates import SkyCoord
-            from astropy import units as u
-            
-            # Create SkyCoord objects for all sources
-            coords = SkyCoord(
-                ra=output_catalog["RA"].values * u.degree,
-                dec=output_catalog["DEC"].values * u.degree
-            )
-            
-            # Find duplicates by matching coordinates within 1 arcsecond
-            to_keep = []
-            for i in range(len(output_catalog)):
-                if i in to_keep:
-                    continue
-                # Check if this source matches any already kept source
-                is_duplicate = False
-                for j in to_keep:
-                    separation = coords[i].separation(coords[j])
-                    if separation.arcsecond < 1.0:  # 1 arcsecond tolerance
-                        is_duplicate = True
-                        break
-                if not is_duplicate:
-                    to_keep.append(i)
-            
-            output_catalog = output_catalog.iloc[to_keep].reset_index(drop=True)
-            logger.info(f"Removed {len(output_catalog) - len(to_keep)} duplicate sources from catalog")
 
         # Final output catalog is ready
         output_catalog.to_csv(fpath, index=False, float_format="%.6f")
