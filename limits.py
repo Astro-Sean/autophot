@@ -1364,7 +1364,8 @@ class Limits:
                 # ---- Bracket phase ------------------------------------------
                 step = 0.5
                 max_steps = 30
-                m_bright = float(initialGuess)
+                # Start at artificially bright magnitude to ensure we find the detected end
+                m_bright = -10.0  # Very bright starting point
                 c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
                 going_faint = c_bright >= completeness_target
                 m_faint, c_faint = m_bright, c_bright
