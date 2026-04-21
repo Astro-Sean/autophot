@@ -699,6 +699,7 @@ class Catalog:
         target_name=None,
         catalog_custom_fpath=None,
         include_IR_sequence_data=True,
+        max_sources=None,
     ):
         """
         Download and process catalog data for a given target.
@@ -717,6 +718,9 @@ class Catalog:
             File path to a custom catalog (used if catalogName is 'custom').
         include_IR_sequence_data : bool, optional
             Boolean to include IR sequence data from 2MASS (default is True).
+        max_sources : int, optional
+            Maximum number of sources to return (default None for no limit).
+            If set, catalogs will be limited to this many sources after download.
 
         Returns:
         --------
@@ -1133,6 +1137,29 @@ class Catalog:
             # Propagate catalog failures as hard stops: downstream calibration
             # should not proceed without a valid catalog.
             raise
+
+        # Limit catalog size if max_sources is specified
+        if max_sources is not None and selectedCatalog is not None and len(selectedCatalog) > max_sources:
+            logger.info(
+                f"Limiting catalog from {len(selectedCatalog)} to {max_sources} sources"
+            )
+            # Sort by distance to target if RA and DEC columns are available
+            if "RA" in selectedCatalog.columns and "DEC" in selectedCatalog.columns:
+                from astropy.coordinates import SkyCoord
+                from astropy import units as u
+                
+                catalog_coords = SkyCoord(
+                    ra=selectedCatalog["RA"].values * u.degree,
+                    dec=selectedCatalog["DEC"].values * u.degree
+                )
+                distances = catalog_coords.separation(target_coords)
+                selectedCatalog = selectedCatalog.assign(distance=distances.arcsecond)
+                selectedCatalog = selectedCatalog.nsmallest(max_sources, "distance")
+                selectedCatalog = selectedCatalog.drop(columns=["distance"])
+            else:
+                # If RA/DEC not available, just take the first max_sources rows
+                selectedCatalog = selectedCatalog.head(max_sources)
+            logger.info(f"Catalog limited to {len(selectedCatalog)} sources")
 
         return selectedCatalog
 
