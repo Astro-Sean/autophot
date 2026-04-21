@@ -1500,6 +1500,8 @@ class Limits:
                             logger.warning(f"Extended injection trial failed at m={m:.2f}: {e}")
                             continue
 
+                    logger.info(f"Extended injection trials completed: {len(extended_steps)} points populated")
+
                 # ---- Plot completeness curve (still inside pool context) -----
                 if plot:
                     self._plot_completeness(
@@ -2632,6 +2634,8 @@ class Limits:
                 write_dir,
                 base,
                 position,
+                counts_ref=counts_ref,
+                exposure_time=exposure_time,
             )
 
     def _plot_injection_recovery(
@@ -2645,6 +2649,8 @@ class Limits:
         write_dir,
         base,
         position,
+        counts_ref=None,
+        exposure_time=None,
     ) -> None:
         """
         Plot injected apparent magnitude vs recovered apparent magnitude.
@@ -2670,7 +2676,15 @@ class Limits:
         # Convert to apparent magnitudes
         injected_apparent = inst_mags + selected_zeropoint
         # Convert recovered flux to instrumental magnitude, then to apparent
-        recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
+        # The recovered flux is in PSF flux parameter units (normalized), need to convert to actual flux
+        # flux_param * counts_ref = actual flux in counts
+        # Then convert to magnitude: m = -2.5 * log10(flux / exposure_time)
+        if counts_ref is not None and exposure_time is not None and counts_ref > 0:
+            recovered_flux_actual = recovered_fluxes * counts_ref / exposure_time  # Convert to ADU/s
+            recovered_inst = -2.5 * np.log10(np.maximum(recovered_flux_actual, 1e-30))
+        else:
+            # Fallback: use recovered flux directly (assumed to be in correct units)
+            recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
         recovered_apparent = recovered_inst + selected_zeropoint
 
         # Separate detected vs non-detected (use 50% threshold)
