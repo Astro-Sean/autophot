@@ -2992,13 +2992,11 @@ class Limits:
                 zorder=20,
             )
 
-        ax_snr.set_ylabel("S/N (log scale)", fontsize=9)
+        ax_snr.set_ylabel("S/N", fontsize=9)
         ax_snr.set_xlabel("Injected Apparent Magnitude [mag]", fontsize=9)
-        ax_snr.set_yscale('log')
         ax_snr.invert_xaxis()
         ax_snr.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
 
-        fig.tight_layout()
         save_path = os.path.join(write_dir, f"InjectionRecovery_{base}.png")
         fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
