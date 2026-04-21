@@ -2786,8 +2786,8 @@ class Limits:
             pass
 
         plt.ioff()
-        fig, (ax, ax_snr) = plt.subplots(2, 1, figsize=set_size(340, 1.5), sharex=True)
-        plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.1, hspace=0.1)
+        fig, ax = plt.subplots(figsize=set_size(340, 1))
+        plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
 
         # Plot zeropoint calibration sources (catalog sources used for zeropoint)
         if zeropoint_apparent is not None and len(zeropoint_apparent) > 0:
@@ -2937,66 +2937,7 @@ class Limits:
         ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2, fontsize=7)
         ax.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
 
-        # S/N vs magnitude plot (bottom panel)
-        # Calculate S/N from recovered flux (use flux as proxy for S/N since brighter sources have higher S/N)
-        # Convert recovered flux to ADU/s for consistent S/N calculation
-        recovery_method_upper = str(recovery_method).strip().upper() if recovery_method is not None else "AP"
-        if recovery_method_upper == "AP":
-            recovered_flux_adu_per_s = recovered_fluxes
-        else:
-            if counts_ref is not None and exposure_time is not None and counts_ref > 0 and exposure_time > 0:
-                recovered_flux_adu_per_s = recovered_fluxes * counts_ref / exposure_time
-            elif exposure_time is not None and exposure_time > 0:
-                recovered_flux_adu_per_s = recovered_fluxes / exposure_time
-            else:
-                recovered_flux_adu_per_s = recovered_fluxes
-
-        # Estimate S/N: use flux as rough proxy (S/N ~ flux for background-limited case)
-        # Add small offset to avoid log(0)
-        snr_values = np.maximum(recovered_flux_adu_per_s, 1e-10)
-
-        # Color points by detection status (detected vs non-detected)
-        colors = np.where(det_rates >= 0.5, get_okabe_color('blue'), get_okabe_color('red'))
-
-        # Plot S/N vs magnitude
-        ax_snr.scatter(
-            injected_apparent,
-            snr_values,
-            s=get_marker_size('medium'),
-            c=colors,
-            alpha=get_alpha('dark'),
-            marker='o',
-            edgecolors='black',
-            linewidth=0.5,
-            zorder=10,
-        )
-
-        # Mark limiting magnitude
-        if np.isfinite(inject_lmag):
-            limit_apparent = inject_lmag + selected_zeropoint
-            ax_snr.axvline(
-                x=limit_apparent,
-                color=get_okabe_color('red'),
-                linestyle="-.",
-                lw=0.5,
-                zorder=20,
-            )
-
-        # Mark transient magnitude
-        if transient_apparent is not None and np.isfinite(transient_apparent):
-            ax_snr.axvline(
-                x=transient_apparent,
-                color=get_okabe_color('blue'),
-                linestyle="-",
-                lw=0.5,
-                zorder=20,
-            )
-
-        ax_snr.set_ylabel("S/N", fontsize=9)
-        ax_snr.set_xlabel("Injected Apparent Magnitude [mag]", fontsize=9)
-        ax_snr.invert_xaxis()
-        ax_snr.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
-
+        fig.tight_layout()
         save_path = os.path.join(write_dir, f"InjectionRecovery_{base}.png")
         fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
