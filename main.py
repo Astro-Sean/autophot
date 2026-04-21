@@ -5771,9 +5771,37 @@ def run_photometry():
 
         # Append sequence star catalog (CatalogSources) if available
         if CatalogSources is not None and not CatalogSources.empty:
+            # Remove duplicate entries based on RA and DEC before writing
+            from astropy.coordinates import SkyCoord
+            from astropy import units as u
+            
+            # Create SkyCoord objects for all sources
+            coords = SkyCoord(
+                ra=CatalogSources["RA"].values * u.degree,
+                dec=CatalogSources["DEC"].values * u.degree
+            )
+            
+            # Find duplicates by matching coordinates within 1 arcsecond
+            to_keep = []
+            for i in range(len(CatalogSources)):
+                if i in to_keep:
+                    continue
+                # Check if this source matches any already kept source
+                is_duplicate = False
+                for j in to_keep:
+                    separation = coords[i].separation(coords[j])
+                    if separation.arcsecond < 1.0:  # 1 arcsecond tolerance
+                        is_duplicate = True
+                        break
+                if not is_duplicate:
+                    to_keep.append(i)
+            
+            CatalogSources_dedup = CatalogSources.iloc[to_keep].reset_index(drop=True)
+            logging.info(f"Removed {len(CatalogSources) - len(to_keep)} duplicate sources from CALIB catalog")
+            
             with open(calibration_file, "a") as file:
                 file.write("\n# Sequence star catalog used for calibration\n")
-                CatalogSources.to_csv(file, index=False, float_format="%.6f")
+                CatalogSources_dedup.to_csv(file, index=False, float_format="%.6f")
 
         # Redoes the sources if enabled.
         if input_yaml["photometry"].get("redo_sources", False):
