@@ -1817,10 +1817,10 @@ class Limits:
             s_med = float(np.exp(np.nanmedian(flat[:, 1])))
             mm = np.linspace(np.nanmin(mags), np.nanmax(mags), 200)
             p_med = 1.0 / (1.0 + np.exp(np.clip((mm - m50) / s_med, -60, 60)))
-            ax.plot(mm, p_med, "-", lw=1.0, color="#1f77b4", label="logistic (median)")
+            ax.plot(mm, p_med, "-", lw=0.5, color="#1f77b4", label="logistic (median)")
 
-            ax.axhline(float(completeness_target), color="0.6", lw=0.6, ls="--")
-            ax.axvline(float(m50), color="k", lw=0.6, ls="--", label=f"m50={m50:.3f}")
+            ax.axhline(float(completeness_target), color="0.6", lw=0.5, ls="--")
+            ax.axvline(float(m50), color="k", lw=0.5, ls="--", label=f"m50={m50:.3f}")
             ax.set_xlabel("Injected ePSF instrumental magnitude")
             ax.set_ylabel("Recovery fraction")
 
@@ -1989,7 +1989,7 @@ class Limits:
                 yerr=stats["mag_std"],
                 fmt="none",
                 color="red",
-                linewidth=1.0,
+                linewidth=0.5,
                 capsize=3,
                 alpha=0.7,
             )
@@ -2109,7 +2109,7 @@ class Limits:
                 width=widths,
                 color="#B0C4DE",
                 edgecolor="#4D4D4D",
-                linewidth=0.6,
+                linewidth=0.5,
                 zorder=2,
             )
             ax.errorbar(
@@ -2118,7 +2118,7 @@ class Limits:
                 yerr=p_err,
                 fmt="none",
                 ecolor="#4D4D4D",
-                elinewidth=0.6,
+                elinewidth=0.5,
                 capsize=2,
                 zorder=3,
             )
@@ -2132,7 +2132,7 @@ class Limits:
                 bc_percent,
                 "-",
                 ms=3.5,
-                lw=0.8,
+                lw=0.5,
                 color="#0000FF",
             )
             # Add arrows for jumps > 0.1 mag
@@ -2140,7 +2140,7 @@ class Limits:
                 mag_jump = abs(bm[i+1] - bm[i])
                 if mag_jump > 0.1:
                     ax.annotate('', xy=(bm[i+1], bc_percent[i+1]), xytext=(bm[i], bc_percent[i]),
-                               arrowprops=dict(arrowstyle='->', color='#0000FF', lw=1.0))
+                               arrowprops=dict(arrowstyle='->', color='#0000FF', lw=0.5))
         if bisect_steps:
             bm, bc, _ = zip(*bisect_steps)  # Unpack 3 values: (mag, detection_rate, recovered_flux)
             bc_percent = [c * 100 for c in bc]  # Convert to percentage
@@ -2149,7 +2149,7 @@ class Limits:
                 bc_percent,
                 "--",
                 ms=3.5,
-                lw=0.8,
+                lw=0.5,
                 color="#00AA00",
             )
             # Add arrows for jumps > 0.1 mag
@@ -2157,7 +2157,7 @@ class Limits:
                 mag_jump = abs(bm[i+1] - bm[i])
                 if mag_jump > 0.1:
                     ax.annotate('', xy=(bm[i+1], bc_percent[i+1]), xytext=(bm[i], bc_percent[i]),
-                               arrowprops=dict(arrowstyle='->', color='#00AA00', lw=1.0))
+                               arrowprops=dict(arrowstyle='->', color='#00AA00', lw=0.5))
 
         # Reference lines.
         ax.axhline(50, color="0.7", lw=0.5, ls="--", zorder=0)
@@ -2780,7 +2780,7 @@ class Limits:
                 alpha=get_alpha('dark'),
                 marker='*',
                 edgecolors='black',
-                linewidth=1.0,
+                linewidth=0.5,
                 label=f"Transient [{transient_apparent:.2f}]",
                 zorder=25,
             )
@@ -2809,7 +2809,7 @@ class Limits:
                 c=get_color('outliers'),
                 alpha=get_alpha('medium'),
                 marker='x',
-                linewidth=1.0,
+                linewidth=0.5,
                 label=f"Non-detected injected [{len(nondet_injected)}]",
                 zorder=8,
             )
@@ -2822,7 +2822,7 @@ class Limits:
                 mag_range,
                 color=get_color('fit'),
                 linestyle="--",
-                lw=get_line_width('thick'),
+                lw=0.5,
                 zorder=15,
                 label="Expected (1:1)",
             )
@@ -2834,7 +2834,7 @@ class Limits:
                 x=limit_apparent,
                 color=get_okabe_color('red'),
                 linestyle="-.",
-                lw=get_line_width('thick'),
+                lw=0.5,
                 zorder=20,
             )
             ax.text(
@@ -2856,7 +2856,7 @@ class Limits:
                 x=transient_apparent,
                 color=get_okabe_color('blue'),
                 linestyle="-",
-                lw=get_line_width('thick'),
+                lw=0.5,
                 zorder=20,
             )
             ax.text(
