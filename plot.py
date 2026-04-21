@@ -775,7 +775,7 @@ class Plot:
                 ax1.scatter(
                     psfSources["x_pix"],
                     psfSources["y_pix"],
-                    s=5,
+                    s=get_marker_size('medium'),
                     marker="+",
                     linewidths=0.8,
                     color=get_divergent_color('psf'),

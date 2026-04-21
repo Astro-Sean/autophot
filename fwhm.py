@@ -233,7 +233,7 @@ class Find_FWHM:
                 cleaned_df["y_pix"],
                 color="blue",
                 label="Isolated Sources",
-                s=5,
+                s=get_marker_size('medium'),
             )
             ax.scatter(
                 coms[:, 0],
@@ -241,7 +241,7 @@ class Find_FWHM:
                     color="#00AA00",
                 marker="x",
                 label="Segment COMs",
-                s=5,
+                s=get_marker_size('medium'),
             )
             ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
             fpath = self.input_yaml["fpath"]
@@ -491,7 +491,7 @@ class Find_FWHM:
                     xerr=xerr,
                     yerr=yerr,
                     fmt="o",
-                    ms=5,
+                    ms=get_marker_size('medium'),
                     mfc="none",
                     mec=get_color('inliers'),
                     ecolor="lightgrey",
@@ -507,7 +507,7 @@ class Find_FWHM:
                     xerr=df_out.get("m_inst_err", None),
                     yerr=df_out.get("m_peak_err", None),
                     fmt="x",
-                    ms=5,
+                    ms=get_marker_size('medium'),
                     color=get_color('outliers'),
                     ecolor="lightgrey",
                     alpha=get_alpha('medium'),

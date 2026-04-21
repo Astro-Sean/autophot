@@ -3951,7 +3951,7 @@ class PSF:
                     sources["y_pix"],
                     marker="+",
                     c="cyan",
-                    s=5,
+                    s=get_marker_size('medium'),
                     lw=0.5,
                     label="Input position",
                     zorder=10,
