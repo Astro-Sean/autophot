@@ -2604,6 +2604,7 @@ class Limits:
                 selected_zeropoint,
                 write_dir,
                 base,
+                position,
             )
 
     def _plot_injection_recovery(
@@ -2615,6 +2616,7 @@ class Limits:
         selected_zeropoint,
         write_dir,
         base,
+        position,
     ) -> None:
         """
         Plot injected apparent magnitude vs recovered apparent magnitude.
@@ -2622,7 +2624,7 @@ class Limits:
         non-detected sources flatten out. Also plots catalog sources for comparison.
         """
         import matplotlib.pyplot as plt
-        from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
+        from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width, get_okabe_color
 
         logger = logging.getLogger(__name__)
 
@@ -2652,6 +2654,7 @@ class Limits:
 
         # Get catalog sources for comparison
         catalog = getattr(self, 'catalog', None)
+        transient_apparent = None
         if catalog is not None and len(catalog) > 0:
             use_filter = self.input_yaml.get("imageFilter")
             if use_filter and use_filter in catalog.columns and "flux_AP" in catalog.columns:
@@ -2662,6 +2665,17 @@ class Limits:
                 valid_mask = np.isfinite(catalog_inst) & np.isfinite(catalog_apparent)
                 catalog_inst = catalog_inst[valid_mask]
                 catalog_apparent = catalog_apparent[valid_mask]
+
+                # Try to find transient/target source by position
+                if position is not None and "x_pix" in catalog.columns and "y_pix" in catalog.columns:
+                    tx, ty = position
+                    catalog_x = catalog["x_pix"].values
+                    catalog_y = catalog["y_pix"].values
+                    # Find source closest to target position
+                    distances = np.sqrt((catalog_x - tx)**2 + (catalog_y - ty)**2)
+                    target_idx = np.argmin(distances)
+                    if distances[target_idx] < 5.0:  # Within 5 pixels
+                        transient_apparent = catalog_apparent[target_idx]
             else:
                 catalog_inst = None
                 catalog_apparent = None
@@ -2694,6 +2708,21 @@ class Limits:
                 edgecolors='none',
                 label=f"Catalog sources [{len(catalog_apparent)}]",
                 zorder=5,
+            )
+
+        # Plot transient/target source if available
+        if transient_apparent is not None and np.isfinite(transient_apparent):
+            ax.scatter(
+                transient_apparent,
+                transient_apparent,
+                s=get_marker_size('large') * 2,
+                c=get_okabe_color('vermilion'),
+                alpha=get_alpha('dark'),
+                marker='*',
+                edgecolors='black',
+                linewidth=1.0,
+                label=f"Transient [{transient_apparent:.2f}]",
+                zorder=25,
             )
 
         # Plot detected injected sources
