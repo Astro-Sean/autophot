@@ -1478,6 +1478,9 @@ class Limits:
                                 str(exc),
                             )
 
+                # ---- Extended injection trials for plotting (bright to faint) ----
+                extended_steps = []  # Initialize before plotting
+
                 # ---- Plot completeness curve (still inside pool context) -----
                 if plot:
                     self._plot_completeness(
@@ -1505,9 +1508,6 @@ class Limits:
                     )
 
                     # Detection-limit demo plot removed by request.
-
-                # ---- Extended injection trials for plotting (bright to faint) ----
-                extended_steps = []
                 if plot and np.isfinite(inject_lmag):
                     # Run injection trials from very bright to 1-2 mag below detection limit
                     mag_bright = -10.0  # Very bright starting point
