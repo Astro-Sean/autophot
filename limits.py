@@ -292,20 +292,22 @@ def _injection_worker(args):
 
         # For PSF method, use PSF-fit SNR for detection (not beta aperture)
         # For AP method, use beta aperture detection
+        # Return recovered flux for plotting injected vs recovered magnitude
+        recovered_flux = float(mres["flux_AP"].iloc[0]) if method == "AP" else flux_hat
         if method == "PSF":
             effective_snr_limit = float(snr_limit) if snr_limit is not None else 3.0
             det_snr = np.isfinite(snr_val) and (snr_val >= effective_snr_limit)
-            return det_snr, beta_p
+            return det_snr, beta_p, recovered_flux
         else:
             # AP method: use beta detection, optionally with SNR gate if snr_limit is set
             if snr_limit is not None:
                 det_snr = np.isfinite(snr_val) and (snr_val >= float(snr_limit))
-                return (det_beta and det_snr), beta_p
+                return (det_beta and det_snr), beta_p, recovered_flux
             else:
-                return det_beta, beta_p
+                return det_beta, beta_p, recovered_flux
 
     except Exception:
-        return False, 0.0
+        return False, 0.0, np.nan
 
 
 # ===========================================================================
@@ -1289,7 +1291,7 @@ class Limits:
             def run_trials_at_mag(m: float, redo: int = None, pool=None, *, return_flags: bool = False):
                 """
                 Inject at *m* at all sites with *redo* sub-pixel jitter
-                repetitions and return (mean_detection_rate, beta_array[, det_flags]).
+                repetitions and return (mean_detection_rate, beta_array, recovered_flux_array[, det_flags]).
                 """
                 redo = int(redo_default if redo is None else redo)
                 redo = max(1, min(redo, 50))
@@ -1327,17 +1329,18 @@ class Limits:
 
                 det_flags = np.array([r[0] for r in results], dtype=bool)
                 betas = np.array([r[1] for r in results], dtype=float)
-                
+                recovered_fluxes = np.array([r[2] for r in results], dtype=float)
+
                 # DIAGNOSTIC: log detection rate at this magnitude
                 F = flux_for_mag(m)
                 logger.debug(
                     "run_trials_at_mag(m=%.3f): F=%.4e, det_rate=%.3f (%d/%d)",
                     m, F, float(det_flags.mean()), int(det_flags.sum()), len(det_flags)
                 )
-                
+
                 if return_flags:
-                    return float(det_flags.mean()), betas, det_flags
-                return float(det_flags.mean()), betas
+                    return float(det_flags.mean()), betas, recovered_fluxes, det_flags
+                return float(det_flags.mean()), betas, recovered_fluxes
 
             # =================================================================
             # Single ProcessPoolExecutor for the ENTIRE search (or serial if n_jobs==1)
@@ -1352,16 +1355,16 @@ class Limits:
                 step = 0.5
                 max_steps = 30
                 m_bright = float(initialGuess)
-                c_bright, _ = run_trials_at_mag(m_bright, pool=pool)
+                c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
                 going_faint = c_bright >= completeness_target
                 m_faint, c_faint = m_bright, c_bright
 
-                bracket_steps.append((m_bright, c_bright))
+                bracket_steps.append((m_bright, c_bright, np.median(f_bright)))
 
                 for _ in range(max_steps):
                     m_test = m_faint + step if going_faint else m_bright - step
-                    c_test, _ = run_trials_at_mag(m_test, pool=pool)
-                    bracket_steps.append((m_test, c_test))
+                    c_test, _, f_test = run_trials_at_mag(m_test, pool=pool)
+                    bracket_steps.append((m_test, c_test, np.median(f_test)))
 
                     if going_faint:
                         m_faint, c_faint = m_test, c_test
@@ -1391,14 +1394,14 @@ class Limits:
                         float(initialGuess) + 2.0,
                     ):
                         m_bright = float(guess)
-                        c_bright, _ = run_trials_at_mag(m_bright, pool=pool)
+                        c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
                         going_faint = c_bright >= completeness_target
                         m_faint, c_faint = m_bright, c_bright
-                        bracket_steps.append((m_bright, c_bright))
+                        bracket_steps.append((m_bright, c_bright, np.median(f_bright)))
                         for _ in range(35):
                             m_test = m_faint + step if going_faint else m_bright - step
-                            c_test, _ = run_trials_at_mag(m_test, pool=pool)
-                            bracket_steps.append((m_test, c_test))
+                            c_test, _, f_test = run_trials_at_mag(m_test, pool=pool)
+                            bracket_steps.append((m_test, c_test, np.median(f_test)))
                             if going_faint:
                                 m_faint, c_faint = m_test, c_test
                                 if c_faint < completeness_target:
@@ -1432,12 +1435,15 @@ class Limits:
                     # ---- Bisect phase ----------------------------------------
                     lo_m, lo_c = m_bright, c_bright
                     hi_m, hi_c = m_faint, c_faint
-                    bisect_steps = [(lo_m, lo_c), (hi_m, hi_c)]
+                    # Get recovered fluxes for initial bracket endpoints
+                    _, _, lo_f = run_trials_at_mag(lo_m, pool=pool)
+                    _, _, hi_f = run_trials_at_mag(hi_m, pool=pool)
+                    bisect_steps = [(lo_m, lo_c, np.median(lo_f)), (hi_m, hi_c, np.median(hi_f))]
 
                     for _ in range(30):
                         mid_m = 0.5 * (lo_m + hi_m)
-                        mid_c, _ = run_trials_at_mag(mid_m, pool=pool)
-                        bisect_steps.append((mid_m, mid_c))
+                        mid_c, _, mid_f = run_trials_at_mag(mid_m, pool=pool)
+                        bisect_steps.append((mid_m, mid_c, np.median(mid_f)))
 
                         if mid_c >= completeness_target:
                             lo_m, lo_c = mid_m, mid_c
@@ -2611,8 +2617,8 @@ class Limits:
         base,
     ) -> None:
         """
-        Plot apparent magnitude vs instrumental magnitude for injected sources.
-        Shows detection performance: detected sources follow a line (slope ~1),
+        Plot injected apparent magnitude vs recovered apparent magnitude.
+        Shows photometry recovery: detected sources follow a 1:1 line,
         non-detected sources flatten out. Also plots catalog sources for comparison.
         """
         import matplotlib.pyplot as plt
@@ -2626,19 +2632,23 @@ class Limits:
             logger.warning("No injection steps to plot")
             return
 
-        # Extract magnitudes and detection rates
+        # Extract magnitudes, detection rates, and recovered fluxes
         inst_mags = np.array([step[0] for step in all_steps])
         det_rates = np.array([step[1] for step in all_steps])
+        recovered_fluxes = np.array([step[2] for step in all_steps])
 
         # Convert to apparent magnitudes
-        apparent_mags = inst_mags + selected_zeropoint
+        injected_apparent = inst_mags + selected_zeropoint
+        # Convert recovered flux to instrumental magnitude, then to apparent
+        recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
+        recovered_apparent = recovered_inst + selected_zeropoint
 
         # Separate detected vs non-detected (use 50% threshold)
         detected_mask = det_rates >= 0.5
-        detected_inst = inst_mags[detected_mask]
-        detected_apparent = apparent_mags[detected_mask]
-        nondet_inst = inst_mags[~detected_mask]
-        nondet_apparent = apparent_mags[~detected_mask]
+        detected_injected = injected_apparent[detected_mask]
+        detected_recovered = recovered_apparent[detected_mask]
+        nondet_injected = injected_apparent[~detected_mask]
+        nondet_recovered = recovered_apparent[~detected_mask]
 
         # Get catalog sources for comparison
         catalog = getattr(self, 'catalog', None)
@@ -2672,64 +2682,60 @@ class Limits:
         fig, ax = plt.subplots(figsize=set_size(340, 1))
         plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
 
-        # Plot catalog sources
-        if catalog_inst is not None and len(catalog_inst) > 0:
+        # Plot catalog sources (plot catalog apparent vs catalog apparent for reference)
+        if catalog_apparent is not None and len(catalog_apparent) > 0:
             ax.scatter(
                 catalog_apparent,
-                catalog_inst,
+                catalog_apparent,
                 s=get_marker_size('small'),
                 c=get_color('all_sources'),
                 alpha=get_alpha('medium'),
                 marker='s',
                 edgecolors='none',
-                label=f"Catalog sources [{len(catalog_inst)}]",
+                label=f"Catalog sources [{len(catalog_apparent)}]",
                 zorder=5,
             )
 
         # Plot detected injected sources
-        if len(detected_inst) > 0:
+        if len(detected_injected) > 0:
             ax.scatter(
-                detected_apparent,
-                detected_inst,
+                detected_injected,
+                detected_recovered,
                 s=get_marker_size('medium'),
                 c=get_color('inliers'),
                 alpha=get_alpha('dark'),
                 marker='o',
                 edgecolors='black',
                 linewidth=0.5,
-                label=f"Detected injected [{len(detected_inst)}]",
+                label=f"Detected injected [{len(detected_injected)}]",
                 zorder=10,
             )
 
         # Plot non-detected injected sources
-        if len(nondet_inst) > 0:
+        if len(nondet_injected) > 0:
             ax.scatter(
-                nondet_apparent,
-                nondet_inst,
+                nondet_injected,
+                nondet_recovered,
                 s=get_marker_size('medium'),
                 c=get_color('outliers'),
                 alpha=get_alpha('medium'),
                 marker='x',
                 linewidth=1.0,
-                label=f"Non-detected injected [{len(nondet_inst)}]",
+                label=f"Non-detected injected [{len(nondet_injected)}]",
                 zorder=8,
             )
 
-        # Fit line to detected sources (should have slope ~1)
-        if len(detected_inst) > 2:
-            # Fit with slope constrained to 1 (apparent = instrumental + zeropoint)
-            slope_fit = 1.0
-            intercept_fit = selected_zeropoint
-            x_line = np.linspace(np.min(apparent_mags), np.max(apparent_mags), 100)
-            y_line = slope_fit * x_line - intercept_fit
+        # Plot 1:1 line (expected for perfect recovery)
+        if len(injected_apparent) > 0:
+            mag_range = np.linspace(np.min(injected_apparent), np.max(injected_apparent), 100)
             ax.plot(
-                x_line,
-                y_line,
+                mag_range,
+                mag_range,
                 color=get_color('fit'),
                 linestyle="--",
                 lw=get_line_width('thick'),
                 zorder=15,
-                label=f"Expected (slope=1, ZP={intercept_fit:.2f})",
+                label="Expected (1:1)",
             )
 
         # Mark limiting magnitude
@@ -2744,7 +2750,7 @@ class Limits:
                 label=f"Limiting mag: {limit_apparent:.2f}",
             )
             ax.axhline(
-                y=inject_lmag,
+                y=limit_apparent,
                 color=get_color('outliers'),
                 linestyle="-.",
                 lw=get_line_width('thick'),
@@ -2752,8 +2758,8 @@ class Limits:
             )
 
         # Labels and styling
-        ax.set_xlabel("Apparent Magnitude [mag]", fontsize=9)
-        ax.set_ylabel("Instrumental Magnitude [mag]", fontsize=9)
+        ax.set_xlabel("Injected Apparent Magnitude [mag]", fontsize=9)
+        ax.set_ylabel("Recovered Apparent Magnitude [mag]", fontsize=9)
         ax.invert_xaxis()
         ax.invert_yaxis()
         ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2, fontsize=7)
