@@ -6,8 +6,19 @@ Plotting utilities for subtraction checks, source diagnostics, and light curves.
 
 import logging
 import os
+import sys
 
 logger = logging.getLogger(__name__)
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Import plotting utilities with fallback
+try:
+    from plotting_utils import get_divergent_color
+except ImportError:
+    logger.warning("plotting_utils module not found, some plotting features may be limited")
+    get_divergent_color = None
 
 
 class Plot:
@@ -727,14 +738,12 @@ class Plot:
                 except Exception:
                     pass
 
-            # Import plotting utilities for divergent colors
-            from plotting_utils import get_divergent_color
-
             # Plot the target source as a circle
+            edge_color = get_divergent_color('target') if get_divergent_color else 'blue'
             circle = Circle(
                 (self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"]),
                 radius,
-                edgecolor=get_divergent_color('target'),
+                edgecolor=edge_color,
                 facecolor="none",
                 zorder=4,
                 lw=1.0,
@@ -754,7 +763,7 @@ class Plot:
                 self.input_yaml["target_x_pix"],
                 self.input_yaml["target_y_pix"] + radius + 2,
                 display_name,
-                color=get_divergent_color('target'),
+                color=edge_color,
                 fontsize=4,
                 ha="center",
                 va="bottom",
