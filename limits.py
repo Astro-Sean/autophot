@@ -136,12 +136,17 @@ def _injection_worker(args):
             sources=trial_df, plot=False, background_rms=background_rms, verbose=0
         )
 
+        # noiseSky from Aperture.measure() is per-pixel RMS (not total noise)
+        # beta_aperture uses sigma * sqrt(npix) internally to compute total noise
         beta_p = beta_aperture(
             n=beta_n,
             flux_aperture=float(mres["flux_AP"].iloc[0]),
             sigma=float(mres["noiseSky"].iloc[0]),
             npix=float(mres["area"].iloc[0]),
         )
+        # Debug assertion to verify noiseSky units
+        assert np.isfinite(mres["noiseSky"].iloc[0]) and mres["noiseSky"].iloc[0] > 0, \
+            f"Invalid noiseSky: {mres['noiseSky'].iloc[0]} (must be finite and positive per-pixel RMS)"
         det_beta = beta_p >= DETECTION_BETA_THRESH
 
         # Detection SNR gate: either aperture SNR (legacy) or PSF-fit SNR.
@@ -386,9 +391,9 @@ class Limits:
                 if scale_override is not None
                 else float(self.input_yaml["scale"])
             )
-            mag_factor = self.input_yaml["limiting_magnitude"]["inject_source_location"]
+            location_fwhm_mult = self.input_yaml["limiting_magnitude"]["inject_source_location"]
 
-            half = int(np.ceil(mag_factor * fwhm + scale))
+            half = int(np.ceil(location_fwhm_mult * fwhm + scale))
             # If `image` is already a cutout (e.g. the shared target cutout),
             # the configured full-frame scale can request a region larger than
             # the provided array. Clamp so Cutout2D never expands beyond bounds.
@@ -694,15 +699,15 @@ class Limits:
             min_cutout_size = 2 * min_half_size
             
             # Current scale-based cutout size
-            mag_factor = float(lim_cfg.get("inject_source_location", 3.0))
-            current_half_size = int(np.ceil(mag_factor * fwhm_px + base_scale))
+            location_fwhm_mult = float(lim_cfg.get("inject_source_location", 3.0))
+            current_half_size = int(np.ceil(location_fwhm_mult * fwhm_px + base_scale))
             current_cutout_size = 2 * current_half_size
-            
+
             # Update scale if current cutout is too small
             if current_cutout_size < min_cutout_size:
                 # Calculate the scale needed to achieve minimum cutout size
                 needed_half_size = min_half_size
-                needed_scale = needed_half_size - mag_factor * fwhm_px
+                needed_scale = needed_half_size - location_fwhm_mult * fwhm_px
                 # Ensure scale is at least the base scale and is reasonable
                 new_scale = max(base_scale, needed_scale, 10.0)  # minimum 10px scale
                 
@@ -890,6 +895,7 @@ class Limits:
             counts_ref = float(psf_meas["counts_AP"].iloc[0])  # aperture counts (same units as image data)
             
             # Guard: check if calibration failed
+            assert counts_ref > 0 and F_ref > 0, f"Invalid calibration: counts_ref={counts_ref}, F_ref={F_ref}"
             if not np.isfinite(counts_ref) or counts_ref <= 0:
                 logger.error(
                     f"PSF calibration failed: counts_ref={counts_ref:.4e} (must be finite and positive). "
@@ -949,7 +955,8 @@ class Limits:
                 return counts_target / counts_ref
 
             # DIAGNOSTIC: verify calibration round-trip
-            m_roundtrip = -2.5 * np.log10(F_ref)  # what mag does flux=1.0 correspond to?
+            # Use counts_ref/exposure_time to get ADU/s, consistent with pipeline convention m = -2.5 * log10(ADU/s)
+            m_roundtrip = -2.5 * np.log10(counts_ref / exposure_time)  # instrumental mag from counts_ref
             F_roundtrip = flux_for_mag(m_roundtrip)
             logger.info(
                 "Calibration round-trip check: m_roundtrip=%.4f, flux_for_mag(m_roundtrip)=%.6f (should be ~1.0)",
@@ -1373,13 +1380,20 @@ class Limits:
                             break
                     else:
                         # When stepping brighter (looking for detected end)
+                        # Keep m_faint fixed (this is the undetected endpoint)
                         if c_test >= completeness_target:
                             # Found detected end
                             m_bright, c_bright = m_test, c_test
                             break
                         else:
-                            # Still not detected; this becomes new bright boundary (keep faint fixed)
-                            m_bright, c_bright = m_test, c_test
+                            # Still not detected even at this brighter magnitude
+                            # This indicates a fundamental detection problem - log warning and break
+                            logger.warning(
+                                f"Bracket phase stepping bright: source not detected even at brighter mag {m_test:.3f} "
+                                f"(completeness={c_test:.3f} < target={completeness_target:.3f}). "
+                                "This may indicate a detection issue."
+                            )
+                            break
 
                 bracketed = (c_bright >= completeness_target) and (
                     c_faint < completeness_target
@@ -2578,11 +2592,9 @@ class Limits:
                     ax_inject.set_title(f'Injected mag = {mag_target:.2f}', fontsize=9)
                     
                     # Add apparent magnitude text in lower left corner
+                    # mag_target is already the injected apparent magnitude; no recomputation needed
                     if selected_zeropoint is not None:
-                        injected_counts  = float(np.sum(psf_inject))
-                        exposure_time    = max(1.0, float(self.input_yaml.get("exposure_time", 1.0)))
-                        inst_mag_inj     = -2.5 * np.log10(max(injected_counts / exposure_time, 1e-30))
-                        apparent_mag_inj = inst_mag_inj + selected_zeropoint
+                        apparent_mag_inj = mag_target
                         ax_inject.text(
                             0.05, 0.05,
                             f"In: {apparent_mag_inj:.2f}",
@@ -2638,6 +2650,7 @@ class Limits:
                 position,
                 counts_ref=counts_ref,
                 exposure_time=exposure_time,
+                recovery_method=recovery_method,
             )
 
     def _plot_injection_recovery(
@@ -2653,6 +2666,7 @@ class Limits:
         position,
         counts_ref=None,
         exposure_time=None,
+        recovery_method=None,
     ) -> None:
         """
         Plot injected apparent magnitude vs recovered apparent magnitude.
@@ -2684,17 +2698,24 @@ class Limits:
         logger.info(f"Debug: injected_apparent range: {injected_apparent.min():.2f} to {injected_apparent.max():.2f}")
 
         # Convert recovered flux to instrumental magnitude, then to apparent
-        # The recovered flux is in PSF flux parameter units (normalized by counts_ref)
-        # To convert to actual flux: flux_actual = flux_param * counts_ref / exposure_time
-        # Then convert to magnitude: m = -2.5 * log10(flux_actual)
-        logger.info(f"Debug: counts_ref={counts_ref}, exposure_time={exposure_time}")
+        # The recovered flux units depend on recovery_method:
+        # - AP method: flux_AP is already ADU/s (divided by exposure_time in Aperture.measure())
+        # - PSF/EMCEE methods: flux_hat is raw ADU counts (not divided by exposure_time)
+        logger.info(f"Debug: recovery_method={recovery_method}, counts_ref={counts_ref}, exposure_time={exposure_time}")
         logger.info(f"Debug: recovered_fluxes sample: {recovered_fluxes[:3]}")
-        if counts_ref is not None and exposure_time is not None and counts_ref > 0:
-            recovered_flux_actual = recovered_fluxes * counts_ref / exposure_time
-            logger.info(f"Debug: recovered_flux_actual sample: {recovered_flux_actual[:3]}")
-            recovered_inst = -2.5 * np.log10(np.maximum(recovered_flux_actual, 1e-30))
-        else:
+        
+        recovery_method_upper = str(recovery_method).strip().upper() if recovery_method is not None else "AP"
+        if recovery_method_upper == "AP":
+            # AP method: flux_AP is already ADU/s, apply mag() directly
             recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
+        else:
+            # PSF/EMCEE methods: flux_hat is raw ADU, convert to ADU/s first
+            if exposure_time is not None and exposure_time > 0:
+                recovered_flux_adu_per_s = recovered_fluxes / exposure_time
+                recovered_inst = -2.5 * np.log10(np.maximum(recovered_flux_adu_per_s, 1e-30))
+            else:
+                recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
+        
         logger.info(f"Debug: recovered_inst sample: {recovered_inst[:3]}")
         recovered_apparent = recovered_inst + selected_zeropoint
 
@@ -2713,11 +2734,10 @@ class Limits:
             use_filter = self.input_yaml.get("imageFilter")
             if use_filter and use_filter in catalog.columns and "flux_AP" in catalog.columns:
                 catalog_flux = catalog["flux_AP"].values
-                catalog_inst = -2.5 * np.log10(catalog_flux)
                 catalog_apparent = catalog[use_filter].values
                 # Filter out invalid values
-                valid_mask = np.isfinite(catalog_inst) & np.isfinite(catalog_apparent)
-                catalog_inst = catalog_inst[valid_mask]
+                valid_mask = np.isfinite(catalog_flux) & np.isfinite(catalog_apparent)
+                catalog_flux = catalog_flux[valid_mask]
                 catalog_apparent = catalog_apparent[valid_mask]
 
                 # Try to find transient/target source by position
