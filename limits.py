@@ -1817,7 +1817,7 @@ class Limits:
                 )
             emp = np.asarray(emp, float)
 
-            fig, ax = plt.subplots(figsize=set_size(540, 1))
+            fig, ax = plt.subplots(figsize=set_size(340, 1))
             ax.plot(mags, emp, "o", ms=4, color="0.2", label="empirical")
 
             # median model curve
@@ -1965,7 +1965,7 @@ class Limits:
         if not write_dir:
             write_dir = "."
         
-        fig, ax = plt.subplots(figsize=set_size(540, 1.5))
+        fig, ax = plt.subplots(figsize=set_size(340, 1.5))
         
         # Scatter plot of all sources
         sc = ax.scatter(
@@ -2955,26 +2955,21 @@ class Limits:
         # Add small offset to avoid log(0)
         snr_values = np.maximum(recovered_flux_adu_per_s, 1e-10)
 
+        # Color points by detection status (detected vs non-detected)
+        colors = np.where(det_rates >= 0.5, get_okabe_color('blue'), get_okabe_color('red'))
+
         # Plot S/N vs magnitude
         ax_snr.scatter(
             injected_apparent,
             snr_values,
             s=get_marker_size('medium'),
-            c=det_rates,
-            cmap='viridis',
+            c=colors,
             alpha=get_alpha('dark'),
             marker='o',
             edgecolors='black',
             linewidth=0.5,
             zorder=10,
         )
-
-        # Colorbar for detection rate
-        sm = plt.cm.ScalarMappable(cmap='viridis', norm=plt.Normalize(vmin=0, vmax=1))
-        sm.set_array([])
-        cbar = fig.colorbar(sm, ax=ax_snr, orientation='vertical', pad=0.02)
-        cbar.set_label('Detection Rate', fontsize=8)
-        cbar.ax.tick_params(labelsize=7)
 
         # Mark limiting magnitude
         if np.isfinite(inject_lmag):
