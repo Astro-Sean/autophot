@@ -147,6 +147,7 @@ def _injection_worker(args):
         # Detection SNR gate: either aperture SNR (legacy) or PSF-fit SNR.
         method = str(recovery_method).strip().upper() if recovery_method is not None else "AP"
         snr_val = np.nan
+        flux_hat = np.nan  # Initialize before PSF block
         if method == "PSF":
             try:
                 # Fast PSF-flux estimate using weighted least squares on a local stamp.
@@ -288,7 +289,7 @@ def _injection_worker(args):
             try:
                 snr_val = float(mres["SNR"].iloc[0])
             except Exception:
-                return False, beta_p
+                return False, beta_p, np.nan
 
         # For PSF method, use PSF-fit SNR for detection (not beta aperture)
         # For AP method, use beta aperture detection
@@ -598,14 +599,14 @@ class Limits:
             import copy
             local_input_yaml = copy.deepcopy(self.input_yaml)
 
-            def _exclude_target_overlap(df: pd.DataFrame, 
-                                         target_cx: float, 
+            def _exclude_target_overlap(df: pd.DataFrame,
+                                         target_cx: float,
                                          target_cy: float,
                                          exclusion_r: float) -> pd.DataFrame:
                 """
                 Remove any injection sites whose aperture could overlap with the
                 transient aperture at (target_cx, target_cy).
-                
+
                 exclusion_r = aperture_radius (transient) + aperture_radius (injected)
                               + fwhm (PSF wing buffer)
                 Sites within exclusion_r pixels of the target are removed.
@@ -616,6 +617,21 @@ class Limits:
                 dy = df["y_pix"].to_numpy() - target_cy
                 dist = np.sqrt(dx**2 + dy**2)
                 return df[dist >= exclusion_r].copy()
+
+            def _filter_edge_clearance(df: pd.DataFrame,
+                                      cutout_w: float,
+                                      cutout_h: float,
+                                      margin: float) -> pd.DataFrame:
+                """Remove sites too close to cutout edges."""
+                if len(df) == 0:
+                    return df
+                mask = (
+                    (df["x_pix"] >= margin) &
+                    (df["x_pix"] <= cutout_w - margin) &
+                    (df["y_pix"] >= margin) &
+                    (df["y_pix"] <= cutout_h - margin)
+                )
+                return df[mask].copy()
 
             # If aperture_radius equals fwhm (default fallback), try to calculate optimum
             if configured_radius == fwhm:
@@ -849,11 +865,11 @@ class Limits:
             
             # Ensure PSF fits within blank canvas
             if y_start < 0 or y_end > calib_H or x_start < 0 or x_end > calib_W:
-                # Fallback: place at target position if bounds check fails
-                logger.warning("PSF placement bounds check failed, placing at target position")
-                y_start = int(calib_cy - psf_h // 2)
+                # Fallback: clamp coordinates to canvas bounds
+                logger.warning("PSF placement bounds exceeded; clamping to canvas.")
+                y_start = int(np.clip(y_start, 0, calib_H - psf_h))
                 y_end = y_start + psf_h
-                x_start = int(calib_cx - psf_w // 2)
+                x_start = int(np.clip(x_start, 0, calib_W - psf_w))
                 x_end = x_start + psf_w
             blank[y_start:y_end, x_start:x_end] = psf_unit
             
@@ -910,7 +926,7 @@ class Limits:
             )
 
             # Memoised so repeated calls at the same magnitude are free.
-            @lru_cache(maxsize=512)
+            # Note: lru_cache removed because this is a closure capturing mutable variables
             def flux_for_mag(m: float) -> float:
                 """
                 Return ePSF flux parameter to inject for instrumental magnitude m.
@@ -1067,23 +1083,8 @@ class Limits:
                 injection_df = _exclude_target_overlap(
                     injection_df, _target_cx, _target_cy, target_exclusion_r
                 )
-                
+
                 # Add edge clearance to prevent injection sites from being too close to cutout boundaries
-                def _filter_edge_clearance(df: pd.DataFrame,
-                                          cutout_w: float,
-                                          cutout_h: float,
-                                          margin: float) -> pd.DataFrame:
-                    """Remove sites too close to cutout edges."""
-                    if len(df) == 0:
-                        return df
-                    mask = (
-                        (df["x_pix"] >= margin) & 
-                        (df["x_pix"] <= cutout_w - margin) &
-                        (df["y_pix"] >= margin) & 
-                        (df["y_pix"] <= cutout_h - margin)
-                    )
-                    return df[mask].copy()
-                
                 injection_df = _filter_edge_clearance(
                     injection_df, W, H, edge_margin
                 )
@@ -1938,6 +1939,8 @@ class Limits:
         """
         Create diagnostic plot showing S/N vs apparent magnitude relationship.
         """
+        import logging
+        logger = logging.getLogger(__name__)
         import matplotlib.pyplot as plt
         from functions import set_size
         
@@ -2223,9 +2226,9 @@ class Limits:
 
             # Define target magnitudes for subpanel injection
             # Convert instrumental limiting magnitude to apparent magnitude
-            selected_zeropoint = zeropoint if zeropoint is not None else image_zeropoint
-            if selected_zeropoint is not None:
-                limiting_apparent_mag = inject_lmag + selected_zeropoint
+            # selected_zeropoint already computed at top of function
+            if selected_zeropoint is not None and np.isfinite(float(selected_zeropoint)):
+                limiting_apparent_mag = inject_lmag + float(selected_zeropoint)
             else:
                 limiting_apparent_mag = inject_lmag  # Fallback to instrumental if no zeropoint
             
