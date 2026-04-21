@@ -1695,7 +1695,7 @@ class Limits:
         outcomes_m = []
         outcomes_y = []
         for m in mags:
-            _, _, flags = run_trials_at_mag(float(m), redo=int(redo), pool=pool, return_flags=True)
+            _, _, _, flags = run_trials_at_mag(float(m), redo=int(redo), pool=pool, return_flags=True)
             outcomes_m.extend([float(m)] * int(len(flags)))
             outcomes_y.extend([1.0 if bool(v) else 0.0 for v in np.asarray(flags).ravel().tolist()])
 
