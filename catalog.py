@@ -1799,6 +1799,36 @@ class Catalog:
                         ):
                             output_catalog.at[index, filter_name] = entry[filter_name]
 
+        # Remove duplicate entries based on RA and DEC
+        # Use a small tolerance (1 arcsecond) to account for coordinate differences
+        if len(output_catalog) > 0:
+            from astropy.coordinates import SkyCoord
+            from astropy import units as u
+            
+            # Create SkyCoord objects for all sources
+            coords = SkyCoord(
+                ra=output_catalog["RA"].values * u.degree,
+                dec=output_catalog["DEC"].values * u.degree
+            )
+            
+            # Find duplicates by matching coordinates within 1 arcsecond
+            to_keep = []
+            for i in range(len(output_catalog)):
+                if i in to_keep:
+                    continue
+                # Check if this source matches any already kept source
+                is_duplicate = False
+                for j in to_keep:
+                    separation = coords[i].separation(coords[j])
+                    if separation.arcsecond < 1.0:  # 1 arcsecond tolerance
+                        is_duplicate = True
+                        break
+                if not is_duplicate:
+                    to_keep.append(i)
+            
+            output_catalog = output_catalog.iloc[to_keep].reset_index(drop=True)
+            logger.info(f"Removed {len(output_catalog) - len(to_keep)} duplicate sources from catalog")
+
         # Final output catalog is ready
         output_catalog.to_csv(fpath, index=False, float_format="%.6f")
         return output_catalog
