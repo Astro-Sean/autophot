@@ -77,6 +77,7 @@ from photutils.utils.cutouts import overlap_slices
 # Local
 # ---------------------------------------------------------------------------
 from functions import border_msg, set_size, log_warning_from_exception
+from plotting_utils import get_marker_size
 
 # ---------------------------------------------------------------------------
 # Module-level logger
