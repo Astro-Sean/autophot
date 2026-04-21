@@ -1364,21 +1364,13 @@ class Limits:
                 # ---- Bracket phase ------------------------------------------
                 step = 0.5
                 max_steps = 30
-                # Use initialGuess as starting point, but sanity-check at -10.0
-                m_bright = float(initialGuess)
+                # Start at artificially bright magnitude to ensure we find the detected end
+                m_bright = -10.0  # Very bright starting point
                 c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
                 going_faint = c_bright >= completeness_target
                 m_faint, c_faint = m_bright, c_bright
 
                 bracket_steps.append((m_bright, c_bright, np.median(f_bright)))
-
-                # Sanity check: if completeness is below target even at very bright mag, warn
-                c_sanity, _, _ = run_trials_at_mag(-10.0, pool=pool)
-                if c_sanity < completeness_target:
-                    logger.warning(
-                        f"Completeness < target even at m=-10.0 (c={c_sanity:.3f}). "
-                        "PSF may be broken or detection threshold too high."
-                    )
 
                 # Determine target faint magnitude: 1 mag below limiting magnitude (if known)
                 # Otherwise, just use the standard bracketing logic
