@@ -2241,7 +2241,11 @@ class Catalog:
                             inlier_catalog_mag_linear = catalog_mag_linear[inlier_mask]
                             inlier_inst_mag_linear = inst_mag_linear[inlier_mask]
                             all_residuals = inlier_catalog_mag_linear - fit_line(inlier_inst_mag_linear.reshape(-1, 1))
-                            linear_residual_mask = np.abs(all_residuals) < residual_threshold
+                            inlier_residual_mask = np.abs(all_residuals) < residual_threshold
+                            
+                            # Expand inlier residual mask back to full array size
+                            linear_residual_mask = np.zeros(len(flux), dtype=bool)
+                            linear_residual_mask[inlier_mask] = inlier_residual_mask
                             
                             # Combined mask: must be in flux range AND have good residual
                             final_linear_mask = linear_flux_mask & linear_residual_mask
