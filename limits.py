@@ -2095,7 +2095,7 @@ class Limits:
 
         # Bracket and bisect search trajectories.
         if bracket_steps:
-            bm, bc = zip(*bracket_steps)
+            bm, bc, _ = zip(*bracket_steps)  # Unpack 3 values: (mag, detection_rate, recovered_flux)
             bc_percent = [c * 100 for c in bc]  # Convert to percentage
             ax.plot(
                 bm,
@@ -2112,7 +2112,7 @@ class Limits:
                     ax.annotate('', xy=(bm[i+1], bc_percent[i+1]), xytext=(bm[i], bc_percent[i]),
                                arrowprops=dict(arrowstyle='->', color='#0000FF', lw=1.0))
         if bisect_steps:
-            bm, bc = zip(*bisect_steps)
+            bm, bc, _ = zip(*bisect_steps)  # Unpack 3 values: (mag, detection_rate, recovered_flux)
             bc_percent = [c * 100 for c in bc]  # Convert to percentage
             ax.plot(
                 bm,
