@@ -4576,7 +4576,7 @@ def run_photometry():
 
         # Create Limits instance for get_cutout method
         from limits import Limits
-        getDetectionLimits = Limits(input_yaml=input_yaml)
+        getDetectionLimits = Limits(input_yaml=input_yaml, catalog=CatalogSources)
 
         try:
             # Use get_cutout to create target cutout (ensures consistency with limiting magnitude test)

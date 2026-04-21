@@ -328,7 +328,7 @@ class Limits:
     * PSF injection / recovery           (getInjectedLimit)
     """
 
-    def __init__(self, input_yaml: dict):
+    def __init__(self, input_yaml: dict, catalog=None):
         """
         Parameters
         ----------
@@ -337,8 +337,11 @@ class Limits:
             ``fwhm``, ``scale``, ``gain``, ``exposure_time``, ``target_x_pix``,
             ``target_y_pix``, ``photometry.aperture_radius``,
             ``limiting_magnitude.inject_source_location``, ``fpath``.
+        catalog : pd.DataFrame, optional
+            Source catalog for plotting comparison in injection recovery.
         """
         self.input_yaml = input_yaml
+        self.catalog = catalog
 
         # Optional RNG seed for reproducible limiting-magnitude experiments.
         seed = self.input_yaml.get("rng_seed", None)
