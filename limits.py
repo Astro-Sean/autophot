@@ -2817,7 +2817,7 @@ class Limits:
                 nondet_injected,
                 nondet_recovered,
                 s=get_marker_size('medium'),
-                c=get_okabe_color('blue'),
+                c=get_okabe_color('red'),
                 alpha=get_alpha('medium'),
                 marker='x',
                 linewidth=0.5,
