@@ -2785,11 +2785,11 @@ class Limits:
                 zorder=25,
             )
 
-        # Plot detected injected sources
+        # Plot detected injected sources (flipped axis: recovered on x, injected on y)
         if len(detected_injected) > 0:
             ax.scatter(
-                detected_injected,
                 detected_recovered,
+                detected_injected,
                 s=get_marker_size('medium'),
                 c=get_color('inliers'),
                 alpha=get_alpha('dark'),
@@ -2800,11 +2800,11 @@ class Limits:
                 zorder=10,
             )
 
-        # Plot non-detected injected sources
+        # Plot non-detected injected sources (flipped axis)
         if len(nondet_injected) > 0:
             ax.scatter(
-                nondet_injected,
                 nondet_recovered,
+                nondet_injected,
                 s=get_marker_size('medium'),
                 c=get_color('outliers'),
                 alpha=get_alpha('medium'),
@@ -2814,7 +2814,7 @@ class Limits:
                 zorder=8,
             )
 
-        # Plot 1:1 line (expected for perfect recovery)
+        # Plot 1:1 line (expected for perfect recovery, flipped axis)
         if len(injected_apparent) > 0:
             mag_range = np.linspace(np.min(injected_apparent), np.max(injected_apparent), 100)
             ax.plot(
@@ -2827,30 +2827,40 @@ class Limits:
                 label="Expected (1:1)",
             )
 
-        # Mark limiting magnitude
+        # Mark limiting magnitude (flipped axis: horizontal line now)
         if np.isfinite(inject_lmag):
             limit_apparent = inject_lmag + selected_zeropoint
-            ax.axvline(
-                x=limit_apparent,
-                color=get_color('outliers'),
-                linestyle="-.",
-                lw=get_line_width('thick'),
-                zorder=20,
-                label=f"Limiting mag: {limit_apparent:.2f}",
-            )
             ax.axhline(
                 y=limit_apparent,
                 color=get_color('outliers'),
                 linestyle="-.",
                 lw=get_line_width('thick'),
                 zorder=20,
+                label=f"Limiting mag: {limit_apparent:.2f}",
+            )
+            ax.axvline(
+                x=limit_apparent,
+                color=get_color('outliers'),
+                linestyle="-.",
+                lw=get_line_width('thick'),
+                zorder=20,
             )
 
-        # Labels and styling
-        ax.set_xlabel("Injected Apparent Magnitude [mag]", fontsize=9)
-        ax.set_ylabel("Recovered Apparent Magnitude [mag]", fontsize=9)
-        ax.invert_xaxis()
-        ax.invert_yaxis()
+        # Labels and styling (flipped axis)
+        ax.set_xlabel("Recovered Apparent Magnitude [mag]", fontsize=9)
+        ax.set_ylabel("Injected Apparent Magnitude [mag]", fontsize=9)
+
+        # Set axis limits based on data range
+        all_mags = np.concatenate([injected_apparent, recovered_apparent])
+        if len(all_mags) > 0:
+            mag_min = np.min(all_mags)
+            mag_max = np.max(all_mags)
+            margin = 0.5  # 0.5 mag margin
+            ax.set_xlim(mag_max + margin, mag_min - margin)  # Inverted for magnitude
+            ax.set_ylim(mag_max + margin, mag_min - margin)  # Inverted for magnitude
+        else:
+            ax.invert_xaxis()
+            ax.invert_yaxis()
         ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2, fontsize=7)
         ax.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
 
