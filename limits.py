@@ -1479,7 +1479,25 @@ class Limits:
                             )
 
                 # ---- Extended injection trials for plotting (bright to faint) ----
-                extended_steps = []  # Initialize before plotting
+                extended_steps = []
+                if plot and np.isfinite(inject_lmag):
+                    # Run injection trials from very bright to 1-2 mag below detection limit
+                    mag_bright = -10.0  # Very bright starting point
+                    mag_faint = inject_lmag - 1.5  # 1.5 mag below detection limit
+                    nmags = 15  # Number of magnitude points
+                    mags_extended = np.linspace(mag_bright, mag_faint, nmags)
+
+                    logger.info(
+                        f"Running extended injection trials for plotting: {mag_bright:.2f} to {mag_faint:.2f} mag ({nmags} points)"
+                    )
+
+                    for m in mags_extended:
+                        try:
+                            c, _, f = run_trials_at_mag(m, pool=pool)
+                            extended_steps.append((m, c, np.median(f)))
+                        except Exception as e:
+                            logger.warning(f"Extended injection trial failed at m={m:.2f}: {e}")
+                            continue
 
                 # ---- Plot completeness curve (still inside pool context) -----
                 if plot:
@@ -1503,29 +1521,12 @@ class Limits:
                         injection_df=injection_df,
                         F_ref=F_ref,
                         counts_ref=counts_ref,
+                        extended_steps=extended_steps,
                         orig_position=_orig_position,
                         target_name=self.input_yaml.get("target_name", None),
                     )
 
                     # Detection-limit demo plot removed by request.
-                if plot and np.isfinite(inject_lmag):
-                    # Run injection trials from very bright to 1-2 mag below detection limit
-                    mag_bright = -10.0  # Very bright starting point
-                    mag_faint = inject_lmag - 1.5  # 1.5 mag below detection limit
-                    nmags = 15  # Number of magnitude points
-                    mags_extended = np.linspace(mag_bright, mag_faint, nmags)
-
-                    logger.info(
-                        f"Running extended injection trials for plotting: {mag_bright:.2f} to {mag_faint:.2f} mag ({nmags} points)"
-                    )
-
-                    for m in mags_extended:
-                        try:
-                            c, _, f = run_trials_at_mag(m, pool=pool)
-                            extended_steps.append((m, c, np.median(f)))
-                        except Exception as e:
-                            logger.warning(f"Extended injection trial failed at m={m:.2f}: {e}")
-                            continue
 
                 # Optional: EMCEE diagnostic plot for one representative injected trial.
                 if (
@@ -2025,6 +2026,7 @@ class Limits:
         injection_df=None,
         F_ref=None,
         counts_ref=None,
+        extended_steps=None,
         orig_position=None,
         target_name=None,
     ) -> None:
