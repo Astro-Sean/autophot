@@ -2237,7 +2237,10 @@ class Catalog:
                             linear_flux_mask = (flux >= min_linear_flux) & (flux <= max_linear_flux)
                             
                             # Apply tight residual threshold to remove individual outliers
-                            all_residuals = catalog_mag_linear - fit_line(inst_mag_linear.reshape(-1, 1))
+                            # Use inlier arrays only to avoid mismatch with clean_catalog
+                            inlier_catalog_mag_linear = catalog_mag_linear[inlier_mask]
+                            inlier_inst_mag_linear = inst_mag_linear[inlier_mask]
+                            all_residuals = inlier_catalog_mag_linear - fit_line(inlier_inst_mag_linear.reshape(-1, 1))
                             linear_residual_mask = np.abs(all_residuals) < residual_threshold
                             
                             # Combined mask: must be in flux range AND have good residual
