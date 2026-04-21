@@ -323,6 +323,7 @@ default_input:
     injection_jitter_repetitions: 5 # int --- Sub-pixel jitter repetitions per site per magnitude (more = smoother completeness curve; slower).
     completeness_plot_span_mag: 0.8 # float --- Half-span (mag) around the adopted limit used for the completeness plot sampling range (smaller = fewer bins far from transition).
     completeness_plot_nmags: 9 # int --- Number of magnitudes sampled across completeness_plot_span_mag for the completeness bar chart.
+    plot_injection_recovery: false # bool --- If true, generate the InjectionRecovery plot showing injected vs recovered magnitudes. If false, skip this plot.
     n_jobs: 1 # int --- Worker processes for injection/recovery and background-limit trials (per-image). 1 = serial; >1 can speed up Monte Carlo trials.
 
   alignment:

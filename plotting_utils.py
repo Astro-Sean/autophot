@@ -7,7 +7,6 @@ import numpy as np
 
 # Okabe-Ito colorblind-friendly palette (widely used in scientific publications)
 OKABE_ITO = {
-    'black': '#000000',
     'orange': '#E69F00',
     'sky_blue': '#56B4E9',
     'bluish_green': '#009E73',

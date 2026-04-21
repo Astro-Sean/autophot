@@ -813,34 +813,14 @@ class Aperture:
         write_dir = os.path.dirname(fpath)
         base = os.path.splitext(os.path.basename(fpath))[0]
 
-        fig = plt.figure(figsize=set_size(340, 1))
-        grid = GridSpec(
-            2,
-            2,
-            width_ratios=[1, 0.25],
-            height_ratios=[1, 0.25],
-            wspace=0.01,
-            hspace=0.01,
-        )
-
-        ax_main = fig.add_subplot(grid[0, 0])
-        ax_right = fig.add_subplot(grid[0, 1], sharey=ax_main)
-        ax_bottom = fig.add_subplot(grid[1, 0], sharex=ax_main)
-
-        ax_right.yaxis.tick_right()
-        ax_right.xaxis.tick_top()
-        ax_main.xaxis.tick_top()
-
         cx, cy = cutout_center
-        aperture_scale = int(annulusOUT + fwhm)
-        zoom_size = 1.25 * aperture_scale
-        ax_main.set_xlim(cx - zoom_size, cx + zoom_size)
-        ax_main.set_ylim(cy - zoom_size, cy + zoom_size)
 
-        x_min = int(np.floor(ax_main.get_xlim()[0]))
-        x_max = int(np.ceil(ax_main.get_xlim()[1]))
-        y_min = int(np.floor(ax_main.get_ylim()[0]))
-        y_max = int(np.ceil(ax_main.get_ylim()[1]))
+        # FIX 3 & 5: compute zoom bounds arithmetically, not from axes state
+        zoom_size = 1.25 * (annulusOUT + fwhm)
+        x_min = max(0, int(np.floor(cx - zoom_size)))
+        x_max = min(image.shape[1], int(np.ceil(cx + zoom_size)))
+        y_min = max(0, int(np.floor(cy - zoom_size)))
+        y_max = min(image.shape[0], int(np.ceil(cy + zoom_size)))
 
         zoom_image = image[y_min:y_max, x_min:x_max]
         zoom_error = (
@@ -849,77 +829,118 @@ class Aperture:
             else np.zeros_like(zoom_image)
         )
 
-        # Guard against tiny zoom regions that cause plotting errors
+        fig = plt.figure(figsize=set_size(340, 1))
+        grid = GridSpec(
+            2, 2,
+            width_ratios=[1, 0.25],
+            height_ratios=[1, 0.25],
+            wspace=0.15,
+            hspace=0.15,
+        )
+        ax_main = fig.add_subplot(grid[0, 0])
+        ax_right = fig.add_subplot(grid[0, 1], sharey=ax_main)
+        ax_bottom = fig.add_subplot(grid[1, 0], sharex=ax_main)
+
+        ax_right.yaxis.tick_right()
+        ax_right.xaxis.tick_top()
+        ax_main.xaxis.tick_top()
+
+        # Guard: skip profiles for tiny regions
         if zoom_image.shape[0] < 5 or zoom_image.shape[1] < 5:
             logger.warning(
-                f"Zoom region too small for profile plotting: {zoom_image.shape}, skipping profiles"
+                f"Zoom region too small for profile plotting: {zoom_image.shape}"
             )
             norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
+            # FIX 1: use cutout-local coordinates for simpler alignment
             ax_main.imshow(
-                image, origin="lower", norm=norm, cmap="viridis", aspect="auto"
+                zoom_image,
+                origin="lower",
+                norm=norm,
+                cmap="viridis",
+                aspect="auto",
             )
-            for radius, color, style in [
+            ax_main.set_xlim(0, zoom_image.shape[1])
+            ax_main.set_ylim(0, zoom_image.shape[0])
+
+            # Convert full-image coordinates to cutout-local coordinates
+            cx_local = cx - x_min
+            cy_local = cy - y_min
+
+            for radius, color, ls in [
                 (ap_size, "#00AA00", "-"),
                 (annulusIN, "#FF0000", "--"),
                 (annulusOUT, "#FF0000", "--"),
             ]:
                 ax_main.add_patch(
-                    Circle((cx, cy), radius, ec=color, fc="none", lw=0.5, ls=style)
+                    Circle((cx_local, cy_local), radius, ec=color, fc="none", lw=0.5, ls=ls)
                 )
+            label = base if saveTarget else index
+            save_name = os.path.join(write_dir, f"Aperture_{label}.png")
+            fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
+            plt.close(fig)
             return
 
         norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
-        ax_main.imshow(
-            image, origin="lower", norm=norm, cmap="viridis", aspect="auto"
-        )
 
-        for radius, color, style in [
+        # FIX 1: render zoom cutout without extent for simpler alignment
+        ax_main.imshow(
+            zoom_image,
+            origin="lower",
+            norm=norm,
+            cmap="viridis",
+            aspect="auto",
+        )
+        ax_main.set_xlim(0, zoom_image.shape[1])
+        ax_main.set_ylim(0, zoom_image.shape[0])
+
+        # Convert full-image coordinates to cutout-local coordinates
+        cx_local = cx - x_min
+        cy_local = cy - y_min
+
+        for radius, color, ls in [
             (ap_size, "#00AA00", "-"),
             (annulusIN, "#FF0000", "--"),
             (annulusOUT, "#FF0000", "--"),
         ]:
             ax_main.add_patch(
-                Circle((cx, cy), radius, ec=color, fc="none", lw=0.5, ls=style)
+                Circle((cx_local, cy_local), radius, ec=color, fc="none", lw=0.5, ls=ls)
             )
 
         kw = dict(ls=":", color="white", lw=0.5, alpha=0.7)
-        ax_main.axvline(cx, **kw)
-        ax_main.axhline(cy, **kw)
-        ax_bottom.axvline(cx, **kw)
-        ax_right.axhline(cy, **kw)
+        ax_main.axvline(cx_local, **kw)
+        ax_main.axhline(cy_local, **kw)
+        ax_bottom.axvline(cx_local, **kw)
+        ax_right.axhline(cy_local, **kw)
 
         hx = zoom_image.mean(axis=0)
         hy = zoom_image.mean(axis=1)
-        # SE of mean = sqrt(sum(sigma^2))/N (not mean(sigma))
         n_rows, n_cols = zoom_error.shape[0], zoom_error.shape[1]
         hx_err = np.sqrt(np.nansum(zoom_error**2, axis=0)) / max(n_rows, 1)
         hy_err = np.sqrt(np.nansum(zoom_error**2, axis=1)) / max(n_cols, 1)
-        # Use actual zoom_image dimensions to avoid shape mismatch
-        x_range = np.arange(x_min, x_min + zoom_image.shape[1])
-        y_range = np.arange(y_min, y_min + zoom_image.shape[0])
+
+        # Coordinate arrays in cutout-local coordinates
+        x_range = np.arange(0, zoom_image.shape[1])
+        y_range = np.arange(0, zoom_image.shape[0])
 
         kw_step = dict(color="dodgerblue", where="mid", lw=0.5)
         ax_bottom.step(x_range, hx, **kw_step)
         ax_bottom.fill_between(
-            x_range, hx - hx_err, hx + hx_err, color="dodgerblue", alpha=0.3, step="mid"
+            x_range, hx - hx_err, hx + hx_err,
+            color="dodgerblue", alpha=0.3, step="mid"
         )
-
         ax_right.step(hy, y_range, **kw_step)
         ax_right.fill_betweenx(
-            y_range, hy - hy_err, hy + hy_err, color="dodgerblue", alpha=0.3, step="mid"
+            y_range, hy - hy_err, hy + hy_err,
+            color="dodgerblue", alpha=0.3, step="mid"
         )
 
-        # Background level (from annulus median) for reference.
-        # Note: the plotted profiles are mean cuts through the stamp and include
-        # the source, so they will not sit on the background line near the PSF.
-        # This line reflects the local annulus-median background used for AP.
+        bias_applied = False
         try:
-            ann = CircularAnnulus((cx, cy), r_in=float(annulusIN), r_out=float(annulusOUT))
-            # Match the measurement path: use unweighted annulus pixels.
+            ann = CircularAnnulus(
+                (cx, cy), r_in=float(annulusIN), r_out=float(annulusOUT)
+            )
             ann_mask = ann.to_mask(method="center")
             bkg_pix = ann_mask.get_values(image)
-            # Match `Aperture.measure()` behavior: it treats exact zeros in the
-            # image as bad-pixel flags by mapping them to NaN upstream.
             bkg_pix = bkg_pix[np.isfinite(bkg_pix) & (bkg_pix != 0.0)]
             if bkg_pix.size > 0:
                 bkg_level_raw = float(np.median(bkg_pix))
@@ -929,28 +950,27 @@ class Aperture:
                     )
                 )
                 bkg_level_used = (
-                    max(bkg_level_raw, 0.0) if (enforce_nn and np.isfinite(bkg_level_raw)) else bkg_level_raw
+                    max(bkg_level_raw, 0.0)
+                    if (enforce_nn and np.isfinite(bkg_level_raw))
+                    else bkg_level_raw
                 )
-
-                kw_bkg_used = dict(color="#FFA500", lw=0.9, ls="--", alpha=0.95)
-                ax_bottom.axhline(bkg_level_used, **kw_bkg_used)
-                ax_right.axvline(bkg_level_used, **kw_bkg_used)
-                # If flooring is enabled and changed the value, show the raw level too.
+                kw_bkg = dict(color="#FFA500", lw=0.9, ls="--", alpha=0.95)
+                ax_bottom.axhline(bkg_level_used, **kw_bkg)
+                ax_right.axvline(bkg_level_used, **kw_bkg)
                 if enforce_nn and np.isfinite(bkg_level_raw) and bkg_level_raw < 0:
+                    bias_applied = True
                     kw_bkg_raw = dict(color="#FFA500", lw=0.7, ls=":", alpha=0.8)
                     ax_bottom.axhline(bkg_level_raw, **kw_bkg_raw)
                     ax_right.axvline(bkg_level_raw, **kw_bkg_raw)
-                
         except Exception:
             pass
 
         ax_bottom.set_xlabel("X position (pixels)")
-        ax_bottom.set_ylabel(r"Counts [$e^-$]")
-        ax_right.set_xlabel(r"Counts [$e^-$]")
+        ylabel = "ADU +BIAS" if bias_applied else "ADU"
+        ax_bottom.set_ylabel(ylabel)
+        ax_right.set_xlabel(ylabel)
         ax_right.yaxis.set_label_position("right")
         ax_right.yaxis.tick_right()
-        ax_bottom.set_xlim(ax_main.get_xlim())
-        ax_right.set_ylim(ax_main.get_ylim())
 
         label = base if saveTarget else index
         save_name = os.path.join(write_dir, f"Aperture_{label}.png")
@@ -1539,12 +1559,10 @@ class Aperture:
             # Plot all profiles; grey-out rejected ones.
             for idx, prof in profiles_map.items():
                 in_kept = idx in kept_set
-                ax1.plot(
-                    radii / fwhm,
-                    prof,
-                    color=None if in_kept else "grey",
-                    alpha=1.0 if in_kept else 0.3,
-                )
+                if in_kept:
+                    ax1.plot(radii / fwhm, prof, color="tab:blue", alpha=0.6, lw=0.8)
+                else:
+                    ax1.plot(radii / fwhm, prof, color="grey", alpha=0.3, lw=0.5)
 
             if fine_r is not None:
                 ax1.plot(fine_r / fwhm, fine_profile, ls="--", color="black")

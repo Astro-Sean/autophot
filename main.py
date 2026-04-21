@@ -213,7 +213,6 @@ def _heuristic_filter_mapping(raw_filter: str) -> str:
         zp -> z
         Sloan_g -> g
     """
-    import re
     f = str(raw_filter).strip().lower().replace(" ", "").replace("-", "_")
     
     # Standard survey-style suffixes (ZTF, Pan-STARRS style)
@@ -275,9 +274,6 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
     trim_info : dict
         Information about trimming performed
     """
-    import numpy as np
-    from astropy.wcs import WCS
-
     logging.info(f"NaN boundary trimming: image shape {image_data.shape}")
     nan_count = np.sum(np.isnan(image_data))
     total_pixels = image_data.size
@@ -358,10 +354,9 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
 
     logging.info(f"NaN boundary trimming: final bounds x=[{x_min},{x_max}], y=[{y_min},{y_max}]")
     logging.info(f"NaN boundary trimming: original shape {image_data.shape}, will trim to ({y_max - y_min + 1}, {x_max - x_min + 1})")
-    
+
     # Perform trim using Cutout2D for proper WCS handling
-    from astropy.nddata import Cutout2D
-    
+
     # Create WCS from header
     try:
         wcs = WCS(header)
@@ -442,8 +437,6 @@ def run_photometry():
     # ---------------------------------------------------------------------
     # Check for optional Astromatic tools
     # ---------------------------------------------------------------------
-    import shutil
-    import logging
     logger = logging.getLogger(__name__)
 
     # Check which tools are available
@@ -473,9 +466,6 @@ def run_photometry():
     # ---------------------------------------------------------------------
     # CLI parsing (must happen before heavy imports)
     # ---------------------------------------------------------------------
-    import argparse
-    import re
-    from pathlib import Path
 
     def _print_default_yaml_help() -> None:
         """
@@ -678,11 +668,6 @@ def run_photometry():
             .replace("_APT", "")
             .replace("_ERROR", "")
         )
-        wdir = input_yaml["fits_dir"]
-        output_dir_suffix = "_" + input_yaml["outdir_name"]
-        fits_basename = os.path.basename(wdir)
-        reduced_dir_name = fits_basename + output_dir_suffix
-        new_output_dir = os.path.join(os.path.dirname(wdir), reduced_dir_name)
         cur_dir = os.path.join(new_output_dir, base)
         # Standardized per-image outputs (must include the FITS filename stem).
         # In template-preparation mode, the completion marker is the generated
@@ -1077,8 +1062,8 @@ def run_photometry():
                 if date_key and date_key != "not_given_by_user" and date_key in header:
                     date_iso = header[date_key]
                     date_mjd = convert_to_mjd_astropy(date_iso)
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning(f"Failed to convert date from header key {date_key}: {e}")
         if telescope == "MPI-2.2" and "TDP-MID" in header:
             date_mjd = header["TDP-MID"]
             logging.info("MPI-2.2MM detected (TDP-MID); MJD: %.3f", date_mjd)
@@ -1303,8 +1288,8 @@ def run_photometry():
                                 break
                     if m is not None:
                         imageFilter = m
-            except Exception:
-                pass
+            except Exception as e:
+                logging.warning(f"Failed to detect filter from folder name: {e}")
         else:
             open_filter = False
             found_correct_key = False
@@ -1906,8 +1891,8 @@ def run_photometry():
                         med_rms = float(np.nanmedian(background_rms))
                         if np.isfinite(med_rms) and med_rms >= float(bg_rms_min):
                             is_crowded = True
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.debug(f"Failed to check crowded field condition: {e}")
                 if is_crowded:
                     input_yaml.setdefault("wcs", {})["profile"] = "crowded"
                     logging.info(
@@ -2028,8 +2013,8 @@ def run_photometry():
                         logging.info(
                             "apply_solved_to_fits=False: keeping original WCS in FITS; updated pixel_scale in config only"
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logging.warning(f"Failed to update pixel_scale from solved WCS: {e}")
                 break  # Exits after one successful attempt.
         # Use current header (solved or original) for rest of pipeline
         imageWCS = get_wcs(header)
@@ -2198,6 +2183,12 @@ def run_photometry():
         background_surface = np.asarray(result["background"], dtype=np.float32)
         background_rms = np.asarray(result["background_rms"], dtype=np.float32)
         defects_mask = np.asarray(result["defects_mask"], dtype=bool)
+
+        # Cache background results for potential reuse after template subtraction
+        fpath_before_subtraction = fpath
+        background_surface_cached = background_surface.copy()
+        background_rms_cached = background_rms.copy()
+        defects_mask_cached = defects_mask.copy()
 
         # Subtracts the background surface from the image.
         # Background subtraction in-place; free the surface immediately after use.
@@ -2491,13 +2482,13 @@ def run_photometry():
                                     "template_subtraction.subpixel_refine_before_subtraction, "
                                     "or use alignment_method 'astroalign' / 'swarp'."
                                 )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.warning(f"Template subpixel refine check failed: {e}")
 
-                except Exception:
+                except Exception as e:
+                    log_exception(e, "Template alignment failed")
                     template_available = False
                     input_yaml["template_subtraction"]["do_subtraction"] = False
-                    pass
 
             except Exception as e:
                 log_exception(e, "Template subtraction failed")
@@ -2510,29 +2501,30 @@ def run_photometry():
         image, header = get_image_and_header(fpath)
         imageWCS = get_wcs(header)
 
-        result = bg_remover.remove(
-            image,
-            header=header,
-            plot=False,
-            fwhm=ImageFWHM,
-            galaxies=variable_sources,
-            mask_simbad_galaxies=True,
-        )
+        # Reuse cached background results if fpath hasn't changed
+        if fpath == fpath_before_subtraction:
+            background_surface = background_surface_cached.copy()
+            background_rms = background_rms_cached.copy()
+            defects_mask = defects_mask_cached.copy()
+            logging.info("Reusing cached background results (fpath unchanged)")
+        else:
+            result = bg_remover.remove(
+                image,
+                header=header,
+                plot=False,
+                fwhm=ImageFWHM,
+                galaxies=variable_sources,
+                mask_simbad_galaxies=True,
+            )
 
-        background_surface = np.asarray(result["background"], dtype=np.float32)
-        background_rms = np.asarray(result["background_rms"], dtype=np.float32)
-        defects_mask = np.asarray(result["defects_mask"], dtype=bool)
+            background_surface = np.asarray(result["background"], dtype=np.float32)
+            background_rms = np.asarray(result["background_rms"], dtype=np.float32)
+            defects_mask = np.asarray(result["defects_mask"], dtype=bool)
 
         # Save the background_rms array with '.weight' inserted before the suffix
         base, ext = os.path.splitext(fpath)
         weight_fpath = f"{base}.weight{ext}"
         safe_fits_write(weight_fpath, background_rms, header)
-
-        target_x_pix, target_y_pix = update_target_pixel_coords(
-            input_yaml, imageWCS, index
-        )
-        input_yaml["target_x_pix"] = target_x_pix
-        input_yaml["target_y_pix"] = target_y_pix
 
         # =============================================================================
         #     Get a Reference catalog
@@ -2601,25 +2593,25 @@ def run_photometry():
         # =============================================================================
         # Runs SExtractor to measure the image FWHM and detect sources.
 
+        def _run_sextractor_two_pass(config, fpath, **kwargs):
+            """Run SExtractor with optional FWHM refinement pass."""
+            fwhm, sources, scale = SExtractorWrapper(config=config).run(fpath, **kwargs)
+            if np.isfinite(fwhm):
+                fwhm, sources, scale = SExtractorWrapper(config=config).run(
+                    fpath, use_FWHM=fwhm, **kwargs
+                )
+            return fwhm, sources, scale
+
         try:
             sex_crowded = input_yaml.get("photometry", {}).get("crowded_field", False)
-            ImageFWHM, FWHMSources, scale = SExtractorWrapper(config=input_yaml).run(
-                fpath,
+            ImageFWHM, FWHMSources, scale = _run_sextractor_two_pass(
+                config=input_yaml,
+                fpath=fpath,
                 pixel_scale=pixel_scale,
                 masked_sources=variable_sources,
                 weight_path=weight_fpath,
                 crowded=sex_crowded,
             )
-            # Only run refined SExtractor call if first call succeeded
-            if np.isfinite(ImageFWHM):
-                ImageFWHM, FWHMSources, scale = SExtractorWrapper(config=input_yaml).run(
-                    fpath,
-                    pixel_scale=pixel_scale,
-                    masked_sources=variable_sources,
-                    weight_path=weight_fpath,
-                    use_FWHM=ImageFWHM,
-                    crowded=sex_crowded,
-                )
         except Exception as e:
             log_exception(e, "Issue with SExtractor")
 
@@ -2845,11 +2837,6 @@ def run_photometry():
 
         # Updates the input YAML with the FWHM and scale.
         imageWCS = get_wcs(header)
-        target_x_pix, target_y_pix = update_target_pixel_coords(
-            input_yaml, imageWCS, index
-        )
-        input_yaml["target_x_pix"] = target_x_pix
-        input_yaml["target_y_pix"] = target_y_pix
 
         # =============================================================================
         # PSF Model Building
@@ -3113,8 +3100,7 @@ def run_photometry():
             and (not do_aperture_ONLY or prepare_template)
         ):
             try:
-                image_orig = get_image(science_path_original)
-                header_orig = get_header(science_path_original)
+                image_orig, header_orig = get_image_and_header(science_path_original)
                 result_orig = bg_remover.remove(
                     image_orig,
                     header=header_orig,
@@ -3463,10 +3449,11 @@ def run_photometry():
 
             # If the weight map exists, save it with the new basename
             if os.path.exists(weight_fpath):
+                weight_image, weight_header = get_image_and_header(weight_fpath)
                 safe_fits_write(
                     os.path.join(cur_dir, newWeightBasename),
-                    get_image(weight_fpath),
-                    get_header(weight_fpath),
+                    weight_image,
+                    weight_header,
                 )
                 logging.getLogger(__name__).debug(
                     "Weight map written: %s",
@@ -3523,8 +3510,7 @@ def run_photometry():
                 else:
 
                     # Loads the science image.
-                    science_image = get_image(fpath)
-                    science_header = get_header(fpath)
+                    science_image, science_header = get_image_and_header(fpath)
                     science_wcs = get_wcs(science_header)
                     # Gets the image shape and center.
                     ny, nx = science_image.shape
@@ -3556,8 +3542,7 @@ def run_photometry():
                     )
                     science_header.update(science_cutout.wcs.to_header(relax=True), relax=True)
                     # Loads the template image.
-                    template_image = get_image(templateFpath)
-                    template_header = get_header(templateFpath)
+                    template_image, template_header = get_image_and_header(templateFpath)
                     template_wcs = get_wcs(template_header)
                     # Creates a cutout for the template image.
                     template_cutout = Cutout2D(
@@ -3583,8 +3568,7 @@ def run_photometry():
                     )
 
             # Reloads the image and header.
-            image = get_image(fpath)
-            header = get_header(fpath)
+            image, header = get_image_and_header(fpath)
             imageWCS = get_wcs(header)
             height, width = image.shape
 
@@ -3792,8 +3776,7 @@ def run_photometry():
             ConsistentSources = None
             stamp_loc = None
 
-            template_image = get_image(templateFpath)
-            template_header = get_header(templateFpath)
+            template_image, template_header = get_image_and_header(templateFpath)
 
             # Build a KDTree for masked pixels for efficient nearest-neighbor search
             masked_image = (defects_mask) | (image == 0) | (template_image == 0)
@@ -4141,8 +4124,7 @@ def run_photometry():
                 and df_zogy_template is not None
                 and len(df_zogy_science) >= 5
             ):
-                template_image = get_image(templateFpath)
-                template_header = get_header(templateFpath)
+                template_image, template_header = get_image_and_header(templateFpath)
                 use_independent_template_psf = input_yaml["template_subtraction"].get(
                     "zogy_template_psf_independent", True
                 )
@@ -4319,9 +4301,6 @@ def run_photometry():
             input_yaml["target_ra"],
             input_yaml["target_dec"],
             index,
-        )
-        target_x_pix, target_y_pix = update_target_pixel_coords(
-            input_yaml, imageWCS, index
         )
 
         # Prevent downstream local background failures when WCS maps the
@@ -5279,136 +5258,130 @@ def run_photometry():
             or TargetPosition.at[idx, "SNR"] < 5
             or get_LimitingMagnitude
         ):
-            if (
-                TargetPosition.at[idx, "threshold"] < 5
-                or TargetPosition.at[idx, "SNR"] < 5
-                or get_LimitingMagnitude
-            ):
-                snr_val = TargetPosition.at[idx, "SNR"]
-                logging.info(
-                    border_msg("Getting detection limits for transient neighborhood")
-                )
-                # Limits instance already created earlier for get_cutout
-                try:
-                    # Use the full image for PSF calibration to avoid coordinate conversion issues
-                    image_for_limiting = image  # Always use full image, not cutout
-                    # If we already have the local-fit cutout, don't re-cut it again
-                    # (Limits.get_cutout uses input_yaml target pixel coords which are
-                    # full-frame and will be out-of-bounds on the cutout array).
-                    if target_cutout is not None:
-                        expandedCutout = np.asarray(target_cutout, dtype=float)
-                    else:
-                        # Gets the expanded cutout of the image.
-                        expandedCutout = getDetectionLimits.get_cutout(image=image_for_limiting)
-                    if expandedCutout is None:
-                        logging.warning(
-                            "getCutout returned None; skipping detection limits."
+            snr_val = TargetPosition.at[idx, "SNR"]
+            logging.info(
+                border_msg("Getting detection limits for transient neighborhood")
+            )
+            # Limits instance already created earlier for get_cutout
+            try:
+                # Use the full image for PSF calibration to avoid coordinate conversion issues
+                image_for_limiting = image  # Always use full image, not cutout
+                # If we already have the local-fit cutout, don't re-cut it again
+                # (Limits.get_cutout uses input_yaml target pixel coords which are
+                # full-frame and will be out-of-bounds on the cutout array).
+                if target_cutout is not None:
+                    expandedCutout = np.asarray(target_cutout, dtype=float)
+                else:
+                    # Gets the expanded cutout of the image.
+                    expandedCutout = getDetectionLimits.get_cutout(image=image_for_limiting)
+                if expandedCutout is None:
+                    logging.warning(
+                        "getCutout returned None; skipping detection limits."
+                    )
+                    InjectedLimit = np.nan
+                else:
+                    lim_cfg = input_yaml.get("limiting_magnitude") or {}
+                    beta_limit = float(lim_cfg.get("beta_limit", 0.5))
+                    raw_initial_guess = lim_cfg.get("initial_guess", np.nan)
+                    try:
+                        initial_guess = (
+                            np.nan
+                            if raw_initial_guess is None
+                            else float(raw_initial_guess)
                         )
-                        InjectedLimit = np.nan
-                    else:
-                        lim_cfg = input_yaml.get("limiting_magnitude") or {}
-                        beta_limit = float(lim_cfg.get("beta_limit", 0.5))
-                        raw_initial_guess = lim_cfg.get("initial_guess", np.nan)
-                        try:
-                            initial_guess = (
-                                np.nan
-                                if raw_initial_guess is None
-                                else float(raw_initial_guess)
+                    except Exception:
+                        initial_guess = np.nan
+                    try:
+                        beta_sigma = float(
+                            flux_upper_limit(
+                                n=3.0, sigma=1.0, beta_p=float(beta_limit)
                             )
-                        except Exception:
-                            initial_guess = np.nan
-                        try:
-                            beta_sigma = float(
-                                flux_upper_limit(
-                                    n=3.0, sigma=1.0, beta_p=float(beta_limit)
-                                )
-                            )
-                            beta_sigma_str = f"{beta_sigma:.2f}"
-                        except Exception:
-                            beta_sigma_str = "unknown"
-                        logging.info(
-                            "Limiting magnitude config:\n"
-                            "\tbeta_limit=%g (~%s sigma; n=3 beta formalism)\n"
-                            "\tdetection_limit=%r\n"
-                            "\tcompleteness_target=%.2f\n"
-                            "\trecovery_method=%s",
-                            float(beta_limit),
-                            beta_sigma_str,
-                            lim_cfg.get("detection_limit", None),
-                            float(lim_cfg.get("completeness_target", 0.5)),
-                            str(lim_cfg.get("recovery_method", "PSF")),
                         )
-                        detection_snr_limit = lim_cfg.get("detection_limit", None)
-                        # Calculates the injected detection limit.
-                        if epsf_model:
-                            # Use a zeropoint consistent with the recovery/photometry method.
-                            # - AP recovery -> AP zeropoint (if available)
-                            # - PSF/EMCEE recovery -> PSF zeropoint preferred, else fall back to AP
-                            rec_method = str(lim_cfg.get("recovery_method", "PSF")).strip().upper()
-                            if rec_method in {"MCMC", "EMCEE"}:
-                                rec_method = "EMCEE"
-                            if rec_method in {"PSF", "EMCEE"}:
-                                if "PSF" in image_zeropoint:
-                                    zeropoint = image_zeropoint["PSF"]["zeropoint"]
-                                elif "AP" in image_zeropoint:
-                                    zeropoint = image_zeropoint["AP"]["zeropoint"]
-                                else:
-                                    zeropoint = None
+                        beta_sigma_str = f"{beta_sigma:.2f}"
+                    except Exception:
+                        beta_sigma_str = "unknown"
+                    logging.info(
+                        "Limiting magnitude config:\n"
+                        "\tbeta_limit=%g (~%s sigma; n=3 beta formalism)\n"
+                        "\tdetection_limit=%r\n"
+                        "\tcompleteness_target=%.2f\n"
+                        "\trecovery_method=%s",
+                        float(beta_limit),
+                        beta_sigma_str,
+                        lim_cfg.get("detection_limit", None),
+                        float(lim_cfg.get("completeness_target", 0.5)),
+                        str(lim_cfg.get("recovery_method", "PSF")),
+                    )
+                    detection_snr_limit = lim_cfg.get("detection_limit", None)
+                    # Calculates the injected detection limit.
+                    if epsf_model:
+                        # Use a zeropoint consistent with the recovery/photometry method.
+                        # - AP recovery -> AP zeropoint (if available)
+                        # - PSF/EMCEE recovery -> PSF zeropoint preferred, else fall back to AP
+                        rec_method = str(lim_cfg.get("recovery_method", "PSF")).strip().upper()
+                        if rec_method in {"MCMC", "EMCEE"}:
+                            rec_method = "EMCEE"
+                        if rec_method in {"PSF", "EMCEE"}:
+                            if "PSF" in image_zeropoint:
+                                zeropoint = image_zeropoint["PSF"]["zeropoint"]
+                            elif "AP" in image_zeropoint:
+                                zeropoint = image_zeropoint["AP"]["zeropoint"]
                             else:
-                                if "AP" in image_zeropoint:
-                                    zeropoint = image_zeropoint["AP"]["zeropoint"]
-                                elif "PSF" in image_zeropoint:
-                                    zeropoint = image_zeropoint["PSF"]["zeropoint"]
-                                else:
-                                    zeropoint = None
-                            logging.info(
-                                "Performing artificial source injection (beta_limit=%.3f, snr_gate=%s)",
-                                float(beta_limit),
-                                "off" if detection_snr_limit is None else str(detection_snr_limit),
-                            )
-                            # For consistency, run injection directly on the full image
-                            # Always use target position in full image coordinates from input_yaml
-                            # (not the fitted position which may be in cutout coordinates)
-                            lim_pos = (
-                                float(input_yaml["target_x_pix"]),
-                                float(input_yaml["target_y_pix"]),
-                            )
-                            lim_rms = background_rms
+                                zeropoint = None
+                        else:
+                            if "AP" in image_zeropoint:
+                                zeropoint = image_zeropoint["AP"]["zeropoint"]
+                            elif "PSF" in image_zeropoint:
+                                zeropoint = image_zeropoint["PSF"]["zeropoint"]
+                            else:
+                                zeropoint = None
+                        logging.info(
+                            "Performing artificial source injection (beta_limit=%.3f, snr_gate=%s)",
+                            float(beta_limit),
+                            "off" if detection_snr_limit is None else str(detection_snr_limit),
+                        )
+                        # For consistency, run injection directly on the full image
+                        # Use fitted position from TargetPosition instead of expected position
+                        lim_pos = (
+                            float(TargetPosition.at[idx, "x_fit"]),
+                            float(TargetPosition.at[idx, "y_fit"]),
+                        )
+                        lim_rms = background_rms
 
-                            # Keep limiting-magnitude recovery consistent with target AP:
-                            # allow negative annulus medians (do not floor to 0) during
-                            # injection/recovery measurements.
-                            _old_enforce_nn_lim = None
-                            try:
-                                _old_enforce_nn_lim = bool(
-                                    (input_yaml.get("photometry") or {}).get(
-                                        "enforce_nonnegative_local_background", True
-                                    )
+                        # Keep limiting-magnitude recovery consistent with target AP:
+                        # allow negative annulus medians (do not floor to 0) during
+                        # injection/recovery measurements.
+                        _old_enforce_nn_lim = None
+                        try:
+                            _old_enforce_nn_lim = bool(
+                                (input_yaml.get("photometry") or {}).get(
+                                    "enforce_nonnegative_local_background", True
                                 )
-                                if "photometry" not in input_yaml or input_yaml["photometry"] is None:
-                                    input_yaml["photometry"] = {}
-                                input_yaml["photometry"]["enforce_nonnegative_local_background"] = False
-                                InjectedLimit = getDetectionLimits.get_injected_limit(
-                                    image,  # Pass full image instead of cutout
-                                    initialGuess=initial_guess,
-                                    detection_limit=detection_snr_limit,
-                                    detection_cutoff=beta_limit,
-                                    position=lim_pos,
-                                    epsf_model=epsf_model,
-                                    background_rms=lim_rms,
-                                    zeropoint=zeropoint,
-                                    plot=True,
-                                    n_jobs=lim_n_jobs,
-                                    image_zeropoint=image_zeropoint,
-                                )
-                            finally:
-                                if _old_enforce_nn_lim is not None:
-                                    try:
-                                        input_yaml["photometry"][
-                                            "enforce_nonnegative_local_background"
-                                        ] = bool(_old_enforce_nn_lim)
-                                    except Exception:
-                                        pass
+                            )
+                            if "photometry" not in input_yaml or input_yaml["photometry"] is None:
+                                input_yaml["photometry"] = {}
+                            input_yaml["photometry"]["enforce_nonnegative_local_background"] = False
+                            InjectedLimit = getDetectionLimits.get_injected_limit(
+                                image,  # Pass full image instead of cutout
+                                initialGuess=initial_guess,
+                                detection_limit=detection_snr_limit,
+                                detection_cutoff=beta_limit,
+                                position=lim_pos,
+                                epsf_model=epsf_model,
+                                background_rms=lim_rms,
+                                zeropoint=zeropoint,
+                                plot=True,
+                                n_jobs=lim_n_jobs,
+                                image_zeropoint=image_zeropoint,
+                            )
+                        finally:
+                            if _old_enforce_nn_lim is not None:
+                                try:
+                                    input_yaml["photometry"][
+                                        "enforce_nonnegative_local_background"
+                                    ] = bool(_old_enforce_nn_lim)
+                                except Exception:
+                                    pass
                         # The injected limiting magnitude search uses
                         # aperture-based recovery (beta_aperture), so for
                         # consistency we also store aperture-based beta for
@@ -5431,9 +5404,9 @@ def run_photometry():
                                 )
                             except Exception:
                                 pass
-                except Exception as e:
-                    log_exception(e)
-                    InjectedLimit = np.nan
+            except Exception as e:
+                log_exception(e)
+                InjectedLimit = np.nan
 
         # =============================================================================
         # Save Output
@@ -5764,23 +5737,13 @@ def run_photometry():
                 dec=CatalogSources["DEC"].values * u.degree
             )
             
-            # Find duplicates by matching coordinates within 1 arcsecond
-            to_keep = []
-            for i in range(len(CatalogSources)):
-                if i in to_keep:
-                    continue
-                # Check if this source matches any already kept source
-                is_duplicate = False
-                for j in to_keep:
-                    separation = coords[i].separation(coords[j])
-                    if separation.arcsecond < 1.0:  # 1 arcsecond tolerance
-                        is_duplicate = True
-                        break
-                if not is_duplicate:
-                    to_keep.append(i)
-            
-            CatalogSources_dedup = CatalogSources.iloc[to_keep].reset_index(drop=True)
-            logging.info(f"Removed {len(CatalogSources) - len(to_keep)} duplicate sources from CALIB catalog")
+            # Self-match: find each source's nearest neighbour (excluding itself)
+            # This is O(N log N) instead of O(N²) nested loop
+            idx_match, sep, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
+            keep_mask = sep > 1.0 * u.arcsec  # Keep sources with no close neighbour
+            CatalogSources_dedup = CatalogSources[keep_mask].reset_index(drop=True)
+            n_removed = len(CatalogSources) - len(CatalogSources_dedup)
+            logging.info(f"Removed {n_removed} duplicate sources from CALIB catalog")
             
             with open(calibration_file, "a") as file:
                 file.write("\n# Sequence star catalog used for calibration\n")
@@ -5788,8 +5751,7 @@ def run_photometry():
 
         # Redoes the sources if enabled.
         if input_yaml["photometry"].get("redo_sources", False):
-            image = get_image(scienceFpath_cutout)
-            header = get_header(scienceFpath_cutout)
+            image, header = get_image_and_header(scienceFpath_cutout)
             # Gets the WCS information from the header.
             imageWCS = get_wcs(header)
             # Converts world coordinates of isolated sources to pixel coordinates.

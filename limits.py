@@ -15,9 +15,15 @@ import logging
 import os
 import sys
 import time
+import copy
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from functools import lru_cache
+
+# ---------------------------------------------------------------------------
+# Third-party
+# ---------------------------------------------------------------------------
+import pandas as pd
 
 
 @contextmanager
@@ -30,11 +36,34 @@ def _pool_or_serial(n_jobs: int):
         yield pool
 
 
+@lru_cache(maxsize=512)
+def _flux_for_mag_cached(m: float, counts_ref: float, exposure_time: float) -> float:
+    """Cached version of flux_for_mag for performance optimization."""
+    flux_target = 10.0 ** (-0.4 * m)
+    counts_target = flux_target * exposure_time
+    return counts_target / counts_ref
+
+
+def _compute_p_det(df: pd.DataFrame, beta_n: float) -> pd.Series:
+    """Compute detection probability (beta) for each site."""
+    def _beta_row(row):
+        if (np.isfinite(row["flux_AP"]) and row["flux_AP"] > 0
+                and np.isfinite(row["noiseSky"]) and row["noiseSky"] > 0
+                and np.isfinite(row["area"]) and row["area"] > 0):
+            return beta_aperture(
+                n=beta_n,
+                flux_aperture=row["flux_AP"],
+                sigma=row["noiseSky"],
+                npix=row["area"],
+            )
+        return 0.0
+    return df.apply(_beta_row, axis=1)
+
+
 # ---------------------------------------------------------------------------
 # Third-party
 # ---------------------------------------------------------------------------
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from scipy.optimize import curve_fit
@@ -139,15 +168,21 @@ def _injection_worker(args):
 
         # noiseSky from Aperture.measure() is per-pixel RMS (not total noise)
         # beta_aperture uses sigma * sqrt(npix) internally to compute total noise
+        # Validate noiseSky first before computing beta_p
+        noise_sky = float(mres["noiseSky"].iloc[0])
+        flux_ap = float(mres["flux_AP"].iloc[0])
+        area_px = float(mres["area"].iloc[0])
+
+        if not (np.isfinite(noise_sky) and noise_sky > 0):
+            logger.warning("Invalid noiseSky=%.4e; returning non-detection.", noise_sky)
+            return False, 0.0, np.nan
+
         beta_p = beta_aperture(
             n=beta_n,
-            flux_aperture=float(mres["flux_AP"].iloc[0]),
-            sigma=float(mres["noiseSky"].iloc[0]),
-            npix=float(mres["area"].iloc[0]),
+            flux_aperture=flux_ap,
+            sigma=noise_sky,
+            npix=area_px,
         )
-        # Debug assertion to verify noiseSky units
-        assert np.isfinite(mres["noiseSky"].iloc[0]) and mres["noiseSky"].iloc[0] > 0, \
-            f"Invalid noiseSky: {mres['noiseSky'].iloc[0]} (must be finite and positive per-pixel RMS)"
         det_beta = beta_p >= DETECTION_BETA_THRESH
 
         # Detection SNR gate: either aperture SNR (legacy) or PSF-fit SNR.
@@ -744,10 +779,11 @@ class Limits:
                     # flux_guess ~= k * sigma_sky * sqrt(Npix).
                     # This is more stable than using a percentile of random annulus mags,
                     # especially when the background mean is shifted (bias) but scatter is unchanged.
+                    # Start at 10 sigma to ensure we're in the detectable regime before searching fainter.
                     try:
-                        guess_k = float(lim_cfg.get("initial_guess_sigma_mult", 5.0))
+                        guess_k = float(lim_cfg.get("initial_guess_sigma_mult", 10.0))
                     except Exception:
-                        guess_k = 5.0
+                        guess_k = 10.0
                     probe_n = int((lim_cfg.get("initial_guess_n_samples", 24)))
                     probe_n = max(8, min(probe_n, 72))
                     # Use r_base for probe radius
@@ -809,8 +845,6 @@ class Limits:
             else:
                 oversampling = 1
 
-            logger.info(f"PSF oversampling factor: {oversampling}x")
-
             # Grids will be constructed after final cutout shape is known
 
             # =================================================================
@@ -819,20 +853,17 @@ class Limits:
             # Use cutout center for PSF evaluation (grid is cutout-sized)
             # Target is always at the centre of the cutout by construction.
             cx, cy = cutout_cx, cutout_cy
-            # Create pixel-resolution grid (always needed for injection)
-            gridx, gridy = np.meshgrid(np.arange(W), np.arange(H))
-            # Create oversampled grid for PSF evaluation
+            # Create oversampled grid for PSF evaluation (will downsample later)
             if oversampling > 1:
                 gx_os = np.linspace(0, W - 1, W * oversampling)
                 gy_os = np.linspace(0, H - 1, H * oversampling)
                 gridx_os, gridy_os = np.meshgrid(gx_os, gy_os)
             else:
+                # Pixel-resolution grid for injection (will be reused after final cutout)
+                gridx, gridy = np.meshgrid(np.arange(W), np.arange(H))
                 gridx_os, gridy_os = gridx, gridy
             psf_os = epsf_model.evaluate(
                 x=gridx_os, y=gridy_os, flux=1.0, x_0=cx, y_0=cy
-            )
-            logger.info(
-                f"Oversampled PSF shape={psf_os.shape}, " f"sum={np.nansum(psf_os):.4f}"
             )
 
             psf_unit = (
@@ -857,8 +888,6 @@ class Limits:
             # Use cutout-sized blank canvas for PSF calibration (no background contamination)
             calib_H, calib_W = H, W
             calib_cx, calib_cy = cx, cy  # Cutout center
-            logger.info(f"Using cutout for PSF calibration: shape=({calib_H},{calib_W}), center=({calib_cx:.1f},{calib_cy:.1f})")
-            
             blank = np.zeros((calib_H, calib_W), dtype=float)
             # Place PSF at the center of the blank canvas
             psf_h, psf_w = psf_unit.shape
@@ -866,12 +895,7 @@ class Limits:
             y_end = y_start + psf_h
             x_start = int(calib_cx - psf_w // 2)
             x_end = x_start + psf_w
-            
-            logger.info(
-                f"PSF placement: blank shape=({calib_H},{calib_W}), PSF shape=({psf_h},{psf_w}), "
-                f"center=({calib_cx:.1f},{calib_cy:.1f}), placement=({x_start}:{x_end}, {y_start}:{y_end})"
-            )
-            
+
             # Ensure PSF fits within blank canvas
             if y_start < 0 or y_end > calib_H or x_start < 0 or x_end > calib_W:
                 # Fallback: clamp coordinates to canvas bounds
@@ -881,14 +905,7 @@ class Limits:
                 x_start = int(np.clip(x_start, 0, calib_W - psf_w))
                 x_end = x_start + psf_w
             blank[y_start:y_end, x_start:x_end] = psf_unit
-            
-            # Verify PSF was placed correctly
-            psf_region = blank[y_start:y_end, x_start:x_end]
-            logger.info(
-                f"PSF placement verification: region sum={np.sum(psf_region):.4f}, "
-                f"blank sum={np.sum(blank):.4f}, PSF at correct location={np.sum(psf_region) > 0}"
-            )
-            
+
             psf_ap = Aperture(input_yaml=local_input_yaml, image=blank)
             psf_meas = psf_ap.measure(
                 pd.DataFrame({"x_pix": [cutout_cx], "y_pix": [cutout_cy]}),  # Use same centre as PSF evaluation
@@ -899,10 +916,11 @@ class Limits:
             counts_ref = float(psf_meas["counts_AP"].iloc[0])  # aperture counts (same units as image data)
             
             # Guard: check if calibration failed
-            assert counts_ref > 0 and F_ref > 0, f"Invalid calibration: counts_ref={counts_ref}, F_ref={F_ref}"
-            if not np.isfinite(counts_ref) or counts_ref <= 0:
+            if not (np.isfinite(counts_ref) and counts_ref > 0
+                    and np.isfinite(F_ref) and F_ref > 0):
                 logger.error(
-                    f"PSF calibration failed: counts_ref={counts_ref:.4e} (must be finite and positive). "
+                    f"PSF calibration failed: counts_ref={counts_ref:.4e}, F_ref={F_ref:.4e} "
+                    f"(both must be finite and positive). "
                     f"PSF sum={np.sum(psf_unit):.4e}, PSF placement=({x_start}:{x_end}, {y_start}:{y_end})"
                 )
                 return np.nan
@@ -910,10 +928,6 @@ class Limits:
             # DIAGNOSTIC: Check if PSF flux parameter represents total integrated flux
             # psf_unit is normalized to sum=1.0, so total flux should be 1.0
             psf_total_sum = np.sum(psf_unit)
-            logger.info(
-                f"PSF flux parameter interpretation check: psf_unit sum={psf_total_sum:.4f}, "
-                f"aperture counts={counts_ref:.4f}, ratio={counts_ref/psf_total_sum:.4f}"
-            )
 
             exposure_time = float(self.input_yaml.get("exposure_time", 1.0))
             if exposure_time <= 0:
@@ -926,55 +940,20 @@ class Limits:
             m_ref_check = -2.5 * np.log10(1.0 / exposure_time)  # magnitude of 1 count per second
             # Also compute standard instrumental magnitude for logging
             m_ref = mag(F_ref)
-            
-            logger.info(
-                f"PSF calibration: flux_param=1.0 -> 1 total count, "
-                f"m_ref={m_ref_check:.3f} (exposure_time={exposure_time:.1f}s)\n"
-                f"  aperture efficiency (counts_ref/1.0) = {counts_ref:.4f}\n"
-                f"  measured: F_ref={F_ref:.4e} ADU/s, counts_ref={counts_ref:.4e}, "
-                f"m_ref={m_ref:.3f}"
-            )
 
             # Memoised so repeated calls at the same magnitude are free.
-            # Note: lru_cache removed because this is a closure capturing mutable variables
+            # Uses cached module-level function for performance
             def flux_for_mag(m: float) -> float:
-                """
-                Return ePSF flux parameter to inject for instrumental magnitude m.
-
-                Key insight: ePSF flux parameter is total integrated flux.
-                flux=1.0 means PSF sum = 1.0 total count (in the same units as the image data).
-
-                Derivation:
-                    m     = -2.5*log10(flux_adu_per_s)  [instrumental magnitude, flux in ADU/s]
-                    flux_target_adu_per_s = 10^(-0.4*m)  [ADU/s for target mag]
-                    counts_target = flux_target_adu_per_s * exposure_time  [total counts]
-
-                    For flux_param=1.0, aperture measures counts_ref (total counts).
-                    Since scaling is linear: counts = flux_param * counts_ref
-
-                    flux_param = counts_target / counts_ref
-                               = (flux_target_adu_per_s * t) / counts_ref
-                               = 10^(-0.4*m) * (t / counts_ref)
-                """
-                flux_target_adu_per_s = 10.0 ** (-0.4 * m)  # ADU/s
-                counts_target = flux_target_adu_per_s * exposure_time  # total counts
-                return counts_target / counts_ref
+                """Return ePSF flux parameter to inject for instrumental magnitude m."""
+                return _flux_for_mag_cached(m, counts_ref, exposure_time)
 
             # DIAGNOSTIC: verify calibration round-trip
             # Use counts_ref/exposure_time to get ADU/s, consistent with pipeline convention m = -2.5 * log10(ADU/s)
             m_roundtrip = -2.5 * np.log10(counts_ref / exposure_time)  # instrumental mag from counts_ref
             F_roundtrip = flux_for_mag(m_roundtrip)
-            logger.info(
-                "Calibration round-trip check: m_roundtrip=%.4f, flux_for_mag(m_roundtrip)=%.6f (should be ~1.0)",
-                m_roundtrip, F_roundtrip
-            )
 
             # Log what flux is being injected at the initial guess
             F_at_guess = flux_for_mag(initialGuess)
-            logger.info(
-                "At initialGuess=%.3f: flux_param=%.4e, counts_injected=%.4e, counts_ref=%.4e",
-                initialGuess, F_at_guess, F_at_guess * counts_ref, counts_ref
-            )
 
             # =================================================================
             # Choose quiet injection sites
@@ -1053,21 +1032,7 @@ class Limits:
                     background_rms=cutout_rms,
                     verbose=0,
                 )
-                p_det = df.apply(
-                    lambda row: (
-                        beta_aperture(
-                            n=beta_n,
-                            flux_aperture=row["flux_AP"],
-                            sigma=row["noiseSky"],
-                            npix=row["area"],
-                        )
-                        if (np.isfinite(row["flux_AP"]) and row["flux_AP"] > 0
-                            and np.isfinite(row["noiseSky"]) and row["noiseSky"] > 0
-                            and np.isfinite(row["area"]) and row["area"] > 0)
-                        else 0.0  # noise fluctuation → treat as quiet
-                    ),
-                    axis=1,
-                )
+                p_det = _compute_p_det(df, beta_n)
                 # Diagnostic logging for quiet point selection
                 logger.info(
                     "Quiet point selection: n_sites=%d, p_det_range=[%.4f, %.4f], thresh=%.4f, "
@@ -1169,21 +1134,7 @@ class Limits:
                             background_rms=cutout_rms,
                             verbose=0,
                         )
-                        p_det = df.apply(
-                            lambda row: (
-                                beta_aperture(
-                                    n=beta_n,
-                                    flux_aperture=row["flux_AP"],
-                                    sigma=row["noiseSky"],
-                                    npix=row["area"],
-                                )
-                                if (np.isfinite(row["flux_AP"]) and row["flux_AP"] > 0
-                                    and np.isfinite(row["noiseSky"]) and row["noiseSky"] > 0
-                                    and np.isfinite(row["area"]) and row["area"] > 0)
-                                else 0.0  # noise fluctuation → treat as quiet
-                            ),
-                            axis=1,
-                        )
+                        p_det = _compute_p_det(df, beta_n)
                         if use_quiet_sites:
                             injection_df = df[p_det < DETECTION_BETA_THRESH].copy()
                         else:
@@ -1252,9 +1203,9 @@ class Limits:
             if len(injection_df) > sourceNum:
                 injection_df = injection_df.sample(sourceNum).reset_index(drop=True)
 
-            # Recompute grids after final cutout shape is known
+            # Compute grids after final cutout shape is known (compute once, reuse everywhere)
             H_final, W_final = cutout.shape
-            gridx, gridy = np.meshgrid(np.arange(W_final), np.arange(H_final))
+            gridy, gridx = np.indices((H_final, W_final))
             
             # Recompute r_max and r_base after final cutout shape is known
             margin_r = float(np.ceil(fwhm_px))
@@ -1316,10 +1267,15 @@ class Limits:
                 dy = local_rng.random((n_sites, redo)) - 0.5
                 F = flux_for_mag(m)
 
+                # Vectorized jitter: build arrays directly instead of nested list comprehension
+                k_idx, j_idx = np.divmod(np.arange(n_sites * redo), redo)
+                x_inj_all = x_pix_arr[k_idx] + dx[k_idx, j_idx]
+                y_inj_all = y_pix_arr[k_idx] + dy[k_idx, j_idx]
+
                 tasks = [
                     (
-                        x_pix_arr[k] + dx[k, j],
-                        y_pix_arr[k] + dy[k, j],
+                        x_inj_all[n],
+                        y_inj_all[n],
                         F,
                         gridx,
                         gridy,
@@ -1332,8 +1288,7 @@ class Limits:
                         DETECTION_BETA_THRESH,
                         recovery_method,
                     )
-                    for k in range(n_sites)
-                    for j in range(redo)
+                    for n in range(len(x_inj_all))
                 ]
 
                 if pool is not None:
@@ -1368,13 +1323,23 @@ class Limits:
                 # ---- Bracket phase ------------------------------------------
                 step = 0.5
                 max_steps = 30
-                # Start at artificially bright magnitude to ensure we find the detected end
-                m_bright = -10.0  # Very bright starting point
-                c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
-                going_faint = c_bright >= completeness_target
-                m_faint, c_faint = m_bright, c_bright
+                # Check if injection recovery plot is enabled
+                plot_injection_recovery = (self.input_yaml.get("limiting_magnitude") or {}).get("plot_injection_recovery", False)
 
-                bracket_steps.append((m_bright, c_bright, np.median(f_bright)))
+                if plot_injection_recovery:
+                    # Start at artificially bright magnitude for visualization in the plot
+                    m_bright = -10.0  # Very bright starting point
+                    c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
+                    going_faint = c_bright >= completeness_target
+                    m_faint, c_faint = m_bright, c_bright
+                    bracket_steps.append((m_bright, c_bright, np.median(f_bright)))
+                else:
+                    # Skip the -10.0 trial; start from data-driven initial guess instead
+                    m_bright = float(initialGuess) if np.isfinite(initialGuess) else -5.0
+                    c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
+                    going_faint = c_bright >= completeness_target
+                    m_faint, c_faint = m_bright, c_bright
+                    bracket_steps.append((m_bright, c_bright, np.median(f_bright)))
 
                 # Determine target faint magnitude: 1 mag below limiting magnitude (if known)
                 # Otherwise, just use the standard bracketing logic
@@ -2213,8 +2178,8 @@ class Limits:
             secax = ax.secondary_xaxis(
                 "top",
                 functions=(
-                    lambda m: m + _zp,
-                    lambda m: m - _zp,
+                    lambda m, zp=_zp: m + zp,
+                    lambda m, zp=_zp: m - zp,
                 ),
             )
             secax.set_xlabel("Apparent brightness [mag]")
@@ -2320,10 +2285,6 @@ class Limits:
                 if scored:
                     scored.sort(key=lambda t: t[0])   # ascending → quietest first
                     _, demo_x, demo_y = scored[0]
-                    logger.info(
-                        "Subpanel demo site (quietest): (%.1f, %.1f), |flux_AP|=%.4g",
-                        demo_x, demo_y, scored[0][0],
-                    )
 
             if demo_x is None:
                 # Random circumference fallback – not always top-right (index 0)
@@ -2364,7 +2325,6 @@ class Limits:
                     inject_x = demo_x
                     inject_y = demo_y
                     # inject_x/inject_y are in cutout-local coordinates (from injection_df["x_pix"]/["y_pix"])
-                    logger.info(f"Injecting PSF at cutout coordinates: ({inject_x:.1f}, {inject_y:.1f})")
 
                     # Use normalized PSF for subpanel injection (same as used for calibration)
                     # This ensures flux=1.0 means exactly 1 total count
@@ -2407,10 +2367,6 @@ class Limits:
                     # Reduced verbosity - removed PSF injection shape logging
                     
                     injected += psf_inject
-                    logger.info(
-                        f"Subpanel injection: mag={mag_target:.2f}, flux_adu={flux_adu:.4e}, "
-                        f"psf_sum={np.sum(psf_inject):.4e}"
-                    )
                     
                     # Zoom centred on TARGET so it always appears in the centre of the panel.
                     # The zoom radius is large enough to include the injection site with margin.
@@ -2632,20 +2588,23 @@ class Limits:
 
         # ---- Plot injection recovery vs magnitude (apparent vs instrumental) ----
         if bracket_steps or bisect_steps or extended_steps:
-            self._plot_injection_recovery(
-                bracket_steps,
-                bisect_steps,
-                extended_steps,
-                inject_lmag,
-                zeropoint,
-                selected_zeropoint,
-                write_dir,
-                base,
-                position,
-                counts_ref=counts_ref,
-                exposure_time=exposure_time,
-                recovery_method=recovery_method,
-            )
+            # Check configuration to see if injection recovery plot should be generated
+            plot_injection_recovery = (self.input_yaml.get("limiting_magnitude") or {}).get("plot_injection_recovery", False)
+            if plot_injection_recovery:
+                self._plot_injection_recovery(
+                    bracket_steps,
+                    bisect_steps,
+                    extended_steps,
+                    inject_lmag,
+                    zeropoint,
+                    selected_zeropoint,
+                    write_dir,
+                    base,
+                    position,
+                    counts_ref=counts_ref,
+                    exposure_time=exposure_time,
+                    recovery_method=recovery_method,
+                )
 
     def _plot_injection_recovery(
         self,

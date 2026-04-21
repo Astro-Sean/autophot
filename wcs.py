@@ -2288,6 +2288,12 @@ class WCSSolver:
             # when this flag was always on. Default: omit (False); set True for
             # legacy behavior matching older AutoPHoT.
             use_crpix_center = bool(wcs_cfg.get("solve_field_crpix_center", False))
+            
+            # Sigma level for sources used,
+            
+            
+            common_args.insert(-1, "--nsigma")
+            common_args.insert(-1, "5")
             if use_crpix_center:
                 common_args.insert(-1, "--crpix-center")
                 logger.info(
