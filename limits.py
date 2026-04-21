@@ -1506,6 +1506,27 @@ class Limits:
 
                     # Detection-limit demo plot removed by request.
 
+                # ---- Extended injection trials for plotting (bright to faint) ----
+                extended_steps = []
+                if plot and np.isfinite(inject_lmag):
+                    # Run injection trials from very bright to 1-2 mag below detection limit
+                    mag_bright = -10.0  # Very bright starting point
+                    mag_faint = inject_lmag - 1.5  # 1.5 mag below detection limit
+                    nmags = 15  # Number of magnitude points
+                    mags_extended = np.linspace(mag_bright, mag_faint, nmags)
+
+                    logger.info(
+                        f"Running extended injection trials for plotting: {mag_bright:.2f} to {mag_faint:.2f} mag ({nmags} points)"
+                    )
+
+                    for m in mags_extended:
+                        try:
+                            c, _, f = run_trials_at_mag(m, pool=pool)
+                            extended_steps.append((m, c, np.median(f)))
+                        except Exception as e:
+                            logger.warning(f"Extended injection trial failed at m={m:.2f}: {e}")
+                            continue
+
                 # Optional: EMCEE diagnostic plot for one representative injected trial.
                 if (
                     plot
@@ -2595,10 +2616,11 @@ class Limits:
         plt.close(fig)
 
         # ---- Plot injection recovery vs magnitude (apparent vs instrumental) ----
-        if bracket_steps or bisect_steps:
+        if bracket_steps or bisect_steps or extended_steps:
             self._plot_injection_recovery(
                 bracket_steps,
                 bisect_steps,
+                extended_steps,
                 inject_lmag,
                 zeropoint,
                 selected_zeropoint,
@@ -2611,6 +2633,7 @@ class Limits:
         self,
         bracket_steps,
         bisect_steps,
+        extended_steps,
         inject_lmag,
         zeropoint,
         selected_zeropoint,
@@ -2628,8 +2651,8 @@ class Limits:
 
         logger = logging.getLogger(__name__)
 
-        # Combine bracket and bisect steps
-        all_steps = bracket_steps + bisect_steps
+        # Use extended_steps if available, otherwise fall back to bracket/bisect steps
+        all_steps = extended_steps if extended_steps else (bracket_steps + bisect_steps)
         if not all_steps:
             logger.warning("No injection steps to plot")
             return
@@ -2655,6 +2678,7 @@ class Limits:
         # Get catalog sources for comparison
         catalog = getattr(self, 'catalog', None)
         transient_apparent = None
+        zeropoint_apparent = None
         if catalog is not None and len(catalog) > 0:
             use_filter = self.input_yaml.get("imageFilter")
             if use_filter and use_filter in catalog.columns and "flux_AP" in catalog.columns:
@@ -2676,12 +2700,18 @@ class Limits:
                     target_idx = np.argmin(distances)
                     if distances[target_idx] < 5.0:  # Within 5 pixels
                         transient_apparent = catalog_apparent[target_idx]
+
+                # Get zeropoint calibration sources (sources used for zeropoint fitting)
+                # These are typically the catalog sources that passed quality cuts
+                zeropoint_apparent = catalog_apparent.copy()
             else:
                 catalog_inst = None
                 catalog_apparent = None
+                zeropoint_apparent = None
         else:
             catalog_inst = None
             catalog_apparent = None
+            zeropoint_apparent = None
 
         # Use the project-wide plotting style
         try:
@@ -2696,17 +2726,17 @@ class Limits:
         fig, ax = plt.subplots(figsize=set_size(340, 1))
         plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
 
-        # Plot catalog sources (plot catalog apparent vs catalog apparent for reference)
-        if catalog_apparent is not None and len(catalog_apparent) > 0:
+        # Plot zeropoint calibration sources (catalog sources used for zeropoint)
+        if zeropoint_apparent is not None and len(zeropoint_apparent) > 0:
             ax.scatter(
-                catalog_apparent,
-                catalog_apparent,
+                zeropoint_apparent,
+                zeropoint_apparent,
                 s=get_marker_size('small'),
-                c=get_color('all_sources'),
+                c=get_okabe_color('sky_blue'),
                 alpha=get_alpha('medium'),
                 marker='s',
                 edgecolors='none',
-                label=f"Catalog sources [{len(catalog_apparent)}]",
+                label=f"Zeropoint sources [{len(zeropoint_apparent)}]",
                 zorder=5,
             )
 
