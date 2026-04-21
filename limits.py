@@ -1482,9 +1482,9 @@ class Limits:
                 # ---- Extended injection trials for plotting (bright to faint) ----
                 extended_steps = []
                 if plot and np.isfinite(inject_lmag):
-                    # Run injection trials from very bright to 1-2 mag below detection limit
+                    # Run injection trials from very bright to 1 mag below detection limit
                     mag_bright = -10.0  # Very bright starting point
-                    mag_faint = inject_lmag - 1.5  # 1.5 mag below detection limit
+                    mag_faint = inject_lmag - 1.0  # 1 mag below detection limit
                     nmags = 15  # Number of magnitude points
                     mags_extended = np.linspace(mag_bright, mag_faint, nmags)
 
@@ -2676,15 +2676,9 @@ class Limits:
         # Convert to apparent magnitudes
         injected_apparent = inst_mags + selected_zeropoint
         # Convert recovered flux to instrumental magnitude, then to apparent
-        # The recovered flux is in PSF flux parameter units (normalized), need to convert to actual flux
-        # flux_param * counts_ref = actual flux in counts
-        # Then convert to magnitude: m = -2.5 * log10(flux / exposure_time)
-        if counts_ref is not None and exposure_time is not None and counts_ref > 0:
-            recovered_flux_actual = recovered_fluxes * counts_ref / exposure_time  # Convert to ADU/s
-            recovered_inst = -2.5 * np.log10(np.maximum(recovered_flux_actual, 1e-30))
-        else:
-            # Fallback: use recovered flux directly (assumed to be in correct units)
-            recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
+        # The recovered flux is in the same units as catalog flux_AP (ADU or ADU/s)
+        # Convert directly to magnitude: m = -2.5 * log10(flux)
+        recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
         recovered_apparent = recovered_inst + selected_zeropoint
 
         # Separate detected vs non-detected (use 50% threshold)
