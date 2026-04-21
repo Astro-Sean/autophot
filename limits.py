@@ -2742,10 +2742,8 @@ class Limits:
         catalog = getattr(self, 'catalog', None)
         transient_apparent = None
         zeropoint_apparent = None
-        logger.info(f"Debug: catalog exists: {catalog is not None}, catalog length: {len(catalog) if catalog is not None else 0}")
         if catalog is not None and len(catalog) > 0:
             use_filter = self.input_yaml.get("imageFilter")
-            logger.info(f"Debug: use_filter={use_filter}, has filter in catalog: {use_filter in catalog.columns if use_filter else False}, has flux_AP: {'flux_AP' in catalog.columns}")
             if use_filter and use_filter in catalog.columns and "flux_AP" in catalog.columns:
                 catalog_flux = catalog["flux_AP"].values
                 catalog_apparent = catalog[use_filter].values
@@ -2753,7 +2751,6 @@ class Limits:
                 valid_mask = np.isfinite(catalog_flux) & np.isfinite(catalog_apparent)
                 catalog_flux = catalog_flux[valid_mask]
                 catalog_apparent = catalog_apparent[valid_mask]
-                logger.info(f"Debug: catalog_apparent length after filtering: {len(catalog_apparent)}")
 
                 # Try to find transient/target source by position
                 if position is not None and "x_pix" in catalog.columns and "y_pix" in catalog.columns:
@@ -2763,25 +2760,17 @@ class Limits:
                     # Find source closest to target position
                     distances = np.sqrt((catalog_x - tx)**2 + (catalog_y - ty)**2)
                     target_idx = np.argmin(distances)
-                    logger.info(f"Debug: position={position}, target_idx={target_idx}, distance={distances[target_idx]:.2f}")
                     if distances[target_idx] < 5.0:  # Within 5 pixels
                         transient_apparent = catalog_apparent[target_idx]
-                        logger.info(f"Debug: transient_apparent={transient_apparent}")
-                    else:
-                        logger.warning(f"Transient source not found within 5 pixels (distance={distances[target_idx]:.2f})")
-                else:
-                    logger.warning(f"Cannot find transient: position={position}, has x_pix={'x_pix' in catalog.columns}, has y_pix={'y_pix' in catalog.columns}")
 
                 # Get zeropoint calibration sources (sources used for zeropoint fitting)
                 # These are typically the catalog sources that passed quality cuts
                 zeropoint_apparent = catalog_apparent.copy()
             else:
-                logger.warning("Catalog missing required columns (imageFilter or flux_AP)")
                 catalog_inst = None
                 catalog_apparent = None
                 zeropoint_apparent = None
         else:
-            logger.warning("Catalog is None or empty")
             catalog_inst = None
             catalog_apparent = None
             zeropoint_apparent = None
