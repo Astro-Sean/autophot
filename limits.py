@@ -2793,7 +2793,7 @@ class Limits:
             ax.scatter(
                 zeropoint_apparent,
                 zeropoint_apparent,
-                s=get_marker_size('small'),
+                s=get_marker_size('small') * 3,
                 c=get_okabe_color('green'),
                 alpha=get_alpha('medium'),
                 marker='s',
@@ -2807,7 +2807,7 @@ class Limits:
             ax.scatter(
                 transient_apparent,
                 transient_apparent,
-                s=get_marker_size('large') * 2,
+                s=get_marker_size('large') * 4,
                 c=get_okabe_color('vermilion'),
                 alpha=get_alpha('dark'),
                 marker='*',
@@ -2822,7 +2822,7 @@ class Limits:
             ax.scatter(
                 detected_injected,
                 detected_recovered,
-                s=get_marker_size('medium'),
+                s=get_marker_size('medium') * 3,
                 c=get_okabe_color('blue'),
                 alpha=get_alpha('dark'),
                 marker='o',
@@ -2837,11 +2837,11 @@ class Limits:
             ax.scatter(
                 nondet_injected,
                 nondet_recovered,
-                s=get_marker_size('medium'),
+                s=get_marker_size('medium') * 3,
                 c=get_okabe_color('red'),
                 alpha=get_alpha('medium'),
                 marker='x',
-                linewidth=0.5,
+                linewidth=1.0,
                 label=f"Non-detected injected [{len(nondet_injected)}]",
                 zorder=8,
             )
