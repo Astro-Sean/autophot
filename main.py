@@ -3628,22 +3628,8 @@ def run_photometry():
             if has_detected:
                 MatchingSources = detected_sources.copy()
                 if use_catalog and has_catalog:
-                    common = [
-                        c
-                        for c in MatchingSources.columns
-                        if c in CatalogSources.columns
-                    ]
-                    catalog_sub = CatalogSources[common].copy()
-                    for c in MatchingSources.columns:
-                        if c not in catalog_sub.columns:
-                            catalog_sub[c] = np.nan
-                    catalog_sub = catalog_sub[MatchingSources.columns]
-                    n_before = len(MatchingSources)
-                    MatchingSources = pd.concat(
-                        [MatchingSources, catalog_sub], ignore_index=True
-                    )
                     logging.info(
-                        f"Matching: {n_before} detected + {len(CatalogSources)} catalog -> {len(MatchingSources)} total"
+                        f"Matching: {len(MatchingSources)} detected sources (catalog available but not concatenated to avoid duplication)"
                     )
                 else:
                     logging.info(f"Matching: {len(MatchingSources)} detected sources")
