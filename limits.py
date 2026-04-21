@@ -2679,11 +2679,16 @@ class Limits:
         # The recovered flux is in PSF flux parameter units (normalized by counts_ref)
         # To convert to actual flux: flux_actual = flux_param * counts_ref / exposure_time
         # Then convert to magnitude: m = -2.5 * log10(flux_actual)
+        logger.info(f"Debug: counts_ref={counts_ref}, exposure_time={exposure_time}")
+        logger.info(f"Debug: recovered_fluxes sample: {recovered_fluxes[:3]}")
         if counts_ref is not None and exposure_time is not None and counts_ref > 0:
             recovered_flux_actual = recovered_fluxes * counts_ref / exposure_time
+            logger.info(f"Debug: recovered_flux_actual sample: {recovered_flux_actual[:3]}")
             recovered_inst = -2.5 * np.log10(np.maximum(recovered_flux_actual, 1e-30))
         else:
             recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
+        logger.info(f"Debug: recovered_inst sample: {recovered_inst[:3]}")
+        logger.info(f"Debug: injected_apparent sample: {injected_apparent[:3]}")
         recovered_apparent = recovered_inst + selected_zeropoint
 
         # Separate detected vs non-detected (use 50% threshold)
