@@ -1045,7 +1045,7 @@ def plot_lightcurve(
                     color=c,
                     ecolor=c,
                     marker="s",
-                    markersize=4,
+                    markersize=5,
                     ls="",
                     capsize=1.5,
                     markeredgecolor="black",
@@ -1062,7 +1062,7 @@ def plot_lightcurve(
                     markerfacecolor="none",
                     markeredgewidth=0.5,
                     marker="v",
-                    markersize=4,
+                    markersize=5,
                     ls="",
                     zorder=2,
                 )
@@ -1075,7 +1075,7 @@ def plot_lightcurve(
                     markerfacecolor="none",
                     markeredgewidth=0.5,
                     marker="^",
-                    markersize=4,
+                    markersize=5,
                     ls="",
                     zorder=2,
                 )

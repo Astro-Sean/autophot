@@ -2110,7 +2110,7 @@ class Catalog:
                     fmt="x",
                     color=get_color('outliers'),
                     ecolor="lightgrey",
-                    markersize=get_marker_size('medium'),
+                    markersize=5,
                     alpha=get_alpha('medium'),
                     lw=get_line_width('thin'),
                     capsize=0,
