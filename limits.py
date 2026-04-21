@@ -1495,30 +1495,9 @@ class Limits:
                                 str(exc),
                             )
 
-                # ---- Extended injection trials for plotting (bright to faint) ----
+                # ---- Extended injection trials for plotting ----
+                # Rely on bracket and bisect steps to determine magnitude range
                 extended_steps = []
-                if plot and np.isfinite(inject_lmag):
-                    # Run injection trials from very bright to 1 mag below detection limit
-                    mag_bright = -10.0  # Very bright starting point
-                    mag_faint = inject_lmag - 1.0  # 1 mag below detection limit
-                    nmags = 15  # Number of magnitude points
-                    mags_extended = np.linspace(mag_bright, mag_faint, nmags)
-
-                    logger.info(
-                        f"Running extended injection trials for plotting: {mag_bright:.2f} to {mag_faint:.2f} mag ({nmags} points)"
-                    )
-
-                    for m in mags_extended:
-                        try:
-                            c, _, f = run_trials_at_mag(m, pool=pool)
-                            # Store all individual recovered fluxes, not just median
-                            for flux_val in f:
-                                extended_steps.append((m, c, flux_val))
-                        except Exception as e:
-                            logger.warning(f"Extended injection trial failed at m={m:.2f}: {e}")
-                            continue
-
-                    logger.info(f"Extended injection trials completed: {len(extended_steps)} points populated")
 
                 # ---- Plot completeness curve (still inside pool context) -----
                 if plot:
