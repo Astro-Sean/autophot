@@ -264,7 +264,7 @@ default_input:
     gaia_curve_map_order_by: distance # str --- `distance` (Python sort after prefetch) or `brightness` (SQL order only).
     # When order is distance: Gaia ADQL cannot ORDER BY sky distance; we request TOP N (prefetch) then sort in Python.
     gaia_nearest_prefetch_factor: 50 # int --- SQL TOP >= max_sources * factor (capped below) before distance sort.
-    gaia_nearest_prefetch_min: 500 # int --- Minimum prefetch TOP when using distance ordering.
+    gaia_nearest_prefetch_min: 200 # int --- Minimum prefetch TOP when using distance ordering.
     gaia_nearest_prefetch_max: 10000 # int --- Maximum prefetch TOP (archive load vs completeness tradeoff).
     # Gaia archive / GaiaXPy pacing (ESA recommends spacing heavy queries, e.g. 1 s).
     gaia_archive_query_pause_before_sec: 1.0 # float --- Sleep before each Gaia ADQL job (seconds).

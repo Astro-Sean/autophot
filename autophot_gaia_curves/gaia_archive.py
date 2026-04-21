@@ -422,13 +422,13 @@ def gaia_xp_sql_top_n(
         # Smaller final N -> cap multiplier so we do not over-fetch the archive
         # (e.g. 100 nearest does not need TOP 5000 by default).
         if ms <= 50:
-            factor = min(factor, 12)
+            factor = min(factor, 8)
         elif ms <= 100:
-            factor = min(factor, 18)
+            factor = min(factor, 5)
         elif ms <= 200:
-            factor = min(factor, 25)
+            factor = min(factor, 10)
         elif ms <= 500:
-            factor = min(factor, 35)
+            factor = min(factor, 15)
         prefetch = min(int(prefetch_max), max(int(prefetch_min), ms * factor))
         return prefetch, True
     return ms, False
