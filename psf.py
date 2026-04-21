@@ -3951,7 +3951,7 @@ class PSF:
                     sources["y_pix"],
                     marker="+",
                     c="cyan",
-                    s=30,
+                    s=5,
                     lw=0.5,
                     label="Input position",
                     zorder=10,

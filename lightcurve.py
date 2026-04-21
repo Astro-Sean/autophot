@@ -677,7 +677,7 @@ def plot_lightcurve(
                 ax.scatter(
                     normal_detects.mjd - reference_epoch,
                     normal_detects["plot_mag"],
-                    s=80,
+                    s=5,
                     c=c,
                     marker='o',  # normal circular marker
                     edgecolors='black',
@@ -693,7 +693,7 @@ def plot_lightcurve(
                 sc = ax.scatter(
                     inv_detects.mjd - reference_epoch,
                     inv_detects["plot_mag"],
-                    s=100,  # slightly larger marker size for visibility
+                    s=5,
                     c=c,   # face color
                     marker='s',  # square marker (patch) so hatch works
                     edgecolors='black',
@@ -705,7 +705,7 @@ def plot_lightcurve(
                 sc.set_edgecolor('white')
                 # Add label manually with detection marker in legend (only if not already added)
                 if normal_detects.empty:
-                    ax.scatter([], [], s=100, c=c, marker='o', edgecolors='black',
+                    ax.scatter([], [], s=5, c=c, marker='o', edgecolors='black',
                              linewidth=0.8, label=leg_label if leg_label else "")
 
         if show_limits and not nondetects.empty:
@@ -849,7 +849,7 @@ def plot_lightcurve(
         h_pos = ax0.scatter(
             [],
             [],
-            s=80,
+            s=5,
             marker="o",
             facecolors=_fc,
             edgecolors="black",
@@ -858,7 +858,7 @@ def plot_lightcurve(
         h_neg = ax0.scatter(
             [],
             [],
-            s=100,
+            s=5,
             marker="s",
             facecolors=_fc,
             edgecolors="white",

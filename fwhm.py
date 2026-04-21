@@ -233,7 +233,7 @@ class Find_FWHM:
                 cleaned_df["y_pix"],
                 color="blue",
                 label="Isolated Sources",
-                s=30,
+                s=5,
             )
             ax.scatter(
                 coms[:, 0],
@@ -241,7 +241,7 @@ class Find_FWHM:
                     color="#00AA00",
                 marker="x",
                 label="Segment COMs",
-                s=50,
+                s=5,
             )
             ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
             fpath = self.input_yaml["fpath"]
