@@ -15,10 +15,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Import plotting utilities with fallback
 try:
-    from plotting_utils import get_divergent_color
+    from plotting_utils import get_divergent_color, get_marker_size
 except ImportError:
     logger.warning("plotting_utils module not found, some plotting features may be limited")
     get_divergent_color = None
+    get_marker_size = None
 
 
 class Plot:
