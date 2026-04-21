@@ -2861,7 +2861,8 @@ class Limits:
             ax.errorbar(
                 unique_mags,
                 recovered_means,
-                yerr=recovered_stds,
+                xerr=None,  # No error on injected magnitude (known value)
+                yerr=recovered_stds,  # Error on recovered magnitude (measured)
                 fmt='none',
                 color=get_okabe_color('blue'),
                 alpha=get_alpha('medium'),
