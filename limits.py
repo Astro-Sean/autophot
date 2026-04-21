@@ -59,6 +59,7 @@ from functions import (
     border_msg,
 )
 from aperture import Aperture
+from plotting_utils import get_marker_size
 
 # ===========================================================================
 # Module-level worker functions
