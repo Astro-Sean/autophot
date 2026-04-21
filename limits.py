@@ -2717,6 +2717,18 @@ class Limits:
         nondet_injected = injected_apparent[~detected_mask]
         nondet_recovered = recovered_apparent[~detected_mask]
 
+        # Compute errorbars: group by injected magnitude and compute std of recovered magnitudes
+        unique_mags = np.unique(injected_apparent)
+        recovered_means = []
+        recovered_stds = []
+        for mag in unique_mags:
+            mask = injected_apparent == mag
+            if np.sum(mask) > 0:
+                recovered_means.append(np.mean(recovered_apparent[mask]))
+                recovered_stds.append(np.std(recovered_apparent[mask]))
+        recovered_means = np.array(recovered_means)
+        recovered_stds = np.array(recovered_stds)
+
         # Get catalog sources for comparison
         catalog = getattr(self, 'catalog', None)
         transient_apparent = None
@@ -2836,6 +2848,20 @@ class Limits:
                 lw=0.5,
                 zorder=15,
                 label="Expected (1:1)",
+            )
+
+        # Plot errorbars (mean recovered magnitude with std at each injected magnitude)
+        if len(unique_mags) > 0:
+            ax.errorbar(
+                unique_mags,
+                recovered_means,
+                yerr=recovered_stds,
+                fmt='none',
+                color=get_okabe_color('blue'),
+                alpha=get_alpha('medium'),
+                lw=0.5,
+                capsize=2,
+                zorder=7,
             )
 
         # Mark limiting magnitude as vertical red line
