@@ -1495,7 +1495,9 @@ class Limits:
                     for m in mags_extended:
                         try:
                             c, _, f = run_trials_at_mag(m, pool=pool)
-                            extended_steps.append((m, c, np.median(f)))
+                            # Store all individual recovered fluxes, not just median
+                            for flux_val in f:
+                                extended_steps.append((m, c, flux_val))
                         except Exception as e:
                             logger.warning(f"Extended injection trial failed at m={m:.2f}: {e}")
                             continue
@@ -2673,8 +2675,14 @@ class Limits:
         det_rates = np.array([step[1] for step in all_steps])
         recovered_fluxes = np.array([step[2] for step in all_steps])
 
+        logger.info(f"Debug: inst_mags range: {inst_mags.min():.2f} to {inst_mags.max():.2f}")
+        logger.info(f"Debug: selected_zeropoint: {selected_zeropoint}")
+        logger.info(f"Debug: det_rates range: {det_rates.min():.2f} to {det_rates.max():.2f}")
+
         # Convert to apparent magnitudes
         injected_apparent = inst_mags + selected_zeropoint
+        logger.info(f"Debug: injected_apparent range: {injected_apparent.min():.2f} to {injected_apparent.max():.2f}")
+
         # Convert recovered flux to instrumental magnitude, then to apparent
         # The recovered flux is in PSF flux parameter units (normalized by counts_ref)
         # To convert to actual flux: flux_actual = flux_param * counts_ref / exposure_time
@@ -2688,7 +2696,6 @@ class Limits:
         else:
             recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
         logger.info(f"Debug: recovered_inst sample: {recovered_inst[:3]}")
-        logger.info(f"Debug: injected_apparent sample: {injected_apparent[:3]}")
         recovered_apparent = recovered_inst + selected_zeropoint
 
         # Separate detected vs non-detected (use 50% threshold)
