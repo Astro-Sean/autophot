@@ -941,17 +941,19 @@ class Limits:
                 flux=1.0 means PSF sum = 1.0 total count (in the same units as the image data).
 
                 Derivation:
-                    m     = -2.5*log10(counts / t)  [instrumental magnitude]
-                    counts_target = t * 10^(-0.4*m)  [total counts for target mag]
+                    m     = -2.5*log10(flux_adu_per_s)  [instrumental magnitude, flux in ADU/s]
+                    flux_target_adu_per_s = 10^(-0.4*m)  [ADU/s for target mag]
+                    counts_target = flux_target_adu_per_s * exposure_time  [total counts]
 
-                    For flux_param=1.0, aperture measures counts_ref.
+                    For flux_param=1.0, aperture measures counts_ref (total counts).
                     Since scaling is linear: counts = flux_param * counts_ref
 
                     flux_param = counts_target / counts_ref
-                               = (t * 10^(-0.4*m)) / counts_ref
+                               = (flux_target_adu_per_s * t) / counts_ref
                                = 10^(-0.4*m) * (t / counts_ref)
                 """
-                counts_target = (10.0 ** (-0.4 * m)) * exposure_time
+                flux_target_adu_per_s = 10.0 ** (-0.4 * m)  # ADU/s
+                counts_target = flux_target_adu_per_s * exposure_time  # total counts
                 return counts_target / counts_ref
 
             # DIAGNOSTIC: verify calibration round-trip
@@ -2700,21 +2702,28 @@ class Limits:
         # Convert recovered flux to instrumental magnitude, then to apparent
         # The recovered flux units depend on recovery_method:
         # - AP method: flux_AP is already ADU/s (divided by exposure_time in Aperture.measure())
-        # - PSF/EMCEE methods: flux_hat is raw ADU counts (not divided by exposure_time)
+        # - PSF/EMCEE methods: flux_hat is the PSF flux parameter (dimensionless scaling factor)
+        #   To convert to actual flux: flux_actual = flux_hat * counts_ref / exposure_time
         logger.info(f"Debug: recovery_method={recovery_method}, counts_ref={counts_ref}, exposure_time={exposure_time}")
         logger.info(f"Debug: recovered_fluxes sample: {recovered_fluxes[:3]}")
-        
+
         recovery_method_upper = str(recovery_method).strip().upper() if recovery_method is not None else "AP"
         if recovery_method_upper == "AP":
             # AP method: flux_AP is already ADU/s, apply mag() directly
             recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
         else:
-            # PSF/EMCEE methods: flux_hat is raw ADU, convert to ADU/s first
-            if exposure_time is not None and exposure_time > 0:
-                recovered_flux_adu_per_s = recovered_fluxes / exposure_time
+            # PSF/EMCEE methods: flux_hat is PSF flux parameter (dimensionless)
+            # Convert to actual flux: flux_actual = flux_hat * counts_ref / exposure_time
+            if counts_ref is not None and exposure_time is not None and counts_ref > 0 and exposure_time > 0:
+                recovered_flux_adu_per_s = recovered_fluxes * counts_ref / exposure_time
                 recovered_inst = -2.5 * np.log10(np.maximum(recovered_flux_adu_per_s, 1e-30))
             else:
-                recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
+                # Fallback: treat as raw ADU divided by exposure_time
+                if exposure_time is not None and exposure_time > 0:
+                    recovered_flux_adu_per_s = recovered_fluxes / exposure_time
+                    recovered_inst = -2.5 * np.log10(np.maximum(recovered_flux_adu_per_s, 1e-30))
+                else:
+                    recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
         
         logger.info(f"Debug: recovered_inst sample: {recovered_inst[:3]}")
         recovered_apparent = recovered_inst + selected_zeropoint
