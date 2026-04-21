@@ -5772,9 +5772,6 @@ def run_photometry():
         # Append sequence star catalog (CatalogSources) if available
         if CatalogSources is not None and not CatalogSources.empty:
             # Remove duplicate entries based on RA and DEC before writing
-            from astropy.coordinates import SkyCoord
-            from astropy import units as u
-            
             # Create SkyCoord objects for all sources
             coords = SkyCoord(
                 ra=CatalogSources["RA"].values * u.degree,
