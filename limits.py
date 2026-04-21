@@ -2676,9 +2676,14 @@ class Limits:
         # Convert to apparent magnitudes
         injected_apparent = inst_mags + selected_zeropoint
         # Convert recovered flux to instrumental magnitude, then to apparent
-        # The recovered flux is in the same units as catalog flux_AP (ADU or ADU/s)
-        # Convert directly to magnitude: m = -2.5 * log10(flux)
-        recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
+        # The recovered flux is in PSF flux parameter units (normalized by counts_ref)
+        # To convert to actual flux: flux_actual = flux_param * counts_ref / exposure_time
+        # Then convert to magnitude: m = -2.5 * log10(flux_actual)
+        if counts_ref is not None and exposure_time is not None and counts_ref > 0:
+            recovered_flux_actual = recovered_fluxes * counts_ref / exposure_time
+            recovered_inst = -2.5 * np.log10(np.maximum(recovered_flux_actual, 1e-30))
+        else:
+            recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
         recovered_apparent = recovered_inst + selected_zeropoint
 
         # Separate detected vs non-detected (use 50% threshold)
