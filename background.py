@@ -66,7 +66,13 @@ from photutils.background import (
 from photutils.background.interpolators import BkgZoomInterpolator, BkgIDWInterpolator
 from photutils.segmentation import detect_threshold, detect_sources
 
-from scipy.ndimage import binary_dilation, uniform_filter, gaussian_filter, label as ndi_label
+from scipy.ndimage import (
+    binary_dilation,
+    uniform_filter,
+    gaussian_filter,
+    label as ndi_label,
+    find_objects,
+)
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # --- Local ---
@@ -375,7 +381,11 @@ class BackgroundSubtractor:
         )
 
         mask = np.zeros(image.shape, dtype=bool)
-        residual = image.copy()
+        # Avoid an unconditional full copy when possible (NumPy 2.0+ supports copy=).
+        try:
+            residual = np.asarray(image, dtype=np.float64, copy=False)
+        except TypeError:
+            residual = np.asarray(image, dtype=np.float64)
 
         # Safety: cap mask fraction so Background2D always has enough data to
         # fit a gradient.  If the mask exceeds this, stop iterating.
@@ -545,33 +555,32 @@ class BackgroundSubtractor:
         """
         ny, nx = image.shape
         path_r, path_c = [r0], [c0]
-        r, c = r0, c0
+        r, c = float(r0), float(c0)
         half_cone = np.deg2rad(cone_deg)
+        steps = np.array([1.0, 2.0, 3.0], dtype=np.float64)
         for _ in range(max_steps - 1):
-            best_r, best_c, best_pixel_value = None, None, -np.inf
-            for dangle in (0.0, half_cone, -half_cone):
-                a = angle_rad + dangle
-                dc = np.cos(a)
-                dr = np.sin(a)
-                for step in (1, 2, 3):
-                    cn = int(round(c + step * dc))
-                    rn = int(round(r + step * dr))
-                    if 0 <= rn < ny and 0 <= cn < nx:
-                        pixel_value = float(image[rn, cn])
-                        if (
-                            pixel_value >= flux_threshold
-                            and pixel_value > best_pixel_value
-                        ):
-                            best_pixel_value = pixel_value
-                            best_r, best_c = rn, cn
-            if best_r is None:
+            dangles = np.array([0.0, half_cone, -half_cone], dtype=np.float64)
+            aa = angle_rad + dangles[:, None]
+            cos_a = np.cos(aa)
+            sin_a = np.sin(aa)
+            cn = np.round(c + cos_a * steps).astype(np.int64)
+            rn = np.round(r + sin_a * steps).astype(np.int64)
+            valid = (rn >= 0) & (rn < ny) & (cn >= 0) & (cn < nx)
+            vals = np.where(valid, image[rn, cn], -np.inf)
+            eligible = valid & (vals >= flux_threshold)
+            if not np.any(eligible):
                 break
-            r, c = best_r, best_c
-            path_r.append(r)
-            path_c.append(c)
+            masked = np.where(eligible, vals, -np.inf)
+            flat = int(np.argmax(masked))
+            bi, bj = np.unravel_index(flat, masked.shape)
+            r, c = float(rn[bi, bj]), float(cn[bi, bj])
+            path_r.append(int(r))
+            path_c.append(int(c))
             if len(path_r) >= 2:
-                angle_rad = np.arctan2(r - path_r[-2], c - path_c[-2])
-        return np.array(path_r), np.array(path_c)
+                angle_rad = np.arctan2(
+                    path_r[-1] - path_r[-2], path_c[-1] - path_c[-2]
+                )
+        return np.asarray(path_r, dtype=np.int64), np.asarray(path_c, dtype=np.int64)
 
     def _make_saturation_streak_mask(
         self,
@@ -598,7 +607,8 @@ class BackgroundSubtractor:
         streak_mask = np.zeros_like(image, dtype=bool)
         half = max(1, int(bleed_half_length))
         # Flux threshold for "still on streak" - lower to catch fainter tails
-        sigma = float(np.nanstd(image)) if np.isfinite(np.nanstd(image)) else 0.0
+        raw_std = np.nanstd(image)
+        sigma = float(raw_std) if np.isfinite(raw_std) else 0.0
         background_level = float(np.nanmedian(image)) + 1.5 * sigma
         min_thresh = streak_flux_frac * saturate   # must be above this to be a streak
         max_thresh = 0.35 * saturate               # cap to avoid masking whole bright image
@@ -611,13 +621,20 @@ class BackgroundSubtractor:
         struct = np.ones((3, 3), dtype=int)
         labels, n_comp = ndi_label(sat_core, structure=struct)
 
-        for idx in range(1, n_comp + 1):
-            blob = labels == idx
-            n_pix = np.sum(blob)
-            streak_mask |= blob
+        blob_slices = find_objects(labels, int(n_comp))
+        for idx, sl in enumerate(blob_slices, start=1):
+            if sl is None:
+                continue
+            sub_lbl = labels[sl]
+            blob = sub_lbl == idx
+            n_pix = int(blob.sum())
+            sub_streak = streak_mask[sl]
+            sub_streak[blob] = True
             if n_pix < 2:
                 continue
-            rr, cc = np.where(blob)
+            rr, cc = np.nonzero(blob)
+            rr = rr + sl[0].start
+            cc = cc + sl[1].start
             cy, cx = np.mean(rr), np.mean(cc)
             r0, c0 = int(round(cy)), int(round(cx))
             dr, dc = rr - cy, cc - cx
@@ -729,12 +746,19 @@ class BackgroundSubtractor:
         labels, n_comp = ndi_label(bright, structure=struct)
         trail_mask = np.zeros_like(img, dtype=bool)
         n_trails = 0
-        for idx in range(1, n_comp + 1):
-            blob = labels == idx
-            n_pix = int(np.sum(blob))
-            if n_pix < max(3, min_area_px):
+        min_area = max(3, min_area_px)
+        blob_slices = find_objects(labels, int(n_comp))
+        for idx, sl in enumerate(blob_slices, start=1):
+            if sl is None:
                 continue
-            rr, cc = np.where(blob)
+            sub_lbl = labels[sl]
+            blob = sub_lbl == idx
+            n_pix = int(blob.sum())
+            if n_pix < min_area:
+                continue
+            rr, cc = np.nonzero(blob)
+            rr = rr + sl[0].start
+            cc = cc + sl[1].start
             cy, cx = np.mean(rr), np.mean(cc)
             dr, dc = rr - cy, cc - cx
             mrr = np.mean(dr * dr)
@@ -751,7 +775,8 @@ class BackgroundSubtractor:
             width = 2.0 * (float(np.max(np.abs(proj_minor))) + 0.5)
             width = max(width, 1.0)
             if length >= min_length_px and (length / width) >= min_aspect_ratio:
-                trail_mask |= blob
+                sub_trail = trail_mask[sl]
+                sub_trail[blob] = True
                 n_trails += 1
         if np.any(trail_mask):
             trail_mask = binary_dilation(
@@ -845,13 +870,29 @@ class BackgroundSubtractor:
                 sigma_smooth = max(min(image.shape) / 50.0, 10.0)
 
             img_finite = np.where(np.isfinite(image), image, med)
-            smooth = gaussian_filter(
-                img_finite, sigma=float(sigma_smooth), mode="nearest"
-            )
-            resid = img_finite - smooth
-
-            std_smooth = np.nanstd(smooth[finite])
-            std_resid = np.nanstd(resid[finite])
+            # Full-image gaussian_filter dominates CPU on large detectors; the
+            # large-scale ratio is a coarse regime flag, so a modest stride
+            # preserves the heuristic while cutting cost ~stride^2.
+            ny, nx = image.shape
+            max_dim = max(ny, nx)
+            stride = max(1, int(np.ceil(max_dim / 1024)))
+            if stride > 1:
+                img_s = img_finite[::stride, ::stride]
+                finite_s = finite[::stride, ::stride]
+                sigma_s = float(sigma_smooth) / float(stride)
+                smooth_s = gaussian_filter(
+                    img_s, sigma=max(sigma_s, 1.5), mode="nearest"
+                )
+                resid_s = img_s - smooth_s
+                std_smooth = np.nanstd(smooth_s[finite_s])
+                std_resid = np.nanstd(resid_s[finite_s])
+            else:
+                smooth = gaussian_filter(
+                    img_finite, sigma=float(sigma_smooth), mode="nearest"
+                )
+                resid = img_finite - smooth
+                std_smooth = np.nanstd(smooth[finite])
+                std_resid = np.nanstd(resid[finite])
             large_scale_ratio = float(std_smooth / (std_smooth + std_resid + 1e-6))
         except Exception:
             large_scale_ratio = 0.0

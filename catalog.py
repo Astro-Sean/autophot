@@ -1273,30 +1273,91 @@ class Catalog:
             # --- Convert RA/DEC to pixel coordinates if WCS is provided ---
             if image_wcs:
                 try:
-                    # Filter out coordinates that are too far from the image center
-                    ra_values = selectedCatalog[catalog_keywords["RA"]].values
-                    dec_values = selectedCatalog[catalog_keywords["DEC"]].values
+                    ra_values = np.asarray(
+                        selectedCatalog[catalog_keywords["RA"]].values, dtype=float
+                    )
+                    dec_values = np.asarray(
+                        selectedCatalog[catalog_keywords["DEC"]].values, dtype=float
+                    )
 
-                    # Get the image center
-                    center_ra, center_dec = image_wcs.wcs.crval
+                    # Angular pre-filter: must match how the catalog was queried (usually
+                    # within max_distance arcmin of the science target). Using CRVAL + a
+                    # fixed 1° cap wrongly drops on-chip sources on wide stacks / coadds
+                    # where CRVAL sits far from the field geometric center (common after
+                    # astrometry.net SIP updates on template images).
+                    cfg_cat = self.input_yaml.get("catalog", {}) or {}
+                    max_dist_arcmin = float(cfg_cat.get("max_distance", 10.0))
+                    t_ra = self.input_yaml.get("target_ra")
+                    t_dec = self.input_yaml.get("target_dec")
+                    if (
+                        t_ra is not None
+                        and t_dec is not None
+                        and np.isfinite(t_ra)
+                        and np.isfinite(t_dec)
+                    ):
+                        cen_ra = float(t_ra)
+                        cen_dec = float(t_dec)
+                        # Query radius plus a generous margin (arcsec)
+                        max_distance_threshold = (max_dist_arcmin + 5.0) * 60.0
+                    else:
+                        shape = getattr(image_wcs, "array_shape", None)
+                        if shape is not None and len(shape) == 2:
+                            ny, nx = int(shape[0]), int(shape[1])
+                            cx = 0.5 * float(max(nx - 1, 0))
+                            cy = 0.5 * float(max(ny - 1, 0))
+                            cen_ra, cen_dec = image_wcs.all_pix2world(
+                                np.asarray([cx]),
+                                np.asarray([cy]),
+                                0,
+                            )
+                            cen_ra = float(np.asarray(cen_ra).ravel()[0])
+                            cen_dec = float(np.asarray(cen_dec).ravel()[0])
+                            corners_x = np.array(
+                                [0.0, float(nx - 1), 0.0, float(nx - 1)], dtype=float
+                            )
+                            corners_y = np.array(
+                                [0.0, 0.0, float(ny - 1), float(ny - 1)], dtype=float
+                            )
+                            cra, cde = image_wcs.all_pix2world(corners_x, corners_y, 0)
+                            sc_cen = SkyCoord(
+                                cen_ra * u.deg, cen_dec * u.deg, frame="icrs"
+                            )
+                            sc_corner = SkyCoord(
+                                np.asarray(cra).ravel() * u.deg,
+                                np.asarray(cde).ravel() * u.deg,
+                                frame="icrs",
+                            )
+                            max_sep = float(
+                                np.max(sc_cen.separation(sc_corner).to(u.arcsec).value)
+                            )
+                            max_distance_threshold = max(3600.0, max_sep * 1.25)
+                        else:
+                            cen_ra, cen_dec = image_wcs.wcs.crval
+                            max_distance_threshold = 4 * 3600.0
 
-                    # Calculate angular distance from the center
-                    dra = (ra_values - center_ra) * np.cos(np.radians(center_dec))
-                    ddec = dec_values - center_dec
-                    distance = np.sqrt(dra**2 + ddec**2) * 3600  # arcseconds
-
-                    # Define a reasonable threshold (e.g., 1 degree = 3600 arcseconds)
-                    max_distance_threshold = 3600  # arcseconds
-
-                    # Filter out sources too far from the center
+                    dra = (ra_values - cen_ra) * np.cos(np.radians(cen_dec))
+                    ddec = dec_values - cen_dec
+                    distance = np.sqrt(dra**2 + ddec**2) * 3600.0  # arcseconds
                     valid_indices = distance < max_distance_threshold
+                    if not np.any(valid_indices):
+                        logger.warning(
+                            "Catalog WCS pre-filter removed all sources (sky vs ref); "
+                            "relaxing filter and keeping full list for pixel conversion."
+                        )
+                        valid_indices = np.ones(len(ra_values), dtype=bool)
+
                     ra_values = ra_values[valid_indices]
                     dec_values = dec_values[valid_indices]
 
-                    # Convert valid coordinates to pixel coordinates
-                    x_pix, y_pix = image_wcs.wcs_world2pix(ra_values, dec_values, index)
+                    # Full distortion (SIP, etc.): avoid wcs_world2pix, which can disagree
+                    # with all_pix2world / solve-field SIP headers used elsewhere.
+                    coords = SkyCoord(
+                        ra=ra_values * u.deg, dec=dec_values * u.deg, frame="icrs"
+                    )
+                    x_pix, y_pix = image_wcs.world_to_pixel(coords)
+                    x_pix = np.asarray(x_pix, dtype=float).ravel()
+                    y_pix = np.asarray(y_pix, dtype=float).ravel()
 
-                    # Update outputCatalog with valid sources only
                     outputCatalog = outputCatalog.iloc[valid_indices].copy()
                     outputCatalog["x_pix"] = x_pix
                     outputCatalog["y_pix"] = y_pix
@@ -1312,13 +1373,42 @@ class Catalog:
 
             # Populate photometric band columns for the current filter.
             image_filter = self.input_yaml["imageFilter"]
+            logger.debug(f"Populating filter columns for {image_filter}; input catalog columns: {list(selectedCatalog.columns)}")
+
+            # For custom catalogs, auto-detect all filter columns (pattern: <filter> and <filter>_err)
+            # This handles arbitrary filter names without requiring catalog.yml entries
+            if catalogName == "custom":
+                import re
+                # Find all columns that look like filter magnitudes (have corresponding _err column)
+                filter_cols = []
+                for col in selectedCatalog.columns:
+                    if str(col).endswith('_err'):
+                        continue
+                    err_col = f"{col}_err"
+                    if err_col in selectedCatalog.columns:
+                        filter_cols.append(col)
+                        logger.debug(f"Auto-detected filter column pair: {col} / {err_col}")
+
+                # Copy all detected filter columns to output
+                for col in filter_cols:
+                    err_col = f"{col}_err"
+                    outputCatalog[col] = selectedCatalog[col].values
+                    outputCatalog[err_col] = selectedCatalog[err_col].values
+                    logger.debug(f"Auto-copied custom filter {col} from catalog")
+
+            # Always ensure the current image filter is populated (primary logic)
             for col in [image_filter, f"{image_filter}_err"]:
+                if col in outputCatalog.columns:
+                    logger.debug(f"Column {col} already present in output catalog")
+                    continue
                 # First try catalog.yml mapping
                 if col in catalog_keywords and catalog_keywords[col] in selectedCatalog:
                     outputCatalog[col] = selectedCatalog[catalog_keywords[col]].values
+                    logger.debug(f"Mapped {col} from catalog_keywords")
                 # Fallback: copy directly if column exists (for custom catalogs)
                 elif col in selectedCatalog.columns:
                     outputCatalog[col] = selectedCatalog[col].values
+                    logger.debug(f"Copied {col} directly from catalog")
                 # Case-insensitive fallback for custom catalogs only (not standard UBVRI/ugriz/JHK)
                 # to avoid conflating different photometric systems (e.g., r vs R)
                 elif col not in catalog_keywords:
@@ -1326,7 +1416,10 @@ class Catalog:
                     for cat_col in selectedCatalog.columns:
                         if str(cat_col).lower() == col_lower:
                             outputCatalog[col] = selectedCatalog[cat_col].values
+                            logger.debug(f"Mapped {col} case-insensitively from {cat_col}")
                             break
+                else:
+                    logger.warning(f"Could not find column {col} in catalog; available columns: {list(selectedCatalog.columns)}")
 
             # --- Retrieve all available filters ---
             baseDatabase = os.path.join(
@@ -1395,8 +1488,14 @@ class Catalog:
                             f"Excluding {(~hasFilterinfo).sum()} sources with no {image_filter} band information"
                         )
                         outputCatalog = outputCatalog[hasFilterinfo]
+                else:
+                    logger.warning(
+                        f"Filter column '{image_filter}' not found in output catalog; "
+                        f"available columns: {list(outputCatalog.columns)}"
+                    )
 
             logger.info(f"{len(outputCatalog)} sources in output catalog")
+            logger.debug(f"Output catalog columns: {list(outputCatalog.columns)}")
             return outputCatalog
 
         except Exception as e:

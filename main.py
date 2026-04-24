@@ -2566,7 +2566,18 @@ def run_photometry():
                     CatalogSources["y_pix"].values < height - border
                 )
                 mask = (mask_x) & (mask_y)
+                n_before = len(CatalogSources)
                 CatalogSources = CatalogSources[mask]
+                n_after = len(CatalogSources)
+                if n_after < n_before:
+                    logging.info(
+                        f"Border filtering: removed {n_before - n_after} sources outside border, {n_after} sources remaining"
+                    )
+                if n_after == 0:
+                    logging.warning(
+                        f"All catalog sources removed by border filter (border={border}, image={width}x{height})"
+                    )
+                    CatalogSources = None
 
         # =============================================================================
         # Run source detection on final calibrated image
@@ -3214,17 +3225,10 @@ def run_photometry():
         # Zeropoint Calculation
         # =============================================================================
         # Calculates the zeropoint for the image.
-        # For template preparation, use image-detected sources (IsolatedSources) instead
-        # of external catalog sources, since external catalogs lack image-specific columns
-        # (threshold, snr) needed for quality filtering in GetZeropoint.clean()
 
         Calibrate_Catalog = Catalog(input_yaml=input_yaml)
         GetZeropoint = Zeropoint(input_yaml=input_yaml)
-        if prepare_template:
-            # For templates, use image-detected sources with flux measurements
-            CatalogSources = GetZeropoint.clean(sources=IsolatedSources)
-        else:
-            CatalogSources = GetZeropoint.clean(sources=CatalogSources)
+        CatalogSources = GetZeropoint.clean(sources=CatalogSources)
 
         # Check linearity of catalog sources before fitting zeropoint
         # This filters out non-linear/saturated catalog sources

@@ -36,6 +36,10 @@ custom:
   c_err: !!str   c_err
   o: !!str       o
   o_err: !!str   o_err
+  w: !!str       w
+  w_err: !!str   w_err
+  y: !!str       y
+  y_err: !!str   y_err
 
 
 legacy:
