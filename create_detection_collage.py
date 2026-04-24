@@ -132,7 +132,8 @@ def create_detection_collage(detections):
         try:
             with fits.open(orig_path) as hdul:
                 orig_data = hdul[0].data
-                orig_wcs = WCS(hdul[0].header)
+                from wcs import get_wcs
+                orig_wcs = get_wcs(hdul[0].header)
             
             with fits.open(diff_path) as hdul:
                 diff_data = hdul[0].data

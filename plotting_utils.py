@@ -41,12 +41,12 @@ DIVERGENT_PALETTE = {
     'fwhm_high': '#B30000',  # Dark red for high FWHM
     'cross': '#CC79A7',  # Reddish purple for cross markers
 }
-
+# /home/sbrennan/Desktop/SN2024pba/photometry/SN_A/SN2024pba/images_REDUCED/DEEP_SN2024pba_2025-02-11_ZTF_g/LOG_DEEP_SN2024pba_2025-02-11_ZTF_g.log
 # Consistent marker sizes
 MARKER_SIZES = {
-    'small': 2,
-    'medium': 4,
-    'large': 6,
+    'small': 4,
+    'medium': 6,
+    'large': 10,
 }
 
 # Consistent line widths
@@ -55,7 +55,6 @@ LINE_WIDTHS = {
     'medium': 1.0,
     'thick': 1.5,
 }
-
 # Consistent alpha values
 ALPHA_VALUES = {
     'very_light': 0.15,
@@ -75,15 +74,15 @@ def get_okabe_color(color_name):
 
 def get_marker_size(size_name):
     """Get marker size from predefined sizes."""
-    return MARKER_SIZES.get(size_name, 2.2)
+    return MARKER_SIZES.get(size_name, 3)
 
 def get_line_width(width_name):
     """Get line width from predefined widths."""
-    return LINE_WIDTHS.get(width_name, 1.0)
+    return LINE_WIDTHS.get(width_name, 0.5)
 
 def get_alpha(alpha_name):
     """Get alpha value from predefined values."""
-    return ALPHA_VALUES.get(alpha_name, 0.5)
+    return ALPHA_VALUES.get(alpha_name, 0.75)
 
 def get_divergent_color(color_name):
     """Get color from divergent palette."""

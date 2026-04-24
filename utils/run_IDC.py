@@ -101,13 +101,13 @@ class ImageDistortionCorrector:
         "ASTREF_WEIGHT": 1,
         "ASTREFMAG_KEY": "MAG_AUTO",
         "ASTREFMAGERR_KEY": "MAGERR_AUTO",
-        "ASTREFCENT_KEYS": "XWIN_WORLD,YWIN_WORLD",
+        "ASTREFCENT_KEYS": "ALPHA_J2000,DELTA_J2000",
         "ASTREFERR_KEYS": "ERRA_WORLD,ERRB_WORLD,ERRTHETA_WORLD",
         "DISTORT_KEYS": "XWIN_IMAGE,YWIN_IMAGE",
         "ELLIPTICITY_MAX": 0.5,
         "MOSAIC_TYPE": "UNCHANGED",
         "STABILITY_TYPE": "EXPOSURE",
-        "SN_THRESHOLDS": "5.0,100000.0",
+        "SN_THRESHOLDS": "1.0,100000.0",
     }
 
     DEFAULT_SWARP_CONFIG = {
@@ -933,20 +933,20 @@ NNW
             }
             scamp_config_sci = {
                 **scamp_config_base,
-                "FWHM_THRESHOLDS": f"{0.6*fwhm_sci_pix:.2f},{6*fwhm_sci_pix:.2f}",
+                "FWHM_THRESHOLDS": f"{0.3*fwhm_sci_pix:.2f},{10*fwhm_sci_pix:.2f}",
             }
             scamp_config_ref = {
                 **scamp_config_base,
-                "FWHM_THRESHOLDS": f"{0.6*fwhm_ref_pix:.2f},{6*fwhm_ref_pix:.2f}",
+                "FWHM_THRESHOLDS": f"{0.3*fwhm_ref_pix:.2f},{10*fwhm_ref_pix:.2f}",
             }
             self.logger.info(
                 'SCAMP: CROSSID_RADIUS=%.2f" POSITION_MAXERR=%.2f" FWHM_THRESHOLDS sci=[%.2f,%.2f] ref=[%.2f,%.2f]',
                 crossid_arcsec,
                 position_maxerr_arcsec,
-                0.6 * fwhm_sci_pix,
-                6 * fwhm_sci_pix,
-                0.6 * fwhm_ref_pix,
-                6 * fwhm_ref_pix,
+                0.3 * fwhm_sci_pix,
+                10 * fwhm_sci_pix,
+                0.3 * fwhm_ref_pix,
+                10 * fwhm_ref_pix,
             )
 
             # SWarp: resampling type from FWHM/undersampling
@@ -1088,6 +1088,21 @@ NNW
                     scamp_ref = {}
                 else:
                     self.logger.info("Running SCAMP for reference image...")
+                    # Check for required SCAMP columns
+                    try:
+                        with fits.open(ref_sex["catalog_path"]) as hdul:
+                            ref_cols = list(hdul[2].data.columns.names)
+                        with fits.open(sci_sex["catalog_path"]) as hdul:
+                            sci_cols = list(hdul[2].data.columns.names)
+                        required_cols = ["ALPHA_J2000", "DELTA_J2000", "MAG_AUTO", "MAGERR_AUTO"]
+                        missing_ref = [c for c in required_cols if c not in ref_cols]
+                        missing_sci = [c for c in required_cols if c not in sci_cols]
+                        if missing_ref:
+                            self.logger.warning(f"Reference catalog missing columns: {missing_ref}")
+                        if missing_sci:
+                            self.logger.warning(f"Science catalog missing columns: {missing_sci}")
+                    except Exception as e:
+                        self.logger.warning(f"Could not read catalog columns: {e}")
                     scamp_ref = self.run_scamp(
                         ref_sex["catalog_path"],
                         reference_cat=sci_sex["catalog_path"],
@@ -1957,14 +1972,32 @@ NNW
             _clean_scamp_outputs()
             raise
 
+        # Check if log file exists and read it
+        if not os.path.isfile(log_file):
+            self.logger.warning(
+                f"SCAMP log file not created at {log_file}; catalog may be invalid"
+            )
+            _clean_scamp_outputs()
+            return None
+
         with open(log_file) as log_f:
             log_content = log_f.read()
+
+        # Log SCAMP return code and key messages for debugging
+        self.logger.info(
+            f"SCAMP return code: {result.returncode}, log file: {log_file}"
+        )
+        if "Not enough matched detections" in log_content:
+            self.logger.warning("SCAMP: Not enough matched detections in catalog")
+        if "FATAL ERROR" in log_content:
+            self.logger.warning(f"SCAMP: FATAL ERROR in log: {log_content[:500]}")
 
         if result.returncode != 0 or "Not enough matched detections" in log_content:
             self.logger.warning(
                 f"SCAMP failed (code {result.returncode}). See {log_file}"
             )
-            _clean_scamp_outputs()
+            # Don't clean up outputs for debugging
+            # _clean_scamp_outputs()
             return None
 
         distortion = self._parse_scamp_xml(xml_file)

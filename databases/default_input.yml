@@ -111,7 +111,7 @@ default_input:
     psf_build_sigma_clip_maxiters: 15 # int --- Maximum SigmaClip iterations for EPSFBuilder stacking.
     psf_fit_shape_bright_scale_fwhm: 3.0 # float --- PSF photometry fit window scale (bright tier) in FWHM units.
     psf_fit_shape_faint_scale_fwhm: 2.5 # float --- PSF photometry fit window scale (faint tier) in FWHM units.
-    psf_fit_shape_vfaint_scale_fwhm: 2.0 # float --- PSF photometry fit window scale (very-faint tier) in FWHM units.
+    psf_fit_shape_vfaint_scale_fwhm: 2.5 # float --- PSF photometry fit window scale (very-faint tier) in FWHM units.
     psf_fit_shape_bright_min_arcsec: 3.0 # float --- Minimum bright-tier fit window size in arcsec (converted to pixels via pixel_scale).
     psf_fit_shape_faint_min_arcsec: 2.5 # float --- Minimum faint-tier fit window size in arcsec (converted to pixels via pixel_scale).
     psf_fit_shape_vfaint_min_arcsec: 2.0 # float --- Minimum very-faint-tier fit window size in arcsec (converted to pixels via pixel_scale).
@@ -182,7 +182,7 @@ default_input:
     refine_after_solve: False # bool --- If True, run an additional WCS refinement pass after a successful solve.
     # Final small linear correction after solve-field/SCAMP, estimated from matched stars.
     # This only nudges CRPIX and is applied only when the residual improvement is measurable.
-    post_scamp_linear_refine: True # bool --- Enable post-solve CRPIX micro-alignment.
+    post_scamp_linear_refine: False # bool --- Enable post-solve CRPIX micro-alignment.
     post_scamp_linear_refine_min_points: 30 # int --- Minimum matched stars required for the micro-alignment estimate.
     post_scamp_linear_refine_max_shift_px: 2.0 # float --- Maximum allowed CRPIX nudge magnitude in pixels.
     post_scamp_linear_refine_min_improve_px: 0.03 # float --- Require at least this absolute median residual improvement (pixels).
@@ -423,7 +423,7 @@ default_input:
     local_nonnegative_target_offset: True # bool --- If True, after local subtraction in the cutout, add a uniform constant to the residual (and subtract the same from the returned local surface) so a chosen cutout statistic meets a floor (see local_cutout_floor_stat/local_cutout_min_value). This is a robustness hack for difference images. The pipeline removes this constant again for AP/PSF/limiting-magnitude measurements to avoid biasing fluxes.
     local_cutout_floor_stat: median # str --- Which statistic to floor in the locally subtracted cutout: "median" (recommended; allows some negatives) or "min" (forces all finite pixels >= floor; stronger bias).
     local_cutout_min_value: 0.0 # float --- Floor value for the chosen statistic in the locally subtracted cutout. Use 0.0 for nonnegative median; small positive if you truly require >0.
-    local_cutout_annulus_sigma_mult: 5.0 # float --- Additional requirement: raise the local cutout floor so the background-like median is >= (this * annulus_std), where annulus_std is sigma-clipped std in an annulus around the target on the locally subtracted cutout.
+    local_cutout_annulus_sigma_mult: 2.0 # float --- Additional requirement: raise the local cutout floor so the background-like median is >= (this * annulus_std), where annulus_std is sigma-clipped std in an annulus around the target on the locally subtracted cutout.
     local_cutout_annulus_in_scale_fwhm: 3.0 # float --- Inner radius for the annulus_std estimate, in units of FWHM (pixels). The effective inner radius is max(exclude_inner_radius, this*FWHM).
     local_cutout_annulus_width_scale_fwhm: 2.0 # float --- Width of the annulus used for annulus_std estimate, in units of FWHM (pixels).
 

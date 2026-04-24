@@ -1774,6 +1774,27 @@ class Catalog:
         tolerance_arcsec = max_separation
 
         cols = ["RA", "DEC"] + updated_filter_list
+        
+        # Check if output catalog already exists and load it (with deduplication)
+        if os.path.isfile(fpath):
+            logger.info(f"Loading existing custom catalog from {fpath}")
+            existing_catalog = pd.read_csv(fpath)
+            if not existing_catalog.empty:
+                # Deduplicate existing catalog
+                coords_existing = SkyCoord(
+                    ra=existing_catalog["RA"].values * u.degree,
+                    dec=existing_catalog["DEC"].values * u.degree
+                )
+                idx_match, sep, _ = coords_existing.match_to_catalog_sky(coords_existing, nthneighbor=2)
+                keep_mask = sep > 1.0 * u.arcsec
+                existing_catalog = existing_catalog[keep_mask].reset_index(drop=True)
+                n_dups = len(coords_existing) - len(existing_catalog)
+                if n_dups > 0:
+                    logger.warning(f"Removed {n_dups} duplicates from existing cached catalog - RESAVING clean version")
+                    # Save the deduplicated catalog back to file
+                    existing_catalog.to_csv(fpath, index=False, float_format="%.6f")
+                return existing_catalog
+        
         output_catalog = pd.DataFrame(columns=cols)
 
         for catalogName in catalog_list:
@@ -1820,12 +1841,30 @@ class Catalog:
             # Concatenate all new rows at once for performance
             if new_rows:
                 new_rows_df = pd.DataFrame(new_rows)
+                n_before = len(output_catalog)
                 output_catalog = pd.concat(
                     [output_catalog, new_rows_df], ignore_index=True
                 )
+                logger.info(f"Added {len(new_rows_df)} sources from {catalogName}, catalog now has {len(output_catalog)} sources")
 
+        # Final deduplication: remove any duplicate sources that may have been added
+        if not output_catalog.empty:
+            coords_final = SkyCoord(
+                ra=output_catalog["RA"].values * u.degree,
+                dec=output_catalog["DEC"].values * u.degree
+            )
+            idx_match, sep, _ = coords_final.match_to_catalog_sky(coords_final, nthneighbor=2)
+            keep_mask = sep > 1.0 * u.arcsec  # Keep sources with no close neighbour within 1 arcsec
+            n_before_dedup = len(output_catalog)
+            output_catalog = output_catalog[keep_mask].reset_index(drop=True)
+            n_removed = n_before_dedup - len(output_catalog)
+            logger.info(f"Final catalog: {len(output_catalog)} sources (removed {n_removed} duplicates)")
+            if n_removed > 0:
+                logger.warning(f"Removed {n_removed} duplicate sources from final combined catalog")
+        
         # Final output catalog is ready
         output_catalog.to_csv(fpath, index=False, float_format="%.6f")
+        logger.info(f"Saved clean catalog to {fpath}")
         return output_catalog
 
     # =============================================================================
@@ -2001,8 +2040,12 @@ class Catalog:
                     # Apply sigma clipping on residuals
                     clipped = sigma_clip(residuals, sigma=2.5, maxiters=5)
                     # Keep only points within sigma-clipped range
-                    residual_mask = ~clipped.mask
-                    inlier_mask[inlier_mask] = residual_mask
+                    residual_mask = np.asarray(~clipped.mask, dtype=bool).flatten()
+                    # Ensure shapes match before assignment
+                    if residual_mask.shape[0] == np.sum(inlier_mask):
+                        inlier_mask[inlier_mask] = residual_mask
+                    else:
+                        logger.warning(f"Shape mismatch in residual masking: {residual_mask.shape[0]} vs {np.sum(inlier_mask)}, skipping sigma clip update")
                     n_sigma_outliers = np.sum(~residual_mask)
                     if n_sigma_outliers > 0:
                         logger.info(f"Post-RANSAC sigma clipping removed {n_sigma_outliers} additional outliers")
@@ -2093,7 +2136,7 @@ class Catalog:
                     xerr=inst_mag_err_linear[ransac_inliers],
                     fmt="o",
                     markersize=get_marker_size('medium'),
-                    mfc="none",
+                    mfc=get_color('inliers'),
                     mec=get_color('inliers'),
                     ecolor="lightgrey",
                     alpha=get_alpha('dark'),
@@ -2241,7 +2284,7 @@ class Catalog:
                             inlier_catalog_mag_linear = catalog_mag_linear[inlier_mask]
                             inlier_inst_mag_linear = inst_mag_linear[inlier_mask]
                             all_residuals = inlier_catalog_mag_linear - fit_line(inlier_inst_mag_linear.reshape(-1, 1))
-                            inlier_residual_mask = np.abs(all_residuals) < residual_threshold
+                            inlier_residual_mask = np.abs(np.asarray(all_residuals).flatten()) < residual_threshold
                             
                             # Expand inlier residual mask back to full array size
                             linear_residual_mask = np.zeros(len(flux), dtype=bool)
@@ -2822,7 +2865,7 @@ class Catalog:
 
         # Calculate the SNR for each source
         sourceSNR = snr(selectedCatalog["maxPixel"], selectedCatalog["noiseSky"])
-        selectedCatalog["SNR"] = np.round(sourceSNR, 1)
+        selectedCatalog["snr"] = np.round(sourceSNR, 1)
 
         # Log the number of sources with valid instrumental magnitude (finite flux > 0)
         logger.info(

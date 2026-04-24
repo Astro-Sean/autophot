@@ -981,7 +981,7 @@ class Zeropoint:
             inlier_masks_full = {
                 k: np.zeros(len(clean_catalog), dtype=bool) for k in ["AP", "PSF"]
             }
-            colors = {"AP": "blue", "PSF": "green"}
+            colors = {"AP": get_color('inliers'), "PSF": get_color('robust')}
             labels = {"AP": "Aperture", "PSF": "PSF"}
             global_xmins, global_xmaxs, global_ymins, global_ymaxs = [], [], [], []
 
@@ -1257,7 +1257,7 @@ class Zeropoint:
                 if os.path.exists(_style):
                     plt.style.use(_style)
                 fig_hist, ax_hist = plt.subplots(1, 1, figsize=set_size(540, 1))
-                colors = {"AP": "blue", "PSF": "green"}
+                colors = {"AP": get_color('inliers'), "PSF": get_color('robust')}
                 labels_base = {"AP": "Aperture", "PSF": "PSF"}
                 inlier_masks_full = {
                     k: np.zeros(len(clean_catalog), dtype=bool) for k in ["AP", "PSF"]
@@ -1558,9 +1558,9 @@ class Zeropoint:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(340, 2.0), sharex=True)
         plt.subplots_adjust(hspace=0.35, top=0.95, bottom=0.1, left=0.15, right=0.95)
 
-        # Okabe-Ito palette for consistent, colorblind-friendly plots.
-        okabe_blue = "#0000FF"
-        okabe_orange = "#FF0000"
+        # Consistent colors from plotting_utils palette
+        inlier_color = get_color('inliers')
+        outlier_color = get_color('outliers')
 
         # Top panel: uncorrected data
         if inlier_mask is not None:
@@ -1572,7 +1572,7 @@ class Zeropoint:
                 yerr=ye[inlier_mask],
                 fmt="o",
                 ms=get_marker_size('medium'),
-                color=okabe_blue,
+                color=inlier_color,
                 ecolor="lightgrey",
                 alpha=0.8,
                 capsize=2,
@@ -1587,7 +1587,7 @@ class Zeropoint:
                 yerr=ye,
                 fmt="o",
                 ms=get_marker_size('medium'),
-                color=okabe_blue,
+                color=inlier_color,
                 ecolor="lightgrey",
                 alpha=0.8,
                 capsize=2,
@@ -1692,7 +1692,7 @@ class Zeropoint:
                 yerr=ye_corrected[inlier_mask],
                 fmt="o",
                 ms=get_marker_size('medium'),
-                color="green",
+                color=get_color('robust'),
                 ecolor="lightgrey",
                 alpha=0.8,
                 capsize=2,
@@ -1708,7 +1708,7 @@ class Zeropoint:
                     yerr=ye_corrected[outlier_mask],
                     fmt="x",
                     ms=get_marker_size('medium'),
-                    color="orange",
+                    color=outlier_color,
                     ecolor="lightgrey",
                     alpha=0.6,
                     capsize=2,
@@ -1723,7 +1723,7 @@ class Zeropoint:
                 yerr=ye_corrected,
                 fmt="o",
                 ms=get_marker_size('medium'),
-                color="green",
+                color=get_color('robust'),
                 ecolor="lightgrey",
                 alpha=0.8,
                 capsize=2,
@@ -2362,10 +2362,10 @@ class Zeropoint:
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(340, 2.0), sharex=True)
             plt.subplots_adjust(hspace=0.35, top=0.95, bottom=0.1, left=0.15, right=0.95)
 
-            # Okabe-Ito palette for consistent, colorblind-friendly plots.
-            okabe_blue = get_color('inliers')
-            okabe_orange = get_color('outliers')
-            okabe_gray = get_color('all_sources')
+            # Consistent colors from plotting_utils palette
+            inlier_color = get_color('inliers')
+            outlier_color = get_color('outliers')
+            all_sources_color = get_color('all_sources')
 
             # Top panel: uncorrected data - show cleaned distribution (inliers)
             ax1.errorbar(
@@ -2375,7 +2375,7 @@ class Zeropoint:
                 yerr=ye,
                 fmt="o",
                 ms=get_marker_size('medium'),
-                color=okabe_blue,
+                color=inlier_color,
                 ecolor="lightgrey",
                 alpha=0.8,
                 capsize=1,
@@ -2433,7 +2433,7 @@ class Zeropoint:
                 yerr=ye_corrected,
                 fmt="o",
                 ms=get_marker_size('medium'),
-                color=okabe_blue,
+                color=inlier_color,
                 ecolor="lightgrey",
                 alpha=0.8,
                 capsize=1,

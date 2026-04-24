@@ -1479,9 +1479,22 @@ class AutomatedPhotometry:
                     )
                 else:
                     _log(
-                        "[WARNING] TNS lookup skipped; no TNS access or target_name, "
+                        "[ERROR] Cannot proceed: no TNS access, no target_name, "
                         "and no fallback RA/Dec provided in the configuration."
                     )
+                    print(
+                        f"\n{'='*60}\n"
+                        f"ERROR: Cannot proceed without target coordinates.\n\n"
+                        f"You must provide one of:\n"
+                        f"  1. target_name + TNS API credentials (in wcs: TNS_BOT_ID, etc.)\n"
+                        f"  2. target_ra and target_dec coordinates manually\n"
+                        f"  3. target_name with RA/Dec fallback (if TNS fails)\n\n"
+                        f"Add to your input:\n"
+                        f"   autophot_input['target_ra'] = <RA in degrees>\n"
+                        f"   autophot_input['target_dec'] = <Dec in degrees>\n"
+                        f"{'='*60}\n"
+                    )
+                    sys.exit("Stopped: No target coordinates provided.")
 
             # Clean and validate input files
             file_list = prepare_db.clean()
@@ -1522,7 +1535,7 @@ class AutomatedPhotometry:
                     if download_kind is True:
                         download_kind = "panstarrs"
 
-                    logger.info(
+                    _log(
                         "Downloading templates for science image filters: %s",
                         ", ".join(sorted(required_filters)) if required_filters else "None"
                     )

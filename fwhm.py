@@ -484,7 +484,7 @@ class Find_FWHM:
                 xerr = xerr_vals if xerr_vals is not None and np.any(np.isfinite(xerr_vals)) else None
                 yerr = yerr_vals if yerr_vals is not None and np.any(np.isfinite(yerr_vals)) else None
                 
-                # Selected linear inliers - small outlined markers to reduce overlap
+                # Selected linear inliers - filled markers
                 ax.errorbar(
                     df_lin["m_inst"],
                     df_lin["m_peak"],
@@ -492,7 +492,7 @@ class Find_FWHM:
                     yerr=yerr,
                     fmt="o",
                     ms=get_marker_size('medium'),
-                    mfc="none",
+                    mfc=get_color('inliers'),
                     mec=get_color('inliers'),
                     ecolor="lightgrey",
                     alpha=get_alpha('dark'),

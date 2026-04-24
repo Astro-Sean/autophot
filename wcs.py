@@ -209,49 +209,50 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
         WCS: 2D celestial WCS object, or None if invalid.
     """
     if header is None:
+        logger.warning("get_wcs: header is None")
         return None
-        
+
     try:
         header = _normalize_projection_codes(header, inplace=False)
-        
+
         # Check for basic WCS keywords
         required = ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2']
         missing = [k for k in required if k not in header]
         if missing:
-            logger.debug(f"WCS creation failed: missing keywords {missing}")
+            logger.warning(f"get_wcs: missing keywords {missing}")
             return None
-            
+
         with warnings.catch_warnings():
             if silent:
                 warnings.simplefilter("ignore")
             with silence_astropy_wcs_info():
                 wcs = WCS(header, fix=True, relax=True)
-                
+
         # Validate WCS has celestial component
         if not wcs.has_celestial:
-            logger.debug("WCS has no celestial component")
+            logger.warning("get_wcs: WCS has no celestial component")
             return None
-            
+
         # Ensure 2D celestial WCS so reproject and callers get consistent pixel grid
         naxis = getattr(wcs.wcs, "naxis", 2)
         if naxis > 2:
             wcs = wcs.celestial
-            
+
         # Test transformation
         try:
             test_x, test_y = float(header['CRPIX1']), float(header['CRPIX2'])
             test_world = wcs.pixel_to_world(test_x, test_y)
             if test_world is None:
-                logger.debug("WCS transformation test failed")
+                logger.warning("get_wcs: WCS transformation test failed - returned None")
                 return None
         except Exception as e:
-            logger.debug(f"WCS transformation test failed: {e}")
+            logger.warning(f"get_wcs: WCS transformation test failed with exception: {e}")
             return None
-            
+
         return wcs
-        
+
     except Exception as e:
-        logger.debug(f"WCS creation failed: {e}")
+        logger.warning(f"get_wcs: WCS creation failed with exception: {e}")
         return None
 
 
@@ -605,6 +606,9 @@ def _wcs_match_separation_stats_arcsec(
     """
     Compute robust angular-separation stats (median, p95) for matched points.
     """
+    if wcs_obj is None:
+        logger.debug("_wcs_match_separation_stats_arcsec: wcs_obj is None")
+        return np.nan, np.nan
     sky_true = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
     ra_p, dec_p = wcs_obj.all_pix2world(x_pix, y_pix, 0)
     sky_pred = SkyCoord(
@@ -631,6 +635,9 @@ def _best_wcs_match_separation_stats_arcsec(
     Returns:
         (median_arcsec, p95_arcsec, applied_shift_px)
     """
+    if wcs_obj is None:
+        logger.debug("_best_wcs_match_separation_stats_arcsec: wcs_obj is None")
+        return np.nan, np.nan, 0.0
     med1, p951 = _wcs_match_separation_stats_arcsec(wcs_obj, x_pix, y_pix, ra_deg, dec_deg)
     x0 = np.asarray(x_pix, dtype=float) + 1.0
     y0 = np.asarray(y_pix, dtype=float) + 1.0
@@ -1443,7 +1450,12 @@ class WCSSolver:
                 or self.default_input.get("saturate")
             )
             try:
-                satur_str = str(float(satur_val))
+                satur_float = float(satur_val)
+                # SExtractor rejects inf/NaN SATUR_LEVEL values
+                if not np.isfinite(satur_float) or satur_float <= 0:
+                    satur_str = "1e7"
+                else:
+                    satur_str = str(satur_float)
             except Exception:
                 satur_str = "1e7"
 
@@ -1534,14 +1546,23 @@ class WCSSolver:
                 logger.info(
                     "Running SExtractor for SCAMP: %s", " ".join(map(str, sex_cmd))
                 )
-                subprocess.run(
+                result = subprocess.run(
                     sex_cmd,
                     check=False,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
+                    stderr=subprocess.PIPE,
                     timeout=timeout_sec,
                     cwd=temp_dir,
                 )
+                # Log SExtractor output for debugging
+                if result.stdout:
+                    logger.debug(
+                        "SExtractor stdout: %s", result.stdout.decode("utf-8", errors="replace")
+                    )
+                if result.stderr:
+                    logger.warning(
+                        "SExtractor stderr: %s", result.stderr.decode("utf-8", errors="replace")
+                    )
             except subprocess.TimeoutExpired:
                 logger.warning(
                     "SExtractor for SCAMP exceeded timeout (%.1f s)", timeout_sec
@@ -1549,8 +1570,17 @@ class WCSSolver:
                 return np.nan
             if not os.path.isfile(cat_path):
                 logger.warning(
-                    "SCAMP: SExtractor catalog not created; aborting SCAMP solve."
+                    "SCAMP: SExtractor catalog not created at %s; aborting SCAMP solve.",
+                    cat_path
                 )
+                # Log temp directory contents for debugging
+                try:
+                    temp_files = os.listdir(temp_dir)
+                    logger.warning(
+                        "SCAMP: Temp directory contents: %s", ", ".join(temp_files)
+                    )
+                except Exception:
+                    pass
                 return np.nan
 
             astref_cat = str(wcs_cfg.get("scamp_astref_catalog", "GAIA-DR3"))
@@ -1804,9 +1834,14 @@ class WCSSolver:
                 continue
 
             if x_m is not None and y_m is not None and ra_m is not None and dec_m is not None:
-                med_arcsec, p95_arcsec, _ = _best_wcs_match_separation_stats_arcsec(
-                    get_wcs(scamp_header), x_m, y_m, ra_m, dec_m
-                )
+                scamp_wcs = get_wcs(scamp_header)
+                if scamp_wcs is not None:
+                    med_arcsec, p95_arcsec, _ = _best_wcs_match_separation_stats_arcsec(
+                        scamp_wcs, x_m, y_m, ra_m, dec_m
+                    )
+                else:
+                    logger.debug("SCAMP trial: get_wcs returned None, skipping residual calculation")
+                    med_arcsec, p95_arcsec = np.nan, np.nan
                 logger.info(
                     "SCAMP trial '%s': matched-star residual med/p95=%.3f/%.3f arcsec",
                     trial_label,
@@ -1920,12 +1955,21 @@ class WCSSolver:
             wcs_before_nudge = get_wcs(wcs_header)
             wcs_header["CRPIX1"] = old_crpix1 + dx_px
             wcs_header["CRPIX2"] = old_crpix2 + dy_px
-            med_before, p95_before, _ = _best_wcs_match_separation_stats_arcsec(
-                wcs_before_nudge, x_m, y_m, ra_m, dec_m
-            )
-            med_after, p95_after, _ = _best_wcs_match_separation_stats_arcsec(
-                get_wcs(wcs_header), x_m, y_m, ra_m, dec_m
-            )
+            if wcs_before_nudge is not None:
+                med_before, p95_before, _ = _best_wcs_match_separation_stats_arcsec(
+                    wcs_before_nudge, x_m, y_m, ra_m, dec_m
+                )
+            else:
+                logger.debug("wcs_before_nudge is None, skipping CRPIX nudge comparison")
+                med_before, p95_before = np.nan, np.nan
+            wcs_after_nudge = get_wcs(wcs_header)
+            if wcs_after_nudge is not None:
+                med_after, p95_after, _ = _best_wcs_match_separation_stats_arcsec(
+                    wcs_after_nudge, x_m, y_m, ra_m, dec_m
+                )
+            else:
+                logger.debug("wcs_after_nudge is None, skipping CRPIX nudge comparison")
+                med_after, p95_after = np.nan, np.nan
             logger.info(
                 "Applied post-solve CRPIX nudge: dCRPIX=(%+.3f,%+.3f) px "
                 "(n=%d, origin_shift=%+.1f px, residual med %.3f->%.3f px; "
@@ -2589,12 +2633,20 @@ class WCSSolver:
                             np.asarray(ra_d, dtype=float),
                             np.asarray(dec_d, dtype=float),
                         )
-                        med_in, p95_in, sh_in = _best_wcs_match_separation_stats_arcsec(
-                            input_wcs_for_compare, x_d, y_d, ra_d, dec_d
-                        )
-                        med_sv, p95_sv, sh_sv = _best_wcs_match_separation_stats_arcsec(
-                            solved_wcs_for_compare, x_d, y_d, ra_d, dec_d
-                        )
+                        if input_wcs_for_compare is not None:
+                            med_in, p95_in, sh_in = _best_wcs_match_separation_stats_arcsec(
+                                input_wcs_for_compare, x_d, y_d, ra_d, dec_d
+                            )
+                        else:
+                            logger.debug("input_wcs_for_compare is None, skipping comparison")
+                            med_in, p95_in, sh_in = np.nan, np.nan, 0.0
+                        if solved_wcs_for_compare is not None:
+                            med_sv, p95_sv, sh_sv = _best_wcs_match_separation_stats_arcsec(
+                                solved_wcs_for_compare, x_d, y_d, ra_d, dec_d
+                            )
+                        else:
+                            logger.debug("solved_wcs_for_compare is None, skipping comparison")
+                            med_sv, p95_sv, sh_sv = np.nan, np.nan, 0.0
                         logger.info(
                             "WCS compare on solve-field matches (n=%d): input med/p95=%.3f/%.3f arcsec (shift=%+.1f px) | solved med/p95=%.3f/%.3f arcsec (shift=%+.1f px)",
                             int(len(x_d)),
@@ -2936,25 +2988,28 @@ class WCSSolver:
                 # Validate merged WCS before writing
                 with silence_astropy_wcs_info():
                     merged_wcs = get_wcs(self.header)
-                    try:
-                        from astropy.wcs import utils as wcs_utils
+                    if merged_wcs is None:
+                        logger.warning("Merged WCS is None after get_wcs - cannot validate pixel scale")
+                    else:
+                        try:
+                            from astropy.wcs import utils as wcs_utils
 
-                        scale_val = wcs_utils.proj_plane_pixel_scales(merged_wcs)[0]
-                        scale = (
-                            float(scale_val * 3600)
-                            if hasattr(scale_val, "value")
-                            else float(scale_val * 3600)
-                        )  # arcsec/pix
-                        if not np.isfinite(scale) or scale <= 0 or scale > 3600:
-                            logger.warning(
-                                "Merged WCS has invalid pixel scale (%.6f); rejecting",
-                                scale,
+                            scale_val = wcs_utils.proj_plane_pixel_scales(merged_wcs)[0]
+                            scale = (
+                                float(scale_val * 3600)
+                                if hasattr(scale_val, "value")
+                                else float(scale_val * 3600)
+                            )  # arcsec/pix
+                            if not np.isfinite(scale) or scale <= 0 or scale > 3600:
+                                logger.warning(
+                                    "Merged WCS has invalid pixel scale (%.6f); rejecting",
+                                    scale,
+                                )
+                                return np.nan
+                        except Exception as ev:
+                            log_warning_from_exception(
+                                logger, "Could not validate merged WCS", ev
                             )
-                            return np.nan
-                    except Exception as ev:
-                        log_warning_from_exception(
-                            logger, "Could not validate merged WCS", ev
-                        )
 
                 safe_fits_write(self.fpath, self.image, self.header,
                     output_verify="ignore",

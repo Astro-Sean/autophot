@@ -150,6 +150,9 @@ try:
 except ImportError:
     phase_cross_correlation = None  # subpixel refinement disabled if skimage missing
 
+from functools import lru_cache
+from typing import NamedTuple
+
 # =============================================================================
 # Custom / Local Module Imports
 # =============================================================================
@@ -227,6 +230,15 @@ RNG = np.random.default_rng(seed=42)
 # Chosen to be extremely small but non-zero so it passes finite checks
 # but is trivially distinguishable from real flux.
 NO_DATA_SENTINEL = 1e-30
+
+
+class AlignmentResult(NamedTuple):
+    """Structured result from an alignment attempt."""
+    science_path: Optional[str]
+    template_path: Optional[str]
+    method_used: str
+    median_offset_px: Optional[float]
+
 
 # Supported PanSTARRS filter names
 PANSTARRS_FILTERS = frozenset({"g", "r", "i", "z",'y','w'})
@@ -339,6 +351,386 @@ class FluxMatchParams:
 
     fix_slope_to_one: bool = True
     """If True, fix slope to 1 when fitting science vs reference (only fit intercept)."""
+
+
+@dataclass
+class ReprojectConfig:
+    """Cached reproject configuration extracted once from input_yaml."""
+    method: str = "adaptive"
+    roundtrip: bool = True
+    interp_order: Any = "bicubic"
+    parallel: bool = False
+    conserve_flux: bool = False
+    center_jacobian: bool = False
+    subpixel_refine: bool = True
+    subpixel_min_shift: float = 0.05
+    subpixel_max_shift: float = 3.0
+
+    @classmethod
+    def from_yaml(cls, input_yaml: Dict[str, Any]) -> "ReprojectConfig":
+        cfg = input_yaml.get("alignment", {})
+        return cls(
+            method=str(cfg.get("reproject_method", "adaptive")).lower().strip(),
+            roundtrip=bool(cfg.get("reproject_roundtrip_coords", True)),
+            interp_order=_normalize_reproject_interp_order(
+                cfg.get("reproject_interp_order", "bicubic")
+            ),
+            parallel=bool(cfg.get("reproject_parallel", False)),
+            conserve_flux=bool(cfg.get("reproject_adaptive_conserve_flux", False)),
+            center_jacobian=bool(cfg.get("reproject_adaptive_center_jacobian", False)),
+            subpixel_refine=bool(cfg.get("reproject_subpixel_refine", True)),
+            subpixel_min_shift=float(cfg.get("reproject_subpixel_min_shift", 0.05)),
+            subpixel_max_shift=float(cfg.get("reproject_subpixel_max_shift", 3.0)),
+        )
+
+
+def _prepare_projection_header(header_in: fits.Header) -> fits.Header:
+    """
+    Build a projection header for reproject, preserving SIP/PV/TPV distortion
+    keywords. Appends -SIP to TAN CTYPEs when SIP coefficients are present.
+    """
+    hdr = header_in.copy()
+    sip_keys = ("A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER")
+    if any(k in hdr for k in sip_keys):
+        for ctype_key in ("CTYPE1", "CTYPE2"):
+            cval = str(hdr.get(ctype_key, ""))
+            if cval and "TAN" in cval and not cval.endswith("-SIP"):
+                hdr[ctype_key] = f"{cval}-SIP"
+    return hdr
+
+
+def _distortion_summary(header_in: fits.Header) -> str:
+    """Return a compact string describing WCS distortion keywords present."""
+    keys = list(header_in.keys())
+    pv_count = sum(1 for k in keys if str(k).startswith("PV"))
+    sip_count = sum(
+        1 for k in keys
+        if str(k).startswith(("A_", "B_", "AP_", "BP_", "SIP_"))
+    )
+    c1 = str(header_in.get("CTYPE1", ""))
+    c2 = str(header_in.get("CTYPE2", ""))
+    return f"CTYPE1={c1} CTYPE2={c2} PV={pv_count} SIP={sip_count}"
+
+
+def _introspect_reproject_adaptive() -> Dict[str, Any]:
+    """
+    Inspect reproject_adaptive signature once at import time.
+    Returns dict of supported optional kwargs for the installed version.
+    """
+    if reproject_adaptive is None:
+        return {}
+    import inspect as _inspect
+    extras: Dict[str, Any] = {}
+    try:
+        sig = _inspect.signature(reproject_adaptive)
+        params = sig.parameters
+        if "conserve_flux" in params:
+            extras["_has_conserve_flux"] = True
+        if "center_jacobian" in params:
+            extras["_has_center_jacobian"] = True
+    except (TypeError, ValueError):
+        pass
+    return extras
+
+
+# Introspect once at import time - not on every alignment call
+_REPROJECT_ADAPTIVE_EXTRAS: Dict[str, Any] = _introspect_reproject_adaptive()
+
+
+def _build_adaptive_kwargs(cfg: ReprojectConfig) -> Dict[str, Any]:
+    """Build extra kwargs for reproject_adaptive from config and introspection cache."""
+    kwargs: Dict[str, Any] = {}
+    if _REPROJECT_ADAPTIVE_EXTRAS.get("_has_conserve_flux"):
+        kwargs["conserve_flux"] = cfg.conserve_flux
+    if _REPROJECT_ADAPTIVE_EXTRAS.get("_has_center_jacobian"):
+        kwargs["center_jacobian"] = cfg.center_jacobian
+    return kwargs
+
+
+def compute_alignment_rms(
+    sci_data: np.ndarray,
+    ref_data: np.ndarray,
+    fwhm_pixels: float,
+) -> Optional[float]:
+    """
+    Compute robust alignment quality from pre-loaded arrays.
+
+    Accepts arrays directly to avoid redundant FITS I/O. Uses mutual
+    nearest-neighbour star matching for robustness in crowded fields.
+
+    Returns median offset in pixels or None if measurement fails.
+    """
+    if DAOStarFinder is None:
+        return None
+    if sci_data.shape != ref_data.shape:
+        return None
+
+    try:
+        fwhm = max(float(fwhm_pixels), 2.0)
+        from astropy.stats import sigma_clipped_stats as _scs
+
+        _, med_sci, std_sci = _scs(sci_data, sigma=3.0)
+        _, med_ref, std_ref = _scs(ref_data, sigma=3.0)
+
+        if std_sci <= 0 or std_ref <= 0:
+            return None
+
+        daofind_sci = DAOStarFinder(fwhm=fwhm, threshold=5.0 * std_sci)
+        daofind_ref = DAOStarFinder(fwhm=fwhm, threshold=5.0 * std_ref)
+
+        tbl_sci = daofind_sci(sci_data - med_sci)
+        tbl_ref = daofind_ref(ref_data - med_ref)
+
+        if tbl_sci is None or tbl_ref is None:
+            return None
+        if len(tbl_sci) < 5 or len(tbl_ref) < 5:
+            return None
+
+        sci_xy = np.column_stack(
+            (tbl_sci["xcentroid"].data, tbl_sci["ycentroid"].data)
+        )
+        ref_xy = np.column_stack(
+            (tbl_ref["xcentroid"].data, tbl_ref["ycentroid"].data)
+        )
+
+        max_sep = float(max(2.5, 2.5 * fwhm))
+        tree_ref = cKDTree(ref_xy)
+        tree_sci = cKDTree(sci_xy)
+
+        d_sr, i_sr = tree_ref.query(sci_xy, k=1)
+        d_rs, i_rs = tree_sci.query(ref_xy, k=1)
+
+        idx_s = np.arange(len(sci_xy), dtype=int)
+        mutual = (i_rs[i_sr] == idx_s) & np.isfinite(d_sr)
+        if not np.any(mutual):
+            return None
+
+        d_mut = d_sr[mutual]
+        d_mut = d_mut[np.isfinite(d_mut) & (d_mut <= max_sep)]
+        if len(d_mut) < 10:
+            return None
+
+        median_offset = float(np.nanmedian(d_mut))
+        p90 = float(np.nanpercentile(d_mut, 90.0))
+        rms = float(np.sqrt(np.mean(d_mut**2)))
+
+        logger.info(
+            "Alignment diagnostics: median=%.3f px  rms=%.3f px  p90=%.3f px"
+            "  (%d mutual pairs, max_sep=%.2f px)",
+            median_offset, rms, p90, len(d_mut), max_sep,
+        )
+        return median_offset
+
+    except Exception:
+        logger.debug("compute_alignment_rms failed", exc_info=True)
+        return None
+
+
+def _reproject_template(
+    science_image: np.ndarray,
+    science_header: fits.Header,
+    template_image: np.ndarray,
+    template_header: fits.Header,
+    output_path: str,
+    cfg: ReprojectConfig,
+    fwhm_pixels: float = 3.0,
+) -> AlignmentResult:
+    """
+    Reproject template onto the science pixel grid.
+
+    Optimizations vs the original nested closure:
+      - Projection headers prepared once, not re-derived per fallback.
+      - Adaptive kwargs built once from module-level introspection cache.
+      - import inspect called once at module level, not per call.
+      - Subpixel refinement gated on measured shift magnitude to avoid
+        unnecessary ndimage_shift when WCS alignment is already accurate.
+      - Returns structured AlignmentResult instead of bare tuple.
+
+    Parameters
+    ----------
+    science_image, science_header : ndarray, Header
+        Science image data and header (already loaded by caller).
+    template_image, template_header : ndarray, Header
+        Template data and header (already loaded by caller).
+    output_path : str
+        Destination path for the reprojected template FITS.
+    cfg : ReprojectConfig
+        Pre-built configuration (extracted from input_yaml once by caller).
+    fwhm_pixels : float
+        PSF FWHM for alignment quality diagnostic.
+
+    Returns
+    -------
+    AlignmentResult
+        science_path is None on failure.
+    """
+    _FAIL = AlignmentResult(None, None, "reproject", None)
+
+    shape_out = science_image.shape
+
+    # Prepare headers once - shared across all fallback attempts
+    template_proj = _prepare_projection_header(template_header)
+    science_proj = _prepare_projection_header(science_header)
+
+    logger.info(
+        "Reproject distortion: template[%s] -> science[%s]",
+        _distortion_summary(template_proj),
+        _distortion_summary(science_proj),
+    )
+
+    # Build adaptive kwargs once from module-level cache
+    adaptive_kwargs = _build_adaptive_kwargs(cfg)
+
+    # Determine fallback order from requested method
+    all_methods = ("exact", "adaptive", "interp")
+    if cfg.method in all_methods:
+        fallbacks = [cfg.method] + [m for m in all_methods if m != cfg.method]
+    else:
+        logger.warning(
+            "Unknown reproject_method=%r; defaulting to adaptive with fallbacks.",
+            cfg.method,
+        )
+        fallbacks = ["adaptive", "interp", "exact"]
+
+    aligned: Optional[np.ndarray] = None
+    footprint: Optional[np.ndarray] = None
+    used_method: Optional[str] = None
+    last_exc: Optional[Exception] = None
+
+    for m in fallbacks:
+        try:
+            if m == "adaptive":
+                aligned, footprint = reproject_adaptive(
+                    (template_image, template_proj),
+                    output_projection=science_proj,
+                    shape_out=shape_out,
+                    roundtrip_coords=cfg.roundtrip,
+                    parallel=cfg.parallel,
+                    **adaptive_kwargs,
+                )
+            elif m == "interp":
+                aligned, footprint = reproject_interp(
+                    (template_image, template_proj),
+                    output_projection=science_proj,
+                    shape_out=shape_out,
+                    roundtrip_coords=cfg.roundtrip,
+                    order=cfg.interp_order,
+                    parallel=cfg.parallel,
+                )
+            else:  # exact
+                aligned, footprint = reproject_exact(
+                    (template_image, template_proj),
+                    output_projection=science_proj,
+                    shape_out=shape_out,
+                    parallel=cfg.parallel,
+                )
+            used_method = m
+            break
+        except Exception as _e:
+            last_exc = _e
+            log_warning_from_exception(logger, f"Reproject ({m}) failed", _e)
+
+    if used_method is None or aligned is None or footprint is None:
+        logger.error("All reproject methods failed; last error: %s", last_exc)
+        return _FAIL
+
+    # Mask non-footprint pixels with NaN (preserves chip gaps)
+    fp_mask = footprint.astype(bool)
+    aligned[~fp_mask] = np.nan
+
+    # ------------------------------------------------------------------
+    # Subpixel refinement - only apply when shift is meaningful
+    # ------------------------------------------------------------------
+    median_offset: Optional[float] = None
+
+    if cfg.subpixel_refine and phase_cross_correlation is not None:
+        try:
+            ref_valid = np.isfinite(science_image) & (np.abs(science_image) < 1e30)
+            mov_valid = np.isfinite(aligned)
+
+            if np.sum(ref_valid) > 100 and np.sum(mov_valid) > 100:
+                shift_result = phase_cross_correlation(
+                    np.asarray(science_image, dtype=np.float64),
+                    np.asarray(aligned, dtype=np.float64),
+                    reference_mask=ref_valid,
+                    moving_mask=mov_valid,
+                )
+                subpix = (
+                    shift_result[0]
+                    if isinstance(shift_result, tuple)
+                    else shift_result
+                )
+                subpix = np.atleast_1d(np.asarray(subpix, dtype=float))
+
+                if subpix.size >= 2:
+                    shift_mag = float(np.sqrt(subpix[0] ** 2 + subpix[1] ** 2))
+
+                    if shift_mag < cfg.subpixel_min_shift:
+                        # Already well-aligned; skip ndimage_shift entirely
+                        logger.info(
+                            "Subpixel shift magnitude %.4f px < threshold %.4f px; "
+                            "skipping ndimage_shift.",
+                            shift_mag,
+                            cfg.subpixel_min_shift,
+                        )
+                    elif shift_mag > cfg.subpixel_max_shift:
+                        # Large shift indicates WCS failure, not subpixel error
+                        logger.warning(
+                            "Subpixel shift magnitude %.4f px > max %.4f px; "
+                            "skipping to avoid masking valid data.",
+                            shift_mag,
+                            cfg.subpixel_max_shift,
+                        )
+                    else:
+                        aligned = ndimage_shift(
+                            aligned,
+                            (float(subpix[0]), float(subpix[1])),
+                            order=3,
+                            mode="constant",
+                            cval=np.nan,
+                        )
+                        logger.info(
+                            "Subpixel refinement applied: shift=(%.4f, %.4f) px  "
+                            "magnitude=%.4f px",
+                            float(subpix[0]),
+                            float(subpix[1]),
+                            shift_mag,
+                        )
+
+        except Exception as e:
+            log_warning_from_exception(
+                logger,
+                "Subpixel refinement failed (using WCS-aligned result)",
+                e,
+                exc_info=True,
+            )
+
+    # ------------------------------------------------------------------
+    # Write output
+    # ------------------------------------------------------------------
+    hdr = template_header.copy()
+    hdr.update(science_proj, relax=True)
+    hdr["NAXIS1"] = aligned.shape[1]
+    hdr["NAXIS2"] = aligned.shape[0]
+    hdu = fits.PrimaryHDU(aligned.astype(np.float32), header=hdr)
+    hdu.writeto(output_path, overwrite=True, output_verify="silentfix+ignore")
+
+    # ------------------------------------------------------------------
+    # Alignment quality diagnostic - uses already-loaded science_image
+    # ------------------------------------------------------------------
+    try:
+        aligned_loaded, _ = read_fits(output_path)
+        median_offset = compute_alignment_rms(science_image, aligned_loaded, fwhm_pixels)
+    except Exception:
+        median_offset = None
+
+    logger.info("Reproject alignment succeeded (method=%s).", used_method)
+    return AlignmentResult(
+        science_path=None,  # filled in by caller
+        template_path=output_path,
+        method_used=f"reproject/{used_method}",
+        median_offset_px=median_offset,
+    )
 
 
 # =============================================================================
@@ -1607,7 +1999,7 @@ class Templates:
         trimmed_header = header.copy()
         
         try:
-            wcs = WCS(trimmed_header)
+            wcs = get_wcs(trimmed_header)
             # Update CRPIX to account for offset
             if 'CRPIX1' in trimmed_header:
                 trimmed_header['CRPIX1'] -= x_min
@@ -2065,18 +2457,18 @@ class Templates:
         """
         Align science and template images to a common pixel grid.
 
-        Three strategies are tried in cascading order:
-          1. **SWarp** (SCAMP+SWarp astrometric solution)
-          2. **AstroAlign** (feature-based affine transform)
-          3. **Reproject** (pure WCS-based reprojection)
+        Cascade order (first success wins):
+          1. SWarp  (if method='swarp')
+          2. AstroAlign  (if method in ('swarp','astroalign'))
+          3. WCS Reproject  (always attempted as final fallback)
 
-        The *method* parameter controls which strategy is tried first,
-        but the cascade always falls through to reproject as a last resort.
+        Images are loaded once and passed to module-level helpers to avoid
+        redundant FITS I/O. ReprojectConfig and projection headers are built
+        once per call and shared across fallback attempts.
 
         Returns
         -------
-        (science_out, template_out) : tuple of str or None
-            Paths to aligned images, or (None, None) on complete failure.
+        (science_out, template_out) or (None, None) on failure.
         """
         sci_name = Path(scienceFpath).name
         ref_name = Path(templateFpath).name
@@ -2090,344 +2482,84 @@ class Templates:
             scienceDir = Path(scienceFpath).parent
             new_templateFpath = str(scienceDir / Path(templateFpath).name)
 
-            # Read headers (single I/O pass each)
+            # Single I/O pass per file - data reused across all strategies
             scienceImage, scienceHeader = read_fits(scienceFpath)
             templateImage, templateHeader = read_fits(templateFpath)
-            imageWCS = get_wcs(scienceHeader)
+
+            # Early shape-compatibility check before any expensive computation
+            if scienceImage.ndim != 2 or templateImage.ndim != 2:
+                logger.error(
+                    "align: expected 2D images, got science=%s template=%s",
+                    scienceImage.shape,
+                    templateImage.shape,
+                )
+                return None, None
+
+            fwhm_pix = float(self.input_yaml.get("fwhm", 3.0))
+
+            # Build reproject config once - shared across reproject attempts
+            reproject_cfg = ReprojectConfig.from_yaml(self.input_yaml)
 
             # ------------------------------------------------------------------
-            # Helper: assess astrometric quality of an alignment
+            # Strategy helpers
             # ------------------------------------------------------------------
-            def _log_alignment_rms(
-                sci_path: str,
-                ref_path: str,
-                fwhm_pixels: float,
-            ) -> Optional[float]:
-                """
-                Log approximate alignment RMS (diagnostic only). Does not reject.
-                """
-                try:
-                    sci_data, _ = read_fits(sci_path)
-                    ref_data, _ = read_fits(ref_path)
-                    if sci_data.shape != ref_data.shape:
-                        return None
-                    from astropy.stats import sigma_clipped_stats as _scs
-
-                    _, med_sci, std_sci = _scs(sci_data, sigma=3.0)
-                    _, med_ref, std_ref = _scs(ref_data, sigma=3.0)
-                    fwhm = max(float(fwhm_pixels), 2.0)
-                    daofind_sci = DAOStarFinder(fwhm=fwhm, threshold=5.0 * std_sci)
-                    daofind_ref = DAOStarFinder(fwhm=fwhm, threshold=5.0 * std_ref)
-                    tbl_sci = daofind_sci(sci_data - med_sci) or []
-                    tbl_ref = daofind_ref(ref_data - med_ref) or []
-                    if len(tbl_sci) < 5 or len(tbl_ref) < 5:
-                        return None
-                    sci_xy = np.vstack(
-                        (tbl_sci["xcentroid"].data, tbl_sci["ycentroid"].data)
-                    ).T
-                    ref_xy = np.vstack(
-                        (tbl_ref["xcentroid"].data, tbl_ref["ycentroid"].data)
-                    ).T
-                    if len(sci_xy) < 5 or len(ref_xy) < 5:
-                        return None
-
-                    # Use mutual nearest-neighbor pairs and clip by a generous
-                    # distance tied to image FWHM. One-way nearest-neighbor
-                    # pairing can overestimate RMS in crowded fields.
-                    max_sep = float(max(2.5, 2.5 * fwhm))
-                    tree_ref = cKDTree(ref_xy)
-                    d_sr, i_sr = tree_ref.query(sci_xy, k=1)
-                    tree_sci = cKDTree(sci_xy)
-                    d_rs, i_rs = tree_sci.query(ref_xy, k=1)
-
-                    if len(i_sr) == 0 or len(i_rs) == 0:
-                        return None
-                    idx_s = np.arange(len(sci_xy), dtype=int)
-                    mutual = (i_rs[i_sr] == idx_s) & np.isfinite(d_sr)
-                    if not np.any(mutual):
-                        return None
-                    d_mut = d_sr[mutual]
-                    d_mut = d_mut[np.isfinite(d_mut) & (d_mut <= max_sep)]
-                    if len(d_mut) < 10:
-                        return None
-
-                    med = float(np.nanmedian(d_mut))
-                    p90 = float(np.nanpercentile(d_mut, 90.0))
-                    rms = float(np.sqrt(np.mean(d_mut**2)))
-                    logger.info(
-                        "Alignment offset diagnostics: median=%.3f px rms=%.3f px p90=%.3f px (%d mutual pairs, max_sep=%.2f px).",
-                        med,
-                        rms,
-                        p90,
-                        int(len(d_mut)),
-                        max_sep,
-                    )
-                    # Return a robust score for gating; RMS can be dominated by
-                    # a small high-residual tail in crowded fields.
-                    return med
-                except Exception:
-                    return None
-
-            # ------------------------------------------------------------------
-            # Strategy implementations
-            # ------------------------------------------------------------------
-
-            def _reproject() -> Tuple[Optional[str], Optional[str]]:
-                def _prepare_projection_header(header_in):
-                    """
-                    Build a projection header for reproject while preserving
-                    distortion keywords (SIP/PV/TPV) where possible.
-                    """
-                    hdr = header_in.copy()
-                    sip_keys = ("A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER")
-                    if any(k in hdr for k in sip_keys):
-                        for ctype_key in ("CTYPE1", "CTYPE2"):
-                            cval = str(hdr.get(ctype_key, ""))
-                            # SIP is defined for TAN projections; avoid invalid
-                            # projection strings like RA---TPV-SIP.
-                            if (
-                                cval
-                                and ("TAN" in cval)
-                                and not cval.endswith("-SIP")
-                            ):
-                                hdr[ctype_key] = f"{cval}-SIP"
-                    return hdr
-
-                def _distortion_summary(header_in) -> str:
-                    keys = list(header_in.keys())
-                    pv = sum(1 for k in keys if str(k).startswith("PV"))
-                    sip = sum(
-                        1
-                        for k in keys
-                        if str(k).startswith(("A_", "B_", "AP_", "BP_", "SIP_"))
-                    )
-                    c1 = str(header_in.get("CTYPE1", ""))
-                    c2 = str(header_in.get("CTYPE2", ""))
-                    return f"CTYPE1={c1} CTYPE2={c2} PV={pv} SIP={sip}"
-
-                align_cfg = self.input_yaml.get("alignment", {})
-                method_name = (
-                    str(align_cfg.get("reproject_method", "adaptive")).lower().strip()
-                )
-                # Reproject defaults roundtrip_coords=True; keeping True avoids
-                # one-way WCS glitches that show up as systematic misalignment.
-                roundtrip = bool(align_cfg.get("reproject_roundtrip_coords", True))
-                interp_order_raw = align_cfg.get("reproject_interp_order", "bicubic")
-                interp_order = _normalize_reproject_interp_order(interp_order_raw)
-                parallel = bool(align_cfg.get("reproject_parallel", False))
-                # conserve_flux=True rescales adaptive output; for similar plate
-                # scales it can blur or skew template-science match vs. library default.
-                conserve_flux = bool(
-                    align_cfg.get("reproject_adaptive_conserve_flux", False)
-                )
-                center_jacobian = bool(
-                    align_cfg.get("reproject_adaptive_center_jacobian", False)
-                )
-                logger.info(
-                    "Aligning via WCS reproject (%s) order=%s roundtrip=%s parallel=%s "
-                    "adaptive_conserve_flux=%s adaptive_center_jacobian=%s",
-                    method_name,
-                    interp_order,
-                    roundtrip,
-                    parallel,
-                    conserve_flux,
-                    center_jacobian,
-                )
-                try:
-                    shape_out = scienceImage.shape
-                    # Use FITS headers directly for reproject so distortion
-                    # conventions (SIP/PV/TPV) are preserved in the transform.
-                    template_proj = _prepare_projection_header(templateHeader)
-                    science_proj = _prepare_projection_header(scienceHeader)
-                    logger.info(
-                        "Reproject distortion inputs: template[%s] -> science[%s]",
-                        _distortion_summary(template_proj),
-                        _distortion_summary(science_proj),
-                    )
-                    # Honour requested method; if it fails, fall back in a predictable order.
-                    # (exact -> adaptive -> interp) gives robust behaviour and consistent logs.
-                    if method_name in ("exact", "adaptive", "interp"):
-                        fallbacks = [method_name] + [
-                            m
-                            for m in ("exact", "adaptive", "interp")
-                            if m != method_name
-                        ]
-                    else:
-                        logger.warning(
-                            "Unknown reproject_method=%r; defaulting to 'exact' with fallbacks.",
-                            method_name,
-                        )
-                        fallbacks = ["exact", "adaptive", "interp"]
-
-                    last_exc = None
-                    aligned = footprint = None
-                    used_method = None
-                    import inspect as _inspect
-
-                    _adaptive_extras: Dict[str, Any] = {}
-                    try:
-                        _asig = _inspect.signature(reproject_adaptive)
-                        if "conserve_flux" in _asig.parameters:
-                            _adaptive_extras["conserve_flux"] = conserve_flux
-                        if "center_jacobian" in _asig.parameters:
-                            _adaptive_extras["center_jacobian"] = center_jacobian
-                    except (TypeError, ValueError):
-                        pass
-
-                    for m in fallbacks:
-                        try:
-                            if m == "adaptive":
-                                aligned, footprint = reproject_adaptive(
-                                    (templateImage, template_proj),
-                                    output_projection=science_proj,
-                                    shape_out=shape_out,
-                                    roundtrip_coords=roundtrip,
-                                    parallel=parallel,
-                                    **_adaptive_extras,
-                                )
-                            elif m == "interp":
-                                aligned, footprint = reproject_interp(
-                                    (templateImage, template_proj),
-                                    output_projection=science_proj,
-                                    shape_out=shape_out,
-                                    roundtrip_coords=roundtrip,
-                                    order=interp_order,
-                                    parallel=parallel,
-                                )
-                            else:
-                                aligned, footprint = reproject_exact(
-                                    (templateImage, template_proj),
-                                    output_projection=science_proj,
-                                    shape_out=shape_out,
-                                    parallel=parallel,
-                                )
-                            used_method = m
-                            break
-                        except Exception as _e:
-                            last_exc = _e
-                            log_warning_from_exception(
-                                logger, f"Reproject ({m}) failed", _e
-                            )
-
-                    if used_method is None or aligned is None or footprint is None:
-                        raise RuntimeError(
-                            f"All reproject methods failed; last error: {last_exc}"
-                        )
-
-                    fp_mask = footprint.astype(bool)
-                    # Keep NaNs as NaNs for chip gaps, only mask non-footprint areas
-                    aligned[~fp_mask] = np.nan
-
-                    # Optional subpixel refinement to reduce residual misalignment
-                    if (
-                        align_cfg.get("reproject_subpixel_refine", True)
-                        and phase_cross_correlation is not None
-                    ):
-                        try:
-                            ref_valid = np.asarray(
-                                np.isfinite(scienceImage)
-                                & (np.abs(scienceImage) < 1e30),
-                                dtype=bool,
-                            )
-                            mov_valid = np.asarray(
-                                np.isfinite(aligned),
-                                dtype=bool,
-                            )
-                            if np.sum(ref_valid) > 100 and np.sum(mov_valid) > 100:
-                                ref_img = np.asarray(scienceImage, dtype=np.float64)
-                                mov_img = np.asarray(aligned, dtype=np.float64)
-                                shift_result = phase_cross_correlation(
-                                    ref_img,
-                                    mov_img,
-                                    reference_mask=ref_valid,
-                                    moving_mask=mov_valid,
-                                )
-                                subpix_shift = (
-                                    shift_result[0]
-                                    if isinstance(shift_result, tuple)
-                                    else shift_result
-                                )
-                                subpix_shift = np.atleast_1d(
-                                    np.asarray(subpix_shift, dtype=float)
-                                )
-                                if subpix_shift.size >= 2 and np.all(
-                                    np.abs(subpix_shift[:2]) < 5.0
-                                ):
-                                    aligned = ndimage_shift(
-                                        aligned,
-                                        (
-                                            float(subpix_shift[0]),
-                                            float(subpix_shift[1]),
-                                        ),
-                                        order=3,
-                                        mode="constant",
-                                        cval=np.nan,
-                                    )
-                                    # Keep NaNs preserved for chip gaps
-                                    logger.info(
-                                        "Reproject subpixel refinement applied: shift (row, col) = (%.3f, %.3f)",
-                                        float(subpix_shift[0]),
-                                        float(subpix_shift[1]),
-                                    )
-                        except Exception as e:
-                            log_warning_from_exception(
-                                logger,
-                                "Subpixel refinement failed (using WCS-aligned only)",
-                                e,
-                                exc_info=True,
-                            )
-
-                    hdr = templateHeader.copy()
-                    hdr.update(science_proj, relax=True)
-                    # Ensure header dimensions match the aligned array (science grid)
-                    hdr["NAXIS1"] = aligned.shape[1]
-                    hdr["NAXIS2"] = aligned.shape[0]
-                    write_fits(new_templateFpath, aligned.astype(np.float32), hdr)
-
-                    rms_pix = None
-                    try:
-                        fwhm_pix = float(self.input_yaml.get("fwhm", 3.0))
-                        rms_pix = _log_alignment_rms(
-                            scienceFpath, new_templateFpath, fwhm_pix
-                        )
-                    except Exception:
-                        rms_pix = None
-
-                    logger.info(
-                        "Alignment via WCS reproject (%s) succeeded.", used_method
-                    )
-                    return scienceFpath, new_templateFpath
-                except Exception as exc:
-                    log_warning_from_exception(
-                        logger, "Reproject failed", exc, exc_info=True
-                    )
-                    return None, None
 
             def _swarp() -> Tuple[Optional[str], Optional[str]]:
+                if run_IDC is None:
+                    logger.info("run_IDC not available; skipping SWarp.")
+                    return None, None
                 logger.info("Attempting SWarp + SCAMP alignment.")
                 idc = run_IDC.ImageDistortionCorrector(input_yaml=self.input_yaml)
                 res = idc.align_and_resample_both_images(scienceFpath, templateFpath)
-                if res and res.get("science_aligned"):
-                    sci_al, ref_al = res["science_aligned"], res["reference_aligned"]
-                    fwhm_pix = float(self.input_yaml.get("fwhm", 3.0))
-                    _log_alignment_rms(sci_al, ref_al, fwhm_pix)
-                    logger.info("SWarp alignment succeeded.")
-                    return sci_al, ref_al
-                logger.info("SWarp alignment did not produce aligned outputs.")
-                return None, None
+                if not res or not res.get("science_aligned"):
+                    logger.info("SWarp alignment did not produce aligned outputs.")
+                    return None, None
+                sci_al = res["science_aligned"]
+                ref_al = res["reference_aligned"]
+                # Load outputs for RMS diagnostic (separate from alignment I/O)
+                try:
+                    sci_al_data, _ = read_fits(sci_al)
+                    ref_al_data, _ = read_fits(ref_al)
+                    compute_alignment_rms(sci_al_data, ref_al_data, fwhm_pix)
+                except Exception:
+                    pass
+                logger.info("SWarp alignment succeeded.")
+                return sci_al, ref_al
 
             def _astroalign() -> Tuple[Optional[str], Optional[str]]:
+                if run_IDC is None:
+                    logger.info("run_IDC not available; skipping AstroAlign.")
+                    return None, None
                 logger.info("Attempting AstroAlign.")
                 idc = run_IDC.ImageDistortionCorrector(input_yaml=self.input_yaml)
                 res = idc.align_with_astroalign(scienceFpath, templateFpath)
-                if res and res.get("science_aligned"):
-                    sci_al, ref_al = res["science_aligned"], res["reference_aligned"]
-                    fwhm_pix = float(self.input_yaml.get("fwhm", 3.0))
-                    _log_alignment_rms(sci_al, ref_al, fwhm_pix)
-                    logger.info("AstroAlign alignment succeeded.")
-                    return sci_al, ref_al
-                logger.info("AstroAlign did not produce aligned outputs.")
-                return None, None
+                if not res or not res.get("science_aligned"):
+                    logger.info("AstroAlign did not produce aligned outputs.")
+                    return None, None
+                sci_al = res["science_aligned"]
+                ref_al = res["reference_aligned"]
+                try:
+                    sci_al_data, _ = read_fits(sci_al)
+                    ref_al_data, _ = read_fits(ref_al)
+                    compute_alignment_rms(sci_al_data, ref_al_data, fwhm_pix)
+                except Exception:
+                    pass
+                logger.info("AstroAlign alignment succeeded.")
+                return sci_al, ref_al
+
+            def _reproject() -> Tuple[Optional[str], Optional[str]]:
+                result = _reproject_template(
+                    science_image=scienceImage,
+                    science_header=scienceHeader,
+                    template_image=templateImage,
+                    template_header=templateHeader,
+                    output_path=new_templateFpath,
+                    cfg=reproject_cfg,
+                    fwhm_pixels=fwhm_pix,
+                )
+                if result.template_path is None:
+                    return None, None
+                return scienceFpath, result.template_path
 
             # ------------------------------------------------------------------
             # Cascade
@@ -2446,12 +2578,13 @@ class Templates:
                 out = _reproject()
                 if out[0]:
                     return out
-                # Reproject failed or failed quality gate: try feature/scamp fallback.
+                # Reproject failed - try feature-based fallbacks
                 out = _astroalign()
                 if out[0]:
                     return out
                 return _swarp()
 
+            # Default: WCS reproject (most reliable when headers have good WCS)
             return _reproject()
 
         except Exception:
@@ -2475,7 +2608,7 @@ class Templates:
         ----------
         coords : (min_row, min_col, max_row, max_col)
         """
-        wcs_obj = WCS(header)
+        wcs_obj = get_wcs(header)
         center = ((coords[2] + coords[0]) // 2, (coords[3] + coords[1]) // 2)
         size = (coords[2] - coords[0] + 1, coords[3] - coords[1] + 1)
         cutout = Cutout2D(data, position=center, size=size, wcs=wcs_obj)
@@ -2581,7 +2714,7 @@ class Templates:
 
         # --- Load science image (single I/O) ---
         scienceImage, scienceHeader = read_fits(scienceFpath)
-        imageWCS = WCS(scienceHeader, relax=True)
+        imageWCS = get_wcs(scienceHeader)
 
         cy, cx, top, bot, left, right = self.find_non_uniform_center(scienceImage)
         height = bot - top
@@ -2606,7 +2739,7 @@ class Templates:
                 mode="partial",
                 fill_value=np.nan,
             )
-            imageWCS = WCS(cutout.wcs.to_header(relax=True), relax=True)
+            imageWCS = get_wcs(cutout.wcs.to_header(relax=True))
             scienceHeader.update(imageWCS.to_header(relax=True), relax=True)
             scienceImage = cutout.data
 
@@ -2639,7 +2772,7 @@ class Templates:
         # Joint science + template crop
         # ------------------------------------------------------------------
         templateImage, templateHeader = read_fits(templateFpath)
-        templateWCS = WCS(templateHeader, relax=True)
+        templateWCS = get_wcs(templateHeader)
         cropped_templateFpath = str(scienceDir / Path(templateFpath).name)
 
         cy_t, cx_t, top_t, bot_t, left_t, right_t = self.find_non_uniform_center(
@@ -2676,7 +2809,7 @@ class Templates:
                 fill_value=np.nan,
             )
             scienceImage = scienceCutout.data
-            imageWCS = WCS(scienceCutout.wcs.to_header(relax=True), relax=True)
+            imageWCS = get_wcs(scienceCutout.wcs.to_header(relax=True))
             scienceHeader.update(imageWCS.to_header(relax=True), relax=True)
 
             templateCutout = Cutout2D(
@@ -2688,7 +2821,7 @@ class Templates:
                 fill_value=np.nan,
             )
             templateImage = templateCutout.data
-            templateWCS = WCS(templateCutout.wcs.to_header(relax=True), relax=True)
+            templateWCS = get_wcs(templateCutout.wcs.to_header(relax=True))
             templateHeader.update(templateWCS.to_header(relax=True), relax=True)
 
             # Mark shared invalid regions (NaNs from chip gaps or out-of-bounds)

@@ -1568,9 +1568,9 @@ class Aperture:
                 ax1.plot(fine_r / fwhm, fine_profile, ls="--", color="black")
 
             ax1.axvline(
-                global_optimum_pre, color="black", ls=":", label=r"${:.0f}\%$".format(norm_factor*100)
+                global_optimum_pre, color="black", ls=":", label=r"$f_{{enc}}={:.0f}\%$".format(norm_factor*100)
             )
-            ax1.axvline(optimum_radius, color="black", ls="--",label=r"${:.0f}\%$".format(aperture_norm_factor*100)
+            ax1.axvline(optimum_radius, color="black", ls="--",label=r"$f_{{enc}}={:.0f}\%$".format(aperture_norm_factor*100)
             )
             ax1.set_ylabel("Normalized Flux")
             plt.setp(ax1.get_xticklabels(), visible=False)
@@ -1611,7 +1611,7 @@ class Aperture:
                     ax2.hist(
                         other,
                         bins=bins,
-                        facecolor="tab:red",
+                        facecolor="grey",
                         alpha=0.5,
                         label="Rejected",
                         zorder=0,

@@ -151,7 +151,7 @@ def _safe_wcs_from_header(header, silent=True):
     """
     Safely extract WCS from a FITS header with validation.
     
-    Handles multiple header sources and validates WCS before returning.
+    Uses get_wcs for consistency across the codebase.
     Returns None if WCS is missing, invalid, or has no celestial component.
     
     Parameters
@@ -166,40 +166,7 @@ def _safe_wcs_from_header(header, silent=True):
     wcs : astropy.wcs.WCS or None
         Valid WCS object with celestial coordinates, or None if invalid
     """
-    from astropy.wcs import WCS
-    
-    if header is None:
-        return None
-    
-    try:
-        # Suppress astropy warnings if requested
-        ctx = SuppressStdout() if silent else contextlib.nullcontext()
-        with ctx:
-            wcs = WCS(header)
-            
-        # Check if WCS has valid celestial component
-        if not hasattr(wcs, 'has_celestial') or not wcs.has_celestial:
-            return None
-            
-        # Additional validation: check for required WCS keywords
-        required_keys = ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2']
-        if not all(k in header for k in required_keys):
-            return None
-            
-        # Validate by attempting a simple transformation
-        try:
-            test_pix = (float(header['CRPIX1']), float(header['CRPIX2']))
-            # CRPIX values are 1-based (FITS standard), so use all_pix2world with origin=1
-            test_world = wcs.all_pix2world([test_pix[0]], [test_pix[1]], 1)
-            if test_world is None or len(test_world[0]) == 0:
-                return None
-        except Exception:
-            return None
-            
-        return wcs
-        
-    except Exception:
-        return None
+    return get_wcs(header, silent=silent)
 
 
 def _heuristic_filter_mapping(raw_filter: str) -> str:
@@ -357,10 +324,10 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
 
     # Perform trim using Cutout2D for proper WCS handling
 
-    # Create WCS from header
+    # Create WCS from header using get_wcs for consistency
     try:
-        wcs = WCS(header)
-        has_valid_wcs = wcs.has_celestial
+        wcs = get_wcs(header, silent=True)
+        has_valid_wcs = wcs is not None and wcs.has_celestial
     except Exception:
         has_valid_wcs = False
         wcs = None
@@ -381,8 +348,8 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
         )
         trimmed_data = cutout.data
         trimmed_wcs = cutout.wcs
-        # Convert WCS back to header
-        trimmed_header = trimmed_wcs.to_header()
+        # Convert WCS back to header (relax=True to preserve SIP/PV distortion keywords)
+        trimmed_header = trimmed_wcs.to_header(relax=True)
         # Copy non-WCS keywords from original header (sanitize to remove non-ASCII)
         for key in header:
             if key not in trimmed_header and not key.startswith(('CRPIX', 'CRVAL', 'CDELT', 'CTYPE', 'CD1_', 'CD2_', 'PC1_', 'PC2_', 'NAXIS')):
@@ -1114,9 +1081,8 @@ def run_photometry():
                 target_x, target_y = None, None
                 if "target_ra" in input_yaml and "target_dec" in input_yaml:
                     try:
-                        from astropy.wcs import WCS
-                        wcs = WCS(header)
-                        if wcs.has_celestial:
+                        wcs = get_wcs(header, silent=True)
+                        if wcs is not None and wcs.has_celestial:
                             target_x, target_y = wcs.all_world2pix(
                                 float(input_yaml["target_ra"]),
                                 float(input_yaml["target_dec"]),
@@ -1456,6 +1422,17 @@ def run_photometry():
         if input_yaml["target_name"] is not None:
             target_ra = input_yaml["target_ra"]
             target_dec = input_yaml["target_dec"]
+            # Validate that coordinates are provided when target_name is set
+            if target_ra is None or target_dec is None:
+                logging.error(
+                    f"Target name '{input_yaml['target_name']}' provided but "
+                    f"target_ra={target_ra}, target_dec={target_dec}. "
+                    "Please provide valid coordinates or remove target_name."
+                )
+                raise ValueError(
+                    f"Missing coordinates for target '{input_yaml['target_name']}'. "
+                    "Provide target_ra/target_dec or remove target_name."
+                )
             target_coords = SkyCoord(
                 target_ra, target_dec, unit=(u.deg, u.deg), frame="fk5", equinox="J2000"
             )
@@ -2020,6 +1997,9 @@ def run_photometry():
         imageWCS = get_wcs(header)
 
         # Gets the pixel scale in arcseconds.
+        if imageWCS is None:
+            logging.error("Failed to create WCS from header after solve. Cannot compute pixel scale.")
+            raise Exception("WCS is None after solve - cannot compute pixel scale")
         xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
         pixel_scale = xy_pixel_scales[0] * 3600
 
@@ -3234,10 +3214,17 @@ def run_photometry():
         # Zeropoint Calculation
         # =============================================================================
         # Calculates the zeropoint for the image.
+        # For template preparation, use image-detected sources (IsolatedSources) instead
+        # of external catalog sources, since external catalogs lack image-specific columns
+        # (threshold, snr) needed for quality filtering in GetZeropoint.clean()
 
         Calibrate_Catalog = Catalog(input_yaml=input_yaml)
         GetZeropoint = Zeropoint(input_yaml=input_yaml)
-        CatalogSources = GetZeropoint.clean(sources=CatalogSources)
+        if prepare_template:
+            # For templates, use image-detected sources with flux measurements
+            CatalogSources = GetZeropoint.clean(sources=IsolatedSources)
+        else:
+            CatalogSources = GetZeropoint.clean(sources=CatalogSources)
 
         # Check linearity of catalog sources before fitting zeropoint
         # This filters out non-linear/saturated catalog sources
@@ -4546,13 +4533,21 @@ def run_photometry():
         try:
             # Use get_cutout to create target cutout (ensures consistency with limiting magnitude test)
             # Pass the background-subtracted image
-            target_cutout = getDetectionLimits.get_cutout(image=image)
-            if target_cutout is not None:
+            # get_cutout returns (data, cx, cy) tuple
+            cutout_result = getDetectionLimits.get_cutout(image=image)
+            if cutout_result is not None:
+                target_cutout, cutout_cx, cutout_cy = cutout_result
+                # Calculate cutout origin in full-image coordinates
+                # cutout_cx/cy are the target position in cutout-local coordinates
+                # We need cutout_x0/y0 to convert fitted positions back to full-image
+                cutout_x0 = float(bg_target_x_pix) - float(cutout_cx)
+                cutout_y0 = float(bg_target_y_pix) - float(cutout_cy)
                 # Extract corresponding background RMS region
                 if background_rms is not None and np.ndim(background_rms) == 2:
                     # Use get_cutout on background_rms as well
-                    target_cutout_rms = getDetectionLimits.get_cutout(image=background_rms)
-                    if target_cutout_rms is not None:
+                    rms_result = getDetectionLimits.get_cutout(image=background_rms)
+                    if rms_result is not None:
+                        target_cutout_rms, _, _ = rms_result
                         target_cutout_rms = np.abs(np.asarray(target_cutout_rms, dtype=float))
                 # Target position is center of cutout (set by get_cutout)
                 cutout_target_x = float(target_cutout.shape[1] / 2.0)
@@ -4789,14 +4784,19 @@ def run_photometry():
         # so downstream logging/output stays consistent.
         if target_cutout is not None:
             try:
+                logging.info(f"Converting cutout-local to full-image: cutout_x0={cutout_x0:.2f}, cutout_y0={cutout_y0:.2f}")
                 for col in ("x_pix", "y_pix", "x_fit", "y_fit"):
                     if col in TargetPosition.columns and np.isfinite(TargetPosition[col].iloc[0]):
+                        old_val = float(TargetPosition[col].iloc[0])
                         if col.startswith("x"):
-                            TargetPosition.loc[TargetPosition.index[0], col] = float(TargetPosition[col].iloc[0]) + float(cutout_x0)
+                            new_val = old_val + float(cutout_x0)
+                            TargetPosition.loc[TargetPosition.index[0], col] = new_val
                         else:
-                            TargetPosition.loc[TargetPosition.index[0], col] = float(TargetPosition[col].iloc[0]) + float(cutout_y0)
-            except Exception:
-                pass
+                            new_val = old_val + float(cutout_y0)
+                            TargetPosition.loc[TargetPosition.index[0], col] = new_val
+                        logging.info(f"  {col}: {old_val:.3f} -> {new_val:.3f}")
+            except Exception as e:
+                logging.warning(f"Failed to convert cutout coordinates: {e}")
 
             if "flags" in TargetPosition:
                 from photutils.psf import decode_psf_flags
@@ -5273,7 +5273,12 @@ def run_photometry():
                     expandedCutout = np.asarray(target_cutout, dtype=float)
                 else:
                     # Gets the expanded cutout of the image.
-                    expandedCutout = getDetectionLimits.get_cutout(image=image_for_limiting)
+                    # get_cutout returns (data, cx, cy) tuple
+                    cutout_result = getDetectionLimits.get_cutout(image=image_for_limiting)
+                    if cutout_result is not None:
+                        expandedCutout, _, _ = cutout_result
+                    else:
+                        expandedCutout = None
                 if expandedCutout is None:
                     logging.warning(
                         "getCutout returned None; skipping detection limits."
@@ -5485,6 +5490,21 @@ def run_photometry():
             output["snr_psf"] = float(output.get("SNR_PSF", np.nan))
         except Exception:
             output["snr_psf"] = np.nan
+        
+        # Update generic snr column to use the best available SNR (prefer PSF if higher)
+        # This ensures the default snr column reflects the most reliable detection statistic
+        try:
+            snr_ap = output.get("snr_ap", np.nan)
+            snr_psf = output.get("snr_psf", np.nan)
+            if np.isfinite(snr_psf) and np.isfinite(snr_ap):
+                # Use PSF SNR if it's higher (better detection)
+                output["snr"] = max(snr_psf, snr_ap)
+            elif np.isfinite(snr_psf):
+                output["snr"] = snr_psf
+            else:
+                output["snr"] = snr_ap
+        except Exception:
+            pass
         try:
             if "flux_AP" in TargetPosition.columns:
                 output["flux_ap"] = float(TargetPosition.at[idx, "flux_AP"])

@@ -570,6 +570,48 @@ class Prepare:
                 TNS_BOT_NAME=self.input_yaml["wcs"]["TNS_BOT_NAME"],
                 TNS_BOT_API=self.input_yaml["wcs"]["TNS_BOT_API"],
             )
+            
+            # If TNS returned None (object not found) and no manual coordinates provided,
+            # stop and ask user for RA/Dec
+            if tns_response is None:
+                if (
+                    self.input_yaml.get("target_ra") is not None
+                    and self.input_yaml.get("target_dec") is not None
+                ):
+                    self.logger.warning(
+                        "TNS lookup failed for '%s', but manual RA/Dec provided. Using manual coordinates.",
+                        target_name,
+                    )
+                    return {
+                        "ra": float(self.input_yaml["target_ra"]),
+                        "dec": float(self.input_yaml["target_dec"]),
+                    }
+                else:
+                    # No TNS response and no manual coordinates - cannot proceed with target_name
+                    self.logger.error(
+                        "TNS lookup failed for target '%s' and no RA/Dec coordinates provided.",
+                        target_name,
+                    )
+                    print(
+                        f"\n{'='*60}\n"
+                        f"ERROR: Target '{target_name}' not found on TNS.\n\n"
+                        f"You provided a target_name but:\n"
+                        f"  1. TNS lookup failed (no API credentials or object not found), AND\n"
+                        f"  2. No manual RA/Dec coordinates were provided.\n\n"
+                        f"To fix this, either:\n"
+                        f"  a) Provide TNS API credentials in your input YAML:\n"
+                        f"       wcs:\n"
+                        f"         TNS_BOT_ID: <your_bot_id>\n"
+                        f"         TNS_BOT_NAME: <your_bot_name>\n"
+                        f"         TNS_BOT_API: <your_api_key>\n\n"
+                        f"  b) Provide RA/Dec coordinates manually:\n"
+                        f"       autophot_input['target_ra'] = <RA in degrees>\n"
+                        f"       autophot_input['target_dec'] = <Dec in degrees>\n\n"
+                        f"  c) Remove target_name to run without a specific target\n"
+                        f"{'='*60}\n"
+                    )
+                    sys.exit("Stopped: TNS lookup failed and no RA/Dec provided for target_name.")
+            
             AutophotYaml.create(str(transient_path), tns_response)
             obj_name = tns_response.get("name_prefix", "") + tns_response["objname"]
             self.logger.info("Retrieved TNS information for %s.", obj_name)

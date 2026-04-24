@@ -7,6 +7,7 @@ import pathlib
 import glob
 import shutil
 from functions import set_size, get_distance_modulus
+from plotting_utils import get_marker_size
 from astropy.time import Time
 from collections import Counter
 
@@ -243,25 +244,38 @@ def _compute_detection_mask(
         )
 
     method_u = str(method).upper()
+    snr_source = "unknown"
+    # Find columns case-insensitively
+    col_map = {c.lower(): c for c in df.columns}
+    snr_psf_col = col_map.get("snr_psf")
+    snr_ap_col = col_map.get("snr_ap")
+    snr_col = col_map.get("snr")
+    
     if use_SNR_limit:
-        if method_u == "PSF" and "snr_psf" in df.columns:
-            snr = pd.to_numeric(df["snr_psf"], errors="coerce").to_numpy(dtype=float, copy=False)
-        elif method_u == "AP" and "snr_ap" in df.columns:
-            snr = pd.to_numeric(df["snr_ap"], errors="coerce").to_numpy(dtype=float, copy=False)
-        elif "snr" in df.columns:
-            snr = pd.to_numeric(df["snr"], errors="coerce").to_numpy(dtype=float, copy=False)
-        elif method_u == "PSF" and "flux_psf" in df.columns and "flux_psf_err" in df.columns:
-            flux = pd.to_numeric(df["flux_psf"], errors="coerce").to_numpy(dtype=float, copy=False)
-            flux_err = pd.to_numeric(df["flux_psf_err"], errors="coerce").to_numpy(dtype=float, copy=False)
+        if method_u == "PSF" and snr_psf_col:
+            snr = pd.to_numeric(df[snr_psf_col], errors="coerce").to_numpy(dtype=float, copy=False)
+            snr_source = "snr_psf"
+        elif method_u == "AP" and snr_ap_col:
+            snr = pd.to_numeric(df[snr_ap_col], errors="coerce").to_numpy(dtype=float, copy=False)
+            snr_source = "snr_ap"
+        elif snr_col:
+            snr = pd.to_numeric(df[snr_col], errors="coerce").to_numpy(dtype=float, copy=False)
+            snr_source = "snr"
+        # Log the SNR source and values for debugging
+        if len(snr) > 0 and not np.all(np.isnan(snr)):
+            logging.debug(f"_compute_detection_mask: method={method}, snr_source={snr_source}, snr_mean={np.nanmean(snr):.3f}, snr_max={np.nanmax(snr):.3f}")
+        elif method_u == "PSF" and col_map.get("flux_psf") and col_map.get("flux_psf_err"):
+            flux = pd.to_numeric(df[col_map.get("flux_psf")], errors="coerce").to_numpy(dtype=float, copy=False)
+            flux_err = pd.to_numeric(df[col_map.get("flux_psf_err")], errors="coerce").to_numpy(dtype=float, copy=False)
             snr = np.divide(
                 flux,
                 flux_err,
                 out=np.full(len(df), np.nan, dtype=float),
                 where=(flux_err > 0) & np.isfinite(flux_err),
             )
-        elif method_u == "AP" and "flux_ap" in df.columns and "flux_ap_err" in df.columns:
-            flux = pd.to_numeric(df["flux_ap"], errors="coerce").to_numpy(dtype=float, copy=False)
-            flux_err = pd.to_numeric(df["flux_ap_err"], errors="coerce").to_numpy(dtype=float, copy=False)
+        elif method_u == "AP" and col_map.get("flux_ap") and col_map.get("flux_ap_err"):
+            flux = pd.to_numeric(df[col_map.get("flux_ap")], errors="coerce").to_numpy(dtype=float, copy=False)
+            flux_err = pd.to_numeric(df[col_map.get("flux_ap_err")], errors="coerce").to_numpy(dtype=float, copy=False)
             snr = np.divide(
                 flux,
                 flux_err,
@@ -282,6 +296,9 @@ def _compute_detection_mask(
             & np.isfinite(snr)
             & (snr >= float(snr_limit))
         )
+        # Debug logging for detection decision
+        if len(snr) > 0:
+            logging.info(f"_compute_detection_mask: method={method}, snr_source={snr_source}, snr={snr[0]:.3f}, limit={snr_limit}, detected={detected[0]}")
     else:
         detected = np.isfinite(mag) & np.isfinite(err) & (mag < lmag)
 
@@ -526,6 +543,16 @@ def plot_lightcurve(
         df["plot_mag"] = df["apparent_mag"]
         df["plot_err"] = df["apparent_mag_err"]
 
+        # Debug: Log available SNR columns and values
+        logging.info(f"plot_lightcurve: method={method}, use_SNR_limit={use_SNR_limit}, snr_limit={snr_limit}")
+        logging.info(f"plot_lightcurve: columns={list(df.columns)}")
+        if "snr" in df.columns:
+            logging.info(f"plot_lightcurve: snr={df['snr'].iloc[0]:.3f}")
+        if "snr_psf" in df.columns:
+            logging.info(f"plot_lightcurve: snr_psf={df['snr_psf'].iloc[0]:.3f}")
+        if "snr_ap" in df.columns:
+            logging.info(f"plot_lightcurve: snr_ap={df['snr_ap'].iloc[0]:.3f}")
+        
         detected = _compute_detection_mask(
             df,
             "apparent_mag",
@@ -535,6 +562,7 @@ def plot_lightcurve(
             use_SNR_limit=bool(use_SNR_limit),
         )
         detected_s = pd.Series(detected, index=df.index, dtype=bool)
+        logging.info(f"plot_lightcurve: detected={detected_s.iloc[0] if len(detected_s) > 0 else 'N/A'}")
 
         # Check for inverted-only detections using _inverted_fit flag or inst_inverted column
         has_inverted = False
@@ -720,7 +748,7 @@ def plot_lightcurve(
                 markeredgewidth=0.5,
                 ls="",
                 marker="v",
-                markersize=5,
+                markersize=get_marker_size('medium'),
                 alpha=0.85,
                 zorder=1,
             )
@@ -802,7 +830,7 @@ def plot_lightcurve(
             [0],
             color="black",
             marker="v",
-            markersize=5,
+            markersize=get_marker_size('medium'),
             markerfacecolor="none",
             markeredgecolor="black",
             markeredgewidth=0.5,
