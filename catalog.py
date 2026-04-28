@@ -57,7 +57,7 @@ import traceback
 # Local imports
 from functions import (
     AutophotYaml,
-    border_msg,
+    log_step,
     pix_dist,
     mag,
     snr,
@@ -727,7 +727,7 @@ class Catalog:
         DataFrame
             DataFrame containing the catalog data, or None if an error occurs.
         """
-        logger.info(border_msg("Collecting Sequence sources in field"))
+        logger.info(log_step("Catalog: sequence sources in field"))
 
         try:
             catalogName = self._require_catalog_selected(catalogName)
@@ -1522,7 +1522,7 @@ class Catalog:
         try:
             num_sources = len(selectedCatalog)
             logger.info(
-                border_msg(
+                log_step(
                     f"Recentering {num_sources} source{'s' if num_sources > 1 else ''}"
                 )
             )
@@ -1822,9 +1822,7 @@ class Catalog:
             Combined catalog DataFrame.
         """
         catalog_list_str = ",".join([i.upper() for i in catalog_list])
-        logger.info(
-            border_msg(f"Building Custom catalog using from {catalog_list_str}")
-        )
+        logger.info(log_step(f"Custom catalog: {catalog_list_str}"))
 
         # Set default target name if not provided
         if not target_name:
@@ -2009,7 +2007,7 @@ class Catalog:
             base_name = os.path.splitext(os.path.basename(fpath))[0]
             write_dir = os.path.dirname(fpath)
             logger.info(
-                border_msg(f"Checking saturation level using {len(catalog)} sources")
+                log_step(f"Linearity: saturation check ({len(catalog)} sources)")
             )
 
             # Extract filter
@@ -2062,8 +2060,32 @@ class Catalog:
                 logger.warning("Too few points left after error cut.")
                 return clean_catalog, fit_params, saturation_range
 
+            # Calculate S/N and select continuous high S/N subset
+            # This avoids scattered low S/N inliers that break the linearity fit
             flux = clean_catalog["flux_AP"].values
             flux_err = clean_catalog["flux_AP_err"].values
+            snr = flux / flux_err
+
+            # Find a high S/N threshold that gives a continuous bright subset
+            # Start with S/N > 50 for very high quality, then relax if needed
+            min_snr_thresholds = [100, 75, 50, 30, 20, 10]
+            selected_indices = None
+            for min_snr in min_snr_thresholds:
+                high_snr_mask = snr >= min_snr
+                n_high_snr = np.sum(high_snr_mask)
+                if n_high_snr >= 15:  # Need at least 15 sources for robust fit
+                    selected_indices = high_snr_mask
+                    logger.info(
+                        f"Selected {n_high_snr} high S/N sources (SNR >= {min_snr}) for linearity fit"
+                    )
+                    break
+
+            if selected_indices is not None and np.sum(selected_indices) >= 10:
+                clean_catalog = clean_catalog[selected_indices].copy()
+                flux = clean_catalog["flux_AP"].values
+                flux_err = clean_catalog["flux_AP_err"].values
+                snr = snr[selected_indices]
+
             inst_mag_linear = -2.5 * np.log10(flux)
             inst_mag_err_linear = 2.5 / np.log(10) * (flux_err / flux)
             catalog_mag_linear = clean_catalog[use_filter].values
@@ -2149,6 +2171,18 @@ class Catalog:
                     if n_sigma_outliers > 0:
                         logger.info(f"Post-RANSAC sigma clipping removed {n_sigma_outliers} additional outliers")
 
+                # Recompute intercept on the final inlier set so the plotted fit line
+                # matches the points that survive post-RANSAC clipping.
+                if np.sum(inlier_mask) > 1 and np.isfinite(slope):
+                    try:
+                        intercept = float(
+                            np.nanmedian(
+                                y[inlier_mask] - slope * X[inlier_mask].flatten()
+                            )
+                        )
+                    except Exception:
+                        pass
+
                 # Calculate intercept error
                 inlier_X = X[inlier_mask]
                 inlier_y = y[inlier_mask]
@@ -2195,11 +2229,13 @@ class Catalog:
                 inlier_mask = np.ones_like(catalog_mag_linear, dtype=bool)
 
             # Plotting
-            _style = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
+            from plotting_utils import (
+                apply_autophot_mplstyle,
+                ransac_legend_top_outside,
+                set_mag_axes_inverted_xy,
             )
-            if os.path.exists(_style):
-                plt.style.use(_style)
+
+            apply_autophot_mplstyle()
             plt.ioff()
             fig, ax1 = plt.subplots(figsize=set_size(340, 1))
             plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
@@ -2253,7 +2289,10 @@ class Catalog:
                     linestyle="--",
                     lw=get_line_width('thick'),
                     zorder=10,
-                    label=f"Fit: y = {slope:.3f}x + {intercept:.2f} +/- {intercept_error:.2f}",
+                    label=(
+                        f"m_cal = m_inst + {intercept:.2f} ± {intercept_error:.2f} "
+                        f"(slope fixed to 1.0)"
+                    ),
                 )
                 # Add shaded error region
                 ax1.fill_between(
@@ -2285,11 +2324,10 @@ class Catalog:
                         alpha=0.7,
                     )
 
-            ax1.set_xlabel("Instrumental Magnitude [mag]")
-            ax1.set_ylabel(f"Catalog {use_filter} Band [mag]")
-            ax1.invert_yaxis()
-            ax1.invert_xaxis()
-            ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2)
+            ax1.set_xlabel(r"Instrumental $m_\mathrm{inst}$ [mag]")
+            ax1.set_ylabel(rf"Catalog $m_\mathrm{{cal,{use_filter}}}$ [mag]")
+            set_mag_axes_inverted_xy(ax1)
+            ransac_legend_top_outside(ax1, ncol=2)
             ax1.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
             save_path = os.path.join(
                 write_dir, f"Saturation_{base_name}.png"
@@ -2493,9 +2531,7 @@ class Catalog:
 
         # Only emit the full banner when we are actually going to downsample.
         logger.info(
-            border_msg(
-                f"Starting downsampling: {n_src} sources -> target {nmax} sources"
-            )
+            log_step(f"Downsampling: {n_src} sources -> {nmax} max")
         )
 
         # Check if required columns exist
@@ -2716,7 +2752,7 @@ class Catalog:
         radial_profiles = []
         valid_indices = []
 
-        logger.info(border_msg(f"Checking radial profile of {len(catalog)} sources"))
+        logger.info(log_step(f"Radial profile: {len(catalog)} sources"))
 
         for i, (x, y) in enumerate(zip(catalog["x_pix"], catalog["y_pix"])):
             position = (float(x), float(y))
@@ -2940,8 +2976,8 @@ class Catalog:
 
         # Log the start of the measurement process
         logger.info(
-            border_msg(
-                f"Measuring {len(selectedCatalog)} Sources in the Field using Aperture Photometry"
+            log_step(
+                f"Aperture photometry: {len(selectedCatalog)} field sources"
             )
         )
 

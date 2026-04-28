@@ -524,17 +524,17 @@ def _find_unknown_config_paths(
 _IMPORT_ERROR_AUTOPHOT_DEPS: Exception | None = None
 try:
     from functions import (  # type: ignore
-        border_msg,
         AutophotYaml,
         concatenate_csv_files,
-        print_progress_bar,
+        log_step,
         log_exception,
+        print_progress_bar,
         sanitize_photometric_filters,
     )
     from prepare import Prepare  # type: ignore
 except Exception as _exc:  # pragma: no cover
     _IMPORT_ERROR_AUTOPHOT_DEPS = _exc
-    border_msg = None  # type: ignore
+    log_step = None  # type: ignore
     AutophotYaml = None  # type: ignore
     concatenate_csv_files = None  # type: ignore
     print_progress_bar = None  # type: ignore
@@ -910,13 +910,7 @@ def prepare_template_directory(
                 legacy_dir.mkdir(parents=True, exist_ok=True)
                 created_dirs.append(str(legacy_dir))
 
-    _log(
-        border_msg(
-            f"Template directory prepared: {templates_root}",
-            body="-",
-            corner="+",
-        )
-    )
+    _log(log_step(f"Template directory prepared: {templates_root}"))
     _log(
         "Template folder summary: "
         f"created={len(created_dirs)} existing={len(existing_dirs)} "
@@ -1030,11 +1024,7 @@ class AutomatedPhotometry:
         # Common preprocessing defaults used by main.py
         default_input["preprocessing"].setdefault("trim_image", 0)
 
-        _log(
-            border_msg(
-                f"Default input loaded from: {default_input_path}", body="-", corner="+"
-            )
-        )
+        _log(log_step(f"Default input: {default_input_path}"))
         _log(f"Configuration loaded in {time.perf_counter() - t0:.3f} seconds.")
         return default_input
 
@@ -1288,7 +1278,9 @@ class AutomatedPhotometry:
                 ).strip().lower()
                 svo_curve_map = catalog_cfg.get("curve_map_svo", None)
 
-                _log(border_msg("Building Gaia curve-map custom catalog (gaia_custom)"))
+                _log(
+                    log_step("Gaia custom catalog (gaia_custom) curve map")
+                )
                 _log(
                     f"RA={float(target_ra):.6f}, Dec={float(target_dec):.6f}, "
                     f"radius={radius_deg:.4f} deg, max_sources={max_sources}, "
@@ -1444,7 +1436,7 @@ class AutomatedPhotometry:
         python_executable = sys.executable
 
         if do_photometry:
-            _log(border_msg("Performing photometry with AutoPhOT"))
+            _log(log_step("AutoPhOT photometry run"))
 
             # List of available filters (excluding error columns)
             filt_list = [
@@ -1456,7 +1448,7 @@ class AutomatedPhotometry:
 
             # Optional: Enrich target metadata from TNS
             try:
-                _log(border_msg("Checking TNS for transient information"))
+                _log(log_step("TNS check"))
                 tns_coords = prepare_db.check_tns()
                 default_input.update(
                     {
@@ -1503,9 +1495,7 @@ class AutomatedPhotometry:
 
                 if len(file_list) == 0:
                     _log(
-                        border_msg(
-                            "No images left after validation.", body="!", corner="!"
-                        )
+                        log_step("No images left after validation; skipping photometry")
                     )
                     do_photometry = False
                 else:
@@ -1541,7 +1531,7 @@ class AutomatedPhotometry:
                     )
 
                     if download_kind == "panstarrs":
-                        _log(border_msg("Downloading template images from Pan-STARRS"))
+                        _log(log_step("Download templates: Pan-STARRS"))
                         from templates import download_panstarrs_template
 
                         for f in required_filters:
@@ -1553,7 +1543,7 @@ class AutomatedPhotometry:
                                 band=f,
                             )
                     elif download_kind == "sdss":
-                        _log(border_msg("Downloading template images from SDSS"))
+                        _log(log_step("Download templates: SDSS"))
                         from templates import download_sdss_template
 
                         for f in required_filters:
@@ -1565,7 +1555,9 @@ class AutomatedPhotometry:
                                 f=f,
                             )
                     elif download_kind == "legacy":
-                        _log(border_msg("Downloading template images from Legacy Surveys"))
+                        _log(
+                            log_step("Download templates: Legacy Surveys")
+                        )
                         from templates import download_legacy_template
 
                         for f in required_filters:
@@ -1577,7 +1569,7 @@ class AutomatedPhotometry:
                                 band=f,
                             )
                     elif download_kind == "2mass":
-                        _log(border_msg("Downloading template images from 2MASS"))
+                        _log(log_step("Download templates: 2MASS"))
                         from templates import download_2mass_template
 
                         for f in required_filters:
@@ -1707,7 +1699,7 @@ class AutomatedPhotometry:
                                     _log(f"[{done_t}/{total_t}] [TEMPLATE OK]   {fname}")
                         gc.collect()
                     else:
-                        _log(border_msg("Reducing and calibrating template files"))
+                        _log(log_step("Reduce/calibrate template files"))
                         for template in print_progress_bar(
                             template_file_list, title="Template files calibrated"
                         ):
@@ -1721,7 +1713,7 @@ class AutomatedPhotometry:
                             gc.collect()
 
                 # Reduce science frames
-                _log(border_msg("Reducing and calibrating science files"))
+                _log(log_step("Reduce/calibrate science files"))
 
                 counter = 0
                 if file_list:
@@ -1762,9 +1754,8 @@ class AutomatedPhotometry:
                                         break
                         gc.collect()
                     else:
-                        for file in print_progress_bar(
-                            file_list, title="Science files calibrated\n"
-                        ):
+                        from tqdm import tqdm
+                        for file in tqdm(file_list, desc="Processing", unit="file", total=len(file_list)):
                             try:
                                 fname, rc = _run_main_subprocess(
                                     python_executable,
@@ -1792,7 +1783,7 @@ class AutomatedPhotometry:
 
             # Concatenate per-image outputs into one light curve CSV
             reduced_loc = f"{default_input['fits_dir']}_{default_input['outdir_name']}"
-            _log(border_msg(f"Collecting reduced photometry in {reduced_loc}"))
+            _log(log_step(f"Collect photometry: {reduced_loc}"))
             output_loc = os.path.join(reduced_loc, "lightcurve_output.csv")
             concatenate_csv_files(
                 folder_path=reduced_loc,
@@ -1805,7 +1796,7 @@ class AutomatedPhotometry:
             output_photometry = output_loc
         else:
             # do_photometry=False: recover existing files and create output table
-            _log(border_msg("Recovering existing photometry (skip reductions)"))
+            _log(log_step("Recover photometry (skip reductions)"))
 
             # Set up output directory path (same logic as when do_photometry=True)
             work_dir = default_input.get("fits_dir") or ""
@@ -1813,7 +1804,7 @@ class AutomatedPhotometry:
             reduced_loc = f"{work_dir}{out_dir_name}"
 
             # Concatenate existing per-image outputs into one light curve CSV
-            _log(border_msg(f"Collecting reduced photometry in {reduced_loc}"))
+            _log(log_step(f"Collect photometry: {reduced_loc}"))
             output_photometry = os.path.join(reduced_loc, "lightcurve_output.csv")
 
             if os.path.exists(reduced_loc):

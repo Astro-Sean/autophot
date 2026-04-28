@@ -35,8 +35,8 @@ default_input:
   fpath: '' # str --- Runtime: current FITS file path (set internally).
   write_dir: null # str|null --- Runtime: output directory for current image (set internally).
   imageFilter: '' # str --- Runtime: band name for current image after mapping (set internally).
-  exposure_time: 30.0 # float --- Runtime fallback exposure time (seconds) if header key is missing.
-  gain: 1.0 # float --- Runtime fallback detector gain (e-/ADU) if header key is missing.
+  exposure_time: 30.0 # float --- Used only for workflows without a FITS header; science frames must supply EXPTIME/EXPOSURE in the header (see main + aperture.resolve_exposure_time_seconds).
+  gain: 1.0 # float --- Used only for workflows without a FITS header; science frames must supply GAIN (or the telescope.yml gain keyword) in the header (see main + aperture.resolve_gain_e_per_adu).
   read_noise: 0.0 # float --- Runtime fallback read noise (e-) if header key is missing.
   pixel_scale: null # float|null --- Runtime fallback pixel scale (arcsec/pixel) if not in telescope DB/header.
   fwhm: 3.0 # float --- Runtime fallback seeing FWHM (pixels) if not measured/available.
@@ -299,7 +299,7 @@ default_input:
     beta_limit: 0.5 # float --- Beta threshold used to declare an injected source recovered (primary criterion; higher is more conservative).
     detection_limit: null # float|null --- Optional S/N detection threshold. If set, a trial counts as recovered only if (S/N >= detection_limit) AND (beta >= beta_limit). If null, recovery is beta-only.
     completeness_target: 0.5 # float --- Target recovery fraction at the limiting magnitude (Harris 1990 completeness definition; 0.5 = 50% completeness).
-    recovery_method: PSF # str --- Recovery method for injection/recovery limiting magnitude (case-insensitive): "PSF" (default; fast PSF-flux recovery), "EMCEE"/"MCMC" (robust but slow PSF MCMC recovery), or "AP" (aperture recovery).
+    recovery_method: auto # str --- "auto" matches the transient: aperture-only -> AP, PSF path -> PSF. Or set explicitly: PSF, AP, EMCEE/MCMC.
     completeness_solver: bisect # str --- How to solve for the limiting magnitude at completeness_target: "bisect" (default; bracket+bisection on recovery fraction) or "logistic_emcee" (fit a smooth logistic completeness curve with emcee and take m50).
     logistic_emcee_nmags: 9 # int --- For completeness_solver=logistic_emcee: number of magnitudes to sample around the transition.
     logistic_emcee_span_mag: 1.5 # float --- For completeness_solver=logistic_emcee: half-span (mag) around the initial m50 guess to sample.
@@ -330,7 +330,7 @@ default_input:
     reproject_method: adaptive # str --- Reprojection strategy/method selector for WCS alignment (pipeline-specific).
     reproject_roundtrip_coords: True # bool --- Coordinate round-trip check (matches reproject default; False can mis-register).
     reproject_interp_order: bicubic # str|int --- Interpolation order/mode for reprojection (e.g. nearest, bilinear, bicubic).
-    reproject_parallel: False # bool --- Enable parallel reprojection where supported.
+    reproject_parallel: False # bool --- Enable parallel reprojection where supported (faster on large mosaics if CPU-bound; set True when memory allows).
     # reproject_adaptive only: library default is False; True rescales pixels for flux conservation (can blur when scales match).
     reproject_adaptive_conserve_flux: False # bool --- Adaptive reprojection: conserve flux by rescaling pixels (can blur slightly when scales match).
     reproject_adaptive_center_jacobian: False # bool --- More accurate Jacobian at grid points; slower (non-smooth WCS).
@@ -392,13 +392,21 @@ default_input:
 
   background:
     crowded_bright_frac_min: 0.40 # float --- Crowded-field trigger based on bright-source fraction (pipeline-specific metric).
+    # SPEED OPTIMIZATION: Set fast_mode: True to significantly reduce background estimation time.
+    # When enabled: skips FFT-based FWHM estimation (uses default), uses larger mesh boxes,
+    # skips expensive mask edge flattening, reduces sigma-clip iterations, skips full-image
+    # satellite-trail detection by default, and tightens local cutout mask/sigma-clip work.
+    # Trade-off: slightly less accurate background in complex fields, but usually adequate.
     fast_mode: False # bool --- If True, use faster/less robust background estimation settings.
+    # When fast_mode is True: skip _make_satellite_trail_mask (connected-component pass on the full image). Set false to keep trail masking at higher CPU cost.
+    fast_mode_skip_trail_mask: True # bool --- Only used if fast_mode is True; set false to run trail detection anyway.
     mesh_scale_min: 4.0 # float --- Minimum background mesh scale (in FWHM units unless otherwise specified).
     mesh_scale_max: 10.0 # float --- Maximum background mesh scale (in FWHM units unless otherwise specified).
     mesh_filter_size_mesh_units: 3 # int --- Background smoothing filter size expressed in mesh-cell units.
     global_interpolator: zoom # str --- Background2D interpolator ("zoom" fast; "idw" slower, can help pathological gradients).
     global_interp_order: 3 # int --- Order for zoom interpolator (0 nearest, 1 linear, 3 cubic).
     global_sigma_clip_maxiters: 6 # int --- SigmaClip max iterations per mesh cell (lower = faster; use 10+ if noisy).
+    # NOTE: global_mask_edge_flatten is automatically disabled when fast_mode=True unless explicitly set to True.
     global_mask_edge_flatten: True # bool --- If True, damp Background2D interpolation overshoot near masked regions by replacing a thin band around mask edges with a smooth estimate from nearby unmasked pixels.
     global_mask_edge_flatten_radius_px: null # float|null --- Flatten band radius (pixels). If null, defaults to max(2, ~1*FWHM).
     global_mask_edge_flatten_sigma_px: null # float|null --- Gaussian smoothing sigma (pixels) for mask-edge flattening. If null, defaults to radius/2.

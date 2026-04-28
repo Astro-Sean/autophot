@@ -40,6 +40,9 @@ from photutils.background import Background2D, MedianBackground
 from photutils.segmentation import detect_sources, SourceCatalog, make_2dgaussian_kernel
 from photutils.aperture import RectangularAperture
 
+# Module-level logger
+logger = logging.getLogger(__name__)
+
 
 class ColoredLevelFormatter(logging.Formatter):
     """
@@ -692,11 +695,14 @@ def beta_aperture(n, flux_aperture, npix, sigma, noise=0):
     n : float
         Detection threshold in sigma (e.g., 3 for 3*sigma).
     flux_aperture : float or np.ndarray
-        Total flux measured in the aperture.
+        Background-subtracted aperture flux in **per-second** units (e⁻/s),
+        matching ``Aperture.measure``'s ``flux_AP``.
     npix : int or float
-        Number of pixels in the aperture.
+        Geometric aperture area in pixels (same ``area`` as ``Aperture`` uses
+        for background subtraction), *not* the integer pixel count of a mask.
     sigma : float
-        Background standard deviation per pixel.
+        Per-pixel background RMS in **per-second** units (e⁻/s per pixel),
+        matching ``noiseSky`` from ``Aperture.measure``.
     noise : float, optional
         Mean background offset if not background-subtracted (default 0).
 
@@ -754,16 +760,28 @@ def beta_psf(n, flux_psf, flux_psf_err):
     return beta
 
 
+def log_step(msg: str) -> str:
+    """
+    Short one-line marker for routine pipeline steps.
+
+    Puts a blank line between the ``INFO -`` line and the ``— … —`` line, and
+    one after the marker. Message body starts with two newlines so the body is
+    not flush under the prefix.
+    Prefer for frequently called stages; use :func:`border_msg` for major
+    user-visible section breaks.
+    """
+    m = str(msg).strip()
+    if not m:
+        return ""
+    return f"\n\n\n— {m} —\n"
+
+
 def border_msg(msg: str, body: str = "-", corner: str = "+") -> str:
     """
-    Generate a simple, readable banner string for logging.
+    3-line banner for major log sections, with a blank line before and after.
 
     Example:
-        >>> logging.info(border_msg("Filter check"))
-        # blank line above, then:
-        # ----------------
-        #  Filter check
-        # ----------------
+        logging.info(border_msg("Filter check"))
     """
     text = str(msg).strip()
     if not text:
@@ -783,11 +801,7 @@ def border_msg(msg: str, body: str = "-", corner: str = "+") -> str:
         reset_suffix = "\033[0m"
         line = f"{bold_prefix}{line}{reset_suffix}"
 
-    # Avoid leading newlines: most loggers prefix the first line with
-    # "<timestamp> - INFO - " and then print message. If the message starts
-    # with "\n", the "INFO -" portion appears blank, which looks messy.
-    # Instead, put separators at the end so the banner still reads cleanly.
-    return f"\n\n\n{border}\n{line}\n{border}\n\n"
+    return f"\n{border}\n{line}\n{border}\n"
 
 
 # Telescope/instrument config: images must have FITS header keywords TELESCOP and INSTRUME.
@@ -1376,7 +1390,7 @@ def get_image_and_header(fpath):
                     if image.dtype.kind != 'f':
                         image = image.astype(np.float32)
                     best_hdu_idx = best_idx
-                    print(f"Selected HDU {best_idx} (score={best_score:.1f}) with shape {image.shape}")
+                    logger.debug(f"Selected HDU {best_idx} (score={best_score:.1f}) with shape {image.shape}")
             
             # Strategy 3: Last resort - try primary HDU
             if image is None and len(hdul) > 0:
@@ -1385,14 +1399,14 @@ def get_image_and_header(fpath):
                     try:
                         test_image = np.asarray(primary_data)
                         if hasattr(test_image, 'shape'):
-                            print(f"Using primary HDU as fallback with shape {getattr(test_image, 'shape', 'no shape')}")
+                            logger.debug(f"Using primary HDU as fallback with shape {getattr(test_image, 'shape', 'no shape')}")
                             image = test_image.copy()
                             # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
                             if image.dtype.kind != 'f':
                                 image = image.astype(np.float32)
                             best_hdu_idx = 0
                     except Exception as e:
-                        print(f"Error with primary HDU: {e}")
+                        logger.debug(f"Error with primary HDU: {e}")
             
             # Final validation and error handling
             if image is None:
@@ -1726,7 +1740,9 @@ def mag(flux):
 
     Does not mutate the input. Non-positive flux values yield NaN in the output.
 
-    :param flux: Flux in counts per second measured from source
+    :param flux: Brightness in *per-second* units, matching ``Aperture.flux_AP`` and
+        ``psf`` ``flux_PSF`` (e⁻/s when photometry uses ``image * gain`` in
+        :mod:`aperture`).
     :type flux: float or array
     :return: Instrumental magnitude; NaN where flux <= 0
     :rtype: float or array

@@ -98,8 +98,13 @@ def predict_background_under_source(
         yv = st.ravel()[h_idx]
         if not (np.all(np.isfinite(xv)) and np.all(np.isfinite(yv))):
             continue
-        X_rows.append(xv.astype(float, copy=False))
-        Y_rows.append(yv.astype(float, copy=False))
+        # NumPy 2.0: astype(copy=False) raises ValueError if copy needed; use asarray instead
+        try:
+            X_rows.append(xv.astype(float, copy=False))
+            Y_rows.append(yv.astype(float, copy=False))
+        except ValueError:
+            X_rows.append(np.asarray(xv, dtype=float))
+            Y_rows.append(np.asarray(yv, dtype=float))
         if len(X_rows) >= n_samples:
             break
 
@@ -120,7 +125,11 @@ def predict_background_under_source(
     XtY = X.T @ Y
     B = np.linalg.solve(XtX, XtY)
 
-    x0v = stamp0.ravel()[g_idx].astype(float, copy=False)
+    # NumPy 2.0: astype(copy=False) raises ValueError if copy needed
+    try:
+        x0v = stamp0.ravel()[g_idx].astype(float, copy=False)
+    except ValueError:
+        x0v = np.asarray(stamp0.ravel()[g_idx], dtype=float)
     y_pred = x0v @ B
     resid = Y - (X @ B)
     sigma = np.nanstd(resid, axis=0)

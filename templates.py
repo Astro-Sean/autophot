@@ -162,7 +162,7 @@ except ModuleNotFoundError:
     Catalog = None
 try:
     from functions import (
-        border_msg,
+        log_step,
         distance_to_uniform_row_col,
         get_header,
         get_image,
@@ -171,8 +171,11 @@ try:
     )
 except (ModuleNotFoundError, ImportError):
     # Download-only use cases shouldn't require the full photometry stack.
-    def border_msg(message: Any, *args: Any, **kwargs: Any) -> str:
-        return str(message)
+    def log_step(message: Any, *args: Any, **kwargs: Any) -> str:
+        m = str(message).strip()
+        if not m:
+            return ""
+        return f"\n\n— {m} —\n"
 
     distance_to_uniform_row_col = None
     get_header = None
@@ -544,6 +547,8 @@ def _reproject_template(
       - import inspect called once at module level, not per call.
       - Subpixel refinement gated on measured shift magnitude to avoid
         unnecessary ndimage_shift when WCS alignment is already accurate.
+      - Alignment RMS diagnostic uses the in-memory reprojected array (not a
+        second read of the output FITS).
       - Returns structured AlignmentResult instead of bare tuple.
 
     Parameters
@@ -712,15 +717,18 @@ def _reproject_template(
     hdr.update(science_proj, relax=True)
     hdr["NAXIS1"] = aligned.shape[1]
     hdr["NAXIS2"] = aligned.shape[0]
-    hdu = fits.PrimaryHDU(aligned.astype(np.float32), header=hdr)
+    to_write = np.asarray(aligned, dtype=np.float32, copy=False)
+    hdu = fits.PrimaryHDU(to_write, header=hdr)
     hdu.writeto(output_path, overwrite=True, output_verify="silentfix+ignore")
 
     # ------------------------------------------------------------------
-    # Alignment quality diagnostic - uses already-loaded science_image
+    # Alignment quality diagnostic — same pixels as on disk, without
+    # re-reading the FITS (avoids a full redundant I/O on large mosaics).
     # ------------------------------------------------------------------
     try:
-        aligned_loaded, _ = read_fits(output_path)
-        median_offset = compute_alignment_rms(science_image, aligned_loaded, fwhm_pixels)
+        median_offset = compute_alignment_rms(
+            science_image, to_write, fwhm_pixels
+        )
     except Exception:
         median_offset = None
 
@@ -2063,7 +2071,7 @@ class Templates:
 
         try:
             logger.info(
-                border_msg(f"Masking bright sources from {catalogName} catalog")
+                log_step(f"Mask bright sources: {catalogName}")
             )
             target = SkyCoord(
                 self.input_yaml["target_ra"],
@@ -2395,7 +2403,7 @@ class Templates:
             logger.info("Image filter not specified in input YAML")
             return None
 
-        logger.info(border_msg(f"Finding template file for filter {use_filter}"))
+        logger.info(log_step(f"Template for filter {use_filter}"))
         fits_root = Path(self.input_yaml.get("fits_dir", None) or "") / "templates"
         use_filter = str(use_filter).strip()
 
@@ -2473,9 +2481,7 @@ class Templates:
         sci_name = Path(scienceFpath).name
         ref_name = Path(templateFpath).name
         logger.info(
-            border_msg(
-                f"Aligning science and reference images ({sci_name} vs {ref_name})"
-            )
+            log_step(f"Align: {sci_name} vs {ref_name}")
         )
 
         try:
@@ -2702,9 +2708,7 @@ class Templates:
         sci_name = Path(scienceFpath).name
         ref_name = Path(templateFpath).name if templateFpath is not None else "None"
         logger.info(
-            border_msg(
-                f"Cropping science and reference images ({sci_name} vs {ref_name})"
-            )
+            log_step(f"Crop: {sci_name} vs {ref_name}")
         )
 
         target_ra = self.input_yaml["target_ra"]
@@ -3248,6 +3252,16 @@ class Templates:
                         exc_info=True,
                     )
 
+            # If we modified the inlier set after the RANSAC/percentile fit (e.g. via
+            # bin-wise refinement), recompute the intercept on the final inliers so the
+            # diagnostic line passes through the plotted inlier cloud.
+            if np.isfinite(slope) and final_inliers.sum() >= max(3, params.min_absolute_samples):
+                try:
+                    diffs_final = mag_tpl_r[final_inliers] - (slope * mag_img_r[final_inliers])
+                    intercept = float(np.nanmedian(diffs_final))
+                except Exception:
+                    pass
+
             # --- Build result DataFrame ---
             result = catalog_img.loc[idx_r].copy()
             result["mag_img"] = mag_img_r
@@ -3319,8 +3333,17 @@ class Templates:
         """Save a diagnostic magnitude-comparison plot to disk."""
         from matplotlib import pyplot as plt
         from functions import set_size
-        from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
+        from plotting_utils import (
+            apply_autophot_mplstyle,
+            get_color,
+            get_marker_size,
+            get_alpha,
+            get_line_width,
+            ransac_legend_top_outside,
+            set_mag_axes_inverted_xy,
+        )
 
+        apply_autophot_mplstyle()
         plt.ioff()
         fig, ax = plt.subplots(figsize=set_size(340, 1))
         plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
@@ -3361,7 +3384,18 @@ class Templates:
         )
         xx = np.linspace(mag_img_robust.min(), mag_img_robust.max(), 100)
         yy = slope * xx + intercept
-        ax.plot(xx, yy, color=get_color('fit'), linestyle="--", lw=get_line_width('thin'), label=f"Fit: slope={slope:.3f}, intercept={intercept:.3f}")
+        if np.isfinite(slope) and abs(float(slope) - 1.0) < 0.02:
+            fit_lbl = f"Fit: m_ref = m_sci + {intercept:.3f} (slope≈1)"
+        else:
+            fit_lbl = f"Fit: m_ref = {slope:.3f} m_sci + {intercept:.3f}"
+        ax.plot(
+            xx,
+            yy,
+            color=get_color("fit"),
+            linestyle="--",
+            lw=get_line_width("medium"),
+            label=fit_lbl,
+        )
         # Add shaded error region (calculate from residuals)
         if sel.sum() > 0:
             residuals = robust.loc[sel, "mag_tpl"].values - (slope * robust.loc[sel, "mag_img"].values + intercept)
@@ -3375,11 +3409,10 @@ class Templates:
                 color=get_color('error_region'),
                 alpha=get_alpha('light'),
             )
-        ax.set(xlabel="Science mag", ylabel="Template mag")
-        ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize="small", ncol=2)
-        ax.grid(alpha=0.3)
-        ax.invert_xaxis()
-        ax.invert_yaxis()
+        ax.set(xlabel="Science m [mag]", ylabel="Reference m [mag]")
+        ransac_legend_top_outside(ax, ncol=2, fontsize="small")
+        ax.grid(alpha=0.3, ls="--")
+        set_mag_axes_inverted_xy(ax)
 
         base = Path(self.input_yaml["fpath"]).stem
         out = (
@@ -3588,7 +3621,9 @@ class Templates:
         t0 = time.time()
         sci_name = Path(scienceFpath).name
         ref_name = Path(templateFpath).name
-        logger.info(border_msg(f"Starting image subtraction ({sci_name} - {ref_name})"))
+        logger.info(
+            log_step(f"Image subtraction: {sci_name} - {ref_name}")
+        )
 
         prepared_template_fpath: Optional[str] = None
         template_work_fpath: str = str(templateFpath)
@@ -3640,18 +3675,40 @@ class Templates:
 
             # Keep interpolation to the WCS reproject stage only.
 
-            # Extract relevant header values with sensible defaults
-            science_fwhm = scienceHeader["fwhm"]
-            template_fwhm = templateHeader.get("fwhm", 3)
-            science_gain = float(scienceHeader.get("gain", 1))
-            template_gain = float(templateHeader.get("gain", 1))
+            # Extract instrument scalars in a consistent way.
+            # Prefer pipeline config (`input_yaml`) for science FWHM/gain/read-noise because
+            # the header may not be updated after alignment/cropping steps. Fall back to
+            # common FITS keys if needed.
+            def _hdr_float(hdr: fits.Header, keys: list[str], default: float) -> float:
+                for k in keys:
+                    if k in hdr:
+                        try:
+                            v = float(hdr.get(k))
+                            if np.isfinite(v):
+                                return v
+                        except Exception:
+                            continue
+                return float(default)
+
+            science_fwhm = float(self.input_yaml.get("fwhm", _hdr_float(scienceHeader, ["FWHM", "fwhm"], 3.0)))
+            template_fwhm = float(_hdr_float(templateHeader, ["FWHM", "fwhm"], 3.0))
+
+            # Gain: prefer pipeline-resolved value for science; template often needs header.
+            science_gain = float(self.input_yaml.get("gain", _hdr_float(scienceHeader, ["GAIN", "gain"], 1.0)))
+            template_gain = float(_hdr_float(templateHeader, ["GAIN", "gain"], 1.0))
 
             # Saturation: header may be missing or effectively "no saturation".
             # Treat missing / non-finite / non-positive values as "no hard limit"
             # by mapping them to np.inf. Downstream code interprets np.inf as
             # "do not mask on saturation".
             def _safe_saturate(hdr: fits.Header) -> float:
-                saturate_raw_value = hdr.get("saturate", np.inf)
+                saturate_raw_value = None
+                for k in ("SATURATE", "saturate", "SATLEVEL", "SATUR"):
+                    if k in hdr:
+                        saturate_raw_value = hdr.get(k)
+                        break
+                if saturate_raw_value is None:
+                    saturate_raw_value = np.inf
                 try:
                     sat = float(saturate_raw_value)
                 except Exception:
@@ -3809,8 +3866,17 @@ class Templates:
                     logger.info(
                         "Template inpainting skipped/failed (non-fatal): %s", _e
                     )
-            science_readnoise = float(scienceHeader.get("READNOISE", 1))
-            template_readnoise = float(templateHeader.get("READNOISE", 1))
+            # Read noise: prefer pipeline config (science) and common FITS keys (template).
+            # main.py writes RDNOISE; some surveys use READNOISE.
+            science_readnoise = float(
+                self.input_yaml.get(
+                    "read_noise",
+                    _hdr_float(scienceHeader, ["RDNOISE", "READNOISE", "rdnoise", "readnoise"], 1.0),
+                )
+            )
+            template_readnoise = float(
+                _hdr_float(templateHeader, ["RDNOISE", "READNOISE", "rdnoise", "readnoise"], 1.0)
+            )
 
             # NOTE: `scale` in default_input.yml is a plotting/cutout helper and
             # is not the same as SFFT's kernel half-width.

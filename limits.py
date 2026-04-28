@@ -38,10 +38,19 @@ def _pool_or_serial(n_jobs: int):
 
 @lru_cache(maxsize=512)
 def _flux_for_mag_cached(m: float, counts_ref: float, exposure_time: float) -> float:
-    """Cached version of flux_for_mag for performance optimization."""
-    flux_target = 10.0 ** (-0.4 * m)
-    counts_target = flux_target * exposure_time
-    return counts_target / counts_ref
+    """
+    ePSF ``flux`` parameter for instrumental magnitude *m* (cached).
+
+    ``counts_ref`` is the aperture sum integrated over the exposure, same units
+    as ``Aperture.counts_AP`` (e⁻ in the frame when the pipeline uses
+    ``image * gain``).  ``m`` uses the same e⁻/s convention as ``mag(flux_AP)``.
+
+    Returns the scale factor for ``epsf_model.evaluate(..., flux=...)`` such
+    that the *in-aperture* integrated signal matches a source of magnitude *m*.
+    """
+    flux_e_per_s = 10.0 ** (-0.4 * m)
+    aperture_e_in_frame = flux_e_per_s * float(exposure_time)
+    return aperture_e_in_frame / float(counts_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -69,14 +78,100 @@ from functions import (
     mag,
     points_in_circum,
     beta_aperture,
-    border_msg,
 )
-from aperture import Aperture
+from aperture import (
+    Aperture,
+    resolve_exposure_time_seconds,
+    resolve_gain_e_per_adu,
+)
 from plotting_utils import get_marker_size
 
 
+def _effective_exposure_seconds(input_yaml: dict) -> float:
+    """Exposure time [s]; same rules as ``Aperture.measure`` (required, no default)."""
+    return resolve_exposure_time_seconds(None, input_yaml)
+
+
+def _downsample_psf_flux_conserving(psf_os: np.ndarray, oversampling: int) -> np.ndarray:
+    """
+    Flux-conserving binning of an oversampled PSF onto detector pixels.
+
+    Same convention as ``Limits._downsample_psf`` (block sum over oversample
+    cells).  Used so ePSF oversampling matches photutils / pipeline PSF models.
+    """
+    osamp = int(oversampling)
+    if osamp <= 1:
+        return np.asarray(psf_os, dtype=float)
+    H_os, W_os = psf_os.shape
+    H = H_os // osamp
+    W = W_os // osamp
+    return (
+        psf_os[: H * osamp, : W * osamp]
+        .reshape(H, osamp, W, osamp)
+        .sum(axis=(1, 3))
+    )
+
+
+def _render_epsf_on_cutout(
+    epsf_model,
+    height: int,
+    width: int,
+    x_0: float,
+    y_0: float,
+    flux: float,
+    oversampling: int,
+) -> np.ndarray:
+    """
+    Render the ePSF onto a full ``(height, width)`` detector grid.
+
+    When ``oversampling > 1``, evaluate on a subpixel grid and bin down with
+    flux-conserving downsampling.  Injection trials **must** use the same path
+    as ``counts_ref`` calibration; otherwise ``flux_for_mag`` is wrong and
+    limiting magnitudes can be biased (often spuriously deep).
+    """
+    osamp = max(1, int(oversampling))
+    H, W = int(height), int(width)
+    if osamp <= 1:
+        gridy, gridx = np.indices((H, W))
+        return np.asarray(
+            epsf_model.evaluate(
+                x=gridx,
+                y=gridy,
+                flux=float(flux),
+                x_0=float(x_0),
+                y_0=float(y_0),
+            ),
+            dtype=float,
+        )
+    gx_os = np.linspace(0, W - 1, W * osamp)
+    gy_os = np.linspace(0, H - 1, H * osamp)
+    gridx_os, gridy_os = np.meshgrid(gx_os, gy_os)
+    psf_os = np.asarray(
+        epsf_model.evaluate(
+            x=gridx_os,
+            y=gridy_os,
+            flux=float(flux),
+            x_0=float(x_0),
+            y_0=float(y_0),
+        ),
+        dtype=float,
+    )
+    return _downsample_psf_flux_conserving(psf_os, osamp)
+
+
+# Sigma multiplier passed to ``beta_aperture`` for injection trials and related
+# completeness (same n as Connolly-style aperture significance). Keep in sync
+# with any code that recomputes aperture beta to match injection (e.g. main.py).
+BETA_APERTURE_SIGMA_N = 3.0
+
+
 def _compute_p_det(df: pd.DataFrame, beta_n: float) -> pd.Series:
-    """Compute detection probability (beta) for each site."""
+    """
+    Compute detection probability (beta) for each site.
+
+    Expects ``flux_AP`` and ``noiseSky`` in matching *per-second* units
+    (e⁻/s and e⁻/s per pixel) as from ``Aperture.measure()``.
+    """
     def _beta_row(row):
         if (np.isfinite(row["flux_AP"]) and row["flux_AP"] > 0
                 and np.isfinite(row["noiseSky"]) and row["noiseSky"] > 0
@@ -129,7 +224,7 @@ def _injection_worker(args):
     Parameters
     ----------
     args : tuple
-        (x_inj, y_inj, F_amp, gridx, gridy, cutout,
+        (x_inj, y_inj, F_amp, cutout, oversampling,
          epsf_model, input_yaml, background_rms,
          snr_limit, beta_n, DETECTION_BETA_THRESH, recovery_method)
 
@@ -141,9 +236,8 @@ def _injection_worker(args):
         x_inj,
         y_inj,
         F_amp,
-        gridx,
-        gridy,
         cutout,
+        oversampling,
         epsf_model,
         input_yaml,
         background_rms,
@@ -154,8 +248,9 @@ def _injection_worker(args):
     ) = args
 
     try:
-        psf_img = epsf_model.evaluate(
-            x=gridx, y=gridy, flux=F_amp, x_0=x_inj, y_0=y_inj
+        ny, nx = cutout.shape
+        psf_img = _render_epsf_on_cutout(
+            epsf_model, ny, nx, x_inj, y_inj, F_amp, oversampling
         )
         new_img = cutout + psf_img
 
@@ -218,17 +313,27 @@ def _injection_worker(args):
                 y2 = min(ny, int(np.floor(y0i)) + half + 2)
 
                 data = np.asarray(new_img[y1:y2, x1:x2], dtype=float)
-                # gx/gy and x_inj/y_inj are all in cutout-local pixel coordinates.
-                gx, gy = np.meshgrid(np.arange(x1, x2), np.arange(y1, y2))
-                psf1 = np.asarray(
-                    epsf_model.evaluate(x=gx, y=gy, flux=1.0, x_0=x0i, y_0=y0i),
-                    dtype=float,
-                )
+                # Same PSF rendering as injection (handles oversampling consistently).
+                psf_stamp = np.asarray(psf_img[y1:y2, x1:x2], dtype=float)
+                if np.isfinite(F_amp) and abs(float(F_amp)) > 1e-30:
+                    psf1 = psf_stamp / float(F_amp)
+                else:
+                    psf1 = _render_epsf_on_cutout(
+                        epsf_model,
+                        y2 - y1,
+                        x2 - x1,
+                        float(x0i - x1),
+                        float(y0i - y1),
+                        1.0,
+                        oversampling,
+                    )
                 # Fit both PSF flux and a constant background level in the stamp:
                 # data ~= flux * psf1 + bkg. This correctly handles any local mean
                 # shift (including the uniform "bias") without forcing background=0
                 # or relying on an annulus estimate.
                 if background_rms is not None:
+                    # RMS map must be in the same units per pixel as ``cutout`` (typically ADU);
+                    # variance is then consistent with ``data`` in the WLS model.
                     rms = np.asarray(background_rms[y1:y2, x1:x2], dtype=float)
                     var = np.maximum(rms * rms, 1e-30)
                 else:
@@ -312,7 +417,7 @@ def _injection_worker(args):
                     batch_steps=int(phot_cfg.get("emcee_batch_steps", 100)),
                     jitter_scale=float(phot_cfg.get("emcee_jitter_scale", 0.01)),
                     use_nddata_uncertainty=True,
-                    gain=float(input_yaml.get("gain", 1.0)),
+                    gain=float(resolve_gain_e_per_adu(None, input_yaml)),
                     readnoise=float(input_yaml.get("read_noise", 0.0)),
                     background_rms=rms_stamp,
                 )
@@ -344,14 +449,13 @@ def _injection_worker(args):
             except Exception:
                 return False, beta_p, np.nan
 
-        # For PSF method, use PSF-fit SNR for detection (not beta aperture)
-        # Guard flux_hat before use as recovered_flux
-        if method == "PSF":
+        # For PSF / EMCEE methods, use PSF-fit (or MCMC) SNR for the gate; AP uses aperture flux/SNR.
+        if method in ("PSF", "EMCEE"):
             recovered_flux = flux_hat if np.isfinite(flux_hat) else np.nan
         else:
             recovered_flux = float(mres["flux_AP"].iloc[0])
 
-        if method == "PSF":
+        if method in ("PSF", "EMCEE"):
             effective_snr_limit = float(snr_limit) if snr_limit is not None else 3.0
             det_snr = np.isfinite(snr_val) and (snr_val >= effective_snr_limit)
             return det_snr, beta_p, recovered_flux
@@ -497,27 +601,10 @@ class Limits:
         """
         Flux-conserving downsampling of an oversampled PSF.
 
-        Reshapes into (H, os, W, os) blocks and takes the sum over the
-        oversampling axes to preserve total flux.
-
-        Parameters
-        ----------
-        psf_os      : 2-D ndarray  (H*os, W*os)
-        oversampling: int
-
-        Returns
-        -------
-        psf_unit : 2-D ndarray  (H, W),  sum(psf_unit) == sum(psf_os)
+        Delegates to module-level ``_downsample_psf_flux_conserving`` (single
+        implementation used by injection rendering and diagnostics).
         """
-        H_os, W_os = psf_os.shape
-        H = H_os // oversampling
-        W = W_os // oversampling
-        # Trim to exact multiple then reshape and sum to preserve flux.
-        return (
-            psf_os[: H * oversampling, : W * oversampling]
-            .reshape(H, oversampling, W, oversampling)
-            .sum(axis=(1, 3))
-        )
+        return _downsample_psf_flux_conserving(psf_os, oversampling)
 
     # -----------------------------------------------------------------------
     # PSF injection / recovery limiting magnitude
@@ -585,10 +672,11 @@ class Limits:
             except Exception:
                 k_sigma = None
             logger.info(
-                "Injected limiting magnitude: beta_limit=%.3f (~%s sigma; n=3 beta formalism), "
-                "snr_gate=%s (limiting_magnitude.detection_limit), beta_n=3",
+                "Injected limiting magnitude: beta_limit=%.3f (~%s sigma; beta_aperture n=%g), "
+                "snr_gate=%s (limiting_magnitude.detection_limit)",
                 float(detection_cutoff),
                 ("%.2f" % float(k_sigma)) if k_sigma is not None else "unknown",
+                float(BETA_APERTURE_SIGMA_N),
                 "off" if detection_limit is None else str(detection_limit),
             )
             # =================================================================
@@ -699,6 +787,18 @@ class Limits:
             # Use local copy of config to avoid mutating shared state
             import copy
             local_input_yaml = copy.deepcopy(self.input_yaml)
+            # Canonical exposure and gain for every Aperture call and for flux_for_mag
+            # (must match ``Aperture.measure`` resolution on this frame).
+            _exp_canon = _effective_exposure_seconds(local_input_yaml)
+            _gain_canon = resolve_gain_e_per_adu(None, local_input_yaml)
+            local_input_yaml["exposure_time"] = _exp_canon
+            local_input_yaml["gain"] = _gain_canon
+            logger.info(
+                "Limiting magnitude: using exposure_time=%.5g s, gain=%.5g e/ADU for "
+                "aperture photometry and injection flux calibration",
+                _exp_canon,
+                _gain_canon,
+            )
 
             def _exclude_target_overlap(df: pd.DataFrame,
                                          target_cx: float,
@@ -910,60 +1010,19 @@ class Limits:
             # Use true cutout centre for PSF evaluation (grid is cutout-sized)
             # cutout_cx, cutout_cy are the true target position from Cutout2D.position_cutout
             cx, cy = cutout_cx, cutout_cy
-            # Create oversampled grid for PSF evaluation (will downsample later)
-            if oversampling > 1:
-                gx_os = np.linspace(0, W - 1, W * oversampling)
-                gy_os = np.linspace(0, H - 1, H * oversampling)
-                gridx_os, gridy_os = np.meshgrid(gx_os, gy_os)
-            else:
-                # Pixel-resolution grid for injection (will be reused after final cutout)
-                gridx, gridy = np.meshgrid(np.arange(W), np.arange(H))
-                gridx_os, gridy_os = gridx, gridy
-            psf_os = epsf_model.evaluate(
-                x=gridx_os, y=gridy_os, flux=1.0, x_0=cx, y_0=cy
+            # Must match ``_injection_worker`` rendering (especially oversampling > 1).
+            psf_unit = _render_epsf_on_cutout(
+                epsf_model, H, W, float(cx), float(cy), 1.0, oversampling
             )
 
-            psf_unit = (
-                self._downsample_psf(psf_os, oversampling)
-                if oversampling > 1
-                else psf_os
-            )
-
-            # Note: epsf_model.evaluate(flux=1.0) may not sum to exactly 1.0 due to
-            # finite grid/truncation. The calibration round-trip is self-consistent:
-            #   inject F_amp via epsf_model.evaluate -> measure counts_ref at F_amp=1
-            #   -> flux_for_mag(m) = 10^(-0.4*m)*exposure_time/counts_ref
-            # No normalization is applied here; counts_ref captures the actual PSF sum.
-
-            # Use cutout-sized blank canvas for PSF calibration (no background contamination)
-            calib_H, calib_W = H, W
-            calib_cx, calib_cy = cx, cy  # Cutout center
-            blank = np.zeros((calib_H, calib_W), dtype=float)
-            # Place PSF at the center of the blank canvas
-            psf_h, psf_w = psf_unit.shape
-            y_start = int(calib_cy - psf_h // 2)
-            y_end = y_start + psf_h
-            x_start = int(calib_cx - psf_w // 2)
-            x_end = x_start + psf_w
-
-            # Ensure PSF fits within blank canvas
-            if y_start < 0 or y_end > calib_H or x_start < 0 or x_end > calib_W:
-                # Fallback: clamp coordinates to canvas bounds
-                logger.warning("PSF placement bounds exceeded; clamping to canvas.")
-                y_start = int(np.clip(y_start, 0, calib_H - psf_h))
-                y_end = y_start + psf_h
-                x_start = int(np.clip(x_start, 0, calib_W - psf_w))
-                x_end = x_start + psf_w
-            blank[y_start:y_end, x_start:x_end] = psf_unit
-
-            psf_ap = Aperture(input_yaml=local_input_yaml, image=blank)
+            psf_ap = Aperture(input_yaml=local_input_yaml, image=psf_unit)
             psf_meas = psf_ap.measure(
                 pd.DataFrame({"x_pix": [cutout_cx], "y_pix": [cutout_cy]}),  # Use same centre as PSF evaluation
                 plot=False,
                 verbose=0,
             )
-            F_ref = float(psf_meas["flux_AP"].iloc[0])  # ADU/s from aperture.measure()
-            counts_ref = float(psf_meas["counts_AP"].iloc[0])  # aperture counts (ADU, same units as image data)
+            F_ref = float(psf_meas["flux_AP"].iloc[0])  # e-/s (same as mag/PSF pipeline)
+            counts_ref = float(psf_meas["counts_AP"].iloc[0])  # integrated e- in frame (see Aperture.measure)
 
             # Guard: check if calibration failed
             if not (np.isfinite(counts_ref) and counts_ref > 0
@@ -971,39 +1030,36 @@ class Limits:
                 logger.error(
                     f"PSF calibration failed: counts_ref={counts_ref:.4e}, F_ref={F_ref:.4e} "
                     f"(both must be finite and positive). "
-                    f"PSF sum={np.sum(psf_unit):.4e}, PSF placement=({x_start}:{x_end}, {y_start}:{y_end})"
+                    f"PSF sum={np.sum(psf_unit):.4e}, shape={psf_unit.shape}, oversampling={oversampling}"
                 )
                 return np.nan
-            
-            # DIAGNOSTIC: Check if PSF flux parameter represents total integrated flux
-            # psf_unit is normalized to sum=1.0, so total flux should be 1.0
-            psf_total_sum = np.sum(psf_unit)
 
-            exposure_time = float(self.input_yaml.get("exposure_time", 1.0))
-            if exposure_time <= 0:
-                logger.warning("exposure_time <= 0; defaulting to 1.0s")
-                exposure_time = 1.0
-
-            # For verification: what magnitude does flux=1.0 correspond to?
-            # Since psf_unit is normalized to sum=1.0, flux=1.0 injects exactly 1 total count
-            # Magnitude of 1 count per second: m = -2.5 * log10(1.0 / exposure_time)
-            m_ref_check = -2.5 * np.log10(1.0 / exposure_time)  # magnitude of 1 count per second
-            # Also compute standard instrumental magnitude for logging
-            m_ref = mag(F_ref)
+            exposure_time = float(local_input_yaml["exposure_time"])
 
             # Memoised so repeated calls at the same magnitude are free.
-            # Uses cached module-level function for performance
             def flux_for_mag(m: float) -> float:
                 """Return ePSF flux parameter to inject for instrumental magnitude m."""
                 return _flux_for_mag_cached(m, counts_ref, exposure_time)
 
-            # DIAGNOSTIC: verify calibration round-trip
-            # Use counts_ref/exposure_time to get ADU/s, consistent with pipeline convention m = -2.5 * log10(ADU/s)
-            m_roundtrip = -2.5 * np.log10(counts_ref / exposure_time)  # instrumental mag from counts_ref
-            F_roundtrip = flux_for_mag(m_roundtrip)
-
-            # Log what flux is being injected at the initial guess
-            F_at_guess = flux_for_mag(initialGuess)
+            # Sanity: mag(counts_ref/exposure) == mag(F_ref); flux_for_mag at that m should return 1.0.
+            mag_at_unit_flux = float(mag(float(F_ref)))
+            f_roundtrip = float(flux_for_mag(mag_at_unit_flux))
+            logger.info(
+                "PSF injection calibration: counts_ref=%.6g (e- in aperture @ model flux=1), "
+                "mag(F=1)=%.5f, flux_for_mag(mag(F=1))=%.6f (expect 1.0), "
+                "flux_for_mag(initialGuess)=%.6g",
+                float(counts_ref),
+                mag_at_unit_flux,
+                f_roundtrip,
+                float(flux_for_mag(float(initialGuess))),
+            )
+            if np.isfinite(f_roundtrip) and abs(f_roundtrip - 1.0) > 0.02:
+                logger.warning(
+                    "PSF flux calibration round-trip differs from 1.0 (got %.6f). "
+                    "Check exposure_time, oversampling, and that the science cutout "
+                    "uses the same ADU/gain convention as Aperture.measure.",
+                    f_roundtrip,
+                )
 
             # =================================================================
             # Choose quiet injection sites
@@ -1011,12 +1067,23 @@ class Limits:
             DETECTION_BETA_THRESH = detection_cutoff
             snr_limit = float(detection_limit) if detection_limit is not None else None
             recovery_method = str(lim_cfg.get("recovery_method", "PSF")).strip().upper()
-            # Accept common synonyms and any letter case.
-            if recovery_method in {"MCMC", "EMCEE"}:
+            # "AUTO" is resolved in main.py to AP vs PSF from do_aperture_ONLY; if unset, prefer PSF.
+            if recovery_method in {"AUTO", "DEFAULT", "MATCH_TRANSIENT", "MATCH_TARGET"}:
+                logger.warning(
+                    "limiting_magnitude.recovery_method=%s was not pre-resolved; using PSF. "
+                    "Set recovery_method explicitly or run from main (auto).",
+                    recovery_method,
+                )
+                recovery_method = "PSF"
+            elif recovery_method in {"MCMC", "EMCEE"}:
                 recovery_method = "EMCEE"
             elif recovery_method in {"PSF", "AP"}:
-                recovery_method = recovery_method
+                pass
             else:
+                logger.warning(
+                    "Unknown recovery_method %r; using PSF.",
+                    recovery_method,
+                )
                 recovery_method = "PSF"
             completeness_target = float(lim_cfg.get("completeness_target", 0.5))
             completeness_target = max(0.0, min(1.0, completeness_target))
@@ -1042,7 +1109,7 @@ class Limits:
                 n_jobs = 1
             # Beta is computed using the canonical n=3 aperture formalism so that
             # beta thresholds are comparable across runs (beta=0.5 ~ S/N~3).
-            beta_n = 3.0
+            beta_n = float(BETA_APERTURE_SIGMA_N)
             # Monte Carlo settings for injection/recovery.
             # Too few sites/jitters makes the completeness curve look jagged.
             sourceNum = int(lim_cfg.get("injection_n_sites", 30))
@@ -1269,10 +1336,8 @@ class Limits:
             if len(injection_df) > sourceNum:
                 injection_df = injection_df.sample(sourceNum).reset_index(drop=True)
 
-            # Compute grids after final cutout shape is known (compute once, reuse everywhere)
             H_final, W_final = cutout.shape
-            gridy, gridx = np.indices((H_final, W_final))
-            
+
             # Recompute r_max and r_base after final cutout shape is known
             margin_r = float(np.ceil(fwhm_px))
             max_safe_r = min(
@@ -1350,9 +1415,8 @@ class Limits:
                         x_inj_all[n],
                         y_inj_all[n],
                         F,
-                        gridx,
-                        gridy,
                         cutout,
+                        oversampling,
                         epsf_model,
                         local_input_yaml,
                         background_rms,
@@ -1595,10 +1659,32 @@ class Limits:
                 if zeropoint is not None and np.isfinite(zeropoint):
                     app_mag = float(inject_lmag) + float(zeropoint)
                     app_str = f" ({app_mag:.3f} apparent)"
-                logger.info(
-                    f"Limiting magnitude: instrumental={inject_lmag:.3f}{app_str}, zeropoint={zeropoint:.3f}"
+                zp_log = (
+                    f"{float(zeropoint):.3f}"
+                    if zeropoint is not None and np.isfinite(zeropoint)
+                    else "n/a"
                 )
-                logger.info(f"Limiting mag ~ {inject_lmag:.3f}{app_str}  [{elapsed:.1f}s]")
+                logger.info(
+                    f"Limiting magnitude: instrumental={inject_lmag:.3f}{app_str}, "
+                    f"zeropoint={zp_log}"
+                )
+                f_inst_per_s = 10.0 ** (-0.4 * float(inject_lmag))
+                logger.info(
+                    "  Context: m_inst = -2.5*log10(flux [e/s]) (same as mag(flux_AP)). "
+                    "Negative m_inst only means the equivalent aperture rate f > 1 e/s; "
+                    "it does not mean the source is bright in apparent terms. "
+                    "At the solved limit, f ≈ %.3g e/s; interpret depth using apparent mag "
+                    "+ zeropoint if the latter is trusted.",
+                    f_inst_per_s,
+                )
+                if str(recovery_method).strip().upper() == "PSF" and snr_limit is None:
+                    logger.info(
+                        "  PSF recovery uses WLS fit S/N ≥ 3.0 by default. "
+                        "Set limiting_magnitude.detection_limit for a stricter (shallower) report."
+                    )
+                logger.info(
+                    f"Limiting mag ~ {inject_lmag:.3f}{app_str}  [{elapsed:.1f}s]"
+                )
             else:
                 logger.info(f"Limiting magnitude search failed [{elapsed:.1f}s]")
 
@@ -1644,12 +1730,16 @@ class Limits:
         r_inj = float(max(r_min, r_base))
         pts = points_in_circum(r_inj, center=(x0c, y0c), n=8)
         x0, y0 = float(pts[0][0]), float(pts[0][1])
-        gridx, gridy = np.meshgrid(np.arange(W), np.arange(H))
         F = float(flux_for_mag(float(m_inj)))
-        img = np.asarray(cutout, dtype=float) + np.asarray(
-            epsf_model.evaluate(x=gridx, y=gridy, flux=F, x_0=x0, y_0=y0),
-            dtype=float,
-        )
+        raw_os = getattr(epsf_model, "oversampling", 1)
+        if isinstance(raw_os, (list, tuple, np.ndarray)):
+            os_inj = int(raw_os[0])
+        elif np.isscalar(raw_os) and raw_os > 1:
+            os_inj = int(raw_os)
+        else:
+            os_inj = 1
+        psf_add = _render_epsf_on_cutout(epsf_model, H, W, x0, y0, F, os_inj)
+        img = np.asarray(cutout, dtype=float) + np.asarray(psf_add, dtype=float)
 
         # Small stamp for speed.
         half = int(np.ceil(max(6.0, 3.0 * fwhm_px)))
@@ -1688,7 +1778,7 @@ class Limits:
             batch_steps=int(phot_cfg.get("emcee_batch_steps", 100)),
             jitter_scale=float(phot_cfg.get("emcee_jitter_scale", 0.01)),
             use_nddata_uncertainty=True,
-            gain=float(self.input_yaml.get("gain", 1.0)),
+            gain=float(resolve_gain_e_per_adu(None, self.input_yaml)),
             readnoise=float(self.input_yaml.get("read_noise", 0.0)),
             background_rms=rms_stamp,
         )
@@ -1916,13 +2006,10 @@ class Limits:
             return {}
         
         # Calculate apparent magnitudes using same scale as limiting magnitude
-        # Pipeline convention: inst_mag = -2.5 * log10(ADU / exposure_time)
-        exposure_time = float(self.input_yaml.get("exposure_time", 1.0))
-        if exposure_time <= 0:
-            exposure_time = 1.0
+        exposure_time = _effective_exposure_seconds(self.input_yaml)
 
         if "flux_AP" in sources.columns:
-            # flux_AP is already in ADU/s from aperture.py, so mag() can be used directly
+            # flux_AP is e-/s from Aperture.measure; mag() is instrumental in that system
             from functions import mag
             sources["apparent_mag"] = sources["flux_AP"].apply(mag) + zeropoint
             logger.info("Using pipeline convention: mag(flux_AP/s) + zeropoint")
@@ -2328,32 +2415,13 @@ class Limits:
                 # Fallback: use MAD which is robust to sources
                 background_rms_scalar = float(mad_std(cutout, ignore_nan=True))
 
-            # Create normalized PSF for subpanel injection (same as used for calibration)
-            # epsf_model is an ImagePSF object, access its data array
-            psf_data = epsf_model.data if hasattr(epsf_model, 'data') else epsf_model
-            cx, cy = psf_data.shape[1] // 2, psf_data.shape[0] // 2
-            oversampling = getattr(epsf_model, "oversampling", 1)
-            if isinstance(oversampling, (list, tuple, np.ndarray)):
-                oversampling = int(oversampling[0])
-            elif np.isscalar(oversampling) and oversampling > 1:
-                oversampling = int(oversampling)
+            raw_os_plot = getattr(epsf_model, "oversampling", 1)
+            if isinstance(raw_os_plot, (list, tuple, np.ndarray)):
+                oversampling_plot = int(raw_os_plot[0])
+            elif np.isscalar(raw_os_plot) and raw_os_plot > 1:
+                oversampling_plot = int(raw_os_plot)
             else:
-                oversampling = 1
-                
-            # Evaluate PSF at center with flux=1.0
-            gridx, gridy = np.meshgrid(np.arange(psf_data.shape[1]), np.arange(psf_data.shape[0]))
-            psf_os = epsf_model.evaluate(x=gridx, y=gridy, flux=1.0, x_0=cx, y_0=cy)
-            
-            # Downsample if needed
-            psf_unit = (
-                self._downsample_psf(psf_os, oversampling)
-                if oversampling > 1
-                else psf_os
-            )
-
-            # Note: Do NOT normalize PSF here. The main calibration uses the actual PSF sum
-            # as counts_ref, and flux_for_mag is calibrated against that. Normalizing here
-            # would create a mismatch between injection and recovery.
+                oversampling_plot = 1
 
             # ── Demo injection site selection ─────────────────────────────────────────
             #
@@ -2448,46 +2516,16 @@ class Limits:
                     inject_y = demo_y
                     # inject_x/inject_y are in cutout-local coordinates (from injection_df["x_pix"]/["y_pix"])
 
-                    # Use normalized PSF for subpanel injection (same as used for calibration)
-                    # This ensures flux=1.0 means exactly 1 total count
-                    
-                    # Ensure PSF fits within cutout
-                    psf_h, psf_w = psf_unit.shape
-                    cutout_h, cutout_w = cutout.shape
-                    
-                    # Reduced verbosity - removed detailed PSF shape logging
-                    
-                    # Trim PSF if it's larger than cutout
-                    if psf_h > cutout_h or psf_w > cutout_w:
-                        # Center the PSF and trim to fit
-                        h_start = (psf_h - cutout_h) // 2
-                        w_start = (psf_w - cutout_w) // 2
-                        h_end = h_start + cutout_h
-                        w_end = w_start + cutout_w
-                        psf_trim = psf_unit[h_start:h_end, w_start:w_end]
-                    else:
-                        psf_trim = psf_unit.copy()
-                    
-                    # Reduced verbosity - removed injected shape logging
-                    
-                    # Use PSF evaluate function for injection
-                    # Create a grid for the cutout
                     ny, nx = cutout.shape
-                    gridx_cutout, gridy_cutout = np.meshgrid(np.arange(nx), np.arange(ny))
-                    
-                    # Use PSF evaluate function for injection
-                    psf_inject = epsf_model.evaluate(
-                        x=gridx_cutout, 
-                        y=gridy_cutout, 
-                        flux=flux_adu,  # Use raw counts directly
-                        x_0=inject_x, 
-                        y_0=inject_y
+                    psf_inject = _render_epsf_on_cutout(
+                        epsf_model,
+                        ny,
+                        nx,
+                        float(inject_x),
+                        float(inject_y),
+                        float(flux_adu),
+                        oversampling_plot,
                     )
-                    
-                    # No downsampling needed - gridx_cutout is already at pixel resolution
-                    
-                    # Reduced verbosity - removed PSF injection shape logging
-                    
                     injected += psf_inject
                     
                     # Zoom centred on TARGET so it always appears in the centre of the panel.

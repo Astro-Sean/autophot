@@ -4,6 +4,7 @@ Uses colorblind-friendly color palettes based on scientific visualization best p
 """
 
 import numpy as np
+from typing import Optional
 
 # Okabe-Ito colorblind-friendly palette (widely used in scientific publications)
 OKABE_ITO = {
@@ -87,3 +88,34 @@ def get_alpha(alpha_name):
 def get_divergent_color(color_name):
     """Get color from divergent palette."""
     return DIVERGENT_PALETTE.get(color_name, '#000000')
+
+
+def apply_autophot_mplstyle():
+    """
+    Use ``autophot.mplstyle`` when present (repo root), else matplotlib defaults.
+    Call at the start of figure construction for consistent RANSAC / calibration plots.
+    """
+    import os
+    import matplotlib.pyplot as plt
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    p = os.path.join(here, "autophot.mplstyle")
+    if os.path.exists(p):
+        plt.style.use(p)
+
+
+def ransac_legend_top_outside(ax, *, ncol: int = 2, fontsize: Optional[str] = "small"):
+    """Shared legend placement for RANSAC / photometry comparison figures."""
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.0),
+        frameon=False,
+        ncol=ncol,
+        fontsize=fontsize,
+    )
+
+
+def set_mag_axes_inverted_xy(ax):
+    """Standard magnitude axis orientation (brighter up/left) for x and y."""
+    ax.invert_xaxis()
+    ax.invert_yaxis()

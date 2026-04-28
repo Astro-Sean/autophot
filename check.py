@@ -16,7 +16,7 @@ import re
 import yaml
 import logging  # Project-specific helpers (assumed to be in your codebase)
 from functions import (
-    border_msg,
+    log_step,
     AutophotYaml,
     concatenate_csv_files,
     print_progress_bar,
@@ -437,13 +437,13 @@ class FitsInfo:
         Returns:
             list: Filenames with complete headers
         """
-        self.logger.info(border_msg(f"Checking {len(self.flist)} files"))
+        self.logger.info(log_step(f"File check: {len(self.flist)} FITS"))
 
         # PHASE 1: CLASSIFY FILES BY HEADER COMPLETENESS
         incorrect_files, correct_files = [], []
         tele_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
 
-        self.logger.info(border_msg("Basic headers"))
+        self.logger.info(log_step("Headers (basic)"))
         for fname in tqdm(self.flist):
             header = get_header(fname)
             if not header:
@@ -555,7 +555,7 @@ class FitsInfo:
                         self.logger.info("Skipping optional keyword extraction (non-interactive mode)")
 
         # PHASE 3: FILTER KEYWORDS FOR ALL VALID FILES (skip files without TELESCOP/INSTRUME, e.g. templates)
-        self.logger.info(border_msg(f"Filters ({len(correct_files)} files)"))
+        self.logger.info(log_step(f"Filters: {len(correct_files)} files"))
         for fname in tqdm(correct_files):
             header = get_header(fname)
             tele_key = next(

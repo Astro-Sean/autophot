@@ -38,7 +38,7 @@ from scipy.optimize import minimize
 import astropy.units as u
 
 sys.path.append(str(Path(__file__).parent.parent))
-from functions import border_msg, remove_wcs_from_header, log_warning_from_exception
+from functions import remove_wcs_from_header, log_warning_from_exception
 from wcs import get_wcs
 
 try:

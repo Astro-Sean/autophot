@@ -32,7 +32,7 @@ from astropy.stats import sigma_clip
 from astropy.table import Table
 from scipy.spatial import cKDTree
 
-from functions import border_msg, log_warning_from_exception
+from functions import log_step, log_warning_from_exception
 
 logger = logging.getLogger(__name__)
 
@@ -831,12 +831,9 @@ class SExtractorWrapper:
             sextractor_bin = get_sextractor_executable()
             if sextractor_bin is None:
                 raise RuntimeError("SExtractor is not installed.")
-            # Clear, high-level banner for the SExtractor step.
-            mode_label = (
-                "crowded-field parameters" if crowded else "standard parameters"
-            )
+            mode_label = "crowded" if crowded else "default"
             logger.info(
-                border_msg(f"Running SExtractor on {fits_path.name} ({mode_label})")
+                log_step(f"SExtractor: {fits_path.name} ({mode_label})")
             )
             # Single open: one mmap/read pass for header + data (bad-region mask).
             with fits.open(fits_path, memmap=True) as hdul:

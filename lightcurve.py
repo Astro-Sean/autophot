@@ -543,16 +543,6 @@ def plot_lightcurve(
         df["plot_mag"] = df["apparent_mag"]
         df["plot_err"] = df["apparent_mag_err"]
 
-        # Debug: Log available SNR columns and values
-        logging.info(f"plot_lightcurve: method={method}, use_SNR_limit={use_SNR_limit}, snr_limit={snr_limit}")
-        logging.info(f"plot_lightcurve: columns={list(df.columns)}")
-        if "snr" in df.columns:
-            logging.info(f"plot_lightcurve: snr={df['snr'].iloc[0]:.3f}")
-        if "snr_psf" in df.columns:
-            logging.info(f"plot_lightcurve: snr_psf={df['snr_psf'].iloc[0]:.3f}")
-        if "snr_ap" in df.columns:
-            logging.info(f"plot_lightcurve: snr_ap={df['snr_ap'].iloc[0]:.3f}")
-        
         detected = _compute_detection_mask(
             df,
             "apparent_mag",

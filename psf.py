@@ -76,8 +76,13 @@ from photutils.utils.cutouts import overlap_slices
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import border_msg, set_size, log_warning_from_exception
+from functions import log_step, set_size, log_warning_from_exception
 from plotting_utils import get_marker_size
+from aperture import (
+    gain_e_per_adu_from_header,
+    resolve_exposure_time_seconds,
+    resolve_gain_e_per_adu,
+)
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -1585,7 +1590,7 @@ class PSF:
             )
 
             if make_template_psf:
-                # Template/science header may lack APER, GAIN, FWHM; use fallbacks.
+                # Template header may lack APER/FWHM; gain must be present (e-/ADU).
                 _fwhm_h = float(self.header.get("FWHM", self.header.get("fwhm", 3.0)))
                 _aper = self.header.get("APER", self.header.get("aper"))
                 aperture_radius = float(
@@ -1594,9 +1599,23 @@ class PSF:
                     else self.input_yaml.get("photometry", {}).get("aperture_radius")
                     or 1.5 * _fwhm_h
                 )
-                _gain = self.header.get("GAIN", self.header.get("gain"))
-                gain = float(
-                    _gain if _gain is not None else self.input_yaml.get("gain", 1.0)
+                try:
+                    gain, tpl_gain_key = gain_e_per_adu_from_header(
+                        self.header, None
+                    )
+                except ValueError as exc:
+                    # PS1 skycell stacks and many survey references omit GAIN; PSF build
+                    # needs a finite value (same convention as main.py for template fpath).
+                    log.warning(
+                        "Template PSF build: no usable GAIN in reference header (%s). "
+                        "Using gain=1.0 e-/ADU; noise model may be approximate.",
+                        exc,
+                    )
+                    gain, tpl_gain_key = 1.0, "assumed_1.0_template_no_header_gain"
+                log.info(
+                    "Template PSF build: gain=%.5g e-/ADU (%s)",
+                    float(gain),
+                    tpl_gain_key,
                 )
                 _fwhm = self.header.get("FWHM", self.header.get("fwhm"))
                 fwhm = float(
@@ -1606,7 +1625,7 @@ class PSF:
                 aperture_radius = float(
                     self.input_yaml["photometry"]["aperture_radius"]
                 )
-                gain = float(self.input_yaml["gain"])
+                gain = resolve_gain_e_per_adu(None, self.input_yaml)
                 fwhm = float(self.input_yaml["fwhm"])
 
             scale = float(self.input_yaml["scale"])
@@ -1856,7 +1875,7 @@ class PSF:
 
             ndimage = self.create_nddata_with_fitting_weights(
                 image=self.image.copy(),
-                gain=float(self.input_yaml.get("gain", gain)),
+                gain=float(gain),
                 read_noise=float(self.input_yaml.get("read_noise", 0.0)),
                 background_rms=background_rms,
             )
@@ -1954,7 +1973,7 @@ class PSF:
                 maxiters=epsf_clip_maxiters,
             )
             log.info(
-                border_msg("PSF build parameters")
+                log_step("PSF: ePSF build details")
                 + "\n"
                 + (
                     "  make_template_psf: {make_template_psf}\n"
@@ -2445,14 +2464,14 @@ class PSF:
         """
         log = logging.getLogger(__name__)
         t0 = time.perf_counter()
-        log.info(border_msg(f"PSF photometry on {len(sources)} sources"))
+        log.info(log_step(f"PSF photometry: {len(sources)} sources"))
 
         if epsf_model is None:
             log.info("No ePSF model; returning sources unchanged.")
             return sources
 
         fwhm = float(self.input_yaml.get("fwhm", 3.0))
-        exposure_time = float(self.input_yaml.get("exposure_time", 30.0))
+        exposure_time = resolve_exposure_time_seconds(None, self.input_yaml)
         image_filter = self.input_yaml.get("imageFilter", "")
         scale = self.input_yaml.get("scale", 0)
         # Use same aperture_radius as aperture photometry to ensure consistent flux scale
@@ -2483,11 +2502,6 @@ class PSF:
         fs_bright_scale = float(phot_cfg.get("psf_fit_shape_bright_scale_fwhm", 3.0))
         fs_faint_scale = float(phot_cfg.get("psf_fit_shape_faint_scale_fwhm", 2.5))
         fs_vfaint_scale = float(phot_cfg.get("psf_fit_shape_vfaint_scale_fwhm", 2.0))
-        
-        # Store base scales
-        base_bright_scale = fs_bright_scale
-        base_faint_scale = fs_faint_scale
-        base_vfaint_scale = fs_vfaint_scale
         
         fit_sampling_boost = 1.0
         if fwhm <= 2.5:
@@ -2670,18 +2684,21 @@ class PSF:
 
         epsf_model_copy = epsf_model.copy()
 
+        # NDData creation already converts to float and allocates a new array in electrons,
+        # so avoid an extra self.image.copy() here (saves memory for large frames).
         ndimage = self.create_nddata_with_fitting_weights(
-            self.image.copy(),
-            gain=float(self.input_yaml.get("gain", 1.0)),
+            self.image,
+            gain=float(resolve_gain_e_per_adu(None, self.input_yaml)),
             read_noise=float(self.input_yaml.get("read_noise", 0.0)),
             background_rms=background_rms,
         )
 
-        # Optional: create inverted image for detecting negative PSF dips (fading sources)
-        # OR use external inverted image passed from main.py
+        # Optional: inverted-image PSF retry for significant negative residuals.
+        # If check_inverted_image is False, we explicitly disable inverted handling
+        # and force the target PSF solution to be positive-only.
         check_inverted = bool(is_target_fit and phot_cfg.get("check_inverted_image", False))
         ndimage_inverted = None
-        if inverted_image is not None:
+        if check_inverted and inverted_image is not None:
             # Use external inverted image provided by main.py
             # Wrap it in NDData with same units/uncertainty as main image
             if isinstance(inverted_image, np.ndarray):
@@ -2727,17 +2744,35 @@ class PSF:
         x_all = np.asarray(sources["x_pix"], float)
         y_all = np.asarray(sources["y_pix"], float)
         flux_all = np.asarray(sources[flux_col], float)
-        orig_idx = np.arange(len(sources)).astype(int)
-        valid = np.isfinite(x_all) & np.isfinite(y_all)
+        # PSF model is fit to the same data as Aperture: image*gain in e⁻. The fit
+        # amplitude is *integrated* signal in the exposure (e⁻), never a rate.
+        # `flux_AP` / `maxPixel` / `sky_bkg_total_flux` are e⁻/s (or e⁻/s-like);
+        # `counts_AP` / `counts` are already per-frame integrated e⁻.
+        if flux_col in ("flux_AP", "maxPixel", "sky_bkg_total_flux"):
+            flux_all = flux_all * float(exposure_time)
+            log.info(
+                "PSF init: column %r is a per-second rate; multiplied by exposure_time=%.4g s "
+                "to match integrated e⁻ in the frame.",
+                flux_col,
+                float(exposure_time),
+            )
+        elif flux_col == "flux":
+            log.info(
+                "PSF init: using column 'flux' as integrated e⁻ in the frame; "
+                "if your table stores a rate, use flux_AP instead."
+            )
 
-        x, y, flux_ap = x_all[valid], y_all[valid], flux_all[valid]
+        orig_idx = np.arange(len(sources)).astype(int)
+        valid = np.isfinite(x_all) & np.isfinite(flux_all)
+
+        x, y, flux_e_frame = x_all[valid], y_all[valid], flux_all[valid]
         idx_keep = orig_idx[valid]
 
         init_params = QTable(
             {
                 "x": x,
                 "y": y,
-                "flux": u.Quantity(np.clip(flux_ap, 1e-6, 1e12), u.electron),
+                "flux": u.Quantity(np.clip(flux_e_frame, 1e-6, 1e12), u.electron),
                 "__row": idx_keep,
             }
         )
@@ -2758,7 +2793,7 @@ class PSF:
         # sigma_fs^2 = (b/g + Nccd/g^2) / C + fs / g
         # where C is the sum of squared PSF values over the PSF footprint
         # We approximate C ~ 1/(pi * fwhm^2) for a normalized Gaussian-like PSF
-        gain = float(self.input_yaml.get("gain", 1.0))
+        gain = float(resolve_gain_e_per_adu(None, self.input_yaml))
         read_noise = float(self.input_yaml.get("read_noise", 0.0))
         fwhm = float(self.input_yaml.get("fwhm", 3.0))
         # Approximate PSF normalization constant C ~ 1/(pi * fwhm^2)
@@ -2767,14 +2802,14 @@ class PSF:
         # Convert bkgrmsval (ADU) to electrons, add read noise squared, divide by PSF norm
         background_noise = (bkgrmsval * gain + read_noise**2) / gain / psf_norm
         # Source photon noise term: fs / g (for normalized PSF)
-        # flux_ap is in ADU, convert to electrons then divide by gain
-        source_noise = flux_ap / gain
+        # flux_e_frame is integrated e⁻ in the frame (same units as Aperture.counts_AP)
+        source_noise = flux_e_frame / gain
         # Total variance (this gives a lower limit on SNR, as per CFHT document)
         sigma_fs_sq = background_noise + source_noise
         snr = (
             np.asarray(sources["SNR"], float)[valid]
             if "SNR" in sources.columns
-            else flux_ap / np.sqrt(np.maximum(sigma_fs_sq, 1e-10))
+            else flux_e_frame / np.sqrt(np.maximum(sigma_fs_sq, 1e-10))
         )
 
         bright_mask = snr >= 8.0
@@ -2837,7 +2872,7 @@ class PSF:
                     batch_steps=int(phot_cfg.get("emcee_batch_steps", 100)),
                     jitter_scale=float(phot_cfg.get("emcee_jitter_scale", 0.01)),
                     use_nddata_uncertainty=True,
-                    gain=float(self.input_yaml.get("gain", 1.0)),
+                    gain=float(resolve_gain_e_per_adu(None, self.input_yaml)),
                     readnoise=float(self.input_yaml.get("read_noise", 0.0)),
                     background_rms=bkgrmsval,
                 )
@@ -2871,32 +2906,8 @@ class PSF:
         group_sep = 3.0 * fwhm if undersampled else 2.0 * fwhm
         group_maker = SourceGrouper(min_separation=max(group_sep, 1.0))
 
-        def _fit_plane_from_annulus(
-            data2d: np.ndarray,
-            x0: float,
-            y0: float,
-            inner_r: float,
-            outer_r: float,
-        ) -> Optional[tuple[float, float, float]]:
-            """
-            Disabled: surface plane fitting (planar background via annulus-fit
-            and subtraction) has been removed; this helper always returns None.
-            """
-            # Surface plane fitting removed (cleanup): this helper is intentionally
-            # disabled so no planar surface subtraction is applied.
-            return None
-
-        def _subtract_plane_in_fit_box(
-            data2d: np.ndarray,
-            coef: tuple[float, float, float],
-            x0: float,
-            y0: float,
-            fit_shape: tuple[int, int],
-        ) -> bool:
-            """Disabled: planar surface subtraction removed."""
-            # Surface plane fitting removed (cleanup): this helper is intentionally
-            # disabled so no planar surface subtraction is applied.
-            return False
+        # Note: planar background fitting/subtraction has been removed from this
+        # fitter (we rely on photutils' annulus-based LocalBackground instead).
 
         # ---- Fit helper ----------------------------------------------------
         # Background: photutils subtracts per-source local background (annulus inner_r..outer_r)
@@ -2916,112 +2927,6 @@ class PSF:
 
             if not iterative:
                 nd_for_fit = nd_override if nd_override is not None else ndimage
-
-                # Optional: LPI-style structured background infill for the transient PSF fit.
-                # Target-only (single source) to keep runtime bounded.
-                if (
-                    is_target_fit
-                    and int(np.count_nonzero(mask)) == 1
-                    and bool((phot_cfg or {}).get("lpi_background_for_target", False))
-                ):
-                    try:
-                        if bool(self.input_yaml.get("_lpi_target_applied_to_image", False)):
-                            raise RuntimeError("LPI already applied in main pipeline; skipping PSF-side LPI to avoid double subtraction.")
-                        from lpi_background import predict_background_under_source
-
-                        sub_init_tmp_lpi = init_params[mask].to_pandas()
-                        _x0 = float(sub_init_tmp_lpi["x"].to_numpy()[0])
-                        _y0 = float(sub_init_tmp_lpi["y"].to_numpy()[0])
-
-                        fwhm_px = float(fwhm) if np.isfinite(fwhm) else 3.0
-                        inner_lpi = (
-                            float((phot_cfg or {}).get("lpi_inner_radius_scale_fwhm", 1.5))
-                            * fwhm_px
-                        )
-                        outer_lpi = (
-                            float((phot_cfg or {}).get("lpi_outer_radius_scale_fwhm", 4.5))
-                            * fwhm_px
-                        )
-                        half_lpi = int(
-                            np.ceil(
-                                float(
-                                    (phot_cfg or {}).get(
-                                        "lpi_stamp_half_size_scale_fwhm", 6.0
-                                    )
-                                )
-                                * fwhm_px
-                            )
-                        )
-
-                        # Work on copies so other tiers/fits see original NDData.
-                        work = np.array(ndimage.data, dtype=float, copy=True)
-                        unc_arr = None
-                        try:
-                            unc_arr = np.array(
-                                ndimage.uncertainty.array, dtype=float, copy=True
-                            )
-                        except Exception:
-                            unc_arr = None
-
-                        bg_pred, bg_sig = predict_background_under_source(
-                            work,
-                            x0=_x0,
-                            y0=_y0,
-                            inner_radius_px=inner_lpi,
-                            outer_radius_px=outer_lpi,
-                            stamp_half_size_px=half_lpi,
-                            n_samples=int((phot_cfg or {}).get("lpi_n_samples", 250)),
-                            sample_window_px=int(
-                                (phot_cfg or {}).get("lpi_sample_window_px", 30)
-                            ),
-                            min_shift_px=float(
-                                (phot_cfg or {}).get("lpi_min_shift_px", outer_lpi)
-                                if (phot_cfg or {}).get("lpi_min_shift_px", None) is not None
-                                else outer_lpi
-                            ),
-                            ridge_lambda=float(
-                                (phot_cfg or {}).get("lpi_ridge_lambda", 0.01)
-                            ),
-                            rng_seed=self.input_yaml.get("rng_seed", None),
-                        )
-
-                        # Apply in-bounds stamp update.
-                        y0i = int(np.rint(_y0))
-                        x0i = int(np.rint(_x0))
-                        y1 = max(0, y0i - half_lpi)
-                        y2 = min(work.shape[0], y0i + half_lpi + 1)
-                        x1 = max(0, x0i - half_lpi)
-                        x2 = min(work.shape[1], x0i + half_lpi + 1)
-                        sy1 = half_lpi - (y0i - y1)
-                        sx1 = half_lpi - (x0i - x1)
-                        sy2 = sy1 + (y2 - y1)
-                        sx2 = sx1 + (x2 - x1)
-
-                        work[y1:y2, x1:x2] = work[y1:y2, x1:x2] - bg_pred[
-                            sy1:sy2, sx1:sx2
-                        ]
-                        if unc_arr is not None:
-                            add_sig = np.asarray(bg_sig[sy1:sy2, sx1:sx2], float)
-                            unc_arr[y1:y2, x1:x2] = np.sqrt(
-                                unc_arr[y1:y2, x1:x2] ** 2 + add_sig**2
-                            )
-
-                        nd_for_fit = _nddata_clone(ndimage, data=work)
-                        if unc_arr is not None:
-                            nd_for_fit.uncertainty = StdDevUncertainty(unc_arr)
-
-                        log.info(
-                            "Target PSF: applied LPI background infill (inner=%.1f px, outer=%.1f px, samples=%d).",
-                            float(inner_lpi),
-                            float(outer_lpi),
-                            int((phot_cfg or {}).get("lpi_n_samples", 250)),
-                        )
-                    except Exception as exc:
-                        log_warning_from_exception(
-                            log,
-                            "Target PSF: LPI background infill failed; using standard local background",
-                            exc,
-                        )
                 if False:
                     # Work on a copy so other tiers/fits see the original image.
                     work = np.array(ndimage.data, dtype=float, copy=True)
@@ -3570,8 +3475,19 @@ class PSF:
             combined, ["flux_fit_err", "flux_err", "flux_uncertainty"], unit=u.electron
         )
 
-        # Check which fits came from inverted image (these should keep negative flux)
-        inverted_fit_mask = np.asarray(combined.get("_inverted_fit", False), bool)
+        # Check which fits came from inverted image (these keep negative flux).
+        # If inverted checking is disabled, always force positive-only flux output.
+        # Ensure we always have a 1D boolean mask aligned with `combined`.
+        # pandas.DataFrame.get() returns the default (scalar) when the column is missing,
+        # which becomes a 0-d numpy array (no len()) if we just np.asarray(...).
+        if "_inverted_fit" in combined.columns:
+            inverted_fit_mask = np.asarray(combined["_inverted_fit"].to_numpy(), dtype=bool)
+        else:
+            inverted_fit_mask = np.zeros(len(combined), dtype=bool)
+
+        # If inverted-image checking is disabled, force positive-only PSF solutions.
+        if is_target_fit and not check_inverted:
+            inverted_fit_mask[:] = False
 
         # Enforce positive fitted fluxes: negative solutions are unphysical for
         # a positive PSF and indicate overfitting or local background issues.

@@ -76,7 +76,7 @@ from scipy.ndimage import (
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # --- Local ---
-from functions import border_msg, set_size, log_warning_from_exception
+from functions import log_step, set_size, log_warning_from_exception
 from wcs import get_wcs
 
 
@@ -252,37 +252,50 @@ class BackgroundSubtractor:
         """
         shape = image.shape
 
-        # --- Estimate FWHM from autocorrelation ---
-        if fwhm_pixels is None:
-            min_dim = min(shape)
-            try:
-                sample_size = min(128, min_dim // 2)
-                cy, cx = shape[0] // 2, shape[1] // 2
-                hs = sample_size // 2
-                sample = image[cy - hs : cy + hs, cx - hs : cx + hs]
-                sample = sample - np.nanmedian(sample)
-
-                ac = np.fft.fftshift(
-                    np.abs(np.fft.ifft2(np.abs(np.fft.fft2(sample)) ** 2))
-                )
-                c0, c1 = np.array(ac.shape) // 2
-                prof = ac[c0, c1:]
-                half_max = prof[0] / 2.0
-                half_idx = np.argmax(prof < half_max)
-                fwhm_pixels = float(half_idx) if half_idx > 0 else 3.0
-            except Exception:
-                fwhm_pixels = 3.0
-
         # --- Compute mesh (box) size ---
         # Allow config to tighten/relax mesh behaviour.
         cfg_bkg = (
             self.config.get("background", {}) if isinstance(self.config, dict) else {}
         )
         fast_mode = bool(cfg_bkg.get("fast_mode", False))
+
+        # --- Estimate FWHM from autocorrelation ---
+        # In fast_mode, skip expensive FFT-based FWHM estimation if not provided
+        if fwhm_pixels is None:
+            if fast_mode:
+                # Use a sensible default to avoid costly autocorrelation
+                fwhm_pixels = 5.0
+            else:
+                min_dim = min(shape)
+                try:
+                    sample_size = min(128, min_dim // 2)
+                    cy, cx = shape[0] // 2, shape[1] // 2
+                    hs = sample_size // 2
+                    sample = image[cy - hs : cy + hs, cx - hs : cx + hs]
+                    sample = sample - np.nanmedian(sample)
+
+                    ac = np.fft.fftshift(
+                        np.abs(np.fft.ifft2(np.abs(np.fft.fft2(sample)) ** 2))
+                    )
+                    c0, c1 = np.array(ac.shape) // 2
+                    prof = ac[c0, c1:]
+                    half_max = prof[0] / 2.0
+                    half_idx = np.argmax(prof < half_max)
+                    fwhm_pixels = float(half_idx) if half_idx > 0 else 3.0
+                except Exception:
+                    fwhm_pixels = 3.0
+
         mesh_min = float(cfg_bkg.get("mesh_scale_min", 4.0))
         mesh_max = float(cfg_bkg.get("mesh_scale_max", 10.0))
         mesh_scale = float(mesh_scale)
+        # In fast_mode, bias toward larger mesh scale for fewer, larger boxes
+        if fast_mode:
+            mesh_scale = min(mesh_max * 1.2, mesh_scale * 1.5)
         mesh_scale = max(mesh_min, min(mesh_scale, mesh_max))
+
+        # In fast_mode, allow smaller min_box to reduce computation for small images
+        if fast_mode:
+            min_box = max(32, min_box // 2)
 
         base = max(min_box, int(mesh_scale * fwhm_pixels))
         max_allowed = max(min_box, int(min(shape) * region_fraction_limit))
@@ -384,7 +397,8 @@ class BackgroundSubtractor:
         # Avoid an unconditional full copy when possible (NumPy 2.0+ supports copy=).
         try:
             residual = np.asarray(image, dtype=np.float64, copy=False)
-        except TypeError:
+        except (TypeError, ValueError):
+            # NumPy <2.0 raises TypeError for copy= keyword; NumPy 2.0+ raises ValueError if copy cannot be avoided
             residual = np.asarray(image, dtype=np.float64)
 
         # Safety: cap mask fraction so Background2D always has enough data to
@@ -1136,7 +1150,14 @@ class BackgroundSubtractor:
         if galaxies is None:
             galaxies = []
 
-        self.logger.info(border_msg("Measuring image background statistics"))
+        self.logger.info(log_step("Background: sky & RMS"))
+
+        cfg_bkg = (
+            (self.config.get("background", {}) or {})
+            if isinstance(self.config, dict)
+            else {}
+        )
+        fast_mode = bool(cfg_bkg.get("fast_mode", False))
 
         # Treat near-zero values as invalid.
         image = np.where(np.abs(image) < 1e-29, np.nan, image)
@@ -1149,8 +1170,9 @@ class BackgroundSubtractor:
         zero_mask = image == 0.0
 
         total = image.size
+        n_nan = int(np.count_nonzero(nan_mask))
         self.logger.info(
-            f"NaN pixels: {np.sum(nan_mask)} ({100.0 * np.sum(nan_mask) / total:.2f}%)"
+            f"NaN pixels: {n_nan} ({100.0 * n_nan / total:.2f}%)"
         )
 
         # Derive FWHM in pixels (if provided); otherwise allow helper to estimate.
@@ -1217,7 +1239,8 @@ class BackgroundSubtractor:
 
         # ---- Satellite trail mask (long thin ridges, no saturation required) ----
         trail_mask = np.zeros_like(image, dtype=bool)
-        if self.config.get("mask_satellite_trails", True):
+        skip_trail = fast_mode and bool(cfg_bkg.get("fast_mode_skip_trail_mask", True))
+        if self.config.get("mask_satellite_trails", True) and not skip_trail:
             trail_n_sigma = float(self.config.get("satellite_trail_n_sigma", 3.0))
             trail_min_length = int(self.config.get("satellite_trail_min_length_px", 40))
             trail_min_aspect = float(
@@ -1231,6 +1254,11 @@ class BackgroundSubtractor:
                 min_aspect_ratio=trail_min_aspect,
                 min_area_px=trail_min_area,
                 dilate_iterations=2,
+            )
+        elif skip_trail:
+            self.logger.info(
+                "Background: fast_mode - skipping satellite trail mask (full-image "
+                "labeling). Set background.fast_mode_skip_trail_mask: false to enable."
             )
 
         # ---- Iterative source mask ----
@@ -1294,8 +1322,14 @@ class BackgroundSubtractor:
         self.logger.info(f"box_size={box_size}  filter_size={filter_size}")
 
         # ---- Global fallback statistics ----
+        stats_maxiters = 3 if fast_mode else 5
         gmean, gmed, gstd = sigma_clipped_stats(
-            image, sigma=3.0, mask=mask, cenfunc=np.nanmedian, stdfunc=mad_std
+            image,
+            sigma=3.0,
+            mask=mask,
+            cenfunc=np.nanmedian,
+            stdfunc=mad_std,
+            maxiters=stats_maxiters,
         )
         self.logger.info(
             f"Global stats - mean {gmean:.3e}  median {gmed:.3e}  std {gstd:.3e}"
@@ -1316,7 +1350,12 @@ class BackgroundSubtractor:
         # spline/zoom interpolation across large masked holes.
         try:
             cfg_bkg = (self.config.get("background", {}) or {}) if isinstance(self.config, dict) else {}
-            if bool(cfg_bkg.get("global_mask_edge_flatten", False)) and mask is not None:
+            fast_mode = bool(cfg_bkg.get("fast_mode", False))
+            # Skip expensive edge flattening in fast_mode unless explicitly requested
+            do_flatten = bool(cfg_bkg.get("global_mask_edge_flatten", False))
+            if fast_mode and not cfg_bkg.get("global_mask_edge_flatten"):
+                do_flatten = False  # Default to False in fast_mode for speed
+            if do_flatten and mask is not None:
                 # Radius (px) around masks to replace with a smoothed estimate.
                 raw_r_flat = cfg_bkg.get("global_mask_edge_flatten_radius_px", None)
                 r_flat = float(raw_r_flat) if raw_r_flat is not None else 0.0
@@ -1448,6 +1487,14 @@ class BackgroundSubtractor:
         local_exclude_percentile = float(bcfg.get("local_exclude_percentile", 95.0))
         local_sigma = float(bcfg.get("local_sigma_clip", 3.0))
         local_sigma_maxiters = int(bcfg.get("local_sigma_clip_maxiters", 10))
+        if bool(bcfg.get("fast_mode", False)):
+            local_mask_iterations = max(1, min(local_mask_iterations, 2))
+            local_sigma_maxiters = min(local_sigma_maxiters, 5)
+            self.logger.info(
+                "Local background: fast_mode - mask_iterations=%d sigma_clip_maxiters=%d",
+                local_mask_iterations,
+                local_sigma_maxiters,
+            )
         local_filter_size_max = bcfg.get("local_filter_size_max", 3)
         local_interpolator = str(bcfg.get("local_interpolator", "zoom")).strip().lower()
         local_interp_order = int(bcfg.get("local_interp_order", 1))

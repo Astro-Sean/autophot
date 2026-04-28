@@ -102,12 +102,18 @@ from scipy.spatial import cKDTree
 from scipy.cluster.hierarchy import fclusterdata
 
 # Local Modules
-from aperture import Aperture
+from aperture import (
+    Aperture,
+    exposure_seconds_from_header,
+    gain_e_per_adu_from_header,
+    resolve_gain_e_per_adu,
+)
 from catalog import Catalog
 from cosmic import RemoveCosmicRays
 from fwhm import Find_FWHM
 from functions import (
     AutophotYaml,
+    log_step,
     border_msg,
     convert_to_mjd_astropy,
     get_instrument_config,
@@ -129,7 +135,7 @@ from functions import (
     LogMessageNormalizeFilter,
     safe_fits_write,
 )
-from limits import Limits
+from limits import BETA_APERTURE_SIGMA_N, Limits
 from plot import Plot
 from psf import PSF
 from templates import Templates
@@ -659,18 +665,15 @@ def run_photometry():
             and not input_yaml.get("restart", True)
             and not prepare_template
         ):
+            _out = (
+                f"imageCalib_template_{base}.csv in {os.path.dirname(science_file)}"
+                if prepare_template
+                else f"OUTPUT_{base}.csv in {cur_dir}"
+            )
             logging.info(
-                border_msg(
-                    (
-                        f"Skipping {science_file}:\n"
-                        f"imageCalib_template_{base}.csv already exists in "
-                        f"{os.path.dirname(science_file)}\n"
-                        f"Set 'restart' to True to reprocess all."
-                        if prepare_template
-                        else f"Skipping {science_file}:\nOUTPUT_{base}.csv already exists in {cur_dir}\nSet 'restart' to True to reprocess all."
-                    ),
-                    body="~",
-                    corner="~",
+                log_step(
+                    f"Skip (restart=False): {os.path.basename(science_file)} — {_out}. "
+                    "Set restart=True to reprocess."
                 )
             )
             return None
@@ -815,7 +818,7 @@ def run_photometry():
         base_filename = os.path.basename(fpath)
         write_dir = (cur_dir + "/").replace(" ", "_")
         input_yaml["write_dir"] = write_dir
-        logging.info(border_msg(f"Processing file: {base_filename}"))
+        logging.info(log_step(f"File: {base_filename}"))
         logging.info("Full path: %s", fpath)
         logging.info("Start time: %s", datetime.datetime.now())
         if was_shortened:
@@ -1040,20 +1043,6 @@ def run_photometry():
                 "Invalid MJD detected; setting MJD to today's value: %.1f", date_mjd
             )
 
-        #  Handle Gain
-        gain_key = telescope_config.get("gain", "GAIN")
-        gain = header.get(gain_key, 1)
-
-        try:
-            gain = float(gain)
-        except (ValueError, TypeError):
-            gain = 1
-            logging.warning("Invalid gain in header; defaulting to 1.")
-
-        if gain == 0:
-            gain = 1
-            logging.warning("Gain is 0; defaulting to 1.")
-
         image_median = np.median(image)
         low_median_threshold = 1e-6
         high_gain_threshold = 1e6
@@ -1180,12 +1169,21 @@ def run_photometry():
         input_yaml["read_noise"] = readnoise
         header["RDNOISE"] = readnoise
 
-        #  Handle Exposure Time
-        exposure_time = header.get(telescope_config.get("exptime", "EXPTIME"), 30)
-        if exposure_time == 0:
-            logging.info("Exposure time is zero; defaulting to 30 s.")
-            exposure_time = 30
-        header["exptime"] = exposure_time
+        #  Handle Exposure Time — must be read from the FITS header (no silent default).
+        primary_key = telescope_config.get("exptime", "EXPTIME")
+        pref = [] if primary_key == "not_given_by_user" else [primary_key]
+        try:
+            exposure_time, used_exptime_key = exposure_seconds_from_header(header, pref)
+        except ValueError as exc:
+            raise ValueError(
+                f"No valid exposure time in FITS header for {fpath!r}: {exc}"
+            ) from exc
+        header["exptime"] = float(exposure_time)
+        logging.info(
+            "Exposure time: %.5g s (header keyword %s)",
+            float(exposure_time),
+            used_exptime_key,
+        )
 
         # Placeholder
         ImageFWHM = None
@@ -1413,6 +1411,34 @@ def run_photometry():
                     )
                     header["gain"] = header[IR_gain_key]
 
+        #  Handle Gain — after instrument-specific header patches (e.g. GROND IR).
+        primary_gain_key = telescope_config.get("gain", "GAIN")
+        pref_gain = (
+            []
+            if primary_gain_key == "not_given_by_user"
+            else [primary_gain_key]
+        )
+        try:
+            gain, gain_header_key = gain_e_per_adu_from_header(header, pref_gain)
+        except ValueError as exc:
+            # Survey stacks (e.g. PS1 skycells) often omit GAIN; strict header gain
+            # still applies to science frames.
+            if is_template:
+                logging.warning(
+                    "Template image has no usable GAIN in FITS header (%s). "
+                    "Using gain=1.0 e-/ADU. For Pan-STARRS stacks, consider "
+                    "utils/fix_panstarrs_headers.py or add GAIN if pixels are not ADU.",
+                    exc,
+                )
+                gain, gain_header_key = 1.0, "assumed_1.0_template_no_header_gain"
+            else:
+                raise ValueError(
+                    f"No valid detector gain (e-/ADU) in FITS header for {fpath!r}: {exc}"
+                ) from exc
+        logging.info(
+            "Gain: %.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
+        )
+
         #  Update WCS Pixel Scale
         # Updates the pixel scale in the input YAML.
         input_yaml["wcs"]["pixel_scale"] = pixel_scale
@@ -1530,10 +1556,8 @@ def run_photometry():
         logging.info("Instrument: %s", instrument)
         logging.info("Filter: %s", imageFilter)
         logging.info("MJD: %.3f", date_mjd)
-        logging.info("Gain: %.3f e/ADU", gain)
         logging.info("Read noise: %.3f e/pixel", readnoise)
         logging.info("Saturation level: %.3f ADU", saturate)
-        logging.info("Exposure time: %.1f s", float(exposure_time))
 
         if pixel_scale:
             logging.info("Pixel scale: %.3f arcsec/pixel", pixel_scale)
@@ -1551,6 +1575,7 @@ def run_photometry():
         # =============================================================================
         # Image Preprocessing
         # =============================================================================
+        logging.info(border_msg("Image preprocessing"))
 
         #  Image Trimming
         # Trims the image to a specified size centered on the target.
@@ -1583,8 +1608,8 @@ def run_photometry():
         if do_trim:
             try:
                 logging.info(
-                    border_msg(
-                        f"Trimming {base_filename} to {trim_image} arcmin box centered on target"
+                    log_step(
+                        f"Trim: {base_filename} to {trim_image} arcmin (target center)"
                     )
                 )
                 imageWCS = get_wcs(header)
@@ -1679,8 +1704,8 @@ def run_photometry():
             # Checks if cropping is actually needed.
             if (height < image.shape[0] - 1) or (width < image.shape[1] - 1):
                 logging.info(
-                    border_msg(
-                        f"Recropping {base_filename} to exclude uniform rows/columns at image boundaries"
+                    log_step(
+                        f"Recrop: {base_filename} (remove uniform edge rows/cols)"
                     )
                 )
                 position = (center_x, center_y)  # Cutout2D expects (x, y) position
@@ -1764,6 +1789,7 @@ def run_photometry():
         # =============================================================================
         #   Run SExtractor
         # =============================================================================
+        logging.info(border_msg("Source detection and FWHM"))
         # Runs SExtractor to measure the image FWHM and detect sources.
         try:
             ImageFWHM, FWHMSources, scale = SExtractorWrapper(config=input_yaml).run(
@@ -1804,6 +1830,7 @@ def run_photometry():
         # =============================================================================
         # Measuring the background statistics (don't remove it)
         # =============================================================================
+        logging.info(border_msg("Background: initial pass"))
         # Creates a background remover instance.
 
         bg_remover = BackgroundSubtractor(input_yaml)
@@ -1902,7 +1929,9 @@ def run_photometry():
                 pass
             else:
                 logging.info(
-                    border_msg(f"Removing cosmic rays and streaks from {base_filename}")
+                    log_step(
+                        f"Remove cosmic rays / streaks: {base_filename}"
+                    )
                 )
                 use_lacosmic = input_yaml["cosmic_rays"].get("use_lacosmic", False)
                 image, cosmic_rays_mask = RemoveCosmicRays(
@@ -1921,6 +1950,7 @@ def run_photometry():
         # =============================================================================
         #          Check for Existing WCS
         # =============================================================================
+        logging.info(border_msg("WCS: check header and plate solve"))
         # Checks if there is an existing WCS in the header.
 
         existingWCS = False
@@ -2132,8 +2162,8 @@ def run_photometry():
         # Checks the target position using TNS coordinates.
 
         logging.info(
-            border_msg(
-                f"TNS position check for {input_yaml.get('target_name', 'Transient')}"
+            log_step(
+                f"TNS check: {input_yaml.get('target_name', 'Transient')}"
             )
         )
         # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
@@ -2150,6 +2180,9 @@ def run_photometry():
         # =============================================================================
         # Remove the background
         # =============================================================================
+        logging.info(
+            border_msg("Background: masked pass (variable sources, SIMBAD)")
+        )
 
         result = bg_remover.remove(
             image,
@@ -2370,6 +2403,7 @@ def run_photometry():
             input_yaml["template_subtraction"].get("do_subtraction", False)
             and not prepare_template
         ):
+            logging.info(border_msg("Template: locate, align, and match"))
             try:
                 # Gets the correct template and puts it in the right place.
                 templateFpath = template_functions.get_template()
@@ -2429,7 +2463,7 @@ def run_photometry():
                         input_yaml["template_subtraction"]["do_subtraction"] = False
                         template_available = False
                         logging.info(
-                            border_msg("!!! No template images found - skipping !!!")
+                            log_step("No template images — skip subtraction")
                         )
                     else:
                         fpath, templateFpath = template_functions.align(
@@ -2477,6 +2511,9 @@ def run_photometry():
         # =============================================================================
         # Get background statistics after subtraction
         # =============================================================================
+        logging.info(
+            border_msg("Calibration stage: image, background, and weight")
+        )
         # Reload in case template alignment overwrote fpath (single open for both).
         image, header = get_image_and_header(fpath)
         imageWCS = get_wcs(header)
@@ -2509,6 +2546,7 @@ def run_photometry():
         # =============================================================================
         #     Get a Reference catalog
         # =============================================================================
+        logging.info(border_msg("Reference photometric catalog"))
         # Creates an instance of the catalog class.
         Calibrate_Catalog = Catalog(input_yaml=input_yaml)
 
@@ -2582,6 +2620,7 @@ def run_photometry():
         # =============================================================================
         # Run source detection on final calibrated image
         # =============================================================================
+        logging.info(border_msg("Source detection on calibrated image"))
         # Runs SExtractor to measure the image FWHM and detect sources.
 
         def _run_sextractor_two_pass(config, fpath, **kwargs):
@@ -2832,6 +2871,9 @@ def run_photometry():
         # =============================================================================
         # PSF Model Building
         # =============================================================================
+        logging.info(
+            border_msg("Aperture, optimum radius, and PSF on sequence stars")
+        )
 
         # Determines if only aperture photometry should be performed.
         if input_yaml["photometry"].get("do_AperturePhotometry", False):
@@ -3224,6 +3266,7 @@ def run_photometry():
         # =============================================================================
         # Zeropoint Calculation
         # =============================================================================
+        logging.info(border_msg("Zeropoint and color terms"))
         # Calculates the zeropoint for the image.
 
         Calibrate_Catalog = Catalog(input_yaml=input_yaml)
@@ -3482,13 +3525,13 @@ def run_photometry():
             and template_available
             and not prepare_template
         ):
+            logging.info(border_msg("Difference image (template subtraction)"))
             science_image = get_image(fpath)
             template_image = get_image(templateFpath)
             if science_image.shape != template_image.shape:
                 logging.info(
-                    border_msg(
-                        f"Cropping science and reference image "
-                        f"({os.path.basename(fpath)} vs {os.path.basename(templateFpath)})"
+                    log_step(
+                        f"Crop: {os.path.basename(fpath)} vs {os.path.basename(templateFpath)}"
                     )
                 )
                 if 0:
@@ -3575,9 +3618,8 @@ def run_photometry():
             # Use both catalog and detected sources for matching: covers poor catalog coverage (detection fills in)
             # and detection failures or missed sources (catalog fills in).
             logging.info(
-                border_msg(
-                    f"Finding matching sources in science and reference images "
-                    f"({os.path.basename(fpath)} vs {os.path.basename(templateFpath)})"
+                log_step(
+                    f"Match sources: {os.path.basename(fpath)} vs {os.path.basename(templateFpath)}"
                 )
             )
             _, detected_sources, _ = SExtractorWrapper(config=input_yaml).run(
@@ -3824,15 +3866,31 @@ def run_photometry():
                     f"Using large aperture for reference image: {templatelarge_aperture:.1f} pixels"
                 )
 
-                # Photometry on the template image.
+                # Photometry on the template image (use *template* exposure from its header).
+                template_exposure, tpl_exp_key = exposure_seconds_from_header(
+                    template_header, None
+                )
+                logging.info(
+                    "Template exposure time: %.5g s (header %s)",
+                    float(template_exposure),
+                    tpl_exp_key,
+                )
+                template_gain, tpl_gain_key = gain_e_per_adu_from_header(
+                    template_header, None
+                )
+                logging.info(
+                    "Template gain: %.5g e-/ADU (header %s)",
+                    float(template_gain),
+                    tpl_gain_key,
+                )
                 template_aperture = Aperture(
                     input_yaml=input_yaml, image=template_image
                 )
                 template_sources = template_aperture.measure(
                     sources=template_sources[["x_pix", "y_pix"]],
-                    exposure_time=template_header.get("exposure_time"),
+                    exposure_time=float(template_exposure),
                     ap_size=templatelarge_aperture,
-                    gain=template_header.get("GAIN"),
+                    gain=float(template_gain),
                     n_jobs=ap_n_jobs,
                 )
 
@@ -4397,7 +4455,11 @@ def run_photometry():
 
                 # Safety: if the LPI correction would remove essentially all signal in the PSF core,
                 # skip it (this indicates the regression learned the source, not the background).
-                stamp_after = np.array(image[y1:y2, x1:x2], dtype=float, copy=False)
+                try:
+                    stamp_after = np.array(image[y1:y2, x1:x2], dtype=float, copy=False)
+                except ValueError:
+                    # NumPy 2.0+ raises ValueError if copy cannot be avoided
+                    stamp_after = np.asarray(image[y1:y2, x1:x2], dtype=float)
                 yy0, xx0 = np.mgrid[0 : bg_pred.shape[0], 0 : bg_pred.shape[1]]
                 rr0 = np.hypot(xx0 - half, yy0 - half)
                 core = rr0 <= float(inner_r)
@@ -4467,7 +4529,7 @@ def run_photometry():
                     sig_ap = sig_ap[np.isfinite(sig_ap)]
                     if sig_ap.size > 0:
                         extra_counts_err = float(np.sqrt(np.sum(sig_ap**2)))
-                        exptime = float(input_yaml.get("exposure_time", 1.0))
+                        exptime = float(input_yaml["exposure_time"])
                         if np.isfinite(exptime) and exptime > 0:
                             lpi_extra_flux_err = extra_counts_err / exptime
                 except Exception:
@@ -4605,7 +4667,9 @@ def run_photometry():
 
         #  Log Start of Targeted Photometry
         # Logs the start of targeted photometry.
-        logging.info(border_msg(f"Targeted photometry on {input_yaml['target_name']}"))
+        logging.info(
+            border_msg(f"Target photometry: {input_yaml['target_name']}")
+        )
 
         # Sets the detection limit used for target detection decisions elsewhere
         # (this is distinct from limiting-magnitude recovery gating below).
@@ -4737,7 +4801,7 @@ def run_photometry():
                     logging.info(f"Using global median background for inversion: {bkg_median:.3f}")
                 
                 # Get image data for inversion - convert to electrons like psf.py does
-                gain = float(input_yaml.get("gain", 1.0))
+                gain = resolve_gain_e_per_adu(None, input_yaml)
                 if target_cutout is not None:
                     image_data = np.array(target_cutout, dtype=float, copy=True) * gain
                 else:
@@ -5162,6 +5226,9 @@ def run_photometry():
         # =============================================================================
         # Calibration and Output
         # =============================================================================
+        logging.info(
+            border_msg("Calibrated magnitudes (AP and PSF on target)")
+        )
         #  Calibrate Magnitudes
         # Calibrates the magnitudes for each method (AP, PSF)
 
@@ -5264,7 +5331,7 @@ def run_photometry():
         ):
             snr_val = TargetPosition.at[idx, "SNR"]
             logging.info(
-                border_msg("Getting detection limits for transient neighborhood")
+                border_msg("Limiting magnitude (injection) near target")
             )
             # Limits instance already created earlier for get_cutout
             try:
@@ -5289,7 +5356,32 @@ def run_photometry():
                     )
                     InjectedLimit = np.nan
                 else:
-                    lim_cfg = input_yaml.get("limiting_magnitude") or {}
+                    if "limiting_magnitude" not in input_yaml or not isinstance(
+                        input_yaml.get("limiting_magnitude"), dict
+                    ):
+                        input_yaml["limiting_magnitude"] = {}
+                    lim_cfg = input_yaml["limiting_magnitude"]
+                    # Match injection/recovery to how the transient is measured:
+                    # aperture-only -> AP; PSF path -> PSF (explicit EMCEE still allowed).
+                    _rraw = lim_cfg.get("recovery_method", "auto")
+                    _rlow = (
+                        str(_rraw).strip().lower()
+                        if _rraw is not None
+                        else "auto"
+                    )
+                    if _rlow in (
+                        "auto",
+                        "default",
+                        "match_transient",
+                        "match_target",
+                    ):
+                        _res = "AP" if do_aperture_ONLY else "PSF"
+                        lim_cfg["recovery_method"] = _res
+                        logging.info(
+                            "limiting_magnitude.recovery_method auto -> %s (transient path: %s)",
+                            _res,
+                            "aperture-only" if do_aperture_ONLY else "PSF",
+                        )
                     beta_limit = float(lim_cfg.get("beta_limit", 0.5))
                     raw_initial_guess = lim_cfg.get("initial_guess", np.nan)
                     try:
@@ -5319,7 +5411,7 @@ def run_photometry():
                         beta_sigma_str,
                         lim_cfg.get("detection_limit", None),
                         float(lim_cfg.get("completeness_target", 0.5)),
-                        str(lim_cfg.get("recovery_method", "PSF")),
+                        str(lim_cfg.get("recovery_method", "auto")),
                     )
                     detection_snr_limit = lim_cfg.get("detection_limit", None)
                     # Calculates the injected detection limit.
@@ -5357,7 +5449,7 @@ def run_photometry():
                         )
                         lim_rms = background_rms
 
-                        # Keep limiting-magnitude recovery consistent with target AP:
+                        # Consistent with target photometry (see recovery_method auto above):
                         # allow negative annulus medians (do not floor to 0) during
                         # injection/recovery measurements.
                         _old_enforce_nn_lim = None
@@ -5391,15 +5483,17 @@ def run_photometry():
                                     ] = bool(_old_enforce_nn_lim)
                                 except Exception:
                                     pass
-                        # The injected limiting magnitude search uses
-                        # aperture-based recovery (beta_aperture), so for
-                        # consistency we also store aperture-based beta for
-                        # this target when an injected limit was computed.
+                        # Recompute aperture beta with the same n used in injection trials
+                        # (limits._injection_worker passes beta_n=3.0 into beta_aperture). Do not
+                        # use photometry.detection_limit here: that is a separate pipeline gate and
+                        # would make stored beta disagree with the limiting-magnitude experiment.
+                        # Note: recovery_method PSF gates trials on fit SNR, but beta_aperture is
+                        # still computed with n=3 for diagnostics/completeness plots.
                         if np.isfinite(InjectedLimit):
                             try:
                                 target_beta = float(
                                     beta_aperture(
-                                        n=detection_limit,
+                                        n=float(BETA_APERTURE_SIGMA_N),
                                         flux_aperture=float(
                                             TargetPosition["flux_AP"].iloc[0]
                                         ),
@@ -5855,11 +5949,7 @@ def run_photometry():
 
         # Logs the completion of photometric measurements.
         end = time.time() - start
-        logging.info(
-            border_msg(
-                f"Photometric measurements done [{end:.1f}s]", body="*", corner="!"
-            )
-        )
+        logging.info(log_step(f"Photometry finished [{end:.1f}s]"))
 
     except Exception as e:
         log_exception(e)

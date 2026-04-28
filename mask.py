@@ -93,7 +93,7 @@ def create_image_mask(filename, layers=["CR"]):
     import numpy as np
     import os
     from astropy.io import fits
-    from functions import border_msg
+    from functions import log_step
 
     if filename is None:
         return None
@@ -103,7 +103,7 @@ def create_image_mask(filename, layers=["CR"]):
     import logging
 
     logger = logging.getLogger(__name__)
-    logger.info(border_msg(f"Creating mask for {fname}"))
+    logger.info(log_step(f"Mask: {fname}"))
 
     maximask_masks = {
         "CR": [0, "Cosmic Rays"],

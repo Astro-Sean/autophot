@@ -31,11 +31,14 @@ from astropy.table import Table
 
 # --- Local Imports (optional) ---
 try:
-    from functions import border_msg, log_warning_from_exception, safe_fits_write, remove_wcs_from_header  # type: ignore
+    from functions import log_step, log_warning_from_exception, safe_fits_write, remove_wcs_from_header  # type: ignore
 except (ModuleNotFoundError, ImportError):
     # Minimal fallback for environments missing the full photometry stack.
-    def border_msg(message: str, *args, **kwargs) -> str:
-        return str(message)
+    def log_step(message: str, *args, **kwargs) -> str:
+        m = str(message).strip()
+        if not m:
+            return ""
+        return f"\n\n— {m} —\n"
 
     def log_warning_from_exception(logger, message, exc, *, exc_info=False):
         logger.warning("%s: %s", message, exc, exc_info=exc_info)
@@ -1343,7 +1346,7 @@ class WCSSolver:
 
         Returns a FITS header with updated WCS on success, or np.nan on failure.
         """
-        logger.info(border_msg("Solving for WCS with SCAMP"))
+        logger.info(log_step("WCS: SCAMP"))
 
         scamp_exe = wcs_cfg.get("scamp_exe_loc") or shutil.which("scamp")
         sex_exe = wcs_cfg.get("sextractor_exe_loc") or shutil.which("sex")
@@ -2050,8 +2053,8 @@ class WCSSolver:
             )
 
         logger.info(
-            border_msg(
-                f"Solving for WCS with Astrometry.net ({os.path.basename(self.fpath)})"
+            log_step(
+                f"WCS: Astrometry.net — {os.path.basename(self.fpath)}"
             )
         )
         if not solvefield_exe:

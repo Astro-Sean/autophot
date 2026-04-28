@@ -28,7 +28,6 @@ import astropy.wcs as WCS
 # Project-specific helpers (assumed to be in your codebase)
 from functions import (
     AutophotYaml,
-    border_msg,
     get_header,
     get_instrument_config,
     load_telescope_config,
@@ -37,6 +36,7 @@ from functions import (
     normalize_photometric_filter_name,
     sanitize_photometric_filters,
     parse_supported_filter_group_key,
+    log_step,
     log_warning_from_exception,
 )
 from check import FitsInfo
@@ -89,11 +89,7 @@ class Prepare:
         default_input_path = os.path.join(script_dir, "databases", "default_input.yml")
         # Load and return the YAML configuration
         default_input_yaml = AutophotYaml(default_input_path, "default_input").load()
-        logging.info(
-            border_msg(
-                f"Default input loaded from: {default_input_path}", body="-", corner="+"
-            )
-        )
+        logging.info(log_step(f"Default input: {default_input_path}"))
         return default_input_yaml
 
     def clean(self) -> List[str]:
@@ -860,13 +856,7 @@ class Prepare:
         # Load telescope configuration (telescope.yml + built-in). Images must have TELESCOP and INSTRUME.
         tele_autophot_input = load_telescope_config(self.input_yaml["wdir"])
 
-        self.logger.info(
-            border_msg(
-                "Filter check",
-                body="-",
-                corner="+",
-            )
-        )
+        self.logger.info(log_step("Filter check"))
         self.logger.info(
             "Checking %d image(s). Catalog bands: %s\n",
             len(flist),
@@ -1140,7 +1130,7 @@ class Prepare:
         Returns:
             List[str]: List of valid template file paths.
         """
-        self.logger.info(border_msg("Searching for template files"))
+        self.logger.info(log_step("Find template files"))
         template_list = []
 
         # Normalize the FITS directory path

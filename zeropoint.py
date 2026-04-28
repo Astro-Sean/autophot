@@ -43,7 +43,7 @@ from scipy.odr import ODR, Model, RealData
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
-from functions import border_msg, snr_err, set_size, calculate_bins, normalize_photometric_filter_name
+from functions import log_step, snr_err, set_size, calculate_bins, normalize_photometric_filter_name
 from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
 
 # ---------------------------------------------------------------------------
@@ -143,34 +143,20 @@ class Zeropoint:
 
     def weighted_average(self, values, errors):
         """
-        Inverse-variance weighted mean and its propagated uncertainty.
+        Deprecated: inverse-variance weighting is disabled by convention.
 
-        Parameters
-        ----------
-        values, errors : array-like
-
-        Returns
-        -------
-        (weighted_avg, weighted_error) : (float, float)
+        Returns a robust median and SE(median) from MAD, ignoring *errors*.
+        Kept only for backward compatibility with older call sites.
         """
         values = np.asarray(values, float)
-        errors = np.asarray(errors, float)
-        if len(values) != len(errors):
-            raise ValueError("values and errors must have the same length")
-
-        # Use only finite, strictly positive uncertainties to form an
-        # inverse-variance weighted mean.  This avoids overweighting
-        # poorly measured points and protects against NaNs/infs.
-        mask = np.isfinite(values) & np.isfinite(errors) & (errors > 0)
-        if mask.sum() == 0:
+        values = values[np.isfinite(values)]
+        if values.size == 0:
             return np.nan, np.nan
-
-        v = values[mask]
-        e = errors[mask]
-        weights = 1.0 / (e**2)
-        weighted_avg = np.sum(weights * v) / np.sum(weights)
-        weighted_err = np.sqrt(1.0 / np.sum(weights))
-        return weighted_avg, weighted_err
+        med = float(np.nanmedian(values))
+        mad = float(median_abs_deviation(values, nan_policy="omit"))
+        n = int(values.size)
+        se_med = (1.858 * mad / np.sqrt(n)) if n >= 2 else mad
+        return med, float(se_med)
 
     def get_color_term_for_filter(self, filter_name: str):
         """
@@ -537,7 +523,7 @@ class Zeropoint:
         -------
         cleaned_sources : DataFrame, or None on error
         """
-        logger.info(border_msg("Cleaning Sequence Stars for Zeropoint"))
+        logger.info(log_step("Zeropoint: clean sequence stars"))
 
         try:
             filter_col = self.input_yaml.get("imageFilter")
@@ -684,7 +670,7 @@ class Zeropoint:
         -------
         (sources, output_zp) : (DataFrame, dict)
         """
-        logger.info(border_msg("Measuring Zeropoint Offset"))
+        logger.info(log_step("Zeropoint: offset vs catalog"))
 
         methods = ["AP"] + (["PSF"] if "flux_PSF" in sources.columns else [])
         method_labels = {"AP": "Aperture", "PSF": "PSF"}
@@ -824,7 +810,7 @@ class Zeropoint:
         -------
         (ZP, slope, inlier_mask, cov) : (float, float, ndarray, ndarray)
         """
-        logger.info("Starting RANSAC + weighted constant fit.")
+        logger.info("Starting RANSAC constant fit (robust errors).")
 
         x = np.asarray(x_indep, float)
         y = np.asarray(delta_mag, float)
@@ -833,7 +819,9 @@ class Zeropoint:
 
         orig_size = len(x)
 
-        # Quality filter: finite, positive weight, error <= 0.5 mag.
+        # Quality filter: finite values, positive weights, error <= 0.5 mag.
+        # NOTE: weights are still used internally for RANSAC conditioning, but we do not
+        # propagate weighted errors as output uncertainties.
         mag_err = 1.0 / np.sqrt(np.clip(w0, 1e-12, None))
         finite = (
             np.isfinite(x)
@@ -847,18 +835,30 @@ class Zeropoint:
         keep_idx = np.where(finite)[0]
         logger.info(f"Filtered {len(x)}/{orig_size} points.")
 
-        # Trivial fallback for very sparse data.
+        # Trivial fallback for very sparse data (robust median and SE from MAD).
         if len(x) < 3:
-            ZP = np.average(y, weights=w0) if len(y) else np.nan
-            sum_w = np.sum(w0)
-            zp_se = 1.0 / np.sqrt(sum_w) if (len(y) and sum_w > 0) else np.nan
+            yv = y[np.isfinite(y)]
+            ZP = float(np.nanmedian(yv)) if yv.size else np.nan
+            mad0 = float(median_abs_deviation(yv, nan_policy="omit")) if yv.size else np.nan
+            n0 = int(yv.size)
+            zp_se = (1.858 * mad0 / np.sqrt(n0)) if n0 >= 2 else mad0
             full = np.zeros(orig_size, dtype=bool)
             full[keep_idx] = True
             return ZP, slope, full, np.diag([zp_se**2, slope_err**2])
 
-        # RANSAC threshold from MAD of residuals.
-        r0 = y - np.average(y, weights=w0)
+        # RANSAC threshold from MAD of residuals (unweighted centre).
+        r0 = y - np.nanmedian(y)
         mad = np.nanmedian(np.abs(r0)) * 1.4826 + 1e-12
+
+        # Use smarter min_samples: at least 5 points or 30% of data, whichever is larger
+        # This prevents overfitting with just 2 points
+        n_points = len(x)
+        smart_min_samples = max(5, min(n_points, int(0.3 * n_points)))
+        effective_min_samples = max(ransac_min_samples, smart_min_samples)
+
+        # Relax residual threshold: 0.15 mag cap instead of 0.1
+        # This allows slightly more scatter while still rejecting true outliers
+        residual_threshold = min(3.0 * mad, 0.15)
 
         ransac = RANSACRegressor(
             PenalisedSlopeRegressor(
@@ -866,24 +866,29 @@ class Zeropoint:
                 slope_tolerance=slope_tolerance,
                 penalty_weight=penalty_weight,
             ),
-            residual_threshold=min(3.0 * mad, 0.1),
+            residual_threshold=residual_threshold,
             max_trials=max_trials,
-            min_samples=ransac_min_samples,
+            min_samples=effective_min_samples,
             random_state=random_state,
         )
         ransac.fit(x[:, None], y)
         inlier_mask = ransac.inlier_mask_
-        logger.info(f"RANSAC: {inlier_mask.sum()}/{len(x)} inliers")
+        logger.info(f"RANSAC: {inlier_mask.sum()}/{len(x)} inliers (threshold={residual_threshold:.3f}, min_samples={effective_min_samples})")
 
+        # If RANSAC rejects too many points (>50%), fall back to all points
+        # The fit may have larger scatter but uses more data
         if inlier_mask.sum() < 2:
             inlier_mask = np.ones(len(x), dtype=bool)
             logger.warning("RANSAC found too few inliers; using all points.")
+        elif inlier_mask.sum() < 0.5 * n_points and n_points > 10:
+            logger.warning(f"RANSAC rejected >50% of points ({inlier_mask.sum()}/{n_points}); consider checking data quality")
 
-        xi, yi, wi = x[inlier_mask], y[inlier_mask], w0[inlier_mask]
-        intercept = np.average(yi, weights=wi)
-        # SE(weighted mean) = 1/sqrt(sum(w_i)) for w_i = 1/sigma_i^2
-        sum_wi = np.sum(wi)
-        intercept_err = 1.0 / np.sqrt(sum_wi) if sum_wi > 0 else np.nan
+        xi, yi = x[inlier_mask], y[inlier_mask]
+        yi = yi[np.isfinite(yi)]
+        intercept = float(np.nanmedian(yi)) if yi.size else np.nan
+        mad_i = float(median_abs_deviation(yi, nan_policy="omit")) if yi.size else np.nan
+        n_i = int(yi.size)
+        intercept_err = (1.858 * mad_i / np.sqrt(n_i)) if n_i >= 2 else mad_i
 
         cov = np.diag([intercept_err**2, slope_err**2])
         full = np.zeros(orig_size, dtype=bool)
@@ -972,11 +977,9 @@ class Zeropoint:
                 fit_params = self._fallback_zeropoint(catalog, use_filter)
                 return catalog, fit_params
 
-            _style = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
-            )
-            if os.path.exists(_style):
-                plt.style.use(_style)
+            from plotting_utils import apply_autophot_mplstyle, ransac_legend_top_outside, set_mag_axes_inverted_xy
+
+            apply_autophot_mplstyle()
             fig, ax = plt.subplots(1, 1, figsize=set_size(540, 1))
             inlier_masks_full = {
                 k: np.zeros(len(clean_catalog), dtype=bool) for k in ["AP", "PSF"]
@@ -1010,6 +1013,8 @@ class Zeropoint:
                         n_segments=n_segments,
                     )
 
+                # RANSAC still uses weights for outlier rejection conditioning, but
+                # we do not propagate inverse-variance weighting into reported errors.
                 yerr = np.sqrt(delta_mag_err**2 + color_corr_err**2)
                 weights = 1.0 / (yerr**2 + 1e-12)
 
@@ -1049,18 +1054,20 @@ class Zeropoint:
                 msg = f"[{flux_type}] ZP={ZP:.3f} +/- {zp_std:.3f}"
                 logger.info(msg)
 
-                # ---- Plot --------------------------------------------------
+                # ---- Plot: m_inst vs m_cal = m_inst + dmag (slope-1 locus y = x + ZP) ----
+                m_cal = inst_mag + delta_mag
+                m_cal_err = yerr
                 in_x = inst_mag[inlier_short]
-                in_y = delta_mag[inlier_short]
-                in_e = yerr[inlier_short]
+                m_cal_in = m_cal[inlier_short]
+                in_e = m_cal_err[inlier_short]
 
                 ax.errorbar(
                     in_x,
-                    in_y,
+                    m_cal_in,
                     xerr=inst_mag_err[inlier_short],
                     yerr=in_e,
                     fmt="o",
-                    ms=get_marker_size('medium'),
+                    ms=get_marker_size("medium"),
                     color=colors[flux_type],
                     ecolor="lightgrey",
                     alpha=0.75,
@@ -1071,11 +1078,11 @@ class Zeropoint:
                 if out_mask.any():
                     ax.errorbar(
                         inst_mag[out_mask],
-                        delta_mag[out_mask],
+                        m_cal[out_mask],
                         xerr=inst_mag_err[out_mask],
-                        yerr=yerr[out_mask],
+                        yerr=m_cal_err[out_mask],
                         fmt="x",
-                        ms=get_marker_size('medium'),
+                        ms=get_marker_size("medium"),
                         color=colors[flux_type],
                         ecolor=colors[flux_type],
                         alpha=0.5,
@@ -1084,17 +1091,38 @@ class Zeropoint:
                     )
 
                 xs = np.linspace(in_x.min() - 0.5, in_x.max() + 0.5, 200)
-                ys = np.full_like(xs, ZP)
-                sig_y = np.full_like(xs, zp_std)
-                ax.plot(xs, ys, "--", color=colors[flux_type], label=msg)
+                ys1 = xs + ZP
+                ax.plot(
+                    xs,
+                    ys1,
+                    "--",
+                    color=colors[flux_type],
+                    lw=get_line_width("medium"),
+                    label=msg + "  (m_cal = m_inst + ZP, slope=1)",
+                )
                 ax.fill_between(
-                    xs, ys - sig_y, ys + sig_y, color=colors[flux_type], alpha=get_alpha('light')
+                    xs,
+                    xs + ZP - zp_std,
+                    xs + ZP + zp_std,
+                    color=colors[flux_type],
+                    alpha=get_alpha("light"),
                 )
 
                 global_xmins.append(xs[0])
                 global_xmaxs.append(xs[-1])
-                global_ymins.append(min(in_y.min() - in_e.mean(), ys[0] - 2 * sig_y[0]))
-                global_ymaxs.append(max(in_y.max() + in_e.mean(), ys[0] + 2 * sig_y[0]))
+                _em = float(np.nanmean(in_e)) if np.size(in_e) else 0.0
+                global_ymins.append(
+                    min(
+                        float(m_cal_in.min()) - _em,
+                        float(np.min(ys1)) - 2.0 * float(zp_std),
+                    )
+                )
+                global_ymaxs.append(
+                    max(
+                        float(m_cal_in.max()) + _em,
+                        float(np.max(ys1)) + 2.0 * float(zp_std),
+                    )
+                )
 
                 full_mask = np.zeros(len(clean_catalog), dtype=bool)
                 full_mask[np.flatnonzero(vmask)] = inlier_short
@@ -1109,22 +1137,21 @@ class Zeropoint:
                 )
                 ax.set_ylim(min(global_ymins) - 0.1 * yr, max(global_ymaxs) + 0.1 * yr)
 
-            y_label = (
-                rf"$m_\mathrm{{cal,{use_filter}}} - m_\mathrm{{inst,{use_filter}}}$"
-            )
+            y_label = rf"Catalog $m_{{\mathrm{{cal,{use_filter}}}}}$ [mag]"
             if has_color_term and fixed_color_coeffs is not None:
-                # Extract slope for display (second element in tuple)
-                slope_for_display = fixed_color_coeffs[1] if len(fixed_color_coeffs) >= 2 else 0.0
+                slope_for_display = (
+                    fixed_color_coeffs[1] if len(fixed_color_coeffs) >= 2 else 0.0
+                )
                 sign = r" + " if slope_for_display <= 0 else r" - "
                 y_label += (
-                    rf"{sign}{abs(slope_for_display):.2f}"
-                    rf"($m_\mathrm{{cal,{color1}}} - m_\mathrm{{cal,{color2}}}$)"
+                    rf" (after colour term{sign}{abs(slope_for_display):.2f} "
+                    rf"$(m_{{\mathrm{{cal,{color1}}}}} - m_{{\mathrm{{cal,{color2}}}}})$)"
                 )
-            y_label += " [mag]"
-            ax.set_xlabel(rf"$m_\mathrm{{inst,{use_filter}}}$ [mag]")
+            ax.set_xlabel(rf"Instrumental $m_{{\mathrm{{inst,{use_filter}}}}}$ [mag]")
             ax.set_ylabel(y_label)
             ax.grid(True, ls="--", alpha=0.5)
-            ax.legend(ncol=2, loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
+            ransac_legend_top_outside(ax, ncol=2)
+            set_mag_axes_inverted_xy(ax)
 
             fig.savefig(
                 os.path.join(write_dir, f"Zeropoint_{base_name}.png"),
@@ -1262,6 +1289,21 @@ class Zeropoint:
                 inlier_masks_full = {
                     k: np.zeros(len(clean_catalog), dtype=bool) for k in ["AP", "PSF"]
                 }
+                # Track global x-range for plot padding
+                x_min = np.inf
+                x_max = -np.inf
+                # Track global y-range so top markers don't overlap histograms
+                y_max = 0.0
+
+                # Optional: aperture correction (measured elsewhere) for plotting AP-corrected ZP.
+                ap_corr_mag = float(self.input_yaml.get("aperture_correction", 0.0) or 0.0)
+                ap_corr_err_mag = float(
+                    self.input_yaml.get("aperture_correction_err", 0.0) or 0.0
+                )
+                apply_ap_corr = bool(
+                    (self.input_yaml.get("photometry") or {}).get("apply_aperture_correction", False)
+                )
+                ap_zp_raw = np.nan
 
                 for flux_type in ["AP", "PSF"]:
                     pack = self._finite_vmask(clean_catalog, flux_type, use_filter)
@@ -1316,6 +1358,8 @@ class Zeropoint:
                     delta_mag_err = delta_mag_err[finite_mask]
                     delta_no_corr = delta_no_corr[finite_mask]
                     delta_no_corr_err = delta_no_corr_err[finite_mask]
+                    # Keep the full finite distribution (pre sigma-clip) for plotting.
+                    delta_mag_full = delta_mag.copy()
 
                     # Track which vmask sources survive finite filtering
                     vmask_finite_idx = np.flatnonzero(vmask)[finite_mask]
@@ -1364,6 +1408,8 @@ class Zeropoint:
                     # Robust central value from the median (stable against
                     # residual outliers and imperfect error modelling).
                     zp_final = float(np.nanmedian(inlier_deltas))
+                    if flux_type == "AP":
+                        ap_zp_raw = zp_final
 
                     n_inl = len(inlier_deltas)
                     mad_zp = float(
@@ -1372,19 +1418,9 @@ class Zeropoint:
                     # SE(median) ~ 1.858 * MAD/sqrt(N) (1.253*sigma/sqrt(N), sigma~1.4826*MAD)
                     zp_std = (1.858 * mad_zp / np.sqrt(n_inl)) if n_inl >= 2 else mad_zp
 
-                    # Inverse-variance weighted uncertainty from propagated
-                    # per-star delta_mag_err.
-                    vm = np.isfinite(inlier_delta_err) & (inlier_delta_err > 0)
-                    zp_err_weighted = np.nan
-                    if np.sum(vm) >= 2:
-                        w = 1.0 / (inlier_delta_err[vm] ** 2)
-                        zp_err_weighted = float(np.sqrt(1.0 / np.sum(w)))
-
-                    zp_err = (
-                        float(zp_err_weighted)
-                        if np.isfinite(zp_err_weighted)
-                        else float(zp_std)
-                    )
+                    # Zeropoint uncertainty: always use empirical scatter (SE of median).
+                    # Per your convention, we do not use inverse-variance weighting for errors.
+                    zp_err = float(zp_std)
 
                     zp_params[flux_type].update(
                         {
@@ -1422,6 +1458,10 @@ class Zeropoint:
                     counts, _ = np.histogram(
                         inlier_deltas, bins=bin_edges, density=True
                     )
+                    try:
+                        y_max = max(float(y_max), float(np.nanmax(counts)))
+                    except Exception:
+                        pass
 
                     # n_inliers = number of unique catalog sources surviving all cuts
                     # vmask_sigma_idx contains the catalog indices of sources that survive all filtering steps
@@ -1441,6 +1481,110 @@ class Zeropoint:
                             f"ZP={zp_final:.3f}+/-{zp_err:.3f})"
                         ),
                     )
+                    # Errorbar marker at top of plot (xerr = zeropoint_error).
+                    # Use a blended transform: x in data units, y in axes fraction.
+                    try:
+                        y_ax = 0.95
+                        if np.isfinite(zp_final) and np.isfinite(zp_err) and zp_err > 0:
+                            ax_hist.errorbar(
+                                [zp_final],
+                                [y_ax],
+                                xerr=[zp_err],
+                                fmt="o",
+                                markersize=3,
+                                color=colors[flux_type],
+                                elinewidth=1.0,
+                                capsize=2,
+                                alpha=0.95,
+                                zorder=20,
+                                transform=ax_hist.get_xaxis_transform(),
+                                clip_on=False,
+                            )
+                    except Exception:
+                        pass
+
+                    # Update global x-range for padding (use the actual inlier deltas)
+                    try:
+                        d_lo = float(np.nanmin(inlier_deltas))
+                        d_hi = float(np.nanmax(inlier_deltas))
+                        if np.isfinite(d_lo) and np.isfinite(d_hi):
+                            x_min = min(x_min, d_lo)
+                            x_max = max(x_max, d_hi)
+                    except Exception:
+                        pass
+
+                    # Optional: also show the aperture-corrected AP zeropoint distribution as
+                    # a separate (step) histogram when an aperture correction was measured
+                    # but not applied to the AP fluxes.
+                    if (
+                        flux_type == "AP"
+                        and np.isfinite(ap_corr_mag)
+                        and ap_corr_mag != 0.0
+                        and not apply_ap_corr
+                    ):
+                        try:
+                            inlier_apcorr = inlier_deltas - float(ap_corr_mag)
+                            # Use the same bin width as the inlier histogram, shifted in x.
+                            be_apcorr = bin_edges - float(ap_corr_mag)
+                            ct_apcorr, _ = np.histogram(
+                                inlier_apcorr, bins=be_apcorr, density=True
+                            )
+                            bc_apcorr = (be_apcorr[:-1] + be_apcorr[1:]) / 2.0
+                            try:
+                                y_max = max(float(y_max), float(np.nanmax(ct_apcorr)))
+                            except Exception:
+                                pass
+                            # Propagate aperture-correction uncertainty into the error reported for the
+                            # corrected zeropoint marker/legend.
+                            xerr_corr = float(zp_err)
+                            if np.isfinite(ap_corr_err_mag) and ap_corr_err_mag > 0:
+                                xerr_corr = float(
+                                    np.sqrt(float(zp_err) ** 2 + float(ap_corr_err_mag) ** 2)
+                                )
+                            ax_hist.hist(
+                                inlier_apcorr,
+                                bins=be_apcorr,
+                                density=True,
+                                histtype="step",
+                                linestyle="--",
+                                linewidth=1.4,
+                                color=colors["AP"],
+                                alpha=0.85,
+                                zorder=5,
+                                label=(
+                                    f"{labels_base['AP']} (+ap corr., "
+                                    f"N={n_sources_used}, "
+                                    f"ZP={(zp_final - ap_corr_mag):.3f}+/-{xerr_corr:.3f})"
+                                ),
+                            )
+                            # Errorbar marker at top of plot for the aperture-corrected distribution.
+                            try:
+                                x_corr = float(zp_final - ap_corr_mag)
+                                y_ax = 0.95
+                                if np.isfinite(x_corr) and np.isfinite(xerr_corr) and xerr_corr > 0:
+                                    ax_hist.errorbar(
+                                        [x_corr],
+                                        [y_ax],
+                                        xerr=[xerr_corr],
+                                        fmt="o",
+                                        markersize=3,
+                                        color=colors["AP"],
+                                        elinewidth=1.0,
+                                        capsize=2,
+                                        alpha=0.95,
+                                        zorder=20,
+                                        transform=ax_hist.get_xaxis_transform(),
+                                        clip_on=False,
+                                    )
+                            except Exception:
+                                pass
+                            d_lo = float(np.nanmin(inlier_apcorr))
+                            d_hi = float(np.nanmax(inlier_apcorr))
+                            if np.isfinite(d_lo) and np.isfinite(d_hi):
+                                x_min = min(x_min, d_lo)
+                                x_max = max(x_max, d_hi)
+                        except Exception:
+                            pass
 
                     # ---- Histogram (without colour correction) -------------
                     if has_color_term and fixed_color_coeffs is not None:
@@ -1473,6 +1617,10 @@ class Zeropoint:
                             std_nc = float(
                                 median_abs_deviation(inl_nc, nan_policy="omit")
                             )
+                            try:
+                                y_max = max(float(y_max), float(np.nanmax(ct_nc)))
+                            except Exception:
+                                pass
 
                             ax_hist.bar(
                                 bc_nc,
@@ -1488,16 +1636,37 @@ class Zeropoint:
                                     f"N={n_sources_nc}, ZP={zp_nc:.3f}+/-{std_nc:.3f})"
                                 ),
                             )
+                            try:
+                                d_lo = float(np.nanmin(inl_nc))
+                                d_hi = float(np.nanmax(inl_nc))
+                                if np.isfinite(d_lo) and np.isfinite(d_hi):
+                                    x_min = min(x_min, d_lo)
+                                    x_max = max(x_max, d_hi)
+                            except Exception:
+                                pass
 
                     # Update inlier mask.
                     full_mask = np.zeros(len(clean_catalog), dtype=bool)
                     full_mask[vmask_sigma_idx] = True
                     inlier_masks_full[flux_type] = full_mask
 
+                # Ensure histogram does not fill the full plot: pad xlim by at least 0.1 mag.
+                if np.isfinite(x_min) and np.isfinite(x_max):
+                    pad = 0.1
+                    ax_hist.set_xlim(x_min - pad, x_max + pad)
+                # Add headroom so top markers (y=0.95 axes fraction) sit above distributions.
+                if np.isfinite(y_max) and y_max > 0:
+                    ax_hist.set_ylim(0.0, float(y_max) / 0.95)
+
                 ax_hist.set_xlabel("Zeropoint [mag]")
                 ax_hist.set_ylabel("Density")
-                ax_hist.grid(True, ls="--", alpha=0.3, zorder=0)
-                ax_hist.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol = 2)
+                ax_hist.grid(True, ls="-", alpha=0.25, zorder=0)
+                ax_hist.legend(
+                    loc="lower center",
+                    bbox_to_anchor=(0.5, 1.0),
+                    frameon=False,
+                    ncol=2,
+                )
                 for patch in ax_hist.patches:
                     patch.set_zorder(3)
 
@@ -2263,7 +2432,7 @@ class Zeropoint:
             if n_inliers < min_inliers:
                 logger.warning(f"fit_color_term: RANSAC inliers {n_inliers} < {min_inliers} ({int(100*min_inlier_frac)}%), using sigma-clip fallback")
                 # Sigma-clip fallback
-                r0 = y - np.average(y, weights=1.0 / (y_err**2 + 1e-12))
+                r0 = y - np.nanmedian(y)
                 clipped = sigma_clip(
                     r0,
                     sigma=3.0,

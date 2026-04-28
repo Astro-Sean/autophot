@@ -60,12 +60,12 @@ from astropy.visualization import ImageNormalize, ZScaleInterval
 # Local
 # ---------------------------------------------------------------------------
 from functions import (
-    mag,
-    snr_err,
-    set_size,
-    border_msg,
+    log_step,
     log_exception,
     log_warning_from_exception,
+    mag,
+    set_size,
+    snr_err,
 )
 
 # ---------------------------------------------------------------------------
@@ -75,6 +75,210 @@ NSOURCES = 10  # minimum source count to justify spawning worker processes
 MAX_WORKERS_DEFAULT = (
     16  # cap on default n_jobs to avoid exhausting HPC process/thread limits
 )
+
+
+def resolve_exposure_time_seconds(exposure_time, input_yaml: dict) -> float:
+    """
+    Return a valid exposure time in seconds.
+
+    Parameters
+    ----------
+    exposure_time : float or None
+        If not ``None``, this value is used (must be finite and > 0).
+    input_yaml : dict
+        Must contain ``exposure_time`` when *exposure_time* is ``None`` — normally
+        set from the FITS header in ``main`` before any photometry.
+
+    Raises
+    ------
+    ValueError
+        If no finite exposure > 0 s is available.
+    """
+    if exposure_time is not None:
+        try:
+            et = float(exposure_time)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid exposure_time argument: {exposure_time!r}") from exc
+        if np.isfinite(et) and et > 0:
+            return et
+        raise ValueError(
+            f"exposure_time must be finite and > 0, got {exposure_time!r}"
+        )
+    raw = input_yaml.get("exposure_time")
+    if raw is None:
+        raise ValueError(
+            "exposure_time is required: pass it to measure(), or set "
+            "input_yaml['exposure_time'] (normally from the FITS EXPTIME/EXPOSURE "
+            "header before running photometry)."
+        )
+    try:
+        et = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"input_yaml['exposure_time'] is not numeric: {raw!r}"
+        ) from exc
+    if not np.isfinite(et) or et <= 0:
+        raise ValueError(
+            f"input_yaml['exposure_time'] must be finite and > 0, got {raw!r}"
+        )
+    return et
+
+
+def exposure_seconds_from_header(header, preferred_keys=None):
+    """
+    Read a positive, finite exposure time in seconds from a FITS ``header``.
+
+    Parameters
+    ----------
+    header : mapping
+        FITS header (supports ``in`` / ``__getitem__``).
+    preferred_keys : sequence of str, optional
+        Tried first in order (e.g. telescope.yml ``exptime`` mapping), then
+        standard alternates.
+
+    Returns
+    -------
+    (exposure_time, key_used) : (float, str)
+
+    Raises
+    ------
+    ValueError
+        If no usable exposure keyword is found.
+    """
+    keys = []
+    if preferred_keys is not None:
+        for k in preferred_keys:
+            if not k or k == "not_given_by_user":
+                continue
+            if k not in keys:
+                keys.append(k)
+    for alt in (
+        "EXPTIME",
+        "EXPOSURE",
+        "TEXP",
+        "EXPTIME0",
+        "TEXPTIME",
+        "INTTIME",
+        "EXPTIM",
+    ):
+        if alt not in keys:
+            keys.append(alt)
+    for key in keys:
+        if key not in header:
+            continue
+        raw = header[key]
+        if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+            continue
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(val) and val > 0:
+            return val, key
+    raise ValueError(
+        "No valid exposure time in FITS header; tried keys "
+        f"{keys[:12]!r}. Add EXPTIME or EXPOSURE (seconds)."
+    )
+
+
+def resolve_gain_e_per_adu(gain, input_yaml: dict) -> float:
+    """
+    Return a valid detector gain in electrons per ADU.
+
+    Parameters
+    ----------
+    gain : float or None
+        If not ``None``, this value is used (must be finite and > 0).
+    input_yaml : dict
+        Must contain ``gain`` when *gain* is ``None`` — normally set from the
+        FITS header in ``main`` before any photometry.
+
+    Raises
+    ------
+    ValueError
+        If no finite gain > 0 e-/ADU is available.
+    """
+    if gain is not None:
+        try:
+            g = float(gain)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid gain argument: {gain!r}") from exc
+        if np.isfinite(g) and g > 0:
+            return g
+        raise ValueError(f"gain must be finite and > 0 e-/ADU, got {gain!r}")
+    raw = input_yaml.get("gain")
+    if raw is None:
+        raise ValueError(
+            "gain is required: pass it to measure(), or set "
+            "input_yaml['gain'] (normally from the FITS GAIN header before "
+            "running photometry)."
+        )
+    try:
+        g = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"input_yaml['gain'] is not numeric: {raw!r}") from exc
+    if not np.isfinite(g) or g <= 0:
+        raise ValueError(
+            f"input_yaml['gain'] must be finite and > 0 e-/ADU, got {raw!r}"
+        )
+    return g
+
+
+def gain_e_per_adu_from_header(header, preferred_keys=None):
+    """
+    Read a positive, finite gain (e-/ADU) from a FITS ``header``.
+
+    Parameters
+    ----------
+    header : mapping
+        FITS header (supports ``in`` / ``__getitem__``).
+    preferred_keys : sequence of str, optional
+        Tried first in order (e.g. telescope.yml ``gain`` mapping), then
+        standard alternates.
+
+    Returns
+    -------
+    (gain, key_used) : (float, str)
+
+    Raises
+    ------
+    ValueError
+        If no usable gain keyword is found.
+    """
+    keys = []
+    if preferred_keys is not None:
+        for k in preferred_keys:
+            if not k or k == "not_given_by_user":
+                continue
+            if k not in keys:
+                keys.append(k)
+    # Pan-STARRS / PS1 hierarchy cards (see utils/fix_panstarrs_headers.py).
+    for alt in (
+        "GAIN",
+        "gain",
+        "EGAIN",
+        "CONADU",
+        "CELL.GAIN",
+        "DET.GAIN",
+    ):
+        if alt not in keys:
+            keys.append(alt)
+    for key in keys:
+        if key not in header:
+            continue
+        raw = header[key]
+        if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+            continue
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(val) and val > 0:
+            return val, key
+    raise ValueError(
+        "No valid detector gain (e-/ADU) in FITS header; tried keys "
+        f"{keys[:12]!r}. Add GAIN or the instrument-specific keyword."
+    )
 
 
 def _resolve_n_jobs(n_jobs, half_cpus=False):
@@ -201,8 +405,9 @@ def _measure_worker(args):
             sqrt_var = np.nan
             snr = 0.0
 
-        # Flux in e/s (counts per second) for consistency with PSF; mag = -2.5*log10(flux).
-        # This is aperture-only flux (light within the aperture); for total flux use aperture correction.
+        # Aperture sum is integrated over the exposure in image_e units (e⁻ in frame);
+        # flux is the rate in e⁻/s for use with mag() and PSF outputs (also e⁻/s).
+        # Aperture-only flux (for total light include aperture correction).
         flux_ap = aperture_sum * inv_exposure_time
 
         try:
@@ -412,6 +617,19 @@ class Aperture:
     * measure()               - per-source flux / magnitude measurements
     * measure_optimum_radius() - data-driven aperture radius selection
     * compute_aperture_correction() - CoG-based aperture correction
+
+    **Flux / count conventions in ``measure()`` output**
+
+    Photometry is performed on ``self.image * gain`` (``image_e``), so sums are in
+    *electrons* integrated over the exposure, unless the caller uses gain=1.0
+    and treats ADU as a proxy.
+
+    * ``counts_AP`` — background-subtracted aperture sum over the *full* exposure
+      (e⁻ in the frame, i.e. integrated, not a rate).
+    * ``flux_AP`` — per-second rate ``counts_AP / exposure_time`` (e⁻/s), matching
+      ``functions.mag()`` and PSF photometry’s ``flux_PSF`` (also e⁻/s).
+    * ``noiseSky`` — local sky RMS per *pixel* in the same *rate* units (e⁻/s per
+      pixel), consistent with ``flux_AP`` in ``beta_aperture``-style S/N.
     """
 
     def __init__(self, input_yaml: dict, image: np.ndarray, verbose: int = 1):
@@ -556,7 +774,7 @@ class Aperture:
         ap_size        : aperture radius (pixels); read from config if None
         exposure_time  : seconds; read from config if None
         read_noise     : electrons; read from config if None
-        gain           : e-/ADU; read from config if None
+        gain           : e-/ADU; from ``input_yaml`` if ``None`` (must be set; normally from FITS header in ``main``)
         plot           : save per-source diagnostic PDF
         background_rms : 2-D RMS map for error model
         saveTarget     : use filename stem (not index) when naming plot files
@@ -566,6 +784,10 @@ class Aperture:
         Returns
         -------
         sources : DataFrame (in-place columns added / updated)
+
+        ``counts_AP`` and ``flux_AP`` follow the conventions described in
+        :class:`Aperture` (integrated e⁻ in frame, and e⁻/s, respectively, when
+        the pipeline uses ``image * gain`` as in this implementation).
         """
         warnings.filterwarnings("ignore", category=RuntimeWarning)
         warnings.filterwarnings("ignore", category=FutureWarning)
@@ -575,8 +797,8 @@ class Aperture:
 
         # ---- Configuration -------------------------------------------------
         fwhm = self.input_yaml["fwhm"]
-        gain = float(gain or self.input_yaml.get("gain", 1.0))
-        exposure_time = float(exposure_time or self.input_yaml.get("exposure_time", 30.0))
+        gain = resolve_gain_e_per_adu(gain, self.input_yaml)
+        exposure_time = resolve_exposure_time_seconds(exposure_time, self.input_yaml)
         read_noise = float(read_noise or self.input_yaml.get("read_noise", 0.0))
         ap_size = ap_size or self.input_yaml["photometry"]["aperture_radius"]
 
@@ -1101,7 +1323,7 @@ class Aperture:
         fwhm = self.input_yaml["fwhm"]
         radii_fwhm = np.arange(0.05, max_radius + 1e-9, 0.1)
         radii = radii_fwhm * fwhm
-        logger.info(border_msg(f"Finding optimum aperture using {n_sources} sources"))
+        logger.info(log_step(f"Optimum aperture: {n_sources} sources"))
 
         sources["optimum_radius"] = np.nan
         sources["mean_slope"] = np.nan
@@ -1114,7 +1336,7 @@ class Aperture:
         sources["tail_outer_std"] = np.nan
         sources["tail_outer_slope"] = np.nan
 
-        gain = self.input_yaml.get("gain", 1.0)
+        gain = resolve_gain_e_per_adu(None, self.input_yaml)
         error = (
             None
             if background_rms is None
@@ -1678,7 +1900,7 @@ class Aperture:
         if fwhm is None or ap_size is None:
             raise ValueError("fwhm and ap_size are required.")
 
-        gain = self.input_yaml.get("gain", 1.0)
+        gain = resolve_gain_e_per_adu(None, self.input_yaml)
         radii = np.arange(0.05, max_radius, 0.1) * fwhm
         error = (
             calc_total_error(image, background_rms, effective_gain=gain)

@@ -58,7 +58,13 @@ from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 
 # --- Local Imports ---
-from functions import pix_dist, border_msg, pad_ones, set_size, get_normalized_histogram
+from functions import (
+    get_normalized_histogram,
+    log_step,
+    pad_ones,
+    pix_dist,
+    set_size,
+)
 
 # --- Logging and Warnings ---
 warnings.simplefilter("ignore", category=AstropyWarning)
@@ -409,7 +415,7 @@ class Find_FWHM:
                 random_state=42,
             )
             ransac.fit(X, y)
-            b = ransac.estimator_.intercept_
+            b = float(ransac.estimator_.intercept_)
 
             inlier_mask = ransac.inlier_mask_.copy()
 
@@ -445,6 +451,14 @@ class Find_FWHM:
                         "Linearity bin-wise refinement skipped.", exc_info=True
                     )
 
+            # After bin-wise refinement, recompute the constant offset so the reported
+            # intercept (and plotted line) matches the final inlier set.
+            if int(np.sum(inlier_mask)) >= 3:
+                try:
+                    b = float(np.nanmedian(y[inlier_mask]))
+                except Exception:
+                    pass
+
             df_lin = df.loc[inlier_mask].copy()
             df_out = df.loc[~inlier_mask].copy()
 
@@ -454,10 +468,8 @@ class Find_FWHM:
                 )
                 return df_lin, fit_params, saturation_range
 
-            # Use RANSAC estimator intercept directly (robust fit), not simple mean of final inliers
-            # The bin-wise filter may unevenly remove points, making simple mean inconsistent with fit
-            res_all = y - b
-            res_sel = res_all[inlier_mask]
+            # Residuals around the final constant offset.
+            res_sel = (y - b)[inlier_mask]
             sigma = _mad(res_sel)
             if not np.isfinite(sigma) or sigma <= 0:
                 sigma = np.nanstd(res_sel) if np.nanstd(res_sel) > 0 else 1e-3
@@ -738,7 +750,7 @@ class Find_FWHM:
         logger = logging.getLogger(__name__)
 
         try:
-            self.logger.info(border_msg("Point-source detection and FWHM measurement"))
+            self.logger.info(log_step("SExtractor: detect sources & FWHM"))
 
             # --- Configuration ---
             cfg = getattr(self, "input_yaml", {}) or {}
@@ -1006,7 +1018,7 @@ class Find_FWHM:
             tuple: (mask_broadened, bkg, sigma)
         """
         self.logger.info(
-            border_msg("Searching for streaks using robust Hough Transform")
+            log_step("Streak search (Hough)")
         )
         try:
             ny, nx = data.shape
@@ -1114,7 +1126,7 @@ class Find_FWHM:
             return sources, None
 
         self.logger.info(
-            border_msg(f"Excluding sources within {radius} pixels of spikes")
+            log_step(f"Exclude sources near streaks: {radius} px")
         )
         self.logger.info(f"Total sources before filtering: {len(sources)}")
 
