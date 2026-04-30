@@ -145,11 +145,6 @@ except ModuleNotFoundError:
     reproject_exact = None
     _REPROJECT_AVAILABLE = False
 
-try:
-    from skimage.registration import phase_cross_correlation
-except ImportError:
-    phase_cross_correlation = None  # subpixel refinement disabled if skimage missing
-
 from functools import lru_cache
 from typing import NamedTuple
 
@@ -368,6 +363,7 @@ class ReprojectConfig:
     subpixel_refine: bool = True
     subpixel_min_shift: float = 0.05
     subpixel_max_shift: float = 3.0
+    subpixel_min_pairs: int = 15
 
     @classmethod
     def from_yaml(cls, input_yaml: Dict[str, Any]) -> "ReprojectConfig":
@@ -384,6 +380,7 @@ class ReprojectConfig:
             subpixel_refine=bool(cfg.get("reproject_subpixel_refine", True)),
             subpixel_min_shift=float(cfg.get("reproject_subpixel_min_shift", 0.05)),
             subpixel_max_shift=float(cfg.get("reproject_subpixel_max_shift", 3.0)),
+            subpixel_min_pairs=int(cfg.get("reproject_subpixel_min_pairs", 15)),
         )
 
 
@@ -545,8 +542,6 @@ def _reproject_template(
       - Projection headers prepared once, not re-derived per fallback.
       - Adaptive kwargs built once from module-level introspection cache.
       - import inspect called once at module level, not per call.
-      - Subpixel refinement gated on measured shift magnitude to avoid
-        unnecessary ndimage_shift when WCS alignment is already accurate.
       - Alignment RMS diagnostic uses the in-memory reprojected array (not a
         second read of the output FITS).
       - Returns structured AlignmentResult instead of bare tuple.
@@ -644,80 +639,13 @@ def _reproject_template(
     aligned[~fp_mask] = np.nan
 
     # ------------------------------------------------------------------
-    # Subpixel refinement - only apply when shift is meaningful
-    # ------------------------------------------------------------------
-    median_offset: Optional[float] = None
-
-    if cfg.subpixel_refine and phase_cross_correlation is not None:
-        try:
-            ref_valid = np.isfinite(science_image) & (np.abs(science_image) < 1e30)
-            mov_valid = np.isfinite(aligned)
-
-            if np.sum(ref_valid) > 100 and np.sum(mov_valid) > 100:
-                shift_result = phase_cross_correlation(
-                    np.asarray(science_image, dtype=np.float64),
-                    np.asarray(aligned, dtype=np.float64),
-                    reference_mask=ref_valid,
-                    moving_mask=mov_valid,
-                )
-                subpix = (
-                    shift_result[0]
-                    if isinstance(shift_result, tuple)
-                    else shift_result
-                )
-                subpix = np.atleast_1d(np.asarray(subpix, dtype=float))
-
-                if subpix.size >= 2:
-                    shift_mag = float(np.sqrt(subpix[0] ** 2 + subpix[1] ** 2))
-
-                    if shift_mag < cfg.subpixel_min_shift:
-                        # Already well-aligned; skip ndimage_shift entirely
-                        logger.info(
-                            "Subpixel shift magnitude %.4f px < threshold %.4f px; "
-                            "skipping ndimage_shift.",
-                            shift_mag,
-                            cfg.subpixel_min_shift,
-                        )
-                    elif shift_mag > cfg.subpixel_max_shift:
-                        # Large shift indicates WCS failure, not subpixel error
-                        logger.warning(
-                            "Subpixel shift magnitude %.4f px > max %.4f px; "
-                            "skipping to avoid masking valid data.",
-                            shift_mag,
-                            cfg.subpixel_max_shift,
-                        )
-                    else:
-                        aligned = ndimage_shift(
-                            aligned,
-                            (float(subpix[0]), float(subpix[1])),
-                            order=3,
-                            mode="constant",
-                            cval=np.nan,
-                        )
-                        logger.info(
-                            "Subpixel refinement applied: shift=(%.4f, %.4f) px  "
-                            "magnitude=%.4f px",
-                            float(subpix[0]),
-                            float(subpix[1]),
-                            shift_mag,
-                        )
-
-        except Exception as e:
-            log_warning_from_exception(
-                logger,
-                "Subpixel refinement failed (using WCS-aligned result)",
-                e,
-                exc_info=True,
-            )
-
-    # ------------------------------------------------------------------
     # Write output
     # ------------------------------------------------------------------
     hdr = template_header.copy()
     hdr.update(science_proj, relax=True)
     hdr["NAXIS1"] = aligned.shape[1]
     hdr["NAXIS2"] = aligned.shape[0]
-    to_write = np.asarray(aligned, dtype=np.float32, copy=False)
+    to_write = np.asarray(aligned, dtype=np.float32)
     hdu = fits.PrimaryHDU(to_write, header=hdr)
     hdu.writeto(output_path, overwrite=True, output_verify="silentfix+ignore")
 
@@ -2466,9 +2394,9 @@ class Templates:
         Align science and template images to a common pixel grid.
 
         Cascade order (first success wins):
-          1. SWarp  (if method='swarp')
-          2. AstroAlign  (if method in ('swarp','astroalign'))
-          3. WCS Reproject  (always attempted as final fallback)
+          - ``swarp``: try SCAMP+SWarp, then WCS reproject, then AstroAlign.
+          - ``astroalign``: try AstroAlign, then WCS reproject, then SCAMP+SWarp.
+          - ``reproject``: try WCS reproject, then AstroAlign, then SCAMP+SWarp.
 
         Images are loaded once and passed to module-level helpers to avoid
         redundant FITS I/O. ReprojectConfig and projection headers are built
@@ -2574,24 +2502,53 @@ class Templates:
                 out = _swarp()
                 if out[0]:
                     return out
-
-            if method in ("astroalign", "swarp"):
+                out = _reproject()
+                if out[0]:
+                    return out
                 out = _astroalign()
                 if out[0]:
                     return out
+                return None, None
+
+            if method == "astroalign":
+                out = _astroalign()
+                if out[0]:
+                    return out
+                out = _reproject()
+                if out[0]:
+                    return out
+                out = _swarp()
+                if out[0]:
+                    return out
+                return None, None
 
             if method == "reproject":
                 out = _reproject()
                 if out[0]:
                     return out
-                # Reproject failed - try feature-based fallbacks
                 out = _astroalign()
                 if out[0]:
                     return out
-                return _swarp()
+                out = _swarp()
+                if out[0]:
+                    return out
+                return None, None
 
-            # Default: WCS reproject (most reliable when headers have good WCS)
-            return _reproject()
+            # Unknown method: behave like reproject-first (safest default).
+            logger.warning(
+                "Unknown alignment_method=%r; falling back to reproject -> astroalign -> swarp.",
+                method,
+            )
+            out = _reproject()
+            if out[0]:
+                return out
+            out = _astroalign()
+            if out[0]:
+                return out
+            out = _swarp()
+            if out[0]:
+                return out
+            return None, None
 
         except Exception:
             logger.exception("Error during alignment")
@@ -4176,6 +4133,23 @@ class Templates:
                 return None, None, None
 
             diff_data, diff_header = read_fits(differenceFpath)
+            # ------------------------------------------------------------------
+            # Preserve "no data" regions through subtraction backends.
+            #
+            # Some subtraction tools (notably SFFT variants) can emit 0-valued pixels
+            # where inputs contained NaNs (chip gaps / no-coverage). Downstream
+            # photometry and diagnostics must treat those pixels as invalid, so we
+            # re-impose the combined NaN mask from the original aligned inputs.
+            # ------------------------------------------------------------------
+            try:
+                combined_nan_mask = (~np.isfinite(scienceImage)) | (~np.isfinite(templateImage))
+                if np.any(combined_nan_mask) and diff_data.shape == combined_nan_mask.shape:
+                    diff_data = np.asarray(diff_data, dtype=float)
+                    diff_data[combined_nan_mask] = np.nan
+            except Exception:
+                # Non-fatal: continue with raw backend output.
+                pass
+
             if np.all(np.isnan(diff_data)) or np.nanstd(diff_data) < 1e-5:
                 logger.error(
                     "Difference image is invalid (all NaN or near-zero variance). "
@@ -4192,6 +4166,13 @@ class Templates:
                     diff_data, mask=invalid, sigma=3, maxiters=5
                 )
                 diff_data = diff_data - float(diff_median)
+                # Defensive: keep no-data regions as NaN after any shifts.
+                try:
+                    if np.any(combined_nan_mask) and diff_data.shape == combined_nan_mask.shape:
+                        diff_data = np.asarray(diff_data, dtype=float)
+                        diff_data[combined_nan_mask] = np.nan
+                except Exception:
+                    pass
                 write_fits(differenceFpath, diff_data, diff_header)
                 logger.info(
                     "Difference image background zeroed (subtracted median %.4g).",

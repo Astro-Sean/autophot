@@ -52,7 +52,7 @@ default_input:
 
   photometry:
     aperture_size: 1.7 # float --- Aperture radius in units of FWHM (pixels = `aperture_size * fwhm`).
-    enforce_nonnegative_local_background: True # bool --- If True, clamp annulus-estimated local background to >=0 before subtraction (prevents flux inflation when local sky is negative from over-subtraction/miscalibration).
+    enforce_nonnegative_local_background: False # bool --- If True, clamp annulus-estimated local background to >=0 before subtraction (prevents flux inflation when local sky is negative from over-subtraction/miscalibration).
     apply_aperture_correction: False # bool --- If True, apply aperture correction from PSF stars to aperture mags.
     plot_aperture_correction: False # bool --- If True, save the aperture-correction diagnostic plot (curve of growth).
     apply_colorterms: True # bool --- If True, measure and apply color term corrections to catalog sources during calibration.
@@ -151,7 +151,7 @@ default_input:
     crowded_auto_background_rms_min: null # float|null --- Crowded-field trigger: minimum background RMS (optional).
 
     redo_wcs: True # bool --- If True, solve/refresh WCS even if a WCS exists in the header.
-    projection_type: SIP # str --- WCS projection/distortion mode: TPV (default: solve-field + SCAMP) or SIP (solve-field only).
+    projection_type: TPV # str --- WCS projection/distortion mode: TPV (solve-field seed + SCAMP refinement) or SIP (solve-field only).
     allow_fallback_to_existing_on_solve_fail: False # bool --- If False, require a fresh solve when redo_wcs=True (no silent fallback to original header WCS).
     apply_solved_to_fits: True # bool --- If True, write solved WCS back into the FITS header on disk.
     solve_field_exe_loc: solve-field # str --- `solve-field` executable name/path (defaults to `solve-field` on PATH).
@@ -182,7 +182,7 @@ default_input:
     refine_after_solve: False # bool --- If True, run an additional WCS refinement pass after a successful solve.
     # Final small linear correction after solve-field/SCAMP, estimated from matched stars.
     # This only nudges CRPIX and is applied only when the residual improvement is measurable.
-    post_scamp_linear_refine: False # bool --- Enable post-solve CRPIX micro-alignment.
+    post_scamp_linear_refine: True # bool --- Enable post-solve CRPIX micro-alignment.
     post_scamp_linear_refine_min_points: 30 # int --- Minimum matched stars required for the micro-alignment estimate.
     post_scamp_linear_refine_max_shift_px: 2.0 # float --- Maximum allowed CRPIX nudge magnitude in pixels.
     post_scamp_linear_refine_min_improve_px: 0.03 # float --- Require at least this absolute median residual improvement (pixels).
@@ -319,7 +319,7 @@ default_input:
     initial_guess_sigma_mult: 5.0 # float --- Initial injected-limit guess uses flux ~= (this * sigma_sky * sqrt(Npix)) from annulus probe measurements; converted to instrumental magnitude.
     scale_growth_factor: 1.5 # float --- If no quiet injection sites are found, multiply runtime `scale` by this factor and retry (up to scale_growth_max_px).
     scale_growth_max_px: 600 # int --- Maximum runtime `scale` (pixels) allowed during limiting-magnitude quiet-site retries.
-    injection_n_sites: 5 # int --- Number of candidate injection sites around the target used for injection/recovery trials (more = smoother completeness curve; slower).
+    injection_n_sites: 10 # int --- Number of candidate injection sites around the target used for injection/recovery trials (more = smoother completeness curve; slower).
     injection_jitter_repetitions: 5 # int --- Sub-pixel jitter repetitions per site per magnitude (more = smoother completeness curve; slower).
     completeness_plot_span_mag: 0.8 # float --- Half-span (mag) around the adopted limit used for the completeness plot sampling range (smaller = fewer bins far from transition).
     completeness_plot_nmags: 9 # int --- Number of magnitudes sampled across completeness_plot_span_mag for the completeness bar chart.
@@ -347,7 +347,9 @@ default_input:
 
   template_subtraction:
     do_subtraction: False # bool --- Enable template subtraction step.
-    alignment_method: reproject # str --- Science-template registration method (reproject, swarp, astroalign).
+    alignment_method: swarp # str --- Science-template registration method (reproject, swarp, astroalign).
+    alignment_use_extended_sources: False # bool --- If True, allow large/extended sources (galaxies) in SCAMP matching catalogs.
+    alignment_max_fwhm_pix: 50.0 # float --- Max FWHM (pixels) kept when alignment_use_extended_sources=False.
     method: sfft # str --- Subtraction backend (sfft default; hotpants or zogy optional where available).
     kernel_order: 0 # int --- Polynomial order for the SFFT kernel flux scaling model.
     download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).

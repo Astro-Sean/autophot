@@ -483,9 +483,10 @@ class SExtractorWrapper:
         mask = (sources["fwhm"] <= fwhm_lo) | (sources["fwhm"] >= fwhm_hi)
         n_rejected_fwhm = int(mask.sum())
         sources = sources[~mask].copy()
-        logger.info(
-            f"Rejected {n_rejected_fwhm} sources outside FWHM range [{fwhm_lo}, {fwhm_hi}]"
-        )
+        if n_rejected_fwhm > 0:
+            logger.info(
+                f"Rejected {n_rejected_fwhm} sources outside FWHM range [{fwhm_lo}, {fwhm_hi}]"
+            )
         # If this removed everything (or nearly everything), disable the FWHM cut
         # for this image rather than returning an empty catalogue.
         if len(sources) == 0 and n0 > 0:
@@ -499,7 +500,8 @@ class SExtractorWrapper:
         snr_ok = sources["snr"].to_numpy() > snr_limit
         n_after_snr = int((~snr_ok).sum())
         sources = sources.loc[snr_ok].copy()
-        logger.info(f"Rejected {n_after_snr} low-SNR sources (SNR < {snr_limit:.1f})")
+        if n_after_snr > 0:
+            logger.info(f"Rejected {n_after_snr} low-SNR sources (SNR < {snr_limit:.1f})")
 
         # --- Step 4: Estimate FWHM if needed ---
         if fwhm_est is None and len(sources) > 0:
@@ -542,19 +544,21 @@ class SExtractorWrapper:
                 near_masked = np.isfinite(dist)
                 removed_near_masked = int(near_masked.sum())
                 sources = sources.loc[~near_masked].copy()
-                logger.info(
-                    "Rejected %d sources within %.2f pixels of masked regions",
-                    removed_near_masked,
-                    match_radius,
-                )
+                if removed_near_masked > 0:
+                    logger.info(
+                        "Rejected %d sources within %.2f pixels of masked regions",
+                        removed_near_masked,
+                        match_radius,
+                    )
 
         # --- Step 6: FLAGS cut ---
         if "flags" in sources.columns:
             n_flagged = int((sources["flags"] > flags).sum())
             sources = sources[sources["flags"] <= flags].copy()
-            logger.info(
-                "Rejected %d sources with FLAGS > %d", n_flagged, flags
-            )
+            if n_flagged > 0:
+                logger.info(
+                    "Rejected %d sources with FLAGS > %d", n_flagged, flags
+                )
 
         # --- Step 7: Sharpness cut (relaxed range when relaxed_cuts) ---
         if "sharpness" in sources.columns:
@@ -564,17 +568,19 @@ class SExtractorWrapper:
             )
             rejected_sharp = mask.sum()
             sources = sources[~mask].copy()
-            logger.info(
-                f"Rejected {rejected_sharp} sources based on sharpness (range [{sharp_lo}, {sharp_hi}])"
+            if rejected_sharp > 0:
+                logger.info(
+                    f"Rejected {rejected_sharp} sources based on sharpness (range [{sharp_lo}, {sharp_hi}])"
             )
 
         # --- Step 8: Saturation cut ---
         if saturation is not None and "peak_flux" in sources.columns:
             n_saturated = len(sources[sources["peak_flux"] >= 0.99 * saturation])
             sources = sources[sources["peak_flux"] < 0.99 * saturation].copy()
-            logger.info(
-                f"Rejected {n_saturated} saturated sources (peak_flux >= 0.99 x saturation)"
-            )
+            if n_saturated > 0:
+                logger.info(
+                    f"Rejected {n_saturated} saturated sources (peak_flux >= 0.99 x saturation)"
+                )
 
         # --- Step 9: Edge cut ---
         x_max, y_max = header.get("NAXIS1", 0), header.get("NAXIS2", 0)
@@ -587,9 +593,10 @@ class SExtractorWrapper:
         )
         edge_rejected = mask.sum()
         sources = sources[~mask].copy()
-        logger.info(
-            f"Rejected {edge_rejected} sources within {margin} pixels of the image edge"
-        )
+        if edge_rejected > 0:
+            logger.info(
+                f"Rejected {edge_rejected} sources within {margin} pixels of the image edge"
+            )
 
         # --- Step 10: Spatial Downsampling if needed ---
         if NMAX is not None and len(sources) > NMAX:

@@ -21,6 +21,23 @@ except ImportError:
     get_divergent_color = None
     get_marker_size = None
 
+try:
+    from lightcurve import (
+        _normalize_photometry_columns,
+        BAND_COLORS,
+        canonical_band_label_map_from_filter_series,
+        canonical_bands_from_filter_series,
+        filter_value_matches_band,
+        photometry_filter_series,
+    )
+except ImportError:
+    _normalize_photometry_columns = None
+    BAND_COLORS = None
+    canonical_band_label_map_from_filter_series = None
+    canonical_bands_from_filter_series = None
+    filter_value_matches_band = None
+    photometry_filter_series = None
+
 
 class Plot:
 
@@ -148,11 +165,13 @@ class Plot:
             axes = []
             for i, (title, img_data) in enumerate(images.items()):
                 ax = fig.add_subplot(gs[i])
+                cmap = plt.get_cmap("bone").copy()
+                cmap.set_bad(color="white")
                 ax.imshow(
                     img_data,
                     origin="lower",
                     aspect="auto",
-                    cmap="bone",
+                    cmap=cmap,
                     vmin=vmins[title],
                     vmax=vmaxs[title],
                 )
@@ -294,21 +313,21 @@ class Plot:
                         axes[0].add_patch(
                             circle
                         )  # Assuming add to first ax, adjust if needed
-                    else:
-                        axes[0].plot(
-                            [x - cross_len, x + cross_len],
-                            [y - cross_len, y + cross_len],
-                            color="#FF0000",
-                            lw=0.5,
-                            zorder=2,
-                        )
-                        axes[0].plot(
-                            [x - cross_len, x + cross_len],
-                            [y + cross_len, y - cross_len],
-                            color="#FF0000",
-                            lw=0.5,
-                            zorder=2,
-                        )
+                    # else:
+                    #     axes[0].plot(
+                    #         [x - cross_len, x + cross_len],
+                    #         [y - cross_len, y + cross_len],
+                    #         color="#FF0000",
+                    #         lw=0.5,
+                    #         zorder=2,
+                    #     )
+                    #     axes[0].plot(
+                    #         [x - cross_len, x + cross_len],
+                    #         [y + cross_len, y - cross_len],
+                    #         color="#FF0000",
+                    #         lw=0.5,
+                    #         zorder=2,
+                    #     )
                     axes[0].annotate(
                         otype,
                         xy=(x, y),
@@ -339,11 +358,13 @@ class Plot:
 
                     # Inset
                     ax_inset = inset_axes(ax, width="30%", height="30%", loc=inset_loc)
+                    cmap = plt.get_cmap("bone").copy()
+                    cmap.set_bad(color="white")
                     ax_inset.imshow(
                         img_data,
                         origin="lower",
                         aspect="auto",
-                        cmap="bone",
+                        cmap=cmap,
                         vmin=vmins[title],
                         vmax=vmaxs[title],
                     )
@@ -406,7 +427,7 @@ class Plot:
             # Optional mask overlay
             if mask is not None:
                 red_overlay = colors.ListedColormap(["none", "#FF0000"])
-                for ax in fig.axes:
+                for ax in fig.axes[:-1]:
                     if ax not in inset_axes_list:
                         ax.imshow(mask, cmap=red_overlay, alpha=0.5, origin="lower")
 
@@ -418,7 +439,6 @@ class Plot:
                     # Red hollow circle at fitted location
                     circle = mpatches.Circle(
                         fitted_location,
-                        radius=radius,
                         edgecolor="#FF0000",
                         facecolor="none",
                         linewidth=0.5,
@@ -430,22 +450,22 @@ class Plot:
                     x, y = expected_location
                     cross_len = aperture_size / 2  # half-length of each arm
 
-                    hline = mlines.Line2D(
-                        [x - cross_len, x + cross_len],
-                        [y, y],
-                        color="#0000FF",
-                        linewidth=0.5,
-                        transform=ax.transData,
-                    )
-                    vline = mlines.Line2D(
-                        [x, x],
-                        [y - cross_len, y + cross_len],
-                        color="#0000FF",
-                        linewidth=0.5,
-                        transform=ax.transData,
-                    )
-                    ax.add_line(hline)
-                    ax.add_line(vline)
+                    # hline = mlines.Line2D(
+                    #     [x - cross_len, x + cross_len],
+                    #     [y, y],
+                    #     color="#0000FF",
+                    #     linewidth=0.5,
+                    #     transform=ax.transData,
+                    # )
+                    # vline = mlines.Line2D(
+                    #     [x, x],
+                    #     [y - cross_len, y + cross_len],
+                    #     color="#0000FF",
+                    #     linewidth=0.5,
+                    #     transform=ax.transData,
+                    # )
+                    # ax.add_line(hline)
+                    # ax.add_line(vline)
 
             # Save figure (PNG only)
             fig.savefig(
@@ -565,8 +585,10 @@ class Plot:
         ty = cy - y0
 
         # Panel 1
+        cmap_vir = plt.get_cmap("viridis").copy()
+        cmap_vir.set_bad(color="white")
         axes[0].imshow(
-            cut, origin="lower", cmap="viridis", vmin=vmin, vmax=vmax
+            cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
         )
         axes[0].axvline(tx, color="#0000FF", lw=0.6, alpha=0.9)
         axes[0].axhline(ty, color="#0000FF", lw=0.6, alpha=0.9)
@@ -587,7 +609,7 @@ class Plot:
 
         # Panel 2
         axes[1].imshow(
-            cut, origin="lower", cmap="viridis", vmin=vmin, vmax=vmax
+            cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
         )
         levels = np.unique(seg)
         levels = levels[levels > 0]
@@ -604,7 +626,7 @@ class Plot:
 
         # Panel 3
         axes[2].imshow(
-            cut, origin="lower", cmap="viridis", vmin=vmin, vmax=vmax
+            cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
         )
         overlay = colors.ListedColormap(["none", "#FF0000"])
         axes[2].imshow(nmask.astype(int), origin="lower", cmap=overlay, alpha=0.35)
@@ -671,20 +693,87 @@ class Plot:
             radius = float(ap_size_fwhm) * float(self.input_yaml["fwhm"])
             scale = self.input_yaml["scale"]
 
-            # Create the figure
+            # Create the figure with WCS axes if available
             plt.ioff()  # Turn interactive mode off
             fig = plt.figure(figsize=set_size(540, 1))
-            ax1 = fig.add_subplot(111)
+            
+            # Try to use WCSAxes for RA/Dec display
+            wcs = None
+            skip_tight_layout = False
+            try:
+                from astropy.wcs import WCS
+                from astropy.io import fits
+                header = fits.getheader(fpath)
+                # Create WCS with fix/relax to handle various distortion parameter types (SIP, TPV, PV)
+                # This prevents issues when headers contain mixed or non-standard WCS keywords
+                wcs = WCS(header, fix=True, relax=True)
+                if wcs.has_celestial:
+                    ax1 = fig.add_subplot(111, projection=wcs)
+                    # Guard: some malformed headers can yield a WCSAxes instance whose
+                    # coordinate helpers are empty; attempting ax1.coords[0] then raises
+                    # "index 0 is out of bounds...". In that case fall back to pixels.
+                    try:
+                        n_coords = len(getattr(ax1, "coords", []))
+                    except Exception:
+                        n_coords = 0
+                    if n_coords < 2:
+                        raise ValueError(
+                            f"WCSAxes has insufficient coords (n={n_coords})"
+                        )
+                    # Configure coordinate axes with minimal overlap
+                    # Main coordinates: RA/Dec on bottom/left
+                    ax1.coords[0].set_ticklabel_position('b')
+                    ax1.coords[0].set_axislabel_position('b')
+                    ax1.coords[0].set_axislabel("RA", fontsize=6, minpad=0.3)
+                    ax1.coords[0].set_major_formatter('hh:mm')
+                    
+                    ax1.coords[1].set_ticklabel_position('l')
+                    ax1.coords[1].set_axislabel_position('l')
+                    ax1.coords[1].set_axislabel("Dec", fontsize=6, minpad=0.3)
+                    ax1.coords[1].set_major_formatter('dd:mm')
+                    
+                    # Hide default frame labels
+                    ax1.set_xlabel("")
+                    ax1.set_ylabel("")
+                    
+                    # Add pixel coordinates on top/right without labels
+                    ax1.coords[0].set_ticks_position('bt')
+                    ax1.coords[1].set_ticks_position('lr')
+                    ax1.coords[0].set_ticklabel_position('b')
+                    ax1.coords[1].set_ticklabel_position('l')
+                    
+                    # Disable coordinate grid
+                    ax1.coords.grid(False)
+                    
+                    # Skip tight_layout for WCS axes (it can fail)
+                    skip_tight_layout = True
+                    
+                    logger.info("Source check plot: using RA/Dec WCS axes")
+                else:
+                    logger.warning("Source check plot: WCS has no celestial component, using pixel axes")
+                    raise ValueError("WCS has no celestial component")
+            except Exception as e:
+                # Fallback to regular axes with pixel coordinates only
+                logger.warning(f"Source check plot: WCS axes failed ({e}), using pixel coordinates only")
+                # Clear the figure to remove any partially-created WCS axes
+                fig.clf()
+                ax1 = fig.add_subplot(111)
+                ax1.set_xlabel("X (pixels)", fontsize=6)
+                ax1.set_ylabel("Y (pixels)", fontsize=6)
+                skip_tight_layout = False
 
             # Normalize and plot the image
             norm = ImageNormalize(
                 image, interval=ZScaleInterval(), stretch=LinearStretch()
             )
+            # Set NaN values to display as white
+            cmap = plt.get_cmap("gray")
+            cmap.set_bad(color='white')
             im = ax1.imshow(
                 image,
                 origin="lower",
                 aspect="auto",
-                cmap="gray",
+                cmap=cmap,
                 interpolation=None,
                 norm=norm,
             )
@@ -759,39 +848,48 @@ class Plot:
                 display_name = f"{name_prefix}{objname}"
             else:
                 display_name = target_name
-            
+
             ax1.text(
                 self.input_yaml["target_x_pix"],
                 self.input_yaml["target_y_pix"] + radius + 2,
                 display_name,
-                color=edge_color,
+                color="#FFD700",
                 fontsize=4,
                 ha="center",
                 va="bottom",
                 fontweight="bold",
             )
 
-            # Plot PSF sources as a clean, consistent marker layer
+            # Plot PSF sources as hexagons with 4*FWHM width
             if psfSources is not None and len(psfSources) > 0:
-                ax1.scatter(
-                    psfSources["x_pix"],
-                    psfSources["y_pix"],
-                    s=get_marker_size('medium'),
-                    marker="+",
-                    linewidths=0.8,
-                    color=get_divergent_color('psf'),
-                    label="PSF sources",
-                    zorder=1,
-                )
+                from matplotlib.patches import RegularPolygon
+                fwhm = float(self.input_yaml.get("fwhm", 5.0))
+                hex_radius = 2.0 * fwhm  # Radius of hexagon = 2*FWHM (width = 4*FWHM)
+                for x, y in zip(psfSources["x_pix"], psfSources["y_pix"]):
+                    if not (np.isfinite(x) and np.isfinite(y)):
+                        continue
+                    hexagon = RegularPolygon(
+                        (x, y),
+                        numVertices=6,
+                        radius=hex_radius,
+                        orientation=np.pi/6,  # Point up
+                        edgecolor=get_divergent_color('psf'),
+                        facecolor="none",
+                        linewidth=0.5,
+                        label="PSF sources" if x == psfSources["x_pix"].iloc[0] else None,
+                        zorder=1,
+                    )
+                    ax1.add_patch(hexagon)
 
             # Plot reference (catalog) sources as squares
             if catalogSources is not None:
+                fwhm = float(self.input_yaml.get("fwhm", 5.0))
+                square_size = 4.0 * fwhm  # Size of the square = 4 * FWHM
                 for x, y in zip(catalogSources["x_pix"], catalogSources["y_pix"]):
                     x = float(x) + marker_dx
                     y = float(y) + marker_dy
                     if not (np.isfinite(x) and np.isfinite(y)):
                         continue
-                    square_size = scale  # Size of the square
                     lower_left = (x - square_size / 2, y - square_size / 2)
                     square = Rectangle(
                         lower_left,
@@ -801,7 +899,7 @@ class Plot:
                         facecolor="none",
                         label="Reference Sources",
                         zorder=1,
-                        lw=0.8,
+                        lw=0.5,
                     )
                     ax1.add_patch(square)
 
@@ -815,7 +913,8 @@ class Plot:
                     norm_fwhm = Normalize(
                         vmin=np.nanmin(fwhm_values), vmax=np.nanmax(fwhm_values)
                     )
-                    cmap = plt.get_cmap("RdBu_r")  # Divergent colormap (blue=low, red=high)
+                    # Perceptually-uniform sequential map for FWHM scaling.
+                    cmap = plt.get_cmap("viridis")
 
                     # Create a ScalarMappable for the colorbar
                     sm = ScalarMappable(norm=norm_fwhm, cmap=cmap)
@@ -864,6 +963,11 @@ class Plot:
                         y = float(y) + marker_dy
                         if not (np.isfinite(x) and np.isfinite(y)):
                             continue
+                        # Skip sources that fall on NaN regions
+                        ix, iy = int(round(x)), int(round(y))
+                        if 0 <= ix < image.shape[1] and 0 <= iy < image.shape[0]:
+                            if np.isnan(image[iy, ix]):
+                                continue
 
                         # Draw "x" as two lines rotated 45 degrees (divergent color for distinct visibility)
                         ax1.plot(
@@ -966,9 +1070,9 @@ class Plot:
             if mask is not None:
                 from matplotlib import colors
 
-                # Orange overlay for masked regions (distinct from target source).
-                mask_cmap = colors.ListedColormap(["none", "#FF9900"])
-                ax1.imshow(mask, cmap=mask_cmap, alpha=0.4, origin="lower")
+                # White overlay for masked regions
+                mask_cmap = colors.ListedColormap(["none", "white"])
+                ax1.imshow(mask, cmap=mask_cmap, alpha=1.0, origin="lower")
 
             # Optional colorbar for distortion grid-map magnitude.
             if distortion_grid_artist is not None:
@@ -1016,7 +1120,8 @@ class Plot:
             )
 
             # Finalize figure layout
-            fig.tight_layout()
+            if not skip_tight_layout:
+                fig.tight_layout()
             ax1.set_aspect("equal", adjustable="box")
 
             # Save figure
@@ -1064,11 +1169,12 @@ class Plot:
         show_details=True,
         default_size=(540, 1),
         ls="",
+        show: bool = False,
     ):
         """
         Plot lightcurve with detections and optional upper limits.
         Detection = SNR >= snr_limit and (beta > beta_limit if 'beta' present).
-        Non-detections are plotted as upper limits at lmag (limiting magnitude) when show_limits=True.
+        Non-detections are plotted as upper limits at limiting_inst_mag (instrumental limiting magnitude) when show_limits=True.
 
         Parameters
         ----------
@@ -1080,7 +1186,8 @@ class Plot:
         import matplotlib.pyplot as plt
         from functions import set_size
 
-        # Color array taken from Superbol by Matt Nicholl
+        # Default color array (legacy). If `lightcurve.BAND_COLORS` is available
+        # it will override known filter colors using `databases/filters.yml`.
         cols = {
             "u": "dodgerblue",
             "g": "g",
@@ -1110,6 +1217,9 @@ class Plot:
             "W": "forestgreen",
             "Q": "peru",
         }
+        palette = cols
+        if isinstance(BAND_COLORS, dict) and BAND_COLORS:
+            palette = {**cols, **BAND_COLORS}
 
         # Maintains order from blue to red effective wavelength
         bandlist = "FSDNAuUBgcVwrRoGEiIzyYJHKWQ"
@@ -1118,6 +1228,42 @@ class Plot:
         marker_iterator = iter(markers)
 
         data = pd.read_csv(output_file)
+        if _normalize_photometry_columns is not None:
+            data = _normalize_photometry_columns(data)
+        if data.columns.duplicated().any():
+            data = data.loc[:, ~data.columns.duplicated()].copy()
+
+        filter_series = (
+            photometry_filter_series(data) if photometry_filter_series else None
+        )
+        uniform_mag = (
+            f"mag_{method_low}" in data.columns
+            and f"mag_{method_low}_err" in data.columns
+        )
+        plotted_uniform_without_filter = False
+        use_filter_bands = (
+            uniform_mag
+            and filter_series is not None
+            and filter_series.notna().any()
+            and canonical_bands_from_filter_series is not None
+        )
+        label_map = {}
+        if (
+            use_filter_bands
+            and canonical_band_label_map_from_filter_series is not None
+            and filter_series is not None
+        ):
+            try:
+                label_map = canonical_band_label_map_from_filter_series(filter_series)
+            except Exception:
+                label_map = {}
+        loop_bands = (
+            canonical_bands_from_filter_series(filter_series)
+            if use_filter_bands
+            else list(bandlist)
+        )
+        if use_filter_bands and not loop_bands:
+            loop_bands = list(bandlist)
 
         if redshift != 0:
             from functions import get_distance_modulus
@@ -1130,45 +1276,111 @@ class Plot:
         ax1 = fig.add_subplot(111)
         ax1.invert_yaxis()
 
+        # Color selection:
+        # - If band is known, use the pipeline palette in `cols`.
+        # - Otherwise, fall back to Matplotlib's default color cycle so unknown
+        #   filters are still distinguishable.
+        _generic_cycle = (
+            plt.rcParams.get("axes.prop_cycle", None).by_key().get("color", [])
+            if plt.rcParams.get("axes.prop_cycle", None) is not None
+            else []
+        )
+        if not _generic_cycle:
+            _generic_cycle = ["k"]
+        _unknown_color_map = {}
+
+        def _color_for_band(band_label: str) -> str:
+            if band_label in palette:
+                return palette[band_label]
+            bl = str(band_label).strip().lower()
+            if bl in palette:
+                return palette[bl]
+            if bl not in _unknown_color_map:
+                _unknown_color_map[bl] = _generic_cycle[
+                    len(_unknown_color_map) % len(_generic_cycle)
+                ]
+            return _unknown_color_map[bl]
+
         num_detect = 0
         num_nondetect = 0
-        for b in bandlist:
+        method_low = str(method).strip().lower()
+        method_u = str(method).strip().upper()
+        for b in loop_bands:
+            # Prefer new uniform columns, then fall back to legacy per-band columns.
             band = b + "_" + method
-            if band not in data.columns:
-                continue
-            err_col = band + "_err"
-            if err_col not in data.columns:
+            if uniform_mag:
+                mag_col = f"mag_{method_low}"
+                err_col = f"mag_{method_low}_err"
+            elif band in data.columns and (band + "_err") in data.columns:
+                mag_col = band
+                err_col = band + "_err"
+            else:
                 continue
 
-            data_band = data[~np.isnan(data[band])].copy()
+            # Long-form CSV: assign rows to this band (gp→g, Sloan_g→g, etc.).
+            if use_filter_bands:
+                mask = filter_series.map(
+                    lambda rv: filter_value_matches_band(b, rv)
+                    if filter_value_matches_band
+                    else str(rv).strip().lower() == str(b).strip().lower()
+                )
+                mask = mask.fillna(False)
+                data_band = data.loc[mask].copy()
+            elif filter_series is not None and filter_series.notna().any():
+                mask = filter_series.map(
+                    lambda rv: filter_value_matches_band(b, rv)
+                    if filter_value_matches_band
+                    else str(rv).strip().lower() == str(b).strip().lower()
+                )
+                mask = mask.fillna(False)
+                data_band = data.loc[mask].copy()
+            elif uniform_mag:
+                if plotted_uniform_without_filter:
+                    continue
+                data_band = data.copy()
+                plotted_uniform_without_filter = True
+            else:
+                data_band = data.copy()
+
+            mag_num = pd.to_numeric(data_band[mag_col], errors="coerce")
+            data_band = data_band[np.isfinite(mag_num)].copy()
             if data_band.empty:
                 continue
 
-            # Resolve SNR: same priority as lightcurve.plot_lightcurve (PSF/AP then generic)
-            if method == "PSF" and "SNR_PSF" in data_band.columns:
-                snr = np.asarray(data_band["SNR_PSF"], dtype=float)
+            col_lc = {str(c).lower(): c for c in data_band.columns}
+
+            # Resolve SNR: match lightcurve-style priority; headers are usually lowercase.
+            if method_u == "PSF" and "snr_psf" in col_lc:
+                snr = np.asarray(data_band[col_lc["snr_psf"]], dtype=float)
             elif (
-                method == "PSF"
-                and "flux_PSF" in data_band.columns
-                and "flux_PSF_err" in data_band.columns
+                method_u == "PSF"
+                and "flux_psf" in col_lc
+                and "flux_psf_err" in col_lc
             ):
-                err_psf = np.asarray(data_band["flux_PSF_err"], dtype=float)
+                err_psf = np.asarray(data_band[col_lc["flux_psf_err"]], dtype=float)
                 snr = np.divide(
-                    data_band["flux_PSF"],
+                    np.asarray(data_band[col_lc["flux_psf"]], dtype=float),
                     err_psf,
                     out=np.full(len(data_band), np.nan),
                     where=(err_psf > 0) & np.isfinite(err_psf),
                 )
-            elif method == "AP" and "SNR_AP" in data_band.columns:
-                snr = np.asarray(data_band["SNR_AP"], dtype=float)
-            elif "snr" in data_band.columns:
-                snr = np.asarray(data_band["snr"], dtype=float)
-            elif "SNR" in data_band.columns:
-                snr = np.asarray(data_band["SNR"], dtype=float)
+            elif method_u == "AP" and "snr_ap" in col_lc:
+                snr = np.asarray(data_band[col_lc["snr_ap"]], dtype=float)
+            elif "snr" in col_lc:
+                snr = np.asarray(data_band[col_lc["snr"]], dtype=float)
+            elif "snr_psf" in col_lc:
+                snr = np.asarray(data_band[col_lc["snr_psf"]], dtype=float)
+            elif "snr_ap" in col_lc:
+                snr = np.asarray(data_band[col_lc["snr_ap"]], dtype=float)
             else:
-                err_vals = np.asarray(data_band[err_col], dtype=float)
+                err_vals = np.asarray(
+                    pd.to_numeric(data_band[err_col], errors="coerce"), dtype=float
+                )
+                mag_vals = np.asarray(
+                    pd.to_numeric(data_band[mag_col], errors="coerce"), dtype=float
+                )
                 snr = np.divide(
-                    data_band[band],
+                    mag_vals,
                     err_vals,
                     out=np.zeros(len(data_band)),
                     where=err_vals > 0,
@@ -1192,23 +1404,33 @@ class Plot:
             marker = next(marker_iterator)
 
             if not detects.empty:
+                x_det = pd.to_numeric(detects["mjd"], errors="coerce") - reference_epoch
+                leg_label = (
+                    label_map.get(str(b).strip().lower(), str(b))
+                    if use_filter_bands
+                    else str(b)
+                )
                 ax1.errorbar(
-                    detects.mjd - reference_epoch,
-                    detects[band],
+                    x_det,
+                    detects[mag_col],
                     yerr=detects[err_col],
-                    c=cols.get(b, "k"),
+                    c=_color_for_band(b),
                     ls="",
                     capsize=2,
                     marker=marker,
-                    label=b,
+                    label=leg_label,
                 )
                 # Optional: draw line connecting detection points
                 if ls:
                     sorted_detects = detects.sort_values("mjd")
+                    x_line = (
+                        pd.to_numeric(sorted_detects["mjd"], errors="coerce")
+                        - reference_epoch
+                    )
                     ax1.plot(
-                        sorted_detects.mjd - reference_epoch,
-                        sorted_detects[band],
-                        color=cols.get(b, "k"),
+                        x_line,
+                        sorted_detects[mag_col],
+                        color=_color_for_band(b),
                         linestyle=ls,
                         linewidth=0.8,
                         alpha=0.6,
@@ -1216,16 +1438,22 @@ class Plot:
                     )
             if show_limits and not nondetects.empty:
                 # Upper limits: plot at limiting magnitude (fainter than this = non-detection)
-                y_lim = (
-                    nondetects["lmag"]
-                    if "lmag" in nondetects.columns
-                    and np.any(np.isfinite(nondetects["lmag"]))
-                    else nondetects[band]
+                if "limiting_inst_mag" in nondetects.columns and np.any(
+                    np.isfinite(nondetects["limiting_inst_mag"])
+                ):
+                    y_lim = nondetects["limiting_inst_mag"]
+                elif "lmag" in nondetects.columns and np.any(np.isfinite(nondetects["lmag"])):
+                    # Backwards compatibility when plotting older output CSVs.
+                    y_lim = nondetects["lmag"]
+                else:
+                    y_lim = nondetects[mag_col]
+                x_nd = (
+                    pd.to_numeric(nondetects["mjd"], errors="coerce") - reference_epoch
                 )
                 ax1.errorbar(
-                    nondetects.mjd - reference_epoch,
+                    x_nd,
                     y_lim,
-                    c=cols.get(b, "k"),
+                    c=_color_for_band(b),
                     ls="",
                     marker="v",
                     markersize=5,
@@ -1280,6 +1508,9 @@ class Plot:
             handletextpad=0.5,
         )
 
-        plt.show()
+        # Only show interactively when requested. In batch mode (Agg backend),
+        # calling show() emits warnings and is not useful.
+        if bool(show):
+            plt.show()
 
         return

@@ -203,15 +203,8 @@ class Zeropoint:
                 }
             return zp_params
         use_filter = self._normalize_filter(use_filter)
-        # Optional aperture correction (AP -> total flux) in magnitudes.
-        # Only applied when apply_aperture_correction is True; otherwise stored for use later.
-        ap_corr_mag = float(self.input_yaml.get("aperture_correction", 0.0) or 0.0)
-        apply_ap = bool((self.input_yaml.get("photometry") or {}).get("apply_aperture_correction", False))
-        ap_scale = (
-            10.0 ** (-0.4 * ap_corr_mag)
-            if (apply_ap and np.isfinite(ap_corr_mag) and ap_corr_mag != 0.0)
-            else 1.0
-        )
+        # Aperture correction is applied at photometry stage (main.py), not here.
+        # The zeropoint is calculated from raw instrumental fluxes/magnitudes.
 
         for flux_type in ["AP", "PSF"]:
             fcol = f"flux_{flux_type}"
@@ -232,9 +225,6 @@ class Zeropoint:
                 continue
 
             flux = np.asarray(catalog[fcol].values, float)
-            if flux_type == "AP" and ap_scale != 1.0:
-                flux = flux * ap_scale
-
             catmag = np.asarray(catalog[use_filter].values, float)
 
             ok = np.isfinite(flux) & (flux > 0) & np.isfinite(catmag)
@@ -467,15 +457,8 @@ class Zeropoint:
         catmag = np.asarray(clean_catalog[use_filter].values, float)
         catmag_err = np.asarray(clean_catalog[f"{use_filter}_err"].values, float)
 
-        # Optional aperture correction (AP -> total flux) in magnitudes; apply only
-        # when apply_aperture_correction is True (otherwise stored for use later).
-        if flux_type == "AP":
-            ap_corr_mag = float(self.input_yaml.get("aperture_correction", 0.0) or 0.0)
-            apply_ap = bool((self.input_yaml.get("photometry") or {}).get("apply_aperture_correction", False))
-            if apply_ap and np.isfinite(ap_corr_mag) and ap_corr_mag != 0.0:
-                ap_scale = 10.0 ** (-0.4 * ap_corr_mag)
-                flux = flux * ap_scale
-                flux_err = flux_err * ap_scale
+        # Aperture correction is applied at photometry stage (main.py), not here.
+        # The zeropoint is calculated from raw instrumental fluxes/magnitudes.
 
         vmask = (
             np.isfinite(flux)
@@ -579,13 +562,13 @@ class Zeropoint:
 
             valid_mags = sources[filter_col].notna()
             n_missing = (~valid_mags).sum()
-            if n_missing:
+            if n_missing > 0:
                 logger.info(f"Removing {n_missing} sources with missing {filter_col}")
 
             too_bright = sources[filter_col] < upperMaglimit
             too_faint = sources[filter_col] > lowerMaglimit
             n_brightness = (too_bright | too_faint).sum()
-            if n_brightness:
+            if n_brightness > 0:
                 logger.info(
                     "Removing %d sources outside magnitude range %.2f-%.2f mag",
                     n_brightness,
@@ -595,7 +578,7 @@ class Zeropoint:
 
             low_snr = sources["threshold"] < threshold_limit
             n_snr = low_snr.sum()
-            if n_snr:
+            if n_snr > 0:
                 logger.info(
                     "Removing %d sources with detection threshold < %.1f",
                     n_snr,
@@ -1295,13 +1278,11 @@ class Zeropoint:
                 # Track global y-range so top markers don't overlap histograms
                 y_max = 0.0
 
-                # Optional: aperture correction (measured elsewhere) for plotting AP-corrected ZP.
+                # Aperture correction is applied at photometry stage (main.py), not during ZP calculation.
+                # The following is for visualization only: show what the ZP would be with aperture correction.
                 ap_corr_mag = float(self.input_yaml.get("aperture_correction", 0.0) or 0.0)
                 ap_corr_err_mag = float(
                     self.input_yaml.get("aperture_correction_err", 0.0) or 0.0
-                )
-                apply_ap_corr = bool(
-                    (self.input_yaml.get("photometry") or {}).get("apply_aperture_correction", False)
                 )
                 ap_zp_raw = np.nan
 
@@ -1514,13 +1495,12 @@ class Zeropoint:
                         pass
 
                     # Optional: also show the aperture-corrected AP zeropoint distribution as
-                    # a separate (step) histogram when an aperture correction was measured
-                    # but not applied to the AP fluxes.
+                    # a separate (step) histogram for visualization when an aperture correction
+                    # was measured.
                     if (
                         flux_type == "AP"
                         and np.isfinite(ap_corr_mag)
                         and ap_corr_mag != 0.0
-                        and not apply_ap_corr
                     ):
                         try:
                             inlier_apcorr = inlier_deltas - float(ap_corr_mag)
@@ -1656,7 +1636,7 @@ class Zeropoint:
                     ax_hist.set_xlim(x_min - pad, x_max + pad)
                 # Add headroom so top markers (y=0.95 axes fraction) sit above distributions.
                 if np.isfinite(y_max) and y_max > 0:
-                    ax_hist.set_ylim(0.0, float(y_max) / 0.95)
+                    ax_hist.set_ylim(0.0, float(y_max) / 0.9)
 
                 ax_hist.set_xlabel("Zeropoint [mag]")
                 ax_hist.set_ylabel("Density")

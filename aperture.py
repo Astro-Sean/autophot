@@ -330,13 +330,27 @@ def _measure_worker(args):
         ap_mask = aperture_masks[i]
         an_mask = annulus_masks[i]
 
-        ap_pix = ap_mask.get_values(image_e)
-        bkg_pix = an_mask.get_values(image_e)
+        def _finite_mask_values(mask_obj, img2d):
+            """
+            Return pixel values under an ApertureMask, excluding padded bounding-box
+            zeros introduced by mask multiplication.
+            """
+            try:
+                cut = mask_obj.multiply(img2d)
+                w = np.asarray(mask_obj.data, dtype=float)
+                vals = np.asarray(cut, dtype=float)[w > 0]
+                return vals
+            except Exception:
+                # Fallback to photutils helper (may include bbox-padding zeros).
+                return mask_obj.get_values(img2d)
+
+        ap_pix = _finite_mask_values(ap_mask, image_e)
+        bkg_pix = _finite_mask_values(an_mask, image_e)
 
         # Optional per-pixel uncertainty (e.g. from Background2D / calc_total_error).
         ap_err_pix = None
         if error is not None:
-            ap_err_pix = ap_mask.get_values(error)
+            ap_err_pix = _finite_mask_values(ap_mask, error)
 
         # Remove NaNs/infs. Do NOT discard exact zeros here: difference images
         # and locally background-subtracted stamps can legitimately contain 0-valued
@@ -808,14 +822,22 @@ class Aperture:
                 "enforce_nonnegative_local_background", True
             )
         )
+        
+        # Configurable annulus radii (in units of FWHM)
+        # gap_fwhm: distance from aperture edge to annulus inner edge
+        # width_fwhm: width of the annulus
+        phot_cfg = self.input_yaml.get("photometry", {})
         if crowded:
-            # Larger annulus to avoid PSF wing contamination (matching PSF background annulus)
-            annulusIN = float(np.ceil(ap_size + 1.0 * fwhm))
-            annulusOUT = float(np.ceil(annulusIN + 2.0 * fwhm))
+            gap_fwhm = float(phot_cfg.get("annulus_gap_fwhm", 0.5))  # Default: 0.5 FWHM from aperture edge
+            width_fwhm = float(phot_cfg.get("annulus_width_fwhm", 1.5))  # Default: 1.5 FWHM width
         else:
-            # Larger annulus to avoid PSF wing contamination (matching PSF background annulus)
-            annulusIN = float(np.ceil(ap_size + 1.5 * fwhm))
-            annulusOUT = float(np.ceil(annulusIN + 3.0 * fwhm))
+            gap_fwhm = float(phot_cfg.get("annulus_gap_fwhm", 0.75))  # Default: 0.75 FWHM from aperture edge
+            width_fwhm = float(phot_cfg.get("annulus_width_fwhm", 2.0))  # Default: 2.0 FWHM width
+        
+        # Calculate annulus radii: inner = aperture + gap, outer = inner + width
+        annulusIN = float(np.ceil(ap_size + gap_fwhm * fwhm))
+        annulusOUT = float(np.ceil(annulusIN + width_fwhm * fwhm))
+        
         area = np.pi * ap_size**2
 
         image_e = self.image * gain
@@ -1073,12 +1095,21 @@ class Aperture:
                 f"Zoom region too small for profile plotting: {zoom_image.shape}"
             )
             norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
+            cmap = plt.get_cmap("viridis").copy()
+            cmap.set_bad(color="white")
+            plot_zero_as_nan = bool(
+                (self.input_yaml.get("plotting") or {}).get("plot_zero_as_nan", True)
+            )
+            zmask = ~np.isfinite(zoom_image)
+            if plot_zero_as_nan:
+                zmask |= (np.asarray(zoom_image, dtype=float) == 0.0)
+            zoom_disp = np.ma.array(zoom_image, mask=zmask)
             # FIX 1: use cutout-local coordinates for simpler alignment
             ax_main.imshow(
-                zoom_image,
+                zoom_disp,
                 origin="lower",
                 norm=norm,
-                cmap="viridis",
+                cmap=cmap,
                 aspect="auto",
             )
             ax_main.set_xlim(0, zoom_image.shape[1])
@@ -1103,13 +1134,22 @@ class Aperture:
             return
 
         norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
+        cmap = plt.get_cmap("viridis").copy()
+        cmap.set_bad(color="white")
+        plot_zero_as_nan = bool(
+            (self.input_yaml.get("plotting") or {}).get("plot_zero_as_nan", True)
+        )
+        zmask = ~np.isfinite(zoom_image)
+        if plot_zero_as_nan:
+            zmask |= (np.asarray(zoom_image, dtype=float) == 0.0)
+        zoom_disp = np.ma.array(zoom_image, mask=zmask)
 
         # FIX 1: render zoom cutout without extent for simpler alignment
         ax_main.imshow(
-            zoom_image,
+            zoom_disp,
             origin="lower",
             norm=norm,
-            cmap="viridis",
+            cmap=cmap,
             aspect="auto",
         )
         ax_main.set_xlim(0, zoom_image.shape[1])
@@ -1125,7 +1165,15 @@ class Aperture:
             (annulusOUT, "#FF0000", "--"),
         ]:
             ax_main.add_patch(
-                Circle((cx_local, cy_local), radius, ec=color, fc="none", lw=0.5, ls=ls)
+                Circle(
+                    (cx_local, cy_local),
+                    radius,
+                    ec=color,
+                    fc="none",
+                    lw=0.6 if color == "#FF0000" else 0.5,
+                    ls=ls,
+                    zorder=5,
+                )
             )
 
         kw = dict(ls=":", color="white", lw=0.5, alpha=0.7)
@@ -1134,17 +1182,30 @@ class Aperture:
         ax_bottom.axvline(cx_local, **kw)
         ax_right.axhline(cy_local, **kw)
 
-        hx = zoom_image.mean(axis=0)
-        hy = zoom_image.mean(axis=1)
-        n_rows, n_cols = zoom_error.shape[0], zoom_error.shape[1]
-        hx_err = np.sqrt(np.nansum(zoom_error**2, axis=0)) / max(n_rows, 1)
-        hy_err = np.sqrt(np.nansum(zoom_error**2, axis=1)) / max(n_cols, 1)
+        # Profiles: NaNs should remain NaNs in the image, but projections should
+        # still be well-defined on finite pixels. Use finite counts per row/col
+        # to compute mean profiles and propagate uncertainty consistently.
+        finite = np.isfinite(zoom_image)
+        hx = np.nanmean(zoom_image, axis=0)
+        hy = np.nanmean(zoom_image, axis=1)
+
+        # Variance of the mean profile: Var(mean) = sum(sigma_i^2) / N^2 for finite pixels.
+        # Use the image finite mask so masked/no-data pixels do not dilute uncertainties.
+        err2 = np.asarray(zoom_error, dtype=float) ** 2
+        err2 = np.where(finite, err2, 0.0)
+        n_col = np.sum(finite, axis=0).astype(float)
+        n_row = np.sum(finite, axis=1).astype(float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            hx_err = np.sqrt(np.sum(err2, axis=0)) / np.where(n_col > 0, n_col, np.nan)
+            hy_err = np.sqrt(np.sum(err2, axis=1)) / np.where(n_row > 0, n_row, np.nan)
 
         # Coordinate arrays in cutout-local coordinates
         x_range = np.arange(0, zoom_image.shape[1])
         y_range = np.arange(0, zoom_image.shape[0])
 
-        kw_step = dict(color="dodgerblue", where="mid", lw=0.5)
+        # Some matplotlib styles set a default marker for lines; explicitly
+        # disable markers so projections remain clean.
+        kw_step = dict(color="dodgerblue", where="mid", lw=0.5, marker=None, markersize=0)
         ax_bottom.step(x_range, hx, **kw_step)
         ax_bottom.fill_between(
             x_range, hx - hx_err, hx + hx_err,
@@ -1177,13 +1238,13 @@ class Aperture:
                     else bkg_level_raw
                 )
                 kw_bkg = dict(color="#FFA500", lw=0.9, ls="--", alpha=0.95)
-                ax_bottom.axhline(bkg_level_used, **kw_bkg)
-                ax_right.axvline(bkg_level_used, **kw_bkg)
+                ax_bottom.axhline(bkg_level_used, **kw_bkg, marker=None)
+                ax_right.axvline(bkg_level_used, **kw_bkg, marker=None)
                 if enforce_nn and np.isfinite(bkg_level_raw) and bkg_level_raw < 0:
                     bias_applied = True
                     kw_bkg_raw = dict(color="#FFA500", lw=0.7, ls=":", alpha=0.8)
-                    ax_bottom.axhline(bkg_level_raw, **kw_bkg_raw)
-                    ax_right.axvline(bkg_level_raw, **kw_bkg_raw)
+                    ax_bottom.axhline(bkg_level_raw, **kw_bkg_raw, marker=None)
+                    ax_right.axvline(bkg_level_raw, **kw_bkg_raw, marker=None)
         except Exception:
             pass
 
@@ -1812,14 +1873,23 @@ class Aperture:
             all_radii = all_radii[np.isfinite(all_radii)]
 
             if len(all_radii) > 0:
-                r_min, r_max = float(np.nanmin(all_radii)), float(np.nanmax(all_radii))
-                r_range = max(r_max - r_min, 0.1)
-                n_bins = min(25, max(8, int(np.ceil(len(all_radii) / 4))))
-                bins = np.linspace(
-                    max(0, r_min - 0.02 * r_range),
-                    min(max_radius, r_max + 0.02 * r_range),
-                    n_bins + 1,
-                )
+                # Freedman–Diaconis rule for bin edges (shared between selected/rejected).
+                # Constrain to [0, max_radius] since radii are in FWHM units here.
+                all_clip = all_radii[(all_radii >= 0.0) & (all_radii <= float(max_radius))]
+                if all_clip.size == 0:
+                    all_clip = all_radii
+                try:
+                    bins = np.histogram_bin_edges(all_clip, bins="fd")
+                except Exception:
+                    # Fallback: simple heuristic that behaves well for small n
+                    n_bins = min(25, max(8, int(np.ceil(len(all_radii) / 4))))
+                    r_min, r_max = float(np.nanmin(all_radii)), float(np.nanmax(all_radii))
+                    r_range = max(r_max - r_min, 0.1)
+                    bins = np.linspace(
+                        max(0, r_min - 0.02 * r_range),
+                        min(max_radius, r_max + 0.02 * r_range),
+                        n_bins + 1,
+                    )
                 if len(per_source) > 0:
                     ax2.hist(
                         per_source,
@@ -1946,9 +2016,11 @@ class Aperture:
         if plot:
             plt.ioff()
             fig, ax = plt.subplots(figsize=set_size(540, aspect=1.2))
-            ax.hist(
-                corrections, bins=15, alpha=0.7, color="steelblue", edgecolor="black"
-            )
+            try:
+                be = np.histogram_bin_edges(corrections, bins="fd")
+            except Exception:
+                be = 15
+            ax.hist(corrections, bins=be, alpha=0.7, color="steelblue", edgecolor="black")
             ax.axvline(
                 correction, color="r", ls="--", label=f"Median: {correction:.3f}"
             )

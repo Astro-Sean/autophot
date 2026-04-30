@@ -25,7 +25,10 @@ from math import ceil
 # ---------------------------------------------------------------------------
 import numpy as np
 import pandas as pd
-import corner
+try:
+    import corner  # type: ignore
+except Exception:  # pragma: no cover
+    corner = None
 import emcee
 from emcee import autocorr
 import matplotlib.pyplot as plt
@@ -1290,6 +1293,41 @@ class PSF:
             epsfstars = extract_stars(ndimage, stars_tbl, size=cutout_shape)
             log.info(f"[robust_extract_stars] Extracted {len(epsfstars)} cutouts")
 
+            # Filter out stars with NaN or masked pixels in the *central* region.
+            # Edge NaNs (common near image boundaries) are acceptable; only reject
+            # if the core PSF region is contaminated.
+            ny_cut, nx_cut = cutout_shape
+            # Core = central 50% of cutout (where PSF flux is concentrated)
+            cy_core = slice(ny_cut // 4, 3 * ny_cut // 4)
+            cx_core = slice(nx_cut // 4, 3 * nx_cut // 4)
+            valid_stars = []
+            valid_indices = []
+            for i, star in enumerate(epsfstars):
+                cutout_data = star.data
+                # Check central region for NaN/masked pixels
+                core_data = cutout_data[cy_core, cx_core]
+                core_bad = ~np.isfinite(core_data)
+                if hasattr(star, 'mask') and star.mask is not None:
+                    core_bad |= star.mask[cy_core, cx_core]
+                # Reject only if >5% of core pixels are bad (avoids edge-only contamination)
+                core_bad_frac = np.sum(core_bad) / core_data.size
+                if core_bad_frac < 0.05:
+                    valid_stars.append(star)
+                    valid_indices.append(i)
+            
+            n_rejected = len(epsfstars) - len(valid_stars)
+            if n_rejected > 0:
+                log.info(
+                    f"[robust_extract_stars] Rejected {n_rejected} cutouts with NaN/masked pixels "
+                    f"in central region ({n_rejected}/{len(epsfstars)})"
+                )
+                epsfstars = EPSFStars(valid_stars)
+                stars_tbl = stars_tbl[valid_indices]
+            
+            if len(epsfstars) == 0:
+                log.error("[robust_extract_stars] No valid cutouts after NaN/mask filtering")
+                return EPSFStars([]), Table()
+
             # Assign per-pixel weights if provided.
             weight_nddata = NDData(weightmap)
             weight_cutouts = extract_stars(weight_nddata, stars_tbl, size=cutout_shape)
@@ -2188,11 +2226,25 @@ class PSF:
                 data_for_plot = data
                 norm = None
 
+            # Render NaNs as white "no data" regions.
+            try:
+                _cmap = plt.get_cmap(cmap).copy() if isinstance(cmap, str) else cmap
+                _cmap = _cmap.copy() if hasattr(_cmap, "copy") else _cmap
+                _cmap.set_bad(color="white")
+            except Exception:
+                _cmap = cmap
+
+            plot_zero_as_nan = bool(
+                (self.input_yaml.get("plotting") or {}).get("plot_zero_as_nan", True)
+            )
+            _mask = ~np.isfinite(data_for_plot)
+            if plot_zero_as_nan:
+                _mask |= (np.asarray(data_for_plot, dtype=float) == 0.0)
             im = ax.imshow(
-                data_for_plot,
+                np.ma.array(data_for_plot, mask=_mask),
                 extent=extent,
                 origin="lower",
-                cmap=cmap,
+                cmap=_cmap,
                 interpolation="none",
                 norm=norm,
                 vmin=None if use_log_scale else vmin,
@@ -2209,8 +2261,9 @@ class PSF:
 
             x_phys = np.arange(nx)
             y_phys = np.arange(ny)
-            hx = data.mean(axis=0)
-            hy = data.mean(axis=1)
+            # Projections should be robust to NaNs in the PSF array.
+            hx = np.nanmean(np.asarray(data, dtype=float), axis=0)
+            hy = np.nanmean(np.asarray(data, dtype=float), axis=1)
 
             ax_B.step(x_phys, hx, color="black", lw=0.5, where="mid")
             ax_R.step(hy, y_phys, color="black", lw=0.5, where="mid")
@@ -2295,18 +2348,24 @@ class PSF:
             xx, yy, x_0=star_shape / 2, y_0=star_shape / 2, flux=1
         )
 
-        all_data = np.concatenate([np.ravel(s) for s in stars] + [psf_model.ravel()])
-        vmin, vmax = ZScaleInterval().get_limits(all_data)
-        norm = ImageNormalize(vmin=vmin, vmax=vmax)
-
+        # Individual normalization per star (not global) for better visibility
+        cmap_vir = plt.get_cmap("viridis").copy()
+        cmap_vir.set_bad(color="white")
         for i in range(num_stars):
             row, col = divmod(i, ncols)
             ax = fig.add_subplot(left_sub[row, col])
+            # Compute zscale limits for this star individually
+            try:
+                vmin_i, vmax_i = ZScaleInterval().get_limits(stars[i])
+                norm_i = ImageNormalize(vmin=vmin_i, vmax=vmax_i)
+            except Exception:
+                # Fallback if zscale fails
+                norm_i = None
             ax.imshow(
-                stars[i],
+                np.ma.array(stars[i], mask=~np.isfinite(stars[i])),
                 origin="lower",
-                cmap="viridis",
-                norm=norm,
+                cmap=cmap_vir,
+                norm=norm_i,
                 interpolation="none",
             )
             ctr = [stars[i].shape[1] / 2, stars[i].shape[0] / 2]
@@ -2350,8 +2409,14 @@ class PSF:
 
         # 2D ePSF image (right side, top of right subgrid)
         ax_right = fig.add_subplot(right_sub[0, 0])
+        cmap_vir = plt.get_cmap("viridis").copy()
+        cmap_vir.set_bad(color="white")
         im = ax_right.imshow(
-            psf_model_plot, origin="lower", cmap="viridis", norm=norm_p, interpolation="none"
+            np.ma.array(psf_model_plot, mask=~np.isfinite(psf_model_plot)),
+            origin="lower",
+            cmap=cmap_vir,
+            norm=norm_p,
+            interpolation="none",
         )
         ax_right.set_title(f"2D ePSF{title_suffix}", fontsize=8, pad=2)
         ax_right.set_xticks([])
@@ -2464,6 +2529,12 @@ class PSF:
         """
         log = logging.getLogger(__name__)
         t0 = time.perf_counter()
+        if sources is None:
+            log.warning("PSF photometry: no sources provided (sources=None); skipping PSF fit.")
+            return sources
+        if len(sources) == 0:
+            log.info(log_step("PSF photometry: 0 sources"))
+            return sources
         log.info(log_step(f"PSF photometry: {len(sources)} sources"))
 
         if epsf_model is None:
@@ -2763,6 +2834,40 @@ class PSF:
             )
 
         orig_idx = np.arange(len(sources)).astype(int)
+        # For the target (single-source) fit, aperture photometry can legitimately fail
+        # (e.g. NaN-heavy difference cutouts, masked annulus, etc.). In that case flux_all
+        # may be NaN even though x/y are valid; do a robust image-based flux bootstrap
+        # so PSF fitting can still proceed and not poison downstream steps with NaNs.
+        if bool(is_target_fit) and len(sources) == 1 and not np.isfinite(flux_all[0]):
+            try:
+                xi = int(np.round(float(x_all[0])))
+                yi = int(np.round(float(y_all[0])))
+                data_e = np.asarray(ndimage.data, dtype=float)
+                if data_e.ndim == 2:
+                    half = int(max(4, np.ceil(1.5 * float(fwhm))))
+                    x0 = max(0, xi - half)
+                    x1 = min(data_e.shape[1], xi + half + 1)
+                    y0 = max(0, yi - half)
+                    y1 = min(data_e.shape[0], yi + half + 1)
+                    patch = data_e[y0:y1, x0:x1]
+                    if patch.size:
+                        bkg = float(np.nanmedian(patch))
+                        # Conservative integrated-flux guess (electrons per frame).
+                        guess = float(np.nansum(np.clip(patch - bkg, 0.0, None)))
+                        if np.isfinite(guess) and guess > 0:
+                            flux_all[0] = guess
+                            log.info(
+                                "Target PSF init: aperture flux missing; bootstrapped "
+                                "flux from %dx%d patch = %.3g e-",
+                                int(patch.shape[1]),
+                                int(patch.shape[0]),
+                                float(guess),
+                            )
+            except Exception as exc:
+                log_warning_from_exception(
+                    log, "Target PSF init: flux bootstrap failed", exc
+                )
+
         valid = np.isfinite(x_all) & np.isfinite(flux_all)
 
         x, y, flux_e_frame = x_all[valid], y_all[valid], flux_all[valid]
@@ -3179,6 +3284,10 @@ class PSF:
         phot_cfg = self.input_yaml.get("photometry", {}) or {}
         crowded_field = bool(phot_cfg.get("crowded_field", False))
 
+        # Use configurable annulus radii (same defaults as aperture.py)
+        gap_fwhm = float(phot_cfg.get("annulus_gap_fwhm", 0.75 if not crowded_field else 0.5))
+        width_fwhm = float(phot_cfg.get("annulus_width_fwhm", 2.0 if not crowded_field else 1.5))
+        
         # Target-only: force PSF local background annulus to match the aperture
         # photometry annulus definition, so AP and PSF subtract the same sky level.
         # (Aperture.measure uses these radii and a median estimator.)
@@ -3187,12 +3296,8 @@ class PSF:
                 ap_size = float(phot_cfg.get("aperture_radius", aperture_radius))
             except Exception:
                 ap_size = float(aperture_radius)
-            if crowded_field:
-                annulusIN = float(np.ceil(ap_size + 1.0 * fwhm))
-                annulusOUT = float(np.ceil(annulusIN + 2.0 * fwhm))
-            else:
-                annulusIN = float(np.ceil(ap_size + 1.5 * fwhm))
-                annulusOUT = float(np.ceil(annulusIN + 3.0 * fwhm))
+            annulusIN = float(np.ceil(ap_size + gap_fwhm * fwhm))
+            annulusOUT = float(np.ceil(annulusIN + width_fwhm * fwhm))
             # Apply to all tiers.
             bright_inner = annulusIN
             bright_outer = annulusOUT
@@ -3207,19 +3312,19 @@ class PSF:
             )
 
         elif crowded_field:
-            bright_inner = aperture_radius + 4.0 * fwhm
-            bright_outer = bright_inner + 2.0 * fwhm
-            faint_inner = aperture_radius + 3.0 * fwhm
-            faint_outer = faint_inner + 2.0 * fwhm
-            vf_inner = aperture_radius + 3.0 * fwhm
-            vf_outer = vf_inner + 2.0 * fwhm
+            bright_inner = aperture_radius + gap_fwhm * fwhm
+            bright_outer = bright_inner + width_fwhm * fwhm
+            faint_inner = aperture_radius + gap_fwhm * fwhm
+            faint_outer = faint_inner + width_fwhm * fwhm
+            vf_inner = aperture_radius + gap_fwhm * fwhm
+            vf_outer = vf_inner + width_fwhm * fwhm
         else:
-            bright_inner = aperture_radius + 6.0 * fwhm
-            bright_outer = aperture_radius + 9.0 * fwhm
-            faint_inner = aperture_radius + 5.0 * fwhm
-            faint_outer = aperture_radius + 8.0 * fwhm
-            vf_inner = aperture_radius + 5.0 * fwhm
-            vf_outer = aperture_radius + 8.0 * fwhm
+            bright_inner = aperture_radius + gap_fwhm * fwhm
+            bright_outer = bright_inner + width_fwhm * fwhm
+            faint_inner = aperture_radius + gap_fwhm * fwhm
+            faint_outer = faint_inner + width_fwhm * fwhm
+            vf_inner = aperture_radius + gap_fwhm * fwhm
+            vf_outer = vf_inner + width_fwhm * fwhm
 
         for mask, inner_r, outer_r, fshape, label in [
             (bright_mask, bright_inner, bright_outer, fit_shape_bright, "bright"),
@@ -3854,10 +3959,12 @@ class PSF:
                 norm1 = ImageNormalize(
                     cutout1, interval=ZScaleInterval(), stretch=LinearStretch()
                 )
+            cmap_vir = plt.get_cmap("viridis").copy()
+            cmap_vir.set_bad(color="white")
             im1 = ax1.imshow(
-                first_image,
+                np.ma.array(first_image, mask=~np.isfinite(first_image)),
                 origin="lower",
-                cmap="viridis",
+                cmap=cmap_vir,
                 norm=norm1,
                 interpolation=None,
             )
@@ -3948,14 +4055,14 @@ class PSF:
                 cut = data[yi0:yi1, xi0:xi1]
                 ax_B.step(
                     np.arange(xi0, xi1),
-                    cut.mean(axis=0),
+                    np.nanmean(np.asarray(cut, dtype=float), axis=0),
                     color=color,
                     lw=0.5,
                     where="mid",
                 )
                 if draw_right:
                     ax_R.step(
-                        cut.mean(axis=1),
+                        np.nanmean(np.asarray(cut, dtype=float), axis=1),
                         np.arange(yi0, yi1),
                         color=color,
                         lw=0.5,
@@ -3984,12 +4091,18 @@ class PSF:
 
             _proj(ax1, ax1_R, ax1_B, first_image, draw_right=False)
 
-            # Error shading on science panel: SE of mean = sqrt(sum(sigma^2))/N (not mean(sigma)).
-            hx = cutout1.mean(axis=0)
-            hy = cutout1.mean(axis=1)
-            n_rows, n_cols = unc_cut.shape[0], unc_cut.shape[1]
-            exh = np.sqrt(np.nansum(unc_cut**2, axis=0)) / max(n_rows, 1)
-            eyh = np.sqrt(np.nansum(unc_cut**2, axis=1)) / max(n_cols, 1)
+            # Error shading on science panel: mean profiles ignoring NaNs and
+            # SE of the mean = sqrt(sum(sigma^2))/N for finite pixels.
+            finite1 = np.isfinite(cutout1)
+            hx = np.nanmean(cutout1, axis=0)
+            hy = np.nanmean(cutout1, axis=1)
+            unc2 = np.asarray(unc_cut, dtype=float) ** 2
+            unc2 = np.where(finite1, unc2, 0.0)
+            n_col = np.sum(finite1, axis=0).astype(float)
+            n_row = np.sum(finite1, axis=1).astype(float)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                exh = np.sqrt(np.sum(unc2, axis=0)) / np.where(n_col > 0, n_col, np.nan)
+                eyh = np.sqrt(np.sum(unc2, axis=1)) / np.where(n_row > 0, n_row, np.nan)
             y_vals = np.arange(y0, y1, dtype=float)
             kw_bottom = dict(
                 facecolor="dodgerblue", edgecolor="none", alpha=0.3, step="mid"
@@ -4029,33 +4142,44 @@ class PSF:
                     norm2 = ImageNormalize(
                         cutout2, interval=ZScaleInterval(), stretch=LinearStretch()
                     )
+                cmap_vir = plt.get_cmap("viridis").copy()
+                cmap_vir.set_bad(color="white")
                 im2 = ax2.imshow(
-                    second_image,
+                    np.ma.array(second_image, mask=~np.isfinite(second_image)),
                     origin="lower",
-                    cmap="viridis",
+                    cmap=cmap_vir,
                     norm=norm2,
                     interpolation=None,
                 )
                 _proj(ax2, ax2_R, ax2_B, second_image, draw_right=False)
 
                 # Error shading on residual panel (same SE of mean as science).
-                hx2 = cutout2.mean(axis=0)
-                hy2 = cutout2.mean(axis=1)
-                ax2_B.fill_between(np.arange(x0, x1), hx2 - exh, hx2 + exh, **kw_bottom)
-                ax2_R.fill_betweenx(y_vals, hy2 - eyh, hy2 + eyh, **kw_right)
+                finite2 = np.isfinite(cutout2)
+                hx2 = np.nanmean(cutout2, axis=0)
+                hy2 = np.nanmean(cutout2, axis=1)
+                # Recompute SE-of-mean using the same uncertainty map but the
+                # residual panel's finite mask (NaN patterns can differ).
+                unc2_2 = np.where(finite2, unc2, 0.0)
+                n_col2 = np.sum(finite2, axis=0).astype(float)
+                n_row2 = np.sum(finite2, axis=1).astype(float)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    exh2 = np.sqrt(np.sum(unc2_2, axis=0)) / np.where(n_col2 > 0, n_col2, np.nan)
+                    eyh2 = np.sqrt(np.sum(unc2_2, axis=1)) / np.where(n_row2 > 0, n_row2, np.nan)
+                ax2_B.fill_between(np.arange(x0, x1), hx2 - exh2, hx2 + exh2, **kw_bottom)
+                ax2_R.fill_betweenx(y_vals, hy2 - eyh2, hy2 + eyh2, **kw_right)
                 _draw_right_step(ax2_R, hy2, y0, y1, color="dodgerblue")
 
                 # Zoom bottom and right panels onto the fit profile (scale to data range).
-                _lo_b = np.nanmin(hx2 - exh)
-                _hi_b = np.nanmax(hx2 + exh)
+                _lo_b = np.nanmin(hx2 - exh2)
+                _hi_b = np.nanmax(hx2 + exh2)
                 _margin_b = (
                     max((_hi_b - _lo_b) * 0.05, 1e-9)
                     if np.isfinite(_hi_b - _lo_b)
                     else 0.1
                 )
                 ax2_B.set_ylim(_lo_b - _margin_b, _hi_b + _margin_b)
-                _lo_r = np.nanmin(hy2 - eyh)
-                _hi_r = np.nanmax(hy2 + eyh)
+                _lo_r = np.nanmin(hy2 - eyh2)
+                _hi_r = np.nanmax(hy2 + eyh2)
                 _margin_r = (
                     max((_hi_r - _lo_r) * 0.05, 1e-9)
                     if np.isfinite(_hi_r - _lo_r)
@@ -4072,10 +4196,12 @@ class PSF:
                 norm3 = ImageNormalize(
                     epsf.data, interval=ZScaleInterval(), stretch=LinearStretch()
                 )
+                cmap_vir = plt.get_cmap("viridis").copy()
+                cmap_vir.set_bad(color="white")
                 im3 = ax3.imshow(
-                    epsf.data,
+                    np.ma.array(epsf.data, mask=~np.isfinite(epsf.data)),
                     origin="lower",
-                    cmap="viridis",
+                    cmap=cmap_vir,
                     norm=norm3,
                     interpolation=None,
                 )
@@ -4238,6 +4364,13 @@ class PSF:
         os.makedirs(writedir, exist_ok=True)
         stem = os.path.splitext(os.path.basename(fpath))[0]
         outpath_png = os.path.join(writedir, f"PSF_MCMC_Corner_{stem}.png")
+
+        if corner is None:
+            log.warning(
+                "Optional dependency 'corner' is not installed; skipping MCMC corner plot. "
+                "Install with `conda install -c conda-forge corner` or `pip install corner`."
+            )
+            return None
 
         fig = corner.corner(
             samples,

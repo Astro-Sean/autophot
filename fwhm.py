@@ -227,7 +227,9 @@ class Find_FWHM:
             zscale = ZScaleInterval()
             norm = ImageNormalize(image, interval=zscale)
             fig, ax = plt.subplots(figsize=set_size(540, aspect=1.3))
-            ax.imshow(image, cmap="viridis", origin="lower", norm=norm)
+            cmap = plt.get_cmap("viridis").copy()
+            cmap.set_bad(color="white")
+            ax.imshow(image, cmap=cmap, origin="lower", norm=norm)
             ax.contour(
                 deblended_map.data,
                 levels=np.unique(deblended_map.data[deblended_map.data > 0]),

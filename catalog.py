@@ -1249,9 +1249,10 @@ class Catalog:
             # --- Filter sources by distance ---
             if "distance" in selectedCatalog:
                 too_far = selectedCatalog["distance"] > max_distance * 60  # arcseconds
-                if too_far.any():
+                n_far = too_far.sum()
+                if n_far > 0:
                     logger.info(
-                        f"Removing {too_far.sum()} sources that are greater than {max_distance:.1f} arcmins from the target"
+                        f"Removing {n_far} sources that are greater than {max_distance:.1f} arcmins from the target"
                     )
                     selectedCatalog = selectedCatalog[~too_far]
 
@@ -1471,9 +1472,10 @@ class Catalog:
                     if usefilter_i in outputCatalog.columns:
                         cutoff_i = magCutoff[i] if i < len(magCutoff) else magCutoff[0]
                         tooFaint |= outputCatalog[usefilter_i].values > cutoff_i
-                if tooFaint.any():
+                n_faint = tooFaint.sum()
+                if n_faint > 0:
                     logger.info(
-                        f"Removing {tooFaint.sum()} sources that are fainter than the cutoff"
+                        f"Removing {n_faint} sources that are fainter than the cutoff"
                     )
                     outputCatalog = outputCatalog.loc[~tooFaint]
 
@@ -1552,8 +1554,18 @@ class Catalog:
                 boxsize = 7
             boxsize = boxsize if boxsize % 2 != 0 else boxsize + 1
             boxsize = max(boxsize, 3)
-            border = boxsize
-            logger.info(f"Boxsize: {boxsize} px (undersampled={undersampled})")
+            # Border must account for aperture photometry annulus (aperture + gap + width)
+            # Use configurable annulus parameters consistent with aperture.py
+            phot_cfg = self.input_yaml.get("photometry", {}) or {}
+            _ap_radius = phot_cfg.get("aperture_radius")
+            ap_radius = float(_ap_radius if _ap_radius is not None else fwhm * 1.7)
+            _gap = phot_cfg.get("annulus_gap_fwhm")
+            gap_fwhm = float(_gap if _gap is not None else 0.75)
+            _width = phot_cfg.get("annulus_width_fwhm")
+            width_fwhm = float(_width if _width is not None else 2.0)
+            annulus_outer = ap_radius + (gap_fwhm + width_fwhm) * fwhm
+            border = max(boxsize, int(np.ceil(annulus_outer)))
+            logger.info(f"Boxsize: {boxsize} px, Border: {border} px (annulus outer={annulus_outer:.1f}, undersampled={undersampled})")
 
             # Filter sources near image borders
             height, width = image.shape
@@ -2899,10 +2911,12 @@ class Catalog:
                 interval = ZScaleInterval()
                 vmin, vmax = interval.get_limits(np.asarray(stars[i]))
                 norm = ImageNormalize(vmin=vmin, vmax=vmax)
+                cmap = plt.get_cmap("viridis").copy()
+                cmap.set_bad(color="white")
                 ax.imshow(
                     stars[i],
                     origin="lower",
-                    cmap="viridis",
+                    cmap=cmap,
                     norm=norm,
                     interpolation="none",
                 )

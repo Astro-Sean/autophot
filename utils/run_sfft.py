@@ -462,6 +462,27 @@ def run_sfft() -> Optional[int]:
     hdr_sci, data_sci = get_fits_info(FITS_SCI)
     hdr_ref, data_ref = get_fits_info(FITS_REF)
 
+    # Synchronize NaN masks between science and reference images
+    # Create a combined NaN mask to ensure both images have NaN in the same locations
+    nan_mask_sci = np.isnan(data_sci)
+    nan_mask_ref = np.isnan(data_ref)
+    combined_nan_mask = nan_mask_sci | nan_mask_ref
+    
+    if np.any(combined_nan_mask):
+        log_info(f"Synchronizing NaN masks: {np.sum(combined_nan_mask)} pixels will be NaN in both images")
+        data_sci[combined_nan_mask] = np.nan
+        data_ref[combined_nan_mask] = np.nan
+        
+        # Write synchronized images back to FITS files for SFFT
+        log_info("Writing synchronized NaN masks to science and reference FITS files")
+        with fits.open(FITS_SCI, mode='update') as hdul:
+            hdul[0].data = data_sci
+            hdul.flush()
+        with fits.open(FITS_REF, mode='update') as hdul:
+            hdul[0].data = data_ref
+            hdul.flush()
+        log_info("FITS files updated with synchronized NaN masks")
+
     def _sanitize_xy_sources(
         xy: Optional[np.ndarray], label: str, width: int, height: int
     ) -> Optional[np.ndarray]:
@@ -1117,6 +1138,40 @@ def run_sfft() -> Optional[int]:
             log_info(f"[{convd}] is convolved in subtraction.")
         except Exception:
             pass
+
+        # ------------------------------------------------------------------
+        # Re-impose NaN mask on output difference image
+        #
+        # Some subtraction / resampling steps can emit exact zeros in regions
+        # where either input image had NaNs (chip gaps / no-data). Those zeros
+        # should remain "invalid" and propagate as NaNs, otherwise downstream
+        # background/SNR/limits can be biased.
+        # ------------------------------------------------------------------
+        try:
+            if np.any(combined_nan_mask) and FITS_DIFF and os.path.isfile(FITS_DIFF):
+                with fits.open(FITS_DIFF, mode="update", memmap=False) as hdul:
+                    diff = np.asarray(hdul[0].data, dtype=float)
+                    if diff.shape == combined_nan_mask.shape:
+                        n_before = int(np.count_nonzero(~np.isfinite(diff)))
+                        diff[combined_nan_mask] = np.nan
+                        hdul[0].data = diff
+                        hdul.flush()
+                        n_after = int(np.count_nonzero(~np.isfinite(diff)))
+                        log_info(
+                            "Applied combined NaN mask to diff: NaN/inf %d -> %d (mask=%d px)",
+                            n_before,
+                            n_after,
+                            int(np.count_nonzero(combined_nan_mask)),
+                        )
+                    else:
+                        log_info(
+                            "Warning: combined_nan_mask shape %s != diff shape %s; "
+                            "cannot reapply NaN mask.",
+                            combined_nan_mask.shape,
+                            diff.shape,
+                        )
+        except Exception as e:
+            log_info(f"Warning: failed to reapply NaN mask to diff: {e}")
 
         t1_sfft = time.time()
         log_info(f"SFFT core elapsed: {t1_sfft - t0_sfft:.3f} s")

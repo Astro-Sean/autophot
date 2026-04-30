@@ -176,7 +176,8 @@ class BackgroundSubtractor:
             lambda x: isinstance(x, (int, float)) and not pd.isna(x) and x > 0
         )
         filtered_galaxies = galaxies[valid]
-        self.logger.info(f"Masking {len(filtered_galaxies)} galaxies from SIMBAD")
+        if len(filtered_galaxies) > 0:
+            self.logger.info(f"Masking {len(filtered_galaxies)} galaxies from SIMBAD")
 
         mask = np.zeros(image.shape, dtype=bool)
         y_grid, x_grid = np.mgrid[0 : image.shape[0], 0 : image.shape[1]]
@@ -215,10 +216,12 @@ class BackgroundSubtractor:
                     f"Error masking galaxy {row.get('MAIN_ID', 'unknown')}: {exc}"
                 )
 
-        self.logger.info(
-            f"Galaxy mask excludes {np.sum(mask)} px "
-            f"({100.0 * np.sum(mask) / image.size:.2f}%)"
-        )
+        n_masked = np.sum(mask)
+        if n_masked > 0:
+            self.logger.info(
+                f"Galaxy mask excludes {n_masked} px "
+                f"({100.0 * n_masked / image.size:.2f}%)"
+            )
         return mask
 
     # -------------------------------------------------------------------------
@@ -580,7 +583,13 @@ class BackgroundSubtractor:
             cn = np.round(c + cos_a * steps).astype(np.int64)
             rn = np.round(r + sin_a * steps).astype(np.int64)
             valid = (rn >= 0) & (rn < ny) & (cn >= 0) & (cn < nx)
-            vals = np.where(valid, image[rn, cn], -np.inf)
+            # Important: np.where evaluates both branches, so we must avoid
+            # indexing `image[rn, cn]` with out-of-bounds indices even if
+            # `valid` would mask them. Clip first, then mask.
+            rn_clip = np.clip(rn, 0, ny - 1)
+            cn_clip = np.clip(cn, 0, nx - 1)
+            vals = image[rn_clip, cn_clip]
+            vals = np.where(valid, vals, -np.inf)
             eligible = valid & (vals >= flux_threshold)
             if not np.any(eligible):
                 break
@@ -1407,8 +1416,14 @@ class BackgroundSubtractor:
                 image, bkg_surface, sub, bkg_rms, self.config["fpath"], mask
             )
 
-        # Defects for downstream: NaN, saturation cores, and saturation streaks/bleed.
-        defects_mask = nan_mask | sat_mask | streak_mask | trail_mask
+        # Defects for downstream:
+        # - NaN/inf (chip gaps / invalid data)
+        # - exact zeros (common "no data" pads after resampling/subtraction)
+        # - saturation cores and extended bleed/streaks/trails
+        #
+        # Treating zeros as defects is important: they are not reliable sky pixels
+        # and can contaminate PSF source selection and background statistics.
+        defects_mask = nan_mask | zero_mask | sat_mask | streak_mask | trail_mask
         return {
             "image": sub,
             "background": bkg_surface,
@@ -1838,12 +1853,14 @@ class BackgroundSubtractor:
 
         for i, (ax, data, title) in enumerate(zip(axes, arrays, titles)):
             vmin, vmax = self._safe_zlimits(data, interval)
-            disp = np.where(np.isfinite(data), data, vmin)
+            # Render NaNs as white "no data" regions.
+            cmap = plt.get_cmap("viridis").copy()
+            cmap.set_bad(color="white")
 
             im = ax.imshow(
-                disp,
+                data,
                 origin="lower",
-                cmap="viridis",
+                cmap=cmap,
                 vmin=vmin,
                 vmax=vmax,
                 interpolation="none",
@@ -1900,12 +1917,14 @@ class BackgroundSubtractor:
 
         for i, (ax, data, title) in enumerate(zip(axes, arrays, titles)):
             vmin, vmax = self._safe_zlimits(data, interval)
-            disp = np.where(np.isfinite(data), data, vmin)
+            # Render NaNs as white "no data" regions.
+            cmap = plt.get_cmap("viridis").copy()
+            cmap.set_bad(color="white")
 
             im = ax.imshow(
-                disp,
+                data,
                 origin="lower",
-                cmap="viridis",
+                cmap=cmap,
                 vmin=vmin,
                 vmax=vmax,
                 interpolation="none",

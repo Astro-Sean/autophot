@@ -34,9 +34,10 @@ DIVERGENT_PALETTE = {
     'negative': '#313695',  # Dark blue for negative deviations
     'neutral': '#FFFFFF',  # White for neutral/center
     'positive': '#B30000',  # Dark red for positive deviations
-    'target': '#59a89c',  # Vermilion for target source
-    'psf': '#009E73',  # Bluish green for PSF sources
-    'reference': '#e02b35',  # Yellow for reference sources
+    # Source-check marker colors (requested: red/green/blue)
+    'target': '#D62728',    # red
+    'psf': '#2CA02C',       # green
+    'reference': '#1F77B4', # blue
     'fwhm_low': '#313695',  # Dark blue for low FWHM
     'fwhm_mid': '#F7F7F7',  # Light gray for mid FWHM
     'fwhm_high': '#B30000',  # Dark red for high FWHM

@@ -40,6 +40,7 @@ requirements:
     - astromatic-source-extractor
     - astroscrappy ==1.2.0
     - ccdproc >=2.0.0
+    - corner
     - emcee ==3.1.6
     - lmfit ==1.3.2
     - matplotlib ==3.10.0

@@ -314,6 +314,16 @@ NNW
 
             # Plot image
             fig, ax = plt.subplots(figsize=figsize)
+            # Render NaNs as white "no data" regions.
+            cmap = plt.get_cmap(cmap).copy() if isinstance(cmap, str) else cmap
+            try:
+                cmap = cmap.copy()
+            except Exception:
+                pass
+            try:
+                cmap.set_bad(color="white")
+            except Exception:
+                pass
             im = ax.imshow(
                 data, cmap=cmap, vmin=vmin, vmax=vmax, origin="lower", **imshow_kwargs
             )
@@ -443,6 +453,28 @@ NNW
             return float(max(bins[min(peak_idx, len(bins) - 2)], pct))
 
     # ----------------------------- SExtractor + PSFEx -----------------------------
+    @staticmethod
+    def _guess_map_weight_path(fits_image: str) -> Optional[str]:
+        """
+        Best-effort MAP_WEIGHT companion for SExtractor alignment.
+
+        The photometry pipeline commonly writes ``<stem>.weight<ext>`` next to the
+        science image. If present, using it in SExtractor improves robustness on
+        mosaics with NaNs / no-coverage bands encoded as zeros.
+        """
+        try:
+            p = Path(str(fits_image))
+            candidates = [
+                p.with_name(p.name + ".weight" + p.suffix),  # e.g. foo.fits -> foo.weight.fits
+                p.with_suffix(".weight.fits"),  # legacy
+            ]
+            for c in candidates:
+                if c.is_file():
+                    return str(c)
+        except Exception:
+            return None
+        return None
+
     def run_sextractor(
         self,
         fits_image: str,
@@ -458,7 +490,10 @@ NNW
         """
         Build a clean catalog using SExtractor, prioritizing extended sources.
         Optimizes the convolution kernel if FWHM is available in the header.
-        Weight maps are not used (weight_path is ignored).
+
+        If ``weight_path`` points to an existing FITS weight map, SExtractor is run with
+        ``WEIGHT_TYPE MAP_WEIGHT`` so invalid pixels can be down-weighted (important for
+        NaN-heavy stacks and SWarp no-coverage bands).
         If crowded is True, uses parameters tuned for crowded fields (tighter deblending,
         smaller background mesh, more deblend levels).
         """
@@ -494,6 +529,12 @@ NNW
                     "CATALOG_TYPE": "FITS_LDAC",
                 }
             )
+
+            # Optional MAP_WEIGHT (0/1 or continuous) for robust detection on masked mosaics.
+            wpath = str(weight_path) if weight_path else ""
+            if wpath and os.path.isfile(wpath):
+                final_config["WEIGHT_TYPE"] = "MAP_WEIGHT"
+                final_config["WEIGHT_IMAGE"] = wpath
 
             if config:
                 final_config.update(config)
@@ -564,7 +605,6 @@ NNW
                 str(final_config["NTHREADS"]),
             ]
 
-            # Weight maps are not used (disabled for alignment/SExtractor)
             subprocess.run(cmd1, check=True, text=True)
 
             tbhdu = 2
@@ -578,22 +618,47 @@ NNW
                     for col, cond in filt.items():
                         if col in catalog.colnames:
                             good &= cond(catalog[col])
-                    # Exclude extended/bad sources: FWHM > ALIGNMENT_MAX_FWHM_PIX (e.g. galaxies, artifacts)
-                    max_fwhm = self.ALIGNMENT_MAX_FWHM_PIX
-                    if "FWHM_IMAGE" in catalog.colnames:
-                        would_keep = good & (catalog["FWHM_IMAGE"] <= max_fwhm)
-                        n_removed = np.sum(good & (catalog["FWHM_IMAGE"] > max_fwhm))
-                        # If excluding would leave 0 sources, keep all (avoid forcing empty catalog)
-                        if np.sum(would_keep) > 0:
-                            good &= catalog["FWHM_IMAGE"] <= max_fwhm
-                            if n_removed > 0:
-                                self.logger.info(
-                                    f"Excluding {n_removed} sources with FWHM > {max_fwhm:.0f} pixels for alignment"
-                                )
-                        elif n_removed > 0:
-                            self.logger.info(
-                                f"All {n_removed} source(s) have FWHM > {max_fwhm:.0f} px; keeping them so alignment can proceed"
+                    # Alignment source selection:
+                    # Default behavior prefers star-like sources by excluding very large FWHM objects.
+                    # For sparse fields, extended sources (galaxies) can be useful alignment anchors.
+                    # Opt-in via YAML:
+                    #   template_subtraction.alignment_use_extended_sources: True
+                    # Optionally override the max-FWHM cutoff:
+                    #   template_subtraction.alignment_max_fwhm_pix: <float>
+                    iy = getattr(self, "input_yaml", None) or {}
+                    ts = iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
+                    use_ext = bool(
+                        isinstance(ts, dict)
+                        and ts.get("alignment_use_extended_sources", False)
+                    )
+                    max_fwhm = float(
+                        ts.get("alignment_max_fwhm_pix", self.ALIGNMENT_MAX_FWHM_PIX)
+                    ) if isinstance(ts, dict) else self.ALIGNMENT_MAX_FWHM_PIX
+                    if not use_ext:
+                        if "FWHM_IMAGE" in catalog.colnames:
+                            would_keep = good & (catalog["FWHM_IMAGE"] <= max_fwhm)
+                            n_removed = np.sum(
+                                good & (catalog["FWHM_IMAGE"] > max_fwhm)
                             )
+                            # If excluding would leave 0 sources, keep all (avoid forcing empty catalog)
+                            if np.sum(would_keep) > 0:
+                                good &= catalog["FWHM_IMAGE"] <= max_fwhm
+                                if n_removed > 0:
+                                    self.logger.info(
+                                        "Alignment SExtractor: excluding %d sources with FWHM > %.0f px",
+                                        int(n_removed),
+                                        float(max_fwhm),
+                                    )
+                            elif n_removed > 0:
+                                self.logger.info(
+                                    "Alignment SExtractor: all %d source(s) have FWHM > %.0f px; keeping them so alignment can proceed",
+                                    int(n_removed),
+                                    float(max_fwhm),
+                                )
+                    else:
+                        self.logger.info(
+                            "Alignment SExtractor: extended sources enabled (keeping large-FWHM objects)."
+                        )
                     cleaned = catalog[good]
                     # cleaned = self.filter_well_defined_positions(cleaned)
                     if "SNR_WIN" in cleaned.colnames:
@@ -784,11 +849,18 @@ NNW
             sextractor_crowded = ts.get(
                 "sextractor_crowded", templates_cfg.get("crowded_field", phot_crowded)
             )
+            sci_w = self._guess_map_weight_path(str(science_image))
+            ref_w = self._guess_map_weight_path(str(reference_image))
+            if sci_w:
+                self.logger.info("Alignment SExtractor: using science MAP_WEIGHT %s", sci_w)
+            if ref_w:
+                self.logger.info("Alignment SExtractor: using reference MAP_WEIGHT %s", ref_w)
+
             sci_sex = self.run_sextractor(
                 str(sci_image_copy),
                 output_dir=str(science_aligned_dir),
                 aperture_radius=sci_aperture_radius,
-                weight_path=None,
+                weight_path=sci_w,
                 PIXEL_SCALE=sci_pix_scale,
                 crowded=sextractor_crowded,
             )
@@ -796,7 +868,7 @@ NNW
                 str(ref_image_copy),
                 output_dir=str(reference_aligned_dir),
                 aperture_radius=ref_aperture_radius,
-                weight_path=None,
+                weight_path=ref_w,
                 PIXEL_SCALE=ref_pix_scale,
                 crowded=sextractor_crowded,
             )
@@ -1439,11 +1511,12 @@ NNW
                 "sextractor_crowded", templates_cfg.get("crowded_field", False)
             )
 
-            def _extract_sources(fits_path, output_dir, aperture_radius):
+            def _extract_sources(fits_path, output_dir, aperture_radius, weight_path=None):
                 return self.run_sextractor(
                     str(fits_path),
                     output_dir=str(output_dir),
                     aperture_radius=aperture_radius,
+                    weight_path=weight_path,
                     crowded=sextractor_crowded,
                 )
 
@@ -1452,12 +1525,21 @@ NNW
             self.logger.info(
                 f"Extracting sources from science image with aperture radius - {sci_aperture_radius:.1f} [px]"
             )
-            sci_sex = _extract_sources(sci_image_copy, science_dir, sci_aperture_radius)
+            sci_w = self._guess_map_weight_path(str(science_image))
+            ref_w = self._guess_map_weight_path(str(reference_image))
+            if sci_w:
+                self.logger.info("AstroAlign SExtractor: using science MAP_WEIGHT %s", sci_w)
+            if ref_w:
+                self.logger.info("AstroAlign SExtractor: using reference MAP_WEIGHT %s", ref_w)
+
+            sci_sex = _extract_sources(
+                sci_image_copy, science_dir, sci_aperture_radius, weight_path=sci_w
+            )
             self.logger.info(
                 f"Extracting sources from reference image with aperture radius - {ref_aperture_radius:.1f} [px]"
             )
             ref_sex = _extract_sources(
-                ref_image_copy, reference_dir, ref_aperture_radius
+                ref_image_copy, reference_dir, ref_aperture_radius, weight_path=ref_w
             )
             fwhm_sci_pix = float(sci_sex.get("fwhm", 2.5))
             fwhm_ref_pix = float(ref_sex.get("fwhm", 2.5))
@@ -1531,7 +1613,8 @@ NNW
 
             def _load_and_clean_image(fits_path):
                 with fits.open(fits_path) as hdul:
-                    img = hdul[0].data.astype(float)
+                    # Keep float32 to avoid doubling memory on full frames.
+                    img = np.asarray(hdul[0].data, dtype=np.float32)
                 img = np.nan_to_num(img, nan=np.nan, posinf=np.nan, neginf=np.nan)
                 return img
 
@@ -1745,6 +1828,34 @@ NNW
         # --- Prepare input_images ---
         if isinstance(input_images, str):
             input_images = [input_images]
+        input_images = [str(p) for p in input_images]
+
+        # ------------------------------------------------------------------
+        # Preserve NaNs through SWarp resampling via weight maps.
+        #
+        # SWarp does not reliably propagate NaNs in resampling kernels; the
+        # supported mechanism for "no data" is a weight map (0 = invalid).
+        # We therefore generate a simple MAP_WEIGHT image for each input:
+        #   weight = 1 where finite, 0 where NaN/Inf.
+        # With BLANK_BADPIXELS=Y and FILL_VALUE=NAN, SWarp will blank regions
+        # with zero weight in the resampled products as NaN instead of 0.
+        # ------------------------------------------------------------------
+        weight_images: List[str] = []
+        for img_path in input_images:
+            try:
+                with fits.open(img_path, memmap=False) as hdul:
+                    data = np.asarray(hdul[0].data, dtype=float)
+                w = np.isfinite(data).astype(np.float32)
+                w_path = str(output_dir / (Path(img_path).stem + ".weight.fits"))
+                fits.writeto(w_path, w, overwrite=True)
+                weight_images.append(w_path)
+            except Exception as e:
+                # If weight generation fails, proceed without weights (legacy behaviour)
+                log_warning_from_exception(
+                    self.logger, f"Could not build SWarp weight map for {img_path}", e
+                )
+                weight_images = []
+                break
 
         # --- Prepare output paths ---
         xml_file = str(output_dir / "swarp.xml")
@@ -1778,6 +1889,17 @@ NNW
             "-NTHREADS",
             str(final_config["NTHREADS"]),
         ]
+
+        # Enable weight-map propagation to preserve NaN/no-data regions.
+        if weight_images:
+            cmd.extend(
+                [
+                    "-WEIGHT_TYPE",
+                    "MAP_WEIGHT",
+                    "-WEIGHT_IMAGE",
+                    ",".join(weight_images),
+                ]
+            )
 
         # # --- Add HEAD_PATH to SWarp command if specified ---
         # if head_path:
@@ -1872,6 +1994,80 @@ NNW
                 )
             _cleanup_swarp_outputs()
             return None
+
+        # ------------------------------------------------------------------
+        # Re-impose NaNs on uncovered regions using SWarp weights.
+        #
+        # Some SWarp builds still emit exact 0.0 in no-data regions even when
+        # BLANK_BADPIXELS=Y and FILL_VALUE=NAN. The robust indicator of coverage
+        # is the corresponding weight map: weight <= 0 (or non-finite) means the
+        # output pixel has no valid contributing input data.
+        # ------------------------------------------------------------------
+        def _apply_weight_nan_mask(resamp_fits: Path, weight_fits: Path) -> None:
+            try:
+                if not resamp_fits.is_file() or not weight_fits.is_file():
+                    return
+                with fits.open(resamp_fits, mode="update", memmap=False) as hdul_img:
+                    img = np.asarray(hdul_img[0].data, dtype=float)
+                    if img.ndim != 2:
+                        return
+                    with fits.open(weight_fits, mode="readonly", memmap=False) as hdul_w:
+                        w = np.asarray(hdul_w[0].data, dtype=float)
+                    if w.shape != img.shape:
+                        return
+                    bad = (~np.isfinite(w)) | (w <= 0)
+                    if not np.any(bad):
+                        return
+                    n_before = int(np.count_nonzero(~np.isfinite(img)))
+                    img[bad] = np.nan
+                    hdul_img[0].data = img.astype(np.float32, copy=False)
+                    hdul_img.flush()
+                    n_after = int(np.count_nonzero(~np.isfinite(img)))
+                    if self.verbose_level >= 2:
+                        self.logger.debug(
+                            "SWarp NaN re-mask: %s using %s (NaN/inf %d -> %d; bad=%d)",
+                            str(resamp_fits),
+                            str(weight_fits),
+                            n_before,
+                            n_after,
+                            int(np.count_nonzero(bad)),
+                        )
+            except Exception as e:
+                log_warning_from_exception(
+                    self.logger,
+                    f"Could not re-mask no-data pixels in {resamp_fits.name}",
+                    e,
+                )
+
+        try:
+            resamp_files = list(Path(resample_dir).glob("*.resamp.fits"))
+            # Find per-resampled weight files if present; else fall back to SWarp WEIGHTOUT_NAME.
+            fallback_weight = Path(output_weights)
+            for rf in resamp_files:
+                # Common SWarp naming conventions:
+                #   image.resamp.fits -> image.resamp.weight.fits
+                #   image.resamp.fits -> image.weight.fits
+                candidates = [
+                    rf.with_name(rf.name.replace(".resamp.fits", ".resamp.weight.fits")),
+                    rf.with_name(rf.name.replace(".resamp.fits", ".weight.fits")),
+                ]
+                # Also allow any weight file sharing the same stem prefix.
+                try:
+                    candidates += list(rf.parent.glob(rf.stem + "*.weight*.fits"))
+                except Exception:
+                    pass
+
+                picked = None
+                for c in candidates:
+                    if c.is_file():
+                        picked = c
+                        break
+                if picked is None and fallback_weight.is_file():
+                    picked = fallback_weight
+                if picked is not None:
+                    _apply_weight_nan_mask(rf, picked)
+        except Exception:
+            pass
 
         return {
             "output_dir": str(output_dir),
@@ -2179,9 +2375,18 @@ NNW
             zscale_ref = ZScaleInterval()
             vmin_sci, vmax_sci = zscale_sci.get_limits(sci_data)
             vmin_ref, vmax_ref = zscale_ref.get_limits(ref_data)
+            cmap_img = plt.get_cmap(cmap).copy() if isinstance(cmap, str) else cmap
+            try:
+                cmap_img = cmap_img.copy()
+            except Exception:
+                pass
+            try:
+                cmap_img.set_bad(color="white")
+            except Exception:
+                pass
             im1 = ax1.imshow(
                 sci_data,
-                cmap=cmap,
+                cmap=cmap_img,
                 vmin=vmin_sci,
                 vmax=vmax_sci,
                 **imshow_kwargs,
@@ -2195,7 +2400,7 @@ NNW
             ax1.set_ylabel("Y [Pixel]")
             im2 = ax2.imshow(
                 ref_data,
-                cmap=cmap,
+                cmap=cmap_img,
                 vmin=vmin_ref,
                 vmax=vmax_ref,
                 **imshow_kwargs,

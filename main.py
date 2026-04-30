@@ -882,7 +882,9 @@ def run_photometry():
         image, header = get_image_and_header(fpath)
 
         if np.issubdtype(image.dtype, np.integer):
-            image = image.astype(float)
+            # Promote to float32 early so NaNs can be represented without
+            # doubling memory (float64) for full-frame images.
+            image = image.astype(np.float32)
             safe_fits_write(fpath, image, header)
 
         #  Extract Instrument, Telescope, and Filter metadata
@@ -1060,62 +1062,6 @@ def run_photometry():
         #     safe_fits_write(fpath, image, header)
         #     gain = 1
         #     logging.warning("Gain reset to 1 after application.")
-
-        #  Trim NaN Boundaries (BEFORE WCS check so WCS is correct)
-        # Automatically removes large NaN regions at image edges while keeping target
-        trim_nan_edges = input_yaml["preprocessing"].get("trim_nan_edges", True)
-        if trim_nan_edges:
-            try:
-                # Get target pixel coordinates to ensure target stays in image
-                target_x, target_y = None, None
-                if "target_ra" in input_yaml and "target_dec" in input_yaml:
-                    try:
-                        wcs = get_wcs(header, silent=True)
-                        if wcs is not None and wcs.has_celestial:
-                            target_x, target_y = wcs.all_world2pix(
-                                float(input_yaml["target_ra"]),
-                                float(input_yaml["target_dec"]),
-                                0
-                            )
-                            target_x, target_y = float(target_x), float(target_y)
-                            logging.info(
-                                f"Target position for NaN trimming: ({target_x:.1f}, {target_y:.1f})"
-                            )
-                    except Exception as wcs_exc:
-                        logging.warning(f"Could not get target pixel coords for trimming: {wcs_exc}")
-                
-                buffer = input_yaml["preprocessing"].get("nan_trim_buffer", 10)
-                image, header, trim_info = _trim_nan_boundaries(
-                    image, header, target_x=target_x, target_y=target_y, buffer_pixels=buffer
-                )
-                if trim_info["trimmed"]:
-                    logging.info(
-                        f"Trimmed NaN boundaries: {trim_info['original_shape']} -> {trim_info['trimmed_shape']}"
-                    )
-                    safe_fits_write(fpath, image, header)
-                    
-                    # Refresh WCS and recalculate target pixel coordinates
-                    # The header WCS has changed (CRPIX updated), so target coords must be refreshed
-                    try:
-                        new_wcs = _safe_wcs_from_header(header, silent=True)
-                        if new_wcs is not None and "target_ra" in input_yaml and "target_dec" in input_yaml:
-                            new_target_x, new_target_y = new_wcs.all_world2pix(
-                                float(input_yaml["target_ra"]),
-                                float(input_yaml["target_dec"]),
-                                0
-                            )
-                            input_yaml["target_x_pix"] = float(new_target_x)
-                            input_yaml["target_y_pix"] = float(new_target_y)
-                            logging.info(
-                                f"Target pixel coordinates updated after trimming: "
-                                f"({new_target_x:.1f}, {new_target_y:.1f})"
-                            )
-                        elif new_wcs is None:
-                            logging.warning("WCS not available after trimming; cannot refresh target coordinates")
-                    except Exception as wcs_refresh_exc:
-                        logging.warning(f"Could not refresh target coordinates after trimming: {wcs_refresh_exc}")
-            except Exception as trim_exc:
-                logging.warning(f"NaN boundary trimming failed: {trim_exc}")
 
         #  Keep NaN values as NaN - chip gaps handled by background estimator
         #  which properly ignores NaN regions during background modeling
@@ -1577,6 +1523,83 @@ def run_photometry():
         # =============================================================================
         logging.info(border_msg("Image preprocessing"))
 
+        # -------------------------------------------------------------------------
+        # Trim NaN boundaries (chip gaps / no-coverage edges)
+        # -------------------------------------------------------------------------
+        trim_nan_edges = input_yaml["preprocessing"].get("trim_nan_edges", True)
+        if trim_nan_edges:
+            try:
+                # Get target pixel coordinates to ensure target stays in image.
+                target_x, target_y = None, None
+                if "target_ra" in input_yaml and "target_dec" in input_yaml:
+                    try:
+                        wcs = get_wcs(header, silent=True)
+                        if wcs is not None and wcs.has_celestial:
+                            target_x, target_y = wcs.all_world2pix(
+                                float(input_yaml["target_ra"]),
+                                float(input_yaml["target_dec"]),
+                                0,
+                            )
+                            target_x, target_y = float(target_x), float(target_y)
+                            logging.info(
+                                "Target position for NaN trimming: (%.1f, %.1f)",
+                                target_x,
+                                target_y,
+                            )
+                    except Exception as wcs_exc:
+                        logging.warning(
+                            "Could not get target pixel coords for NaN trimming: %s",
+                            wcs_exc,
+                        )
+
+                buffer = input_yaml["preprocessing"].get("nan_trim_buffer", 10)
+                image, header, trim_info = _trim_nan_boundaries(
+                    image,
+                    header,
+                    target_x=target_x,
+                    target_y=target_y,
+                    buffer_pixels=buffer,
+                )
+                if trim_info.get("trimmed", False):
+                    logging.info(
+                        "Trimmed NaN boundaries: %s -> %s",
+                        trim_info.get("original_shape"),
+                        trim_info.get("trimmed_shape"),
+                    )
+                    safe_fits_write(fpath, image, header)
+
+                    # Refresh WCS and recalculate target pixel coordinates.
+                    try:
+                        new_wcs = _safe_wcs_from_header(header, silent=True)
+                        if (
+                            new_wcs is not None
+                            and "target_ra" in input_yaml
+                            and "target_dec" in input_yaml
+                        ):
+                            new_target_x, new_target_y = new_wcs.all_world2pix(
+                                float(input_yaml["target_ra"]),
+                                float(input_yaml["target_dec"]),
+                                0,
+                            )
+                            input_yaml["target_x_pix"] = float(new_target_x)
+                            input_yaml["target_y_pix"] = float(new_target_y)
+                            logging.info(
+                                "Target pixel coordinates refreshed after trimming: (%.1f, %.1f)",
+                                float(new_target_x),
+                                float(new_target_y),
+                            )
+                        elif new_wcs is None:
+                            logging.warning(
+                                "WCS not available after trimming; cannot refresh target coordinates"
+                            )
+                    except Exception as wcs_refresh_exc:
+                        logging.warning(
+                            "Could not refresh target coordinates after trimming: %s",
+                            wcs_refresh_exc,
+                        )
+            except Exception as trim_exc:
+                logging.warning("NaN boundary trimming failed: %s", trim_exc)
+
         #  Image Trimming
         # Trims the image to a specified size centered on the target.
         trim_image = input_yaml["preprocessing"].get("trim_image", 0)
@@ -1925,27 +1948,27 @@ def run_photometry():
             input_yaml["cosmic_rays"].get("remove_cmrays", False)
             and not already_cleaned
         ):
-            if telescope == "PS1":
-                pass
-            else:
-                logging.info(
-                    log_step(
-                        f"Remove cosmic rays / streaks: {base_filename}"
-                    )
+            # if telescope == "PS1":
+            #     pass
+            # else:
+            logging.info(
+                log_step(
+                    f"Remove cosmic rays / streaks: {base_filename}"
                 )
-                use_lacosmic = input_yaml["cosmic_rays"].get("use_lacosmic", False)
-                image, cosmic_rays_mask = RemoveCosmicRays(
-                    input_yaml=input_yaml,
-                    fpath=fpath,
-                    image=image,
-                    header=header,
-                    use_lacosmic=use_lacosmic,
-                ).remove(
-                    bkg=background_surface,
-                    bkg_rms=background_rms,
-                    gain=gain,
-                    psf_fwhm=ImageFWHM,
-                )
+            )
+            use_lacosmic = input_yaml["cosmic_rays"].get("use_lacosmic", False)
+            image, cosmic_rays_mask = RemoveCosmicRays(
+                input_yaml=input_yaml,
+                fpath=fpath,
+                image=image,
+                header=header,
+                use_lacosmic=use_lacosmic,
+            ).remove(
+                bkg=background_surface,
+                bkg_rms=background_rms,
+                gain=gain,
+                psf_fwhm=ImageFWHM,
+            )
 
         # =============================================================================
         #          Check for Existing WCS
@@ -1960,6 +1983,8 @@ def run_photometry():
         try:
             with SuppressStdout():
                 WCSvalues_old = get_wcs(header)
+            if WCSvalues_old is None:
+                raise ValueError("get_wcs returned None (missing required WCS keywords)")
             existingWCS = True
             logging.info("Pre-existing WCS found in header")
         except Exception as e:
@@ -2025,13 +2050,46 @@ def run_photometry():
                 break  # Exits after one successful attempt.
         # Use current header (solved or original) for rest of pipeline
         imageWCS = get_wcs(header)
+        if imageWCS is None and updated_header is not None:
+            # Try the solved header object if present.
+            try:
+                imageWCS = get_wcs(updated_header)
+                if imageWCS is not None and apply_solved_to_fits:
+                    header = updated_header
+                    safe_fits_write(fpath, image, header)
+                    logging.info(
+                        "Recovered usable WCS from solved header and wrote it to FITS."
+                    )
+            except Exception:
+                imageWCS = None
 
         # Gets the pixel scale in arcseconds.
         if imageWCS is None:
-            logging.error("Failed to create WCS from header after solve. Cannot compute pixel scale.")
-            raise Exception("WCS is None after solve - cannot compute pixel scale")
-        xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
-        pixel_scale = xy_pixel_scales[0] * 3600
+            # Graceful fallback: allow pipeline to continue with a configured pixel scale.
+            fallback = input_yaml.get("pixel_scale", None)
+            if fallback is None:
+                fallback = (input_yaml.get("wcs", {}) or {}).get(
+                    "pixel_scale_arcsec", None
+                )
+            try:
+                pixel_scale = float(fallback) if fallback is not None else float("nan")
+            except Exception:
+                pixel_scale = float("nan")
+            if not np.isfinite(pixel_scale) or pixel_scale <= 0:
+                logging.error(
+                    "Failed to create WCS from header after solve and no valid fallback "
+                    "pixel_scale is configured. Missing keywords likely include CRPIX/CRVAL."
+                )
+                raise Exception("WCS is None after solve - cannot compute pixel scale")
+            logging.warning(
+                "WCS unavailable after solve (missing CRPIX/CRVAL etc). "
+                "Falling back to configured pixel_scale=%.6g arcsec/px; "
+                "WCS-dependent features may be degraded.",
+                pixel_scale,
+            )
+        else:
+            xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
+            pixel_scale = float(xy_pixel_scales[0] * 3600.0)
 
         # Sets the range for which the PSF model can move around.
         input_yaml["dx"] = np.ceil(ImageFWHM)
@@ -2199,9 +2257,11 @@ def run_photometry():
 
         # Cache background results for potential reuse after template subtraction
         fpath_before_subtraction = fpath
-        background_surface_cached = background_surface.copy()
-        background_rms_cached = background_rms.copy()
-        defects_mask_cached = defects_mask.copy()
+        # These arrays can be full-frame (many MB). Keep a single shared copy
+        # and avoid duplicating them unless we truly need to mutate them.
+        background_surface_cached = background_surface
+        background_rms_cached = background_rms
+        defects_mask_cached = defects_mask
 
         # Subtracts the background surface from the image.
         # Background subtraction in-place; free the surface immediately after use.
@@ -2520,9 +2580,9 @@ def run_photometry():
 
         # Reuse cached background results if fpath hasn't changed
         if fpath == fpath_before_subtraction:
-            background_surface = background_surface_cached.copy()
-            background_rms = background_rms_cached.copy()
-            defects_mask = defects_mask_cached.copy()
+            background_surface = background_surface_cached
+            background_rms = background_rms_cached
+            defects_mask = defects_mask_cached
             logging.info("Reusing cached background results (fpath unchanged)")
         else:
             result = bg_remover.remove(
@@ -2616,6 +2676,40 @@ def run_photometry():
                         f"All catalog sources removed by border filter (border={border}, image={width}x{height})"
                     )
                     CatalogSources = None
+                else:
+                    # De-duplicate catalog entries. Some catalogs can contain repeated
+                    # sources (overlapping tiles / duplicate IDs) which can look like
+                    # rows were "appended" downstream even when they were not.
+                    n_pre_dedup = len(CatalogSources)
+                    try:
+                        if {"RA", "DEC"}.issubset(CatalogSources.columns):
+                            CatalogSources = (
+                                CatalogSources.sort_values(["RA", "DEC"])
+                                .drop_duplicates(subset=["RA", "DEC"], keep="first")
+                                .reset_index(drop=True)
+                            )
+                        else:
+                            # Pixel-space fallback: bucket by ~0.05 px to remove near-identical
+                            # duplicates without merging distinct close pairs.
+                            _rx = np.round(CatalogSources["x_pix"].to_numpy(dtype=float), 2)
+                            _ry = np.round(CatalogSources["y_pix"].to_numpy(dtype=float), 2)
+                            CatalogSources = (
+                                CatalogSources.assign(_rx=_rx, _ry=_ry)
+                                .sort_values(["_rx", "_ry"])
+                                .drop_duplicates(subset=["_rx", "_ry"], keep="first")
+                                .drop(columns=["_rx", "_ry"])
+                                .reset_index(drop=True)
+                            )
+                    except Exception:
+                        pass
+                    n_post_dedup = len(CatalogSources)
+                    if n_post_dedup < n_pre_dedup:
+                        logging.info(
+                            "Catalog de-duplication: dropped %d duplicate entries (%d -> %d).",
+                            int(n_pre_dedup - n_post_dedup),
+                            int(n_pre_dedup),
+                            int(n_post_dedup),
+                        )
 
         # =============================================================================
         # Run source detection on final calibrated image
@@ -3251,17 +3345,22 @@ def run_photometry():
                 do_aperture_ONLY = True
                 PSFSources = None
             else:
-                CatalogSources = PSF(
-                    image=image,
-                    input_yaml=input_yaml,
-                ).fit(
-                    epsf_model=epsf_model,
-                    sources=CatalogSources,
-                    plotTarget=False,
-                    ignore_sources=variable_sources,
-                    background_rms=background_rms,
-                    iterative=False,
-                )
+                if CatalogSources is None or len(CatalogSources) == 0:
+                    logging.warning(
+                        "Skipping PSF photometry on catalog sources: no catalog sources available."
+                    )
+                else:
+                    CatalogSources = PSF(
+                        image=image,
+                        input_yaml=input_yaml,
+                    ).fit(
+                        epsf_model=epsf_model,
+                        sources=CatalogSources,
+                        plotTarget=False,
+                        ignore_sources=variable_sources,
+                        background_rms=background_rms,
+                        iterative=False,
+                    )
 
         # =============================================================================
         # Zeropoint Calculation
@@ -4338,6 +4437,9 @@ def run_photometry():
                 result = bg_remover.remove(image, plot=False, fwhm=ImageFWHM)
                 background_surface = result["background"]
                 background_rms = result["background_rms"]
+                # Default behaviour: keep background subtraction enabled even
+                # after template subtraction (difference image).
+                # image = np.asarray(image, dtype=float) - np.asarray(background_surface, dtype=float)
 
         # Gets the header of the image.
         header = get_header(fpath)
@@ -5016,14 +5118,15 @@ def run_photometry():
                 masked_sources=variable_sources,
             )
 
-        # FWHM: from PSF fitting when PSF was run (fwhm used to build ePSF), else from Gaussian fit to target.
-        if (
-            not do_aperture_ONLY
-            and "fwhm_psf" in TargetPosition.columns
-            and np.isfinite(TargetPosition["fwhm_psf"].iloc[0])
-        ):
-            target_fwhm = float(TargetPosition["fwhm_psf"].iloc[0])
-        else:
+        # Target FWHM should reflect the *measured target* width on this frame,
+        # not the global image FWHM or the PSF model FWHM used to build the ePSF.
+        #
+        # `TargetPosition["fwhm_psf"]` is typically the PSF-model FWHM (often == ImageFWHM),
+        # so we keep that separately in the output as `fwhm_psf` and prefer a direct
+        # Gaussian-on-target measurement for `target_fwhm`.
+        target_fwhm = np.nan
+        target_fwhm_gauss = np.nan
+        try:
             # Maximum allowed offset (pixels) for the target Gaussian centroid.
             # `Find_FWHM.fit_gaussian` caps dx/dy to 3 px internally for stability.
             max_radius_pix = 3.0
@@ -5035,7 +5138,40 @@ def run_photometry():
                 dy=max_radius_pix,
                 sigma=ImageFWHM / 2.335,
             )
-            target_fwhm = gaussian_fits["fwhmx"]
+            target_fwhm_gauss = float(gaussian_fits.get("fwhmx", np.nan))
+        except Exception:
+            target_fwhm_gauss = np.nan
+
+        if np.isfinite(target_fwhm_gauss) and target_fwhm_gauss > 0:
+            target_fwhm = float(target_fwhm_gauss)
+        elif (
+            (not do_aperture_ONLY)
+            and "fwhm_psf" in TargetPosition.columns
+            and np.isfinite(TargetPosition["fwhm_psf"].iloc[0])
+        ):
+            # Fallback only if Gaussian fit failed.
+            target_fwhm = float(TargetPosition["fwhm_psf"].iloc[0])
+        else:
+            target_fwhm = float(ImageFWHM) if np.isfinite(ImageFWHM) else np.nan
+
+        # If the target PSF S/N is very low, any target-width estimate is
+        # effectively unconstrained and can be misleading. In that case, do not
+        # report a target FWHM.
+        try:
+            target_snr_psf = np.nan
+            if (
+                (not do_aperture_ONLY)
+                and "flux_PSF" in TargetPosition.columns
+                and "flux_PSF_err" in TargetPosition.columns
+            ):
+                _f = float(TargetPosition["flux_PSF"].iloc[0])
+                _fe = float(TargetPosition["flux_PSF_err"].iloc[0])
+                if np.isfinite(_fe) and _fe > 0:
+                    target_snr_psf = float(np.abs(_f) / _fe)
+            if np.isfinite(target_snr_psf) and target_snr_psf < 3.0:
+                target_fwhm = np.nan
+        except Exception:
+            pass
 
         #  Position Offset Analysis
         # Analyzes the position offset of the target.
@@ -5448,6 +5584,48 @@ def run_photometry():
                             float(TargetPosition.at[idx, "y_fit"]),
                         )
                         lim_rms = background_rms
+                        # Limiting-magnitude injection uses the same image used for target
+                        # measurement by default (including any local DC bias/lift applied by
+                        # background.remove_local_surface in shifted-mean mode).
+                        #
+                        # Optional expert toggle: revert that lift for injection/recovery to
+                        # measure depth on the raw (unshifted) image scale.
+                        image_for_limits = image
+                        try:
+                            lim_cfg_local = input_yaml.get("limiting_magnitude") or {}
+                            revert_lift = bool(lim_cfg_local.get("revert_target_dc_bias_for_injection", False))
+                        except Exception:
+                            revert_lift = False
+                        if revert_lift:
+                            try:
+                                if (
+                                    "local_cutout_nonneg_lift" in locals()
+                                    and "local_cutout_box" in locals()
+                                    and np.isfinite(local_cutout_nonneg_lift)
+                                    and float(local_cutout_nonneg_lift) != 0.0
+                                    and isinstance(local_cutout_box, (tuple, list))
+                                    and len(local_cutout_box) == 4
+                                ):
+                                    y0b, y1b, x0b, x1b = [int(v) for v in local_cutout_box]
+                                    if (
+                                        0 <= y0b < y1b <= image.shape[0]
+                                        and 0 <= x0b < x1b <= image.shape[1]
+                                    ):
+                                        # Avoid promoting the full frame to float64; float32
+                                        # is sufficient and halves memory.
+                                        image_for_limits = np.asarray(image, dtype=np.float32).copy()
+                                        image_for_limits[y0b:y1b, x0b:x1b] = (
+                                            image_for_limits[y0b:y1b, x0b:x1b]
+                                            - float(local_cutout_nonneg_lift)
+                                        )
+                                        logging.info(
+                                            "Limiting magnitude: reverted local target DC bias (+%.6g) for injection box %s "
+                                            "(limiting_magnitude.revert_target_dc_bias_for_injection=True).",
+                                            float(local_cutout_nonneg_lift),
+                                            str(local_cutout_box),
+                                        )
+                            except Exception:
+                                image_for_limits = image
 
                         # Consistent with target photometry (see recovery_method auto above):
                         # allow negative annulus medians (do not floor to 0) during
@@ -5463,7 +5641,7 @@ def run_photometry():
                                 input_yaml["photometry"] = {}
                             input_yaml["photometry"]["enforce_nonnegative_local_background"] = False
                             InjectedLimit = getDetectionLimits.get_injected_limit(
-                                image,  # Pass full image instead of cutout
+                                image_for_limits,
                                 initialGuess=initial_guess,
                                 detection_limit=detection_snr_limit,
                                 detection_cutoff=beta_limit,
@@ -5567,9 +5745,9 @@ def run_photometry():
             "separation": separation if "separation" in locals() else np.nan,
             "beta": target_beta,
             # Limiting magnitude in the instrumental-magnitude system.
-            # Downstream lightcurve code converts to apparent magnitude by adding
+            # Downstream plotting/lightcurve code converts to apparent magnitude by adding
             # the selected band/method zeropoint (single zeropoint application).
-            "lmag": (
+            "limiting_inst_mag": (
                 float(InjectedLimit) if np.isfinite(InjectedLimit) else np.nan
             ),
             "PreformSubtractioned": (
@@ -5577,6 +5755,22 @@ def run_photometry():
             ),
             "etime": time.time() - start,
         }
+        output.update(
+            {
+                "mag_ap": np.nan,
+                "mag_ap_err": np.nan,
+                "mag_psf": np.nan,
+                "mag_psf_err": np.nan,
+                "inst_mag_ap": np.nan,
+                "inst_mag_ap_err": np.nan,
+                "inst_mag_psf": np.nan,
+                "inst_mag_psf_err": np.nan,
+                "zp_ap": np.nan,
+                "zp_ap_err": np.nan,
+                "zp_psf": np.nan,
+                "zp_psf_err": np.nan,
+            }
+        )
 
         # Provide lowercase aliases for downstream tools (e.g. lightcurve.py) that
         # expect snake_case columns.
@@ -5723,95 +5917,132 @@ def run_photometry():
         for method in image_zeropoint.keys():
             if method in image_zeropoint:
                 try:
-                    output.update(
-                        {
-                            f"zp_{image_filter}_{method}": image_zeropoint[method][
-                                "zeropoint"
-                            ],
-                            f"zp_{image_filter}_{method}_err": image_zeropoint[method][
-                                "zeropoint_error"
-                            ],
-                        }
-                    )
+                    m_low = str(method).strip().lower()
+                    if m_low in ("ap", "psf"):
+                        output[f"zp_{m_low}"] = image_zeropoint[method]["zeropoint"]
+                        output[f"zp_{m_low}_err"] = image_zeropoint[method][
+                            "zeropoint_error"
+                        ]
                 except Exception:
                     pass
 
-        # Adds flux and magnitude values (only for methods present in TargetPosition).
+        # -------------------------------------------------------------------------
+        # Derived outputs: limiting magnitude in apparent system (limits.py-consistent)
+        # -------------------------------------------------------------------------
+        try:
+            lim_inst = float(output.get("limiting_inst_mag", np.nan))
+            if not np.isfinite(lim_inst):
+                output["limiting_mag"] = np.nan
+            else:
+                lim_cfg = input_yaml.get("limiting_magnitude") or {}
+                recovery_method = str(lim_cfg.get("recovery_method", "PSF")).strip().upper()
+                # Keep consistent with limits.py's selected_zeropoint rules.
+                if recovery_method in {"AUTO", "DEFAULT", "MATCH_TRANSIENT", "MATCH_TARGET"}:
+                    recovery_method = "AP" if do_aperture_ONLY else "PSF"
+                elif recovery_method in {"MCMC", "EMCEE"}:
+                    recovery_method = "EMCEE"
+
+                if recovery_method in {"PSF", "EMCEE"}:
+                    zp_sel = output.get("zp_psf", np.nan)
+                    zp_fallback = output.get("zp_ap", np.nan)
+                else:
+                    zp_sel = output.get("zp_ap", np.nan)
+                    zp_fallback = output.get("zp_psf", np.nan)
+
+                zp_sel = float(zp_sel) if np.isfinite(zp_sel) else np.nan
+                if not np.isfinite(zp_sel):
+                    zp_sel = float(zp_fallback) if np.isfinite(zp_fallback) else np.nan
+
+                output["limiting_mag"] = lim_inst + zp_sel if np.isfinite(zp_sel) else np.nan
+        except Exception:
+            output["limiting_mag"] = np.nan
+
+        # Adds uniform flux/magnitude values (filter stored in `filter` column).
+        #
+        # We intentionally avoid writing wide per-filter columns like:
+        #   {filter}_{method}, inst_{filter}_{method}, zp_{filter}_{method}
+        # because they produce confusing/duplicated headers after concatenation.
         for method in image_zeropoint.keys():
+            m_low = str(method).strip().lower()
+            if m_low not in ("ap", "psf"):
+                continue
+
             prefix = f"{image_filter}_{method}"
             inst_prefix = f"inst_{image_filter}_{method}"
-            flux_col = f"flux_{method}"
-            if (
-                flux_col not in TargetPosition.columns
-                or inst_prefix not in TargetPosition.columns
-            ):
-                output.update(
-                    {
-                        f"flux_{method}": np.nan,
-                        f"flux_{method}_err": np.nan,
-                        inst_prefix: np.nan,
-                        f"{inst_prefix}_err": np.nan,
-                        prefix: np.nan,
-                        f"{prefix}_err": np.nan,
-                    }
-                )
-            else:
-                output.update(
-                    {
-                        f"flux_{method}": TargetPosition.at[idx, flux_col],
-                        f"flux_{method}_err": TargetPosition.at[idx, f"{flux_col}_err"],
-                        inst_prefix: TargetPosition.at[idx, inst_prefix],
-                        f"{inst_prefix}_err": TargetPosition.at[
-                            idx, f"{inst_prefix}_err"
-                        ],
-                        prefix: TargetPosition.at[idx, prefix],
-                        f"{prefix}_err": TargetPosition.at[idx, f"{prefix}_err"],
-                    }
-                )
-                # Add inverted versions for PSF if inverted fit was used
-                if method == "PSF" and "_inverted_fit" in TargetPosition.columns and TargetPosition.at[idx, "_inverted_fit"]:
-                    # Add inverted flux and magnitude columns
-                    if "flux_PSF_inverted" in TargetPosition.columns:
-                        output["flux_psf_inverted"] = float(TargetPosition.at[idx, "flux_PSF_inverted"])
-                    if "flux_PSF_err_inverted" in TargetPosition.columns:
-                        output["flux_psf_err_inverted"] = float(TargetPosition.at[idx, "flux_PSF_err_inverted"])
-                    if "inst_inverted" in TargetPosition.columns:
-                        output["inst_inverted"] = float(TargetPosition.at[idx, "inst_inverted"])
-                        # Add band-specific instrumental magnitude for inverted fit
-                        output[f"{inst_prefix}_inverted"] = float(TargetPosition.at[idx, "inst_inverted"])
-                    if "inst_inverted_err" in TargetPosition.columns:
-                        output["inst_inverted_err"] = float(TargetPosition.at[idx, "inst_inverted_err"])
-                        # Add band-specific instrumental magnitude error for inverted fit
-                        output[f"{inst_prefix}_err_inverted"] = float(TargetPosition.at[idx, "inst_inverted_err"])
-                    # Add calibrated magnitude for inverted fit
-                    try:
-                        if "inst_inverted" in TargetPosition.columns and "PSF" in image_zeropoint:
-                            inv_inst = float(TargetPosition.at[idx, "inst_inverted"])
-                            zp = image_zeropoint["PSF"]["zeropoint"]
-                            zp_err = image_zeropoint["PSF"]["zeropoint_error"]
-                            output[f"{prefix}_inverted"] = inv_inst + zp
-                            output[f"{prefix}_inverted_err"] = float(TargetPosition.at[idx, "inst_inverted_err"]) + zp_err
-                    except Exception:
-                        pass
-                    # Calibrated mag from difference-image PSF (pre-invert), same zeropoint as PSF
-                    try:
-                        inst_n_col = f"inst_{image_filter}_PSF_normal"
-                        inst_ne_col = f"inst_{image_filter}_PSF_normal_err"
-                        if inst_n_col in TargetPosition.columns and "PSF" in image_zeropoint:
-                            n_inst = float(TargetPosition.at[idx, inst_n_col])
-                            if np.isfinite(n_inst):
-                                zp = image_zeropoint["PSF"]["zeropoint"]
-                                zp_err = image_zeropoint["PSF"]["zeropoint_error"]
-                                output[f"{prefix}_normal"] = n_inst + zp
-                                if inst_ne_col in TargetPosition.columns:
-                                    n_e = float(TargetPosition.at[idx, inst_ne_col])
-                                    if np.isfinite(n_e):
-                                        output[f"{prefix}_normal_err"] = n_e + zp_err
-                    except Exception:
-                        pass
+            if prefix in TargetPosition.columns:
+                output[f"mag_{m_low}"] = TargetPosition.at[idx, prefix]
+                if f"{prefix}_err" in TargetPosition.columns:
+                    output[f"mag_{m_low}_err"] = TargetPosition.at[idx, f"{prefix}_err"]
+            if inst_prefix in TargetPosition.columns:
+                output[f"inst_mag_{m_low}"] = TargetPosition.at[idx, inst_prefix]
+                if f"{inst_prefix}_err" in TargetPosition.columns:
+                    output[f"inst_mag_{m_low}_err"] = TargetPosition.at[
+                        idx, f"{inst_prefix}_err"
+                    ]
 
         # Normalise column headers to lowercase for consistent downstream use (lightcurve, etc.).
         output_normalised = {str(k).strip().lower(): v for k, v in output.items()}
+
+        # Order columns for readability (long-form schema; keep any extras at the end).
+        preferred = [
+            # identity / timing
+            "filename",
+            "filename_path",
+            "date",
+            "mjd",
+            "filter",
+            # core photometry
+            "mag_psf",
+            "mag_psf_err",
+            "mag_ap",
+            "mag_ap_err",
+            "limiting_inst_mag",
+            "limiting_mag",
+            # quality
+            "snr",
+            "snr_psf",
+            "snr_ap",
+            "threshold",
+            "beta",
+            # fluxes
+            "flux_psf",
+            "flux_psf_err",
+            "flux_ap",
+            "flux_ap_err",
+            # calibration
+            "zp_psf",
+            "zp_psf_err",
+            "zp_ap",
+            "zp_ap_err",
+            # PSF / seeing
+            "target_fwhm",
+            "fwhm_psf",
+            "image_fwhm",
+            # pointing
+            "xpix",
+            "ypix",
+            "xpix_err",
+            "ypix_err",
+            "ra",
+            "dec",
+            "ra_err_arcsec",
+            "dec_err_arcsec",
+            # meta
+            "telescope",
+            "instrument",
+            "airmass",
+            "exposure_time",
+            "preformsubtractioned",
+            "etime",
+        ]
+        ordered = {}
+        for k in preferred:
+            if k in output_normalised:
+                ordered[k] = output_normalised[k]
+        for k in output_normalised.keys():
+            if k not in ordered:
+                ordered[k] = output_normalised[k]
+        output_normalised = ordered
         # Saves the standardized per-image output.
         output_df = pd.DataFrame(output_normalised, index=[0])
         output_df.to_csv(

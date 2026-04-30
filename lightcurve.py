@@ -10,6 +10,7 @@ from functions import set_size, get_distance_modulus
 from plotting_utils import get_marker_size
 from astropy.time import Time
 from collections import Counter
+from pathlib import Path
 
 # =============================================================================
 # =============================================================================
@@ -51,6 +52,8 @@ BAND_WAVELENGTHS = {
     "J": 12350,
     "H": 16620,
     "K": 21590,
+    "w": 6579,
+    "W": 6579,
 }
 
 # Colours for plots (per-band). Keep these in sync with the palette user-supplied.
@@ -84,7 +87,37 @@ cols = {
     "Q": "peru",
 }
 
-BAND_COLORS = cols
+def _load_filter_colors_from_db() -> dict:
+    """
+    Load `filter_colors` from `databases/filters.yml` (project palette).
+
+    Returns {} on any failure so we can safely fall back to defaults.
+    """
+    try:
+        db_path = Path(__file__).resolve().parent / "databases" / "filters.yml"
+        if not db_path.is_file():
+            return {}
+        import yaml  # type: ignore
+
+        with open(db_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        fc = data.get("filter_colors", {}) if isinstance(data, dict) else {}
+        if not isinstance(fc, dict):
+            return {}
+        out = {}
+        for k, v in fc.items():
+            ks = str(k).strip()
+            vs = str(v).strip()
+            if ks and vs:
+                out[ks] = vs
+        return out
+    except Exception:
+        return {}
+
+
+# Prefer the project palette from databases/filters.yml; fall back to built-ins above.
+_db_cols = _load_filter_colors_from_db()
+BAND_COLORS = {**cols, **_db_cols}
 
 # Colour indices -> plotting colour (distinct, hue between constituent bands).
 COLOR_INDEX_COLORS = {
@@ -150,6 +183,112 @@ def _normalize_photometry_columns(df):
     return df
 
 
+def filter_value_matches_band(band_char: str, raw_filter) -> bool:
+    """
+    True if a photometry-table ``filter`` cell corresponds to band ``band_char``.
+
+    Maps survey-style names (e.g. ``gp`` → ``g``) using ``main._heuristic_filter_mapping``
+    so long-form CSV rows match the band order used in plots.
+    """
+    if raw_filter is None or pd.isna(raw_filter):
+        return False
+    bc = str(band_char).strip().lower()
+    if not bc:
+        return False
+    rs = str(raw_filter).strip()
+    if rs.lower() == bc:
+        return True
+    try:
+        from main import _heuristic_filter_mapping
+
+        canon = str(_heuristic_filter_mapping(rs)).strip().lower()
+        return canon == bc
+    except Exception:
+        return False
+
+
+def photometry_filter_series(df: pd.DataFrame):
+    """Return the per-row filter column if present (``filter``, ``imagefilter``, …)."""
+    if df is None or df.empty:
+        return None
+    preferred = ("filter", "imagefilter", "band", "image_filter")
+    lower_map = {str(c).lower(): c for c in df.columns}
+    for name in preferred:
+        if name in lower_map:
+            return df[lower_map[name]]
+    return None
+
+
+def canonical_bands_from_filter_series(fser: pd.Series):
+    """
+    Unique canonical band codes present in a filter column, sorted by pivot wavelength.
+
+    Used for long-form CSVs (shared ``mag_psf`` / ``zp_psf``) so plots iterate real
+    bands (e.g. ``w``) instead of the full bandlist (which would mis-label as ``F``
+    if the filter column was not detected).
+    """
+    raw_unique = [
+        str(x).strip() for x in fser.dropna().unique() if str(x).strip()
+    ]
+    canon_list = []
+    seen = set()
+    for raw in raw_unique:
+        try:
+            from main import _heuristic_filter_mapping
+
+            c = str(_heuristic_filter_mapping(raw)).strip()
+        except Exception:
+            c = raw
+        ck = str(c).lower()
+        if ck not in seen:
+            seen.add(ck)
+            canon_list.append(c)
+    return sorted(
+        canon_list,
+        key=lambda bb: BAND_WAVELENGTHS.get(
+            bb, BAND_WAVELENGTHS.get(str(bb).lower(), 1e12)
+        ),
+    )
+
+
+def canonical_band_label_map_from_filter_series(fser: pd.Series) -> dict[str, str]:
+    """
+    Map canonical band -> preferred display label taken from the `filter` column.
+
+    This keeps legend labels faithful to the input data (e.g. if the CSV filter
+    column contains "wp", the plotted label is "wp"), while still grouping rows
+    by canonical band (e.g. wp→w) for long-form photometry tables.
+    """
+    if fser is None or len(fser) == 0:
+        return {}
+    raw = fser.dropna().astype(str).map(str.strip)
+    raw = raw[raw.astype(bool)]
+    if raw.empty:
+        return {}
+
+    def _canon(s: str) -> str:
+        try:
+            from main import _heuristic_filter_mapping
+
+            return str(_heuristic_filter_mapping(s)).strip().lower()
+        except Exception:
+            return str(s).strip().lower()
+
+    tmp = pd.DataFrame({"raw": raw})
+    tmp["canon"] = tmp["raw"].map(_canon)
+    # For each canonical band, choose the most common raw label; tie-break by first occurrence.
+    out: dict[str, str] = {}
+    for canon, g in tmp.groupby("canon", sort=False):
+        counts = g["raw"].value_counts()
+        if counts.empty:
+            continue
+        top_n = int(counts.iloc[0])
+        top_vals = set(counts[counts == top_n].index.tolist())
+        chosen = next((v for v in g["raw"].tolist() if v in top_vals), g["raw"].iloc[0])
+        out[str(canon).strip().lower()] = str(chosen).strip()
+    return out
+
+
 def _inverted_fit_series_to_bool(series: pd.Series) -> pd.Series:
     """Parse ``_inverted_fit`` column to real booleans (CSV / mixed types safe).
 
@@ -185,7 +324,11 @@ def _resolve_band_triplet(cols, band: str, method: str):
     without conflating distinct filters that differ by case (e.g. r vs R).
     """
     # Prefer exact-case first, then lowercase legacy.
+    m_low = str(method).strip().lower()
     cand = [
+        # New uniform schema (preferred)
+        (f"mag_{m_low}", f"mag_{m_low}_err", f"zp_{band}_{method}"),
+        (f"mag_{m_low}", f"mag_{m_low}_err", f"zp_{m_low}"),
         (f"{band}_{method}", f"{band}_{method}_err", f"zp_{band}_{method}"),
         (
             f"{band}_{method}".lower(),
@@ -200,10 +343,15 @@ def _resolve_band_triplet(cols, band: str, method: str):
 
 
 def _lmag_to_apparent(df: pd.DataFrame, zp_col: str) -> pd.Series:
-    """Convert pipeline ``lmag`` (instrumental) to apparent using band zeropoint."""
-    if "lmag" not in df.columns:
+    """Convert pipeline limiting mag (instrumental) to apparent using band zeropoint."""
+    col = (
+        "limiting_inst_mag"
+        if "limiting_inst_mag" in df.columns
+        else ("lmag" if "lmag" in df.columns else None)
+    )
+    if col is None:
         return pd.Series(np.nan, index=df.index, dtype=float)
-    li = pd.to_numeric(df["lmag"], errors="coerce")
+    li = pd.to_numeric(df[col], errors="coerce")
     zp = pd.to_numeric(df[zp_col], errors="coerce")
     return li + zp
 
@@ -225,9 +373,14 @@ def _compute_detection_mask(
     """
     mag = pd.to_numeric(df[mag_col], errors="coerce").to_numpy(dtype=float, copy=False)
     err = pd.to_numeric(df[err_col], errors="coerce").to_numpy(dtype=float, copy=False)
+    lim_col = (
+        "limiting_inst_mag"
+        if "limiting_inst_mag" in df.columns
+        else ("lmag" if "lmag" in df.columns else None)
+    )
     lmag = (
-        pd.to_numeric(df["lmag"], errors="coerce").to_numpy(dtype=float, copy=False)
-        if "lmag" in df.columns
+        pd.to_numeric(df[lim_col], errors="coerce").to_numpy(dtype=float, copy=False)
+        if lim_col is not None
         else np.full(len(df), np.nan, dtype=float)
     )
 
@@ -398,6 +551,27 @@ def plot_lightcurve(
     # Band plotting order (exclude Gaia G so it is not conflated with SDSS g).
     band_order = "FSDNAuUBgcVwrRoEiIzyYJHKWQ"
     cols = {b: base_cols.get(b, BAND_COLORS.get(b, "k")) for b in band_order}
+    # Unknown filters: assign distinct generic colors from Matplotlib's cycle.
+    _generic_cycle = (
+        plt.rcParams.get("axes.prop_cycle", None).by_key().get("color", [])
+        if plt.rcParams.get("axes.prop_cycle", None) is not None
+        else []
+    )
+    if not _generic_cycle:
+        _generic_cycle = ["k"]
+    _unknown_color_map: dict[str, str] = {}
+
+    def _color_for_band(band_label: str) -> str:
+        if band_label in base_cols:
+            return base_cols[band_label]
+        bl = str(band_label).strip().lower()
+        if bl in base_cols:
+            return base_cols[bl]
+        if bl not in _unknown_color_map:
+            _unknown_color_map[bl] = _generic_cycle[
+                len(_unknown_color_map) % len(_generic_cycle)
+            ]
+        return _unknown_color_map[bl]
     data = pd.read_csv(output_file)
     data = _normalize_photometry_columns(data)
     # If the CSV has duplicate column names (can happen after concatenation or
@@ -416,7 +590,11 @@ def plot_lightcurve(
         Also supports inverted counterparts (e.g. g_psf_inverted).
         """
         # Prefer exact-case first, then lowercase legacy.
+        m_low = str(method).strip().lower()
         cand = [
+            # New uniform schema (preferred)
+            (f"mag_{m_low}", f"mag_{m_low}_err", f"zp_{band}_{method}"),
+            (f"mag_{m_low}", f"mag_{m_low}_err", f"zp_{m_low}"),
             (f"{band}_{method}", f"{band}_{method}_err", f"zp_{band}_{method}"),
             (
                 f"{band}_{method}".lower(),
@@ -442,15 +620,27 @@ def plot_lightcurve(
                 return trip
         return None
 
-    # Discover which bands are actually present in the table, ensuring we don't
-    # accidentally map multiple band labels (e.g. r and R) onto the same triplet.
+    # Discover which bands are actually present. For long-form CSVs (shared
+    # mag_psf / zp_psf + per-row ``filter``), every band letter would otherwise
+    # resolve to the same triplet and only the first letter in band_order (``F``)
+    # would be used — wrong for e.g. Pan-STARRS/ZTF ``w``.
+    m_low_plot = str(method).strip().lower()
+    long_form_uniform = (
+        f"mag_{m_low_plot}" in data.columns
+        and f"mag_{m_low_plot}_err" in data.columns
+        and f"zp_{m_low_plot}" in data.columns
+    )
+    fser_disc = photometry_filter_series(data)
     bands_in_data = []
     used_triplets = set()
-    for b in band_order:
-        triplet = _resolve_band_triplet(set(data.columns), b, method)
-        if triplet is not None and triplet not in used_triplets:
-            bands_in_data.append(b)
-            used_triplets.add(triplet)
+    if long_form_uniform and fser_disc is not None and fser_disc.notna().any():
+        bands_in_data = canonical_bands_from_filter_series(fser_disc)
+    if not bands_in_data:
+        for b in band_order:
+            triplet = _resolve_band_triplet(set(data.columns), b, method)
+            if triplet is not None and triplet not in used_triplets:
+                bands_in_data.append(b)
+                used_triplets.add(triplet)
     if not bands_in_data:
         logging.getLogger(__name__).info(
             "No valid photometric bands found in '%s' for method '%s'.",
@@ -517,7 +707,19 @@ def plot_lightcurve(
         if triplet is None:
             continue
         col, err_col, zp_col = triplet
-        df = data[np.isfinite(data[zp_col])].copy()
+        # For new long-form output tables (shared mag_psf/zp_psf + per-row `filter`),
+        # we must subset rows by the filter column. Otherwise each band loop plots
+        # the full table and the last-drawn band's color dominates (appears "all red").
+        if long_form_uniform and fser_disc is not None and fser_disc.notna().any():
+            try:
+                m = fser_disc.map(lambda rv: filter_value_matches_band(band, rv)).fillna(False)
+                df = data[m & np.isfinite(data[zp_col])].copy()
+            except Exception:
+                df = data[np.isfinite(data[zp_col])].copy()
+        else:
+            df = data[np.isfinite(data[zp_col])].copy()
+        if df.empty:
+            continue
         df.sort_values(by="mjd", inplace=True)
         # Check if col is already an apparent magnitude (has zeropoint applied)
         # If it starts with 'inst_' it's instrumental, otherwise it's apparent
@@ -531,12 +733,10 @@ def plot_lightcurve(
 
         band_offset = (idx - mid_idx) * offset
         df["apparent_mag"] = df["apparent_mag"] + band_offset
-        # lmag in photometry CSV is instrumental (see main.py); convert to apparent
+        # limiting_inst_mag in photometry CSV is instrumental (see main.py); convert to apparent
         # so upper-limit points match the detection magnitude scale on the plot.
-        # Note: band_offset is NOT applied to lmag as it's used for detection thresholds,
+        # Note: band_offset is NOT applied to the limiting mag as it's used for detection thresholds,
         # not for visual plot positioning.
-        if "lmag" not in df.columns:
-            df["lmag"] = np.nan
         df["lmag"] = _lmag_to_apparent(df, zp_col)
         
         # Initialize plot_mag and plot_err for this band's df
@@ -602,7 +802,7 @@ def plot_lightcurve(
         if return_detections and not nondetects.empty:
             nondetections_list.append(nondetects)
 
-        c = cols.get(band, "k")
+        c = _color_for_band(band)
         if offset != 0:
             leg_label = (
                 band
@@ -742,6 +942,19 @@ def plot_lightcurve(
                 alpha=0.85,
                 zorder=1,
             )
+            # If this filter has only non-detections, still include it in the legend
+            # as a standard detection marker (circle) so users can see the filter list.
+            if all_detects.empty and leg_label:
+                ax.scatter(
+                    [],
+                    [],
+                    s=get_marker_size('medium'),
+                    c=c,
+                    marker="o",
+                    edgecolors="black",
+                    linewidth=0.8,
+                    label=leg_label,
+                )
 
         if not single_plot:
             ax.set_ylabel(f"{band} (mag)")
@@ -897,7 +1110,7 @@ def plot_lightcurve(
     ax0.invert_yaxis()
 
     # ---------- Colour evolution panel (same-night pairs only) ----------
-    if plot_color and color_ax is not None and "filter" in data.columns:
+    if plot_color and color_ax is not None and photometry_filter_series(data) is not None:
         color_ax.tick_params(axis="both", which="major")
         color_ax.tick_params(axis="both", which="minor", length=2.5)
         color_ax.grid(True, which="major", alpha=0.35, linestyle="-", linewidth=0.5)
@@ -912,29 +1125,19 @@ def plot_lightcurve(
                 continue
             col1, err1, zp1 = t1
             col2, err2, zp2 = t2
-            fcol = (
-                data["filter"].astype(str).str.lower()
-                if "filter" in data.columns
-                else None
-            )
-            d1 = (
-                data[(fcol == b1.lower()) & np.isfinite(data[zp1])].copy()
-                if fcol is not None
-                else pd.DataFrame()
-            )
-            d2 = (
-                data[(fcol == b2.lower()) & np.isfinite(data[zp2])].copy()
-                if fcol is not None
-                else pd.DataFrame()
-            )
+            fser = photometry_filter_series(data)
+            if fser is not None:
+                m1 = fser.map(lambda rv: filter_value_matches_band(b1, rv)).fillna(False)
+                m2 = fser.map(lambda rv: filter_value_matches_band(b2, rv)).fillna(False)
+                d1 = data[m1 & np.isfinite(data[zp1])].copy()
+                d2 = data[m2 & np.isfinite(data[zp2])].copy()
+            else:
+                d1 = pd.DataFrame()
+                d2 = pd.DataFrame()
             d1["mag"] = d1[col1] + d1[zp1] if col1.startswith('inst_') else d1[col1]
             d1["err"] = d1[err1]
             d2["mag"] = d2[col2] + d2[zp2] if col2.startswith('inst_') else d2[col2]
             d2["err"] = d2[err2]
-            if "lmag" not in d1.columns:
-                d1["lmag"] = np.nan
-            if "lmag" not in d2.columns:
-                d2["lmag"] = np.nan
             d1["lmag"] = _lmag_to_apparent(d1, zp1)
             d2["lmag"] = _lmag_to_apparent(d2, zp2)
             if use_SNR_limit:
@@ -1107,7 +1310,17 @@ def plot_lightcurve(
     plt.savefig(outpath, **save_kw, bbox_inches="tight")
 
     if show:
-        plt.show()
+        # Avoid `FigureCanvasAgg is non-interactive` warnings in batch runs.
+        try:
+            import matplotlib
+
+            backend = str(matplotlib.get_backend()).lower()
+        except Exception:
+            backend = ""
+        if "agg" in backend:
+            plt.close("all")
+        else:
+            plt.show()
     else:
         plt.close("all")
 
@@ -1163,21 +1376,16 @@ def generate_photometry_table(
     if complete_data.columns.duplicated().any():
         complete_data = complete_data.loc[:, ~complete_data.columns.duplicated()].copy()
     phot_table = []
-    # Prefer using the per-row filter column if present, so we don't duplicate
-    # bands (e.g. 'g' and 'G') and we keep the dataset's actual filter names.
-    if "filter" in complete_data.columns:
-        _filters = complete_data["filter"].dropna().astype(str).map(str.strip)
-        bands = [b for b in _filters.unique().tolist() if b]
-        # Order by effective wavelength when known; otherwise keep input order.
-        bands = sorted(
-            bands,
-            key=lambda b: BAND_WAVELENGTHS.get(
-                b, BAND_WAVELENGTHS.get(b.lower(), 1e12)
-            ),
-        )
+    # Prefer using the per-row filter column if present. Map raw names (gp, Sloan_g, …)
+    # to canonical bands so `_resolve_band_triplet` matches the uniform mag/zp schema.
+    fser_all = photometry_filter_series(complete_data)
+    if fser_all is not None and fser_all.notna().any():
+        bands = canonical_bands_from_filter_series(fser_all)
+        label_map = canonical_band_label_map_from_filter_series(fser_all)
     else:
         # Fallback when no filter column exists.
         bands = list("FSDNAuUBgcVwrRoEiIzyYJHKWQ")
+        label_map = {}
 
     used_triplets = set()
     for band in bands:
@@ -1190,20 +1398,28 @@ def generate_photometry_table(
         used_triplets.add(trip)
 
         data = complete_data[np.isfinite(complete_data[zp_col])].copy()
-        if "filter" in data.columns:
-            f = data["filter"].astype(str).str.strip()
-            # Match filter name case-insensitively but preserve original label in output.
-            data = data[f.str.lower() == str(band).lower()].copy()
+        fcol = photometry_filter_series(data)
+        if fcol is not None:
+            mask = fcol.map(lambda rv: filter_value_matches_band(band, rv))
+            data = data[mask.fillna(False)].copy()
             if data.empty:
                 continue
+        band_label = label_map.get(str(band).strip().lower(), band)
         # Robust numeric coercion: CSV concatenation can yield strings like "nan".
         if "beta" in data.columns:
             data["beta"] = pd.to_numeric(data["beta"], errors="coerce")
-        if "lmag" not in data.columns:
+        lim_col = (
+            "limiting_inst_mag"
+            if "limiting_inst_mag" in data.columns
+            else ("lmag" if "lmag" in data.columns else None)
+        )
+        if lim_col is None:
             data["lmag"] = np.nan
-        lmag_inst = pd.to_numeric(data["lmag"], errors="coerce")
+            lmag_inst = pd.to_numeric(data["lmag"], errors="coerce")
+        else:
+            lmag_inst = pd.to_numeric(data[lim_col], errors="coerce")
         zp_num = pd.to_numeric(data[zp_col], errors="coerce")
-        # Pipeline stores lmag in instrumental system; detection cut uses apparent mags.
+        # Pipeline stores limiting mag in instrumental system; detection cut uses apparent mags.
         data["lmag"] = lmag_inst + zp_num
         if col.startswith("inst_"):
             data["__app_mag_det__"] = pd.to_numeric(data[col], errors="coerce") + zp_num
@@ -1267,7 +1483,7 @@ def generate_photometry_table(
                 mag_values = detects[col]
             
             detects = detects.assign(
-                Filter=band,
+                Filter=band_label,
                 Limit="-",
                 MJD=detects["mjd"].round(3),
                 Date=Time(detects["mjd"], format="mjd").iso,
@@ -1306,7 +1522,7 @@ def generate_photometry_table(
                     else pd.Series(np.nan, index=inv_detects.index, dtype=float)
                 )
                 inv_detects = inv_detects.assign(
-                    Filter=band,
+                    Filter=band_label,
                     Limit=pd.to_numeric(inv_detects["lmag"], errors="coerce").round(
                         3
                     ),
@@ -1319,7 +1535,7 @@ def generate_photometry_table(
 
         if not nondetects.empty:
             nondetects = nondetects.assign(
-                Filter=band,
+                Filter=band_label,
                 MJD=nondetects["mjd"].round(3),
                 Date=Time(nondetects["mjd"], format="mjd").iso,
                 Mag=pd.Series(np.nan, index=nondetects.index, dtype=float),
@@ -1348,10 +1564,11 @@ def generate_photometry_table(
     color_table_path = None
     if (
         include_color_table
-        and "filter" in complete_data.columns
+        and photometry_filter_series(complete_data) is not None
         and len(complete_data) > 1
     ):
         color_rows = []
+        fser_cd = photometry_filter_series(complete_data)
         for b1, b2 in _COLOR_PAIRS:
             t1 = _resolve_band_triplet(set(complete_data.columns), b1, method)
             t2 = _resolve_band_triplet(set(complete_data.columns), b2, method)
@@ -1359,19 +1576,12 @@ def generate_photometry_table(
                 continue
             col1, err1, zp1 = t1
             col2, err2, zp2 = t2
-            fcol = complete_data["filter"].astype(str).str.lower()
-            d1 = complete_data[
-                (fcol == b1.lower()) & np.isfinite(complete_data[zp1])
-            ].copy()
-            d2 = complete_data[
-                (fcol == b2.lower()) & np.isfinite(complete_data[zp2])
-            ].copy()
+            m1 = fser_cd.map(lambda rv: filter_value_matches_band(b1, rv)).fillna(False)
+            m2 = fser_cd.map(lambda rv: filter_value_matches_band(b2, rv)).fillna(False)
+            d1 = complete_data[m1 & np.isfinite(complete_data[zp1])].copy()
+            d2 = complete_data[m2 & np.isfinite(complete_data[zp2])].copy()
             if d1.empty or d2.empty:
                 continue
-            if "lmag" not in d1.columns:
-                d1["lmag"] = np.nan
-            if "lmag" not in d2.columns:
-                d2["lmag"] = np.nan
             d1["mag"] = d1[col1] + d1[zp1] if col1.startswith("inst_") else d1[col1]
             d1["err"] = d1[err1]
             d1["lmag"] = _lmag_to_apparent(d1, zp1)

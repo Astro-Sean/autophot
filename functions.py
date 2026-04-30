@@ -1563,6 +1563,13 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
     # Concatenate all DataFrames
     concatenated_data = pd.concat(concatenated_data, ignore_index=True)
 
+    # If concatenation produced duplicate column names (common when mixing legacy
+    # wide-format outputs across versions), keep the first occurrence.
+    if concatenated_data.columns.duplicated().any():
+        concatenated_data = concatenated_data.loc[
+            :, ~concatenated_data.columns.duplicated()
+        ].copy()
+
     # Write the concatenated data to the output file
     concatenated_data.to_csv(
         output_filename, index=False, na_rep="NaN"

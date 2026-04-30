@@ -187,10 +187,13 @@ class RemoveCosmicRays:
         zscale_cleaned = ZScaleInterval()
         vmin_cleaned, vmax_cleaned = zscale_cleaned.get_limits(cleaned)
 
+        cmap = plt.get_cmap("viridis").copy()
+        cmap.set_bad(color="white")
+
         # --- Plot the original image ---
         im0 = axes[0].imshow(
             original,
-            cmap="viridis",
+            cmap=cmap,
             origin="lower",
             vmin=vmin_original,
             vmax=vmax_original,
@@ -203,7 +206,7 @@ class RemoveCosmicRays:
         # --- Plot the cleaned image ---
         im1 = axes[1].imshow(
             cleaned,
-            cmap="viridis",
+            cmap=cmap,
             origin="lower",
             vmin=vmin_cleaned,
             vmax=vmax_cleaned

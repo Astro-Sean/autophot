@@ -190,26 +190,41 @@ def save_lpi_diagnostic_plot(
     fig, axes = plt.subplots(2, 3, figsize=(10.5, 6.2), constrained_layout=True)
     ax = axes.ravel()
 
-    im0 = ax[0].imshow(stamp0, origin="lower", cmap="bone", vmin=v0[0], vmax=v0[1])
+    cmap_bone = plt.get_cmap("bone").copy()
+    cmap_bone.set_bad(color="white")
+    cmap_vir = plt.get_cmap("viridis").copy()
+    cmap_vir.set_bad(color="white")
+    cmap_mag = plt.get_cmap("magma").copy()
+    cmap_mag.set_bad(color="white")
+
+    im0 = ax[0].imshow(
+        stamp0, origin="lower", cmap=cmap_bone, vmin=v0[0], vmax=v0[1]
+    )
     ax[0].set_title("Stamp (data)")
     fig.colorbar(im0, ax=ax[0], fraction=0.046, pad=0.03)
 
     m = np.zeros_like(stamp0, dtype=float)
     m[good] = 1.0
     m[hidden] = 2.0
-    im1 = ax[1].imshow(m, origin="lower", cmap="viridis", vmin=0, vmax=2)
+    im1 = ax[1].imshow(m, origin="lower", cmap=cmap_vir, vmin=0, vmax=2)
     ax[1].set_title("Mask (good=1, hidden=2)")
     fig.colorbar(im1, ax=ax[1], fraction=0.046, pad=0.03)
 
-    im2 = ax[2].imshow(bg_pred, origin="lower", cmap="bone", vmin=vp[0], vmax=vp[1])
+    im2 = ax[2].imshow(
+        bg_pred, origin="lower", cmap=cmap_bone, vmin=vp[0], vmax=vp[1]
+    )
     ax[2].set_title("Predicted background (hidden)")
     fig.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.03)
 
-    im3 = ax[3].imshow(corrected, origin="lower", cmap="bone", vmin=v1[0], vmax=v1[1])
+    im3 = ax[3].imshow(
+        corrected, origin="lower", cmap=cmap_bone, vmin=v1[0], vmax=v1[1]
+    )
     ax[3].set_title("Corrected stamp (data - pred)")
     fig.colorbar(im3, ax=ax[3], fraction=0.046, pad=0.03)
 
-    im4 = ax[4].imshow(bg_sig, origin="lower", cmap="magma", vmin=vs[0], vmax=vs[1])
+    im4 = ax[4].imshow(
+        bg_sig, origin="lower", cmap=cmap_mag, vmin=vs[0], vmax=vs[1]
+    )
     ax[4].set_title("Predicted sigma (hidden)")
     fig.colorbar(im4, ax=ax[4], fraction=0.046, pad=0.03)
 
