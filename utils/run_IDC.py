@@ -452,6 +452,61 @@ NNW
             return float(max(bins[min(peak_idx, len(bins) - 2)], pct))
 
     # ----------------------------- SExtractor + PSFEx -----------------------------
+    def _validate_and_trim_weight_map(
+        self,
+        weight_path: Optional[str],
+        expected_shape: Tuple[int, int],
+        output_dir: Path
+    ) -> Optional[str]:
+        """
+        Validate weight map shape matches expected image shape, trim if needed.
+
+        When images are trimmed (e.g., NaN boundary trimming), weight maps may
+        still have the original shape. This function checks and trims them.
+
+        Returns path to (potentially trimmed) weight map, or None if invalid.
+        """
+        if weight_path is None or not Path(weight_path).exists():
+            return None
+
+        try:
+            with fits.open(weight_path, memmap=False) as h_w:
+                weight_data = h_w[0].data
+                weight_header = h_w[0].header
+
+                if weight_data is None:
+                    return None
+
+                # Check if shapes match
+                if weight_data.shape == expected_shape:
+                    return weight_path  # No trimming needed
+
+                self.logger.warning(
+                    "Weight map shape %s does not match image shape %s, trimming...",
+                    weight_data.shape, expected_shape
+                )
+
+                # Trim weight map to match expected shape (centered crop)
+                h_diff = weight_data.shape[0] - expected_shape[0]
+                w_diff = weight_data.shape[1] - expected_shape[1]
+
+                y_start = h_diff // 2
+                x_start = w_diff // 2
+                y_end = y_start + expected_shape[0]
+                x_end = x_start + expected_shape[1]
+
+                trimmed_weight = weight_data[y_start:y_end, x_start:x_end]
+
+                # Write trimmed weight to output_dir
+                trimmed_path = output_dir / (Path(weight_path).stem + "_trimmed.fits")
+                fits.writeto(str(trimmed_path), trimmed_weight, weight_header, overwrite=True)
+                self.logger.info("Trimmed weight map saved to %s", trimmed_path)
+                return str(trimmed_path)
+
+        except Exception as e:
+            self.logger.warning("Could not validate/trim weight map %s: %s", weight_path, e)
+            return None
+
     @staticmethod
     def _guess_map_weight_path(fits_image: str) -> Optional[str]:
         """
@@ -1053,6 +1108,15 @@ NNW
             )
             sci_w = self._guess_map_weight_path(str(science_image))
             ref_w = self._guess_map_weight_path(str(reference_image))
+
+            # Validate and trim weight maps if shapes don't match images
+            sci_w = self._validate_and_trim_weight_map(
+                sci_w, sci_shape, science_aligned_dir
+            )
+            ref_w = self._validate_and_trim_weight_map(
+                ref_w, ref_shape, reference_aligned_dir
+            )
+
             if sci_w:
                 self.logger.info("Alignment SExtractor: using science MAP_WEIGHT %s", sci_w)
             if ref_w:
@@ -1782,6 +1846,15 @@ NNW
             )
             sci_w = self._guess_map_weight_path(str(science_image))
             ref_w = self._guess_map_weight_path(str(reference_image))
+
+            # Validate and trim weight maps if shapes don't match images
+            # Get image shapes from the copied images
+            with fits.open(sci_image_copy) as h_s, fits.open(ref_image_copy) as h_r:
+                sci_shape_align = h_s[0].data.shape
+                ref_shape_align = h_r[0].data.shape
+            sci_w = self._validate_and_trim_weight_map(sci_w, sci_shape_align, science_dir)
+            ref_w = self._validate_and_trim_weight_map(ref_w, ref_shape_align, reference_dir)
+
             if sci_w:
                 self.logger.info("AstroAlign SExtractor: using science MAP_WEIGHT %s", sci_w)
             if ref_w:
