@@ -2493,21 +2493,6 @@ class Templates:
                 )
                 if result.template_path is None:
                     return None, None
-                # Validate output has valid pixels (not all NaN)
-                try:
-                    with fits.open(result.template_path) as hdul:
-                        data = hdul[0].data
-                        n_valid = np.sum(np.isfinite(data))
-                        n_total = data.size
-                        if n_valid == 0:
-                            logger.warning(
-                                f"Reproject output is all NaN ({n_valid}/{n_total} valid). "
-                                f"Template does not overlap with science WCS. Triggering fallback."
-                            )
-                            return None, None
-                        logger.debug(f"Reproject output: {n_valid}/{n_total} valid pixels ({100*n_valid/n_total:.1f}%)")
-                except Exception as e:
-                    logger.debug(f"Could not validate reproject output: {e}")
                 return scienceFpath, result.template_path
 
             # ------------------------------------------------------------------
