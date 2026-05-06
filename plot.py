@@ -1682,6 +1682,18 @@ class Plot:
                 fontsize="small",
             )
 
+            # Add source count in bottom left
+            ax.text(
+                0.05,
+                0.05,
+                f"N = {len(df_plot)}",
+                transform=ax.transAxes,
+                verticalalignment="bottom",
+                horizontalalignment="left",
+                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+                fontsize="small",
+            )
+
             fig.tight_layout()
             fig.savefig(save_path, dpi=150, facecolor="white")
             plt.close(fig)
