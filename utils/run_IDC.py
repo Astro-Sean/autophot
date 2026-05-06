@@ -148,7 +148,6 @@ class ImageDistortionCorrector:
         self._executables: Dict[str, str] = {}
         self._temp_dirs: set[str] = set()
         self.cleanup_intermediate = True
-        self.origin = 1
         self.input_yaml = input_yaml
 
     # -------------------------------- Utilities --------------------------------
@@ -509,6 +508,12 @@ NNW
             with fits.open(fits_image) as hdul:
                 header = hdul[0].header
                 fwhm_pixels = header.get("FWHM", 2.0)
+                pixel_scale_header = header.get("PIXSCALE", header.get("CDELT2", 0))
+                if pixel_scale_header:
+                    pixel_scale_header = abs(float(pixel_scale_header)) * 3600.0
+                else:
+                    pixel_scale_header = PIXEL_SCALE if PIXEL_SCALE > 0 else 1.0
+                seeing_fwhm_arcsec = float(fwhm_pixels) * pixel_scale_header
 
             self._create_conv_file(conv_path, fwhm_pixels=fwhm_pixels)
 
@@ -527,6 +532,7 @@ NNW
                     "NTHREADS": self.default_threads,
                     "PIXEL_SCALE": PIXEL_SCALE,
                     "CATALOG_TYPE": "FITS_LDAC",
+                    "SEEING_FWHM": round(seeing_fwhm_arcsec, 3),
                 }
             )
 
@@ -749,6 +755,195 @@ NNW
             pixel_scale = proj_plane_pixel_scales(wcs_obj)[0] * 3600.0
             return wcs_obj, pixel_scale, header
 
+    def _validate_alignment_quality(
+        self,
+        science_data: np.ndarray,
+        reference_data: np.ndarray,
+        fwhm_pixels: float,
+        max_shift_pixels: float = 2.0,
+        min_correlation: float = 0.3,
+    ) -> Dict:
+        """
+        Validate alignment quality using image correlation and difference statistics.
+
+        Computes multiple metrics to assess alignment:
+        - Normalized cross-correlation (should be high for good alignment)
+        - Relative RMS difference (should be low for good alignment)
+        - Gradient correlation (edges should align)
+        - Local shift estimates (should be small and consistent)
+
+        Parameters
+        ----------
+        science_data : np.ndarray
+            Science image data (2D)
+        reference_data : np.ndarray
+            Reference/template image data (2D, aligned to science grid)
+        fwhm_pixels : float
+            FWHM in pixels for setting correlation search radius
+        max_shift_pixels : float
+            Maximum acceptable shift (pixels) from cross-correlation peak
+        min_correlation : float
+            Minimum acceptable correlation coefficient (0-1)
+
+        Returns
+        -------
+        Dict with quality metrics and pass/fail flags
+        """
+        result = {
+            "passed": False,
+            "correlation": np.nan,
+            "correlation_shift_px": (np.nan, np.nan),
+            "rel_rms_diff": np.nan,
+            "gradient_correlation": np.nan,
+            "edge_agreement": np.nan,
+            "metrics": {},
+        }
+
+        try:
+            # Ensure same shape
+            if science_data.shape != reference_data.shape:
+                self.logger.warning(
+                    "Alignment validation: shape mismatch %s vs %s",
+                    science_data.shape, reference_data.shape
+                )
+                return result
+
+            # Create masks for valid pixels
+            valid = np.isfinite(science_data) & np.isfinite(reference_data)
+            if valid.sum() < 100:
+                self.logger.warning("Alignment validation: too few valid pixels")
+                return result
+
+            # Normalize images for correlation (robust scaling)
+            def _normalize(img, mask):
+                med = np.nanmedian(img[mask])
+                mad = np.nanmedian(np.abs(img[mask] - med))
+                if mad > 0:
+                    return (img - med) / mad
+                return img - med
+
+            sci_norm = _normalize(science_data, valid)
+            ref_norm = _normalize(reference_data, valid)
+
+            # 1. Normalized cross-correlation with subpixel refinement
+            # Search window: +/- 2 FWHM
+            search_radius = max(3, int(2 * fwhm_pixels))
+            cc_size = 2 * search_radius + 1
+
+            # Compute cross-correlation via FFT for speed
+            sci_fft = np.fft.fft2(sci_norm * valid)
+            ref_fft = np.fft.fft2(ref_norm * valid)
+            cc = np.fft.fftshift(np.fft.ifft2(sci_fft * np.conj(ref_fft))).real
+
+            # Find peak
+            center = cc.shape[0] // 2, cc.shape[1] // 2
+            y_slice = slice(center[0] - search_radius, center[0] + search_radius + 1)
+            x_slice = slice(center[1] - search_radius, center[1] + search_radius + 1)
+            cc_window = cc[y_slice, x_slice]
+
+            max_idx = np.unravel_index(np.argmax(cc_window), cc_window.shape)
+            dy = max_idx[0] - search_radius
+            dx = max_idx[1] - search_radius
+            peak_cc = cc_window[max_idx] / (valid.sum() * 1.0)  # Normalize
+
+            result["correlation"] = float(peak_cc)
+            result["correlation_shift_px"] = (float(dy), float(dx))
+
+            # 2. Relative RMS difference (after median subtraction)
+            diff = (science_data - reference_data)
+            rel_rms = np.sqrt(np.nanmedian(diff[valid]**2)) / (
+                0.5 * (np.nanmedian(np.abs(science_data[valid])) +
+                       np.nanmedian(np.abs(reference_data[valid]))) + 1e-10
+            )
+            result["rel_rms_diff"] = float(rel_rms)
+
+            # 3. Gradient correlation (edges should align even if fluxes differ)
+            from scipy.ndimage import sobel
+            sci_grad = np.sqrt(sobel(science_data, axis=0)**2 + sobel(science_data, axis=1)**2)
+            ref_grad = np.sqrt(sobel(reference_data, axis=0)**2 + sobel(reference_data, axis=1)**2)
+            grad_valid = np.isfinite(sci_grad) & np.isfinite(ref_grad)
+            if grad_valid.sum() > 100:
+                sci_g_norm = _normalize(sci_grad, grad_valid)
+                ref_g_norm = _normalize(ref_grad, grad_valid)
+                grad_cc = np.corrcoef(
+                    sci_g_norm[grad_valid].flat[:50000],  # Sample for speed
+                    ref_g_norm[grad_valid].flat[:50000]
+                )[0, 1]
+                result["gradient_correlation"] = float(grad_cc)
+
+            # 4. Edge agreement: fraction of strong gradient pixels that agree in position
+            grad_thresh = np.nanpercentile(sci_grad[grad_valid], 90)
+            strong_edges = (sci_grad > grad_thresh) & (ref_grad > grad_thresh)
+            if strong_edges.sum() > 10:
+                edge_agree = np.corrcoef(
+                    sci_grad[strong_edges].flat[:10000],
+                    ref_grad[strong_edges].flat[:10000]
+                )[0, 1] if strong_edges.sum() > 100 else 0.5
+                result["edge_agreement"] = float(edge_agree)
+
+            # 5. Regional correlation analysis (detect systematic distortion)
+            # Divide image into quadrants and check correlation in each
+            ny, nx = science_data.shape
+            n_regions_y = max(2, ny // 200)
+            n_regions_x = max(2, nx // 200)
+            region_ccs = []
+            for ry in range(n_regions_y):
+                for rx in range(n_regions_x):
+                    y0 = ry * ny // n_regions_y
+                    y1 = (ry + 1) * ny // n_regions_y
+                    x0 = rx * nx // n_regions_x
+                    x1 = (rx + 1) * nx // n_regions_x
+                    reg_valid = valid[y0:y1, x0:x1]
+                    if reg_valid.sum() > 50:
+                        reg_cc = np.corrcoef(
+                            sci_norm[y0:y1, x0:x1][reg_valid].flat[:1000],
+                            ref_norm[y0:y1, x0:x1][reg_valid].flat[:1000]
+                        )[0, 1] if reg_valid.sum() > 100 else np.nan
+                        if np.isfinite(reg_cc):
+                            region_ccs.append(reg_cc)
+            if len(region_ccs) > 2:
+                result["regional_cc_mean"] = float(np.mean(region_ccs))
+                result["regional_cc_std"] = float(np.std(region_ccs))
+                result["regional_cc_min"] = float(np.min(region_ccs))
+                # Flag if any region has very low correlation
+                regional_uniformity_ok = result["regional_cc_min"] > 0.1
+            else:
+                regional_uniformity_ok = True
+
+            # Determine pass/fail
+            shift_magnitude = np.sqrt(dy**2 + dx**2)
+            correlation_ok = peak_cc > min_correlation
+            shift_ok = shift_magnitude < max_shift_pixels
+
+            result["passed"] = correlation_ok and shift_ok and regional_uniformity_ok
+            result["metrics"] = {
+                "shift_magnitude_px": float(shift_magnitude),
+                "correlation_ok": bool(correlation_ok),
+                "shift_ok": bool(shift_ok),
+                "regional_uniformity_ok": bool(regional_uniformity_ok),
+                "search_radius_px": search_radius,
+                "n_regions_checked": len(region_ccs),
+            }
+
+            self.logger.info(
+                "Alignment quality: corr=%.3f (shift=%.2f,%.2f px), rel_rms=%.3f, "
+                "grad_corr=%.3f, regional_cc=%.3f+/-%.3f (min=%.3f), passed=%s",
+                result["correlation"],
+                result["correlation_shift_px"][0],
+                result["correlation_shift_px"][1],
+                result["rel_rms_diff"],
+                result.get("gradient_correlation", np.nan),
+                result.get("regional_cc_mean", np.nan),
+                result.get("regional_cc_std", np.nan),
+                result.get("regional_cc_min", np.nan),
+                result["passed"],
+            )
+
+        except Exception as e:
+            self.logger.warning("Alignment validation failed: %s", e)
+
+        return result
+
     # ------------------------ Align + resample via SCAMP/SWarp ------------------------
     def align_and_resample_both_images(
         self,
@@ -821,8 +1016,11 @@ NNW
                 ref_shape = ref_data.shape
                 sci_pix_scale = proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
                 ref_pix_scale = proj_plane_pixel_scales(ref_wcs)[0] * 3600.0
+                # Use origin=1 (FITS 1-based convention) so that the center pixel
+                # is (naxis/2 + 0.5) in FITS coords, which matches what SWarp expects
+                # for CENTER_TYPE=MANUAL.  Using origin=0 was 0.5 px off.
                 ra_arr, dec_arr = sci_wcs.all_pix2world(
-                    [sci_shape[1] / 2], [sci_shape[0] / 2], 0
+                    [sci_shape[1] / 2 + 0.5], [sci_shape[0] / 2 + 0.5], 1
                 )
                 center_ra, center_dec = float(ra_arr[0]), float(dec_arr[0])
                 # Force SWARP to always resample both images (removed skip check)
@@ -1324,6 +1522,33 @@ NNW
                         e,
                     )
 
+                # Validate alignment quality before accepting
+                try:
+                    with fits.open(aligned_sci) as h1, fits.open(aligned_ref) as h2:
+                        sci_data = np.asarray(h1[0].data, dtype=float)
+                        ref_data = np.asarray(h2[0].data, dtype=float)
+                    quality = self._validate_alignment_quality(
+                        sci_data, ref_data, max(fwhm_sci_pix, fwhm_ref_pix)
+                    )
+                    if not quality.get("passed", False):
+                        self.logger.warning(
+                            "SCAMP/SWarp alignment quality check FAILED "
+                            "(corr=%.3f, shift=%.2f px). Falling back to AstroAlign.",
+                            quality.get("correlation", np.nan),
+                            quality.get("metrics", {}).get("shift_magnitude_px", np.nan),
+                        )
+                        return self._align_fallback_reproject_then_astroalign(
+                            science_image, reference_image, output_dir
+                        )
+                    self.logger.info(
+                        "SCAMP/SWarp alignment quality PASSED "
+                        "(corr=%.3f, rel_rms=%.3f)",
+                        quality.get("correlation", np.nan),
+                        quality.get("rel_rms_diff", np.nan),
+                    )
+                except Exception as e:
+                    self.logger.debug("Alignment quality check skipped: %s", e)
+
             # Remove the aligned working directory after copying aligned images over the originals.
             if science_aligned_dir.exists():
                 shutil.rmtree(science_aligned_dir, ignore_errors=True)
@@ -1568,17 +1793,20 @@ NNW
                 sci_image_path=str(sci_image_copy),
                 ref_image_path=str(ref_image_copy),
             )
-            self.plot_matched_sources_side_by_side(
-                sci_image_path=str(sci_image_copy),
-                ref_image_path=str(ref_image_copy),
-                sci_cat_path=sci_sex["catalog_path"],
-                ref_cat_path=ref_sex["catalog_path"],
-                output_plot_path=science_dir / "matched_sources.png",
-                label_color="#FF0000",
-                label_fontsize=10,
-                circle_radius_sci=fwhm_sci_pix,
-                circle_radius_ref=fwhm_ref_pix,
-            )
+            try:
+                self.plot_matched_sources_side_by_side(
+                    sci_image_path=str(sci_image_copy),
+                    ref_image_path=str(ref_image_copy),
+                    sci_cat_path=sci_sex["catalog_path"],
+                    ref_cat_path=ref_sex["catalog_path"],
+                    output_plot_path=science_dir / "matched_sources.png",
+                    label_color="#FF0000",
+                    label_fontsize=10,
+                    circle_radius_sci=fwhm_sci_pix,
+                    circle_radius_ref=fwhm_ref_pix,
+                )
+            except Exception as _plot_exc:
+                self.logger.debug("Matched-sources plot failed (non-fatal): %s", _plot_exc)
             sci_tab, ref_tab = _load_matched_catalogs(
                 sci_sex["catalog_path"], ref_sex["catalog_path"]
             )
@@ -1622,6 +1850,31 @@ NNW
             sci_img = _load_and_clean_image(sci_image_copy)
             MAX_CONTROL_POINTS = 300
             use_aafitrans = False
+            tform = None
+            matched_src = None
+            matched_dst = None
+
+            def _validate_transform_matrix(tform_obj, max_scale=1.5, max_rot_deg=45.0):
+                """Validate that transform matrix is reasonable (no extreme scaling/rotation)."""
+                try:
+                    matrix = tform_obj.params if hasattr(tform_obj, "params") else tform_obj._matrix
+                    # Extract linear part (2x2)
+                    linear = matrix[:2, :2]
+                    # Check scale factors (should be close to 1.0)
+                    scale_x = np.sqrt(linear[0, 0]**2 + linear[1, 0]**2)
+                    scale_y = np.sqrt(linear[0, 1]**2 + linear[1, 1]**2)
+                    if scale_x > max_scale or scale_x < 1/max_scale:
+                        return False, f"X scale factor {scale_x:.2f} out of range"
+                    if scale_y > max_scale or scale_y < 1/max_scale:
+                        return False, f"Y scale factor {scale_y:.2f} out of range"
+                    # Check rotation (should be small for aligned images)
+                    rot = np.arctan2(linear[1, 0], linear[0, 0]) * 180 / np.pi
+                    if abs(rot) > max_rot_deg:
+                        return False, f"Rotation {rot:.1f}° exceeds limit"
+                    return True, "OK"
+                except Exception as e:
+                    return False, f"Validation error: {e}"
+
             try:
                 import aafitrans
 
@@ -1638,6 +1891,10 @@ NNW
                     get_best_fit=True,
                     seed=None,
                 )
+                valid, msg = _validate_transform_matrix(tform)
+                if not valid:
+                    self.logger.warning(f"aafitrans transform invalid: {msg}")
+                    raise ValueError(msg)
                 use_aafitrans = True
                 self.logger.info("Using aafitrans for alignment")
             except Exception as e:
@@ -1649,6 +1906,11 @@ NNW
                     pts_sci,
                     max_control_points=min(MAX_CONTROL_POINTS, len(pts_ref)),
                 )
+                # Validate astroalign transform too
+                valid, msg = _validate_transform_matrix(tform)
+                if not valid:
+                    self.logger.error(f"AstroAlign transform invalid: {msg}")
+                    raise ValueError(f"Cannot find valid alignment transform: {msg}")
             if use_aafitrans:
                 try:
                     from scipy import ndimage
@@ -1710,6 +1972,28 @@ NNW
                 )
             except Exception as e:
                 self.logger.info(f"Could not compute alignment metrics: {e}")
+
+            # Validate alignment quality using image correlation
+            try:
+                quality = self._validate_alignment_quality(
+                    sci_img, aligned_ref_img, max(fwhm_sci_pix, fwhm_ref_pix)
+                )
+                if not quality.get("passed", False):
+                    self.logger.warning(
+                        "AstroAlign alignment quality check FAILED "
+                        "(corr=%.3f, shift=%.2f px). Result may be unreliable.",
+                        quality.get("correlation", np.nan),
+                        quality.get("metrics", {}).get("shift_magnitude_px", np.nan),
+                    )
+                else:
+                    self.logger.info(
+                        "AstroAlign alignment quality PASSED "
+                        "(corr=%.3f, rel_rms=%.3f)",
+                        quality.get("correlation", np.nan),
+                        quality.get("rel_rms_diff", np.nan),
+                    )
+            except Exception as e:
+                self.logger.debug("AstroAlign quality check skipped: %s", e)
 
             # Remove aligned working directories and their contents after successful alignment.
             if science_dir.exists():
@@ -1950,13 +2234,13 @@ NNW
                     stderr=subprocess.STDOUT,
                     text=True,
                     check=False,
-                    timeout=90,
+                    timeout=300,
                 )
             self.clean_log(log_file)
         except subprocess.TimeoutExpired:
             with open(log_file, "a") as f:
-                f.write("\nERROR: SWarp execution timed out after 90 seconds\n")
-            self.logger.warning("SWarp timed out (90 s). See %s", log_file)
+                f.write("\nERROR: SWarp execution timed out after 300 seconds\n")
+            self.logger.warning("SWarp timed out (300 s). See %s", log_file)
             _cleanup_swarp_outputs()
             return None
         except Exception as e:
@@ -2255,11 +2539,15 @@ NNW
         return aligned_image
 
     def clean_image(self, path: Path):
-        """Clean NaN/inf/zero values in a FITS image."""
+        """Replace non-finite values (NaN/inf) in a FITS image with NaN.
+
+        Note: exact zeros are NOT replaced — zero is a valid pixel value on
+        background-subtracted images and replacing it with NaN would create
+        artificial holes in the data that corrupt downstream subtraction.
+        """
         with fits.open(path, mode="update") as hdul:
-            data = hdul[0].data
-            # np.nan_to_num(data, copy=False, nan=1e-30, posinf=1e-30, neginf=1e-30)
-            data[data == 0] = np.nan
+            data = np.asarray(hdul[0].data, dtype=float)
+            data[~np.isfinite(data)] = np.nan
             hdul[0].data = data
             hdul.flush()
 
@@ -2623,7 +2911,7 @@ NNW
                     2.5 / np.log(10) * (flux_err / flux),
                     0.02,
                 )
-                snr = np.where(flux_err > 0, flux / flux_err, 0.0)
+                snr = np.where(flux_err > 0, np.abs(flux) / flux_err, 0.0)
                 tbl["MAG_APER"], tbl["MAGERR_APER"], tbl["SNR_APER"] = mag, magerr, snr
             else:
                 # If neither is available, fill with NaN and default values
@@ -2731,7 +3019,7 @@ NNW
                         ),
                         residual_threshold=0.25,
                         max_trials=500,
-                        min_samples=max(3, len(sci_mag_clean) // 3),
+                        min_samples=2,
                     )
                     ransac.fit(ref_mag_clean.reshape(-1, 1), sci_mag_clean)
                     intercept = ransac.estimator_.intercept_
