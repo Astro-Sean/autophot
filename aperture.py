@@ -841,7 +841,7 @@ class Aperture:
         area = np.pi * ap_size**2
 
         image_e = self.image * gain
-        image_e[image_e == 0.0] = np.nan
+        image_e[~np.isfinite(image_e)] = np.nan
 
         inv_exp_time = 1.0 / exposure_time
         read_noise_sq = read_noise**2

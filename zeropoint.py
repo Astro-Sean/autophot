@@ -25,6 +25,7 @@ import traceback
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 from astropy.stats import (
     sigma_clip,
@@ -708,7 +709,7 @@ class Zeropoint:
                 )
                 mask |= clip1.mask
                 clip2 = sigma_clip(
-                    zp.values,
+                    np.asarray(zp),
                     sigma=5,
                     masked=True,
                     maxiters=10,
@@ -725,13 +726,15 @@ class Zeropoint:
 
                 valid = ~mask
                 n_valid = int(np.sum(valid))
+                zp_arr = np.asarray(zp)
+                zp_err_arr = np.asarray(zp_err)
                 if weighted_average:
                     image_zp, image_zp_err = self.weighted_average(
-                        zp.values[valid], zp_err.values[valid]
+                        zp_arr[valid], zp_err_arr[valid]
                     )
                 else:
                     image_zp, _, mad_val = sigma_clipped_stats(
-                        zp.values[valid],
+                        zp_arr[valid],
                         sigma=3.0,
                         cenfunc=np.nanmedian,
                         stdfunc=mad_std,
@@ -833,15 +836,18 @@ class Zeropoint:
         r0 = y - np.nanmedian(y)
         mad = np.nanmedian(np.abs(r0)) * 1.4826 + 1e-12
 
-        # Use smarter min_samples: at least 5 points or 30% of data, whichever is larger
-        # This prevents overfitting with just 2 points
+        # The fitted model is a constant (0-slope), which has exactly 1 DOF.
+        # Two points are sufficient to determine the intercept; using N/3 or N*0.3
+        # makes RANSAC over-restrictive on small catalogs, often finding no consensus
+        # set and falling back to all-point median (including outliers).
         n_points = len(x)
-        smart_min_samples = max(5, min(n_points, int(0.3 * n_points)))
-        effective_min_samples = max(ransac_min_samples, smart_min_samples)
+        effective_min_samples = max(ransac_min_samples, 2)
 
-        # Relax residual threshold: 0.15 mag cap instead of 0.1
-        # This allows slightly more scatter while still rejecting true outliers
-        residual_threshold = min(3.0 * mad, 0.15)
+        # Use 3*MAD as the inlier threshold without capping: the 0.15 mag cap
+        # was too tight for fields with genuine photometric scatter > 0.05 mag
+        # (non-photometric nights, crowded fields, filter mismatches), causing
+        # RANSAC to reject most valid inliers and produce a biased ZP.
+        residual_threshold = max(3.0 * mad, 0.05)
 
         ransac = RANSACRegressor(
             PenalisedSlopeRegressor(
@@ -856,7 +862,7 @@ class Zeropoint:
         )
         ransac.fit(x[:, None], y)
         inlier_mask = ransac.inlier_mask_
-        logger.info(f"RANSAC: {inlier_mask.sum()}/{len(x)} inliers (threshold={residual_threshold:.3f}, min_samples={effective_min_samples})")
+        logger.info(f"RANSAC: {inlier_mask.sum()}/{n_points} inliers (threshold={residual_threshold:.3f}, min_samples={effective_min_samples})")
 
         # If RANSAC rejects too many points (>50%), fall back to all points
         # The fit may have larger scatter but uses more data
@@ -1448,6 +1454,11 @@ class Zeropoint:
                     # vmask_sigma_idx contains the catalog indices of sources that survive all filtering steps
                     n_sources_used = len(vmask_sigma_idx)
 
+                    _corr_tag = (
+                        "color corr., "
+                        if (has_color_term and fixed_color_coeffs is not None)
+                        else ""
+                    )
                     ax_hist.bar(
                         bin_centers,
                         counts,
@@ -1457,9 +1468,8 @@ class Zeropoint:
                         alpha=0.8,
                         zorder=4,
                         label=(
-                            f"{labels_base[flux_type]} (color corr., "
-                            f"N={n_sources_used}, "
-                            f"ZP={zp_final:.3f}+/-{zp_err:.3f})"
+                            f"{labels_base[flux_type]} ({_corr_tag}N={n_sources_used})"
+                            f"||ZP = {zp_final:.3f} \u00b1 {zp_err:.3f}"
                         ),
                     )
                     # Errorbar marker at top of plot (xerr = zeropoint_error).
@@ -1532,9 +1542,8 @@ class Zeropoint:
                                 alpha=0.85,
                                 zorder=5,
                                 label=(
-                                    f"{labels_base['AP']} (+ap corr., "
-                                    f"N={n_sources_used}, "
-                                    f"ZP={(zp_final - ap_corr_mag):.3f}+/-{xerr_corr:.3f})"
+                                    f"{labels_base['AP']} (+ap corr., N={n_sources_used})"
+                                    f"||ZP = {(zp_final - ap_corr_mag):.3f} \u00b1 {xerr_corr:.3f}"
                                 ),
                             )
                             # Errorbar marker at top of plot for the aperture-corrected distribution.
@@ -1612,8 +1621,8 @@ class Zeropoint:
                                 alpha=0.6,
                                 zorder=3,
                                 label=(
-                                    f"{labels_base[flux_type]} (no corr., "
-                                    f"N={n_sources_nc}, ZP={zp_nc:.3f}+/-{std_nc:.3f})"
+                                    f"{labels_base[flux_type]} (no corr., N={n_sources_nc})"
+                                    f"||ZP = {zp_nc:.3f} \u00b1 {std_nc:.3f}"
                                 ),
                             )
                             try:
@@ -1641,15 +1650,40 @@ class Zeropoint:
                 ax_hist.set_xlabel("Zeropoint [mag]")
                 ax_hist.set_ylabel("Density")
                 ax_hist.grid(True, ls="-", alpha=0.25, zorder=0)
-                ax_hist.legend(
-                    loc="lower center",
-                    bbox_to_anchor=(0.5, 1.0),
-                    frameon=False,
-                    ncol=2,
-                )
                 for patch in ax_hist.patches:
                     patch.set_zorder(3)
 
+                # Build a two-column legend: left col = description, right col = ZP value.
+                # Labels are encoded as "left_text||right_text"; split and reassemble.
+                _handles, _labels = ax_hist.get_legend_handles_labels()
+                _left_labels, _right_labels = [], []
+                for _lbl in _labels:
+                    if "||" in _lbl:
+                        _l, _r = _lbl.split("||", 1)
+                    else:
+                        _l, _r = _lbl, ""
+                    _left_labels.append(_l.strip())
+                    _right_labels.append(_r.strip())
+                # Right-column handles: invisible patches carrying only the ZP text.
+                _blank_handles = [
+                    mpatches.Patch(color="none", label=_r) for _r in _right_labels
+                ]
+                _combined_handles = _handles + _blank_handles
+                _combined_labels  = _left_labels + _right_labels
+                ax_hist.legend(
+                    _combined_handles,
+                    _combined_labels,
+                    loc="lower center",
+                    bbox_to_anchor=(0.5, 1.01),
+                    borderaxespad=0.0,
+                    frameon=True,
+                    framealpha=0.95,
+                    fontsize="small",
+                    ncol=2,
+                    handlelength=1.2,
+                    handletextpad=0.4,
+                    columnspacing=0.8,
+                )
                 fig_hist.tight_layout()
                 os.makedirs(write_dir, exist_ok=True)
                 fig_hist.savefig(
@@ -2175,14 +2209,18 @@ class Zeropoint:
                 logger.info(f"fit_color_term: using polynomial order {poly_order} ({'linear' if poly_order == 1 else 'quadratic'})")
                 fit_mode = "polynomial"
 
+            zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
+            ct_threshold = float(zp_cfg.get("color_term_threshold", 5.0))
+            ct_mag_err_limit = float(zp_cfg.get("color_term_mag_err_limit", 0.32))
+
             df = catalog.copy()
             if "sky" in df.columns:
                 sky_mask = sigma_clip(np.abs(df["sky"].values), sigma=5, maxiters=10)
                 df = df[~sky_mask.mask]
             if "threshold" in df.columns:
-                df = df[df["threshold"] >= 5]
+                df = df[df["threshold"] >= ct_threshold]
 
-            clean = df[df[f"{use_filter}_err"] < 0.32].copy()
+            clean = df[df[f"{use_filter}_err"] < ct_mag_err_limit].copy()
 
             required = [
                 use_filter,
@@ -2221,7 +2259,7 @@ class Zeropoint:
             flux_ap, flux_err = flux_ap[finite], flux_err[finite]
 
             # Filter by S/N >= 5
-            snr = flux_ap / flux_err
+            snr = np.abs(flux_ap) / flux_err
             snr_mask = snr >= 5
             n_before_snr = len(x)
             x, y, x_err, y_err = x[snr_mask], y[snr_mask], x_err[snr_mask], y_err[snr_mask]

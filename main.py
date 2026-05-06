@@ -1115,15 +1115,33 @@ def run_photometry():
         input_yaml["read_noise"] = readnoise
         header["RDNOISE"] = readnoise
 
-        #  Handle Exposure Time — must be read from the FITS header (no silent default).
+        #  Handle Exposure Time — science frames must have a valid header; ZTF reference
+        # templates often omit EXPTIME, so use default_input exposure_time for template paths only.
         primary_key = telescope_config.get("exptime", "EXPTIME")
         pref = [] if primary_key == "not_given_by_user" else [primary_key]
         try:
             exposure_time, used_exptime_key = exposure_seconds_from_header(header, pref)
         except ValueError as exc:
-            raise ValueError(
-                f"No valid exposure time in FITS header for {fpath!r}: {exc}"
-            ) from exc
+            if is_template:
+                fallback = float(input_yaml.get("exposure_time", 30.0) or 30.0)
+                if not (np.isfinite(fallback) and fallback > 0):
+                    fallback = 30.0
+                exposure_time = fallback
+                used_exptime_key = "default_input.exposure_time (template)"
+                logging.warning(
+                    "No usable EXPTIME in template header for %s; using %.3g s from "
+                    "default_input.exposure_time. (%s)",
+                    fpath,
+                    float(exposure_time),
+                    exc,
+                )
+                header["EXPTIME"] = float(exposure_time)
+                if "EXPOSURE" not in header:
+                    header["EXPOSURE"] = float(exposure_time)
+            else:
+                raise ValueError(
+                    f"No valid exposure time in FITS header for {fpath!r}: {exc}"
+                ) from exc
         header["exptime"] = float(exposure_time)
         logging.info(
             "Exposure time: %.5g s (header keyword %s)",
@@ -2748,6 +2766,10 @@ def run_photometry():
             )
 
         input_yaml["fwhm"] = ImageFWHM
+        # Measured science-frame seeing FWHM (pixels); same quantity as output `image_fwhm`.
+        input_yaml["science_fwhm"] = (
+            float(ImageFWHM) if np.isfinite(ImageFWHM) else None
+        )
         input_yaml["scale"] = scale
         phot_cfg = input_yaml.get("photometry", {}) or {}
         undersampled_thr = float(phot_cfg.get("undersampled_fwhm_threshold", 2.5))
@@ -2837,6 +2859,9 @@ def run_photometry():
                     crowded=True,
                 )
                 input_yaml["fwhm"] = ImageFWHM
+                input_yaml["science_fwhm"] = (
+                    float(ImageFWHM) if np.isfinite(ImageFWHM) else None
+                )
                 input_yaml["scale"] = scale
                 phot_cfg = input_yaml.get("photometry", {}) or {}
                 undersampled_thr = float(
@@ -2988,7 +3013,7 @@ def run_photometry():
         IsolatedSources = aperture_photometry.measure(
             sources=IsolatedSources,
             plot=False,
-            ap_size=1.7 * input_yaml["fwhm"],
+            ap_size=1.7 * ImageFWHM,
             background_rms=background_rms,
             n_jobs=ap_n_jobs,
         )
@@ -2999,7 +3024,7 @@ def run_photometry():
         IsolatedSources = IsolatedSources.reset_index()
 
         # Calculates the box size with optimized odd conversion.
-        boxsize = odd(min(int(np.ceil(input_yaml["fwhm"])) * 2, 5))
+        boxsize = odd(min(int(np.ceil(ImageFWHM)) * 2, 5))
         # boxsize += boxsize % 2 == 0  # Makes odd if even
 
         # Removes sources near the image edges.
@@ -3081,7 +3106,7 @@ def run_photometry():
             psf_source_pool = IsolatedSources.copy()
 
         input_yaml["photometry"]["aperture_radius"] = odd(
-            int(np.ceil(optimum_radius * input_yaml["fwhm"]))
+            int(np.ceil(optimum_radius * ImageFWHM))
         )
         aperture_radius = float(input_yaml["photometry"]["aperture_radius"])
         logging.info(
@@ -3466,8 +3491,20 @@ def run_photometry():
                     ImageColorTerm = color_coeffs[1][0]  # First slope
                     ImageColorTermError = color_coeff_errors[1][0] if color_coeff_errors is not None else None
                 else:
-                    ImageColorTerm = color_coeffs[1] if len(color_coeffs) == 2 else color_coeffs[1]
-                    ImageColorTermError = color_coeff_errors[1] if color_coeff_errors is not None else None
+                    # fit_color_term can return a scalar or wrong arity when very few stars remain.
+                    if not isinstance(color_coeffs, (tuple, list)) or len(color_coeffs) < 2:
+                        logging.warning(
+                            "Color term fit returned unexpected coefficients %r; disabling color term.",
+                            color_coeffs,
+                        )
+                        color_coeffs, color_coeff_errors = None, None
+                        n_segments = 1
+                        ImageColorTerm, ImageColorTermError = None, None
+                    else:
+                        ImageColorTerm = color_coeffs[1]
+                        ImageColorTermError = (
+                            color_coeff_errors[1] if color_coeff_errors is not None else None
+                        )
 
         # Gets the zeropoint and plots the histogram.
         # CatalogSources, image_zeropoint = GetZeropoint.fit_zeropoint(catalog=CatalogSources,
@@ -3555,7 +3592,7 @@ def run_photometry():
         )
         image_sources = None
 
-        header["aper"] = int(np.ceil(optimum_radius * input_yaml["fwhm"]))
+        header["aper"] = int(np.ceil(optimum_radius * ImageFWHM))
         header["RDNOISE"] = readnoise
 
         # Writes the modified image and header back to the FITS file.
@@ -3926,12 +3963,13 @@ def run_photometry():
                     source_coords, k=1, distance_upper_bound=scale
                 )
 
+                excluded_sources = matched_df[min_distances <= scale]
                 matched_df = matched_df[min_distances > scale]
 
                 if not excluded_sources.empty:
                     logging.info(
-                        f"Excluded {len(excluded_sources)} sources due to proximity to  a nan region "
-                        f"(threshold: {distance_threshold:.2f} pixels)."
+                        f"Excluded {len(excluded_sources)} sources due to proximity to a nan/masked region "
+                        f"(threshold: {scale:.2f} pixels)."
                     )
 
             df_zogy_science = None
@@ -3966,9 +4004,19 @@ def run_photometry():
                 )
 
                 # Photometry on the template image (use *template* exposure from its header).
-                template_exposure, tpl_exp_key = exposure_seconds_from_header(
-                    template_header, None
-                )
+                try:
+                    template_exposure, tpl_exp_key = exposure_seconds_from_header(
+                        template_header, None
+                    )
+                except ValueError:
+                    template_exposure = float(
+                        input_yaml.get("exposure_time", 30.0) or 30.0
+                    )
+                    tpl_exp_key = "default_input.exposure_time (template)"
+                    logging.warning(
+                        "Template header lacks EXPTIME; using %.3g s for aperture photometry.",
+                        float(template_exposure),
+                    )
                 logging.info(
                     "Template exposure time: %.5g s (header %s)",
                     float(template_exposure),
@@ -4257,9 +4305,12 @@ def run_photometry():
                 )
                 variable_sources = variable_sources[mask_x & mask_y]
 
-                variable_sources["x_pix"] += 1
-                variable_sources["y_pix"] += 1
-                masked_sources = variable_sources[["x_pix", "y_pix"]].values.tolist()
+                # Build 1-based (x, y) pairs for SFFT's XY_PriorBan without
+                # mutating variable_sources: those coords stay 0-based for all
+                # SExtractor masking calls that come before AND after this point.
+                masked_sources = (
+                    variable_sources[["x_pix", "y_pix"]].values + 1.0
+                ).tolist()
             else:
                 masked_sources = []
 
@@ -4399,12 +4450,10 @@ def run_photometry():
                         "X_IMAGE_REF_SCI_MEAN",
                         "Y_IMAGE_REF_SCI_MEAN",
                     }.issubset(MatchingSources.columns):
-                        MatchingSources["x_pix"] = MatchingSources[
-                            "X_IMAGE_REF_SCI_MEAN"
-                        ]
-                        MatchingSources["y_pix"] = MatchingSources[
-                            "Y_IMAGE_REF_SCI_MEAN"
-                        ]
+                        # X/Y_IMAGE_REF_SCI_MEAN come from SExtractor (1-based);
+                        # convert to 0-based to match the pipeline convention.
+                        MatchingSources["x_pix"] = MatchingSources["X_IMAGE_REF_SCI_MEAN"] - 1
+                        MatchingSources["y_pix"] = MatchingSources["Y_IMAGE_REF_SCI_MEAN"] - 1
                     elif {"x_center", "y_center"}.issubset(MatchingSources.columns):
                         MatchingSources["x_pix"] = MatchingSources["x_center"]
                         MatchingSources["y_pix"] = MatchingSources["y_center"]
@@ -4437,9 +4486,7 @@ def run_photometry():
                 result = bg_remover.remove(image, plot=False, fwhm=ImageFWHM)
                 background_surface = result["background"]
                 background_rms = result["background_rms"]
-                # Default behaviour: keep background subtraction enabled even
-                # after template subtraction (difference image).
-                # image = np.asarray(image, dtype=float) - np.asarray(background_surface, dtype=float)
+                image = np.asarray(image, dtype=float) - np.asarray(background_surface, dtype=float)
 
         # Gets the header of the image.
         header = get_header(fpath)
@@ -4622,7 +4669,7 @@ def run_photometry():
                     if phot_ap_rad is None:
                         phot_ap_rad = float(
                             (input_yaml.get("photometry") or {}).get("aperture_size", 1.7)
-                        ) * float(input_yaml.get("fwhm", ImageFWHM))
+                        ) * float(ImageFWHM)
                     ap_rad = float(phot_ap_rad)
                     yy, xx = np.mgrid[0 : bg_sig.shape[0], 0 : bg_sig.shape[1]]
                     rr = np.hypot(xx - half, yy - half)
@@ -4717,9 +4764,12 @@ def run_photometry():
                     if rms_result is not None:
                         target_cutout_rms, _, _ = rms_result
                         target_cutout_rms = np.abs(np.asarray(target_cutout_rms, dtype=float))
-                # Target position is center of cutout (set by get_cutout)
-                cutout_target_x = float(target_cutout.shape[1] / 2.0)
-                cutout_target_y = float(target_cutout.shape[0] / 2.0)
+                # Target position in cutout-local coordinates, as returned by
+                # Cutout2D.position_cutout.  Do NOT assume the geometric centre
+                # of the array: near image edges the cutout is partial and the
+                # target sits offset from shape/2.
+                cutout_target_x = float(cutout_cx)
+                cutout_target_y = float(cutout_cy)
         except Exception as e:
             logging.warning(f"get_cutout failed for target cutout: {e}, falling back to direct slicing")
             target_cutout = None
@@ -4791,7 +4841,7 @@ def run_photometry():
         )
 
         # Refines the centroid with COM inside ~1xFWHM box (odd box size).
-        boxsize = int(np.ceil(input_yaml["fwhm"]))
+        boxsize = int(np.ceil(ImageFWHM))
         if boxsize % 2 == 0:
             boxsize += 1
 
@@ -4955,7 +5005,7 @@ def run_photometry():
         if target_cutout is not None:
             try:
                 logging.info(f"Converting cutout-local to full-image: cutout_x0={cutout_x0:.2f}, cutout_y0={cutout_y0:.2f}")
-                for col in ("x_pix", "y_pix", "x_fit", "y_fit"):
+                for col in ("x_pix", "y_pix", "x_fit", "y_fit", "x_fit_normal", "y_fit_normal"):
                     if col in TargetPosition.columns and np.isfinite(TargetPosition[col].iloc[0]):
                         old_val = float(TargetPosition[col].iloc[0])
                         if col.startswith("x"):
@@ -5094,11 +5144,11 @@ def run_photometry():
                 aper_rad_pix = phot_cfg.get("aperture_radius", None)
                 if aper_rad_pix is None:
                     aper_size_fwhm = float(phot_cfg.get("aperture_size", 1.7))
-                    aper_rad_pix = aper_size_fwhm * float(input_yaml.get("fwhm", ImageFWHM))
+                    aper_rad_pix = aper_size_fwhm * float(ImageFWHM)
                 aper_rad_pix = float(aper_rad_pix)
                 header["APER"] = aper_rad_pix
             except Exception:
-                aper_rad_pix = float(1.7) * float(input_yaml.get("fwhm", ImageFWHM))
+                aper_rad_pix = float(1.7) * float(ImageFWHM)
             # Creates an instance of the plot class.
             makePlots = Plot(input_yaml=input_yaml)
             # Plots the template subtraction check.

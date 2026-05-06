@@ -3904,7 +3904,7 @@ class PSF:
             aspect = 5.0 * golden_ratio / width_in
             width_pt = width_in * 72.27
             fig = plt.figure(figsize=set_size(width_pt, aspect=aspect))
-            gs = GridSpec(1, ncols, width_ratios=[1] * ncols, wspace=0.45)
+            gs = GridSpec(1, ncols, width_ratios=[1] * ncols, wspace=0.05)
 
             ax_list, cax_list = [], []
             for k in range(ncols):
@@ -3974,11 +3974,11 @@ class PSF:
                     sources["x_pix"],
                     sources["y_pix"],
                     marker="+",
-                    c="cyan",
+                    c="red",
                     s=get_marker_size('medium'),
-                    lw=0.5,
+                    lw=1.2,
                     label="Input position",
-                    zorder=10,
+                    zorder=11,
                 )
                 # Add dashed box showing fitting bounds region
                 phot_cfg = self.input_yaml.get("photometry", {})
@@ -4010,7 +4010,21 @@ class PSF:
                         pass
 
             if "x_fit" in sources and "y_fit" in sources:
-                for _, row in sources.iterrows():
+                _fit_radius = max(2.0, aperture_radius * 0.35)
+                for _fit_i, (_, row) in enumerate(sources.iterrows()):
+                    ax1.add_patch(
+                        Circle(
+                            (row["x_fit"], row["y_fit"]),
+                            _fit_radius,
+                            edgecolor="red",
+                            facecolor="none",
+                            lw=1.2,
+                            ls="-",
+                            alpha=0.9,
+                            zorder=10,
+                            label="Fitted position" if _fit_i == 0 else None,
+                        )
+                    )
                     ax1.add_patch(
                         Circle(
                             (row["x_fit"], row["y_fit"]),
@@ -4019,7 +4033,8 @@ class PSF:
                             facecolor="none",
                             lw=0.5,
                             ls="--",
-                            alpha=0.8,
+                            alpha=0.6,
+                            zorder=9,
                         )
                     )
                     xe, ye = row.get("x_fit_err", np.nan), row.get("y_fit_err", np.nan)
@@ -4037,11 +4052,11 @@ class PSF:
                                 2 * xe,
                                 2 * ye,
                                 angle=0,
-                                edgecolor="#FF0000",
+                                edgecolor="red",
                                 facecolor="none",
                                 lw=0.5,
-                                alpha=1,
-                                zorder=1,
+                                alpha=0.6,
+                                zorder=9,
                             )
                         )
 

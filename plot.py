@@ -235,9 +235,9 @@ class Plot:
                                 skipped_markers += 1
                                 continue
                                 
-                            # Convert to 0-indexed if needed (FITS is 1-indexed)
-                            x_plot = float(x_pix) - 1 if x_pix > 0 else float(x_pix)
-                            y_plot = float(y_pix) - 1 if y_pix > 0 else float(y_pix)
+                            # Coordinates are already 0-based (converted on ingestion).
+                            x_plot = float(x_pix)
+                            y_plot = float(y_pix)
                             
                             # Check if coordinates are within THIS panel's image bounds
                             if not (0 <= x_plot < panel_width and 0 <= y_plot < panel_height):
@@ -703,11 +703,37 @@ class Plot:
             try:
                 from astropy.wcs import WCS
                 from astropy.io import fits
-                header = fits.getheader(fpath)
-                # Create WCS with fix/relax to handle various distortion parameter types (SIP, TPV, PV)
-                # This prevents issues when headers contain mixed or non-standard WCS keywords
-                wcs = WCS(header, fix=True, relax=True)
-                if wcs.has_celestial:
+
+                def _pick_celestial_wcs(_fpath: str):
+                    """
+                    Return a 2D celestial WCS suitable for plotting, or None.
+
+                    Some FITS store the science image/WCS in an extension rather than the
+                    primary HDU. Also, WCSAxes works best with an explicitly 2D celestial
+                    WCS (`w.celestial`) even when the full WCS has extra axes.
+                    """
+                    try:
+                        with fits.open(_fpath, memmap=False) as hdul:
+                            for hdu in hdul:
+                                hdr = getattr(hdu, "header", None)
+                                if hdr is None:
+                                    continue
+                                # Must look like an image header.
+                                if int(hdr.get("NAXIS", 0)) < 2:
+                                    continue
+                                w = WCS(hdr, fix=True, relax=True)
+                                if not getattr(w, "has_celestial", False):
+                                    continue
+                                wc = w.celestial
+                                # Guard against malformed celestial WCS that produces empty coords
+                                if getattr(wc, "pixel_n_dim", 0) >= 2:
+                                    return wc
+                    except Exception:
+                        return None
+                    return None
+
+                wcs = _pick_celestial_wcs(fpath)
+                if wcs is not None:
                     ax1 = fig.add_subplot(111, projection=wcs)
                     # Guard: some malformed headers can yield a WCSAxes instance whose
                     # coordinate helpers are empty; attempting ax1.coords[0] then raises
