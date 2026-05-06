@@ -196,9 +196,8 @@ default_input:
     scamp_single_call: True # bool --- If True (default), run SCAMP only once per image (disables multi-trial optimization).
     scamp_optimize_after_solve: False # bool --- (Advanced) If True, try multiple SCAMP parameter trials after solve-field.
     scamp_optimize_max_trials: 1 # int --- Maximum SCAMP optimization trials to evaluate (1=base only).
-    scamp_distort_degrees: 4 # int --- SCAMP distortion polynomial degree (higher can model stronger optical distortion; default 4).
-    # RECOMMENDED: For edge alignment issues (host galaxy misalignment), reduce polynomial degree:
-    #   scamp_distort_degrees: 3  # More stable at edges than degree 4
+    scamp_distort_degrees: 3 # int --- SCAMP distortion polynomial degree (default 3; use 4 only for severe distortion).
+    # Degree 3 is more stable at image edges than degree 4, which can overfit and cause edge misalignment.
     # RECOMMENDED: If you see "Convergence not achieved after 30 iterations" errors with TPV WCS,
     # try these conservative settings:
     #   scamp_distort_degrees: 3
