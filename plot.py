@@ -1597,6 +1597,21 @@ class Plot:
                 logger.warning("No sources with PSF fit errors for WCS vs PSF offset plot")
                 return
 
+            # Exclude sources with very large position errors (> FWHM)
+            # These indicate problematic fits and should not dominate the plot
+            fwhm = float(self.input_yaml.get("fwhm", 3.0))
+            reasonable_err = (
+                (df_plot["x_fit_err"] <= fwhm) & (df_plot["y_fit_err"] <= fwhm)
+            )
+            n_before = len(df_plot)
+            df_plot = df_plot[reasonable_err].copy()
+            n_excluded = n_before - len(df_plot)
+            if n_excluded > 0:
+                logger.info(
+                    f"WCS vs PSF offset plot: excluded {n_excluded}/{n_before} sources "
+                    f"with position errors > FWHM ({fwhm:.1f} px)"
+                )
+
             # Create plot
             width_pt = 5.5 * 72.27
             aspect = 1.0
