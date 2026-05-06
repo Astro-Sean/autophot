@@ -951,20 +951,6 @@ NNW
                 fwhm_ref_arcsec,
             )
 
-            if len(sci_sex.get("catalog", [])) == 0:
-                self.logger.info(
-                    "Science catalog empty after filtering; skipping SCAMP/SWarp, falling back to AstroAlign."
-                )
-                return self._align_fallback_reproject_then_astroalign(
-                    science_image, reference_image, output_dir
-                )
-            if len(ref_sex.get("catalog", [])) == 0:
-                self.logger.info(
-                    "Reference catalog empty after filtering; skipping SCAMP/SWarp, falling back to AstroAlign."
-                )
-                return self._align_fallback_reproject_then_astroalign(
-                    science_image, reference_image, output_dir
-                )
 
             sci_is_undersampled = fwhm_sci_pix < 2.0
             ref_is_undersampled = fwhm_ref_pix < 2.0
@@ -997,27 +983,6 @@ NNW
                     science_image, reference_image, output_dir
                 )
 
-            if _num_matched < 5:
-                retry_radius = min(crossid_radius * 1.5, 30.0)
-                self.logger.info(
-                    "Too few matches (%d); retrying with larger radius %.2f arcsec.",
-                    _num_matched,
-                    retry_radius,
-                )
-                try:
-                    _num_matched, _ = _do_match(retry_radius)
-                except Exception as e:
-                    log_warning_from_exception(
-                        self.logger, "Retry matching failed", e
-                    )
-                if _num_matched < 5:
-                    self.logger.info(
-                        "Too few matched sources (%d) for SCAMP/SWarp. Falling back to reproject/AstroAlign.",
-                        _num_matched,
-                    )
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
-                    )
 
             self.logger.info(
                 "Matched sources for SCAMP/SWarp: %d (science %d, reference %d)",
@@ -1671,8 +1636,6 @@ NNW
             order = np.argsort(joint)[::-1]
             pts_sci = np.vstack([sy[order], sx[order]]).T
             pts_ref = np.vstack([ry[order], rx[order]]).T
-            if pts_sci.shape[0] < 3:
-                raise ValueError("Fewer than 3 control points for AstroAlign")
 
             def _load_and_clean_image(fits_path):
                 with fits.open(fits_path) as hdul:
