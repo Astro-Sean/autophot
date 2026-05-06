@@ -151,7 +151,7 @@ default_input:
     crowded_auto_background_rms_min: null # float|null --- Crowded-field trigger: minimum background RMS (optional).
 
     redo_wcs: True # bool --- If True, solve/refresh WCS even if a WCS exists in the header.
-    projection_type: SIP # str --- WCS projection/distortion mode: TPV (solve-field seed + SCAMP refinement) or SIP (solve-field only).
+    projection_type: TPV # str --- WCS projection/distortion mode: TPV (solve-field seed + SCAMP refinement) or SIP (solve-field only).
     allow_fallback_to_existing_on_solve_fail: False # bool --- If False, require a fresh solve when redo_wcs=True (no silent fallback to original header WCS).
     apply_solved_to_fits: True # bool --- If True, write solved WCS back into the FITS header on disk.
     solve_field_exe_loc: solve-field # str --- `solve-field` executable name/path (defaults to `solve-field` on PATH).
@@ -197,6 +197,11 @@ default_input:
     scamp_optimize_after_solve: False # bool --- (Advanced) If True, try multiple SCAMP parameter trials after solve-field.
     scamp_optimize_max_trials: 1 # int --- Maximum SCAMP optimization trials to evaluate (1=base only).
     scamp_distort_degrees: 4 # int --- SCAMP distortion polynomial degree (higher can model stronger optical distortion; default 4).
+    # RECOMMENDED: If you see "Convergence not achieved after 30 iterations" errors with TPV WCS,
+    # try these conservative settings:
+    #   scamp_distort_degrees: 3
+    #   prefer_scamp_tpv_after_solve: False
+    # Or disable SCAMP entirely with projection_type: SIP (solve-field only)
     scamp_nthreads: 4 # int --- Number of SCAMP threads (within one SCAMP run).
     sextractor_nthreads: 4 # int --- SExtractor NTHREADS when run via run_sex wrapper.
     scamp_crossid_radius: 2.5 # float --- Cross-identification radius (arcsec) for SCAMP matching.
@@ -321,8 +326,8 @@ default_input:
     initial_guess_sigma_mult: 5.0 # float --- Initial injected-limit guess uses flux ~= (this * sigma_sky * sqrt(Npix)) from annulus probe measurements; converted to instrumental magnitude.
     scale_growth_factor: 1.5 # float --- If no quiet injection sites are found, multiply runtime `scale` by this factor and retry (up to scale_growth_max_px).
     scale_growth_max_px: 600 # int --- Maximum runtime `scale` (pixels) allowed during limiting-magnitude quiet-site retries.
-    injection_n_sites: 100 # int --- Number of quiet injection sites around the target used for injection/recovery trials (more = smoother completeness curve; slower). Default 100, max 500.
-    injection_jitter_repetitions: 5 # int --- Sub-pixel jitter repetitions per site per magnitude (more = smoother completeness curve; slower).
+    injection_n_sites: 25 # int --- Number of quiet injection sites around the target used for injection/recovery trials (more = smoother completeness curve; slower). Default 100, max 500.
+    injection_jitter_repetitions: 3 # int --- Sub-pixel jitter repetitions per site per magnitude (more = smoother completeness curve; slower).
     completeness_plot_span_mag: 0.8 # float --- Half-span (mag) around the adopted limit used for the completeness plot sampling range (smaller = fewer bins far from transition).
     completeness_plot_nmags: 9 # int --- Number of magnitudes sampled across completeness_plot_span_mag for the completeness bar chart.
     plot_injection_recovery: false # bool --- If true, generate the InjectionRecovery plot showing injected vs recovered magnitudes. If false, skip this plot.
