@@ -1508,7 +1508,22 @@ NNW
                 )
                 self.logger.debug(f"Using reproject_interp with order={order} for alignment")
             aligned_ref = np.asarray(aligned_ref, dtype=float)
+            # CRITICAL: Apply footprint mask - pixels with no coverage (footprint==0) must be NaN
+            # The footprint indicates valid reprojection coverage (1=valid, 0=no data)
+            footprint_arr = np.asarray(footprint, dtype=bool)
+            aligned_ref[~footprint_arr] = np.nan
+            # Also ensure any remaining non-finite values are NaN
             aligned_ref[~np.isfinite(aligned_ref)] = np.nan
+            n_valid = np.sum(np.isfinite(aligned_ref))
+            n_total = aligned_ref.size
+            self.logger.debug(
+                f"Reproject footprint: {n_valid}/{n_total} valid pixels ({100*n_valid/n_total:.1f}%)"
+            )
+            if n_valid == 0:
+                self.logger.error(
+                    "Reproject produced all-NaN output - template may not overlap with science image"
+                )
+                return None
             out_header = ref_header.copy()
             out_header = remove_wcs_from_header(out_header)
             out_header.update(sci_wcs.to_header(), relax=True)

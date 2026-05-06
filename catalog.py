@@ -2076,7 +2076,7 @@ class Catalog:
             # This avoids scattered low S/N inliers that break the linearity fit
             flux = clean_catalog["flux_AP"].values
             flux_err = clean_catalog["flux_AP_err"].values
-            snr = flux / flux_err
+            snr = np.abs(flux) / flux_err
 
             # Find a high S/N threshold that gives a continuous bright subset
             # Start with S/N > 50 for very high quality, then relax if needed
@@ -2436,8 +2436,17 @@ class Catalog:
                             inlier_residual_mask = np.abs(np.asarray(all_residuals).flatten()) < residual_threshold
                             
                             # Expand inlier residual mask back to full array size
-                            linear_residual_mask = np.zeros(len(flux), dtype=bool)
-                            linear_residual_mask[inlier_mask] = inlier_residual_mask
+                            # Ensure arrays have matching length to prevent indexing error
+                            n_inliers = np.sum(inlier_mask)
+                            if len(inlier_residual_mask) != n_inliers:
+                                logger.warning(
+                                    f"Array length mismatch: inlier_residual_mask={len(inlier_residual_mask)}, "
+                                    f"inlier_mask.sum()={n_inliers}. Skipping residual masking."
+                                )
+                                linear_residual_mask = inlier_mask.copy()
+                            else:
+                                linear_residual_mask = np.zeros(len(flux), dtype=bool)
+                                linear_residual_mask[inlier_mask] = inlier_residual_mask
                             
                             # Combined mask: must be in flux range AND have good residual
                             final_linear_mask = linear_flux_mask & linear_residual_mask
