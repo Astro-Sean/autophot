@@ -3246,6 +3246,54 @@ class Limits:
                         ax_inject.set_ylabel('')
                     ax_inject.tick_params(labelsize=8)
 
+            # Fourth panel (bottom right): original cutout with injection site markers
+            if cutout is not None and injection_df is not None and len(injection_df) > 0:
+                ax_sites = fig.add_subplot(gs[2, 2])
+                ny, nx = cutout.shape
+
+                # Display original cutout (no injections)
+                from astropy.visualization import simple_norm
+                norm = simple_norm(cutout, 'sqrt', percent=99.5)
+                cmap = plt.get_cmap("viridis").copy()
+                cmap.set_bad(color="white")
+                plot_zero_as_nan = bool((self.input_yaml.get("limiting_magnitude") or {}).get("plot_zero_as_nan", True))
+                cut_disp = np.asarray(cutout, dtype=float).copy()
+                if plot_zero_as_nan:
+                    cut_disp[np.asarray(cut_disp, dtype=float) == 0.0] = np.nan
+                ax_sites.imshow(
+                    np.ma.array(cut_disp, mask=~np.isfinite(cut_disp)),
+                    origin="lower",
+                    cmap=cmap,
+                    norm=norm,
+                )
+                ax_sites.set_xlim(0, nx)
+                ax_sites.set_ylim(0, ny)
+
+                # Mark target position
+                from matplotlib.patches import Circle
+                target_marker = Circle((target_x, target_y), radius=aperture_radius,
+                                      edgecolor='red', facecolor='none', linestyle='-', linewidth=0.5)
+                ax_sites.add_patch(target_marker)
+                ax_sites.text(target_x, target_y + aperture_radius, transient_label,
+                             color='red', fontsize=8, ha='center', va='bottom')
+
+                # Mark all injection sites
+                for _, site in injection_df.iterrows():
+                    sx, sy = float(site["x_pix"]), float(site["y_pix"])
+                    if not (np.isfinite(sx) and np.isfinite(sy)):
+                        continue
+                    # Circle marker for each injection site
+                    site_circle = Circle((sx, sy), radius=aperture_radius,
+                                        edgecolor='cyan', facecolor='none', linestyle='--', linewidth=0.5)
+                    ax_sites.add_patch(site_circle)
+                    # Small cross at center
+                    ax_sites.plot([sx], [sy], '+', color='cyan', markersize=4, markeredgewidth=0.5)
+
+                ax_sites.set_title("Injection sites", fontsize=9)
+                ax_sites.set_xlabel('X [pixels]', fontsize=8)
+                ax_sites.set_ylabel('Y [pixels]', fontsize=8)
+                ax_sites.tick_params(labelsize=8)
+
             # Add axis data: small grey lines at top of main plot showing injected magnitudes
             # Plot on secondary axis (apparent magnitude) for correct positioning
             # Mark the injected magnitudes used in the three cutout panels as
