@@ -1869,6 +1869,26 @@ class WCSSolver:
         if isinstance(best_trial_header, fits.Header):
             if best_trial_label is None:
                 best_trial_label = "base"
+            # Validate that the distortion model is invertible (catches extreme SCAMP solutions)
+            try:
+                test_wcs = get_wcs(best_trial_header)
+                if test_wcs is not None:
+                    # Test transform at image center - if this fails, the distortion is too extreme
+                    cx, cy = best_trial_header.get("NAXIS1", 1000) / 2, best_trial_header.get("NAXIS2", 1000) / 2
+                    ra_test, dec_test = test_wcs.all_pix2world(cx, cy, 0)
+                    # Round-trip test: world->pix->world should converge
+                    x_back, y_back = test_wcs.all_world2pix(ra_test, dec_test, 0, maxiter=50)
+                    if not (np.isfinite(x_back) and np.isfinite(y_back)):
+                        raise ValueError("WCS round-trip failed")
+                    logger.debug("SCAMP WCS passed invertibility test at image center")
+            except Exception as inv_exc:
+                logger.warning(
+                    "SCAMP trial '%s' distortion model failed invertibility test: %s. "
+                    "Rejecting extreme distortion solution.",
+                    best_trial_label, inv_exc
+                )
+                return np.nan  # Reject this SCAMP solution, will fall back to solve-field SIP
+
             logger.info(
                 "Using SCAMP WCS solution (trial='%s', preferred TPV/PV distortion model).",
                 best_trial_label,
@@ -2974,7 +2994,9 @@ class WCSSolver:
                             tmp_wcs = get_wcs(self.header)
                             crpix1 = float(self.header["CRPIX1"])
                             crpix2 = float(self.header["CRPIX2"])
-                            rd = tmp_wcs.all_pix2world([[crpix1]], [[crpix2]], 0)
+                            # CRPIX is defined in FITS 1-based pixel convention;
+                            # use origin=1 so astropy does not apply an extra +1 offset.
+                            rd = tmp_wcs.all_pix2world([[crpix1]], [[crpix2]], 1)
                             self.header["CRPIX1"] = crpix1 + crpix_offset
                             self.header["CRPIX2"] = crpix2 + crpix_offset
                             self.header["CRVAL1"] = float(rd[0].flat[0])
