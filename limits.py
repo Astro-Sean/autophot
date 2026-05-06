@@ -1624,17 +1624,71 @@ class Limits:
             cand_df = cand_df.sort_values("_snr_score", ascending=True)
             quiet_mask = cand_df["_snr_score"] <= float(effective_snr_limit)
             cand_quiet = cand_df[quiet_mask].copy()
+
+            def _select_uniform_in_angle(df, cx, cy, n_select):
+                """
+                Select n_select sites uniformly distributed in angle around (cx, cy).
+                Within each angular sector, pick the site with lowest _snr_score.
+                This ensures spatial coverage around the full annulus.
+                """
+                if len(df) <= n_select:
+                    return df.copy()
+                # Compute angle of each site relative to center
+                x = np.asarray(df["x_pix"], float)
+                y = np.asarray(df["y_pix"], float)
+                angles = np.arctan2(y - cy, x - cx)  # Range: [-pi, pi]
+                # Normalize to [0, 2pi)
+                angles = np.mod(angles + 2 * np.pi, 2 * np.pi)
+                # Assign to angular bins
+                bin_edges = np.linspace(0, 2 * np.pi, n_select + 1)
+                bin_idx = np.digitize(angles, bin_edges) - 1
+                bin_idx = np.clip(bin_idx, 0, n_select - 1)
+                # Within each bin, pick the site with lowest _snr_score
+                df = df.copy()
+                df["_angle_bin"] = bin_idx
+                selected = []
+                for b in range(n_select):
+                    bin_df = df[df["_angle_bin"] == b]
+                    if len(bin_df) > 0:
+                        # Already sorted by _snr_score, take first
+                        selected.append(bin_df.iloc[0])
+                if len(selected) == 0:
+                    return df.head(n_select)
+                result = pd.DataFrame(selected).drop(columns=["_angle_bin"])
+                return result
+
             if len(cand_quiet) > 0:
-                chosen = cand_quiet.head(n_quiet)
-                logger.info(
-                    "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; using the lowest %d.",
-                    int(len(cand_quiet)),
-                    int(len(cand_df)),
-                    float(effective_snr_limit),
-                    int(min(n_quiet, len(cand_quiet))),
-                )
+                if len(cand_quiet) > n_quiet:
+                    # Select uniformly in angle to ensure spatial coverage
+                    chosen = _select_uniform_in_angle(
+                        cand_quiet, cutout_cx, cutout_cy, n_quiet
+                    )
+                    logger.info(
+                        "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; "
+                        "selected %d uniformly in angle around target.",
+                        int(len(cand_quiet)),
+                        int(len(cand_df)),
+                        float(effective_snr_limit),
+                        int(len(chosen)),
+                    )
+                else:
+                    chosen = cand_quiet.copy()
+                    logger.info(
+                        "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; using all %d.",
+                        int(len(cand_quiet)),
+                        int(len(cand_df)),
+                        float(effective_snr_limit),
+                        int(len(cand_quiet)),
+                    )
             else:
-                chosen = cand_df.head(n_quiet)
+                # No truly quiet sites - use lowest |S/N| but still try for angular diversity
+                if len(cand_df) > n_quiet:
+                    chosen = _select_uniform_in_angle(
+                        cand_df.head(min(len(cand_df), n_quiet * 3)),
+                        cutout_cx, cutout_cy, n_quiet
+                    )
+                else:
+                    chosen = cand_df.copy()
                 # Not a fatal condition: proceed using the lowest-|S/N| sites anyway.
                 # This usually means the local environment is structured everywhere
                 # in the allowed annulus (common in difference images near bright hosts).
@@ -1647,7 +1701,7 @@ class Limits:
                     "No candidates with |S/N|<=%.3g in local environment; using the lowest %d sites anyway "
                     "(min/med/max |S/N| = %.3g / %.3g / %.3g; |S/N| quantiles [5,25,50,75,95]=%s).",
                     float(effective_snr_limit),
-                    int(min(n_quiet, len(cand_df))),
+                    int(len(chosen)),
                     float(np.nanmin(chosen["_snr_score"])),
                     float(np.nanmedian(chosen["_snr_score"])),
                     float(np.nanmax(chosen["_snr_score"])),
@@ -2784,9 +2838,9 @@ class Limits:
 
                     ax.plot(
                         mag_curve, comp_curve,
-                        color="darkorange", lw=1.0, ls="-",
+                        color="lightgrey", lw=0.5, ls="--", zorder=0,
                         label=f"Sigmoid fit (s={s_fit:.2f})",
-                        zorder=5, alpha=0.8
+                        alpha=0.5
                     )
                     logger.info(
                         "Completeness sigmoid fit: m50=%.3f, s=%.3f, span=[%.2f, %.2f]",
@@ -2799,7 +2853,6 @@ class Limits:
         ax.set_xlabel("Injected brightness [mag]", fontsize=9)
         ax.set_ylabel("Recovery fraction [%]", fontsize=9)
         
-
         # Optional apparent-magnitude secondary axis.
         secax = None
         if selected_zeropoint is not None:
