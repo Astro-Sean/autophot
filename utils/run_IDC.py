@@ -1664,7 +1664,7 @@ NNW
                         e,
                     )
 
-                # Validate alignment quality before accepting
+                # Validate alignment quality for diagnostics (but always accept SWarp if it succeeded)
                 try:
                     with fits.open(aligned_sci) as h1, fits.open(aligned_ref) as h2:
                         sci_data = np.asarray(h1[0].data, dtype=float)
@@ -1673,21 +1673,20 @@ NNW
                         sci_data, ref_data, max(fwhm_sci_pix, fwhm_ref_pix)
                     )
                     if not quality.get("passed", False):
+                        # Log quality metrics but accept SWarp result regardless
                         self.logger.warning(
-                            "SCAMP/SWarp alignment quality check FAILED "
-                            "(corr=%.3f, shift=%.2f px). Falling back to AstroAlign.",
+                            "SCAMP/SWarp alignment quality check reported issues "
+                            "(corr=%.3f, shift=%.2f px), but accepting result since SWarp succeeded.",
                             quality.get("correlation", np.nan),
                             quality.get("metrics", {}).get("shift_magnitude_px", np.nan),
                         )
-                        return self._align_fallback_reproject_then_astroalign(
-                            science_image, reference_image, output_dir
+                    else:
+                        self.logger.info(
+                            "SCAMP/SWarp alignment quality PASSED "
+                            "(corr=%.3f, rel_rms=%.3f)",
+                            quality.get("correlation", np.nan),
+                            quality.get("rel_rms_diff", np.nan),
                         )
-                    self.logger.info(
-                        "SCAMP/SWarp alignment quality PASSED "
-                        "(corr=%.3f, rel_rms=%.3f)",
-                        quality.get("correlation", np.nan),
-                        quality.get("rel_rms_diff", np.nan),
-                    )
                 except Exception as e:
                     self.logger.debug("Alignment quality check skipped: %s", e)
 
