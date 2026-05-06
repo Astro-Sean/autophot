@@ -1624,71 +1624,17 @@ class Limits:
             cand_df = cand_df.sort_values("_snr_score", ascending=True)
             quiet_mask = cand_df["_snr_score"] <= float(effective_snr_limit)
             cand_quiet = cand_df[quiet_mask].copy()
-
-            def _select_uniform_in_angle(df, cx, cy, n_select):
-                """
-                Select n_select sites uniformly distributed in angle around (cx, cy).
-                Within each angular sector, pick the site with lowest _snr_score.
-                This ensures spatial coverage around the full annulus.
-                """
-                if len(df) <= n_select:
-                    return df.copy()
-                # Compute angle of each site relative to center
-                x = np.asarray(df["x_pix"], float)
-                y = np.asarray(df["y_pix"], float)
-                angles = np.arctan2(y - cy, x - cx)  # Range: [-pi, pi]
-                # Normalize to [0, 2pi)
-                angles = np.mod(angles + 2 * np.pi, 2 * np.pi)
-                # Assign to angular bins
-                bin_edges = np.linspace(0, 2 * np.pi, n_select + 1)
-                bin_idx = np.digitize(angles, bin_edges) - 1
-                bin_idx = np.clip(bin_idx, 0, n_select - 1)
-                # Within each bin, pick the site with lowest _snr_score
-                df = df.copy()
-                df["_angle_bin"] = bin_idx
-                selected = []
-                for b in range(n_select):
-                    bin_df = df[df["_angle_bin"] == b]
-                    if len(bin_df) > 0:
-                        # Already sorted by _snr_score, take first
-                        selected.append(bin_df.iloc[0])
-                if len(selected) == 0:
-                    return df.head(n_select)
-                result = pd.DataFrame(selected).drop(columns=["_angle_bin"])
-                return result
-
             if len(cand_quiet) > 0:
-                if len(cand_quiet) > n_quiet:
-                    # Select uniformly in angle to ensure spatial coverage
-                    chosen = _select_uniform_in_angle(
-                        cand_quiet, cutout_cx, cutout_cy, n_quiet
-                    )
-                    logger.info(
-                        "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; "
-                        "selected %d uniformly in angle around target.",
-                        int(len(cand_quiet)),
-                        int(len(cand_df)),
-                        float(effective_snr_limit),
-                        int(len(chosen)),
-                    )
-                else:
-                    chosen = cand_quiet.copy()
-                    logger.info(
-                        "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; using all %d.",
-                        int(len(cand_quiet)),
-                        int(len(cand_df)),
-                        float(effective_snr_limit),
-                        int(len(cand_quiet)),
-                    )
+                chosen = cand_quiet.head(n_quiet)
+                logger.info(
+                    "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; using the lowest %d.",
+                    int(len(cand_quiet)),
+                    int(len(cand_df)),
+                    float(effective_snr_limit),
+                    int(min(n_quiet, len(cand_quiet))),
+                )
             else:
-                # No truly quiet sites - use lowest |S/N| but still try for angular diversity
-                if len(cand_df) > n_quiet:
-                    chosen = _select_uniform_in_angle(
-                        cand_df.head(min(len(cand_df), n_quiet * 3)),
-                        cutout_cx, cutout_cy, n_quiet
-                    )
-                else:
-                    chosen = cand_df.copy()
+                chosen = cand_df.head(n_quiet)
                 # Not a fatal condition: proceed using the lowest-|S/N| sites anyway.
                 # This usually means the local environment is structured everywhere
                 # in the allowed annulus (common in difference images near bright hosts).
@@ -1701,7 +1647,7 @@ class Limits:
                     "No candidates with |S/N|<=%.3g in local environment; using the lowest %d sites anyway "
                     "(min/med/max |S/N| = %.3g / %.3g / %.3g; |S/N| quantiles [5,25,50,75,95]=%s).",
                     float(effective_snr_limit),
-                    int(len(chosen)),
+                    int(min(n_quiet, len(cand_df))),
                     float(np.nanmin(chosen["_snr_score"])),
                     float(np.nanmedian(chosen["_snr_score"])),
                     float(np.nanmax(chosen["_snr_score"])),
@@ -2790,65 +2736,6 @@ class Limits:
             except Exception:
                 pass
 
-        # Plot sigmoid curve fit from bracket/bisect data
-        # Fit logistic: P(m) = 100 / (1 + exp((m - m50)/s))
-        all_steps = (bracket_steps or []) + (bisect_steps or [])
-        if len(all_steps) >= 3 and np.isfinite(adopted_mag):
-            try:
-                # Extract (mag, detection_rate) pairs
-                mags_fit = np.array([s[0] for s in all_steps if np.isfinite(s[0]) and np.isfinite(s[1])])
-                comp_fit = np.array([s[1] for s in all_steps if np.isfinite(s[0]) and np.isfinite(s[1])]) * 100.0
-
-                if len(mags_fit) >= 3:
-                    # Fit for s (width) around fixed m50
-                    def _logistic(m, m50, s):
-                        return 100.0 / (1.0 + np.exp(np.clip((m - m50) / s, -60, 60)))
-
-                    # Use curve_fit to find best s, keeping m50 near adopted_mag
-                    try:
-                        popt, _ = curve_fit(
-                            _logistic, mags_fit, comp_fit,
-                            p0=[adopted_mag, 0.3],
-                            bounds=([adopted_mag - 1.0, 0.05], [adopted_mag + 1.0, 2.0]),
-                            maxfev=5000
-                        )
-                        m50_fit, s_fit = popt
-                    except Exception:
-                        # Fallback: estimate s from 10-90% transition
-                        sorted_idx = np.argsort(mags_fit)
-                        m_sorted = mags_fit[sorted_idx]
-                        c_sorted = comp_fit[sorted_idx]
-                        # Find where completeness crosses 10% and 90%
-                        m10 = m_sorted[np.argmin(np.abs(c_sorted - 10))] if any(c_sorted <= 10) else m_sorted[0]
-                        m90 = m_sorted[np.argmin(np.abs(c_sorted - 90))] if any(c_sorted >= 90) else m_sorted[-1]
-                        # s ≈ (m10 - m90) / ln(9) since 90->10 is factor of 9 in odds
-                        s_fit = max(0.1, abs(m10 - m90) / np.log(9)) if m10 != m90 else 0.3
-                        m50_fit = adopted_mag
-
-                    # Generate smooth curve spanning 0% to 100%
-                    # Extend range to ensure curve reaches ~0 and ~100
-                    x_min = min(mags_fit.min(), m50_fit - 3 * s_fit)
-                    x_max = max(mags_fit.max(), m50_fit + 3 * s_fit)
-                    # Always extend at least 1 mag beyond m50 to show full transition
-                    x_min = min(x_min, m50_fit - 1.0)
-                    x_max = max(x_max, m50_fit + 1.0)
-
-                    mag_curve = np.linspace(x_min, x_max, 200)
-                    comp_curve = _logistic(mag_curve, m50_fit, s_fit)
-
-                    ax.plot(
-                        mag_curve, comp_curve,
-                        color="lightgrey", lw=0.5, ls="--", zorder=0,
-                        label=f"Sigmoid fit (s={s_fit:.2f})",
-                        alpha=0.5
-                    )
-                    logger.info(
-                        "Completeness sigmoid fit: m50=%.3f, s=%.3f, span=[%.2f, %.2f]",
-                        m50_fit, s_fit, x_min, x_max
-                    )
-            except Exception as e:
-                logger.debug(f"Sigmoid fit failed: {e}")
-        
         # Add axis labels to main completeness plot
         ax.set_xlabel("Injected brightness [mag]", fontsize=9)
         ax.set_ylabel("Recovery fraction [%]", fontsize=9)
