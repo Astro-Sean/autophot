@@ -49,78 +49,6 @@ except ImportError:
     HAS_REPROJECT = False
 
 
-def validate_and_trim_weight_map(
-    weight_path: Optional[str],
-    expected_shape: Tuple[int, int],
-    output_dir: Path,
-    logger: Optional[logging.Logger] = None,
-) -> Optional[str]:
-    """
-    Validate weight map shape matches expected image shape, trim if needed.
-
-    When images are trimmed (e.g., NaN boundary trimming), weight maps may
-    still have the original shape. This function checks and trims them.
-
-    Parameters
-    ----------
-    weight_path : str or None
-        Path to the weight map FITS file
-    expected_shape : tuple of (height, width)
-        Expected shape of the image
-    output_dir : Path
-        Directory to save trimmed weight map if needed
-    logger : logging.Logger or None
-        Logger for warnings/info (uses print if None)
-
-    Returns
-    -------
-    str or None
-        Path to (potentially trimmed) weight map, or None if invalid
-    """
-    if weight_path is None or not Path(weight_path).exists():
-        return None
-
-    _log = logger.info if logger else print
-    _warn = logger.warning if logger else print
-
-    try:
-        with fits.open(weight_path, memmap=False) as h_w:
-            weight_data = h_w[0].data
-            weight_header = h_w[0].header
-
-            if weight_data is None:
-                return None
-
-            # Check if shapes match
-            if weight_data.shape == expected_shape:
-                return weight_path  # No trimming needed
-
-            _warn(
-                f"Weight map shape {weight_data.shape} does not match image shape {expected_shape}, trimming..."
-            )
-
-            # Trim weight map to match expected shape (centered crop)
-            h_diff = weight_data.shape[0] - expected_shape[0]
-            w_diff = weight_data.shape[1] - expected_shape[1]
-
-            y_start = h_diff // 2
-            x_start = w_diff // 2
-            y_end = y_start + expected_shape[0]
-            x_end = x_start + expected_shape[1]
-
-            trimmed_weight = weight_data[y_start:y_end, x_start:x_end]
-
-            # Write trimmed weight to output_dir
-            trimmed_path = output_dir / (Path(weight_path).stem + "_trimmed.fits")
-            fits.writeto(str(trimmed_path), trimmed_weight, weight_header, overwrite=True)
-            _log(f"Trimmed weight map saved to {trimmed_path}")
-            return str(trimmed_path)
-
-    except Exception as e:
-        _warn(f"Could not validate/trim weight map {weight_path}: {e}")
-        return None
-
-
 class ImageDistortionCorrector:
     """
     Process astronomical images with SExtractor, SCAMP, SWarp, and AstroAlign,
@@ -524,22 +452,6 @@ NNW
             return float(max(bins[min(peak_idx, len(bins) - 2)], pct))
 
     # ----------------------------- SExtractor + PSFEx -----------------------------
-    def _validate_and_trim_weight_map(
-        self,
-        weight_path: Optional[str],
-        expected_shape: Tuple[int, int],
-        output_dir: Path
-    ) -> Optional[str]:
-        """
-        Validate weight map shape matches expected image shape, trim if needed.
-
-        When images are trimmed (e.g., NaN boundary trimming), weight maps may
-        still have the original shape. This function checks and trims them.
-
-        Returns path to (potentially trimmed) weight map, or None if invalid.
-        """
-        return validate_and_trim_weight_map(weight_path, expected_shape, output_dir, self.logger)
-
     @staticmethod
     def _guess_map_weight_path(fits_image: str) -> Optional[str]:
         """
@@ -843,214 +755,6 @@ NNW
             pixel_scale = proj_plane_pixel_scales(wcs_obj)[0] * 3600.0
             return wcs_obj, pixel_scale, header
 
-    def _validate_alignment_quality(
-        self,
-        science_data: np.ndarray,
-        reference_data: np.ndarray,
-        fwhm_pixels: float,
-        max_shift_pixels: float = 2.0,
-        min_correlation: float = 0.3,
-    ) -> Dict:
-        """
-        Validate alignment quality using image correlation and difference statistics.
-
-        Computes multiple metrics to assess alignment:
-        - Normalized cross-correlation (should be high for good alignment)
-        - Relative RMS difference (should be low for good alignment)
-        - Gradient correlation (edges should align)
-        - Local shift estimates (should be small and consistent)
-
-        Parameters
-        ----------
-        science_data : np.ndarray
-            Science image data (2D)
-        reference_data : np.ndarray
-            Reference/template image data (2D, aligned to science grid)
-        fwhm_pixels : float
-            FWHM in pixels for setting correlation search radius
-        max_shift_pixels : float
-            Maximum acceptable shift (pixels) from cross-correlation peak
-        min_correlation : float
-            Minimum acceptable correlation coefficient (0-1)
-
-        Returns
-        -------
-        Dict with quality metrics and pass/fail flags
-        """
-        result = {
-            "passed": False,
-            "correlation": np.nan,
-            "correlation_shift_px": (np.nan, np.nan),
-            "rel_rms_diff": np.nan,
-            "gradient_correlation": np.nan,
-            "edge_agreement": np.nan,
-            "metrics": {},
-        }
-
-        try:
-            # Ensure same shape - crop to common region if needed
-            if science_data.shape != reference_data.shape:
-                self.logger.info(
-                    "Alignment validation: shape mismatch %s vs %s, cropping to common region",
-                    science_data.shape, reference_data.shape
-                )
-                # Crop both to the overlapping region
-                min_h = min(science_data.shape[0], reference_data.shape[0])
-                min_w = min(science_data.shape[1], reference_data.shape[1])
-                science_data = science_data[:min_h, :min_w]
-                reference_data = reference_data[:min_h, :min_w]
-
-            # Create masks for valid pixels
-            valid = np.isfinite(science_data) & np.isfinite(reference_data)
-            if valid.sum() < 100:
-                self.logger.warning("Alignment validation: too few valid pixels")
-                return result
-
-            # Normalize images for correlation (robust scaling)
-            def _normalize(img, mask):
-                med = np.nanmedian(img[mask])
-                mad = np.nanmedian(np.abs(img[mask] - med))
-                if mad > 0:
-                    return (img - med) / mad
-                return img - med
-
-            sci_norm = _normalize(science_data, valid)
-            ref_norm = _normalize(reference_data, valid)
-
-            # 1. Normalized cross-correlation with subpixel refinement
-            # Search window: +/- 2 FWHM
-            search_radius = max(3, int(2 * fwhm_pixels))
-            cc_size = 2 * search_radius + 1
-
-            # Compute cross-correlation via FFT for speed
-            # Use zero-padding for regions with NaN to avoid correlation artifacts
-            sci_fft = np.fft.fft2(np.nan_to_num(sci_norm, nan=0.0) * valid)
-            ref_fft = np.fft.fft2(np.nan_to_num(ref_norm, nan=0.0) * valid)
-            cc = np.fft.fftshift(np.fft.ifft2(sci_fft * np.conj(ref_fft))).real
-
-            # Find peak
-            center = cc.shape[0] // 2, cc.shape[1] // 2
-            y_slice = slice(center[0] - search_radius, center[0] + search_radius + 1)
-            x_slice = slice(center[1] - search_radius, center[1] + search_radius + 1)
-            cc_window = cc[y_slice, x_slice]
-
-            max_idx = np.unravel_index(np.argmax(cc_window), cc_window.shape)
-            dy = max_idx[0] - search_radius
-            dx = max_idx[1] - search_radius
-            peak_cc = cc_window[max_idx] / (valid.sum() * 1.0)  # Normalize
-
-            # Handle NaN correlation (can happen with many NaN pixels in image)
-            if not np.isfinite(peak_cc):
-                self.logger.debug("FFT correlation returned NaN, using gradient correlation as fallback")
-                peak_cc = result.get("gradient_correlation", np.nan)
-                dy, dx = 0.0, 0.0  # Assume no shift if correlation failed
-
-            result["correlation"] = float(peak_cc)
-            result["correlation_shift_px"] = (float(dy), float(dx))
-
-            # 2. Relative RMS difference (after median subtraction)
-            diff = (science_data - reference_data)
-            rel_rms = np.sqrt(np.nanmedian(diff[valid]**2)) / (
-                0.5 * (np.nanmedian(np.abs(science_data[valid])) +
-                       np.nanmedian(np.abs(reference_data[valid]))) + 1e-10
-            )
-            result["rel_rms_diff"] = float(rel_rms)
-
-            # 3. Gradient correlation (edges should align even if fluxes differ)
-            from scipy.ndimage import sobel
-            sci_grad = np.sqrt(sobel(science_data, axis=0)**2 + sobel(science_data, axis=1)**2)
-            ref_grad = np.sqrt(sobel(reference_data, axis=0)**2 + sobel(reference_data, axis=1)**2)
-            grad_valid = np.isfinite(sci_grad) & np.isfinite(ref_grad)
-            if grad_valid.sum() > 100:
-                sci_g_norm = _normalize(sci_grad, grad_valid)
-                ref_g_norm = _normalize(ref_grad, grad_valid)
-                grad_cc = np.corrcoef(
-                    sci_g_norm[grad_valid].flat[:50000],  # Sample for speed
-                    ref_g_norm[grad_valid].flat[:50000]
-                )[0, 1]
-                result["gradient_correlation"] = float(grad_cc)
-
-            # 4. Edge agreement: fraction of strong gradient pixels that agree in position
-            grad_thresh = np.nanpercentile(sci_grad[grad_valid], 90)
-            strong_edges = (sci_grad > grad_thresh) & (ref_grad > grad_thresh)
-            if strong_edges.sum() > 10:
-                edge_agree = np.corrcoef(
-                    sci_grad[strong_edges].flat[:10000],
-                    ref_grad[strong_edges].flat[:10000]
-                )[0, 1] if strong_edges.sum() > 100 else 0.5
-                result["edge_agreement"] = float(edge_agree)
-
-            # 5. Regional correlation analysis (detect systematic distortion)
-            # Divide image into quadrants and check correlation in each
-            ny, nx = science_data.shape
-            n_regions_y = max(2, ny // 200)
-            n_regions_x = max(2, nx // 200)
-            region_ccs = []
-            for ry in range(n_regions_y):
-                for rx in range(n_regions_x):
-                    y0 = ry * ny // n_regions_y
-                    y1 = (ry + 1) * ny // n_regions_y
-                    x0 = rx * nx // n_regions_x
-                    x1 = (rx + 1) * nx // n_regions_x
-                    reg_valid = valid[y0:y1, x0:x1]
-                    if reg_valid.sum() > 50:
-                        reg_cc = np.corrcoef(
-                            sci_norm[y0:y1, x0:x1][reg_valid].flat[:1000],
-                            ref_norm[y0:y1, x0:x1][reg_valid].flat[:1000]
-                        )[0, 1] if reg_valid.sum() > 100 else np.nan
-                        if np.isfinite(reg_cc):
-                            region_ccs.append(reg_cc)
-            if len(region_ccs) > 2:
-                result["regional_cc_mean"] = float(np.mean(region_ccs))
-                result["regional_cc_std"] = float(np.std(region_ccs))
-                result["regional_cc_min"] = float(np.min(region_ccs))
-                # Flag if any region has very low correlation
-                regional_uniformity_ok = result["regional_cc_min"] > 0.1
-            else:
-                regional_uniformity_ok = True
-
-            # Determine pass/fail
-            shift_magnitude = np.sqrt(dy**2 + dx**2)
-            correlation_ok = peak_cc > min_correlation
-            shift_ok = shift_magnitude < max_shift_pixels
-
-            # If FFT correlation failed but gradient correlation is high, accept alignment
-            # This handles images with many NaN pixels where FFT correlation is unreliable
-            grad_corr = result.get("gradient_correlation", np.nan)
-            if not np.isfinite(peak_cc) and np.isfinite(grad_corr) and grad_corr > 0.5:
-                self.logger.debug("FFT correlation failed but gradient correlation is good (%.3f), accepting alignment", grad_corr)
-                correlation_ok = True
-                shift_ok = True  # Assume no shift since correlation failed
-
-            result["passed"] = correlation_ok and shift_ok and regional_uniformity_ok
-            result["metrics"] = {
-                "shift_magnitude_px": float(shift_magnitude),
-                "correlation_ok": bool(correlation_ok),
-                "shift_ok": bool(shift_ok),
-                "regional_uniformity_ok": bool(regional_uniformity_ok),
-                "search_radius_px": search_radius,
-                "n_regions_checked": len(region_ccs),
-            }
-
-            self.logger.info(
-                "Alignment quality: corr=%.3f (shift=%.2f,%.2f px), rel_rms=%.3f, "
-                "grad_corr=%.3f, regional_cc=%.3f+/-%.3f (min=%.3f), passed=%s",
-                result["correlation"],
-                result["correlation_shift_px"][0],
-                result["correlation_shift_px"][1],
-                result["rel_rms_diff"],
-                result.get("gradient_correlation", np.nan),
-                result.get("regional_cc_mean", np.nan),
-                result.get("regional_cc_std", np.nan),
-                result.get("regional_cc_min", np.nan),
-                result["passed"],
-            )
-
-        except Exception as e:
-            self.logger.warning("Alignment validation failed: %s", e)
-
-        return result
-
     # ------------------------ Align + resample via SCAMP/SWarp ------------------------
     def align_and_resample_both_images(
         self,
@@ -1060,6 +764,8 @@ NNW
         resample_only: Optional[bool] = True,
         science_already_resampled: bool = False,
         reference_already_resampled: bool = False,
+        center_ra: Optional[float] = None,
+        center_dec: Optional[float] = None,
     ) -> Optional[dict]:
         """
         Align and resample both science and reference images to the science image's grid,
@@ -1076,6 +782,8 @@ NNW
             resample_only: If True, align both images using SWarp but do not combine them.
             science_already_resampled: If True, skip SWarp for science; use image as-is (avoids double resampling).
             reference_already_resampled: If True, skip SWarp for reference; use image as-is.
+            center_ra: Optional RA (degrees) to center alignment on (e.g., transient location).
+            center_dec: Optional Dec (degrees) to center alignment on (e.g., transient location).
         Returns:
             Dictionary with paths to aligned images and alignment metadata.
         """
@@ -1123,13 +831,24 @@ NNW
                 ref_shape = ref_data.shape
                 sci_pix_scale = proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
                 ref_pix_scale = proj_plane_pixel_scales(ref_wcs)[0] * 3600.0
-                # Use origin=1 (FITS 1-based convention) so that the center pixel
-                # is (naxis/2 + 0.5) in FITS coords, which matches what SWarp expects
-                # for CENTER_TYPE=MANUAL.  Using origin=0 was 0.5 px off.
-                ra_arr, dec_arr = sci_wcs.all_pix2world(
-                    [sci_shape[1] / 2 + 0.5], [sci_shape[0] / 2 + 0.5], 1
-                )
-                center_ra, center_dec = float(ra_arr[0]), float(dec_arr[0])
+                # Use provided center (transient location) if available, otherwise image center
+                # This ensures alignment is optimized at the transient location, not image center
+                if center_ra is not None and center_dec is not None:
+                    self.logger.info(
+                        "Aligning at transient location: RA=%.6f, Dec=%.6f (instead of image center)",
+                        center_ra, center_dec
+                    )
+                else:
+                    # Use origin=1 (FITS 1-based convention) so that the center pixel
+                    # is (naxis/2 + 0.5) in FITS coords, which matches what SWarp expects
+                    # for CENTER_TYPE=MANUAL.  Using origin=0 was 0.5 px off.
+                    ra_arr, dec_arr = sci_wcs.all_pix2world(
+                        [sci_shape[1] / 2 + 0.5], [sci_shape[0] / 2 + 0.5], 1
+                    )
+                    center_ra, center_dec = float(ra_arr[0]), float(dec_arr[0])
+                    self.logger.info(
+                        "Aligning at image center: RA=%.6f, Dec=%.6f", center_ra, center_dec
+                    )
                 # Force SWARP to always resample both images (removed skip check)
                 science_skip_resample = False
                 reference_skip_resample = False
@@ -1156,15 +875,6 @@ NNW
             )
             sci_w = self._guess_map_weight_path(str(science_image))
             ref_w = self._guess_map_weight_path(str(reference_image))
-
-            # Validate and trim weight maps if shapes don't match images
-            sci_w = self._validate_and_trim_weight_map(
-                sci_w, sci_shape, science_aligned_dir
-            )
-            ref_w = self._validate_and_trim_weight_map(
-                ref_w, ref_shape, reference_aligned_dir
-            )
-
             if sci_w:
                 self.logger.info("Alignment SExtractor: using science MAP_WEIGHT %s", sci_w)
             if ref_w:
@@ -1299,34 +1009,6 @@ NNW
                 )
             except Exception as e:
                 self.logger.debug("Matched-sources plot failed (non-fatal): %s", e)
-
-            # Weight catalog errors near target to prioritize alignment accuracy there
-            try:
-                with fits.open(science_image) as h:
-                    header = h[0].header
-                    target_ra = header.get("CRVAL1")
-                    target_dec = header.get("CRVAL2")
-                    if target_ra is not None and target_dec is not None:
-                        # Weight science catalog errors near target
-                        self._weight_catalog_errors_near_target(
-                            sci_sex["catalog_path"], target_ra, target_dec,
-                            sigma_deg=max(5/60, 5*pix_scale/3600)  # 5 arcmin or 5 pix, whichever larger
-                        )
-                        self.logger.debug(
-                            "Weighted science catalog errors near target (RA=%.4f, Dec=%.4f)",
-                            target_ra, target_dec
-                        )
-                        # Weight reference catalog errors near target too
-                        self._weight_catalog_errors_near_target(
-                            ref_sex["catalog_path"], target_ra, target_dec,
-                            sigma_deg=max(5/60, 5*pix_scale/3600)
-                        )
-                        self.logger.debug(
-                            "Weighted reference catalog errors near target (RA=%.4f, Dec=%.4f)",
-                            target_ra, target_dec
-                        )
-            except Exception as e:
-                self.logger.debug("Could not weight catalog errors near target: %s", e)
 
             self.logger.info(
                 "Proceeding with SCAMP + SWarp alignment (%d matched sources).",
@@ -1639,32 +1321,6 @@ NNW
                         science_image, reference_image, output_dir
                     )
 
-                # Ensure aligned images have matching shapes (pad/crop to science shape)
-                try:
-                    with fits.open(aligned_sci) as h_sci, fits.open(aligned_ref) as h_ref:
-                        sci_shape = h_sci[0].data.shape
-                        ref_shape = h_ref[0].data.shape
-                        if sci_shape != ref_shape:
-                            self.logger.info(
-                                "SWarp output shape mismatch: science %s vs reference %s. "
-                                "Resampling reference to match science shape.",
-                                sci_shape, ref_shape
-                            )
-                            # Resample reference to match science shape
-                            from scipy.ndimage import zoom
-                            ref_data = h_ref[0].data.astype(float)
-                            # Compute zoom factors
-                            zoom_y = sci_shape[0] / ref_shape[0] if ref_shape[0] > 0 else 1.0
-                            zoom_x = sci_shape[1] / ref_shape[1] if ref_shape[1] > 0 else 1.0
-                            # Use order=1 (bilinear) for speed and to avoid overshoot
-                            ref_resampled = zoom(ref_data, (zoom_y, zoom_x), order=1, cval=np.nan)
-                            # Update the aligned_ref file
-                            h_ref[0].data = ref_resampled
-                            h_ref.writeto(aligned_ref, overwrite=True)
-                            self.logger.info("Reference image resampled to %s", sci_shape)
-                except Exception as e:
-                    self.logger.warning("Could not match image shapes: %s", e)
-
                 aligned_science_fpath = science_image
                 aligned_reference_fpath = reference_image
                 try:
@@ -1692,32 +1348,6 @@ NNW
                         e,
                     )
 
-                # Validate alignment quality for diagnostics (but always accept SWarp if it succeeded)
-                try:
-                    with fits.open(aligned_sci) as h1, fits.open(aligned_ref) as h2:
-                        sci_data = np.asarray(h1[0].data, dtype=float)
-                        ref_data = np.asarray(h2[0].data, dtype=float)
-                    quality = self._validate_alignment_quality(
-                        sci_data, ref_data, max(fwhm_sci_pix, fwhm_ref_pix)
-                    )
-                    if not quality.get("passed", False):
-                        # Log quality metrics but accept SWarp result regardless
-                        self.logger.warning(
-                            "SCAMP/SWarp alignment quality check reported issues "
-                            "(corr=%.3f, shift=%.2f px), but accepting result since SWarp succeeded.",
-                            quality.get("correlation", np.nan),
-                            quality.get("metrics", {}).get("shift_magnitude_px", np.nan),
-                        )
-                    else:
-                        self.logger.info(
-                            "SCAMP/SWarp alignment quality PASSED "
-                            "(corr=%.3f, rel_rms=%.3f)",
-                            quality.get("correlation", np.nan),
-                            quality.get("rel_rms_diff", np.nan),
-                        )
-                except Exception as e:
-                    self.logger.debug("Alignment quality check skipped: %s", e)
-
             # Remove the aligned working directory after copying aligned images over the originals.
             if science_aligned_dir.exists():
                 shutil.rmtree(science_aligned_dir, ignore_errors=True)
@@ -1733,6 +1363,32 @@ NNW
                     "Removed aligned working dir: %s", reference_aligned_dir
                 )
 
+            # Post-alignment verification at transient location if provided
+            target_offset_px = None
+            if center_ra is not None and center_dec is not None:
+                try:
+                    with fits.open(aligned_science_fpath) as hsci, fits.open(aligned_reference_fpath) as href:
+                        wsci = get_wcs(hsci[0].header)
+                        wref = get_wcs(href[0].header)
+                        if wsci is not None and wref is not None:
+                            x_sci, y_sci = wsci.all_world2pix(center_ra, center_dec, 0)
+                            x_ref, y_ref = wref.all_world2pix(center_ra, center_dec, 0)
+                            dx = float(x_sci - x_ref)
+                            dy = float(y_sci - y_ref)
+                            target_offset_px = np.hypot(dx, dy)
+                            self.logger.info(
+                                "Post-alignment transient offset: dx=%.3f px, dy=%.3f px, total=%.3f px",
+                                dx, dy, target_offset_px
+                            )
+                            # Warn if offset is significant (>0.5 px)
+                            if target_offset_px > 0.5:
+                                self.logger.warning(
+                                    "Large residual offset at transient location (%.2f px) - subtraction may have artifacts",
+                                    target_offset_px
+                                )
+                except Exception as e:
+                    self.logger.debug(f"Could not verify alignment at transient location: {e}")
+
             return {
                 "science_aligned": str(aligned_science_fpath),
                 "reference_aligned": str(aligned_reference_fpath),
@@ -1742,6 +1398,7 @@ NNW
                 "reference_undersampled": ref_is_undersampled,
                 "science_fwhm_pixels": fwhm_sci_pix,
                 "reference_fwhm_pixels": fwhm_ref_pix,
+                "target_offset_pixels": target_offset_px,
             }
 
         except Exception as e:
@@ -1921,15 +1578,6 @@ NNW
             )
             sci_w = self._guess_map_weight_path(str(science_image))
             ref_w = self._guess_map_weight_path(str(reference_image))
-
-            # Validate and trim weight maps if shapes don't match images
-            # Get image shapes from the copied images
-            with fits.open(sci_image_copy) as h_s, fits.open(ref_image_copy) as h_r:
-                sci_shape_align = h_s[0].data.shape
-                ref_shape_align = h_r[0].data.shape
-            sci_w = self._validate_and_trim_weight_map(sci_w, sci_shape_align, science_dir)
-            ref_w = self._validate_and_trim_weight_map(ref_w, ref_shape_align, reference_dir)
-
             if sci_w:
                 self.logger.info("AstroAlign SExtractor: using science MAP_WEIGHT %s", sci_w)
             if ref_w:
@@ -2008,35 +1656,9 @@ NNW
                     )
                 return x, y, snr
 
-            # Get target position for spatial weighting
-            try:
-                with fits.open(science_image) as h:
-                    header = h[0].header
-                    target_ra = header.get("CRVAL1")
-                    target_dec = header.get("CRVAL2")
-                    # Convert target RA/Dec to pixel coordinates
-                    if target_ra is not None and target_dec is not None and "ALPHA_J2000" in sci_tab.colnames:
-                        from astropy.wcs import WCS
-                        wcs = WCS(header)
-                        target_x, target_y = wcs.all_world2pix(target_ra, target_dec, 0)
-                    else:
-                        target_x, target_y = sci_img.shape[1] / 2, sci_img.shape[0] / 2
-            except Exception:
-                target_x, target_y = sci_img.shape[1] / 2, sci_img.shape[0] / 2
-
             sx, sy, ssnr = _extract_xy_snr(sci_tab)
             rx, ry, rsnr = _extract_xy_snr(ref_tab)
-
-            # Weight sources by proximity to target (combined with SNR)
-            # Sources near target get boosted weight for better local alignment
-            def apply_target_weight(x, y, snr, tx, ty, sigma_pix=200):
-                dist = np.sqrt((x - tx)**2 + (y - ty)**2)
-                spatial_weight = np.exp(-0.5 * (dist / sigma_pix)**2)
-                return snr * (1.0 + 2.0 * spatial_weight)  # Up to 3x boost for nearby sources
-
-            s_weighted = apply_target_weight(sx, sy, ssnr, target_x, target_y)
-            r_weighted = apply_target_weight(rx, ry, rsnr, target_x, target_y)
-            joint = np.minimum(s_weighted, r_weighted)
+            joint = np.minimum(ssnr, rsnr)
             order = np.argsort(joint)[::-1]
             pts_sci = np.vstack([sy[order], sx[order]]).T
             pts_ref = np.vstack([ry[order], rx[order]]).T
@@ -2054,31 +1676,6 @@ NNW
             sci_img = _load_and_clean_image(sci_image_copy)
             MAX_CONTROL_POINTS = 300
             use_aafitrans = False
-            tform = None
-            matched_src = None
-            matched_dst = None
-
-            def _validate_transform_matrix(tform_obj, max_scale=1.5, max_rot_deg=45.0):
-                """Validate that transform matrix is reasonable (no extreme scaling/rotation)."""
-                try:
-                    matrix = tform_obj.params if hasattr(tform_obj, "params") else tform_obj._matrix
-                    # Extract linear part (2x2)
-                    linear = matrix[:2, :2]
-                    # Check scale factors (should be close to 1.0)
-                    scale_x = np.sqrt(linear[0, 0]**2 + linear[1, 0]**2)
-                    scale_y = np.sqrt(linear[0, 1]**2 + linear[1, 1]**2)
-                    if scale_x > max_scale or scale_x < 1/max_scale:
-                        return False, f"X scale factor {scale_x:.2f} out of range"
-                    if scale_y > max_scale or scale_y < 1/max_scale:
-                        return False, f"Y scale factor {scale_y:.2f} out of range"
-                    # Check rotation (should be small for aligned images)
-                    rot = np.arctan2(linear[1, 0], linear[0, 0]) * 180 / np.pi
-                    if abs(rot) > max_rot_deg:
-                        return False, f"Rotation {rot:.1f}° exceeds limit"
-                    return True, "OK"
-                except Exception as e:
-                    return False, f"Validation error: {e}"
-
             try:
                 import aafitrans
 
@@ -2095,10 +1692,6 @@ NNW
                     get_best_fit=True,
                     seed=None,
                 )
-                valid, msg = _validate_transform_matrix(tform)
-                if not valid:
-                    self.logger.warning(f"aafitrans transform invalid: {msg}")
-                    raise ValueError(msg)
                 use_aafitrans = True
                 self.logger.info("Using aafitrans for alignment")
             except Exception as e:
@@ -2110,11 +1703,6 @@ NNW
                     pts_sci,
                     max_control_points=min(MAX_CONTROL_POINTS, len(pts_ref)),
                 )
-                # Validate astroalign transform too
-                valid, msg = _validate_transform_matrix(tform)
-                if not valid:
-                    self.logger.error(f"AstroAlign transform invalid: {msg}")
-                    raise ValueError(f"Cannot find valid alignment transform: {msg}")
             if use_aafitrans:
                 try:
                     from scipy import ndimage
@@ -2176,28 +1764,6 @@ NNW
                 )
             except Exception as e:
                 self.logger.info(f"Could not compute alignment metrics: {e}")
-
-            # Validate alignment quality using image correlation
-            try:
-                quality = self._validate_alignment_quality(
-                    sci_img, aligned_ref_img, max(fwhm_sci_pix, fwhm_ref_pix)
-                )
-                if not quality.get("passed", False):
-                    self.logger.warning(
-                        "AstroAlign alignment quality check FAILED "
-                        "(corr=%.3f, shift=%.2f px). Result may be unreliable.",
-                        quality.get("correlation", np.nan),
-                        quality.get("metrics", {}).get("shift_magnitude_px", np.nan),
-                    )
-                else:
-                    self.logger.info(
-                        "AstroAlign alignment quality PASSED "
-                        "(corr=%.3f, rel_rms=%.3f)",
-                        quality.get("correlation", np.nan),
-                        quality.get("rel_rms_diff", np.nan),
-                    )
-            except Exception as e:
-                self.logger.debug("AstroAlign quality check skipped: %s", e)
 
             # Remove aligned working directories and their contents after successful alignment.
             if science_dir.exists():

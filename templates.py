@@ -2444,7 +2444,14 @@ class Templates:
                     return None, None
                 logger.info("Attempting SWarp + SCAMP alignment.")
                 idc = run_IDC.ImageDistortionCorrector(input_yaml=self.input_yaml)
-                res = idc.align_and_resample_both_images(scienceFpath, templateFpath)
+                # Use transient location for alignment if available (optimizes subtraction at target)
+                target_ra = self.input_yaml.get("target_ra")
+                target_dec = self.input_yaml.get("target_dec")
+                res = idc.align_and_resample_both_images(
+                    scienceFpath, templateFpath,
+                    center_ra=float(target_ra) if target_ra is not None else None,
+                    center_dec=float(target_dec) if target_dec is not None else None,
+                )
                 if not res or not res.get("science_aligned"):
                     logger.info("SWarp alignment did not produce aligned outputs.")
                     return None, None
@@ -3840,16 +3847,18 @@ class Templates:
             # Oversubtraction artefacts can occur if we pass an uninitialized
             # (often 0) kernel size into SFFT.
             #
-            # Instead, derive SFFT kernel half-width from the measured FWHMs,
-            # mirroring SFFT's internal KerHWRatio-based default behaviour.
+            # Instead, derive SFFT kernel half-width from the measured FWHMs.
+            # HOTPANTS uses 1.5*FWHM for its kernel radius; we match that here
+            # to avoid over-fitting with SFFT's default 2.0*FWHM.
             KER_HW_MIN = 3
             KER_HW_MAX = 50
             fwhm_ref = float(template_fwhm)
             fwhm_sci = float(science_fwhm)
+            # Use 1.5x max FWHM like HOTPANTS, with minimum of 5px for stability
             ker_hw = int(
-                max(KER_HW_MIN, min(KER_HW_MAX, round(2.0 * max(fwhm_ref, fwhm_sci))))
+                max(KER_HW_MIN, min(KER_HW_MAX, round(1.5 * max(fwhm_ref, fwhm_sci))))
             )
-            scale = ker_hw
+            scale = max(ker_hw, 5)
             target_location = [
                 (self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"])
             ]
@@ -3868,13 +3877,18 @@ class Templates:
             logger.info("Building science and template masks...")
 
             # NaN / sentinel masks
+            # NOTE: the original (abs(x) < 1.1e-20) & (x != 0) condition was
+            # logically impossible — any float that close to zero IS 0.0 in
+            # IEEE 754 and will never satisfy != 0.  The guard has been removed
+            # so that true near-zero sentinel pixels (written by SWarp/SFFT in
+            # no-coverage regions) are correctly marked as invalid.
             template_mask_nans = (
-                ((np.abs(templateImage) < 1.1e-20) & (templateImage != 0))
+                (np.abs(templateImage) < 1.1e-20)
                 | (~np.isfinite(templateImage))
             ).astype(np.int32)
 
             science_mask_nans = (
-                ((np.abs(scienceImage) < 1.1e-20) & (scienceImage != 0))
+                (np.abs(scienceImage) < 1.1e-20)
                 | (~np.isfinite(scienceImage))
             ).astype(np.int32)
 
@@ -4016,8 +4030,10 @@ class Templates:
                 min_sources = ts_cfg.get("sfft_crowded_min_sources", 300)
                 min_density = ts_cfg.get("sfft_crowded_min_density", 1.5)
                 is_crowded = n_src >= min_sources or density >= min_density
-                # Always use ECP (crowded); sparse (ESP) is no longer used by default.
-                ts_cfg["sfft_crowded_method"] = True
+                # Default to sparse (ESP) for better performance on typical fields.
+            # User can explicitly set sfft_crowded_method: true for dense fields.
+                if "sfft_crowded_method" not in ts_cfg:
+                    ts_cfg["sfft_crowded_method"] = False
                 if is_crowded:
                     logger.info(
                         "Image detected as crowded (%d sources, %.2f per sq arcmin) -> using SFFT crowded (ECP)",
@@ -4026,13 +4042,13 @@ class Templates:
                     )
                 else:
                     logger.info(
-                        "Image sparse (%d sources, %.2f per sq arcmin) -> using SFFT crowded (ECP) anyway",
+                        "Image sparse (%d sources, %.2f per sq arcmin) -> using SFFT sparse (ESP)",
                         n_src,
                         density,
                     )
             elif "sfft_crowded_method" not in ts_cfg and "crowded_field" not in ts_cfg:
                 ts_cfg["sfft_crowded_method"] = (
-                    True  # default to ECP; sparse (ESP) only when explicitly set False
+                    False  # default to ESP (sparse) for better performance on typical fields
                 )
             # Kernel polynomial order: default to 0 unless the user explicitly overrides
             user_kernel = ts_cfg.get("kernel_order", None)
@@ -4041,7 +4057,7 @@ class Templates:
             else:
                 kernel_order = int(user_kernel)
 
-            # 4b. SFFT: default is crowded (ECP); sparse (ESP) only if user sets sfft_crowded_method: false.
+            # 4b. SFFT: default is sparse (ESP) for better performance; crowded (ECP) only if explicitly enabled.
 
             # Filter matching sources that fall on masked pixels
             filtered_matching_sources = [
@@ -4159,8 +4175,28 @@ class Templates:
                 return None, None, None
 
             # Zero the difference image background (sigma-clipped median) so it is ~0
+            # Exclude: NaN/sentinel pixels, the universal subtraction mask, AND a
+            # circular exclusion zone around the target so that a bright transient
+            # (or imperfect-subtraction residuals) cannot bias the background median
+            # and cause the zeroing step to absorb real transient flux.
             invalid = ~np.isfinite(diff_data) | (np.abs(diff_data) < 1.1e-20)
             invalid = invalid | (universal_mask.astype(bool))
+            try:
+                _tx = float(self.input_yaml.get("target_x_pix", np.nan))
+                _ty = float(self.input_yaml.get("target_y_pix", np.nan))
+                _fwhm_excl = float(self.input_yaml.get("fwhm", science_fwhm))
+                _excl_r = max(3.0 * _fwhm_excl, 15.0)
+                if np.isfinite(_tx) and np.isfinite(_ty):
+                    _ny, _nx = diff_data.shape
+                    _yy, _xx = np.ogrid[:_ny, :_nx]
+                    _target_mask = ((_xx - _tx) ** 2 + (_yy - _ty) ** 2) <= _excl_r ** 2
+                    invalid = invalid | _target_mask
+                    logger.info(
+                        "Diff background zeroing: excluding %.1f-px radius around target (%.1f, %.1f).",
+                        _excl_r, _tx, _ty,
+                    )
+            except Exception as _exc:
+                logger.debug("Could not build target exclusion mask for diff zeroing: %s", _exc)
             if not invalid.all():
                 _, diff_median, _ = sigma_clipped_stats(
                     diff_data, mask=invalid, sigma=3, maxiters=5
@@ -4303,9 +4339,12 @@ class Templates:
             allow_bg_override = _as_bool(
                 ts_sub.get("sfft_allow_crowded_bg_order_override", False), False
             )
-            # Enforce a global flux scale in SFFT (constant kernel-sum photometric ratio).
-            # This intentionally disables spatially varying photometric scaling.
-            const_phot_ratio = True
+            # Allow user to control photometric scaling behavior.
+            # HOTPANTS allows spatially-varying scaling by default; matching this
+            # improves subtraction quality for images with spatial PSF/flux variations.
+            const_phot_ratio = _as_bool(
+                ts_sub.get("sfft_const_phot_ratio", False), False
+            )
 
             # crowded_field is a shortcut: when True, use SFFT crowded (ECP) unless
             # the user *explicitly* forces sparse via `force_sparse_sfft`.
