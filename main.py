@@ -2476,6 +2476,7 @@ def run_photometry():
 
         templateFpath = None
         template_available = False
+        alignment_modified_image = False  # Track if alignment resampled science image
         science_path_original = fpath
         scienceFpath_cutout = fpath
         if (
@@ -2545,6 +2546,7 @@ def run_photometry():
                             log_step("No template images — skip subtraction")
                         )
                     else:
+                        fpath_before_align = fpath
                         fpath, templateFpath = template_functions.align(
                             scienceFpath=fpath,
                             templateFpath=templateFpath,
@@ -2552,6 +2554,8 @@ def run_photometry():
                                 "alignment_method"
                             ],
                         )
+                        # Check if alignment modified the science image (resampling changes pixels)
+                        alignment_modified_image = (fpath != fpath_before_align)
                         template_available = True
                         try:
                             _wcs_apply = input_yaml.get("wcs", {}).get(
@@ -2597,9 +2601,13 @@ def run_photometry():
         image, header = get_image_and_header(fpath)
         imageWCS = get_wcs(header)
 
-        # Reuse cached background results if fpath hasn't changed AND shapes match
-        # (shape can change after alignment, which invalidates the background cache)
-        if fpath == fpath_before_subtraction and background_rms_cached is not None:
+        # Reuse cached background results if:
+        # 1. fpath hasn't changed
+        # 2. shapes match (alignment can change dimensions)
+        # 3. alignment didn't modify the image (resampling changes pixel values)
+        if (fpath == fpath_before_subtraction and 
+            background_rms_cached is not None and 
+            not alignment_modified_image):
             if background_rms_cached.shape == image.shape:
                 background_surface = background_surface_cached
                 background_rms = background_rms_cached
