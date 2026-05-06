@@ -335,14 +335,18 @@ default_input:
     n_jobs: 1 # int --- Worker processes for injection/recovery and background-limit trials (per-image). 1 = serial; >1 can speed up Monte Carlo trials.
 
   alignment:
-    reproject_method: adaptive # str --- Reprojection strategy/method selector for WCS alignment (pipeline-specific).
+    # reproject_method: "adaptive" uses local area resampling (better for varying distortion at edges)
+    # reproject_method: "interp" uses global interpolation (faster, default)
+    reproject_method: interp # str --- Reprojection strategy: "adaptive" (edge-optimized) or "interp" (fast).
     reproject_roundtrip_coords: True # bool --- Coordinate round-trip check (matches reproject default; False can mis-register).
-    reproject_interp_order: bicubic # str|int --- Interpolation order/mode for reprojection (e.g. nearest, bilinear, bicubic).
+    # bicubic preserves sharp edges better than bilinear; use "lanczos" for maximum sharpness if available
+    reproject_interp_order: bicubic # str|int --- Interpolation: bicubic (sharp edges), bilinear (smooth), nearest (fast).
     reproject_parallel: False # bool --- Enable parallel reprojection where supported (faster on large mosaics if CPU-bound; set True when memory allows).
     # reproject_adaptive only: library default is False; True rescales pixels for flux conservation (can blur when scales match).
     reproject_adaptive_conserve_flux: False # bool --- Adaptive reprojection: conserve flux by rescaling pixels (can blur slightly when scales match).
     reproject_adaptive_center_jacobian: False # bool --- More accurate Jacobian at grid points; slower (non-smooth WCS).
-    reproject_subpixel_refine: False # bool --- If True, apply subpixel refinement after WCS alignment (where implemented).
+    # Subpixel refinement helps edge alignment by correcting small WCS mismatches (<1 pixel)
+    reproject_subpixel_refine: True # bool --- Apply subpixel refinement after WCS alignment (helps edge alignment).
     reproject_max_rms_pixels: 0.90 # float --- Maximum acceptable reproject alignment score (median mutual-pair residual, pixels) before fallback.
     plot_source_check_distortion_vectors: True # bool --- Overlay catalog->detected residual vectors on Sourcecheck plot.
     plot_source_check_distortion_grid_map: False # bool --- Overlay gridded distortion-magnitude heatmap (pixels) on Sourcecheck plot.

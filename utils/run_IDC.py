@@ -42,11 +42,12 @@ from functions import remove_wcs_from_header, log_warning_from_exception
 from wcs import get_wcs
 
 try:
-    from reproject import reproject_interp
+    from reproject import reproject_interp, reproject_adaptive
 
     HAS_REPROJECT = True
 except ImportError:
     HAS_REPROJECT = False
+    reproject_adaptive = None
 
 
 class ImageDistortionCorrector:
@@ -1468,14 +1469,44 @@ NNW
                     "Reproject: missing WCS in science or reference header."
                 )
                 return None
+            # Get reproject config from input_yaml for consistency with templates.py
+            iy = getattr(self, "input_yaml", None) or {}
+            cfg = iy.get("alignment", {}) if isinstance(iy, dict) else {}
+            reproject_method = str(cfg.get("reproject_method", "interp")).lower().strip()
+            interp_order = str(cfg.get("reproject_interp_order", "bicubic")).lower().strip()
+            
+            # Normalize interpolation order
+            if interp_order in ("nearest", "nearest-neighbor", "nn"):
+                order = "nearest-neighbor"
+            elif interp_order in ("bilinear", "linear", "1"):
+                order = "bilinear"
+            elif interp_order in ("biquadratic", "2"):
+                order = "biquadratic"
+            elif interp_order in ("bicubic", "cubic", "3"):
+                order = "bicubic"
+            else:
+                order = "bicubic"  # default for sharper edges
+            
             # Reproject reference onto science grid
-            aligned_ref, footprint = reproject_interp(
-                (ref_data, ref_wcs),
-                sci_wcs,
-                shape_out=sci_data.shape,
-                order="bilinear",
-                roundtrip_coords=True,
-            )
+            if reproject_method == "adaptive" and reproject_adaptive is not None:
+                # Adaptive reprojection (better for varying pixel scales)
+                aligned_ref, footprint = reproject_adaptive(
+                    (ref_data, ref_wcs),
+                    sci_wcs,
+                    shape_out=sci_data.shape,
+                    roundtrip_coords=True,
+                )
+                self.logger.debug("Using reproject_adaptive for alignment")
+            else:
+                # Interpolation reprojection (default, faster)
+                aligned_ref, footprint = reproject_interp(
+                    (ref_data, ref_wcs),
+                    sci_wcs,
+                    shape_out=sci_data.shape,
+                    order=order,
+                    roundtrip_coords=True,
+                )
+                self.logger.debug(f"Using reproject_interp with order={order} for alignment")
             aligned_ref = np.asarray(aligned_ref, dtype=float)
             aligned_ref[~np.isfinite(aligned_ref)] = np.nan
             out_header = ref_header.copy()
