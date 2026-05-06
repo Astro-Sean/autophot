@@ -2493,6 +2493,22 @@ class Templates:
                 )
                 if result.template_path is None:
                     return None, None
+                # Validate output has valid pixels (not all NaN or sentinel)
+                try:
+                    with fits.open(result.template_path) as hdul:
+                        data = hdul[0].data
+                        n_finite = np.sum(np.isfinite(data))
+                        n_total = data.size
+                        # Check for all-NaN or all-sentinel (1e-30) outputs
+                        if n_finite == 0 or np.all(np.abs(data) < 1e-20):
+                            logger.warning(
+                                f"Reproject output has no valid pixels (finite={n_finite}/{n_total}). "
+                                f"Template does not overlap with science WCS. Triggering fallback to AstroAlign."
+                            )
+                            return None, None
+                        logger.debug(f"Reproject output: {n_finite}/{n_total} valid pixels ({100*n_finite/n_total:.1f}%)")
+                except Exception as e:
+                    logger.debug(f"Could not validate reproject output: {e}")
                 return scienceFpath, result.template_path
 
             # ------------------------------------------------------------------
