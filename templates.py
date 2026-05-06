@@ -636,6 +636,12 @@ def _reproject_template(
 
     # Mask non-footprint pixels with NaN (preserves chip gaps)
     fp_mask = footprint.astype(bool)
+    n_valid = np.sum(fp_mask)
+    n_total = fp_mask.size
+    logger.debug(f"Reproject footprint: {n_valid}/{n_total} valid pixels ({100*n_valid/n_total:.1f}%)")
+    if n_valid == 0:
+        logger.error("Reproject produced zero valid pixels - template does not overlap with science image")
+        return _FAIL
     aligned[~fp_mask] = np.nan
 
     # ------------------------------------------------------------------

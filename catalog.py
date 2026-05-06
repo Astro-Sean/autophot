@@ -2349,6 +2349,21 @@ class Catalog:
 
             # Robust selection: find continuous linear region with tight scatter requirement
             if fit_line:
+                # Validate array lengths are consistent before proceeding
+                n_clean = len(clean_catalog)
+                n_flux = len(flux)
+                n_mag = len(catalog_mag_linear)
+                n_inst = len(inst_mag_linear)
+                n_inlier_mask = len(inlier_mask)
+                if not (n_clean == n_flux == n_mag == n_inst == n_inlier_mask):
+                    logger.error(
+                        f"Array length mismatch: clean_catalog={n_clean}, flux={n_flux}, "
+                        f"catalog_mag_linear={n_mag}, inst_mag_linear={n_inst}, inlier_mask={n_inlier_mask}. "
+                        f"Skipping robust selection."
+                    )
+                    clean_catalog = clean_catalog[inlier_mask] if n_clean == n_inlier_mask else clean_catalog
+                    return clean_catalog, saturation_range
+                
                 # Get inlier sources from RANSAC
                 inlier_catalog = clean_catalog[inlier_mask].copy()
                 inlier_flux = flux[inlier_mask]
