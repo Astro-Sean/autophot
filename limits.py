@@ -1252,6 +1252,12 @@ class Limits:
                 "Target exclusion zone: r=%.1f px (2*ap_r=%.1f + fwhm=%.1f)",
                 target_exclusion_r, 2.0 * aperture_radius_local, fwhm
             )
+            logger.info(
+                "Injection photometry config: aperture_r=%.2f px, annulus=[%.2f, %.2f] px "
+                "(gap=%.2f FWHM, width=%.2f FWHM) - consistent with target measurement",
+                aperture_radius_local, annulus_in_local, annulus_out_local,
+                gap_fwhm, width_fwhm
+            )
 
             # Define injection radii early (needed for initial guess)
             fwhm_px = float(self.input_yaml.get("fwhm", 3.0))
