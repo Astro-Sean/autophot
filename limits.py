@@ -2593,10 +2593,10 @@ class Limits:
             pass
 
         plt.ioff()
-        
+
         # Create figure with main completeness plot on top, injection examples below
         fig = plt.figure(figsize=set_size(540, 1.5))
-        gs = GridSpec(3, 3, figure=fig, height_ratios=[1.5, 1, 1])
+        gs = GridSpec(3, 4, figure=fig, height_ratios=[1.5, 1, 1])
         
         # Top row: Main completeness plot (spans all columns)
         ax = fig.add_subplot(gs[0, :])
@@ -3246,9 +3246,9 @@ class Limits:
                         ax_inject.set_ylabel('')
                     ax_inject.tick_params(labelsize=8)
 
-            # Fourth panel (bottom right): original cutout with injection site markers
+            # Fourth panel (bottom right, same row as injection panels): original cutout with injection site markers
             if cutout is not None and injection_df is not None and len(injection_df) > 0:
-                ax_sites = fig.add_subplot(gs[2, 2])
+                ax_sites = fig.add_subplot(gs[1, 3])
                 ny, nx = cutout.shape
 
                 # Display original cutout (no injections)
