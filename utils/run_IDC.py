@@ -1300,6 +1300,34 @@ NNW
             except Exception as e:
                 self.logger.debug("Matched-sources plot failed (non-fatal): %s", e)
 
+            # Weight catalog errors near target to prioritize alignment accuracy there
+            try:
+                with fits.open(science_image) as h:
+                    header = h[0].header
+                    target_ra = header.get("CRVAL1")
+                    target_dec = header.get("CRVAL2")
+                    if target_ra is not None and target_dec is not None:
+                        # Weight science catalog errors near target
+                        self._weight_catalog_errors_near_target(
+                            sci_sex["catalog_path"], target_ra, target_dec,
+                            sigma_deg=max(5/60, 5*pix_scale/3600)  # 5 arcmin or 5 pix, whichever larger
+                        )
+                        self.logger.debug(
+                            "Weighted science catalog errors near target (RA=%.4f, Dec=%.4f)",
+                            target_ra, target_dec
+                        )
+                        # Weight reference catalog errors near target too
+                        self._weight_catalog_errors_near_target(
+                            ref_sex["catalog_path"], target_ra, target_dec,
+                            sigma_deg=max(5/60, 5*pix_scale/3600)
+                        )
+                        self.logger.debug(
+                            "Weighted reference catalog errors near target (RA=%.4f, Dec=%.4f)",
+                            target_ra, target_dec
+                        )
+            except Exception as e:
+                self.logger.debug("Could not weight catalog errors near target: %s", e)
+
             self.logger.info(
                 "Proceeding with SCAMP + SWarp alignment (%d matched sources).",
                 _num_matched,
@@ -1980,9 +2008,35 @@ NNW
                     )
                 return x, y, snr
 
+            # Get target position for spatial weighting
+            try:
+                with fits.open(science_image) as h:
+                    header = h[0].header
+                    target_ra = header.get("CRVAL1")
+                    target_dec = header.get("CRVAL2")
+                    # Convert target RA/Dec to pixel coordinates
+                    if target_ra is not None and target_dec is not None and "ALPHA_J2000" in sci_tab.colnames:
+                        from astropy.wcs import WCS
+                        wcs = WCS(header)
+                        target_x, target_y = wcs.all_world2pix(target_ra, target_dec, 0)
+                    else:
+                        target_x, target_y = sci_img.shape[1] / 2, sci_img.shape[0] / 2
+            except Exception:
+                target_x, target_y = sci_img.shape[1] / 2, sci_img.shape[0] / 2
+
             sx, sy, ssnr = _extract_xy_snr(sci_tab)
             rx, ry, rsnr = _extract_xy_snr(ref_tab)
-            joint = np.minimum(ssnr, rsnr)
+
+            # Weight sources by proximity to target (combined with SNR)
+            # Sources near target get boosted weight for better local alignment
+            def apply_target_weight(x, y, snr, tx, ty, sigma_pix=200):
+                dist = np.sqrt((x - tx)**2 + (y - ty)**2)
+                spatial_weight = np.exp(-0.5 * (dist / sigma_pix)**2)
+                return snr * (1.0 + 2.0 * spatial_weight)  # Up to 3x boost for nearby sources
+
+            s_weighted = apply_target_weight(sx, sy, ssnr, target_x, target_y)
+            r_weighted = apply_target_weight(rx, ry, rsnr, target_x, target_y)
+            joint = np.minimum(s_weighted, r_weighted)
             order = np.argsort(joint)[::-1]
             pts_sci = np.vstack([sy[order], sx[order]]).T
             pts_ref = np.vstack([ry[order], rx[order]]).T
