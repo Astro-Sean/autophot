@@ -2444,14 +2444,7 @@ class Templates:
                     return None, None
                 logger.info("Attempting SWarp + SCAMP alignment.")
                 idc = run_IDC.ImageDistortionCorrector(input_yaml=self.input_yaml)
-                # Use transient location for alignment if available (optimizes subtraction at target)
-                target_ra = self.input_yaml.get("target_ra")
-                target_dec = self.input_yaml.get("target_dec")
-                res = idc.align_and_resample_both_images(
-                    scienceFpath, templateFpath,
-                    center_ra=float(target_ra) if target_ra is not None else None,
-                    center_dec=float(target_dec) if target_dec is not None else None,
-                )
+                res = idc.align_and_resample_both_images(scienceFpath, templateFpath)
                 if not res or not res.get("science_aligned"):
                     logger.info("SWarp alignment did not produce aligned outputs.")
                     return None, None

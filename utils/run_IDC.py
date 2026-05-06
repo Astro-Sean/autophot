@@ -764,8 +764,6 @@ NNW
         resample_only: Optional[bool] = True,
         science_already_resampled: bool = False,
         reference_already_resampled: bool = False,
-        center_ra: Optional[float] = None,
-        center_dec: Optional[float] = None,
     ) -> Optional[dict]:
         """
         Align and resample both science and reference images to the science image's grid,
@@ -782,8 +780,6 @@ NNW
             resample_only: If True, align both images using SWarp but do not combine them.
             science_already_resampled: If True, skip SWarp for science; use image as-is (avoids double resampling).
             reference_already_resampled: If True, skip SWarp for reference; use image as-is.
-            center_ra: Optional RA (degrees) to center alignment on (e.g., transient location).
-            center_dec: Optional Dec (degrees) to center alignment on (e.g., transient location).
         Returns:
             Dictionary with paths to aligned images and alignment metadata.
         """
@@ -831,24 +827,13 @@ NNW
                 ref_shape = ref_data.shape
                 sci_pix_scale = proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
                 ref_pix_scale = proj_plane_pixel_scales(ref_wcs)[0] * 3600.0
-                # Use provided center (transient location) if available, otherwise image center
-                # This ensures alignment is optimized at the transient location, not image center
-                if center_ra is not None and center_dec is not None:
-                    self.logger.info(
-                        "Aligning at transient location: RA=%.6f, Dec=%.6f (instead of image center)",
-                        center_ra, center_dec
-                    )
-                else:
-                    # Use origin=1 (FITS 1-based convention) so that the center pixel
-                    # is (naxis/2 + 0.5) in FITS coords, which matches what SWarp expects
-                    # for CENTER_TYPE=MANUAL.  Using origin=0 was 0.5 px off.
-                    ra_arr, dec_arr = sci_wcs.all_pix2world(
-                        [sci_shape[1] / 2 + 0.5], [sci_shape[0] / 2 + 0.5], 1
-                    )
-                    center_ra, center_dec = float(ra_arr[0]), float(dec_arr[0])
-                    self.logger.info(
-                        "Aligning at image center: RA=%.6f, Dec=%.6f", center_ra, center_dec
-                    )
+                # Use origin=1 (FITS 1-based convention) so that the center pixel
+                # is (naxis/2 + 0.5) in FITS coords, which matches what SWarp expects
+                # for CENTER_TYPE=MANUAL.  Using origin=0 was 0.5 px off.
+                ra_arr, dec_arr = sci_wcs.all_pix2world(
+                    [sci_shape[1] / 2 + 0.5], [sci_shape[0] / 2 + 0.5], 1
+                )
+                center_ra, center_dec = float(ra_arr[0]), float(dec_arr[0])
                 # Force SWARP to always resample both images (removed skip check)
                 science_skip_resample = False
                 reference_skip_resample = False
@@ -1363,32 +1348,6 @@ NNW
                     "Removed aligned working dir: %s", reference_aligned_dir
                 )
 
-            # Post-alignment verification at transient location if provided
-            target_offset_px = None
-            if center_ra is not None and center_dec is not None:
-                try:
-                    with fits.open(aligned_science_fpath) as hsci, fits.open(aligned_reference_fpath) as href:
-                        wsci = get_wcs(hsci[0].header)
-                        wref = get_wcs(href[0].header)
-                        if wsci is not None and wref is not None:
-                            x_sci, y_sci = wsci.all_world2pix(center_ra, center_dec, 0)
-                            x_ref, y_ref = wref.all_world2pix(center_ra, center_dec, 0)
-                            dx = float(x_sci - x_ref)
-                            dy = float(y_sci - y_ref)
-                            target_offset_px = np.hypot(dx, dy)
-                            self.logger.info(
-                                "Post-alignment transient offset: dx=%.3f px, dy=%.3f px, total=%.3f px",
-                                dx, dy, target_offset_px
-                            )
-                            # Warn if offset is significant (>0.5 px)
-                            if target_offset_px > 0.5:
-                                self.logger.warning(
-                                    "Large residual offset at transient location (%.2f px) - subtraction may have artifacts",
-                                    target_offset_px
-                                )
-                except Exception as e:
-                    self.logger.debug(f"Could not verify alignment at transient location: {e}")
-
             return {
                 "science_aligned": str(aligned_science_fpath),
                 "reference_aligned": str(aligned_reference_fpath),
@@ -1398,7 +1357,6 @@ NNW
                 "reference_undersampled": ref_is_undersampled,
                 "science_fwhm_pixels": fwhm_sci_pix,
                 "reference_fwhm_pixels": fwhm_ref_pix,
-                "target_offset_pixels": target_offset_px,
             }
 
         except Exception as e:
