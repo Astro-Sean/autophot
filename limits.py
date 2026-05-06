@@ -384,7 +384,7 @@ def _injection_worker(args):
                         flux_hat = float(theta[0])
                         flux_err = float(np.sqrt(max(cov[0, 0], 0.0)))
                         if np.isfinite(flux_err) and flux_err > 0:
-                            snr_val = flux_hat / flux_err
+                            snr_val = np.abs(flux_hat) / flux_err
             except Exception:
                 snr_val = np.nan
         elif method == "EMCEE":
@@ -462,7 +462,7 @@ def _injection_worker(args):
                     flux_hat = float(fitted.parameters[i_flux])
                     flux_err = float(getattr(fitted, "stds", np.full_like(fitted.parameters, np.nan))[i_flux])
                     if np.isfinite(flux_hat) and np.isfinite(flux_err) and flux_err > 0:
-                        snr_val = flux_hat / flux_err
+                        snr_val = np.abs(flux_hat) / flux_err
                 except Exception:
                     snr_val = np.nan
             except Exception:
@@ -960,6 +960,199 @@ class Limits:
                         keep[i] = True
                 return df[keep].copy()
 
+            def _filter_pixel_statistics(
+                df: pd.DataFrame,
+                image: np.ndarray,
+                *,
+                aperture_radius_pix: float,
+                rms_map: np.ndarray | None = None,
+                max_variance_ratio: float = 3.0,
+                max_abs_mean_sigma: float = 2.5,
+            ) -> pd.DataFrame:
+                """
+                Reject sites whose pixel statistics indicate contamination from
+                bright-star template subtraction residuals.
+
+                Two independent tests are applied (each configurable via
+                ``limiting_magnitude`` YAML keys):
+
+                1. **Variance test** (``inject_max_variance_ratio``):
+                   Compute the sample variance of the pixels inside the aperture
+                   disk.  If an RMS map is available, compare against the median
+                   expected variance from that map.  Otherwise compare against the
+                   cutout-wide background variance estimated from the annulus
+                   immediately outside the aperture.  A residual halo has elevated
+                   pixel-to-pixel scatter even when its mean is near zero.
+                   Reject if:  var_ap / var_ref  >  max_variance_ratio
+
+                2. **Mean-bias test** (``inject_max_abs_mean_sigma``):
+                   Estimate the local background mean from the annulus pixels
+                   (same annulus used for photometry).  Reject if the absolute
+                   mean offset in the aperture exceeds ``max_abs_mean_sigma``
+                   times the expected per-pixel RMS.  This catches bright
+                   positive/negative star-subtraction pedestals.
+                   Reject if:  |mean_ap - mean_annulus| / sigma_ref  >  max_abs_mean_sigma
+
+                Both tests must PASS for a site to be kept.  Sites that fail
+                either test are dropped with a debug-level log entry.
+
+                Thresholds can be relaxed (or tests disabled) via config:
+                  inject_max_variance_ratio: float (default 3.0; 0 = disable)
+                  inject_max_abs_mean_sigma: float (default 2.5; 0 = disable)
+                """
+                if df is None or len(df) == 0:
+                    return df
+                if image is None or np.ndim(image) != 2:
+                    return df
+
+                # Read configurable thresholds (allow YAML override)
+                _var_ratio_thr = float(
+                    lim_cfg.get("inject_max_variance_ratio", max_variance_ratio)
+                )
+                _mean_sigma_thr = float(
+                    lim_cfg.get("inject_max_abs_mean_sigma", max_abs_mean_sigma)
+                )
+                _use_var_test = _var_ratio_thr > 0.0
+                _use_mean_test = _mean_sigma_thr > 0.0
+
+                if not (_use_var_test or _use_mean_test):
+                    return df
+
+                Hn, Wn = int(image.shape[0]), int(image.shape[1])
+                imgf = np.asarray(image, dtype=float)
+                r = float(max(1.0, aperture_radius_pix))
+                r_int = int(np.ceil(r))
+                # Annulus for local background reference: 1.5*r_in to 3.0*r_out
+                ann_in = r * 1.5
+                ann_out = r * 3.0
+
+                # Global background variance fallback: sigma-clipped MAD of finite pixels
+                _global_finite = imgf[np.isfinite(imgf)]
+                if _global_finite.size >= 20:
+                    _global_mad = float(np.nanmedian(np.abs(_global_finite - np.nanmedian(_global_finite))))
+                    _global_sigma = max(_global_mad * 1.4826, 1e-30)
+                    _global_var = _global_sigma ** 2
+                else:
+                    _global_var = 1.0
+
+                keep = np.zeros(len(df), dtype=bool)
+                n_drop_var = 0
+                n_drop_mean = 0
+                xs = np.asarray(df["x_pix"], dtype=float)
+                ys = np.asarray(df["y_pix"], dtype=float)
+
+                for i, (x, y) in enumerate(zip(xs, ys)):
+                    if not (np.isfinite(x) and np.isfinite(y)):
+                        continue
+                    xi = int(np.round(x))
+                    yi = int(np.round(y))
+                    if xi < 0 or yi < 0 or xi >= Wn or yi >= Hn:
+                        continue
+
+                    # --- Aperture pixels ---
+                    x0 = max(0, xi - r_int)
+                    x1 = min(Wn, xi + r_int + 1)
+                    y0 = max(0, yi - r_int)
+                    y1 = min(Hn, yi + r_int + 1)
+                    stamp = imgf[y0:y1, x0:x1]
+                    if stamp.size == 0:
+                        continue
+                    yy, xx = np.indices(stamp.shape)
+                    cx0 = float(x) - float(x0)
+                    cy0 = float(y) - float(y0)
+                    in_ap = (xx - cx0) ** 2 + (yy - cy0) ** 2 <= r ** 2
+                    ap_vals = stamp[in_ap]
+                    ap_vals = ap_vals[np.isfinite(ap_vals)]
+                    if ap_vals.size < 4:
+                        # Too few pixels to test — treat as valid (NaN filter already ran)
+                        keep[i] = True
+                        continue
+                    mean_ap = float(np.mean(ap_vals))
+                    var_ap = float(np.var(ap_vals))
+
+                    # --- Reference variance ---
+                    # Prefer RMS map if available (most accurate for difference images)
+                    if rms_map is not None:
+                        rms_stamp = np.asarray(rms_map, dtype=float)[y0:y1, x0:x1]
+                        rms_ap_vals = rms_stamp[in_ap]
+                        rms_ap_vals = rms_ap_vals[np.isfinite(rms_ap_vals) & (rms_ap_vals > 0)]
+                        if rms_ap_vals.size >= 2:
+                            var_ref = float(np.median(rms_ap_vals) ** 2)
+                        else:
+                            var_ref = _global_var
+                        sigma_ref = float(np.sqrt(max(var_ref, 1e-60)))
+                        # Annulus mean still needed for mean-bias test
+                        try:
+                            ann = CircularAnnulus(
+                                (float(x), float(y)), r_in=ann_in, r_out=ann_out
+                            )
+                            ann_vals = ann.to_mask(method="center").get_values(imgf)
+                            if ann_vals is not None:
+                                ann_vals = np.asarray(ann_vals, dtype=float)
+                                ann_vals = ann_vals[np.isfinite(ann_vals)]
+                            mean_annulus = float(np.median(ann_vals)) if (ann_vals is not None and ann_vals.size >= 4) else 0.0
+                        except Exception:
+                            mean_annulus = 0.0
+                    else:
+                        # Annulus-based reference
+                        try:
+                            ann = CircularAnnulus(
+                                (float(x), float(y)), r_in=ann_in, r_out=ann_out
+                            )
+                            ann_vals = ann.to_mask(method="center").get_values(imgf)
+                            if ann_vals is not None:
+                                ann_vals = np.asarray(ann_vals, dtype=float)
+                                ann_vals = ann_vals[np.isfinite(ann_vals)]
+                            if ann_vals is not None and ann_vals.size >= 8:
+                                mean_annulus = float(np.median(ann_vals))
+                                mad = float(np.median(np.abs(ann_vals - mean_annulus)))
+                                sigma_ref = max(mad * 1.4826, 1e-30)
+                                var_ref = sigma_ref ** 2
+                            else:
+                                mean_annulus = 0.0
+                                var_ref = _global_var
+                                sigma_ref = float(np.sqrt(max(var_ref, 1e-60)))
+                        except Exception:
+                            mean_annulus = 0.0
+                            var_ref = _global_var
+                            sigma_ref = float(np.sqrt(max(var_ref, 1e-60)))
+
+                    # --- Variance test ---
+                    if _use_var_test and var_ref > 1e-60:
+                        ratio = var_ap / var_ref
+                        if ratio > _var_ratio_thr:
+                            n_drop_var += 1
+                            logger.debug(
+                                "Site (%.1f,%.1f) rejected: var_ap/var_ref=%.2f > %.2f "
+                                "(elevated pixel scatter — likely star-subtraction residual).",
+                                x, y, ratio, _var_ratio_thr,
+                            )
+                            continue
+
+                    # --- Mean-bias test ---
+                    if _use_mean_test and sigma_ref > 1e-60:
+                        bias = abs(mean_ap - mean_annulus) / sigma_ref
+                        if bias > _mean_sigma_thr:
+                            n_drop_mean += 1
+                            logger.debug(
+                                "Site (%.1f,%.1f) rejected: |mean_ap - mean_annulus|/sigma=%.2f > %.2f "
+                                "(significant local mean bias — likely star-subtraction pedestal).",
+                                x, y, bias, _mean_sigma_thr,
+                            )
+                            continue
+
+                    keep[i] = True
+
+                n_drop = n_drop_var + n_drop_mean
+                if n_drop > 0:
+                    logger.info(
+                        "Pixel-statistics filter: dropped %d/%d sites "
+                        "(var_test=%d, mean_test=%d; thresholds: var_ratio=%.2g, mean_sigma=%.2g).",
+                        n_drop, len(df), n_drop_var, n_drop_mean,
+                        _var_ratio_thr, _mean_sigma_thr,
+                    )
+                return df[keep].copy()
+
             def _robust_site_snr(df: pd.DataFrame) -> pd.DataFrame:
                 """
                 Ensure candidate-site rows have a finite `SNR` for filtering.
@@ -1375,13 +1568,20 @@ class Limits:
             )
             n4 = int(len(cand_df))
 
+            # Pixel-statistics filter: reject sites contaminated by bright-star
+            # template subtraction residuals (elevated local variance or biased mean).
+            cand_df = _filter_pixel_statistics(
+                cand_df,
+                cutout,
+                aperture_radius_pix=float(aperture_radius_local),
+                rms_map=cutout_rms,
+            )
+            n5 = int(len(cand_df))
+
             logger.info(
-                "Candidate sites: sampled=%d, after_exclusion=%d, after_edge=%d, after_aperture=%d, after_annulus=%d",
-                n0,
-                n1,
-                n2,
-                n3,
-                n4,
+                "Candidate sites: sampled=%d, after_exclusion=%d, after_edge=%d, "
+                "after_aperture=%d, after_annulus=%d, after_pixel_stats=%d",
+                n0, n1, n2, n3, n4, n5,
             )
 
             if len(cand_df) == 0:
@@ -2933,7 +3133,7 @@ class Limits:
                                     flux_hat = float(theta_s[0])
                                     flux_err = float(np.sqrt(max(cov_s[0, 0], 0.0)))
                                     if np.isfinite(flux_err) and flux_err > 0:
-                                        snr = flux_hat / flux_err
+                                        snr = np.abs(flux_hat) / flux_err
 
                         else:  # AP / EMCEE → aperture photometry
                             ap_obj   = Aperture(input_yaml=self.input_yaml, image=injected_zoom)
@@ -2946,7 +3146,7 @@ class Limits:
                             if not np.isfinite(snr):
                                 fl  = float(snr_meas["flux_AP"].iloc[0])
                                 ns  = float(snr_meas["noiseSky"].iloc[0])
-                                snr = fl / ns if ns > 0 else 0.0
+                                snr = np.abs(fl) / ns if ns > 0 else 0.0
 
                         if not np.isfinite(snr):
                             raise ValueError("SNR not finite; using fallback")
