@@ -2735,6 +2735,65 @@ class Limits:
                 )
             except Exception:
                 pass
+
+        # Plot sigmoid curve fit from bracket/bisect data
+        # Fit logistic: P(m) = 100 / (1 + exp((m - m50)/s))
+        all_steps = (bracket_steps or []) + (bisect_steps or [])
+        if len(all_steps) >= 3 and np.isfinite(adopted_mag):
+            try:
+                # Extract (mag, detection_rate) pairs
+                mags_fit = np.array([s[0] for s in all_steps if np.isfinite(s[0]) and np.isfinite(s[1])])
+                comp_fit = np.array([s[1] for s in all_steps if np.isfinite(s[0]) and np.isfinite(s[1])]) * 100.0
+
+                if len(mags_fit) >= 3:
+                    # Fit for s (width) around fixed m50
+                    def _logistic(m, m50, s):
+                        return 100.0 / (1.0 + np.exp(np.clip((m - m50) / s, -60, 60)))
+
+                    # Use curve_fit to find best s, keeping m50 near adopted_mag
+                    try:
+                        popt, _ = curve_fit(
+                            _logistic, mags_fit, comp_fit,
+                            p0=[adopted_mag, 0.3],
+                            bounds=([adopted_mag - 1.0, 0.05], [adopted_mag + 1.0, 2.0]),
+                            maxfev=5000
+                        )
+                        m50_fit, s_fit = popt
+                    except Exception:
+                        # Fallback: estimate s from 10-90% transition
+                        sorted_idx = np.argsort(mags_fit)
+                        m_sorted = mags_fit[sorted_idx]
+                        c_sorted = comp_fit[sorted_idx]
+                        # Find where completeness crosses 10% and 90%
+                        m10 = m_sorted[np.argmin(np.abs(c_sorted - 10))] if any(c_sorted <= 10) else m_sorted[0]
+                        m90 = m_sorted[np.argmin(np.abs(c_sorted - 90))] if any(c_sorted >= 90) else m_sorted[-1]
+                        # s ≈ (m10 - m90) / ln(9) since 90->10 is factor of 9 in odds
+                        s_fit = max(0.1, abs(m10 - m90) / np.log(9)) if m10 != m90 else 0.3
+                        m50_fit = adopted_mag
+
+                    # Generate smooth curve spanning 0% to 100%
+                    # Extend range to ensure curve reaches ~0 and ~100
+                    x_min = min(mags_fit.min(), m50_fit - 3 * s_fit)
+                    x_max = max(mags_fit.max(), m50_fit + 3 * s_fit)
+                    # Always extend at least 1 mag beyond m50 to show full transition
+                    x_min = min(x_min, m50_fit - 1.0)
+                    x_max = max(x_max, m50_fit + 1.0)
+
+                    mag_curve = np.linspace(x_min, x_max, 200)
+                    comp_curve = _logistic(mag_curve, m50_fit, s_fit)
+
+                    ax.plot(
+                        mag_curve, comp_curve,
+                        color="darkorange", lw=1.0, ls="-",
+                        label=f"Sigmoid fit (s={s_fit:.2f})",
+                        zorder=5, alpha=0.8
+                    )
+                    logger.info(
+                        "Completeness sigmoid fit: m50=%.3f, s=%.3f, span=[%.2f, %.2f]",
+                        m50_fit, s_fit, x_min, x_max
+                    )
+            except Exception as e:
+                logger.debug(f"Sigmoid fit failed: {e}")
         
         # Add axis labels to main completeness plot
         ax.set_xlabel("Injected brightness [mag]", fontsize=9)
@@ -3181,7 +3240,7 @@ class Limits:
                     except Exception:
                         _lbl = ""
                     ax_inject.set_title(
-                        f"Injected mag = {mag_target:.2f}" + (f" ({_lbl})" if _lbl else ""),
+                        f"Mag$_{{in}}$ = {mag_target:.2f}" + (f" ({_lbl})" if _lbl else ""),
                         fontsize=9,
                     )
 
@@ -3207,7 +3266,7 @@ class Limits:
                         if np.isfinite(recovered_apparent):
                             ax_inject.text(
                                 0.05, 0.05,
-                                f"Rec: {recovered_apparent:.2f}",
+                                f"Mag$_{{out}}$: {recovered_apparent:.2f}",
                                 transform=ax_inject.transAxes,
                                 color="white", fontsize=7, ha="left", va="bottom",
                                 bbox=dict(boxstyle="round", facecolor="black", alpha=0.5),
