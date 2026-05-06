@@ -834,6 +834,54 @@ NNW
                     [sci_shape[1] / 2 + 0.5], [sci_shape[0] / 2 + 0.5], 1
                 )
                 center_ra, center_dec = float(ra_arr[0]), float(dec_arr[0])
+                
+                # Check if target is near edge or chip gaps - expand output if needed
+                iy = getattr(self, "input_yaml", None) or {}
+                target_ra = iy.get("target_ra")
+                target_dec = iy.get("target_dec")
+                edge_margin_px = 150  # pixels from edge to trigger expansion
+                chip_gap_check_radius = 50  # pixels around target to check for NaNs
+                
+                output_width, output_height = sci_shape[1], sci_shape[0]
+                
+                if target_ra is not None and target_dec is not None:
+                    try:
+                        # Get target pixel position in science image
+                        tx_sci, ty_sci = sci_wcs.all_world2pix(float(target_ra), float(target_dec), 0)
+                        tx_sci, ty_sci = float(tx_sci), float(ty_sci)
+                        
+                        # Check if near science image edge
+                        near_edge = (
+                            tx_sci < edge_margin_px or tx_sci > sci_shape[1] - edge_margin_px or
+                            ty_sci < edge_margin_px or ty_sci > sci_shape[0] - edge_margin_px
+                        )
+                        
+                        # Check for chip gaps (NaN regions) near target
+                        has_chip_gap = False
+                        if np.any(np.isfinite(sci_data)):
+                            y_min = max(0, int(ty_sci) - chip_gap_check_radius)
+                            y_max = min(sci_shape[0], int(ty_sci) + chip_gap_check_radius)
+                            x_min = max(0, int(tx_sci) - chip_gap_check_radius)
+                            x_max = min(sci_shape[1], int(tx_sci) + chip_gap_check_radius)
+                            local_region = sci_data[y_min:y_max, x_min:x_max]
+                            nan_fraction = np.sum(~np.isfinite(local_region)) / local_region.size
+                            has_chip_gap = nan_fraction > 0.05  # >5% NaNs indicates chip gap
+                        
+                        if near_edge or has_chip_gap:
+                            # Expand output size to ensure coverage
+                            pad_x = int(sci_shape[1] * 0.15) if near_edge else 0
+                            pad_y = int(sci_shape[0] * 0.15) if near_edge else 0
+                            output_width = sci_shape[1] + 2 * pad_x
+                            output_height = sci_shape[0] + 2 * pad_y
+                            self.logger.info(
+                                "Target near %s - expanding SWarp output to %dx%d (was %dx%d)",
+                                "image edge" if near_edge else "chip gap",
+                                output_width, output_height,
+                                sci_shape[1], sci_shape[0]
+                            )
+                    except Exception as e:
+                        self.logger.debug(f"Could not check target edge proximity: {e}")
+                
                 # Force SWARP to always resample both images (removed skip check)
                 science_skip_resample = False
                 reference_skip_resample = False
@@ -1070,7 +1118,7 @@ NNW
                 "CENTER": f"{center_ra:.8f},{center_dec:.8f}",
                 "PIXEL_SCALE": pix_scale,
                 "PIXELSCALE_TYPE": "MANUAL",
-                "IMAGE_SIZE": f"{sci_shape[1]},{sci_shape[0]}",
+                "IMAGE_SIZE": f"{output_width},{output_height}",
                 "RESAMPLING_TYPE": sci_resampling_method,
             }
             swarp_config_sci = {
