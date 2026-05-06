@@ -321,7 +321,7 @@ default_input:
     initial_guess_sigma_mult: 5.0 # float --- Initial injected-limit guess uses flux ~= (this * sigma_sky * sqrt(Npix)) from annulus probe measurements; converted to instrumental magnitude.
     scale_growth_factor: 1.5 # float --- If no quiet injection sites are found, multiply runtime `scale` by this factor and retry (up to scale_growth_max_px).
     scale_growth_max_px: 600 # int --- Maximum runtime `scale` (pixels) allowed during limiting-magnitude quiet-site retries.
-    injection_n_sites: 10 # int --- Number of candidate injection sites around the target used for injection/recovery trials (more = smoother completeness curve; slower).
+    injection_n_sites: 100 # int --- Number of quiet injection sites around the target used for injection/recovery trials (more = smoother completeness curve; slower). Default 100, max 500.
     injection_jitter_repetitions: 5 # int --- Sub-pixel jitter repetitions per site per magnitude (more = smoother completeness curve; slower).
     completeness_plot_span_mag: 0.8 # float --- Half-span (mag) around the adopted limit used for the completeness plot sampling range (smaller = fewer bins far from transition).
     completeness_plot_nmags: 9 # int --- Number of magnitudes sampled across completeness_plot_span_mag for the completeness bar chart.

@@ -1526,8 +1526,8 @@ class Limits:
             # -----------------------------------------------------------------
             n_candidates = int(lim_cfg.get("inject_candidate_n_sites", 2000))
             n_candidates = max(200, min(n_candidates, 20000))
-            n_quiet = int(lim_cfg.get("inject_quiet_n_sites", 10))
-            n_quiet = max(3, min(n_quiet, 50))
+            n_quiet = int(lim_cfg.get("inject_quiet_n_sites", 100))
+            n_quiet = max(10, min(n_quiet, 500))
 
             # Sample uniformly in area within [r_min, r_max].
             r_min_with_jitter = float(r_min) + 1.0
