@@ -191,8 +191,8 @@ default_input:
     scamp_exe_loc: null # str|null --- Optional explicit path to `scamp` executable.
     sextractor_exe_loc: null # str|null --- Optional explicit path to SExtractor executable.
     scamp_astref_catalog: GAIA-DR3 # str --- Reference catalog name for SCAMP (if used).
-    scamp_ref_timeout: 60 # int --- Vizier connection timeout (s) for SCAMP REF_TIMEOUT (built-in default 10 is often too low).
-    scamp_ref_server: vizier.cfa.harvard.edu # str --- SCAMP REF_SERVER (Vizier mirror). Override if needed (e.g. vizier.unistra.fr, vizier.ast.cam.ac.uk).
+    scamp_ref_timeout: 120 # int --- Vizier connection timeout (s) for SCAMP REF_TIMEOUT (built-in default 10 is often too low).
+    scamp_ref_server: vizier.unistra.fr # str --- SCAMP REF_SERVER (Vizier mirror). Override if needed (e.g. vizier.unistra.fr, vizier.ast.cam.ac.uk).
     scamp_single_call: True # bool --- If True (default), run SCAMP only once per image (disables multi-trial optimization).
     scamp_optimize_after_solve: False # bool --- (Advanced) If True, try multiple SCAMP parameter trials after solve-field.
     scamp_optimize_max_trials: 1 # int --- Maximum SCAMP optimization trials to evaluate (1=base only).
