@@ -3386,6 +3386,12 @@ def run_photometry():
                         background_rms=background_rms,
                         iterative=False,
                     )
+                    # Diagnostic plot: WCS catalog position vs PSF fitted position
+                    try:
+                        makePlots = Plot(input_yaml=input_yaml)
+                        makePlots.plot_wcs_vs_psf_offset(CatalogSources, imageWCS=imageWCS)
+                    except Exception as exc:
+                        logging.warning(f"WCS vs PSF offset plot failed: {exc}")
 
         # =============================================================================
         # Zeropoint Calculation

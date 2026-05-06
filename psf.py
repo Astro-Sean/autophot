@@ -3970,16 +3970,21 @@ class PSF:
             )
 
             if "x_pix" in sources and "y_pix" in sources:
-                ax1.scatter(
-                    sources["x_pix"],
-                    sources["y_pix"],
-                    marker="+",
-                    c="red",
-                    s=get_marker_size('medium'),
-                    lw=1.2,
-                    label="Input position",
-                    zorder=11,
-                )
+                fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                r = fwhm / 2.0
+                for _, row in sources.iterrows():
+                    ax1.add_patch(
+                        Circle(
+                            (row["x_pix"], row["y_pix"]),
+                            r,
+                            edgecolor="red",
+                            facecolor="none",
+                            lw=1.2,
+                            alpha=0.9,
+                            zorder=10,
+                            label="Input position",
+                        )
+                    )
                 # Add dashed box showing fitting bounds region
                 phot_cfg = self.input_yaml.get("photometry", {})
                 cfg_xy_bounds_arcsec = phot_cfg.get("fitting_xy_bounds", 3.0)
@@ -4010,21 +4015,28 @@ class PSF:
                         pass
 
             if "x_fit" in sources and "y_fit" in sources:
-                _fit_radius = max(2.0, aperture_radius * 0.35)
+                fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                r = fwhm / 2.0
                 for _fit_i, (_, row) in enumerate(sources.iterrows()):
-                    ax1.add_patch(
-                        Circle(
-                            (row["x_fit"], row["y_fit"]),
-                            _fit_radius,
-                            edgecolor="red",
-                            facecolor="none",
-                            lw=1.2,
-                            ls="-",
-                            alpha=0.9,
-                            zorder=10,
-                            label="Fitted position" if _fit_i == 0 else None,
-                        )
+                    # Cross with length 2r (horizontal and vertical lines)
+                    ax1.plot(
+                        [row["x_fit"] - r, row["x_fit"] + r],
+                        [row["y_fit"], row["y_fit"]],
+                        color="red",
+                        lw=1.2,
+                        alpha=0.9,
+                        zorder=11,
+                        label="Fitted position" if _fit_i == 0 else None,
                     )
+                    ax1.plot(
+                        [row["x_fit"], row["x_fit"]],
+                        [row["y_fit"] - r, row["y_fit"] + r],
+                        color="red",
+                        lw=1.2,
+                        alpha=0.9,
+                        zorder=11,
+                    )
+                    # Keep the aperture circle as reference
                     ax1.add_patch(
                         Circle(
                             (row["x_fit"], row["y_fit"]),

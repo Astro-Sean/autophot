@@ -1540,3 +1540,128 @@ class Plot:
             plt.show()
 
         return
+
+    def plot_wcs_vs_psf_offset(self, sources, imageWCS=None):
+        """
+        Diagnostic plot: dx vs dy between PSF fitted position and WCS catalog position.
+
+        dx = x_fit - x_pix (PSF fitted minus WCS catalog)
+        dy = y_fit - y_pix (PSF fitted minus WCS catalog)
+
+        Plots with error bars on both axes to identify systematic offsets or outliers.
+
+        Parameters:
+        sources (pd.DataFrame): DataFrame with columns x_pix, y_pix, x_fit, y_fit,
+                                x_fit_err, y_fit_err.
+        imageWCS (astropy.wcs.WCS, optional): WCS object for logging.
+        """
+        import matplotlib.pyplot as plt
+        from functions import set_size
+        import numpy as np
+
+        try:
+            dir_path = os.path.dirname(os.path.realpath(__file__))
+            plt.style.use(os.path.join(dir_path, "autophot.mplstyle"))
+
+            base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
+            write_dir = os.path.dirname(self.input_yaml["fpath"])
+            save_path = os.path.join(write_dir, f"WCS_vs_PSF_Offset_{base}.png")
+
+            # Filter to sources with valid PSF fits
+            valid = (
+                sources["x_pix"].notna()
+                & sources["y_pix"].notna()
+                & sources["x_fit"].notna()
+                & sources["y_fit"].notna()
+            )
+            df = sources[valid].copy()
+
+            if len(df) == 0:
+                logger.warning("No valid PSF fits for WCS vs PSF offset plot")
+                return
+
+            # Compute offsets
+            df["dx"] = df["x_fit"] - df["x_pix"]
+            df["dy"] = df["y_fit"] - df["y_pix"]
+
+            # Get errors (use catalog position error if available, otherwise PSF fit error)
+            # For dx error: sqrt(x_fit_err^2 + x_pix_err^2). If x_pix_err not available, use x_fit_err only.
+            dx_err = df.get("x_fit_err", np.nan).copy()
+            dy_err = df.get("y_fit_err", np.nan).copy()
+
+            # Filter to sources with finite errors
+            finite_err = dx_err.notna() & dy_err.notna()
+            df_plot = df[finite_err].copy()
+
+            if len(df_plot) == 0:
+                logger.warning("No sources with PSF fit errors for WCS vs PSF offset plot")
+                return
+
+            # Create plot
+            width_pt = 5.5 * 72.27
+            aspect = 1.0
+            fig, ax = plt.subplots(figsize=set_size(width_pt, aspect=aspect))
+
+            # Scatter with error bars on both axes
+            ax.errorbar(
+                df_plot["dx"],
+                df_plot["dy"],
+                xerr=df_plot["x_fit_err"],
+                yerr=df_plot["y_fit_err"],
+                fmt="o",
+                markersize=3,
+                markerfacecolor="dodgerblue",
+                markeredgecolor="none",
+                ecolor="gray",
+                elinewidth=0.5,
+                alpha=0.7,
+                zorder=2,
+            )
+
+            # Zero lines
+            ax.axhline(0, color="red", lw=1.0, ls="--", alpha=0.5, zorder=1)
+            ax.axvline(0, color="red", lw=1.0, ls="--", alpha=0.5, zorder=1)
+
+            # Median offset lines
+            med_dx = np.nanmedian(df_plot["dx"])
+            med_dy = np.nanmedian(df_plot["dy"])
+            ax.axhline(med_dy, color="orange", lw=1.2, ls="-", alpha=0.6, zorder=1, label=f"Median dy = {med_dy:.3f}")
+            ax.axvline(med_dx, color="orange", lw=1.2, ls="-", alpha=0.6, zorder=1, label=f"Median dx = {med_dx:.3f}")
+
+            # RMS
+            rms_dx = np.sqrt(np.nanmean(df_plot["dx"]**2))
+            rms_dy = np.sqrt(np.nanmean(df_plot["dy"]**2))
+
+            ax.set_xlabel(r"$\Delta x = x_{\mathrm{PSF}} - x_{\mathrm{WCS}}$ [px]")
+            ax.set_ylabel(r"$\Delta y = y_{\mathrm{PSF}} - y_{\mathrm{WCS}}$ [px]")
+            ax.set_title(f"WCS vs PSF Position Offset (N={len(df_plot)})")
+            ax.legend(loc="upper right", fontsize="small", framealpha=0.9)
+            ax.grid(True, ls="-", alpha=0.25, zorder=0)
+
+            # Add text with statistics
+            stats_text = (
+                f"Median: ({med_dx:.3f}, {med_dy:.3f}) px\n"
+                f"RMS: ({rms_dx:.3f}, {rms_dy:.3f}) px"
+            )
+            ax.text(
+                0.02,
+                0.98,
+                stats_text,
+                transform=ax.transAxes,
+                verticalalignment="top",
+                horizontalalignment="left",
+                bbox=dict(facecolor="white", alpha=0.85, edgecolor="none"),
+                fontsize="small",
+            )
+
+            fig.tight_layout()
+            fig.savefig(save_path, dpi=150, facecolor="white")
+            plt.close(fig)
+
+            logger.info(f"Saved WCS vs PSF offset plot: {save_path}")
+            logger.info(
+                f"WCS vs PSF offset statistics: Median=({med_dx:.3f}, {med_dy:.3f}) px, RMS=({rms_dx:.3f}, {rms_dy:.3f}) px"
+            )
+
+        except Exception as e:
+            logger.warning(f"WCS vs PSF offset plot failed: {e}")
