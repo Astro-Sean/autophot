@@ -1396,6 +1396,81 @@ NNW
                     "Removed aligned working dir: %s", reference_aligned_dir
                 )
 
+            # Local alignment refinement at target location (fixes edge/host misalignment)
+            target_offset_applied = None
+            if target_ra is not None and target_dec is not None:
+                try:
+                    from skimage.registration import phase_cross_correlation
+                    
+                    with fits.open(aligned_science_fpath) as hsci, fits.open(aligned_reference_fpath) as href:
+                        sci_data = hsci[0].data
+                        ref_data = href[0].data
+                        sci_hdr = hsci[0].header
+                        ref_hdr = href[0].header
+                        
+                        # Get WCS and find target pixel position
+                        sci_wcs_aligned = get_wcs(sci_hdr)
+                        tx, ty = sci_wcs_aligned.all_world2pix(float(target_ra), float(target_dec), 0)
+                        tx, ty = int(round(float(tx))), int(round(float(ty)))
+                        
+                        # Extract stamps around target (size based on FWHM)
+                        stamp_size = int(max(50, 6 * fwhm_sci_pix))
+                        half = stamp_size // 2
+                        
+                        y_min = max(0, ty - half)
+                        y_max = min(sci_data.shape[0], ty + half)
+                        x_min = max(0, tx - half)
+                        x_max = min(sci_data.shape[1], tx + half)
+                        
+                        sci_stamp = sci_data[y_min:y_max, x_min:x_max]
+                        ref_stamp = ref_data[y_min:y_max, x_min:x_max]
+                        
+                        # Check stamps are valid
+                        if (sci_stamp.size > 100 and ref_stamp.size > 100 and 
+                            np.any(np.isfinite(sci_stamp)) and np.any(np.isfinite(ref_stamp))):
+                            
+                            # Normalize stamps for cross-correlation
+                            sci_norm = (sci_stamp - np.nanmedian(sci_stamp)) / (1e-10 + np.nanstd(sci_stamp))
+                            ref_norm = (ref_stamp - np.nanmedian(ref_stamp)) / (1e-10 + np.nanstd(ref_stamp))
+                            
+                            # Replace NaNs with 0 for correlation
+                            sci_norm = np.nan_to_num(sci_norm, nan=0.0)
+                            ref_norm = np.nan_to_num(ref_norm, nan=0.0)
+                            
+                            # Measure offset with phase cross-correlation
+                            shift, error, _ = phase_cross_correlation(
+                                ref_norm, sci_norm, upsample_factor=10, normalization=None
+                            )
+                            
+                            dy, dx = float(shift[0]), float(shift[1])
+                            offset_px = np.hypot(dx, dy)
+                            
+                            self.logger.info(
+                                "Local target offset measured: dx=%.3f px, dy=%.3f px, total=%.3f px",
+                                dx, dy, offset_px
+                            )
+                            
+                            # Apply correction if offset is significant (>0.1 px) but not extreme (<3 px)
+                            if 0.1 < offset_px < 3.0:
+                                self.logger.info("Applying local subpixel shift correction to reference")
+                                from scipy.ndimage import shift as ndimage_shift
+                                
+                                # Shift the entire reference image
+                                shifted_ref = ndimage_shift(ref_data, (dy, dx), order=3, mode='constant', cval=np.nan)
+                                
+                                # Update header with shift information
+                                ref_hdr['ALIGNDX'] = (dx, 'Local alignment shift X (px)')
+                                ref_hdr['ALIGNDY'] = (dy, 'Local alignment shift Y (px)')
+                                ref_hdr['ALIGNTOT'] = (offset_px, 'Local alignment total shift (px)')
+                                
+                                # Save shifted reference
+                                fits.writeto(aligned_reference_fpath, shifted_ref, ref_hdr, overwrite=True)
+                                target_offset_applied = offset_px
+                            else:
+                                self.logger.debug("Local offset %.3f px - no correction needed or too large", offset_px)
+                except Exception as local_exc:
+                    self.logger.debug(f"Local alignment refinement failed: {local_exc}")
+
             return {
                 "science_aligned": str(aligned_science_fpath),
                 "reference_aligned": str(aligned_reference_fpath),
@@ -1405,6 +1480,7 @@ NNW
                 "reference_undersampled": ref_is_undersampled,
                 "science_fwhm_pixels": fwhm_sci_pix,
                 "reference_fwhm_pixels": fwhm_ref_pix,
+                "target_local_offset_applied": target_offset_applied,
             }
 
         except Exception as e:
