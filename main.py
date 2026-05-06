@@ -2597,12 +2597,30 @@ def run_photometry():
         image, header = get_image_and_header(fpath)
         imageWCS = get_wcs(header)
 
-        # Reuse cached background results if fpath hasn't changed
-        if fpath == fpath_before_subtraction:
-            background_surface = background_surface_cached
-            background_rms = background_rms_cached
-            defects_mask = defects_mask_cached
-            logging.info("Reusing cached background results (fpath unchanged)")
+        # Reuse cached background results if fpath hasn't changed AND shapes match
+        # (shape can change after alignment, which invalidates the background cache)
+        if fpath == fpath_before_subtraction and background_rms_cached is not None:
+            if background_rms_cached.shape == image.shape:
+                background_surface = background_surface_cached
+                background_rms = background_rms_cached
+                defects_mask = defects_mask_cached
+                logging.info("Reusing cached background results (fpath unchanged)")
+            else:
+                logging.warning(
+                    "Background cache shape %s doesn't match image shape %s, recalculating",
+                    background_rms_cached.shape, image.shape
+                )
+                result = bg_remover.remove(
+                    image,
+                    header=header,
+                    plot=False,
+                    fwhm=ImageFWHM,
+                    galaxies=variable_sources,
+                    mask_simbad_galaxies=True,
+                )
+                background_surface = np.asarray(result["background"], dtype=np.float32)
+                background_rms = np.asarray(result["background_rms"], dtype=np.float32)
+                defects_mask = np.asarray(result["defects_mask"], dtype=bool)
         else:
             result = bg_remover.remove(
                 image,
