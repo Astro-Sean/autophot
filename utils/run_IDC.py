@@ -42,12 +42,11 @@ from functions import remove_wcs_from_header, log_warning_from_exception
 from wcs import get_wcs
 
 try:
-    from reproject import reproject_interp, reproject_adaptive
+    from reproject import reproject_interp
 
     HAS_REPROJECT = True
 except ImportError:
     HAS_REPROJECT = False
-    reproject_adaptive = None
 
 
 class ImageDistortionCorrector:
@@ -1469,61 +1468,15 @@ NNW
                     "Reproject: missing WCS in science or reference header."
                 )
                 return None
-            # Get reproject config from input_yaml for consistency with templates.py
-            iy = getattr(self, "input_yaml", None) or {}
-            cfg = iy.get("alignment", {}) if isinstance(iy, dict) else {}
-            reproject_method = str(cfg.get("reproject_method", "interp")).lower().strip()
-            interp_order = str(cfg.get("reproject_interp_order", "bicubic")).lower().strip()
-            
-            # Normalize interpolation order
-            if interp_order in ("nearest", "nearest-neighbor", "nn"):
-                order = "nearest-neighbor"
-            elif interp_order in ("bilinear", "linear", "1"):
-                order = "bilinear"
-            elif interp_order in ("biquadratic", "2"):
-                order = "biquadratic"
-            elif interp_order in ("bicubic", "cubic", "3"):
-                order = "bicubic"
-            else:
-                order = "bicubic"  # default for sharper edges
-            
             # Reproject reference onto science grid
-            if reproject_method == "adaptive" and reproject_adaptive is not None:
-                # Adaptive reprojection (better for varying pixel scales)
-                aligned_ref, footprint = reproject_adaptive(
-                    (ref_data, ref_wcs),
-                    sci_wcs,
-                    shape_out=sci_data.shape,
-                    roundtrip_coords=True,
-                )
-                self.logger.debug("Using reproject_adaptive for alignment")
-            else:
-                # Interpolation reprojection (default, faster)
-                aligned_ref, footprint = reproject_interp(
-                    (ref_data, ref_wcs),
-                    sci_wcs,
-                    shape_out=sci_data.shape,
-                    order=order,
-                    roundtrip_coords=True,
-                )
-                self.logger.debug(f"Using reproject_interp with order={order} for alignment")
-            aligned_ref = np.asarray(aligned_ref, dtype=float)
-            # CRITICAL: Apply footprint mask - pixels with no coverage (footprint==0) must be NaN
-            # The footprint indicates valid reprojection coverage (1=valid, 0=no data)
-            footprint_arr = np.asarray(footprint, dtype=bool)
-            aligned_ref[~footprint_arr] = np.nan
-            # Also ensure any remaining non-finite values are NaN
-            aligned_ref[~np.isfinite(aligned_ref)] = np.nan
-            n_valid = np.sum(np.isfinite(aligned_ref))
-            n_total = aligned_ref.size
-            self.logger.debug(
-                f"Reproject footprint: {n_valid}/{n_total} valid pixels ({100*n_valid/n_total:.1f}%)"
+            aligned_ref, footprint = reproject_interp(
+                (ref_data, ref_wcs),
+                sci_wcs,
+                shape_out=sci_data.shape,
+                order="bilinear",
+                roundtrip_coords=True,
             )
-            if n_valid == 0:
-                self.logger.error(
-                    "Reproject produced all-NaN output - template may not overlap with science image"
-                )
-                return None
+            aligned_ref = np.asarray(aligned_ref, dtype=float)
             out_header = ref_header.copy()
             out_header = remove_wcs_from_header(out_header)
             out_header.update(sci_wcs.to_header(), relax=True)
