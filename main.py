@@ -140,6 +140,7 @@ from plot import Plot
 from psf import PSF
 from templates import Templates
 from utils import run_IDC
+from utils.run_IDC import validate_and_trim_weight_map
 from utils.run_sex import SExtractorWrapper
 from wcs import WCSSolver, get_wcs
 from zeropoint import Zeropoint
@@ -2746,6 +2747,16 @@ def run_photometry():
 
         try:
             sex_crowded = input_yaml.get("photometry", {}).get("crowded_field", False)
+            # Validate weight map shape matches image before running SExtractor
+            try:
+                with fits.open(fpath, mode="readonly") as h_img:
+                    img_shape = h_img[0].data.shape
+                weight_fpath = validate_and_trim_weight_map(
+                    weight_fpath, img_shape, Path(fpath).parent, logging.getLogger(__name__)
+                )
+            except Exception as weight_check_exc:
+                logging.warning("Could not validate weight map: %s", weight_check_exc)
+                weight_fpath = None
             ImageFWHM, FWHMSources, scale = _run_sextractor_two_pass(
                 config=input_yaml,
                 fpath=fpath,

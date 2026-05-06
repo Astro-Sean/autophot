@@ -49,6 +49,78 @@ except ImportError:
     HAS_REPROJECT = False
 
 
+def validate_and_trim_weight_map(
+    weight_path: Optional[str],
+    expected_shape: Tuple[int, int],
+    output_dir: Path,
+    logger: Optional[logging.Logger] = None,
+) -> Optional[str]:
+    """
+    Validate weight map shape matches expected image shape, trim if needed.
+
+    When images are trimmed (e.g., NaN boundary trimming), weight maps may
+    still have the original shape. This function checks and trims them.
+
+    Parameters
+    ----------
+    weight_path : str or None
+        Path to the weight map FITS file
+    expected_shape : tuple of (height, width)
+        Expected shape of the image
+    output_dir : Path
+        Directory to save trimmed weight map if needed
+    logger : logging.Logger or None
+        Logger for warnings/info (uses print if None)
+
+    Returns
+    -------
+    str or None
+        Path to (potentially trimmed) weight map, or None if invalid
+    """
+    if weight_path is None or not Path(weight_path).exists():
+        return None
+
+    _log = logger.info if logger else print
+    _warn = logger.warning if logger else print
+
+    try:
+        with fits.open(weight_path, memmap=False) as h_w:
+            weight_data = h_w[0].data
+            weight_header = h_w[0].header
+
+            if weight_data is None:
+                return None
+
+            # Check if shapes match
+            if weight_data.shape == expected_shape:
+                return weight_path  # No trimming needed
+
+            _warn(
+                f"Weight map shape {weight_data.shape} does not match image shape {expected_shape}, trimming..."
+            )
+
+            # Trim weight map to match expected shape (centered crop)
+            h_diff = weight_data.shape[0] - expected_shape[0]
+            w_diff = weight_data.shape[1] - expected_shape[1]
+
+            y_start = h_diff // 2
+            x_start = w_diff // 2
+            y_end = y_start + expected_shape[0]
+            x_end = x_start + expected_shape[1]
+
+            trimmed_weight = weight_data[y_start:y_end, x_start:x_end]
+
+            # Write trimmed weight to output_dir
+            trimmed_path = output_dir / (Path(weight_path).stem + "_trimmed.fits")
+            fits.writeto(str(trimmed_path), trimmed_weight, weight_header, overwrite=True)
+            _log(f"Trimmed weight map saved to {trimmed_path}")
+            return str(trimmed_path)
+
+    except Exception as e:
+        _warn(f"Could not validate/trim weight map {weight_path}: {e}")
+        return None
+
+
 class ImageDistortionCorrector:
     """
     Process astronomical images with SExtractor, SCAMP, SWarp, and AstroAlign,
@@ -466,46 +538,7 @@ NNW
 
         Returns path to (potentially trimmed) weight map, or None if invalid.
         """
-        if weight_path is None or not Path(weight_path).exists():
-            return None
-
-        try:
-            with fits.open(weight_path, memmap=False) as h_w:
-                weight_data = h_w[0].data
-                weight_header = h_w[0].header
-
-                if weight_data is None:
-                    return None
-
-                # Check if shapes match
-                if weight_data.shape == expected_shape:
-                    return weight_path  # No trimming needed
-
-                self.logger.warning(
-                    "Weight map shape %s does not match image shape %s, trimming...",
-                    weight_data.shape, expected_shape
-                )
-
-                # Trim weight map to match expected shape (centered crop)
-                h_diff = weight_data.shape[0] - expected_shape[0]
-                w_diff = weight_data.shape[1] - expected_shape[1]
-
-                y_start = h_diff // 2
-                x_start = w_diff // 2
-                y_end = y_start + expected_shape[0]
-                x_end = x_start + expected_shape[1]
-
-                trimmed_weight = weight_data[y_start:y_end, x_start:x_end]
-
-                # Write trimmed weight to output_dir
-                trimmed_path = output_dir / (Path(weight_path).stem + "_trimmed.fits")
-                fits.writeto(str(trimmed_path), trimmed_weight, weight_header, overwrite=True)
-                self.logger.info("Trimmed weight map saved to %s", trimmed_path)
-                return str(trimmed_path)
-
-        except Exception as e:
-            self.logger.warning("Could not validate/trim weight map %s: %s", weight_path, e)
-            return None
+        return validate_and_trim_weight_map(weight_path, expected_shape, output_dir, self.logger)
 
     @staticmethod
     def _guess_map_weight_path(fits_image: str) -> Optional[str]:
