@@ -800,13 +800,17 @@ NNW
         }
 
         try:
-            # Ensure same shape
+            # Ensure same shape - crop to common region if needed
             if science_data.shape != reference_data.shape:
-                self.logger.warning(
-                    "Alignment validation: shape mismatch %s vs %s",
+                self.logger.info(
+                    "Alignment validation: shape mismatch %s vs %s, cropping to common region",
                     science_data.shape, reference_data.shape
                 )
-                return result
+                # Crop both to the overlapping region
+                min_h = min(science_data.shape[0], reference_data.shape[0])
+                min_w = min(science_data.shape[1], reference_data.shape[1])
+                science_data = science_data[:min_h, :min_w]
+                reference_data = reference_data[:min_h, :min_w]
 
             # Create masks for valid pixels
             valid = np.isfinite(science_data) & np.isfinite(reference_data)
@@ -1494,6 +1498,32 @@ NNW
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
+
+                # Ensure aligned images have matching shapes (pad/crop to science shape)
+                try:
+                    with fits.open(aligned_sci) as h_sci, fits.open(aligned_ref) as h_ref:
+                        sci_shape = h_sci[0].data.shape
+                        ref_shape = h_ref[0].data.shape
+                        if sci_shape != ref_shape:
+                            self.logger.info(
+                                "SWarp output shape mismatch: science %s vs reference %s. "
+                                "Resampling reference to match science shape.",
+                                sci_shape, ref_shape
+                            )
+                            # Resample reference to match science shape
+                            from scipy.ndimage import zoom
+                            ref_data = h_ref[0].data.astype(float)
+                            # Compute zoom factors
+                            zoom_y = sci_shape[0] / ref_shape[0] if ref_shape[0] > 0 else 1.0
+                            zoom_x = sci_shape[1] / ref_shape[1] if ref_shape[1] > 0 else 1.0
+                            # Use order=1 (bilinear) for speed and to avoid overshoot
+                            ref_resampled = zoom(ref_data, (zoom_y, zoom_x), order=1, cval=np.nan)
+                            # Update the aligned_ref file
+                            h_ref[0].data = ref_resampled
+                            h_ref.writeto(aligned_ref, overwrite=True)
+                            self.logger.info("Reference image resampled to %s", sci_shape)
+                except Exception as e:
+                    self.logger.warning("Could not match image shapes: %s", e)
 
                 aligned_science_fpath = science_image
                 aligned_reference_fpath = reference_image
