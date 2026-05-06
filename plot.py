@@ -1610,6 +1610,7 @@ class Plot:
                 yerr=df_plot["y_fit_err"],
                 fmt="o",
                 markersize=3,
+                capsize = 1,
                 markerfacecolor="dodgerblue",
                 markeredgecolor="none",
                 ecolor="gray",
@@ -1619,23 +1620,35 @@ class Plot:
             )
 
             # Zero lines
-            ax.axhline(0, color="red", lw=1.0, ls="--", alpha=0.5, zorder=1)
-            ax.axvline(0, color="red", lw=1.0, ls="--", alpha=0.5, zorder=1)
+            # ax.axhline(0, color="red", lw=1.0, ls="--", alpha=0.5, zorder=1)
+            # ax.axvline(0, color="red", lw=1.0, ls="--", alpha=0.5, zorder=1)
 
             # Median offset lines
             med_dx = np.nanmedian(df_plot["dx"])
             med_dy = np.nanmedian(df_plot["dy"])
-            ax.axhline(med_dy, color="orange", lw=1.2, ls="-", alpha=0.6, zorder=1, label=f"Median dy = {med_dy:.3f}")
-            ax.axvline(med_dx, color="orange", lw=1.2, ls="-", alpha=0.6, zorder=1, label=f"Median dx = {med_dx:.3f}")
+            # ax.axhline(med_dy, color="orange", lw=1.2, ls="-", alpha=0.6, zorder=1, label=f"Median dy = {med_dy:.3f}")
+            # ax.axvline(med_dx, color="orange", lw=1.2, ls="-", alpha=0.6, zorder=1, label=f"Median dx = {med_dx:.3f}")
 
             # RMS
             rms_dx = np.sqrt(np.nanmean(df_plot["dx"]**2))
             rms_dy = np.sqrt(np.nanmean(df_plot["dy"]**2))
 
+            # Symmetric square axes with (0,0) at centre
+            _lim = max(
+                np.nanmax(np.abs(df_plot["dx"] + df_plot["x_fit_err"])),
+                np.nanmax(np.abs(df_plot["dy"] + df_plot["y_fit_err"])),
+                0.1,
+            ) * 1.1
+            ax.set_xlim(-_lim, _lim)
+            ax.set_ylim(-_lim, _lim)
+            ax.set_aspect("equal", adjustable="box")
+            ax.axhline(0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=1)
+            ax.axvline(0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=1)
+
             ax.set_xlabel(r"$\Delta x = x_{\mathrm{PSF}} - x_{\mathrm{WCS}}$ [px]")
             ax.set_ylabel(r"$\Delta y = y_{\mathrm{PSF}} - y_{\mathrm{WCS}}$ [px]")
-            ax.set_title(f"WCS vs PSF Position Offset (N={len(df_plot)})")
-            ax.legend(loc="upper right", fontsize="small", framealpha=0.9)
+            # ax.set_title(f"WCS vs PSF Position Offset (N={len(df_plot)})")
+            # ax.legend(loc="upper right", fontsize="small", framealpha=0.9)
             ax.grid(True, ls="-", alpha=0.25, zorder=0)
 
             # Add text with statistics
@@ -1644,13 +1657,13 @@ class Plot:
                 f"RMS: ({rms_dx:.3f}, {rms_dy:.3f}) px"
             )
             ax.text(
-                0.02,
-                0.98,
+                0.05,
+                0.95,
                 stats_text,
                 transform=ax.transAxes,
                 verticalalignment="top",
                 horizontalalignment="left",
-                bbox=dict(facecolor="white", alpha=0.85, edgecolor="none"),
+                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
                 fontsize="small",
             )
 

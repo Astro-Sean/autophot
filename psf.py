@@ -449,11 +449,20 @@ class MCMCFitter:
     Adaptive emcee-based fitter with the same __call__ signature as the
     photutils least-squares fitters.
 
-    Changes vs. original
-    --------------------
-    * No re-imports inside __call__ or run_mcmc.
-    * logger obtained once at top of __call__ rather than twice.
-    * Covariance now a dataclass (no behavioural change).
+    Key implementation details
+    --------------------------
+    * model.copy() in log_likelihood: each walker evaluation uses an isolated
+      model copy so concurrent parameter assignments don't cross-contaminate.
+    * Relative jitter in _jitter_within_bounds: abs_jitter = max(scale*|p0|, scale)
+      so flux walkers (O(1e4)) and position walkers (O(1)) both spread well.
+    * Boundary reflection with epsilon guard: walkers never land exactly on a
+      bound (which would give log_prior = -inf and stall the chain).
+    * Mixed proposal moves: 70% StretchMove + 30% DEMove for better mixing in
+      correlated PSF posteriors.
+    * Variance floor: per-pixel variance clipped to 1e-30 to prevent
+      division-by-zero / log(0) at masked/saturated pixels.
+    * fit_info reset on counter==0 so stale per_source records from a prior
+      .fit() call on a different tier do not corrupt index arithmetic.
     """
 
     # When nsteps is None, run until convergence (tau < adaptive_tau_target) up to this cap.
@@ -544,21 +553,27 @@ class MCMCFitter:
                 except Exception:
                     return -np.inf
 
-        model.parameters = params
-        mu = model(x, y)
+        # Use a local copy to avoid mutating the shared model instance across
+        # concurrent walker evaluations (emcee calls log_posterior with different
+        # params vectors and model.parameters= is an in-place mutation).
+        local_model = model.copy()
+        local_model.parameters = params
+        mu = local_model(x, y)
         resid = data - mu
 
         if weights is not None:
             var = var / np.clip(weights, 1e-12, None) ** 2
 
-        if not np.all(var > 0):
-            return -np.inf
+        # Clip variance to a positive floor to prevent division-by-zero / log(0)
+        # at bad pixels (e.g. saturated or masked pixels with zero uncertainty).
+        var = np.clip(var, 1e-30, None)
 
         return -0.5 * np.sum(resid**2 / var + np.log(2.0 * np.pi * var))
 
     def log_posterior(self, params, model, x, y, data, weights, noise_variance):
-        # model.copy() is unnecessary for serial emcee (default) and expensive
-        # Called nwalkers * nsteps times (e.g. 50 * 5000 = 250,000 times)
+        # Called nwalkers * nsteps times (e.g. 50 * 5000 = 250,000 times).
+        # model.copy() is done inside log_likelihood so parameter mutations
+        # for each walker are isolated to a local instance.
         lp = self.log_prior(params, model)
         if not np.isfinite(lp):
             return -np.inf
@@ -569,21 +584,36 @@ class MCMCFitter:
     # ---- Walker initialisation --------------------------------------------
 
     def _jitter_within_bounds(self, initial_params, model, scale: float = None):
-        """Scatter walkers near initial params (scale ~ 1% of typical magnitude) for better mixing."""
+        """Scatter walkers near initial params with parameter-aware scaling.
+
+        Uses a relative jitter for each parameter so that flux (O(1e4)) and
+        position (O(1)) walkers both spread meaningfully.  The small absolute
+        jitter_scale=0.01 was too tight for flux, causing all walkers to
+        cluster at the same point and the sampler to stall.
+        """
         if scale is None:
             scale = self.jitter_scale
         ndim = len(initial_params)
         pos = np.empty((self.nwalkers, ndim), float)
+        # Per-parameter absolute jitter: max(relative * |p0|, scale) so that
+        # tiny parameters (e.g. sub-pixel position offsets) still get jittered.
+        abs_jitter = np.array(
+            [max(scale * abs(p), scale) for p in initial_params], float
+        )
+        _eps = 1e-6  # keep walkers strictly inside bounds
         for i in range(self.nwalkers):
-            trial = initial_params + scale * self.random_state.randn(ndim)
+            trial = initial_params + abs_jitter * self.random_state.randn(ndim)
             for j, name in enumerate(model.param_names):
                 lo, hi = getattr(model, name).bounds
                 lo = -1e18 if lo is None else lo
                 hi = 1e18 if hi is None else hi
-                if trial[j] < lo:
-                    trial[j] = lo + (lo - trial[j])
-                if trial[j] > hi:
-                    trial[j] = hi - (trial[j] - hi)
+                # Reflect off boundaries, then clamp with epsilon so the
+                # walker never sits exactly on a bound (log_prior returns -inf).
+                if trial[j] <= lo:
+                    trial[j] = lo + _eps + abs(lo - trial[j])
+                if trial[j] >= hi:
+                    trial[j] = hi - _eps - abs(trial[j] - hi)
+                trial[j] = float(np.clip(trial[j], lo + _eps, hi - _eps))
             pos[i] = trial
         return pos
 
@@ -640,11 +670,20 @@ class MCMCFitter:
         pos0 = self._jitter_within_bounds(initial_params, model)
         ndim = len(initial_params)
 
+        # Use a mixture of StretchMove and DEMove for better mixing.
+        # StretchMove is the default affine-invariant proposal; DEMove
+        # (differential evolution) improves mixing in correlated posteriors
+        # and is complementary for the low-ndim PSF parameter space.
+        _moves = [
+            (emcee.moves.StretchMove(), 0.7),
+            (emcee.moves.DEMove(), 0.3),
+        ]
         self.sampler = emcee.EnsembleSampler(
             self.nwalkers,
             ndim,
             self.log_posterior,
             args=(model, x, y, data, weights, noise_variance),
+            moves=_moves,
         )
 
         total_steps = 0
@@ -761,6 +800,12 @@ class MCMCFitter:
                         weights = None
                 except Exception:
                     pass
+
+        # Reset per-source accumulator so stale records from a previous .fit()
+        # call on a different tier do not corrupt index arithmetic in _psf_fit.
+        if self.counter == 0:
+            self.fit_info["per_source"] = []
+            self.fit_info["samples"] = {}
 
         log.info(f"[MCMC] Fitting source {self.counter + 1} (adaptive)")
         self.run_mcmc(
