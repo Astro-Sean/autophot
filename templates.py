@@ -654,8 +654,21 @@ def _reproject_template(
         logger.error("All reproject methods failed; last error: %s", last_exc)
         return _FAIL
 
-    # Mask non-footprint pixels with NaN (preserves chip gaps)
+    # Check for zero footprint coverage (WCS mismatch - no overlap)
     fp_mask = footprint.astype(bool)
+    n_footprint = np.sum(fp_mask)
+    n_total = fp_mask.size
+    if n_footprint == 0:
+        logger.error(
+            f"Reproject has zero footprint coverage ({n_footprint}/{n_total} pixels). "
+            f"Template and science WCS do not overlap. This is likely due to SCAMP failure "
+            f"causing large WCS shift. Returning failure to trigger fallback to AstroAlign."
+        )
+        return _FAIL
+
+    logger.info(f"Reproject footprint coverage: {n_footprint}/{n_total} pixels ({100*n_footprint/n_total:.1f}%)")
+
+    # Mask non-footprint pixels with NaN (preserves chip gaps)
     aligned[~fp_mask] = np.nan
 
     # ------------------------------------------------------------------
