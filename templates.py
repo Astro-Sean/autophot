@@ -623,7 +623,7 @@ def _reproject_template(
             if m == "adaptive":
                 aligned, footprint = reproject_adaptive(
                     (template_image, template_proj),
-                    output_projection=science_proj,
+                    science_proj,
                     shape_out=shape_out,
                     roundtrip_coords=cfg.roundtrip,
                     parallel=cfg.parallel,
@@ -632,7 +632,7 @@ def _reproject_template(
             elif m == "interp":
                 aligned, footprint = reproject_interp(
                     (template_image, template_proj),
-                    output_projection=science_proj,
+                    science_proj,
                     shape_out=shape_out,
                     roundtrip_coords=cfg.roundtrip,
                     order=cfg.interp_order,
@@ -641,7 +641,7 @@ def _reproject_template(
             else:  # exact
                 aligned, footprint = reproject_exact(
                     (template_image, template_proj),
-                    output_projection=science_proj,
+                    science_proj,
                     shape_out=shape_out,
                     parallel=cfg.parallel,
                 )
