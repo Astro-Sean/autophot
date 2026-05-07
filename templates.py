@@ -595,8 +595,8 @@ def _reproject_template(
 
     logger.info(
         "Reproject distortion: template[%s] -> science[%s]",
-        _distortion_summary(template_proj),
-        _distortion_summary(science_proj),
+        _distortion_summary(template_header),
+        _distortion_summary(science_header),
     )
 
     # Build adaptive kwargs once from module-level cache
