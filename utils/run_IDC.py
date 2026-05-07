@@ -124,7 +124,7 @@ class ImageDistortionCorrector:
         "BLANK_BADPIXELS": "Y",
         "FILL_VALUE": "NAN",
         "CELESTIAL_TYPE": "NATIVE",
-        "PROJECTION_TYPE": "PV",
+        "PROJECTION_TYPE": "TPV",
         "FSCALASTRO_TYPE": "NONE",
         "COPY_KEYWORDS": "TELESCOP,FILTER,INSTRUME,EXPTIME,GAIN,OBSMJD,RDNOISE,APER,FWHM",
         # Allow full WCS transformations including rotation
