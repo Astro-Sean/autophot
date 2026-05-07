@@ -575,13 +575,10 @@ def _reproject_template(
 
     # Log WCS ranges to diagnose overlap issues
     try:
-        from astropy.wcs import WCS
-        sci_wcs = WCS(science_proj)
-        ref_wcs = WCS(template_proj)
         # Get corner coordinates to check overlap
         h, w = science_image.shape
-        sci_corners = sci_wcs.calc_footprint().flatten()
-        ref_corners = ref_wcs.calc_footprint().flatten()
+        sci_corners = science_proj.calc_footprint().flatten()
+        ref_corners = template_proj.calc_footprint().flatten()
         logger.info(
             "Reproject WCS check: science footprint RA=[%.3f,%.3f] Dec=[%.3f,%.3f], "
             "template footprint RA=[%.3f,%.3f] Dec=[%.3f,%.3f]",
