@@ -569,9 +569,12 @@ def _reproject_template(
     shape_out = science_image.shape
 
     # Convert headers to WCS objects for reproject (headers don't work with SIP distortion)
-    from astropy.wcs import WCS
-    template_proj = WCS(template_header)
-    science_proj = WCS(science_header)
+    from wcs import get_wcs
+    template_proj = get_wcs(template_header)
+    science_proj = get_wcs(science_header)
+    if template_proj is None or science_proj is None:
+        logger.error("get_wcs failed for template or science header")
+        return _FAIL
 
     # Log WCS ranges to diagnose overlap issues
     try:
