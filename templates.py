@@ -575,6 +575,10 @@ def _reproject_template(
     if template_proj is None or science_proj is None:
         logger.error("get_wcs failed for template or science header")
         return _FAIL
+    
+    logger.info(f"WCS objects created: template_proj type={type(template_proj)}, science_proj type={type(science_proj)}")
+    logger.info(f"template_proj has_celestial={template_proj.has_celestial}, science_proj has_celestial={science_proj.has_celestial}")
+    logger.info(f"template_proj wcsprm={template_proj.wcs}, science_proj wcsprm={science_proj.wcs}")
 
     # Log WCS ranges to diagnose overlap issues
     try:
