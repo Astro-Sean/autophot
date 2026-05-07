@@ -568,9 +568,9 @@ def _reproject_template(
 
     shape_out = science_image.shape
 
-    # Prepare headers once - shared across all fallback attempts
-    template_proj = _prepare_projection_header(template_header)
-    science_proj = _prepare_projection_header(science_header)
+    # Use headers directly for reproject (no SIP modification - reproject handles this)
+    template_proj = template_header
+    science_proj = science_header
 
     # Log WCS ranges to diagnose overlap issues
     try:
