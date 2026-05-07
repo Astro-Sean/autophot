@@ -634,9 +634,8 @@ def _reproject_template(
                     (template_image, template_proj),
                     science_proj,
                     shape_out=shape_out,
-                    roundtrip_coords=cfg.roundtrip,
-                    order=cfg.interp_order,
-                    parallel=cfg.parallel,
+                    roundtrip_coords=True,
+                    order="bilinear",
                 )
             else:  # exact
                 aligned, footprint = reproject_exact(
