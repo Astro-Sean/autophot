@@ -679,7 +679,7 @@ def _reproject_template(
     # Write output
     # ------------------------------------------------------------------
     hdr = template_header.copy()
-    hdr.update(science_proj, relax=True)
+    hdr.update(science_proj.to_header(), relax=True)
     hdr["NAXIS1"] = aligned.shape[1]
     hdr["NAXIS2"] = aligned.shape[0]
     to_write = np.asarray(aligned, dtype=np.float32)
