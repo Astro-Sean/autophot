@@ -985,10 +985,23 @@ class Aperture:
             sources[col] = vals
 
         if verbose >= 1 and fail_count > 0:
-            logger.warning(
-                f"{fail_count}/{len(results)} sources failed. "
-                "Check 'fail_reason' column."
-            )
+            # Collect fail reasons for diagnostic output
+            fail_reasons = []
+            for i in range(len(sources)):
+                fr = updates.get("fail_reason", [""] * len(sources))[i]
+                if fr:
+                    fail_reasons.append(f"source #{i}: {fr}")
+            # For single-source (target) fits, always show the reason
+            if len(sources) == 1 and fail_reasons:
+                logger.warning(
+                    f"Target photometry failed: {fail_reasons[0]}"
+                )
+            else:
+                logger.warning(
+                    f"{fail_count}/{len(results)} sources failed. "
+                    f"Fail reasons: {'; '.join(fail_reasons[:5])}"
+                    + (f" ... ({len(fail_reasons)-5} more)" if len(fail_reasons) > 5 else "")
+                )
         if verbose >= 1 and floored_count > 0:
             min_raw_bkg = (
                 float(np.nanmin(floored_values))
@@ -1224,7 +1237,7 @@ class Aperture:
             )
             ann_mask = ann.to_mask(method="center")
             bkg_pix = ann_mask.get_values(image)
-            bkg_pix = bkg_pix[np.isfinite(bkg_pix) & (bkg_pix != 0.0)]
+            bkg_pix = bkg_pix[np.isfinite(bkg_pix)]
             if bkg_pix.size > 0:
                 bkg_level_raw = float(np.median(bkg_pix))
                 enforce_nn = bool(

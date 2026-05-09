@@ -2,7 +2,7 @@
 
 [![Anaconda Version](https://anaconda.org/astro-sean/autophot/badges/version.svg)](https://anaconda.org/astro-sean/autophot)
 [![Latest Release Date](https://anaconda.org/astro-sean/autophot/badges/latest_release_date.svg)](https://anaconda.org/astro-sean/autophot)
-[![Latest Release Relative Date](https://anaconda.org/astro-sean/autophot/badges/latest_release_date.svg)](https://anaconda.org/astro-sean/autophot)
+[![Latest Release Relative Date](https://anaconda.org/astro-sean/autophot/badges/latest_release_relative_date.svg)](https://anaconda.org/astro-sean/autophot)
 [![License](https://anaconda.org/astro-sean/autophot/badges/license.svg)](https://anaconda.org/astro-sean/autophot)
 [![Downloads](https://anaconda.org/astro-sean/autophot/badges/downloads.svg)](https://anaconda.org/astro-sean/autophot)
 
@@ -43,11 +43,30 @@ conda activate autophot
 conda install -c astro-sean autophot
 ```
 
+If conda struggles to resolve the environment, prefer `mamba`:
+
+```bash
+conda install -c conda-forge mamba
+mamba create -n autophot -c conda-forge -c astro-sean python=3.11 autophot
+conda activate autophot
+```
+
 Verify installation:
 
 ```bash
 python -c "from autophot import AutomatedPhotometry; print('AutoPhOT import OK')"
 autophot-main -h
+```
+
+### Install from source (developer / latest)
+
+If you are running from a cloned repository, install it in editable mode so
+internal modules (e.g. `plotting_utils.py`) are importable:
+
+```bash
+git clone https://github.com/Astro-Sean/autophot.git
+cd autophot
+pip install -e .
 ```
 
 ---
@@ -89,6 +108,10 @@ conda install -c conda-forge astrometry-net
 conda install -c conda-forge astromatic-source-extractor astromatic-scamp astromatic-swarp
 ```
 
+> [!TIP]
+> For best template-to-science registration (especially near hosts / chip edges),
+> use SCAMP+SWarp alignment and a TPV/PV distortion model (see “Template subtraction” below).
+
 ### HOTPANTS
 
 For template subtraction with the `hotpants` method:
@@ -115,6 +138,10 @@ plot_lightcurve(output_file, snr_limit=3, method="PSF")
 # MJD, Date, Mag, Error, Filter, Limit
 generate_photometry_table(output_file, snr_limit=3, method="PSF")
 ```
+
+Notes on outputs:
+- The pipeline’s default photometry CSV (`lightcurve_output.csv`) is **long-form**: one row per image with a per-row `filter` column and uniform columns like `mag_psf`, `zp_psf`, etc.
+- `plot_lightcurve` / `generate_photometry_table` understand this format and will group points by the `filter` column.
 
 ---
 
@@ -179,6 +206,7 @@ config["wcs"]["redo_wcs"] = True
 # Enable template subtraction
 config["template_subtraction"]["do_subtraction"] = True
 config["template_subtraction"]["method"] = "sfft"
+config["template_subtraction"]["alignment_method"] = "swarp"  # SCAMP+SWarp onto science grid (recommended)
 
 # Create template directories
 prepare_template_directory(
@@ -275,7 +303,7 @@ def main() -> int:
     # Template subtraction
     # ------------------------------------------------------------------
     autophot_input["template_subtraction"]["do_subtraction"] = True
-    autophot_input["template_subtraction"]["alignment_method"] = "reproject"
+    autophot_input["template_subtraction"]["alignment_method"] = "swarp"
     autophot_input["template_subtraction"]["method"] = "sfft"
     autophot_input["template_subtraction"]["kernel_order"] = 1
 
@@ -317,7 +345,7 @@ if __name__ == "__main__":
 
 1. Set subtraction options:
    - `autophot_input["template_subtraction"]["do_subtraction"] = True`
-   - `autophot_input["template_subtraction"]["alignment_method"] = "reproject"`
+   - `autophot_input["template_subtraction"]["alignment_method"] = "swarp"` (recommended; SCAMP+SWarp)
    - `autophot_input["template_subtraction"]["method"] = "sfft"` (or `hotpants`, `zogy`)
 2. Create template directories:
    - Call `prepare_template_directory(...)`.
@@ -325,6 +353,20 @@ if __name__ == "__main__":
 3. Place template FITS files:
    - Put one usable template per filter in `fits_dir/templates/<filter>_template/`.
 4. Run photometry.
+
+---
+
+## Troubleshooting
+
+- `ModuleNotFoundError: No module named 'plotting_utils'`
+  - You are likely running a script directly from a cloned repo without installing it.
+  - Fix: run `pip install -e .` from the repository root.
+
+- `ModuleNotFoundError: No module named 'corner'`
+  - `corner` is used only for optional MCMC diagnostic plots; install via `conda install -c conda-forge corner` (or `pip install corner`).
+
+- `get_wcs: missing keywords ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2']`
+  - The input header lacks a usable WCS. Enable WCS solving (`wcs.redo_wcs: True`) and writing back to FITS (`wcs.apply_solved_to_fits: True`).
 
 
 ---

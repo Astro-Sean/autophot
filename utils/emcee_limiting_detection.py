@@ -132,7 +132,7 @@ def _recover_psf_mcmc_snr(
     except Exception:
         flux_hat, flux_err = np.nan, np.nan
 
-    snr = flux_hat / flux_err if np.isfinite(flux_hat) and np.isfinite(flux_err) and flux_err > 0 else np.nan
+    snr = np.abs(flux_hat) / flux_err if np.isfinite(flux_hat) and np.isfinite(flux_err) and flux_err > 0 else np.nan
     return float(snr), float(flux_hat)
 
 

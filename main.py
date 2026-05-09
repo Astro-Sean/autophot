@@ -140,7 +140,6 @@ from plot import Plot
 from psf import PSF
 from templates import Templates
 from utils import run_IDC
-from utils.run_IDC import validate_and_trim_weight_map
 from utils.run_sex import SExtractorWrapper
 from wcs import WCSSolver, get_wcs
 from zeropoint import Zeropoint
@@ -553,8 +552,8 @@ def run_photometry():
         None
     """
 
-    # Experiment with this - WCS -> pixel index
-    index = 0
+    # Use 1-based indexing to match FITS/SExtractor convention (FITS is 1-based)
+    index = 1
     start = time.time()
 
     #  Filter Out Astropy Warnings
@@ -584,6 +583,19 @@ def run_photometry():
     lim_n_jobs = int((input_yaml.get("limiting_magnitude") or {}).get("n_jobs", 1))
     lim_n_jobs = max(1, lim_n_jobs)
 
+    #  Clear module-level caches to ensure independence between image runs
+    # This prevents state contamination when processing multiple images
+    try:
+        from limits import _flux_for_mag_cached
+        _flux_for_mag_cached.cache_clear()
+    except Exception:
+        pass
+    try:
+        from background import _disk_structuring_element
+        _disk_structuring_element.cache_clear()
+    except Exception:
+        pass
+
     #  Validate Target Information
     # Check that at least one of target_name, target_ra, or target_dec is provided.
     # If all are missing, raise a warning and stop the code.
@@ -603,8 +615,8 @@ def run_photometry():
 
     #  Helper Function: Update Target Pixel Coordinates
     # Updates the target's pixel coordinates after any changes to the WCS.
-    # Uses origin=0 (0-based) so pixel coords match numpy array indexing everywhere.
-    def update_target_pixel_coords(input_yaml, imageWCS, index=0):
+    # Uses origin=1 (1-based) to match FITS/SExtractor convention.
+    def update_target_pixel_coords(input_yaml, imageWCS, index=1):
         """Update target pixel coordinates after WCS changes. index is WCS origin (0=0-based)."""
         target_x_pix, target_y_pix = imageWCS.all_world2pix(
             input_yaml["target_ra"],
@@ -613,6 +625,12 @@ def run_photometry():
         )
         input_yaml["target_x_pix"] = target_x_pix
         input_yaml["target_y_pix"] = target_y_pix
+        
+        logging.info(
+            log_step(
+                f'{input_yaml["target_ra"]} {input_yaml["target_dec"]}'
+            )
+        )
         return target_x_pix, target_y_pix
 
     try:
@@ -832,8 +850,16 @@ def run_photometry():
             )
 
         # When processing a template, ensure TELESCOP/INSTRUME/FILTER exist (e.g. after restore from .original)
+        # Create a copy in the science directory to avoid crosstalk when multiple images use the same template
         if prepare_template and "templates" in os.path.normpath(fpath):
             try:
+                # Copy template to science directory to avoid modifying shared template file
+                sci_dir = Path(fpath).parent
+                template_name = Path(fpath).name
+                template_copy = str(sci_dir / f"template_{template_name}")
+                shutil.copy2(fpath, template_copy)
+                fpath = template_copy
+                
                 with fits.open(fpath, mode="update") as hdul:
                     h = hdul[0].header
                     if not h.get("TELESCOP") or not str(h.get("TELESCOP", "")).strip():
@@ -1557,7 +1583,7 @@ def run_photometry():
                             target_x, target_y = wcs.all_world2pix(
                                 float(input_yaml["target_ra"]),
                                 float(input_yaml["target_dec"]),
-                                0,
+                                1,
                             )
                             target_x, target_y = float(target_x), float(target_y)
                             logging.info(
@@ -1598,7 +1624,7 @@ def run_photometry():
                             new_target_x, new_target_y = new_wcs.all_world2pix(
                                 float(input_yaml["target_ra"]),
                                 float(input_yaml["target_dec"]),
-                                0,
+                                1,
                             )
                             input_yaml["target_x_pix"] = float(new_target_x)
                             input_yaml["target_y_pix"] = float(new_target_y)
@@ -1789,7 +1815,7 @@ def run_photometry():
                     target_ra = float(input_yaml["target_ra"])
                     target_dec = float(input_yaml["target_dec"])
                     target_x_pix, target_y_pix = imageWCS.all_world2pix(
-                        target_ra, target_dec, 0
+                        target_ra, target_dec, 1
                     )
                     input_yaml["target_x_pix"] = float(target_x_pix)
                     input_yaml["target_y_pix"] = float(target_y_pix)
@@ -2186,12 +2212,7 @@ def run_photometry():
                     )
                 ):
                     try:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore")
-                            xi, yi = imageWCS.all_world2pix(float(ra_deg), float(dec_deg), 0)
-                        if np.isfinite(xi) and np.isfinite(yi):
-                            x_pix[i] = float(xi)
-                            y_pix[i] = float(yi)
+                        x_pix[i], y_pix[i] = imageWCS.all_world2pix([ra_deg], [dec_deg], 1)
                     except Exception as src_exc:
                         logging.debug(
                             "Skipping variable source RA=%.7f Dec=%.7f due to WCS "
@@ -2329,8 +2350,8 @@ def run_photometry():
             if input_yaml["target_ra"] is None and input_yaml["target_dec"] is None:
                 # Use image center when no target information is provided.
                 center_pix = (image.shape[1] / 2, image.shape[0] / 2)
-                # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
-                center = imageWCS.all_pix2world([center_pix[0]], [center_pix[1]], 0)
+                # Use origin=1 (1-based) to match FITS/SExtractor convention
+                center = imageWCS.all_pix2world([center_pix[0]], [center_pix[1]], 1)
                 target_coords = SkyCoord(
                     center[0][0],
                     center[1][0],
@@ -2476,7 +2497,6 @@ def run_photometry():
 
         templateFpath = None
         template_available = False
-        alignment_modified_image = False  # Track if alignment resampled science image
         science_path_original = fpath
         scienceFpath_cutout = fpath
         if (
@@ -2546,7 +2566,6 @@ def run_photometry():
                             log_step("No template images — skip subtraction")
                         )
                     else:
-                        fpath_before_align = fpath
                         fpath, templateFpath = template_functions.align(
                             scienceFpath=fpath,
                             templateFpath=templateFpath,
@@ -2554,8 +2573,6 @@ def run_photometry():
                                 "alignment_method"
                             ],
                         )
-                        # Check if alignment modified the science image (resampling changes pixels)
-                        alignment_modified_image = (fpath != fpath_before_align)
                         template_available = True
                         try:
                             _wcs_apply = input_yaml.get("wcs", {}).get(
@@ -2590,6 +2607,25 @@ def run_photometry():
             except Exception as e:
                 log_exception(e, "Template subtraction failed")
                 template_available = False
+        
+        
+        # =============================================================================
+        # Source Masking
+        # =============================================================================
+        # Ensure target pixel coordinates are consistent with the final WCS.
+        
+        # Reload in case template alignment overwrote fpath (single open for both).
+        image, header = get_image_and_header(fpath)
+        imageWCS = get_wcs(header)
+        
+
+        target_x_pix, target_y_pix = update_target_pixel_coords(
+            input_yaml, imageWCS, index
+        )
+        input_yaml["target_x_pix"] = target_x_pix
+        input_yaml["target_y_pix"] = target_y_pix
+
+
 
         # =============================================================================
         # Get background statistics after subtraction
@@ -2597,38 +2633,14 @@ def run_photometry():
         logging.info(
             border_msg("Calibration stage: image, background, and weight")
         )
-        # Reload in case template alignment overwrote fpath (single open for both).
-        image, header = get_image_and_header(fpath)
-        imageWCS = get_wcs(header)
 
-        # Reuse cached background results if:
-        # 1. fpath hasn't changed
-        # 2. shapes match (alignment can change dimensions)
-        # 3. alignment didn't modify the image (resampling changes pixel values)
-        if (fpath == fpath_before_subtraction and 
-            background_rms_cached is not None and 
-            not alignment_modified_image):
-            if background_rms_cached.shape == image.shape:
-                background_surface = background_surface_cached
-                background_rms = background_rms_cached
-                defects_mask = defects_mask_cached
-                logging.info("Reusing cached background results (fpath unchanged)")
-            else:
-                logging.warning(
-                    "Background cache shape %s doesn't match image shape %s, recalculating",
-                    background_rms_cached.shape, image.shape
-                )
-                result = bg_remover.remove(
-                    image,
-                    header=header,
-                    plot=False,
-                    fwhm=ImageFWHM,
-                    galaxies=variable_sources,
-                    mask_simbad_galaxies=True,
-                )
-                background_surface = np.asarray(result["background"], dtype=np.float32)
-                background_rms = np.asarray(result["background_rms"], dtype=np.float32)
-                defects_mask = np.asarray(result["defects_mask"], dtype=bool)
+
+        # Reuse cached background results if fpath hasn't changed
+        if fpath == fpath_before_subtraction:
+            background_surface = background_surface_cached
+            background_rms = background_rms_cached
+            defects_mask = defects_mask_cached
+            logging.info("Reusing cached background results (fpath unchanged)")
         else:
             result = bg_remover.remove(
                 image,
@@ -2773,16 +2785,6 @@ def run_photometry():
 
         try:
             sex_crowded = input_yaml.get("photometry", {}).get("crowded_field", False)
-            # Validate weight map shape matches image before running SExtractor
-            try:
-                with fits.open(fpath, mode="readonly") as h_img:
-                    img_shape = h_img[0].data.shape
-                weight_fpath = validate_and_trim_weight_map(
-                    weight_fpath, img_shape, Path(fpath).parent, logging.getLogger(__name__)
-                )
-            except Exception as weight_check_exc:
-                logging.warning("Could not validate weight map: %s", weight_check_exc)
-                weight_fpath = None
             ImageFWHM, FWHMSources, scale = _run_sextractor_two_pass(
                 config=input_yaml,
                 fpath=fpath,
@@ -3314,7 +3316,7 @@ def run_photometry():
                     psf_sources_orig["y_pix"].to_numpy(dtype=float),
                     0,
                 )
-                x_orig, y_orig = wcs_orig.all_world2pix(ra_pool, dec_pool, 0)
+                x_orig, y_orig = wcs_orig.all_world2pix(ra_pool, dec_pool, 1)
                 psf_sources_orig["x_pix"] = x_orig
                 psf_sources_orig["y_pix"] = y_orig
                 h_orig, w_orig = image_orig.shape
@@ -3733,6 +3735,41 @@ def run_photometry():
                     science_center_world = science_wcs.all_pix2world(
                         *science_center_pix, 0
                     )
+                    # Validate WCS transformation result
+                    if not (np.isfinite(science_center_world[0]) and np.isfinite(science_center_world[1])):
+                        logger.error(
+                            f"WCS transformation returned invalid coordinates at pixel center {science_center_pix}. "
+                            f"RA={science_center_world[0]}, Dec={science_center_world[1]}. "
+                            f"This indicates an invalid WCS header. Check SCAMP alignment results."
+                        )
+                        raise ValueError(
+                            f"Invalid WCS transformation: pixel center {science_center_pix} maps to "
+                            f"RA={science_center_world[0]}, Dec={science_center_world[1]}"
+                        )
+                    
+                    # Additional validation: test round-trip conversion
+                    try:
+                        test_px, test_py = science_wcs.all_world2pix(
+                            science_center_world[0], science_center_world[1], 0
+                        )
+                        if not (np.isfinite(test_px) and np.isfinite(test_py)):
+                            logger.error(
+                                f"WCS round-trip failed: world2pix returned invalid pixel coordinates. "
+                                f"Input RA/Dec={science_center_world}, output px,py={test_px},{test_py}. "
+                                f"This indicates a corrupted WCS header from SWarp."
+                            )
+                            raise ValueError(
+                                f"Invalid WCS round-trip: world2pix returned NaN/Inf for valid sky coordinates"
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"WCS round-trip validation failed: {e}. "
+                            f"This indicates a corrupted WCS header from SWarp alignment."
+                        )
+                        raise ValueError(
+                            f"WCS validation failed: cannot perform round-trip coordinate conversion. "
+                            f"The WCS header from SWarp alignment is likely corrupted."
+                        )
                     center_coord = SkyCoord(
                         ra=science_center_world[0],
                         dec=science_center_world[1],
@@ -3745,9 +3782,11 @@ def run_photometry():
                         input_yaml, science_wcs, index
                     )
                     # Creates a cutout for the science image.
+                    # Use pixel coordinates directly to avoid WCS round-trip NaN failures
+                    # when the WCS does not correctly map the image center.
                     science_cutout = Cutout2D(
                         data=science_image,
-                        position=center_coord,
+                        position=science_center_pix,
                         size=(ny, nx),
                         wcs=science_wcs,
                         mode="partial",
@@ -3757,10 +3796,40 @@ def run_photometry():
                     # Loads the template image.
                     template_image, template_header = get_image_and_header(templateFpath)
                     template_wcs = get_wcs(template_header)
+                    
+                    # Validate template WCS before attempting Cutout2D
+                    try:
+                        # Test if template WCS can convert the center coordinate to pixel coordinates
+                        test_tx, test_ty = template_wcs.all_world2pix(
+                            science_center_world[0], science_center_world[1], 0
+                        )
+                        if not (np.isfinite(test_tx) and np.isfinite(test_ty)):
+                            logger.error(
+                                f"Template WCS cannot convert center coordinate to valid pixel coordinates. "
+                                f"Input RA/Dec={science_center_world}, output px,py={test_tx},{test_ty}. "
+                                f"Template WCS is likely corrupted from SWarp alignment."
+                            )
+                            raise ValueError(
+                                f"Invalid template WCS: world2pix returned NaN/Inf for valid sky coordinates. "
+                                f"SWarp alignment likely produced a corrupted WCS header."
+                            )
+                    except Exception as e:
+                        logger.error(
+                            f"Template WCS validation failed: {e}. "
+                            f"The template WCS from SWarp alignment is likely corrupted."
+                        )
+                        raise ValueError(
+                            f"Template WCS validation failed: cannot convert sky coordinates to pixels. "
+                            f"SWarp alignment likely produced a corrupted WCS header."
+                        )
+                    
                     # Creates a cutout for the template image.
+                    # Use pixel coordinates directly to avoid WCS round-trip NaN failures.
+                    tny, tnx = template_image.shape
+                    template_center_pix = (tnx / 2, tny / 2)
                     template_cutout = Cutout2D(
                         data=template_image,
-                        position=center_coord,
+                        position=template_center_pix,
                         size=(ny, nx),
                         wcs=template_wcs,
                         mode="partial",
@@ -4118,6 +4187,16 @@ def run_photometry():
 
                 # Filter sources where the centroid is well-aligned with the original pixel position
                 well_aligned_mask = distance < POSITION_TOLERANCE
+
+                # Log diagnostic statistics before filtering
+                if np.any(np.isfinite(distance)):
+                    mean_offset = float(np.nanmean(distance))
+                    median_offset = float(np.nanmedian(distance))
+                    std_offset = float(np.nanstd(distance))
+                    logging.info(
+                        "Centroid alignment: mean=%.3f, median=%.3f, std=%.3f px (tolerance=%.1f px)",
+                        mean_offset, median_offset, std_offset, POSITION_TOLERANCE
+                    )
 
                 # If alignment is poor and we reject everything, adaptively relax
                 # the tolerance to keep enough sources for flux-consistent matching.
@@ -5194,6 +5273,65 @@ def run_photometry():
                 aper_rad_pix = float(1.7) * float(ImageFWHM)
             # Creates an instance of the plot class.
             makePlots = Plot(input_yaml=input_yaml)
+            # Load weight maps if available
+            weight_map_sci = None
+            weight_map_ref = None
+            try:
+                write_dir = Path(input_yaml["fpath"]).parent
+                # Try multiple possible locations for weight maps
+                # Weight maps are now copied to aligned directory after SWarp
+                possible_paths = [
+                    write_dir / "aligned" / "science_image.weight.fits",
+                    write_dir / "aligned" / "resampled" / "science_image.weight.fits",
+                    write_dir / "resampled" / "science_image.weight.fits",
+                    write_dir / "science_image.weight.fits",
+                ]
+                sci_weight_path = None
+                for p in possible_paths:
+                    if p.exists():
+                        sci_weight_path = p
+                        with fits.open(p) as hdul:
+                            weight_map_sci = np.asarray(hdul[0].data, dtype=float)
+                        logging.info(f"Loaded science weight map from {p}")
+                        break
+                if sci_weight_path is None:
+                    pass  # Weight maps are optional, no warning needed
+
+                possible_paths_ref = [
+                    write_dir / "aligned" / "reference_image.weight.fits",
+                    write_dir / "aligned" / "resampled" / "reference_image.weight.fits",
+                    write_dir / "resampled" / "reference_image.weight.fits",
+                    write_dir / "reference_image.weight.fits",
+                ]
+                ref_weight_path = None
+                for p in possible_paths_ref:
+                    if p.exists():
+                        ref_weight_path = p
+                        with fits.open(p) as hdul:
+                            weight_map_ref = np.asarray(hdul[0].data, dtype=float)
+                        logging.info(f"Loaded reference weight map from {p}")
+                        break
+                if ref_weight_path is None:
+                    pass  # Weight maps are optional, no warning needed
+            except Exception as e:
+                logging.warning(f"Could not load weight maps for subtraction check: {e}")
+            
+            # Get WCS information for marking target location
+            wcs_sci = None
+            wcs_ref = None
+            try:
+                from astropy.wcs import WCS
+                with fits.open(fpath_nosub) as hdul:
+                    wcs_sci = WCS(hdul[0].header)
+                with fits.open(templateFpath) as hdul:
+                    wcs_ref = WCS(hdul[0].header)
+            except Exception as e:
+                logging.warning(f"Could not load WCS for subtraction check: {e}")
+            
+            # Get target coordinates from input_yaml
+            target_ra = input_yaml.get("target_ra")
+            target_dec = input_yaml.get("target_dec")
+            
             # Plots the template subtraction check.
             makePlots.subtraction_check(
                 image=get_image(fpath_nosub),
@@ -5209,6 +5347,12 @@ def run_photometry():
                 mask=subtraction_mask,
                 matching_sources=MatchingSources,
                 masked_sources=variable_sources,
+                weight_map_sci=weight_map_sci,
+                weight_map_ref=weight_map_ref,
+                wcs_sci=wcs_sci,
+                wcs_ref=wcs_ref,
+                target_ra=target_ra,
+                target_dec=target_dec,
             )
 
         # Target FWHM should reflect the *measured target* width on this frame,

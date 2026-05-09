@@ -70,6 +70,12 @@ class Plot:
         aligned_sources=None,
         matching_sources=None,
         masked_sources=None,
+        weight_map_sci=None,
+        weight_map_ref=None,
+        wcs_sci=None,
+        wcs_ref=None,
+        target_ra=None,
+        target_dec=None,
     ):
         """
         Perform and visualize a subtraction check of astronomical images using zscale with percentile cleaning.
@@ -83,6 +89,12 @@ class Plot:
         mask (ndarray or None): Optional mask to overlay on the images.
         aligned_sources (list): List of aligned sources.
         matching_sources (DataFrame): DataFrame of consistent sources to mark with crosses.
+        weight_map_sci (ndarray or None): Science image weight map for display.
+        weight_map_ref (ndarray or None): Reference image weight map for display.
+        wcs_sci (astropy.wcs.WCS or None): WCS object for science image.
+        wcs_ref (astropy.wcs.WCS or None): WCS object for reference image.
+        target_ra (float or None): Target RA in degrees for marking on weight maps.
+        target_dec (float or None): Target Dec in degrees for marking on weight maps.
         """
         import matplotlib.pyplot as plt
         from functions import set_size
@@ -132,17 +144,28 @@ class Plot:
             for key, img_data in images.items():
                 # First apply percentile cleaning to remove extreme values
                 valid_data = img_data[np.isfinite(img_data)]
-                lower, upper = np.percentile(valid_data, [0.5, 99.5])
-                cleaned_data = np.clip(img_data, lower, upper)
+                if len(valid_data) == 0:
+                    logger.warning(f"subtraction_check: {key} has no valid data, using fallback vmin/vmax")
+                    vmins[key] = np.nanmin(img_data)
+                    vmaxs[key] = np.nanmax(img_data)
+                    continue
+                try:
+                    lower, upper = np.percentile(valid_data, [0.5, 99.5])
+                    cleaned_data = np.clip(img_data, lower, upper)
+                    # Then apply zscale to get optimal display range
+                    vmin, vmax = zscale.get_limits(cleaned_data)
+                    vmins[key] = vmin
+                    vmaxs[key] = vmax
+                except Exception as e:
+                    logger.warning(f"subtraction_check: zscale failed for {key}, using min/max: {e}")
+                    vmins[key] = np.nanmin(img_data)
+                    vmaxs[key] = np.nanmax(img_data)
 
-                # Then apply zscale to get optimal display range
-                vmin, vmax = zscale.get_limits(cleaned_data)
-                vmins[key] = vmin
-                vmaxs[key] = vmax
-
-            # Set up figure
-            fig = plt.figure(figsize=set_size(540, 1), constrained_layout=True)
-            gs = GridSpec(1, 3, figure=fig, wspace=0.1)
+            # Set up figure with 1x3 layout for three images (Image, Reference, Difference)
+            fig = plt.figure(figsize=(18, 5), constrained_layout=False)
+            gs = GridSpec(1, 3, figure=fig, width_ratios=[1, 1, 1], wspace=0.3)
+            axes = [fig.add_subplot(gs[0, i]) for i in range(3)]
+            plt.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.1)
 
             img_height, img_width = image.shape
             margin = 0.05
@@ -161,25 +184,36 @@ class Plot:
                     inset = 1.0 if side == "high" else 0.0
                     return side, main, inset
 
-            # Create axes and plot images with zscale scaling
-            axes = []
-            for i, (title, img_data) in enumerate(images.items()):
-                ax = fig.add_subplot(gs[i])
-                cmap = plt.get_cmap("bone").copy()
+            # Plot images with zscale scaling (Image, Reference, Difference)
+            image_titles = ["Image", "Reference", "Difference"]
+            # Use first image's shape for all panels to ensure identical display
+            if "Image" not in images:
+                logger.error("subtraction_check: 'Image' key not found in images dictionary")
+                return 0
+            ref_width = images["Image"].shape[1]
+            ref_height = images["Image"].shape[0]
+            # Log image shapes for debugging
+            for title in image_titles:
+                logger.info(f"subtraction_check: {title} shape={images[title].shape}")
+            for i, (ax, title) in enumerate(zip(axes, image_titles)):
+                img_data = images[title]
+                cmap = plt.get_cmap("viridis").copy()
                 cmap.set_bad(color="white")
                 ax.imshow(
                     img_data,
                     origin="lower",
-                    aspect="auto",
+                    aspect="equal",
                     cmap=cmap,
                     vmin=vmins[title],
                     vmax=vmaxs[title],
                 )
+                # Set identical axis limits for all panels based on first image
+                ax.set_xlim(0, ref_width)
+                ax.set_ylim(0, ref_height)
                 # Panel titles for readability; no legends are drawn in these axes.
-                ax.set_title(title, fontsize=8, pad=2)
-                ax.set_xlabel("X [Pixel]")
-                ax.set_ylabel("Y [Pixel]")
-                axes.append(ax)
+                ax.set_title(title, fontsize=10, pad=5)
+                ax.set_xlabel("X [Pixel]", fontsize=9)
+                ax.set_ylabel("Y [Pixel]", fontsize=9)
 
             square_size = int(inset_size * 2)  # Width/height of the square in pixels
             if matching_sources is not None and len(matching_sources) > 0:
@@ -218,12 +252,11 @@ class Plot:
                     # Map axes to panel names for correct dimension lookup
                     panel_names = ["Image", "Reference", "Difference"]
                     
-                    for panel_idx, ax in enumerate(axes[:2]):  # Only first two panels
+                    for panel_idx, ax in enumerate(axes):  # Both panels
                         panel_name = panel_names[panel_idx]
                         panel_width, panel_height = image_dims[panel_name]
                         valid_markers = 0
                         skipped_markers = 0
-                        out_of_bounds = 0
                         non_finite = 0
                         
                         for idx, (x_pix, y_pix) in enumerate(zip(
@@ -234,17 +267,12 @@ class Plot:
                                 non_finite += 1
                                 skipped_markers += 1
                                 continue
-                                
+
                             # Coordinates are already 0-based (converted on ingestion).
                             x_plot = float(x_pix)
                             y_plot = float(y_pix)
-                            
-                            # Check if coordinates are within THIS panel's image bounds
-                            if not (0 <= x_plot < panel_width and 0 <= y_plot < panel_height):
-                                out_of_bounds += 1
-                                skipped_markers += 1
-                                continue
-                            
+
+                            # Plot all sources regardless of bounds to show full matching
                             rect = patches.Rectangle(
                                 (x_plot - half_size, y_plot - half_size),
                                 square_size,
@@ -263,7 +291,7 @@ class Plot:
                         if skipped_markers > 0:
                             logger.info(
                                 f"subtraction_check: {panel_name} panel - plotted {valid_markers} markers, "
-                                f"skipped {skipped_markers} ({non_finite} non-finite, {out_of_bounds} out-of-bounds). "
+                                f"skipped {skipped_markers} ({non_finite} non-finite). "
                                 f"Panel dims: {panel_width}x{panel_height}"
                             )
                     
@@ -277,76 +305,86 @@ class Plot:
             if masked_sources is not None and len(masked_sources) > 0:
                 cross_len = square_size / 4  # Length of each arm of the cross
                 skipped_masked = 0
-                for x, y, otype, name in zip(
-                    masked_sources["x_pix"],
-                    masked_sources["y_pix"],
-                    masked_sources["OTYPE_opt"],
-                    masked_sources["MAIN_ID"],
-                ):
-                    # Skip invalid coordinates
-                    if not (np.isfinite(x) and np.isfinite(y)):
-                        skipped_masked += 1
-                        continue
-                    
-                    # Convert to 0-indexed if needed
-                    x_plot = float(x) - 1 if x > 0 else float(x)
-                    y_plot = float(y) - 1 if y > 0 else float(y)
-                    
-                    # Check if coordinates are within image bounds
-                    if not (0 <= x_plot < img_width and 0 <= y_plot < img_height):
-                        skipped_masked += 1
-                        continue
-                    
-                    x = x_plot
-                    y = y_plot
-                    
-                    if "SN*" in otype:
-                        otype = name
-                        circle = mpatches.Circle(
-                            (x, y),
-                            cross_len * 2,
-                            edgecolor="#FF0000",
-                            facecolor="none",
-                            zorder=4,
-                            lw=0.5,
-                        )
-                        axes[0].add_patch(
-                            circle
-                        )  # Assuming add to first ax, adjust if needed
-                    # else:
-                    #     axes[0].plot(
-                    #         [x - cross_len, x + cross_len],
-                    #         [y - cross_len, y + cross_len],
-                    #         color="#FF0000",
-                    #         lw=0.5,
-                    #         zorder=2,
-                    #     )
-                    #     axes[0].plot(
-                    #         [x - cross_len, x + cross_len],
-                    #         [y + cross_len, y - cross_len],
-                    #         color="#FF0000",
-                    #         lw=0.5,
-                    #         zorder=2,
-                    #     )
-                    axes[0].annotate(
-                        otype,
-                        xy=(x, y),
-                        xytext=(x, y + cross_len / 2),
-                        ha="center",
-                        va="bottom",
-                        fontsize=3,
-                        color="#FF0000",
-                        zorder=3,
-                    )
+                # Check if required columns exist
+                required_cols = ["x_pix", "y_pix", "OTYPE_opt", "MAIN_ID"]
+                missing_cols = [col for col in required_cols if col not in masked_sources.columns]
+                if missing_cols:
+                    logger.warning(f"subtraction_check: masked_sources missing columns {missing_cols}")
+                else:
+                    for x, y, otype, name in zip(
+                        masked_sources["x_pix"],
+                        masked_sources["y_pix"],
+                        masked_sources["OTYPE_opt"],
+                        masked_sources["MAIN_ID"],
+                    ):
+                        # Skip invalid coordinates
+                        if not (np.isfinite(x) and np.isfinite(y)):
+                            skipped_masked += 1
+                            continue
+                        
+                        # Convert to 0-indexed if needed
+                        x_plot = float(x) - 1 if x > 0 else float(x)
+                        y_plot = float(y) - 1 if y > 0 else float(y)
+                        
+                        # Check if coordinates are within image bounds
+                        if not (0 <= x_plot < img_width and 0 <= y_plot < img_height):
+                            skipped_masked += 1
+                            continue
+                        
+                        x = x_plot
+                        y = y_plot
+                        
+                        if "SN*" in otype:
+                            otype = name
+                            circle = mpatches.Circle(
+                                (x, y),
+                                cross_len * 2,
+                                edgecolor="#FF0000",
+                                facecolor="none",
+                                zorder=4,
+                                lw=0.5,
+                            )
+                            if len(axes) > 0:
+                                axes[0].add_patch(circle)
+                        # else:
+                        #     axes[0].plot(
+                        #         [x - cross_len, x + cross_len],
+                        #         [y - cross_len, y + cross_len],
+                        #         color="#FF0000",
+                        #         lw=0.5,
+                        #         zorder=2,
+                        #     )
+                        #     axes[0].plot(
+                        #         [x - cross_len, x + cross_len],
+                        #         [y + cross_len, y - cross_len],
+                        #         color="#FF0000",
+                        #         lw=0.5,
+                        #         zorder=2,
+                        #     )
+                        if len(axes) > 0:
+                            axes[0].annotate(
+                                otype,
+                                xy=(x, y),
+                                xytext=(x, y + cross_len / 2),
+                                ha="center",
+                                va="bottom",
+                                fontsize=3,
+                                color="#FF0000",
+                                zorder=3,
+                            )
 
             # Add insets and other features
             for i, (title, img_data) in enumerate(images.items()):
                 ax = axes[i]
 
-                if expected_location:
-                    x, y = map(int, expected_location)
-                    x = max(inset_size, min(x, img_width - inset_size))
-                    y = max(inset_size, min(y, img_height - inset_size))
+                if expected_location and len(expected_location) == 2:
+                    try:
+                        x, y = map(int, expected_location)
+                        x = max(inset_size, min(x, img_width - inset_size))
+                        y = max(inset_size, min(y, img_height - inset_size))
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"subtraction_check: invalid expected_location format: {e}")
+                        continue
 
                     x_side, con_x_main, con_x_inset = get_inset_side(
                         x, inset_size, img_width
@@ -358,7 +396,7 @@ class Plot:
 
                     # Inset
                     ax_inset = inset_axes(ax, width="30%", height="30%", loc=inset_loc)
-                    cmap = plt.get_cmap("bone").copy()
+                    cmap = plt.get_cmap("viridis").copy()
                     cmap.set_bad(color="white")
                     ax_inset.imshow(
                         img_data,
@@ -424,30 +462,32 @@ class Plot:
                             )
                         )
 
-            # Optional mask overlay
+            # Optional mask overlay (skip difference image)
             if mask is not None:
                 red_overlay = colors.ListedColormap(["none", "#FF0000"])
-                for ax in fig.axes[:-1]:
-                    if ax not in inset_axes_list:
+                for i, ax in enumerate(fig.axes[:-1]):
+                    if ax not in inset_axes_list and i != 2:  # Skip difference image (index 2)
                         ax.imshow(mask, cmap=red_overlay, alpha=0.5, origin="lower")
 
             # Add markers for expected and fitted locations
             if fitted_location and len(fitted_location) == 2:
                 radius = aperture_size  # Circle radius in pixels (diameter = inset_size // 4)
 
-                for ax in inset_axes_list[2:]:
-                    # Red hollow circle at fitted location
-                    circle = mpatches.Circle(
-                        fitted_location,
-                        edgecolor="#FF0000",
-                        facecolor="none",
-                        linewidth=0.5,
-                        transform=ax.transData,
-                    )
-                    ax.add_patch(circle)
+                if len(inset_axes_list) >= 3:
+                    for ax in inset_axes_list[2:]:
+                        # Red hollow circle at fitted location
+                        circle = mpatches.Circle(
+                            fitted_location,
+                            edgecolor="#FF0000",
+                            facecolor="none",
+                            linewidth=0.5,
+                            transform=ax.transData,
+                        )
+                        ax.add_patch(circle)
 
-                    # Green cross at expected location (2 lines)
-                    x, y = expected_location
+                        # Green cross at expected location (2 lines)
+                        if expected_location and len(expected_location) == 2:
+                            x, y = expected_location
                     cross_len = aperture_size / 2  # half-length of each arm
 
                     # hline = mlines.Line2D(
@@ -466,6 +506,7 @@ class Plot:
                     # )
                     # ax.add_line(hline)
                     # ax.add_line(vline)
+
 
             # Save figure (PNG only)
             fig.savefig(
@@ -793,7 +834,7 @@ class Plot:
                 image, interval=ZScaleInterval(), stretch=LinearStretch()
             )
             # Set NaN values to display as white
-            cmap = plt.get_cmap("gray")
+            cmap = plt.get_cmap("viridis")
             cmap.set_bad(color='white')
             im = ax1.imshow(
                 image,
@@ -1589,50 +1630,64 @@ class Plot:
             dx_err = df.get("x_fit_err", np.nan).copy()
             dy_err = df.get("y_fit_err", np.nan).copy()
 
-            # Filter to sources with finite errors
+            # Filter to sources with finite errors if available
             finite_err = dx_err.notna() & dy_err.notna()
-            df_plot = df[finite_err].copy()
-
-            if len(df_plot) == 0:
-                logger.warning("No sources with PSF fit errors for WCS vs PSF offset plot")
-                return
-
-            # Exclude sources with very large position errors (> FWHM)
-            # These indicate problematic fits and should not dominate the plot
-            fwhm = float(self.input_yaml.get("fwhm", 3.0))
-            reasonable_err = (
-                (df_plot["x_fit_err"] <= fwhm) & (df_plot["y_fit_err"] <= fwhm)
-            )
-            n_before = len(df_plot)
-            df_plot = df_plot[reasonable_err].copy()
-            n_excluded = n_before - len(df_plot)
-            if n_excluded > 0:
-                logger.info(
-                    f"WCS vs PSF offset plot: excluded {n_excluded}/{n_before} sources "
-                    f"with position errors > FWHM ({fwhm:.1f} px)"
+            has_errors = finite_err.any()
+            
+            if has_errors:
+                df_plot = df[finite_err].copy()
+                # Exclude sources with very large position errors (> FWHM)
+                # These indicate problematic fits and should not dominate the plot
+                fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                reasonable_err = (
+                    (df_plot["x_fit_err"] <= fwhm) & (df_plot["y_fit_err"] <= fwhm)
                 )
+                n_before = len(df_plot)
+                df_plot = df_plot[reasonable_err].copy()
+                n_excluded = n_before - len(df_plot)
+                if n_excluded > 0:
+                    logger.info(
+                        f"WCS vs PSF offset plot: excluded {n_excluded}/{n_before} sources "
+                        f"with position errors > FWHM ({fwhm:.1f} px)"
+                    )
+            else:
+                # No error columns available, plot without error bars
+                df_plot = df.copy()
+                logger.info("WCS vs PSF offset plot: no error columns available, plotting without error bars")
 
             # Create plot
             width_pt = 5.5 * 72.27
             aspect = 1.0
             fig, ax = plt.subplots(figsize=set_size(width_pt, aspect=aspect))
 
-            # Scatter with error bars on both axes
-            ax.errorbar(
-                df_plot["dx"],
-                df_plot["dy"],
-                xerr=df_plot["x_fit_err"],
-                yerr=df_plot["y_fit_err"],
-                fmt="o",
-                markersize=3,
-                capsize = 1,
-                markerfacecolor="dodgerblue",
-                markeredgecolor="none",
-                ecolor="gray",
-                elinewidth=0.5,
-                alpha=0.7,
-                zorder=2,
-            )
+            # Scatter with error bars if available, otherwise simple scatter
+            if has_errors:
+                ax.errorbar(
+                    df_plot["dx"],
+                    df_plot["dy"],
+                    xerr=df_plot["x_fit_err"],
+                    yerr=df_plot["y_fit_err"],
+                    fmt="o",
+                    markersize=3,
+                    capsize = 1,
+                    markerfacecolor="dodgerblue",
+                    markeredgecolor="none",
+                    ecolor="gray",
+                    elinewidth=0.5,
+                    alpha=0.7,
+                    zorder=2,
+                )
+            else:
+                ax.scatter(
+                    df_plot["dx"],
+                    df_plot["dy"],
+                    s=9,
+                    marker="o",
+                    facecolor="dodgerblue",
+                    edgecolor="none",
+                    alpha=0.7,
+                    zorder=2,
+                )
 
             # Zero lines
             # ax.axhline(0, color="red", lw=1.0, ls="--", alpha=0.5, zorder=1)
@@ -1649,19 +1704,66 @@ class Plot:
             rms_dy = np.sqrt(np.nanmean(df_plot["dy"]**2))
 
             # Symmetric square axes with (0,0) at centre
-            _lim = max(
-                np.nanmax(np.abs(df_plot["dx"] + df_plot["x_fit_err"])),
-                np.nanmax(np.abs(df_plot["dy"] + df_plot["y_fit_err"])),
-                0.1,
-            ) * 1.1
+            if has_errors:
+                _lim = max(
+                    np.nanmax(np.abs(df_plot["dx"] + df_plot["x_fit_err"])),
+                    np.nanmax(np.abs(df_plot["dy"] + df_plot["y_fit_err"])),
+                    1.0,
+                ) * 1.1
+            else:
+                _lim = max(
+                    np.nanmax(np.abs(df_plot["dx"])),
+                    np.nanmax(np.abs(df_plot["dy"])),
+                    1.0,
+                ) * 1.1
             ax.set_xlim(-_lim, _lim)
             ax.set_ylim(-_lim, _lim)
+            # Use adjustable='box' for compatibility with twin axes (ax_top, ax_right)
             ax.set_aspect("equal", adjustable="box")
             ax.axhline(0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=1)
             ax.axvline(0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=1)
 
             ax.set_xlabel(r"$\Delta x = x_{\mathrm{PSF}} - x_{\mathrm{WCS}}$ [px]")
             ax.set_ylabel(r"$\Delta y = y_{\mathrm{PSF}} - y_{\mathrm{WCS}}$ [px]")
+
+            # Add upper and right axes for arcsecond offsets
+            # Get pixel scale from input_yaml or WCS
+            pixel_scale = None
+            if "pixel_scale" in self.input_yaml:
+                pixel_scale = float(self.input_yaml["pixel_scale"])
+            elif imageWCS is not None:
+                # Try to get pixel scale from WCS
+                try:
+                    from astropy.wcs import utils as wcs_utils
+                    pixel_scale = wcs_utils.proj_plane_pixel_scales(imageWCS)[0] * 3600  # Convert to arcsec
+                except:
+                    pass
+
+            if pixel_scale is not None and pixel_scale > 0:
+                # Create twin axes for arcsecond display
+                ax_top = ax.twiny()
+                ax_right = ax.twinx()
+
+                # Set the limits for twin axes to match the main axes
+                ax_top.set_xlim(ax.get_xlim())
+                ax_right.set_ylim(ax.get_ylim())
+
+                # Convert pixel limits to arcseconds
+                x_lim_arcsec = np.array(ax.get_xlim()) * pixel_scale
+                y_lim_arcsec = np.array(ax.get_ylim()) * pixel_scale
+
+                # Set tick locations and labels for arcseconds
+                ax_top.set_xticks(ax.get_xticks())
+                ax_top.set_xticklabels([f"{x*pixel_scale:.2f}" for x in ax.get_xticks()])
+                ax_top.set_xlabel(r"$\Delta$RA [arcsec]", fontsize="small")
+
+                ax_right.set_yticks(ax.get_yticks())
+                ax_right.set_yticklabels([f"{y*pixel_scale:.2f}" for y in ax.get_yticks()])
+                ax_right.set_ylabel(r"$\Delta$Dec [arcsec]", fontsize="small")
+
+                # Hide the tick labels on the opposite sides of twin axes
+                ax_top.tick_params(axis="x", which="both", labeltop=True, labelbottom=False)
+                ax_right.tick_params(axis="y", which="both", labelright=True, labelleft=False)
             # ax.set_title(f"WCS vs PSF Position Offset (N={len(df_plot)})")
             # ax.legend(loc="upper right", fontsize="small", framealpha=0.9)
             ax.grid(True, ls="-", alpha=0.25, zorder=0)

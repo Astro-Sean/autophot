@@ -33,6 +33,7 @@
 import os
 import logging
 from functools import lru_cache
+from typing import Optional
 
 # --- Third-Party ---
 import numpy as np
@@ -125,6 +126,43 @@ class BackgroundSubtractor:
 
         self.logger = logging.getLogger(__name__)
         self._box_size_cache: dict = {}
+
+    def _cap_fwhm_for_background_mesh(
+        self, fwhm_pixels: Optional[float]
+    ) -> Optional[float]:
+        """
+        Limit FWHM used only for background mesh / mask sizing.
+
+        Very large measured FWHMs (bad SExtractor passes, nebulous fields) blow up
+        Background2D box sizes and RAM. Science photometry still uses the true
+        ImageFWHM from main.py; this cap is background-estimation only.
+        """
+        if fwhm_pixels is None:
+            return None
+        try:
+            fp = float(fwhm_pixels)
+        except (TypeError, ValueError):
+            return fwhm_pixels
+        if not np.isfinite(fp) or fp <= 0:
+            return fwhm_pixels
+        cfg_bkg = (
+            (self.config.get("background", {}) or {})
+            if isinstance(self.config, dict)
+            else {}
+        )
+        cap = float(cfg_bkg.get("max_fwhm_pixels", 15.0))
+        if not np.isfinite(cap) or cap <= 0:
+            return fp
+        if fp > cap:
+            self.logger.info(
+                "Background mesh: capping FWHM %.2f -> %.2f px "
+                "(background.max_fwhm_pixels=%.1f) to limit Background2D memory use.",
+                fp,
+                cap,
+                cap,
+            )
+            return cap
+        return fp
 
     # -------------------------------------------------------------------------
     # WCS helpers
@@ -299,6 +337,8 @@ class BackgroundSubtractor:
         # In fast_mode, allow smaller min_box to reduce computation for small images
         if fast_mode:
             min_box = max(32, min_box // 2)
+
+        fwhm_pixels = self._cap_fwhm_for_background_mesh(fwhm_pixels)
 
         base = max(min_box, int(mesh_scale * fwhm_pixels))
         max_allowed = max(min_box, int(min(shape) * region_fraction_limit))
@@ -1189,6 +1229,7 @@ class BackgroundSubtractor:
             fwhm_pixels = fwhm / pixel_scale if pixel_scale else fwhm
         else:
             fwhm_pixels = None
+        fwhm_pixels = self._cap_fwhm_for_background_mesh(fwhm_pixels)
 
         # Classify field regime (sparse / crowded / nebulous) and derive
         # dynamic parameters for masking and Background2D. If config marks
@@ -1467,6 +1508,7 @@ class BackgroundSubtractor:
 
         if fwhm_pixels is None:
             fwhm_pixels = 5.0
+        fwhm_pixels = self._cap_fwhm_for_background_mesh(fwhm_pixels)
 
         if not (0 <= x0 < nx and 0 <= y0 < ny):
             raise ValueError(

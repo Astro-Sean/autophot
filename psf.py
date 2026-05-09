@@ -2859,7 +2859,7 @@ class PSF:
 
         x_all = np.asarray(sources["x_pix"], float)
         y_all = np.asarray(sources["y_pix"], float)
-        flux_all = np.asarray(sources[flux_col], float)
+        flux_all = np.asarray(sources[flux_col], float).copy()
         # PSF model is fit to the same data as Aperture: image*gain in e⁻. The fit
         # amplitude is *integrated* signal in the exposure (e⁻), never a rate.
         # `flux_AP` / `maxPixel` / `sky_bkg_total_flux` are e⁻/s (or e⁻/s-like);
@@ -2896,17 +2896,40 @@ class PSF:
                     y1 = min(data_e.shape[0], yi + half + 1)
                     patch = data_e[y0:y1, x0:x1]
                     if patch.size:
-                        bkg = float(np.nanmedian(patch))
-                        # Conservative integrated-flux guess (electrons per frame).
-                        guess = float(np.nansum(np.clip(patch - bkg, 0.0, None)))
-                        if np.isfinite(guess) and guess > 0:
-                            flux_all[0] = guess
-                            log.info(
-                                "Target PSF init: aperture flux missing; bootstrapped "
-                                "flux from %dx%d patch = %.3g e-",
-                                int(patch.shape[1]),
-                                int(patch.shape[0]),
-                                float(guess),
+                        # Check NaN fraction in patch - if too high, bootstrap is unreliable
+                        nan_frac = float(np.sum(~np.isfinite(patch))) / float(patch.size)
+                        if nan_frac > 0.5:
+                            log.warning(
+                                "Target PSF init: bootstrap patch has %.1f%% NaN pixels "
+                                "(near chip gap/edge); flux estimate may be unreliable.",
+                                nan_frac * 100.0,
+                            )
+                        # Use median of finite pixels as background (more robust than nanmedian)
+                        finite_vals = patch[np.isfinite(patch)]
+                        if len(finite_vals) > 0:
+                            bkg = float(np.median(finite_vals))
+                            # Conservative integrated-flux guess (electrons per frame).
+                            guess = float(np.nansum(np.clip(patch - bkg, 0.0, None)))
+                            if np.isfinite(guess) and guess > 0:
+                                flux_all[0] = guess
+                                log.info(
+                                    "Target PSF init: aperture flux missing; bootstrapped "
+                                    "flux from %dx%d patch (%.1f%% NaN) = %.3g e-",
+                                    int(patch.shape[1]),
+                                    int(patch.shape[0]),
+                                    nan_frac * 100.0,
+                                    float(guess),
+                                )
+                            else:
+                                log.warning(
+                                    "Target PSF init: bootstrap flux invalid (%.3g); "
+                                    "patch may be too NaN-heavy.",
+                                    guess,
+                                )
+                        else:
+                            log.warning(
+                                "Target PSF init: bootstrap patch has no finite pixels; "
+                                "cannot estimate flux."
                             )
             except Exception as exc:
                 log_warning_from_exception(
@@ -2914,6 +2937,24 @@ class PSF:
                 )
 
         valid = np.isfinite(x_all) & np.isfinite(flux_all)
+        # For target fit, force inclusion even if flux was NaN before bootstrap
+        # (bootstrap should have fixed it). This prevents the target from being
+        # excluded from the valid mask.
+        if is_target_fit and len(sources) == 1 and not valid[0]:
+            if np.isfinite(flux_all[0]):
+                valid[0] = True
+                log.info("Target PSF: forcing target into valid mask (flux now finite)")
+            else:
+                log.warning("Target PSF: target flux still NaN after bootstrap; cannot force inclusion")
+        # Debug: log target flux status after bootstrap
+        if is_target_fit and len(sources) == 1:
+            log.info(
+                "Target PSF: after bootstrap - flux_all[0]=%.3g, x_all[0]=%.3g, y_all[0]=%.3g, valid=%s",
+                float(flux_all[0]) if len(flux_all) > 0 else float("nan"),
+                float(x_all[0]) if len(x_all) > 0 else float("nan"),
+                float(y_all[0]) if len(y_all) > 0 else float("nan"),
+                bool(valid[0]) if len(valid) > 0 else False,
+            )
 
         x, y, flux_e_frame = x_all[valid], y_all[valid], flux_all[valid]
         idx_keep = orig_idx[valid]
@@ -2936,6 +2977,26 @@ class PSF:
             if background_rms is not None
             else np.nanmedian(ndimage.uncertainty.array)
         )
+        # If bkgrmsval is NaN (e.g., background_rms has NaN pixels near chip gaps),
+        # fall back to estimating from the data itself
+        if not np.isfinite(bkgrmsval):
+            # Estimate background RMS from finite pixels in the data
+            data_finite = ndimage.data[np.isfinite(ndimage.data)]
+            if len(data_finite) > 0:
+                # Use MAD (median absolute deviation) as a robust RMS estimate
+                from scipy.stats import median_abs_deviation
+                bkgrmsval = float(median_abs_deviation(data_finite, scale="normal"))
+                log.warning(
+                    "PSF fit: background_rms is NaN; estimated from data MAD = %.3g ADU",
+                    bkgrmsval,
+                )
+            else:
+                # Last resort: use a conservative default based on typical values
+                bkgrmsval = 5.0  # Conservative default ADU
+                log.warning(
+                    "PSF fit: no finite pixels in data; using default background RMS = %.3g ADU",
+                    bkgrmsval,
+                )
         # Statistical Fisher matrix formalism for PSF photometry SNR
         # SNR = fs / sigma_fs where sigma_fs^2 = 1/F_11
         # F_11 = sum(PSF_i^2 / sigma_i^2) where sigma_i^2 = (b/g) + (Nccd/g^2) + (fs * PSF_i/g)
@@ -2947,7 +3008,10 @@ class PSF:
         read_noise = float(self.input_yaml.get("read_noise", 0.0))
         fwhm = float(self.input_yaml.get("fwhm", 3.0))
         # Approximate PSF normalization constant C ~ 1/(pi * fwhm^2)
-        psf_norm = 1.0 / (np.pi * fwhm**2)
+        # Clamp to reasonable bounds to avoid numerical issues
+        fwhm_clamped = max(1.0, min(fwhm, 50.0))  # Prevent extreme FWHM values
+        psf_norm = 1.0 / (np.pi * fwhm_clamped**2)
+        psf_norm = max(1e-6, min(psf_norm, 1.0))  # Clamp to reasonable range
         # Background noise term: (b/g + Nccd/g^2) / C
         # Convert bkgrmsval (ADU) to electrons, add read noise squared, divide by PSF norm
         background_noise = (bkgrmsval * gain + read_noise**2) / gain / psf_norm
@@ -2956,11 +3020,27 @@ class PSF:
         source_noise = flux_e_frame / gain
         # Total variance (this gives a lower limit on SNR, as per CFHT document)
         sigma_fs_sq = background_noise + source_noise
+        # Ensure sigma_fs_sq is finite and positive
+        sigma_fs_sq = np.maximum(sigma_fs_sq, 1e-10)
         snr = (
             np.asarray(sources["SNR"], float)[valid]
             if "SNR" in sources.columns
-            else flux_e_frame / np.sqrt(np.maximum(sigma_fs_sq, 1e-10))
+            else flux_e_frame / np.sqrt(sigma_fs_sq)
         )
+        # If S/N is still NaN (e.g., flux_e_frame is NaN despite bootstrap), set a default
+        if is_target_fit:
+            nan_snr_count = np.sum(~np.isfinite(snr))
+            if nan_snr_count > 0:
+                log.warning(
+                    "Target PSF: %d/%d sources have NaN S/N; flux_e_frame range=[%.3g, %.3g], "
+                    "sigma_fs_sq range=[%.3g, %.3g]; setting NaN S/N to 5.0",
+                    nan_snr_count, len(snr),
+                    float(np.min(flux_e_frame)) if len(flux_e_frame) > 0 else float("nan"),
+                    float(np.max(flux_e_frame)) if len(flux_e_frame) > 0 else float("nan"),
+                    float(np.min(sigma_fs_sq)) if len(sigma_fs_sq) > 0 else float("nan"),
+                    float(np.max(sigma_fs_sq)) if len(sigma_fs_sq) > 0 else float("nan"),
+                )
+                snr[~np.isfinite(snr)] = 5.0
 
         bright_mask = snr >= 8.0
         faint_mask = (snr >= 4.0) & (snr < 8.0)
@@ -3070,9 +3150,50 @@ class PSF:
             # aperture photometry (annulus median). MMM can behave differently on
             # structured difference-image residuals and produce large AP-vs-PSF flux offsets.
             # Using MedianBackground consistently across all tiers for robust sky estimation.
-            localbkg = LocalBackground(
-                float(inner_r), float(outer_r), bkg_estimator=MedianBackground()
-            )
+            # Handle NaN-heavy regions (chip gaps) by shrinking annulus or falling back to global.
+            if is_target_fit and int(np.count_nonzero(mask)) == 1:
+                _x = float(x_all[mask][0])
+                _y = float(y_all[mask][0])
+                # Try primary annulus first
+                _inner_r, _outer_r = float(inner_r), float(outer_r)
+                _max_shrink = 3  # Number of shrink attempts
+                _shrink_factor = 0.7  # Reduce radii by this factor each attempt
+                for attempt in range(_max_shrink):
+                    # Create annulus mask to check NaN fraction
+                    yy, xx = np.ogrid[:ndimage.data.shape[0], :ndimage.data.shape[1]]
+                    r2 = (xx - _x)**2 + (yy - _y)**2
+                    in_annulus = (r2 >= _inner_r**2) & (r2 < _outer_r**2)
+                    annulus_pixels = ndimage.data[in_annulus]
+                    finite_pixels = annulus_pixels[np.isfinite(annulus_pixels)]
+                    nan_frac = 1.0 - (len(finite_pixels) / max(1, len(annulus_pixels)))
+                    if len(finite_pixels) >= 10 and nan_frac < 0.5:
+                        # Sufficient finite pixels - use this annulus
+                        break
+                    if attempt < _max_shrink - 1:
+                        # Shrink annulus and retry
+                        _inner_r = max(3.0, _inner_r * _shrink_factor)
+                        _outer_r = max(_inner_r + 2.0, _outer_r * _shrink_factor)
+                        log.warning(
+                            "Target PSF: primary annulus (r_in=%.1f, r_out=%.1f) has "
+                            "%.1f%% NaN pixels; shrinking to (r_in=%.1f, r_out=%.1f).",
+                            float(inner_r), float(outer_r), nan_frac * 100.0,
+                            _inner_r, _outer_r,
+                        )
+                    else:
+                        # Fallback to global background if all attempts fail
+                        log.warning(
+                            "Target PSF: all annulus attempts too NaN-heavy; using global background "
+                            "median (%.3g ADU) as fallback.",
+                            float(np.nanmedian(ndimage.data[np.isfinite(ndimage.data)])),
+                        )
+                        # Use a minimal annulus that just returns the global value
+                        _inner_r = 1.0
+                        _outer_r = 2.0
+                localbkg = LocalBackground(_inner_r, _outer_r, bkg_estimator=MedianBackground())
+            else:
+                localbkg = LocalBackground(
+                    float(inner_r), float(outer_r), bkg_estimator=MedianBackground()
+                )
             xy_bounds_this = _effective_xy_bounds_for_shape(fit_shape)
 
             if not iterative:
@@ -3394,8 +3515,19 @@ class PSF:
                 )
                 if res is not None:
                     results.append(res)
+                elif is_target_fit and len(sources) == 1:
+                    log.warning(
+                        "Target PSF fit returned None for %s tier; "
+                        "may be due to convergence issues or invalid parameters.",
+                        label,
+                    )
 
         if not results:
+            if is_target_fit and len(sources) == 1:
+                log.warning(
+                    "Target PSF fitting failed: no valid fit results. "
+                    "This may be due to NaN pixels, invalid flux, or convergence issues."
+                )
             return sources
 
         combined = pd.concat(results)

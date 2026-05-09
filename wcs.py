@@ -577,15 +577,15 @@ def _choose_xy_shift_for_fit_wcs(
     try:
         sky_true = SkyCoord(ra=ra_m * u.deg, dec=dec_m * u.deg, frame="icrs")
 
-        # Assume x/y are FITS-like (1-based) for all_pix2world origin=0
-        ra1, dec1 = initial_wcs.all_pix2world(x_m, y_m, 0)
+        # Assume x/y are FITS-like (1-based) for all_pix2world origin=1
+        ra1, dec1 = initial_wcs.all_pix2world(x_m, y_m, 1)
         sky1 = SkyCoord(ra=np.asarray(ra1) * u.deg, dec=np.asarray(dec1) * u.deg, frame="icrs")
         med_sep_1based = float(np.nanmedian(sky1.separation(sky_true).to(u.arcsec).value))
 
         # Assume x/y are 0-based -> convert to FITS-like by +1
         x0 = x_m + 1.0
         y0 = y_m + 1.0
-        ra0, dec0 = initial_wcs.all_pix2world(x0, y0, 0)
+        ra0, dec0 = initial_wcs.all_pix2world(x0, y0, 1)
         sky0 = SkyCoord(ra=np.asarray(ra0) * u.deg, dec=np.asarray(dec0) * u.deg, frame="icrs")
         med_sep_0based = float(np.nanmedian(sky0.separation(sky_true).to(u.arcsec).value))
 
@@ -613,7 +613,7 @@ def _wcs_match_separation_stats_arcsec(
         logger.debug("_wcs_match_separation_stats_arcsec: wcs_obj is None")
         return np.nan, np.nan
     sky_true = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
-    ra_p, dec_p = wcs_obj.all_pix2world(x_pix, y_pix, 0)
+    ra_p, dec_p = wcs_obj.all_pix2world(x_pix, y_pix, 1)
     sky_pred = SkyCoord(
         ra=np.asarray(ra_p) * u.deg, dec=np.asarray(dec_p) * u.deg, frame="icrs"
     )
@@ -692,7 +692,7 @@ def wcs_world_to_pixel(
     ra_arr = ra_arr[:n]
     dec_arr = dec_arr[:n]
     try:
-        x_pix, y_pix = wcs_obj.all_world2pix(ra_arr, dec_arr, origin)
+        x_pix, y_pix = wcs_obj.all_world2pix(ra_arr, dec_arr, 1)
         return np.asarray(x_pix, dtype=float), np.asarray(y_pix, dtype=float)
     except Exception:
         x_out = np.full(n, np.nan, dtype=float)
@@ -702,7 +702,7 @@ def wcs_world_to_pixel(
                 x_i, y_i = wcs_obj.all_world2pix(
                     np.array([ra_arr[i]], dtype=float),
                     np.array([dec_arr[i]], dtype=float),
-                    origin,
+                    1,
                 )
                 x_out[i] = float(np.asarray(x_i, dtype=float)[0])
                 y_out[i] = float(np.asarray(y_i, dtype=float)[0])
@@ -932,7 +932,7 @@ def _filter_points_against_initial_wcs(
     Returns filtered arrays, number removed, and pre-filter med/p95 residuals.
     """
     sky_true = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
-    ra_p, dec_p = initial_wcs.all_pix2world(x_pix, y_pix, 0)
+    ra_p, dec_p = initial_wcs.all_pix2world(x_pix, y_pix, 1)
     sky_pred = SkyCoord(
         ra=np.asarray(ra_p) * u.deg, dec=np.asarray(dec_p) * u.deg, frame="icrs"
     )
@@ -1875,9 +1875,9 @@ class WCSSolver:
                 if test_wcs is not None:
                     # Test transform at image center - if this fails, the distortion is too extreme
                     cx, cy = best_trial_header.get("NAXIS1", 1000) / 2, best_trial_header.get("NAXIS2", 1000) / 2
-                    ra_test, dec_test = test_wcs.all_pix2world(cx, cy, 0)
+                    ra_test, dec_test = test_wcs.all_pix2world(cx, cy, 1)
                     # Round-trip test: world->pix->world should converge
-                    x_back, y_back = test_wcs.all_world2pix(ra_test, dec_test, 0, maxiter=50)
+                    x_back, y_back = test_wcs.all_world2pix(ra_test, dec_test, 1, maxiter=50)
                     if not (np.isfinite(x_back) and np.isfinite(y_back)):
                         raise ValueError("WCS round-trip failed")
                     logger.debug("SCAMP WCS passed invertibility test at image center")

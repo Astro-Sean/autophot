@@ -1624,16 +1624,62 @@ class Limits:
             cand_df = cand_df.sort_values("_snr_score", ascending=True)
             quiet_mask = cand_df["_snr_score"] <= float(effective_snr_limit)
             cand_quiet = cand_df[quiet_mask].copy()
-            if len(cand_quiet) > 0:
-                chosen = cand_quiet.head(n_quiet)
+
+            # Select spatially uniform sites from the quiet candidates
+            # Take a larger pool (3x n_quiet) to allow spatial selection, then
+            # use K-means clustering to pick uniformly distributed sites
+            pool_size = min(3 * n_quiet, len(cand_quiet)) if len(cand_quiet) > 0 else 0
+            if len(cand_quiet) > 0 and pool_size >= n_quiet:
+                # Take the quietest pool_size candidates
+                pool = cand_quiet.head(pool_size).copy()
+                # Use K-means to select spatially uniform sites
+                try:
+                    from sklearn.cluster import KMeans
+                    coords = np.column_stack([pool["x_pix"].values, pool["y_pix"].values])
+                    kmeans = KMeans(n_clusters=n_quiet, random_state=42, n_init=10)
+                    kmeans.fit(coords)
+                    # Find the closest point to each cluster center
+                    chosen_indices = []
+                    for center in kmeans.cluster_centers_:
+                        distances = np.sum((coords - center) ** 2, axis=1)
+                        chosen_indices.append(np.argmin(distances))
+                    chosen = pool.iloc[chosen_indices].copy()
+                    logger.info(
+                        "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; "
+                        "selected %d spatially uniform sites via K-means from pool of %d.",
+                        int(len(cand_quiet)),
+                        int(len(cand_df)),
+                        float(effective_snr_limit),
+                        int(len(chosen)),
+                        int(pool_size),
+                    )
+                except Exception as exc:
+                    # Fallback to simple selection if clustering fails
+                    logger.warning(
+                        "K-means spatial selection failed (%s); falling back to simple selection.",
+                        str(exc),
+                    )
+                    chosen = cand_quiet.head(n_quiet)
+                    logger.info(
+                        "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; using the lowest %d.",
+                        int(len(cand_quiet)),
+                        int(len(cand_df)),
+                        float(effective_snr_limit),
+                        int(min(n_quiet, len(cand_quiet))),
+                    )
+            elif len(cand_quiet) > 0:
+                # Not enough quiet candidates for spatial selection, just take what we have
+                chosen = cand_quiet.head(min(n_quiet, len(cand_quiet)))
                 logger.info(
-                    "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; using the lowest %d.",
+                    "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; "
+                    "using all %d (insufficient for spatial selection).",
                     int(len(cand_quiet)),
                     int(len(cand_df)),
                     float(effective_snr_limit),
-                    int(min(n_quiet, len(cand_quiet))),
+                    int(len(chosen)),
                 )
             else:
+                # No quiet sites, fall back to lowest-|S/N| sites
                 chosen = cand_df.head(n_quiet)
                 # Not a fatal condition: proceed using the lowest-|S/N| sites anyway.
                 # This usually means the local environment is structured everywhere

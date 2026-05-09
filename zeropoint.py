@@ -1676,7 +1676,7 @@ class Zeropoint:
                     loc="lower center",
                     bbox_to_anchor=(0.5, 1.01),
                     borderaxespad=0.0,
-                    frameon=True,
+                    frameon=False,
                     framealpha=0.95,
                     fontsize="small",
                     ncol=2,

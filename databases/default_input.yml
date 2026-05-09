@@ -216,7 +216,7 @@ default_input:
     scamp_distort_keys: XWIN_IMAGE,YWIN_IMAGE # str --- Image-coordinate columns used by SCAMP distortion fit.
     scamp_mosaic_type: UNCHANGED # str --- SCAMP mosaic handling mode.
     scamp_stability_type: EXPOSURE # str --- SCAMP stability model type.
-    scamp_sn_thresholds: "5.0,100000.0" # str --- SCAMP S/N thresholds, "min,max".
+    scamp_sn_thresholds: "3.0,100000.0" # str --- SCAMP S/N thresholds, "min,max".
 
     search_radius: 0.5 # float --- Search radius (degrees) for blind/assisted WCS solving.
     downsample: 4 # int --- Downsampling factor used for source detection/solving speed-up.
@@ -344,9 +344,9 @@ default_input:
     reproject_parallel: False # bool --- Enable parallel reprojection where supported (faster on large mosaics if CPU-bound; set True when memory allows).
     # reproject_adaptive only: library default is False; True rescales pixels for flux conservation (can blur when scales match).
     reproject_adaptive_conserve_flux: False # bool --- Adaptive reprojection: conserve flux by rescaling pixels (can blur slightly when scales match).
-    reproject_adaptive_center_jacobian: True # bool --- More accurate Jacobian at grid points; slower (non-smooth WCS).
+    reproject_adaptive_center_jacobian: False # bool --- More accurate Jacobian at grid points; slower (non-smooth WCS).
     # Subpixel refinement helps edge alignment by correcting small WCS mismatches (<1 pixel)
-    reproject_subpixel_refine: True # bool --- Apply subpixel refinement after WCS alignment (helps edge alignment).
+    reproject_subpixel_refine: False # bool --- Apply subpixel refinement after WCS alignment (helps edge alignment).
     reproject_max_rms_pixels: 0.90 # float --- Maximum acceptable reproject alignment score (median mutual-pair residual, pixels) before fallback.
     plot_source_check_distortion_vectors: True # bool --- Overlay catalog->detected residual vectors on Sourcecheck plot.
     plot_source_check_distortion_grid_map: False # bool --- Overlay gridded distortion-magnitude heatmap (pixels) on Sourcecheck plot.
@@ -362,6 +362,7 @@ default_input:
     alignment_method: swarp # str --- Science-template registration method (reproject, swarp, astroalign).
     alignment_use_extended_sources: False # bool --- If True, allow large/extended sources (galaxies) in SCAMP matching catalogs.
     alignment_max_fwhm_pix: 50.0 # float --- Max FWHM (pixels) kept when alignment_use_extended_sources=False.
+    alignment_set_crval_to_target: True # bool --- If True, set CRVAL1/CRVAL2 to target RA/Dec before alignment to center WCS on transient.
     method: sfft # str --- Subtraction backend (sfft default; hotpants or zogy optional where available).
     kernel_order: 0 # int --- Polynomial order for the SFFT kernel flux scaling model.
     download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).

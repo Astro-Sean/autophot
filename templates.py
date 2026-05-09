@@ -221,8 +221,9 @@ logger = logging.getLogger(__name__)
 # Global Constants
 # =============================================================================
 
-# Reproducible random number generator (replaces legacy np.random.* calls)
-RNG = np.random.default_rng(seed=42)
+# Random number generator (replaces legacy np.random.* calls)
+# No fixed seed to ensure independent random sequences across images
+RNG = np.random.default_rng(seed=None)
 
 # Sentinel value used to represent "no data" in FITS images after alignment.
 # Chosen to be extremely small but non-zero so it passes finite checks
@@ -853,19 +854,32 @@ def flux_to_mag(
     return mag, mag_err
 
 
-def clean_fits_nans(fpath: str) -> None:
+def clean_fits_nans(fpath: str) -> str:
     """
-    Replace NaN / Inf pixels in a FITS image with NO_DATA_SENTINEL in-place.
+    Replace NaN / Inf pixels in a FITS image with NO_DATA_SENTINEL.
+    
+    Creates a temporary file with cleaned data and returns its path.
+    The original file is NOT modified to prevent cross-image contamination.
 
     This is necessary before feeding images to external tools (HOTPANTS, SFFT)
     that cannot handle IEEE special values.
+    
+    Returns:
+        str: Path to the cleaned temporary file.
     """
-    with fits.open(fpath, mode="update") as hdul:
-        data = hdul[0].data
+    with fits.open(fpath) as hdul:
+        data = hdul[0].data.copy()
+        header = hdul[0].header.copy()
         bad = ~np.isfinite(data)
         if bad.any():
             data[bad] = NO_DATA_SENTINEL
-            hdul.flush()
+    
+    # Write to a temporary file instead of modifying the original
+    fd, tmp_path = tempfile.mkstemp(suffix=".fits", prefix="cleaned_")
+    os.close(fd)
+    hdu = fits.PrimaryHDU(data, header=header)
+    hdu.writeto(tmp_path, overwrite=True, output_verify="silentfix+ignore")
+    return tmp_path
 
 
 def deduplicate_points(
@@ -2725,6 +2739,16 @@ class Templates:
         # Science-only crop (no template)
         # ------------------------------------------------------------------
         if templateFpath is None:
+            # Validate crop center coordinates
+            if not (np.isfinite(cx) and np.isfinite(cy)):
+                logger.error(
+                    f"Invalid crop center coordinates: cx={cx}, cy={cy}. "
+                    f"This indicates find_non_uniform_center returned invalid values. "
+                    f"Image shape: {scienceImage.shape}"
+                )
+                raise ValueError(
+                    f"Invalid crop center: cx={cx}, cy={cy} (must be finite)"
+                )
             cutout = Cutout2D(
                 scienceImage,
                 position=(np.floor(cx), np.floor(cy)),
@@ -2747,7 +2771,7 @@ class Templates:
             target_x_pix, target_y_pix = scienceHeader_newwcs.all_world2pix(
                 target_ra,
                 target_dec,
-                0,
+                1,
             )
 
             border = 10
@@ -2783,6 +2807,17 @@ class Templates:
 
         size = (height - height % 2, width - width % 2)
         position = (np.floor(cx), np.floor(cy))
+        
+        # Validate crop center coordinates
+        if not (np.isfinite(cx) and np.isfinite(cy)):
+            logger.error(
+                f"Invalid crop center coordinates: cx={cx}, cy={cy}. "
+                f"This indicates find_non_uniform_center returned invalid values. "
+                f"Science image shape: {scienceImage.shape}, Template image shape: {templateImage.shape}"
+            )
+            raise ValueError(
+                f"Invalid crop center: cx={cx}, cy={cy} (must be finite)"
+            )
 
         # Check proximity to padding edges
         d_uniform_template = distance_to_uniform_row_col(
@@ -2793,6 +2828,20 @@ class Templates:
         )
 
         if np.isfinite(d_uniform_template) or np.isfinite(d_uniform_science):
+            # Validate WCS before creating cutout
+            try:
+                test_ra, test_dec = imageWCS.all_pix2world([cx], [cy], 1)
+                if not (np.isfinite(test_ra[0]) and np.isfinite(test_dec[0])):
+                    logger.error(
+                        f"Invalid WCS transformation at crop center (cx={cx}, cy={cy}): RA={test_ra[0]}, Dec={test_dec[0]}. "
+                        f"This will cause Cutout2D to fail. Falling back to no crop."
+                    )
+                    # Return original images without cropping
+                    return scienceFpath, templateFpath
+            except Exception as e:
+                logger.error(f"WCS validation failed: {e}. Falling back to no crop.")
+                return scienceFpath, templateFpath
+            
             # Initial cutout
             scienceCutout = Cutout2D(
                 scienceImage,
@@ -2839,7 +2888,7 @@ class Templates:
             target_x_pix, target_y_pix = scienceHeader_newwcs.all_world2pix(
                 target_ra,
                 target_dec,
-                0,
+                1,
             )
             border = self.input_yaml.get("scale", 0)
             h, w = scienceImage_tmp.shape
@@ -2867,8 +2916,8 @@ class Templates:
         try:
             sci_w = get_wcs(scienceHeader)
             ref_w = get_wcs(templateHeader)
-            sx, sy = sci_w.all_world2pix(target_ra, target_dec, 0)
-            tx, ty = ref_w.all_world2pix(target_ra, target_dec, 0)
+            sx, sy = sci_w.all_world2pix(target_ra, target_dec, 1)
+            tx, ty = ref_w.all_world2pix(target_ra, target_dec, 1)
             logger.info(
                 "Post-crop WCS target mapping: science=(%.2f, %.2f) template=(%.2f, %.2f) delta=(%.2f, %.2f) px",
                 float(sx),
@@ -3286,6 +3335,13 @@ class Templates:
                 len(mag_img_r),
                 len(mag_img),
             )
+            # Warn if intercept indicates a systematic offset (>0.5 mag or ~1 pixel equivalent)
+            if np.isfinite(intercept) and abs(intercept) > 0.5:
+                logger.warning(
+                    "RANSAC intercept=%.3f mag indicates systematic offset between images; "
+                    "check WCS alignment and centroid matching.",
+                    intercept,
+                )
 
             # --- Optional diagnostic plot ---
             if make_plot and "fpath" in self.input_yaml:
@@ -3994,8 +4050,9 @@ class Templates:
             else:
                 universal_mask = universal_mask_full
 
-            templateDir = os.path.dirname(templateFpath)
-            mask_loc = os.path.join(templateDir, "universal_mask.fits")
+            # Save mask to scienceDir (not templateDir) to prevent crosstalk
+            # when multiple science images use the same template
+            mask_loc = os.path.join(scienceDir, f"universal_mask_{base_name}")
             save_to_fits(universal_mask.astype(int), mask_loc)
 
             # Deduplicate masked centres
@@ -4119,9 +4176,13 @@ class Templates:
                 )
 
             if method == "sfft":
+                # Clean input files to prevent SFFT from modifying originals in-place
+                # (matches HOTPANTS behavior and prevents crosstalk)
+                sci_clean = clean_fits_nans(scienceFpath)
+                ref_clean = clean_fits_nans(template_work_fpath)
                 method = self._subtract_sfft(
-                    scienceFpath,
-                    template_work_fpath,
+                    sci_clean,
+                    ref_clean,
                     differenceFpath,
                     mask_loc,
                     scienceDir,
@@ -4254,6 +4315,28 @@ class Templates:
                 try:
                     os.remove(prepared_template_fpath)
                 except OSError:
+                    pass
+            # Clean up temporary files created by clean_fits_nans to prevent
+            # filesystem slowdown from accumulating temporary files across runs
+            if method == "sfft":
+                try:
+                    if sci_clean and os.path.exists(sci_clean):
+                        os.remove(sci_clean)
+                except (OSError, NameError, UnboundLocalError):
+                    pass
+                try:
+                    if ref_clean and os.path.exists(ref_clean):
+                        os.remove(ref_clean)
+                except (OSError, NameError, UnboundLocalError):
+                    pass
+            elif method == "hotpants":
+                # HOTPANTS also uses clean_fits_nans but modifies the local variables
+                # We need to track and clean those too
+                try:
+                    # The _subtract_hotpants method creates cleaned files locally
+                    # We can't access them here, so we should add cleanup there
+                    pass
+                except (OSError, NameError, UnboundLocalError):
                     pass
 
     # ----- Private subtraction-backend methods -----
@@ -4678,8 +4761,10 @@ class Templates:
                 resolved_exe = which
 
             # Sanitise inputs
-            clean_fits_nans(scienceFpath)
-            clean_fits_nans(templateFpath)
+            original_sci_path = scienceFpath
+            original_ref_path = templateFpath
+            scienceFpath = clean_fits_nans(scienceFpath)
+            templateFpath = clean_fits_nans(templateFpath)
 
             hotpants_fwhm = ensure_odd(
                 int(max(np.ceil(template_fwhm), np.ceil(science_fwhm)))
@@ -4762,3 +4847,15 @@ class Templates:
                 logger, "HOTPANTS subtraction failed", exc
             )
             return False
+        finally:
+            # Clean up temporary files created by clean_fits_nans
+            try:
+                if scienceFpath != original_sci_path and os.path.exists(scienceFpath):
+                    os.remove(scienceFpath)
+            except (OSError, NameError):
+                pass
+            try:
+                if templateFpath != original_ref_path and os.path.exists(templateFpath):
+                    os.remove(templateFpath)
+            except (OSError, NameError):
+                pass

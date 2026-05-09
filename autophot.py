@@ -1040,6 +1040,12 @@ class AutomatedPhotometry:
         Returns:
             str: Path to the aggregated light curve CSV.
         """
+        global QUIET_MODE
+        
+        # Deep-copy the input configuration to prevent modifications from
+        # persisting across multiple calls to run_photometry()
+        default_input = copy.deepcopy(default_input)
+        
         t0 = time.perf_counter()
         gc.collect()  # Clean up memory early
 
@@ -1096,6 +1102,19 @@ class AutomatedPhotometry:
         if isinstance(fits_dir, str) and fits_dir.endswith("/"):
             fits_dir = fits_dir[:-1]
             default_input["fits_dir"] = fits_dir
+
+        # Clear module-level caches to ensure independence between image runs
+        # This prevents state contamination when processing multiple images
+        try:
+            from limits import _flux_for_mag_cached
+            _flux_for_mag_cached.cache_clear()
+        except Exception:
+            pass
+        try:
+            from background import _disk_structuring_element
+            _disk_structuring_element.cache_clear()
+        except Exception:
+            pass
 
         plt.close("all")
 
@@ -1821,6 +1840,9 @@ class AutomatedPhotometry:
             _log(
                 f"Recovery completed in {time.perf_counter() - t0:.3f} seconds."
             )
+
+        # Reset global QUIET_MODE to prevent state persisting across multiple calls
+        QUIET_MODE = False
 
         return output_photometry
 

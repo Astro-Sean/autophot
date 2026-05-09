@@ -405,6 +405,7 @@ def _compute_detection_mask(
     snr_col = col_map.get("snr")
     
     if use_SNR_limit:
+        # Priority 1: Use explicit SNR columns if available
         if method_u == "PSF" and snr_psf_col:
             snr = pd.to_numeric(df[snr_psf_col], errors="coerce").to_numpy(dtype=float, copy=False)
             snr_source = "snr_psf"
@@ -414,30 +415,34 @@ def _compute_detection_mask(
         elif snr_col:
             snr = pd.to_numeric(df[snr_col], errors="coerce").to_numpy(dtype=float, copy=False)
             snr_source = "snr"
-        # Log the SNR source and values for debugging
-        if len(snr) > 0 and not np.all(np.isnan(snr)):
-            logging.debug(f"_compute_detection_mask: method={method}, snr_source={snr_source}, snr_mean={np.nanmean(snr):.3f}, snr_max={np.nanmax(snr):.3f}")
+        # Priority 2: Compute SNR from flux columns (avoids systematic errors in mag_err)
         elif method_u == "PSF" and col_map.get("flux_psf") and col_map.get("flux_psf_err"):
             flux = pd.to_numeric(df[col_map.get("flux_psf")], errors="coerce").to_numpy(dtype=float, copy=False)
             flux_err = pd.to_numeric(df[col_map.get("flux_psf_err")], errors="coerce").to_numpy(dtype=float, copy=False)
             snr = np.divide(
-                flux,
+                np.abs(flux),  # Use absolute flux to handle negative PSF fits
                 flux_err,
                 out=np.full(len(df), np.nan, dtype=float),
                 where=(flux_err > 0) & np.isfinite(flux_err),
             )
+            snr_source = "flux_psf"
         elif method_u == "AP" and col_map.get("flux_ap") and col_map.get("flux_ap_err"):
             flux = pd.to_numeric(df[col_map.get("flux_ap")], errors="coerce").to_numpy(dtype=float, copy=False)
             flux_err = pd.to_numeric(df[col_map.get("flux_ap_err")], errors="coerce").to_numpy(dtype=float, copy=False)
             snr = np.divide(
-                flux,
+                np.abs(flux),  # Use absolute flux for consistency
                 flux_err,
                 out=np.full(len(df), np.nan, dtype=float),
                 where=(flux_err > 0) & np.isfinite(flux_err),
             )
+            snr_source = "flux_ap"
+        # Priority 3: Last resort - infer SNR from magnitude uncertainty (includes systematic errors)
         else:
-            # Last resort: infer SNR from magnitude uncertainty.
             snr = _snr_from_magerr(err)
+            snr_source = "mag_err"
+        # Log the SNR source and values for debugging
+        if len(snr) > 0 and not np.all(np.isnan(snr)):
+            logging.debug(f"_compute_detection_mask: method={method}, snr_source={snr_source}, snr_mean={np.nanmean(snr):.3f}, snr_max={np.nanmax(snr):.3f}")
     else:
         # Still compute SNR for completeness, but detection uses lmag branch below.
         snr = _snr_from_magerr(err)
@@ -723,11 +728,13 @@ def plot_lightcurve(
         df.sort_values(by="mjd", inplace=True)
         # Check if col is already an apparent magnitude (has zeropoint applied)
         # If it starts with 'inst_' it's instrumental, otherwise it's apparent
+        # Note: For uniform schema, mag_{method} columns (e.g., mag_psf) contain
+        # already-calibrated apparent magnitudes from main.py output
         if col.startswith('inst_'):
             # Convert instrumental magnitude to apparent magnitude
             df["apparent_mag"] = df[col] + df[zp_col]
         else:
-            # Already apparent magnitude, just use it
+            # Already apparent magnitude (calibrated), just use it
             df["apparent_mag"] = df[col]
         df["apparent_mag_err"] = df[err_col]
 

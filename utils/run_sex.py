@@ -525,9 +525,28 @@ class SExtractorWrapper:
             if ms_df is not None and len(ms_df) > 0:
                 match_radius = float(fwhm_est * 2)
                 mask_coords = ms_df[["x_pix", "y_pix"]].to_numpy(dtype=np.float64)
+                # Filter out NaN/Inf coordinates before cKDTree
+                finite_mask = np.all(np.isfinite(mask_coords), axis=1)
+                mask_coords = mask_coords[finite_mask]
+                if len(mask_coords) < len(finite_mask):
+                    logger.debug(
+                        "Filtered %d non-finite mask coordinates before cKDTree",
+                        len(finite_mask) - len(mask_coords)
+                    )
 
             if len(mask_coords) > 0:
                 coords = sources[["x_pix", "y_pix"]].to_numpy(dtype=np.float64)
+                # Filter out NaN/Inf source coordinates before cKDTree
+                finite_coords_mask = np.all(np.isfinite(coords), axis=1)
+                coords = coords[finite_coords_mask]
+                if len(coords) < len(finite_coords_mask):
+                    logger.debug(
+                        "Filtered %d non-finite source coordinates before cKDTree",
+                        len(finite_coords_mask) - len(coords)
+                    )
+                if len(coords) == 0:
+                    logger.debug("No finite source coordinates, skipping masked region filtering")
+                    return sources
                 tree = cKDTree(mask_coords)
                 # Inf distance if no neighbor within match_radius
                 try:

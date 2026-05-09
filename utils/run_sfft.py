@@ -453,35 +453,31 @@ def run_sfft() -> Optional[int]:
     FITS_DIFF = args.diff or os.path.join(out_dir, f"diff_{os.path.basename(FITS_SCI)}")
 
     # --- Load Headers (Once) ---
+    # Use float64 throughout: SFFT internals operate in float64 and mixing float32
+    # would cause a silent precision downgrade when data is written back to FITS.
     def get_fits_info(fits_path: str) -> Tuple[fits.Header, np.ndarray]:
         with fits.open(fits_path, memmap=False) as hdul:
             header = hdul[0].header.copy()
-            data = np.array(hdul[0].data, dtype=np.float32)
+            data = np.array(hdul[0].data, dtype=np.float64)
             return header, data
 
     hdr_sci, data_sci = get_fits_info(FITS_SCI)
     hdr_ref, data_ref = get_fits_info(FITS_REF)
 
-    # Synchronize NaN masks between science and reference images
-    # Create a combined NaN mask to ensure both images have NaN in the same locations
-    nan_mask_sci = np.isnan(data_sci)
-    nan_mask_ref = np.isnan(data_ref)
+    # Build a combined NaN mask from both inputs so that no-data regions in either
+    # image are correctly propagated to the output difference image.
+    # NOTE: we do NOT write this mask back into the input FITS files.  Mutating the
+    # science / template files here would permanently corrupt them on any retry path
+    # (e.g. SFFT post-anomaly feedback) and would cause NaN regions to grow with
+    # each re-run.  SFFT handles no-data regions via the PriorBanMask argument.
+    nan_mask_sci = ~np.isfinite(data_sci)
+    nan_mask_ref = ~np.isfinite(data_ref)
     combined_nan_mask = nan_mask_sci | nan_mask_ref
-    
     if np.any(combined_nan_mask):
-        log_info(f"Synchronizing NaN masks: {np.sum(combined_nan_mask)} pixels will be NaN in both images")
-        data_sci[combined_nan_mask] = np.nan
-        data_ref[combined_nan_mask] = np.nan
-        
-        # Write synchronized images back to FITS files for SFFT
-        log_info("Writing synchronized NaN masks to science and reference FITS files")
-        with fits.open(FITS_SCI, mode='update') as hdul:
-            hdul[0].data = data_sci
-            hdul.flush()
-        with fits.open(FITS_REF, mode='update') as hdul:
-            hdul[0].data = data_ref
-            hdul.flush()
-        log_info("FITS files updated with synchronized NaN masks")
+        log_info(
+            f"Combined NaN/invalid mask: {int(np.count_nonzero(combined_nan_mask))} pixels "
+            "will be forced to NaN in the output difference image."
+        )
 
     def _sanitize_xy_sources(
         xy: Optional[np.ndarray], label: str, width: int, height: int
@@ -668,18 +664,18 @@ def run_sfft() -> Optional[int]:
     # as a subprocess or on HPC (avoids "Thread creation failed" and semaphore leaks).
     NUM_CPU_THREADS_4SUBTRACT = 1
 
-    # Enforce REF convolution globally so DIFF = SCI - conv(REF).
-    # ForceConv is always set to REF: DIFF = SCI - conv(REF) so transients retain
-    # the science PSF. CLI -forceconv is accepted for documentation but overridden.
-    forceconv_arg = str(getattr(args, "forceconv", "REF")).upper().strip()
-    if forceconv_arg != "REF":
+    # Honour the -forceconv CLI argument.
+    # REF  => DIFF = SCI - conv(REF): transients keep the science PSF (default,
+    #         recommended when science has broader PSF than the template).
+    # SCI  => DIFF = conv(SCI) - REF: use when the template has broader PSF.
+    # AUTO => SFFT chooses based on measured FWHMs.
+    ForceConv = str(getattr(args, "forceconv", "REF")).upper().strip()
+    if ForceConv not in ("REF", "SCI", "AUTO"):
         log_info(
-            f"ForceConv='{forceconv_arg}' requested but pipeline enforces 'REF' "
-            "(DIFF = SCI - conv(REF)); overriding."
+            f"ForceConv='{ForceConv}' is not a recognised value; falling back to 'REF'."
         )
-    else:
-        log_info("ForceConv=REF (enforced): DIFF = SCI - conv(REF).")
-    ForceConv = "REF"
+        ForceConv = "REF"
+    log_info(f"ForceConv={ForceConv}: DIFF = SCI - conv(REF) convention applies.")
     GAIN_KEY = "GAIN"
     SATUR_KEY = "SATURATE"
 
@@ -710,8 +706,12 @@ def run_sfft() -> Optional[int]:
     # LOCAL uses a background evaluated around each source; GLOBAL uses the global background.
     is_crowded = args.crowded
 
-    # Align with sfft defaults to reduce systematic scaling bias.
-    DETECT_THRESH = 5.0 if is_crowded else 2.0
+    # SExtractor detection threshold for SFFT source selection.
+    # 3.0 sigma matches SFFT's own documentation and example configs.
+    # The previous value of 1.5 caused large numbers of noise peaks to be detected
+    # on background-subtracted images, polluting the kernel fit and generating
+    # excessive post-anomaly candidates that triggered unnecessary re-runs.
+    DETECT_THRESH = 3.0
     DEBLEND_MINCON = 0.005
 
     constant_phot_ratio = _parse_bool_str(
@@ -786,78 +786,34 @@ def run_sfft() -> Optional[int]:
             if mask_raw.dtype != bool:
                 mask_raw = mask_raw.astype(bool)
 
-            # Some FITS-writing steps may store (x,y) vs (y,x) differently.
-            # Try raw + transpose (when shapes match) and select the orientation
-            # that yields a residual background median closest to 0.
-            candidates = []
+            # FITS and numpy both use row-major (row=y, col=x) storage, so the
+            # mask written by the pipeline should already be in the correct
+            # orientation and no transposition is needed.  The previous heuristic
+            # (pick the orientation whose unmasked science median is closest to 0)
+            # was unreliable on background-subtracted images because both
+            # orientations give median ≈ 0, making the choice effectively random.
             if mask_raw.shape == data_sci.shape:
-                candidates.append(("raw", mask_raw))
-            if mask_raw.T.shape == data_sci.shape:
-                candidates.append(("T", mask_raw.T))
-
-            if not candidates:
-                raise ValueError(
-                    f"Mask shape {mask_raw.shape} does not match science shape {data_sci.shape}"
+                prior_ban_mask = mask_raw
+                log_info(
+                    f"Loaded mask: shape {mask_raw.shape}, "
+                    f"{int(np.count_nonzero(mask_raw))} masked pixels."
                 )
-
-            if len(candidates) == 1:
-                prior_ban_mask = candidates[0][1]
             else:
-                best_name = None
-                best_abs_median = float("inf")
-                best_mask = None
-
-                for name, m in candidates:
-                    vals = data_sci[~m]
-                    vals = vals[np.isfinite(vals)]
-                    if vals.size == 0:
-                        continue
-                    med = float(np.median(vals))
-                    abs_med = abs(med)
-                    if abs_med < best_abs_median:
-                        best_abs_median = abs_med
-                        best_name = name
-                        best_mask = m
-
-                prior_ban_mask = (
-                    best_mask if best_mask is not None else candidates[0][1]
+                raise ValueError(
+                    f"Mask shape {mask_raw.shape} does not match science shape {data_sci.shape}. "
+                    "Ensure the universal_mask.fits was written with the same spatial grid as "
+                    "the science image (no transposition is applied)."
                 )
-                if best_name is not None:
-                    log_info(
-                        f"SFFT chose mask orientation '{best_name}' "
-                        f"(abs(median unmasked science)={best_abs_median:.6g})."
-                    )
         except Exception as e:
             log_info(f"Warning: Could not load mask '{args.mask}': {e}")
 
-    # Estimate a constant background offset for SExtractor when BACK_TYPE='MANUAL'.
-    # SFFT's own guidance typically uses BACK_VALUE=0.0, but if there is a strong
-    # residual DC offset we can compensate. We only apply the estimate when it is
-    # clearly above noise to avoid driving systematic oversubtraction.
+    # Both science and template are background-subtracted by the pipeline before
+    # reaching this script, so BACK_VALUE=0.0 is correct.  Estimating a non-zero
+    # offset here from the (already-zero-median) science image produced a
+    # double-subtraction inside SFFT's internal SExtractor step, biasing source
+    # photometry used for kernel fitting and corrupting the flux scale.
     BACK_VALUE = 0.0
-    if prior_ban_mask is not None:
-        try:
-            if prior_ban_mask.shape == data_sci.shape:
-                vals = data_sci[~prior_ban_mask]
-                vals = vals[np.isfinite(vals)]
-                if vals.size > 0:
-                    med = float(np.median(vals))
-                    mad = float(np.median(np.abs(vals - med)))
-                    robust_sigma = 1.4826 * mad if mad > 0 else 0.0
-                    if abs(med) > max(1e-3, 0.25 * robust_sigma):
-                        BACK_VALUE = med
-                        log_info(
-                            f"SFFT BACK_VALUE (robust median of unmasked pixels): {BACK_VALUE:.6g} "
-                            f"(robust_sigma={robust_sigma:.3g})"
-                        )
-                    else:
-                        BACK_VALUE = 0.0
-                        log_info(
-                            f"SFFT BACK_VALUE suppressed (residual consistent with 0): "
-                            f"med={med:.6g}, robust_sigma={robust_sigma:.3g}"
-                        )
-        except Exception as e:
-            log_info(f"Warning: Could not estimate background offset: {e}")
+    log_info("SFFT BACK_VALUE=0.0 (inputs are pipeline-background-subtracted).")
 
     # --- Run SFFT ---
     t0_sfft = time.time()
@@ -1020,7 +976,7 @@ def run_sfft() -> Optional[int]:
                     PostAnomalyCheck=True,
                     PAC_RATIO_THRESH=PAC_RATIO_THRESH,
                     BoundarySIZE=boundary,
-                ONLY_FLAGS=ONLY_FLAGS,
+                    ONLY_FLAGS=ONLY_FLAGS,
                     BACKEND_4SUBTRACT=BACKEND_4SUBTRACT,
                     CUDA_DEVICE_4SUBTRACT=CUDA_DEVICE_4SUBTRACT,
                     NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
@@ -1157,18 +1113,15 @@ def run_sfft() -> Optional[int]:
                         hdul[0].data = diff
                         hdul.flush()
                         n_after = int(np.count_nonzero(~np.isfinite(diff)))
+                        n_mask = int(np.count_nonzero(combined_nan_mask))
                         log_info(
-                            "Applied combined NaN mask to diff: NaN/inf %d -> %d (mask=%d px)",
-                            n_before,
-                            n_after,
-                            int(np.count_nonzero(combined_nan_mask)),
+                            f"Applied combined NaN mask to diff: NaN/inf {n_before} -> {n_after} "
+                            f"(mask={n_mask} px)"
                         )
                     else:
                         log_info(
-                            "Warning: combined_nan_mask shape %s != diff shape %s; "
-                            "cannot reapply NaN mask.",
-                            combined_nan_mask.shape,
-                            diff.shape,
+                            f"Warning: combined_nan_mask shape {combined_nan_mask.shape} "
+                            f"!= diff shape {diff.shape}; cannot reapply NaN mask."
                         )
         except Exception as e:
             log_info(f"Warning: failed to reapply NaN mask to diff: {e}")
