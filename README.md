@@ -16,7 +16,8 @@
 - **Issues**: [GitHub Issues](https://github.com/Astro-Sean/autophot/issues)
 
 > [!NOTE]
-> I am the sole developer and maintainer of AutoPhOT and also a full-time researcher at MPE. Please open issues on GitHub and I will do my best to resolve them.
+> I am the sole developer and maintainer of AutoPhOT and also a [full-time researcher](https://astro-sean.github.io/index.html) at [MPE](https://www.mpe.mpg.de/person/144270/1302618).
+> Please open issues on GitHub and I will do my best to resolve them as soon as possible.
 
 ---
 
@@ -61,7 +62,7 @@ autophot-main -h
 ### Install from source (developer / latest)
 
 If you are running from a cloned repository, install it in editable mode so
-internal modules (e.g. `plotting_utils.py`) are importable:
+internal modules are importable:
 
 ```bash
 git clone https://github.com/Astro-Sean/autophot.git
