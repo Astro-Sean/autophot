@@ -1147,7 +1147,7 @@ NNW
                     [str(ref_image_copy)],
                     scamp_results=scamp_ref,
                     output_dir=str(resample_dir),
-                    config=swarp_config,
+                    config=swarp_config_ref,
                 )
                 if swarp_res is None:
                     self.logger.info("SWarp failed. Falling back to AstroAlign.")
@@ -1164,9 +1164,9 @@ NNW
                 )
                 swarp_res = self.run_swarp(
                     [str(sci_image_copy)],
-                    scamp_results=scamp_ref,
+                    scamp_results=None,
                     output_dir=str(resample_dir),
-                    config=swarp_config,
+                    config=swarp_config_sci,
                 )
                 if swarp_res is None:
                     self.logger.info("SWarp failed. Falling back to AstroAlign.")
@@ -1192,7 +1192,7 @@ NNW
                 self.logger.debug("Running SWarp on science image...")
                 swarp_res_sci = self.run_swarp(
                     [str(sci_image_copy)],
-                    scamp_results={},
+                    scamp_results=None,
                     output_dir=str(resample_dir_sci),
                     config=swarp_config_sci,
                 )
