@@ -1088,51 +1088,72 @@ NNW
                 center_ra, center_dec, output_width, output_height, pix_scale,
             )
 
-            # Run SCAMP on the reference only, then resample both images together.
-            swarp_config_ref["COMBINE"] = "N"
-            swarp_config_sci["COMBINE"] = "N"
+            # Run SCAMP once on BOTH catalogs with COMBINE=N.
+            # SCAMP solves both on the same astrometric grid and writes one .head
+            # per input catalog.  Copying those .head files next to their FITS
+            # before SWarp guarantees both resamplings use the same grid and
+            # produce identical output shapes — no post-processing trim needed.
+            swarp_config["COMBINE"] = "N"
+
+            # Use the wider of the two FWHM thresholds so both catalogs pass the filter.
+            scamp_config_both = {
+                **scamp_config_base,
+                "FWHM_THRESHOLDS": (
+                    f"{min(0.3*fwhm_sci_pix, 0.3*fwhm_ref_pix):.2f},"
+                    f"{max(10*fwhm_sci_pix, 10*fwhm_ref_pix):.2f}"
+                ),
+            }
 
             if reference_already_scamp:
                 self.logger.info(
                     "Reference header has SCAMP HISTORY; skipping SCAMP, using existing WCS."
                 )
-                scamp_ref = {}
+                scamp_result = {}
             else:
-                self.logger.info("Running SCAMP for reference image...")
-                scamp_ref = self.run_scamp(
-                    ref_sex["catalog_path"],
-                    reference_cat=sci_sex["catalog_path"],
-                    output_dir=str(reference_aligned_dir),
-                    config=scamp_config_ref,
+                self.logger.info(
+                    "Running SCAMP on both catalogs (science + reference, COMBINE=N)..."
                 )
-                if scamp_ref is None:
+                scamp_result = self.run_scamp(
+                    [sci_sex["catalog_path"], ref_sex["catalog_path"]],
+                    reference_cat=None,
+                    output_dir=str(reference_aligned_dir),
+                    config=scamp_config_both,
+                )
+                if scamp_result is None:
                     self.logger.info(
-                        "SCAMP failed for reference image. Falling back to AstroAlign."
+                        "SCAMP failed. Falling back to AstroAlign."
                     )
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
 
-                # Science image already has an accurate WCS from solve-field/SCAMP
-                # at the top of the pipeline. Running SCAMP against its own catalog
-                # (self-referencing) produces a meaningless .head that offsets the
-                # science during SWarp resampling and breaks co-registration.
-                # Do not run SCAMP on the science image here.
+            # Copy each .head file next to its FITS so SWarp picks it up.
+            head_by_stem = (
+                scamp_result.get("head_files_by_stem", {})
+                if isinstance(scamp_result, dict)
+                else {}
+            )
+            sci_cat_stem = Path(sci_sex["catalog_path"]).stem
+            ref_cat_stem = Path(ref_sex["catalog_path"]).stem
 
-            # Place .head files next to their respective FITS so SWarp uses
-            # the SCAMP-refined WCS for BOTH images during resampling.
-            ref_head = scamp_ref.get("head_file") if isinstance(scamp_ref, dict) else None
-            if ref_head and Path(ref_head).exists():
-                ref_head_dst = ref_image_copy.with_suffix(".head")
-                if Path(ref_head).resolve() != ref_head_dst.resolve():
-                    try:
-                        shutil.copy2(ref_head, ref_head_dst)
-                        self.logger.info("Copied SCAMP .head (reference) to %s for SWarp.", ref_head_dst)
-                    except Exception as e:
-                        log_warning_from_exception(self.logger, "Could not copy reference .head for SWarp", e)
-
-            # No .head for science: science WCS is the astrometric reference frame.
-            # SWarp will use the existing FITS WCS from the science image directly.
+            for cat_stem, fits_copy in [
+                (sci_cat_stem, sci_image_copy),
+                (ref_cat_stem, ref_image_copy),
+            ]:
+                head_src = head_by_stem.get(cat_stem)
+                if head_src and Path(head_src).exists():
+                    head_dst = fits_copy.with_suffix(".head")
+                    if Path(head_src).resolve() != head_dst.resolve():
+                        try:
+                            shutil.copy2(head_src, head_dst)
+                            self.logger.info(
+                                "Copied SCAMP .head (%s) to %s for SWarp.",
+                                cat_stem, head_dst,
+                            )
+                        except Exception as e:
+                            log_warning_from_exception(
+                                self.logger, f"Could not copy .head for {cat_stem}", e
+                            )
 
             resample_dir = science_aligned_dir / "resampled_output"
             resample_dir.mkdir(parents=True, exist_ok=True)
@@ -1158,9 +1179,9 @@ NNW
                 )
                 swarp_res = self.run_swarp(
                     [str(ref_image_copy)],
-                    scamp_results=scamp_ref,
+                    scamp_results=scamp_result,
                     output_dir=str(resample_dir),
-                    config=swarp_config_ref,
+                    config=swarp_config,
                 )
                 if swarp_res is None:
                     self.logger.info("SWarp failed. Falling back to AstroAlign.")
@@ -1179,7 +1200,7 @@ NNW
                     [str(sci_image_copy)],
                     scamp_results=None,
                     output_dir=str(resample_dir),
-                    config=swarp_config_sci,
+                    config=swarp_config,
                 )
                 if swarp_res is None:
                     self.logger.info("SWarp failed. Falling back to AstroAlign.")
@@ -1254,12 +1275,10 @@ NNW
                     self.logger.debug("Could not read WCS from SWarp output [%s]: %s", _label, _e)
 
             # Reconcile output shapes.
-            # SWarp floating-point WCS arithmetic can produce outputs differing by
-            # 1-2 px even with identical IMAGE_SIZE.  When the mismatch is small,
-            # trim both outputs to the minimum shape by removing rows/cols from the
-            # END — this preserves the pixel origin so CRPIX and the full WCS are
-            # unchanged.  Large mismatches (>2 px) indicate a genuine coverage gap
-            # and require fallback.
+            # When both images are solved by the same SCAMP call and resampled by
+            # the same SWarp call with identical CENTER/IMAGE_SIZE/PIXEL_SCALE, the
+            # outputs are guaranteed to be the same shape.  A small tolerance (2 px)
+            # is kept only as a safety net for floating-point edge cases.
             _SHAPE_TOL = 2
             try:
                 with fits.open(aligned_sci) as _h:
@@ -2175,16 +2194,34 @@ NNW
 
     def run_scamp(
         self,
-        catalog_path: str,
+        catalog_paths,
         reference_cat: Optional[str] = None,
         output_dir: Optional[str] = None,
         config: Optional[Dict] = None,
     ) -> Optional[Dict]:
+        """Run SCAMP on one or more LDAC catalogs in a single call.
+
+        Parameters
+        ----------
+        catalog_paths : str or list of str
+            One or more LDAC catalog paths to pass to SCAMP.  When multiple
+            catalogs are supplied, SCAMP is invoked with COMBINE=N so that
+            it produces one .head file per catalog, all solved on the same
+            astrometric grid — guaranteeing pixel-level co-registration.
+        reference_cat : str, optional
+            Path to the astrometric reference catalog (ASTREF_CATALOG=FILE).
+            When None, GAIA-DR3 is used.
+        """
+        if isinstance(catalog_paths, (str, Path)):
+            catalog_paths = [str(catalog_paths)]
+        else:
+            catalog_paths = [str(p) for p in catalog_paths]
+
         output_path = Path(output_dir) if output_dir else None
         if output_path:
             output_path.mkdir(parents=True, exist_ok=True)
 
-        stem = Path(catalog_path).stem
+        stem = Path(catalog_paths[0]).stem
 
         # Read scamp_distort_degrees from wcs config for consistency with main pipeline
         iy = getattr(self, "input_yaml", None) or {}
@@ -2199,6 +2236,10 @@ NNW
             "NTHREADS": self.default_threads,
             **(config or {}),
         }
+        # When multiple catalogs are passed, ensure COMBINE=N so SCAMP produces
+        # one .head per input catalog rather than combining them.
+        if len(catalog_paths) > 1:
+            final_config["COMBINE"] = "N"
         final_config = {k: v for k, v in final_config.items() if v is not None}
 
         config_file = (
@@ -2223,7 +2264,7 @@ NNW
 
         cmd = [
             self._check_executable("scamp"),
-            catalog_path,
+            *catalog_paths,
             "-c",
             config_file,
             "-XML_NAME",
@@ -2287,19 +2328,24 @@ NNW
             self.logger.warning(
                 f"SCAMP failed (code {result.returncode}). See {log_file}"
             )
-            # Don't clean up outputs for debugging
-            # _clean_scamp_outputs()
             return None
 
         distortion = self._parse_scamp_xml(xml_file)
-        head_files = list(Path(output_path).glob("*.head")) if output_path else []
-        head_file = str(head_files[0]) if head_files else None
+
+        # Map each input catalog stem to its output .head file.
+        # SCAMP names .head files after the catalog stem (same as the FITS stem).
+        head_files_found = list(Path(output_path).glob("*.head")) if output_path else []
+        head_files_by_stem = {p.stem: str(p) for p in head_files_found}
+
+        # Legacy single-catalog callers expect a "head_file" key.
+        head_file = str(head_files_found[0]) if head_files_found else None
 
         return {
             "output_dir": str(output_path) if output_path else None,
             "xml_file": xml_file,
             "log_file": log_file,
             "head_file": head_file,
+            "head_files_by_stem": head_files_by_stem,
             "distortion": distortion,
             "config": final_config,
         }
