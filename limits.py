@@ -1597,27 +1597,57 @@ class Limits:
                 )
                 return np.nan
 
-            # Generate jitters for each candidate and measure S/N at all jittered positions.
-            # This ensures jittered positions are validated as quiet before selection.
-            # Total measurements = n_candidates * redo_default.
-            _jitter_rng = np.random.default_rng(42)
-            _jitter_dx = _jitter_rng.uniform(-0.5, 0.5, (len(cand_df), redo_default))
-            _jitter_dy = _jitter_rng.uniform(-0.5, 0.5, (len(cand_df), redo_default))
+            # Stage 1: Measure S/N at each candidate site (no jitter).
+            ini_ap = Aperture(input_yaml=local_input_yaml, image=cutout)
+            cand_df = ini_ap.measure(
+                sources=cand_df,
+                plot=False,
+                background_rms=cutout_rms,
+                verbose=0,
+            )
+            cand_df = _robust_site_snr(cand_df)
+
+            # Use the SNR column from Aperture.measure (with NaNs filled by _robust_site_snr).
+            # Score candidates by |SNR| so we choose the quietest background-like sites.
+            snr_col = np.asarray(cand_df.get("SNR", np.nan), dtype=float)
+            cand_df = cand_df.assign(_snr_score=snr_col)
+            cand_df = cand_df[np.isfinite(cand_df["_snr_score"])].copy()
+            if len(cand_df) == 0:
+                logger.warning(
+                    "All candidate sites have non-finite S/N; cannot find injection sites."
+                )
+                return np.nan
+
+            # Select the 100 quietest candidates (spatial selection optional but not critical here)
+            cand_df = cand_df.sort_values("_snr_score", ascending=True)
+            quiet_mask = cand_df["_snr_score"] <= float(effective_snr_limit)
+            cand_quiet = cand_df[quiet_mask].copy()
             
-            # Flatten all jittered positions into a single DataFrame for batch measurement
+            # Take the quietest n_quiet candidates (or fewer if not enough quiet sites)
+            stage1_chosen = cand_quiet.head(n_quiet) if len(cand_quiet) >= n_quiet else cand_df.head(n_quiet)
+            logger.info(
+                "Stage 1 quiet-site selection: sampled %d candidates -> selected %d quietest candidates (|S/N|<=%.3g).",
+                int(n_candidates),
+                int(len(stage1_chosen)),
+                float(effective_snr_limit),
+            )
+
+            # Stage 2: Jitter the selected candidates x3, measure S/N at all jittered positions,
+            # then select the 100 quietest jittered positions.
+            _jitter_rng = np.random.default_rng(42)
+            _jitter_dx = _jitter_rng.uniform(-0.5, 0.5, (len(stage1_chosen), redo_default))
+            _jitter_dy = _jitter_rng.uniform(-0.5, 0.5, (len(stage1_chosen), redo_default))
+            
             jittered_rows = []
-            for i, (x0, y0) in enumerate(zip(cand_df["x_pix"], cand_df["y_pix"])):
+            for i, (x0, y0) in enumerate(zip(stage1_chosen["x_pix"], stage1_chosen["y_pix"])):
                 for j in range(redo_default):
                     jittered_rows.append({
                         "x_pix": x0 + _jitter_dx[i, j],
                         "y_pix": y0 + _jitter_dy[i, j],
-                        "_cand_idx": i,  # Track which candidate this jitter belongs to
-                        "_jitter_idx": j,
                     })
             jittered_df = pd.DataFrame(jittered_rows)
             
             # Measure S/N at all jittered positions
-            ini_ap = Aperture(input_yaml=local_input_yaml, image=cutout)
             jittered_df = ini_ap.measure(
                 sources=jittered_df,
                 plot=False,
@@ -1626,107 +1656,23 @@ class Limits:
             )
             jittered_df = _robust_site_snr(jittered_df)
             
-            # Aggregate S/N per candidate (median absolute S/N across jitters)
+            # Select the 100 quietest jittered positions by |S/N|
             jittered_df["_abs_snr"] = np.abs(jittered_df["SNR"])
-            cand_snr_agg = jittered_df.groupby("_cand_idx")["_abs_snr"].median()
-            cand_df = cand_df.assign(_snr_score=cand_snr_agg.values)
-            cand_df = cand_df[np.isfinite(cand_df["_snr_score"])].copy()
+            jittered_df = jittered_df[np.isfinite(jittered_df["_abs_snr"])].copy()
+            jittered_df = jittered_df.sort_values("_abs_snr", ascending=True)
             
-            if len(cand_df) == 0:
-                logger.warning(
-                    "All candidate sites have non-finite S/N after jitter measurement; cannot find injection sites."
-                )
-                return np.nan
-
-            # Select quietest candidates based on jittered S/N score
-            cand_df = cand_df.sort_values("_snr_score", ascending=True)
-            quiet_mask = cand_df["_snr_score"] <= float(effective_snr_limit)
-            cand_quiet = cand_df[quiet_mask].copy()
-
-            # Select spatially uniform sites from the quiet candidates
-            # Take a larger pool (3x n_quiet) to allow spatial selection, then
-            # use K-means clustering to pick uniformly distributed sites
-            pool_size = min(3 * n_quiet, len(cand_quiet)) if len(cand_quiet) > 0 else 0
-            if len(cand_quiet) > 0 and pool_size >= n_quiet:
-                # Take the quietest pool_size candidates
-                pool = cand_quiet.head(pool_size).copy()
-                # Use K-means to select spatially uniform sites
-                try:
-                    from sklearn.cluster import KMeans
-                    coords = np.column_stack([pool["x_pix"].values, pool["y_pix"].values])
-                    kmeans = KMeans(n_clusters=n_quiet, random_state=42, n_init=10)
-                    kmeans.fit(coords)
-                    # Find the closest point to each cluster center
-                    chosen_indices = []
-                    for center in kmeans.cluster_centers_:
-                        distances = np.sum((coords - center) ** 2, axis=1)
-                        chosen_indices.append(np.argmin(distances))
-                    chosen = pool.iloc[chosen_indices].copy()
-                    logger.info(
-                        "Quiet-site selection: found %d/%d candidates with median |S/N|<=%.3g (jittered); "
-                        "selected %d spatially uniform sites via K-means from pool of %d.",
-                        int(len(cand_quiet)),
-                        int(len(cand_df)),
-                        float(effective_snr_limit),
-                        int(len(chosen)),
-                        int(pool_size),
-                    )
-                except Exception as exc:
-                    # Fallback to simple selection if clustering fails
-                    logger.warning(
-                        "K-means spatial selection failed (%s); falling back to simple selection.",
-                        str(exc),
-                    )
-                    chosen = cand_quiet.head(n_quiet)
-                    logger.info(
-                        "Quiet-site selection: found %d/%d candidates with median |S/N|<=%.3g (jittered); using the lowest %d.",
-                        int(len(cand_quiet)),
-                        int(len(cand_df)),
-                        float(effective_snr_limit),
-                        int(min(n_quiet, len(cand_quiet))),
-                    )
-            elif len(cand_quiet) > 0:
-                # Not enough quiet candidates for spatial selection, just take what we have
-                chosen = cand_quiet.head(min(n_quiet, len(cand_quiet)))
-                logger.info(
-                    "Quiet-site selection: found %d/%d candidates with median |S/N|<=%.3g (jittered); "
-                    "using all %d (insufficient for spatial selection).",
-                    int(len(cand_quiet)),
-                    int(len(cand_df)),
-                    float(effective_snr_limit),
-                    int(len(chosen)),
-                )
-            else:
-                # No quiet sites, fall back to lowest-|S/N| sites
-                chosen = cand_df.head(n_quiet)
-                try:
-                    q = np.nanpercentile(np.asarray(cand_df["_snr_score"], float), [5, 25, 50, 75, 95])
-                    q_str = " / ".join(f"{v:.3g}" for v in q)
-                except Exception:
-                    q_str = "n/a"
-                logger.info(
-                    "No candidates with median |S/N|<=%.3g (jittered) in local environment; using the lowest %d sites anyway "
-                    "(min/med/max median |S/N| = %.3g / %.3g / %.3g; quantiles [5,25,50,75,95]=%s).",
-                    float(effective_snr_limit),
-                    int(min(n_quiet, len(cand_df))),
-                    float(np.nanmin(chosen["_snr_score"])),
-                    float(np.nanmedian(chosen["_snr_score"])),
-                    float(np.nanmax(chosen["_snr_score"])),
-                    q_str,
-                )
-
-            # Extract jittered positions for selected candidates directly
-            chosen_cand_indices = chosen.index.tolist()
-            selected_jittered = jittered_df[jittered_df["_cand_idx"].isin(chosen_cand_indices)].copy()
-            injection_df = selected_jittered[["x_pix", "y_pix"]].reset_index(drop=True)
-
+            # Take the 100 quietest jittered positions (or fewer if not enough)
+            n_jitter_quiet = min(n_quiet, len(jittered_df))
+            jittered_chosen = jittered_df.head(n_jitter_quiet)
+            injection_df = jittered_chosen[["x_pix", "y_pix"]].reset_index(drop=True)
+            
             logger.info(
-                "Quiet-site selection: sampled %d candidates -> selected %d candidates -> "
-                "using %d jittered positions for injection (%d jitters per candidate).",
-                int(n_candidates),
-                int(len(chosen)),
-                int(len(injection_df)),
+                "Stage 2 jittered quiet selection: %d candidates x %d jitters = %d jittered positions -> "
+                "selected %d quietest jittered positions for injection.",
+                int(len(stage1_chosen)),
                 int(redo_default),
+                int(len(jittered_df)),
+                int(len(injection_df)),
             )
 
             # Use only these jittered positions for injection trials.
