@@ -1466,6 +1466,7 @@ NNW
                 "reference_undersampled": ref_is_undersampled,
                 "science_fwhm_pixels": fwhm_sci_pix,
                 "reference_fwhm_pixels": fwhm_ref_pix,
+                "alignment_method": "scamp_swarp",
             }
 
         except Exception as e:
@@ -1546,6 +1547,7 @@ NNW
             return {
                 "science_aligned": science_image,
                 "reference_aligned": str(aligned_reference_fpath),
+                "alignment_method": "reproject",
             }
         except Exception as e:
             self.logger.info("Reproject alignment failed: %s", e)
@@ -1843,7 +1845,7 @@ NNW
             return {
                 "science_aligned": aligned_science_fpath,
                 "reference_aligned": aligned_reference_fpath,
-                # "alignment_offset_arcsec": alignment_offset,
+                "alignment_method": "astroalign",
             }
         except Exception as e:
             import sys

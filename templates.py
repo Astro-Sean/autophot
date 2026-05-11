@@ -2520,7 +2520,8 @@ class Templates:
                     compute_alignment_rms(sci_al_data, ref_al_data, fwhm_pix)
                 except Exception:
                     pass
-                logger.info("SWarp alignment succeeded.")
+                method_used = res.get("alignment_method", "scamp_swarp")
+                logger.info("Alignment succeeded (method: %s).", method_used)
                 return sci_al, ref_al
 
             def _astroalign() -> Tuple[Optional[str], Optional[str]]:
@@ -2541,7 +2542,8 @@ class Templates:
                     compute_alignment_rms(sci_al_data, ref_al_data, fwhm_pix)
                 except Exception:
                     pass
-                logger.info("AstroAlign alignment succeeded.")
+                method_used = res.get("alignment_method", "astroalign")
+                logger.info("Alignment succeeded (method: %s).", method_used)
                 return sci_al, ref_al
 
             def _reproject() -> Tuple[Optional[str], Optional[str]]:
