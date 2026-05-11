@@ -1178,55 +1178,32 @@ NNW
                     ref_image_copy, resampled_dir / "reference_image.resamp.fits"
                 )
             else:
-                # Run SWarp separately for each image with identical grid settings.
-                # Passing both images in a single SWarp call causes each output to be
-                # clipped independently to that image's pixel coverage, producing
-                # shape mismatches even when IMAGE_SIZE is explicitly set.
-                # Two separate calls with the same CENTER/IMAGE_SIZE/PIXEL_SCALE
-                # guarantee identical output shapes.
-                resample_dir_sci = resample_dir / "sci_resamp"
-                resample_dir_ref = resample_dir / "ref_resamp"
-                resample_dir_sci.mkdir(parents=True, exist_ok=True)
-                resample_dir_ref.mkdir(parents=True, exist_ok=True)
-
-                self.logger.debug("Running SWarp on science image...")
-                swarp_res_sci = self.run_swarp(
-                    [str(sci_image_copy)],
+                # Pass both images to a single SWarp call with COMBINE=N.
+                # SWarp computes the output grid once from CENTER/IMAGE_SIZE/PIXEL_SCALE
+                # and writes one .resamp.fits per input — both on the identical grid,
+                # so output shapes are guaranteed to match.
+                # Weight maps are intentionally omitted here: per-image MAP_WEIGHT causes
+                # SWarp to clip each output independently to that image's pixel coverage,
+                # which produces shape mismatches. NaN preservation is handled instead by
+                # the post-SWarp weight re-masking in run_swarp (BLANK_BADPIXELS + FILL_VALUE).
+                swarp_config_both = {
+                    **swarp_config,
+                    "COMBINE": "N",
+                }
+                self.logger.debug("Running SWarp on both images (COMBINE=N, single call)...")
+                swarp_res = self.run_swarp(
+                    [str(sci_image_copy), str(ref_image_copy)],
                     scamp_results=None,
-                    output_dir=str(resample_dir_sci),
-                    config=swarp_config_sci,
+                    output_dir=str(resample_dir),
+                    config=swarp_config_both,
+                    no_weight_maps=True,
                 )
-                if swarp_res_sci is None:
-                    self.logger.info("SWarp failed for science. Falling back to AstroAlign.")
+                if swarp_res is None:
+                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
-
-                self.logger.debug("Running SWarp on reference image...")
-                swarp_res_ref = self.run_swarp(
-                    [str(ref_image_copy)],
-                    scamp_results=scamp_ref,
-                    output_dir=str(resample_dir_ref),
-                    config=swarp_config_ref,
-                )
-                if swarp_res_ref is None:
-                    self.logger.info("SWarp failed for reference. Falling back to AstroAlign.")
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
-                    )
-
-                # Collect outputs into a common resampled_dir under consistent names.
-                resampled_dir = resample_dir / "resampled"
-                resampled_dir.mkdir(parents=True, exist_ok=True)
-                _sci_resamp = next(Path(swarp_res_sci["resampled_dir"]).glob("*.resamp.fits"), None)
-                _ref_resamp = next(Path(swarp_res_ref["resampled_dir"]).glob("*.resamp.fits"), None)
-                if _sci_resamp is None or _ref_resamp is None:
-                    self.logger.info("SWarp resampled files not found. Falling back to AstroAlign.")
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
-                    )
-                shutil.copy2(str(_sci_resamp), str(resampled_dir / "science_image.resamp.fits"))
-                shutil.copy2(str(_ref_resamp), str(resampled_dir / "reference_image.resamp.fits"))
+                resampled_dir = Path(swarp_res["resampled_dir"])
 
             self.logger.debug("Looking for resampled images in %s", resampled_dir)
             aligned_sci = next(
@@ -1263,65 +1240,22 @@ NNW
                 except Exception as _e:
                     self.logger.debug("Could not read WCS from SWarp output [%s]: %s", _label, _e)
 
-            # Verify shapes match — they should by construction.
-            # Small (<=2 px) discrepancies arise from SWarp floating-point rounding
-            # in the WCS projection and can be fixed by NaN-padding the smaller image.
-            # Larger mismatches indicate a genuine coverage gap and require fallback.
-            _SHAPE_PAD_TOLERANCE = 2
+            # Verify shapes match — they should by construction when both images
+            # are passed in a single SWarp call (grid is computed once for both).
             try:
                 with fits.open(aligned_sci) as _h:
                     _sci_shape = _h[0].data.shape
                 with fits.open(aligned_ref) as _h:
                     _ref_shape = _h[0].data.shape
                 if _sci_shape != _ref_shape:
-                    _dy = abs(_sci_shape[0] - _ref_shape[0])
-                    _dx = abs(_sci_shape[1] - _ref_shape[1])
-                    if _dy <= _SHAPE_PAD_TOLERANCE and _dx <= _SHAPE_PAD_TOLERANCE:
-                        # Pad the smaller output with NaNs to match the science shape.
-                        _target_shape = _sci_shape
-                        self.logger.info(
-                            "SWarp shape mismatch (sci=%s, ref=%s) within tolerance "
-                            "(%d px); NaN-padding reference to match science shape.",
-                            _sci_shape, _ref_shape, _SHAPE_PAD_TOLERANCE,
-                        )
-                        try:
-                            # Read science CRPIX to synchronise the reference WCS after padding.
-                            with fits.open(aligned_sci, memmap=False) as _hdul_sci:
-                                _sci_crpix1 = _hdul_sci[0].header.get("CRPIX1")
-                                _sci_crpix2 = _hdul_sci[0].header.get("CRPIX2")
-                            with fits.open(aligned_ref, mode="update", memmap=False) as _hdul:
-                                _data = np.asarray(_hdul[0].data, dtype=np.float32)
-                                _padded = np.full(_target_shape, np.nan, dtype=np.float32)
-                                _cy = min(_data.shape[0], _target_shape[0])
-                                _cx = min(_data.shape[1], _target_shape[1])
-                                _padded[:_cy, :_cx] = _data[:_cy, :_cx]
-                                _hdul[0].data = _padded
-                                _hdul[0].header["NAXIS1"] = _target_shape[1]
-                                _hdul[0].header["NAXIS2"] = _target_shape[0]
-                                # Both images share the same output grid (CENTER, PIXEL_SCALE,
-                                # IMAGE_SIZE) so CRPIX must be identical. The 1-px CRPIX
-                                # discrepancy is purely a SWarp rounding artefact — correct it.
-                                if _sci_crpix1 is not None:
-                                    _hdul[0].header["CRPIX1"] = float(_sci_crpix1)
-                                if _sci_crpix2 is not None:
-                                    _hdul[0].header["CRPIX2"] = float(_sci_crpix2)
-                                _hdul.flush()
-                        except Exception as _pad_e:
-                            log_warning_from_exception(
-                                self.logger, "Could not NaN-pad reference to match science shape", _pad_e
-                            )
-                            return self._align_fallback_reproject_then_astroalign(
-                                science_image, reference_image, output_dir
-                            )
-                    else:
-                        self.logger.warning(
-                            "SWarp outputs have different shapes after resampling "
-                            "(sci=%s, ref=%s). Falling back to reproject alignment.",
-                            _sci_shape, _ref_shape,
-                        )
-                        return self._align_fallback_reproject_then_astroalign(
-                            science_image, reference_image, output_dir
-                        )
+                    self.logger.warning(
+                        "SWarp outputs have different shapes after resampling "
+                        "(sci=%s, ref=%s). Falling back to reproject alignment.",
+                        _sci_shape, _ref_shape,
+                    )
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
                 else:
                     self.logger.info(
                         "SWarp outputs match: both images shape=%s.", _sci_shape,
@@ -1882,6 +1816,7 @@ NNW
         output_dir: Optional[str] = None,
         config: Optional[Dict] = None,
         head_path: Optional[str] = None,
+        no_weight_maps: bool = False,
     ) -> Dict:
         """
         Resample images using SWarp onto a common grid.
@@ -1937,7 +1872,9 @@ NNW
         # with zero weight in the resampled products as NaN instead of 0.
         # ------------------------------------------------------------------
         weight_images: List[str] = []
-        for img_path in input_images:
+        if no_weight_maps:
+            weight_images = []
+        for img_path in ([] if no_weight_maps else input_images):
             try:
                 with fits.open(img_path, memmap=False) as hdul:
                     data = np.asarray(hdul[0].data, dtype=float)
