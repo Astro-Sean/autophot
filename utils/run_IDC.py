@@ -1127,33 +1127,34 @@ NNW
                         science_image, reference_image, output_dir
                     )
 
-            # Copy each .head file next to its FITS so SWarp picks it up.
-            head_by_stem = (
-                scamp_result.get("head_files_by_stem", {})
+            # Copy the SCAMP .head file to BOTH images.
+            # SCAMP 2.14.0 writes one .head per instrument, not per catalog.
+            # When both catalogs share instrument metadata (e.g., same FILTER),
+            # only one .head is produced.  Copy it to both FITS so SWarp uses
+            # the same astrometric solution for both resamplings.
+            head_src = (
+                scamp_result.get("head_file")
                 if isinstance(scamp_result, dict)
-                else {}
+                else None
             )
-            sci_cat_stem = Path(sci_sex["catalog_path"]).stem
-            ref_cat_stem = Path(ref_sex["catalog_path"]).stem
-
-            for cat_stem, fits_copy in [
-                (sci_cat_stem, sci_image_copy),
-                (ref_cat_stem, ref_image_copy),
-            ]:
-                head_src = head_by_stem.get(cat_stem)
-                if head_src and Path(head_src).exists():
+            if head_src and Path(head_src).exists():
+                for fits_copy, label in [(sci_image_copy, "science"), (ref_image_copy, "reference")]:
                     head_dst = fits_copy.with_suffix(".head")
                     if Path(head_src).resolve() != head_dst.resolve():
                         try:
                             shutil.copy2(head_src, head_dst)
                             self.logger.info(
-                                "Copied SCAMP .head (%s) to %s for SWarp.",
-                                cat_stem, head_dst,
+                                "Copied SCAMP .head to %s for SWarp (%s).",
+                                head_dst, label,
                             )
                         except Exception as e:
                             log_warning_from_exception(
-                                self.logger, f"Could not copy .head for {cat_stem}", e
+                                self.logger, f"Could not copy .head for {label}", e
                             )
+            else:
+                self.logger.warning(
+                    "SCAMP produced no .head file; SWarp will use FITS WCS directly."
+                )
 
             resample_dir = science_aligned_dir / "resampled_output"
             resample_dir.mkdir(parents=True, exist_ok=True)
