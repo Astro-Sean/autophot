@@ -998,12 +998,16 @@ NNW
             crossid_arcsec = max(
                 1.5 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 1.5 * pix_scale, 2.0
             )
-            # Tighter POSITION_MAXERR for better edge precision (was 0.5")
-            position_maxerr_arcsec = max(1.5 * pix_scale, 0.3)
+            # Adaptive POSITION_MAXERR: tighter for good fields (0.3"), more permissive for sparse fields
+            # With few sources, we need to allow more positional uncertainty for SCAMP to find a solution
+            is_sparse_field = _num_matched < 30
+            position_maxerr_arcsec = max(1.5 * pix_scale, 1.0 if is_sparse_field else 0.3)
+            # Adaptive SN threshold: lower minimum for sparse fields to include more sources
+            sn_thresholds = "3.0,1000.0" if is_sparse_field else "5.0,1000.0"
             scamp_config_base = {
                 "CROSSID_RADIUS": crossid_arcsec,
                 "POSITION_MAXERR": position_maxerr_arcsec,
-                "SN_THRESHOLDS": "5.0,1000.0",  # Exclude faint sources (noisy at edges)
+                "SN_THRESHOLDS": sn_thresholds,
                 "MATCH_RESOL": "0.0",  # Auto-select best matching resolution
                 "ASTREF_WEIGHT": "1",  # Weight by magnitude (prioritize bright, well-measured)
                 "VERBOSE_TYPE": "FULL" if self.verbose_level >= 2 else "NORMAL",
@@ -1026,10 +1030,13 @@ NNW
                     f"{max(10*fwhm_sci_pix, 10*fwhm_ref_pix):.2f}"
                 ),
             }
+            sparse_note = " (sparse field mode)" if is_sparse_field else ""
             self.logger.info(
-                'SCAMP: CROSSID_RADIUS=%.2f" POSITION_MAXERR=%.2f" FWHM_THRESHOLDS sci=[%.2f,%.2f] ref=[%.2f,%.2f]',
+                'SCAMP: CROSSID_RADIUS=%.2f" POSITION_MAXERR=%.2f" SN_THRESHOLDS=%s%s FWHM_THRESHOLDS sci=[%.2f,%.2f] ref=[%.2f,%.2f]',
                 crossid_arcsec,
                 position_maxerr_arcsec,
+                sn_thresholds,
+                sparse_note,
                 0.3 * fwhm_sci_pix,
                 10 * fwhm_sci_pix,
                 0.3 * fwhm_ref_pix,
