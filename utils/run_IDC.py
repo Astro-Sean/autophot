@@ -1178,19 +1178,55 @@ NNW
                     ref_image_copy, resampled_dir / "reference_image.resamp.fits"
                 )
             else:
-                self.logger.debug("Running SWarp on both images simultaneously...")
-                swarp_res = self.run_swarp(
-                    [str(sci_image_copy), str(ref_image_copy)],
-                    scamp_results=scamp_ref,
-                    output_dir=str(resample_dir),
-                    config=swarp_config,
+                # Run SWarp separately for each image with identical grid settings.
+                # Passing both images in a single SWarp call causes each output to be
+                # clipped independently to that image's pixel coverage, producing
+                # shape mismatches even when IMAGE_SIZE is explicitly set.
+                # Two separate calls with the same CENTER/IMAGE_SIZE/PIXEL_SCALE
+                # guarantee identical output shapes.
+                resample_dir_sci = resample_dir / "sci_resamp"
+                resample_dir_ref = resample_dir / "ref_resamp"
+                resample_dir_sci.mkdir(parents=True, exist_ok=True)
+                resample_dir_ref.mkdir(parents=True, exist_ok=True)
+
+                self.logger.debug("Running SWarp on science image...")
+                swarp_res_sci = self.run_swarp(
+                    [str(sci_image_copy)],
+                    scamp_results={},
+                    output_dir=str(resample_dir_sci),
+                    config=swarp_config_sci,
                 )
-                if swarp_res is None:
-                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
+                if swarp_res_sci is None:
+                    self.logger.info("SWarp failed for science. Falling back to AstroAlign.")
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
-                resampled_dir = Path(swarp_res["resampled_dir"])
+
+                self.logger.debug("Running SWarp on reference image...")
+                swarp_res_ref = self.run_swarp(
+                    [str(ref_image_copy)],
+                    scamp_results=scamp_ref,
+                    output_dir=str(resample_dir_ref),
+                    config=swarp_config_ref,
+                )
+                if swarp_res_ref is None:
+                    self.logger.info("SWarp failed for reference. Falling back to AstroAlign.")
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
+
+                # Collect outputs into a common resampled_dir under consistent names.
+                resampled_dir = resample_dir / "resampled"
+                resampled_dir.mkdir(parents=True, exist_ok=True)
+                _sci_resamp = next(Path(swarp_res_sci["resampled_dir"]).glob("*.resamp.fits"), None)
+                _ref_resamp = next(Path(swarp_res_ref["resampled_dir"]).glob("*.resamp.fits"), None)
+                if _sci_resamp is None or _ref_resamp is None:
+                    self.logger.info("SWarp resampled files not found. Falling back to AstroAlign.")
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
+                shutil.copy2(str(_sci_resamp), str(resampled_dir / "science_image.resamp.fits"))
+                shutil.copy2(str(_ref_resamp), str(resampled_dir / "reference_image.resamp.fits"))
 
             self.logger.debug("Looking for resampled images in %s", resampled_dir)
             aligned_sci = next(
