@@ -1017,6 +1017,15 @@ NNW
                 **scamp_config_base,
                 "FWHM_THRESHOLDS": f"{0.3*fwhm_ref_pix:.2f},{10*fwhm_ref_pix:.2f}",
             }
+            # Config for running SCAMP on both catalogs together
+            # Use wider FWHM thresholds to accommodate both science and reference sources
+            scamp_config_both = {
+                **scamp_config_base,
+                "FWHM_THRESHOLDS": (
+                    f"{min(0.3*fwhm_sci_pix, 0.3*fwhm_ref_pix):.2f},"
+                    f"{max(10*fwhm_sci_pix, 10*fwhm_ref_pix):.2f}"
+                ),
+            }
             self.logger.info(
                 'SCAMP: CROSSID_RADIUS=%.2f" POSITION_MAXERR=%.2f" FWHM_THRESHOLDS sci=[%.2f,%.2f] ref=[%.2f,%.2f]',
                 crossid_arcsec,
