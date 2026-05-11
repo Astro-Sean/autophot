@@ -1119,8 +1119,6 @@ NNW
                 
                 try:
                     # Copy and modify FILTER headers in LDAC catalogs
-                    from astropy.io import fits
-                    
                     for cat_path, cat_tmp, filter_val in [
                         (sci_cat_path, sci_cat_tmp, "w_sci"),
                         (ref_cat_path, ref_cat_tmp, "w_ref"),
