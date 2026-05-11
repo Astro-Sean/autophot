@@ -1747,6 +1747,20 @@ class Limits:
                 logger.warning("No valid injection sites after bounds filtering; aborting.")
                 return np.nan
 
+            # Pre-generate all jittered positions once so every magnitude
+            # evaluation uses the exact same set of (site, jitter) pairs.
+            # Total trials per magnitude = n_sites * redo_default.
+            _jitter_rng = np.random.default_rng(42)
+            _jitter_dx = _jitter_rng.uniform(-0.5, 0.5, (n_sites, redo_default))
+            _jitter_dy = _jitter_rng.uniform(-0.5, 0.5, (n_sites, redo_default))
+            _k_idx, _j_idx = np.divmod(np.arange(n_sites * redo_default), redo_default)
+            _x_inj_all = x_pix_arr[_k_idx] + _jitter_dx[_k_idx, _j_idx]
+            _y_inj_all = y_pix_arr[_k_idx] + _jitter_dy[_k_idx, _j_idx]
+            logger.info(
+                "Injection trial grid: %d sites x %d jitters = %d total trials per magnitude.",
+                int(n_sites), int(redo_default), int(n_sites * redo_default),
+            )
+
             # Default serial; cap workers to avoid HPC fork/resource limits.
             n_jobs = n_jobs if n_jobs is not None else 1
             n_jobs = max(1, min(n_jobs, 8))
@@ -1779,17 +1793,22 @@ class Limits:
 
                 redo = int(redo_default if redo is None else redo)
                 redo = max(1, min(redo, 50))
-                # Per-magnitude deterministic seeding for reproducibility
-                seed = int(abs(hash(round(m, 4)))) % (2**31)
-                local_rng = np.random.default_rng(seed)
-                dx = local_rng.random((n_sites, redo)) - 0.5
-                dy = local_rng.random((n_sites, redo)) - 0.5
                 F = flux_for_mag(m)
 
-                # Vectorized jitter: build arrays directly instead of nested list comprehension
-                k_idx, j_idx = np.divmod(np.arange(n_sites * redo), redo)
-                x_inj_all = x_pix_arr[k_idx] + dx[k_idx, j_idx]
-                y_inj_all = y_pix_arr[k_idx] + dy[k_idx, j_idx]
+                # Use pre-generated jitter positions when redo matches redo_default;
+                # fall back to on-the-fly generation only for non-default redo values
+                # (e.g. logistic_emcee solver).
+                if redo == redo_default:
+                    x_inj_all = _x_inj_all
+                    y_inj_all = _y_inj_all
+                else:
+                    seed = int(abs(hash(round(m, 4)))) % (2**31)
+                    local_rng = np.random.default_rng(seed)
+                    dx = local_rng.random((n_sites, redo)) - 0.5
+                    dy = local_rng.random((n_sites, redo)) - 0.5
+                    k_idx, j_idx = np.divmod(np.arange(n_sites * redo), redo)
+                    x_inj_all = x_pix_arr[k_idx] + dx[k_idx, j_idx]
+                    y_inj_all = y_pix_arr[k_idx] + dy[k_idx, j_idx]
 
                 tasks = [
                     (
