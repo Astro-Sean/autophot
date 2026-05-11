@@ -849,7 +849,16 @@ NNW
                     [_cx_pix], [_cy_pix], 0
                 )
                 center_ra, center_dec = float(ra_arr[0]), float(dec_arr[0])
-                output_width, output_height = sci_shape[1], sci_shape[0]
+                
+                # Compute optimal output size as intersection of valid (non-NaN) regions
+                # from both images. This reduces computation when coverage differs.
+                output_width, output_height = self._compute_optimal_output_shape(
+                    sci_hdul[0].data, sci_wcs, ref_hdul[0].data, ref_wcs, pix_scale
+                )
+                self.logger.info(
+                    "Optimal output shape: %dx%d (science was %dx%d, reference was %dx%d)",
+                    output_width, output_height, sci_shape[1], sci_shape[0], ref_shape[1], ref_shape[0]
+                )
                 
                 # Force SWARP to always resample both images (removed skip check)
                 science_skip_resample = False
@@ -1600,6 +1609,105 @@ NNW
         except Exception as e:
             self.logger.info("Reproject alignment failed: %s", e)
             return None
+
+    def _compute_optimal_output_shape(
+        self,
+        sci_data: np.ndarray,
+        sci_wcs,
+        ref_data: np.ndarray,
+        ref_wcs,
+        pix_scale: float,
+    ) -> Tuple[int, int]:
+        """Compute optimal output shape as intersection of valid (non-NaN) regions.
+        
+        This reduces output size when images have different coverage or significant
+        masked edges, avoiding computation on regions where only one image has data.
+        
+        Parameters
+        ----------
+        sci_data, ref_data : ndarray
+            Image data arrays (may contain NaN for masked regions)
+        sci_wcs, ref_wcs : WCS
+            World coordinate systems for each image
+        pix_scale : float
+            Output pixel scale in arcsec/pixel
+            
+        Returns
+        -------
+        (width, height) : tuple of int
+            Optimal output dimensions in pixels
+        """
+        try:
+            # Find valid (finite) pixel regions in each image
+            sci_valid = np.isfinite(sci_data)
+            ref_valid = np.isfinite(ref_data)
+            
+            # Get bounding boxes of valid regions
+            def _valid_bbox(valid_mask):
+                rows = np.any(valid_mask, axis=1)
+                cols = np.any(valid_mask, axis=0)
+                if not np.any(rows) or not np.any(cols):
+                    return None
+                rmin, rmax = np.where(rows)[0][[0, -1]]
+                cmin, cmax = np.where(cols)[0][[0, -1]]
+                return (cmin, rmin, cmax, rmax)  # x1,y1,x2,y2 in pixel coords
+            
+            sci_bbox = _valid_bbox(sci_valid)
+            ref_bbox = _valid_bbox(ref_valid)
+            
+            if sci_bbox is None or ref_bbox is None:
+                # Fall back to science shape if no valid data found
+                return sci_data.shape[1], sci_data.shape[0]
+            
+            # Convert bounding box corners to world coordinates
+            def _bbox_corners(bbox):
+                x1, y1, x2, y2 = bbox
+                return np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+            
+            sci_corners = _bbox_corners(sci_bbox)
+            ref_corners = _bbox_corners(ref_bbox)
+            
+            # Convert to RA/Dec
+            sci_world = sci_wcs.all_pix2world(sci_corners, 0)
+            ref_world = ref_wcs.all_pix2world(ref_corners, 0)
+            
+            # Find overlapping RA/Dec region
+            ra_min = max(np.min(sci_world[:, 0]), np.min(ref_world[:, 0]))
+            ra_max = min(np.max(sci_world[:, 0]), np.max(ref_world[:, 0]))
+            dec_min = max(np.min(sci_world[:, 1]), np.min(ref_world[:, 1]))
+            dec_max = min(np.max(sci_world[:, 1]), np.max(ref_world[:, 1]))
+            
+            # Check if there is any overlap
+            if ra_min >= ra_max or dec_min >= dec_max:
+                self.logger.warning(
+                    "No overlap in valid regions; using science image shape."
+                )
+                return sci_data.shape[1], sci_data.shape[0]
+            
+            # Convert overlap size to pixels at output pixel scale
+            # cos(dec) factor for RA separation
+            cos_dec = np.cos(np.radians((dec_min + dec_max) / 2))
+            ra_sep = (ra_max - ra_min) * cos_dec * 3600  # arcsec
+            dec_sep = (dec_max - dec_min) * 3600  # arcsec
+            
+            width = int(ra_sep / pix_scale)
+            height = int(dec_sep / pix_scale)
+            
+            # Ensure minimum size and add small margin
+            width = max(width, 100)
+            height = max(height, 100)
+            
+            # Cap at original science size (don't expand beyond input)
+            width = min(width, sci_data.shape[1])
+            height = min(height, sci_data.shape[0])
+            
+            return width, height
+            
+        except Exception as e:
+            self.logger.warning(
+                "Could not compute optimal output shape: %s. Using science shape.", e
+            )
+            return sci_data.shape[1], sci_data.shape[0]
 
     def _align_fallback_reproject_then_astroalign(
         self,
