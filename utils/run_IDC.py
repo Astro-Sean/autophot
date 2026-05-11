@@ -1043,19 +1043,18 @@ NNW
                 )
                 ref_resampling_method = override_ref.strip().upper()
 
-            # Pad IMAGE_SIZE by 2 pixels in each dimension.  SWarp uses floating-point
-            # WCS arithmetic to compute the output extent and can produce outputs 1 px
-            # smaller than requested for one image but not the other.  The 2-px padding
-            # guarantees both outputs are always >= the science shape; both are then
-            # cropped back to the exact science shape after SWarp (see below).
-            _swarp_pad = 2
             swarp_config = {
                 "CENTER_TYPE": "MANUAL",
                 "CENTER": f"{center_ra:.8f},{center_dec:.8f}",
                 "PIXEL_SCALE": pix_scale,
                 "PIXELSCALE_TYPE": "MANUAL",
-                "IMAGE_SIZE": f"{output_width + _swarp_pad},{output_height + _swarp_pad}",
+                "IMAGE_SIZE": f"{output_width},{output_height}",
                 "RESAMPLING_TYPE": sci_resampling_method,
+                # OVERSAMPLING>1 causes SWarp to compute grid extents at N× resolution
+                # internally then round back, producing off-by-one shape mismatches
+                # when two images with slightly different sky coverage are resampled
+                # onto the same grid. OVERSAMPLING=1 eliminates this rounding.
+                "OVERSAMPLING": 1,
             }
             swarp_config_sci = {
                 **swarp_config,
@@ -1223,43 +1222,6 @@ NNW
                 self.logger.info(
                     "Could not find resampled images. Falling back to AstroAlign."
                 )
-                return self._align_fallback_reproject_then_astroalign(
-                    science_image, reference_image, output_dir
-                )
-
-            # Crop both SWarp outputs to the exact science shape.
-            # IMAGE_SIZE was padded by _swarp_pad px; trimming from the end
-            # preserves the pixel origin so CRPIX remains valid.
-            def _crop_to_shape(fpath: Path, target_ny: int, target_nx: int) -> bool:
-                try:
-                    with fits.open(fpath, mode="update", memmap=False) as _hdul:
-                        _d = np.asarray(_hdul[0].data, dtype=np.float32)
-                        _ny, _nx = _d.shape
-                        if _ny == target_ny and _nx == target_nx:
-                            return True
-                        if _ny < target_ny or _nx < target_nx:
-                            self.logger.warning(
-                                "SWarp output %s is smaller (%d,%d) than target (%d,%d) "
-                                "even after padding — cannot crop.",
-                                fpath.name, _ny, _nx, target_ny, target_nx,
-                            )
-                            return False
-                        _d = _d[:target_ny, :target_nx]
-                        _hdul[0].data = _d
-                        _hdul[0].header["NAXIS1"] = target_nx
-                        _hdul[0].header["NAXIS2"] = target_ny
-                        _hdul.flush()
-                    return True
-                except Exception as _e:
-                    log_warning_from_exception(self.logger, f"Could not crop {fpath.name}", _e)
-                    return False
-
-            _crop_ok = (
-                _crop_to_shape(aligned_sci, output_height, output_width)
-                and _crop_to_shape(aligned_ref, output_height, output_width)
-            )
-            if not _crop_ok:
-                self.logger.warning("SWarp output crop failed. Falling back to reproject.")
                 return self._align_fallback_reproject_then_astroalign(
                     science_image, reference_image, output_dir
                 )
