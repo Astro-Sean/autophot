@@ -853,7 +853,7 @@ NNW
                 # Compute optimal output size as intersection of valid (non-NaN) regions
                 # from both images. This reduces computation when coverage differs.
                 output_width, output_height = self._compute_optimal_output_shape(
-                    sci_hdul[0].data, sci_wcs, ref_hdul[0].data, ref_wcs, pix_scale
+                    sci_data, sci_wcs, ref_data, ref_wcs, pix_scale
                 )
                 self.logger.info(
                     "Optimal output shape: %dx%d (science was %dx%d, reference was %dx%d)",
