@@ -1088,21 +1088,11 @@ NNW
                 center_ra, center_dec, output_width, output_height, pix_scale,
             )
 
-            # Run SCAMP once on BOTH catalogs with COMBINE=N.
-            # SCAMP solves both on the same astrometric grid and writes one .head
-            # per input catalog.  Copying those .head files next to their FITS
-            # before SWarp guarantees both resamplings use the same grid and
-            # produce identical output shapes — no post-processing trim needed.
+            # Run SCAMP on the reference only, using the science catalog as reference.
+            # The science image already has an accurate solve-field WCS; running SCAMP
+            # on it (self-referencing) produces meaningless offsets.  Only the
+            # reference gets SCAMP refinement.
             swarp_config["COMBINE"] = "N"
-
-            # Use the wider of the two FWHM thresholds so both catalogs pass the filter.
-            scamp_config_both = {
-                **scamp_config_base,
-                "FWHM_THRESHOLDS": (
-                    f"{min(0.3*fwhm_sci_pix, 0.3*fwhm_ref_pix):.2f},"
-                    f"{max(10*fwhm_sci_pix, 10*fwhm_ref_pix):.2f}"
-                ),
-            }
 
             if reference_already_scamp:
                 self.logger.info(
@@ -1110,51 +1100,32 @@ NNW
                 )
                 scamp_result = {}
             else:
-                self.logger.info(
-                    "Running SCAMP on both catalogs (science + reference, COMBINE=N)..."
-                )
+                self.logger.info("Running SCAMP for reference image...")
                 scamp_result = self.run_scamp(
-                    [sci_sex["catalog_path"], ref_sex["catalog_path"]],
+                    ref_sex["catalog_path"],
                     reference_cat=sci_sex["catalog_path"],
                     output_dir=str(reference_aligned_dir),
-                    config=scamp_config_both,
+                    config=scamp_config_ref,
                 )
                 if scamp_result is None:
                     self.logger.info(
-                        "SCAMP failed. Falling back to AstroAlign."
+                        "SCAMP failed for reference image. Falling back to AstroAlign."
                     )
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
 
-            # Copy the SCAMP .head file to BOTH images.
-            # SCAMP 2.14.0 writes one .head per instrument, not per catalog.
-            # When both catalogs share instrument metadata (e.g., same FILTER),
-            # only one .head is produced.  Copy it to both FITS so SWarp uses
-            # the same astrometric solution for both resamplings.
-            head_src = (
-                scamp_result.get("head_file")
-                if isinstance(scamp_result, dict)
-                else None
-            )
-            if head_src and Path(head_src).exists():
-                for fits_copy, label in [(sci_image_copy, "science"), (ref_image_copy, "reference")]:
-                    head_dst = fits_copy.with_suffix(".head")
-                    if Path(head_src).resolve() != head_dst.resolve():
-                        try:
-                            shutil.copy2(head_src, head_dst)
-                            self.logger.info(
-                                "Copied SCAMP .head to %s for SWarp (%s).",
-                                head_dst, label,
-                            )
-                        except Exception as e:
-                            log_warning_from_exception(
-                                self.logger, f"Could not copy .head for {label}", e
-                            )
-            else:
-                self.logger.warning(
-                    "SCAMP produced no .head file; SWarp will use FITS WCS directly."
-                )
+            # Copy the SCAMP .head file next to the reference FITS.
+            # The science image keeps its original solve-field WCS (no .head needed).
+            ref_head = scamp_result.get("head_file") if isinstance(scamp_result, dict) else None
+            if ref_head and Path(ref_head).exists():
+                ref_head_dst = ref_image_copy.with_suffix(".head")
+                if Path(ref_head).resolve() != ref_head_dst.resolve():
+                    try:
+                        shutil.copy2(ref_head, ref_head_dst)
+                        self.logger.info("Copied SCAMP .head (reference) to %s for SWarp.", ref_head_dst)
+                    except Exception as e:
+                        log_warning_from_exception(self.logger, "Could not copy reference .head for SWarp", e)
 
             resample_dir = science_aligned_dir / "resampled_output"
             resample_dir.mkdir(parents=True, exist_ok=True)
@@ -1276,11 +1247,13 @@ NNW
                     self.logger.debug("Could not read WCS from SWarp output [%s]: %s", _label, _e)
 
             # Reconcile output shapes.
-            # When both images are solved by the same SCAMP call and resampled by
-            # the same SWarp call with identical CENTER/IMAGE_SIZE/PIXEL_SCALE, the
-            # outputs are guaranteed to be the same shape.  A small tolerance (2 px)
-            # is kept only as a safety net for floating-point edge cases.
-            _SHAPE_TOL = 2
+            # SWarp floating-point WCS arithmetic can produce outputs differing by
+            # several px when images have asymmetric NaN/coverage regions, even with
+            # identical IMAGE_SIZE.  When the mismatch is small, trim both outputs to
+            # the minimum shape by removing rows/cols from the END — this preserves
+            # the pixel origin so CRPIX and the full WCS are unchanged.  Only fall back
+            # for genuinely large mismatches (>10 px) indicating a coverage gap.
+            _SHAPE_TOL = 10
             try:
                 with fits.open(aligned_sci) as _h:
                     _sci_shape = _h[0].data.shape
