@@ -1050,11 +1050,11 @@ NNW
                 "PIXELSCALE_TYPE": "MANUAL",
                 "IMAGE_SIZE": f"{output_width},{output_height}",
                 "RESAMPLING_TYPE": sci_resampling_method,
-                # OVERSAMPLING>1 causes SWarp to compute grid extents at N× resolution
-                # internally then round back, producing off-by-one shape mismatches
-                # when two images with slightly different sky coverage are resampled
-                # onto the same grid. OVERSAMPLING=1 eliminates this rounding.
-                "OVERSAMPLING": 1,
+                # OVERSAMPLING>0 causes SWarp to compute grid extents at N× sub-pixel
+                # resolution internally then round back, producing off-by-one shape
+                # mismatches when two images are resampled onto the same grid.
+                # OVERSAMPLING=0 disables this entirely.
+                "OVERSAMPLING": 0,
             }
             swarp_config_sci = {
                 **swarp_config,
