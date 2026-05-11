@@ -1302,12 +1302,23 @@ NNW
                         "to minimum shape (%d,%d) — WCS unchanged, target within bounds.",
                         _sci_shape, _ref_shape, _ny, _nx,
                     )
+                    # Read science CRPIX before trimming — both images share the
+                    # same output grid so CRPIX must be identical.  Any difference
+                    # between science and reference CRPIX is a SWarp rounding
+                    # artefact; copy science CRPIX into the reference to fix it.
+                    with fits.open(aligned_sci, memmap=False) as _hdul_s:
+                        _sci_crpix1 = _hdul_s[0].header.get("CRPIX1")
+                        _sci_crpix2 = _hdul_s[0].header.get("CRPIX2")
                     for _trim_path in [aligned_sci, aligned_ref]:
                         with fits.open(_trim_path, mode="update", memmap=False) as _hdul:
                             _d = np.asarray(_hdul[0].data, dtype=np.float32)
                             _hdul[0].data = _d[:_ny, :_nx]
                             _hdul[0].header["NAXIS1"] = _nx
                             _hdul[0].header["NAXIS2"] = _ny
+                            if _sci_crpix1 is not None:
+                                _hdul[0].header["CRPIX1"] = float(_sci_crpix1)
+                            if _sci_crpix2 is not None:
+                                _hdul[0].header["CRPIX2"] = float(_sci_crpix2)
                             _hdul.flush()
                 else:
                     self.logger.info(
