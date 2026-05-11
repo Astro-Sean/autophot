@@ -1324,12 +1324,11 @@ NNW
             except Exception as _e:
                 self.logger.debug("Could not verify/reconcile SWarp output shapes: %s", _e)
 
-            # Save aligned images to science directory (not overwriting original template)
-            # to prevent crosstalk when multiple science images use the same template
+            # Overwrite the reference_image path in-place with the aligned version.
+            # reference_image is already a per-science-image copy so overwriting it
+            # does not affect other science images using the same original template.
             aligned_science_fpath = science_image
-            sci_dir = Path(science_image).parent
-            ref_name = Path(reference_image).name
-            aligned_reference_fpath = str(sci_dir / f"aligned_{ref_name}")
+            aligned_reference_fpath = reference_image
 
             # SWarp reads the SCAMP .head file next to the input FITS during resampling
             # and writes the correct aligned WCS into the .resamp.fits output.
