@@ -3945,7 +3945,9 @@ class PSF:
             inst_col = f"inst_{image_filter}_PSF"
             inst_err_col = f"inst_{image_filter}_PSF_err"
             # For inverted fits, use absolute flux for magnitude calculation
-            flux_for_mag = np.where(inverted_fit_mask, np.abs(updated["flux_PSF"]), updated["flux_PSF"])
+            # Use updated's _inverted_fit column (copied at line ~3876) to match updated's shape
+            inverted_fit_mask_updated = updated.get("_inverted_fit", pd.Series(False, index=updated.index)).to_numpy(dtype=bool)
+            flux_for_mag = np.where(inverted_fit_mask_updated, np.abs(updated["flux_PSF"]), updated["flux_PSF"])
             updated[inst_col] = -2.5 * np.log10(flux_for_mag)
             # Valid flux: positive for normal, any non-zero finite for inverted
             valid_flux = np.isfinite(updated["flux_PSF"]) & (updated["flux_PSF"] != 0)
