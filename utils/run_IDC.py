@@ -1245,28 +1245,53 @@ NNW
                 except Exception as _e:
                     self.logger.debug("Could not read WCS from SWarp output [%s]: %s", _label, _e)
 
-            # Verify shapes match — they should by construction when both images
-            # are passed in a single SWarp call (grid is computed once for both).
+            # Reconcile output shapes.
+            # SWarp floating-point WCS arithmetic can produce outputs differing by
+            # 1-2 px even with identical IMAGE_SIZE.  When the mismatch is small,
+            # trim both outputs to the minimum shape by removing rows/cols from the
+            # END — this preserves the pixel origin so CRPIX and the full WCS are
+            # unchanged.  Large mismatches (>2 px) indicate a genuine coverage gap
+            # and require fallback.
+            _SHAPE_TOL = 2
             try:
                 with fits.open(aligned_sci) as _h:
                     _sci_shape = _h[0].data.shape
                 with fits.open(aligned_ref) as _h:
                     _ref_shape = _h[0].data.shape
+
                 if _sci_shape != _ref_shape:
-                    self.logger.warning(
-                        "SWarp outputs have different shapes after resampling "
-                        "(sci=%s, ref=%s). Falling back to reproject alignment.",
-                        _sci_shape, _ref_shape,
+                    _dy = abs(_sci_shape[0] - _ref_shape[0])
+                    _dx = abs(_sci_shape[1] - _ref_shape[1])
+                    if _dy > _SHAPE_TOL or _dx > _SHAPE_TOL:
+                        self.logger.warning(
+                            "SWarp outputs have different shapes after resampling "
+                            "(sci=%s, ref=%s) — mismatch too large, falling back.",
+                            _sci_shape, _ref_shape,
+                        )
+                        return self._align_fallback_reproject_then_astroalign(
+                            science_image, reference_image, output_dir
+                        )
+                    # Trim both to the minimum shape.
+                    _ny = min(_sci_shape[0], _ref_shape[0])
+                    _nx = min(_sci_shape[1], _ref_shape[1])
+                    self.logger.info(
+                        "SWarp shape mismatch (sci=%s, ref=%s); trimming both "
+                        "to minimum shape (%d,%d) — WCS unchanged.",
+                        _sci_shape, _ref_shape, _ny, _nx,
                     )
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
-                    )
+                    for _trim_path in [aligned_sci, aligned_ref]:
+                        with fits.open(_trim_path, mode="update", memmap=False) as _hdul:
+                            _d = np.asarray(_hdul[0].data, dtype=np.float32)
+                            _hdul[0].data = _d[:_ny, :_nx]
+                            _hdul[0].header["NAXIS1"] = _nx
+                            _hdul[0].header["NAXIS2"] = _ny
+                            _hdul.flush()
                 else:
                     self.logger.info(
                         "SWarp outputs match: both images shape=%s.", _sci_shape,
                     )
             except Exception as _e:
-                self.logger.debug("Could not verify SWarp output shapes: %s", _e)
+                self.logger.debug("Could not verify/reconcile SWarp output shapes: %s", _e)
 
             # Save aligned images to science directory (not overwriting original template)
             # to prevent crosstalk when multiple science images use the same template
