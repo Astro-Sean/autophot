@@ -470,7 +470,7 @@ class Zeropoint:
             & np.isfinite(catmag_err)
             & (catmag_err > 0)
         )
-        if vmask.sum() < 3:
+        if vmask.sum() < 2:
             logger.warning(f"{flux_type}: only {vmask.sum()} valid sources; skipping.")
             return None
 
