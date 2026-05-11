@@ -1718,8 +1718,6 @@ class Plot:
                 ) * 1.1
             ax.set_xlim(-_lim, _lim)
             ax.set_ylim(-_lim, _lim)
-            # Use adjustable='box' for compatibility with twin axes (ax_top, ax_right)
-            ax.set_aspect("equal", adjustable="box")
             ax.axhline(0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=1)
             ax.axvline(0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=1)
 
@@ -1743,6 +1741,8 @@ class Plot:
                 # Create twin axes for arcsecond display
                 ax_top = ax.twiny()
                 ax_right = ax.twinx()
+                # set_aspect is incompatible with shared/twin axes; the symmetric
+                # ±_lim xlim/ylim already enforces a square data region.
 
                 # Set the limits for twin axes to match the main axes
                 ax_top.set_xlim(ax.get_xlim())
@@ -1764,6 +1764,9 @@ class Plot:
                 # Hide the tick labels on the opposite sides of twin axes
                 ax_top.tick_params(axis="x", which="both", labeltop=True, labelbottom=False)
                 ax_right.tick_params(axis="y", which="both", labelright=True, labelleft=False)
+            else:
+                # No twin axes — safe to enforce equal aspect
+                ax.set_aspect("equal", adjustable="box")
             # ax.set_title(f"WCS vs PSF Position Offset (N={len(df_plot)})")
             # ax.legend(loc="upper right", fontsize="small", framealpha=0.9)
             ax.grid(True, ls="-", alpha=0.25, zorder=0)

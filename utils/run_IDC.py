@@ -123,6 +123,7 @@ class ImageDistortionCorrector:
         "VERBOSE_TYPE": "LOG",
         "BLANK_BADPIXELS": "Y",
         "FILL_VALUE": "NAN",
+        "EDGE_THRESH": 0.0,
         "CELESTIAL_TYPE": "NATIVE",
         "PROJECTION_TYPE": "TAN",
         "FSCALASTRO_TYPE": "NONE",
@@ -1235,9 +1236,11 @@ NNW
                 if _sci_shape != _ref_shape:
                     self.logger.warning(
                         "SWarp outputs have different shapes after resampling "
-                        "(sci=%s, ref=%s). This should not happen with CENTER=sci_center "
-                        "and IMAGE_SIZE=sci_shape — check SWarp configuration.",
+                        "(sci=%s, ref=%s). Falling back to reproject alignment.",
                         _sci_shape, _ref_shape,
+                    )
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
                     )
                 else:
                     self.logger.info(
