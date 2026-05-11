@@ -613,7 +613,7 @@ def _wcs_match_separation_stats_arcsec(
         logger.debug("_wcs_match_separation_stats_arcsec: wcs_obj is None")
         return np.nan, np.nan
     sky_true = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
-    ra_p, dec_p = wcs_obj.all_pix2world(x_pix, y_pix, 1)
+    ra_p, dec_p = wcs_obj.all_pix2world(x_pix, y_pix, 0)
     sky_pred = SkyCoord(
         ra=np.asarray(ra_p) * u.deg, dec=np.asarray(dec_p) * u.deg, frame="icrs"
     )
@@ -692,7 +692,7 @@ def wcs_world_to_pixel(
     ra_arr = ra_arr[:n]
     dec_arr = dec_arr[:n]
     try:
-        x_pix, y_pix = wcs_obj.all_world2pix(ra_arr, dec_arr, 1)
+        x_pix, y_pix = wcs_obj.all_world2pix(ra_arr, dec_arr, 0)
         return np.asarray(x_pix, dtype=float), np.asarray(y_pix, dtype=float)
     except Exception:
         x_out = np.full(n, np.nan, dtype=float)
@@ -702,7 +702,7 @@ def wcs_world_to_pixel(
                 x_i, y_i = wcs_obj.all_world2pix(
                     np.array([ra_arr[i]], dtype=float),
                     np.array([dec_arr[i]], dtype=float),
-                    1,
+                    0,
                 )
                 x_out[i] = float(np.asarray(x_i, dtype=float)[0])
                 y_out[i] = float(np.asarray(y_i, dtype=float)[0])
@@ -771,77 +771,6 @@ def _build_scamp_optimization_trials(
     trials.append(("very_tight_match", very_tight))
 
     return trials[:max_trials]
-
-
-def _estimate_crpix_linear_nudge_from_matches(
-    wcs_obj: WCS,
-    x_pix: np.ndarray,
-    y_pix: np.ndarray,
-    ra_deg: np.ndarray,
-    dec_deg: np.ndarray,
-    *,
-    min_points: int = 30,
-) -> dict | None:
-    """
-    Estimate a small global CRPIX nudge (dx, dy) from matched star residuals.
-
-    The estimate is based on robust medians of (x_obs - x_pred, y_obs - y_pred),
-    trying both pixel-origin hypotheses (raw and +1 px) for match-table columns.
-    """
-    x_obs = np.asarray(x_pix, dtype=float)
-    y_obs = np.asarray(y_pix, dtype=float)
-    ra_arr = np.asarray(ra_deg, dtype=float)
-    dec_arr = np.asarray(dec_deg, dtype=float)
-    n = int(min(len(x_obs), len(y_obs), len(ra_arr), len(dec_arr)))
-    if n < int(max(3, min_points)):
-        return None
-
-    x_obs = x_obs[:n]
-    y_obs = y_obs[:n]
-    ra_arr = ra_arr[:n]
-    dec_arr = dec_arr[:n]
-
-    x_pred, y_pred = wcs_world_to_pixel(wcs_obj, ra_arr, dec_arr, origin=0)
-    if len(x_pred) != n or len(y_pred) != n:
-        return None
-
-    best = None
-    for shift_px in (0.0, 1.0):
-        xo = x_obs + shift_px
-        yo = y_obs + shift_px
-        valid = (
-            np.isfinite(xo)
-            & np.isfinite(yo)
-            & np.isfinite(x_pred)
-            & np.isfinite(y_pred)
-        )
-        if int(np.count_nonzero(valid)) < int(max(3, min_points)):
-            continue
-
-        dx = xo[valid] - x_pred[valid]
-        dy = yo[valid] - y_pred[valid]
-        dx_med = float(np.nanmedian(dx))
-        dy_med = float(np.nanmedian(dy))
-        r_pre = np.hypot(dx, dy)
-        r_post = np.hypot(dx - dx_med, dy - dy_med)
-        pre_med = float(np.nanmedian(r_pre))
-        post_med = float(np.nanmedian(r_post))
-
-        candidate = {
-            "origin_shift_px": float(shift_px),
-            "dx_px": dx_med,
-            "dy_px": dy_med,
-            "pre_med_resid_px": pre_med,
-            "post_med_resid_px": post_med,
-            "n_valid": int(np.count_nonzero(valid)),
-        }
-        if best is None or (
-            np.isfinite(candidate["pre_med_resid_px"])
-            and candidate["pre_med_resid_px"] < best["pre_med_resid_px"]
-        ):
-            best = candidate
-
-    return best
 
 
 def _sip_summary(wcs_obj: WCS) -> str:
@@ -932,7 +861,7 @@ def _filter_points_against_initial_wcs(
     Returns filtered arrays, number removed, and pre-filter med/p95 residuals.
     """
     sky_true = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
-    ra_p, dec_p = initial_wcs.all_pix2world(x_pix, y_pix, 1)
+    ra_p, dec_p = initial_wcs.all_pix2world(x_pix, y_pix, 0)
     sky_pred = SkyCoord(
         ra=np.asarray(ra_p) * u.deg, dec=np.asarray(dec_p) * u.deg, frame="icrs"
     )
@@ -1900,121 +1829,6 @@ class WCSSolver:
         logger.info("SCAMP unavailable/failed after solve-field; keeping solve-field WCS.")
         return np.nan
 
-    def _apply_post_scamp_linear_refinement(
-        self,
-        wcs_header: fits.Header,
-        wcs_cfg: dict,
-        matched_points: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None,
-    ) -> fits.Header:
-        """
-        Optionally apply a small CRPIX nudge using matched points.
-
-        This preserves distortion terms and adjusts only the linear reference pixel.
-        """
-        try:
-            enable_nudge = bool(wcs_cfg.get("post_scamp_linear_refine", True))
-            if not enable_nudge or matched_points is None:
-                return wcs_header
-
-            x_m, y_m, ra_m, dec_m = matched_points
-            min_points = int(
-                max(8, wcs_cfg.get("post_scamp_linear_refine_min_points", 30))
-            )
-            max_shift_px = float(
-                max(0.0, wcs_cfg.get("post_scamp_linear_refine_max_shift_px", 2.0))
-            )
-            min_improve_px = float(
-                max(0.0, wcs_cfg.get("post_scamp_linear_refine_min_improve_px", 0.03))
-            )
-            min_improve_frac = float(
-                max(
-                    0.0,
-                    wcs_cfg.get("post_scamp_linear_refine_min_improve_frac", 0.02),
-                )
-            )
-
-            nudge = _estimate_crpix_linear_nudge_from_matches(
-                get_wcs(wcs_header),
-                x_m,
-                y_m,
-                ra_m,
-                dec_m,
-                min_points=min_points,
-            )
-            if nudge is None:
-                return wcs_header
-
-            dx_px = float(nudge["dx_px"])
-            dy_px = float(nudge["dy_px"])
-            shift_norm = float(np.hypot(dx_px, dy_px))
-            pre_med_px = float(nudge["pre_med_resid_px"])
-            post_med_px = float(nudge["post_med_resid_px"])
-            need_improve = max(min_improve_px, pre_med_px * min_improve_frac)
-            improve = pre_med_px - post_med_px
-            if not (
-                np.isfinite(dx_px)
-                and np.isfinite(dy_px)
-                and np.isfinite(pre_med_px)
-                and np.isfinite(post_med_px)
-                and shift_norm <= max_shift_px
-                and improve >= need_improve
-            ):
-                logger.info(
-                    "Skipped post-solve CRPIX nudge "
-                    "(n=%d, |shift|=%.3f px, improve=%.4f px, required>=%.4f px, max_shift=%.3f px).",
-                    int(nudge.get("n_valid", 0)),
-                    float(shift_norm),
-                    float(improve),
-                    float(need_improve),
-                    float(max_shift_px),
-                )
-                return wcs_header
-
-            old_crpix1 = float(wcs_header.get("CRPIX1", np.nan))
-            old_crpix2 = float(wcs_header.get("CRPIX2", np.nan))
-            if not (np.isfinite(old_crpix1) and np.isfinite(old_crpix2)):
-                return wcs_header
-
-            wcs_before_nudge = get_wcs(wcs_header)
-            wcs_header["CRPIX1"] = old_crpix1 + dx_px
-            wcs_header["CRPIX2"] = old_crpix2 + dy_px
-            if wcs_before_nudge is not None:
-                med_before, p95_before, _ = _best_wcs_match_separation_stats_arcsec(
-                    wcs_before_nudge, x_m, y_m, ra_m, dec_m
-                )
-            else:
-                logger.debug("wcs_before_nudge is None, skipping CRPIX nudge comparison")
-                med_before, p95_before = np.nan, np.nan
-            wcs_after_nudge = get_wcs(wcs_header)
-            if wcs_after_nudge is not None:
-                med_after, p95_after, _ = _best_wcs_match_separation_stats_arcsec(
-                    wcs_after_nudge, x_m, y_m, ra_m, dec_m
-                )
-            else:
-                logger.debug("wcs_after_nudge is None, skipping CRPIX nudge comparison")
-                med_after, p95_after = np.nan, np.nan
-            logger.info(
-                "Applied post-solve CRPIX nudge: dCRPIX=(%+.3f,%+.3f) px "
-                "(n=%d, origin_shift=%+.1f px, residual med %.3f->%.3f px; "
-                "sky med/p95 %.3f/%.3f -> %.3f/%.3f arcsec).",
-                dx_px,
-                dy_px,
-                int(nudge["n_valid"]),
-                float(nudge["origin_shift_px"]),
-                pre_med_px,
-                post_med_px,
-                float(med_before),
-                float(p95_before),
-                float(med_after),
-                float(p95_after),
-            )
-            return wcs_header
-        except Exception as exc:
-            log_warning_from_exception(
-                logger, "Post-solve linear refinement skipped", exc
-            )
-            return wcs_header
-
     # --- Plate Solve ---
     def plate_solve(
         self,
@@ -2842,11 +2656,6 @@ class WCSSolver:
                         "projection_type=SIP: skipping SCAMP refinement and using solve-field WCS."
                     )
 
-                wcs_header = self._apply_post_scamp_linear_refinement(
-                    wcs_header=wcs_header,
-                    wcs_cfg=wcs_cfg,
-                    matched_points=matched_points_for_refine,
-                )
                 # Remove all previous WCS from science header, then add only WCS keywords from solver.
                 # Optional behavior (option 1): preserve the *input* non-linear distortion model
                 # (e.g. instrument TPV/PV polynomials) and only update linear terms from the solver.

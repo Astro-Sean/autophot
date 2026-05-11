@@ -357,21 +357,6 @@ if __name__ == "__main__":
 
 ---
 
-## Troubleshooting
-
-- `ModuleNotFoundError: No module named 'plotting_utils'`
-  - You are likely running a script directly from a cloned repo without installing it.
-  - Fix: run `pip install -e .` from the repository root.
-
-- `ModuleNotFoundError: No module named 'corner'`
-  - `corner` is used only for optional MCMC diagnostic plots; install via `conda install -c conda-forge corner` (or `pip install corner`).
-
-- `get_wcs: missing keywords ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2']`
-  - The input header lacks a usable WCS. Enable WCS solving (`wcs.redo_wcs: True`) and writing back to FITS (`wcs.apply_solved_to_fits: True`).
-
-
----
-
 ## Citation
 
 If you use AutoPhOT in your research, please cite:

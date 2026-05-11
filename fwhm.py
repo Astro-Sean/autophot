@@ -127,6 +127,7 @@ class Find_FWHM:
         x_col: str = "x_pix",
         y_col: str = "y_pix",
         min_distance: float = 5.0,
+        all_sources: pd.DataFrame = None,
     ) -> pd.DataFrame:
         """
         Return sources with no neighbors within `min_distance` using KDTree.
@@ -136,6 +137,10 @@ class Find_FWHM:
             x_col (str): Column name for x coordinates.
             y_col (str): Column name for y coordinates.
             min_distance (float): Minimum distance (in pixels) to consider a source as isolated.
+            all_sources (pd.DataFrame): Optional full raw catalog to check neighbors against.
+                If provided, isolation is checked against ALL detections (including blended or
+                flagged sources that were removed from fwhm_table), preventing PSF contamination
+                from unfiltered neighbors.
 
         Returns:
             pd.DataFrame: Only sources with no neighbors within `min_distance`.
@@ -143,13 +148,19 @@ class Find_FWHM:
         if len(fwhm_table) < 2:
             return fwhm_table
 
-        coords = fwhm_table[[x_col, y_col]].values
-        tree = cKDTree(coords)
-        distances, _ = tree.query(coords, k=2)
-        nearest_distances = distances[:, 1]
-        cleaned_sources = fwhm_table[nearest_distances > min_distance].reset_index(
-            drop=True
-        )
+        candidate_coords = fwhm_table[[x_col, y_col]].values
+
+        if all_sources is not None and len(all_sources) > 0 and x_col in all_sources.columns and y_col in all_sources.columns:
+            neighbor_coords = all_sources[[x_col, y_col]].values
+            neighbor_tree = cKDTree(neighbor_coords)
+            counts = neighbor_tree.query_ball_point(candidate_coords, r=min_distance, return_length=True)
+            is_isolated = counts <= 1
+        else:
+            tree = cKDTree(candidate_coords)
+            distances, _ = tree.query(candidate_coords, k=2)
+            is_isolated = distances[:, 1] > min_distance
+
+        cleaned_sources = fwhm_table[is_isolated].reset_index(drop=True)
         self.logger.info(
             f"Cleaned {len(fwhm_table)} sources to {len(cleaned_sources)} with isolation distance [{min_distance}]"
         )

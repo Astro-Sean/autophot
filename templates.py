@@ -2409,6 +2409,22 @@ class Templates:
             if not candidates:
                 logger.info("No template files found in %s", template_dir)
                 continue
+            
+            # Prioritize templates named X_template.fits or Xp_template.fits over other files
+            # Check for both standard (X_template.fits) and legacy (Xp_template.fits) formats
+            preferred_names = [f"{use_filter}_template.fits"]
+            if use_filter in {"u", "g", "r", "i", "z"}:
+                preferred_names.append(f"{use_filter}p_template.fits")
+            
+            preferred_candidate = None
+            for pref_name in preferred_names:
+                preferred_candidate = next((p for p in candidates if p.name == pref_name), None)
+                if preferred_candidate:
+                    result = str(preferred_candidate)
+                    logger.info("Template filepath (preferred X_template.fits format): %s", result)
+                    return result
+            
+            # Fallback to first candidate
             result = str(candidates[0])
             if template_dir.name.endswith("_template"):
                 logger.info(
@@ -2771,7 +2787,7 @@ class Templates:
             target_x_pix, target_y_pix = scienceHeader_newwcs.all_world2pix(
                 target_ra,
                 target_dec,
-                1,
+                0,
             )
 
             border = 10
@@ -2830,7 +2846,7 @@ class Templates:
         if np.isfinite(d_uniform_template) or np.isfinite(d_uniform_science):
             # Validate WCS before creating cutout
             try:
-                test_ra, test_dec = imageWCS.all_pix2world([cx], [cy], 1)
+                test_ra, test_dec = imageWCS.all_pix2world([cx], [cy], 0)
                 if not (np.isfinite(test_ra[0]) and np.isfinite(test_dec[0])):
                     logger.error(
                         f"Invalid WCS transformation at crop center (cx={cx}, cy={cy}): RA={test_ra[0]}, Dec={test_dec[0]}. "
@@ -2888,7 +2904,7 @@ class Templates:
             target_x_pix, target_y_pix = scienceHeader_newwcs.all_world2pix(
                 target_ra,
                 target_dec,
-                1,
+                0,
             )
             border = self.input_yaml.get("scale", 0)
             h, w = scienceImage_tmp.shape
@@ -2916,8 +2932,8 @@ class Templates:
         try:
             sci_w = get_wcs(scienceHeader)
             ref_w = get_wcs(templateHeader)
-            sx, sy = sci_w.all_world2pix(target_ra, target_dec, 1)
-            tx, ty = ref_w.all_world2pix(target_ra, target_dec, 1)
+            sx, sy = sci_w.all_world2pix(target_ra, target_dec, 0)
+            tx, ty = ref_w.all_world2pix(target_ra, target_dec, 0)
             logger.info(
                 "Post-crop WCS target mapping: science=(%.2f, %.2f) template=(%.2f, %.2f) delta=(%.2f, %.2f) px",
                 float(sx),
@@ -3617,6 +3633,7 @@ class Templates:
         scienceNoise: Optional[str] = None,
         templateNoise: Optional[str] = None,
         background_defects_mask: Optional[np.ndarray] = None,
+        flux_scale_ref_to_sci: Optional[float] = None,
     ) -> Tuple[
         Optional[str], Optional[np.ndarray], Optional[List[Tuple[float, float]]]
     ]:
@@ -3765,6 +3782,25 @@ class Templates:
 
             science_saturate = _safe_saturate(scienceHeader)
             template_saturate = _safe_saturate(templateHeader)
+
+            # Apply photometric flux scale from find_flux_consistent_sources if provided.
+            # flux_scale_ref_to_sci = 10**(-0.4 * intercept), multiplying template
+            # brings it to the same photometric scale as the science image.
+            if flux_scale_ref_to_sci is not None and np.isfinite(flux_scale_ref_to_sci) and flux_scale_ref_to_sci > 0:
+                templateImage = templateImage * flux_scale_ref_to_sci
+                if np.isfinite(template_saturate):
+                    template_saturate = float(template_saturate) * flux_scale_ref_to_sci
+                if np.isfinite(template_gain) and template_gain > 0:
+                    template_gain = float(template_gain) / flux_scale_ref_to_sci
+                write_fits(_ensure_prepared_template_path(), templateImage, templateHeader)
+                logger.info(
+                    "Applied photometric flux scale to template: flux_scale=%.4g (%.3f mag offset). "
+                    "template_gain: %.4g; template_saturate: %s.",
+                    flux_scale_ref_to_sci,
+                    -2.5 * np.log10(flux_scale_ref_to_sci),
+                    float(template_gain),
+                    f"{template_saturate:.4g}" if np.isfinite(template_saturate) else "inf",
+                )
 
             # -------------------------------------------------------------
             # Optional: rescale reference (template) image to science scale.

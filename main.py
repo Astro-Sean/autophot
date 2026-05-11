@@ -552,8 +552,8 @@ def run_photometry():
         None
     """
 
-    # Use 1-based indexing to match FITS/SExtractor convention (FITS is 1-based)
-    index = 1
+    # Use 0-based indexing to match numpy array convention
+    index = 0
     start = time.time()
 
     #  Filter Out Astropy Warnings
@@ -615,8 +615,8 @@ def run_photometry():
 
     #  Helper Function: Update Target Pixel Coordinates
     # Updates the target's pixel coordinates after any changes to the WCS.
-    # Uses origin=1 (1-based) to match FITS/SExtractor convention.
-    def update_target_pixel_coords(input_yaml, imageWCS, index=1):
+    # Uses origin=0 (0-based) to match numpy array convention.
+    def update_target_pixel_coords(input_yaml, imageWCS, index=0):
         """Update target pixel coordinates after WCS changes. index is WCS origin (0=0-based)."""
         target_x_pix, target_y_pix = imageWCS.all_world2pix(
             input_yaml["target_ra"],
@@ -1583,7 +1583,7 @@ def run_photometry():
                             target_x, target_y = wcs.all_world2pix(
                                 float(input_yaml["target_ra"]),
                                 float(input_yaml["target_dec"]),
-                                1,
+                                0,
                             )
                             target_x, target_y = float(target_x), float(target_y)
                             logging.info(
@@ -1624,7 +1624,7 @@ def run_photometry():
                             new_target_x, new_target_y = new_wcs.all_world2pix(
                                 float(input_yaml["target_ra"]),
                                 float(input_yaml["target_dec"]),
-                                1,
+                                0,
                             )
                             input_yaml["target_x_pix"] = float(new_target_x)
                             input_yaml["target_y_pix"] = float(new_target_y)
@@ -1815,7 +1815,7 @@ def run_photometry():
                     target_ra = float(input_yaml["target_ra"])
                     target_dec = float(input_yaml["target_dec"])
                     target_x_pix, target_y_pix = imageWCS.all_world2pix(
-                        target_ra, target_dec, 1
+                        target_ra, target_dec, 0
                     )
                     input_yaml["target_x_pix"] = float(target_x_pix)
                     input_yaml["target_y_pix"] = float(target_y_pix)
@@ -2212,7 +2212,7 @@ def run_photometry():
                     )
                 ):
                     try:
-                        x_pix[i], y_pix[i] = imageWCS.all_world2pix([ra_deg], [dec_deg], 1)
+                        x_pix[i], y_pix[i] = imageWCS.all_world2pix([ra_deg], [dec_deg], 0)
                     except Exception as src_exc:
                         logging.debug(
                             "Skipping variable source RA=%.7f Dec=%.7f due to WCS "
@@ -2350,8 +2350,7 @@ def run_photometry():
             if input_yaml["target_ra"] is None and input_yaml["target_dec"] is None:
                 # Use image center when no target information is provided.
                 center_pix = (image.shape[1] / 2, image.shape[0] / 2)
-                # Use origin=1 (1-based) to match FITS/SExtractor convention
-                center = imageWCS.all_pix2world([center_pix[0]], [center_pix[1]], 1)
+                center = imageWCS.all_pix2world([center_pix[0]], [center_pix[1]], 0)
                 target_coords = SkyCoord(
                     center[0][0],
                     center[1][0],
@@ -2976,8 +2975,9 @@ def run_photometry():
                     "to retain more sources.",
                     isolation_dist,
                 )
+            _raw_sex_cat = (input_yaml.get("photometry") or {}).get("last_raw_sex_catalog")
             IsolatedSources = Find_FWHM(input_yaml=input_yaml).filter_isolated_sources(
-                FWHMSources, min_distance=isolation_dist
+                FWHMSources, min_distance=isolation_dist, all_sources=_raw_sex_cat
             )
 
         IsolatedSources = Catalog(input_yaml=input_yaml).recenter(
@@ -3316,7 +3316,7 @@ def run_photometry():
                     psf_sources_orig["y_pix"].to_numpy(dtype=float),
                     0,
                 )
-                x_orig, y_orig = wcs_orig.all_world2pix(ra_pool, dec_pool, 1)
+                x_orig, y_orig = wcs_orig.all_world2pix(ra_pool, dec_pool, 0)
                 psf_sources_orig["x_pix"] = x_orig
                 psf_sources_orig["y_pix"] = y_orig
                 h_orig, w_orig = image_orig.shape
@@ -3727,13 +3727,15 @@ def run_photometry():
                     # Loads the science image.
                     science_image, science_header = get_image_and_header(fpath)
                     science_wcs = get_wcs(science_header)
-                    # Gets the image shape and center.
+                    # Gets the image shape.
                     ny, nx = science_image.shape
-                    science_center_pix = (nx / 2, ny / 2)
-                    # Converts the center pixel to sky coordinates.
-                    # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
+                    # Use the science image pixel center as the cutout center.
+                    # SWarp is configured with CENTER = science pixel center and
+                    # IMAGE_SIZE = science shape, so both resampled images are already
+                    # registered to this grid and the pixel center is the natural anchor.
+                    science_center_pix = (nx / 2.0, ny / 2.0)
                     science_center_world = science_wcs.all_pix2world(
-                        *science_center_pix, 0
+                        science_center_pix[0], science_center_pix[1], 0
                     )
                     # Validate WCS transformation result
                     if not (np.isfinite(science_center_world[0]) and np.isfinite(science_center_world[1])):
@@ -4236,6 +4238,7 @@ def run_photometry():
                 )
 
                 # Finds flux-consistent sources between image and template.
+                flux_scale_ref_to_sci = None
                 if len(image_sources) > 5:
                     template_obj = Templates(input_yaml=input_yaml)
                     MatchingSources, offset_params = (
@@ -4244,6 +4247,17 @@ def run_photometry():
                             template_sources,
                         )
                     )
+                    # offset_params = (mag_slope, flux_scale); use flux_scale to
+                    # rescale template to science photometric level before subtraction.
+                    if offset_params is not None and len(offset_params) == 2:
+                        _, _flux_scale = offset_params
+                        if _flux_scale is not None and np.isfinite(_flux_scale) and _flux_scale > 0:
+                            flux_scale_ref_to_sci = float(_flux_scale)
+                            logging.info(
+                                "Photometric flux scale from find_flux_consistent_sources: %.4g (%.3f mag offset)",
+                                flux_scale_ref_to_sci,
+                                -2.5 * np.log10(flux_scale_ref_to_sci),
+                            )
                 else:
                     MatchingSources = image_sources
 
@@ -4555,6 +4569,7 @@ def run_photometry():
                     scienceNoise=weight_fpath,
                     templateNoise=template_weight_path,
                     background_defects_mask=defects_mask,
+                    flux_scale_ref_to_sci=flux_scale_ref_to_sci,
                 )
                 if fpath is None:
                     logging.warning(
@@ -4633,8 +4648,8 @@ def run_photometry():
         # Keep `target_x_pix/y_pix` unchanged for the actual transient centroid
         # fitting (so we do not silently "move" the transient).
         ny, nx = image.shape[0], image.shape[1]
-        bg_target_x_pix = float(target_x_pix)
-        bg_target_y_pix = float(target_y_pix)
+        bg_target_x_pix = float(target_x_pix) if np.isfinite(target_x_pix) else float(nx) / 2.0
+        bg_target_y_pix = float(target_y_pix) if np.isfinite(target_y_pix) else float(ny) / 2.0
         if not (0 <= bg_target_x_pix < nx and 0 <= bg_target_y_pix < ny):
             margin = int(max(1, np.ceil(1.0 * float(ImageFWHM))))
             xlo = min(max(0, margin), nx - 1)
@@ -4645,8 +4660,8 @@ def run_photometry():
             bg_target_y_pix = float(np.clip(bg_target_y_pix, ylo, yhi))
             logging.warning(
                 "Target pixel from WCS (%.1f, %.1f) outside image (%dx%d); clamping to (%.1f, %.1f) only for local background fit.",
-                float(target_x_pix),
-                float(target_y_pix),
+                float(target_x_pix) if np.isfinite(target_x_pix) else float("nan"),
+                float(target_y_pix) if np.isfinite(target_y_pix) else float("nan"),
                 int(nx),
                 int(ny),
                 bg_target_x_pix,

@@ -124,7 +124,7 @@ class ImageDistortionCorrector:
         "BLANK_BADPIXELS": "Y",
         "FILL_VALUE": "NAN",
         "CELESTIAL_TYPE": "NATIVE",
-        "PROJECTION_TYPE": "TPV",
+        "PROJECTION_TYPE": "TAN",
         "FSCALASTRO_TYPE": "NONE",
         "COPY_KEYWORDS": "TELESCOP,FILTER,INSTRUME,EXPTIME,GAIN,OBSMJD,RDNOISE,APER,FWHM",
         # Allow full WCS transformations including rotation
@@ -763,15 +763,14 @@ NNW
         science_image: str,
         reference_image: str,
         output_dir: Optional[str] = None,
-        resample_only: Optional[bool] = True,
         science_already_resampled: bool = False,
         reference_already_resampled: bool = False,
     ) -> Optional[dict]:
         """
-        Align and resample both science and reference images to the science image's grid,
-        placing the results in separate folders for inspection.
-        If `resample_only` is True, run both images through SWarp together for alignment,
-        but do not combine them.
+        Align and resample both science and reference images to the science image's grid.
+        SCAMP is run on the reference image only (against the science catalog) to compute
+        the WCS correction. Both images are then resampled together in a single SWarp call
+        onto a common grid defined by the science image pixel centre and shape.
         If an image is already resampled (flag or header RESAMPLED/SWARPED), SWarp is skipped
         for that image to avoid degrading the data.
 
@@ -779,7 +778,6 @@ NNW
             science_image: Path to science image.
             reference_image: Path to reference image.
             output_dir: Output directory for aligned images.
-            resample_only: If True, align both images using SWarp but do not combine them.
             science_already_resampled: If True, skip SWarp for science; use image as-is (avoids double resampling).
             reference_already_resampled: If True, skip SWarp for reference; use image as-is.
         Returns:
@@ -832,84 +830,17 @@ NNW
                 ref_shape = ref_data.shape
                 sci_pix_scale = proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
                 ref_pix_scale = proj_plane_pixel_scales(ref_wcs)[0] * 3600.0
-                # Use origin=1 (FITS 1-based convention) so that the center pixel
-                # is (naxis/2 + 0.5) in FITS coords, which matches what SWarp expects
-                # for CENTER_TYPE=MANUAL.  Using origin=0 was 0.5 px off.
+                # Use the science image pixel center as the SWarp grid CENTER, and the
+                # science image shape as IMAGE_SIZE.  This is the only combination that
+                # guarantees SWarp produces an output of exactly sci_shape for the science
+                # image (it completely fills its own pixel-center grid) so no post-hoc
+                # cropping is required.  The reference is resampled onto the identical grid
+                # and will therefore have the same shape.
                 ra_arr, dec_arr = sci_wcs.all_pix2world(
-                    [sci_shape[1] / 2 + 0.5], [sci_shape[0] / 2 + 0.5], 1
+                    [sci_shape[1] / 2.0], [sci_shape[0] / 2.0], 0
                 )
                 center_ra, center_dec = float(ra_arr[0]), float(dec_arr[0])
-                
-                # Check if target is near edge or chip gaps - expand output if needed
-                iy = getattr(self, "input_yaml", None) or {}
-                ts = iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
-                target_ra = iy.get("target_ra")
-                target_dec = iy.get("target_dec")
-                edge_margin_px = 150  # pixels from edge to trigger expansion
-
-                # Set CRVAL to target position if configured
-                if bool(ts.get("alignment_set_crval_to_target", False)):
-                    if target_ra is not None and target_dec is not None:
-                        try:
-                            with fits.open(str(science_image_copy), mode="update") as hdul:
-                                header = hdul[0].header
-                                old_crval1 = header.get("CRVAL1")
-                                old_crval2 = header.get("CRVAL2")
-                                header["CRVAL1"] = float(target_ra)
-                                header["CRVAL2"] = float(target_dec)
-                                hdul.flush()
-                                self.logger.info(
-                                    f"Set CRVAL to target position: CRVAL1={float(target_ra):.6f}, "
-                                    f"CRVAL2={float(target_dec):.6f} (was {old_crval1:.6f}, {old_crval2:.6f})"
-                                )
-                                # Re-read WCS with updated CRVAL from the file
-                                sci_wcs = WCS(fits.getheader(str(science_image_copy), 0))
-                        except Exception as e:
-                            self.logger.warning(f"Failed to set CRVAL to target position: {e}")
-                    else:
-                        self.logger.warning("alignment_set_crval_to_target enabled but target_ra/target_dec not available")
-
-                chip_gap_check_radius = 50  # pixels around target to check for NaNs
-                
                 output_width, output_height = sci_shape[1], sci_shape[0]
-                
-                if target_ra is not None and target_dec is not None:
-                    try:
-                        # Get target pixel position in science image
-                        tx_sci, ty_sci = sci_wcs.all_world2pix(float(target_ra), float(target_dec), 1)
-                        tx_sci, ty_sci = float(tx_sci), float(ty_sci)
-                        
-                        # Check if near science image edge
-                        near_edge = (
-                            tx_sci < edge_margin_px or tx_sci > sci_shape[1] - edge_margin_px or
-                            ty_sci < edge_margin_px or ty_sci > sci_shape[0] - edge_margin_px
-                        )
-                        
-                        # Check for chip gaps (NaN regions) near target
-                        has_chip_gap = False
-                        if np.any(np.isfinite(sci_data)):
-                            y_min = max(0, int(ty_sci) - chip_gap_check_radius)
-                            y_max = min(sci_shape[0], int(ty_sci) + chip_gap_check_radius)
-                            x_min = max(0, int(tx_sci) - chip_gap_check_radius)
-                            x_max = min(sci_shape[1], int(tx_sci) + chip_gap_check_radius)
-                            local_region = sci_data[y_min:y_max, x_min:x_max]
-                            nan_fraction = np.sum(~np.isfinite(local_region)) / local_region.size
-                            has_chip_gap = nan_fraction > 0.05  # >5% NaNs indicates chip gap
-                        
-                        if near_edge or has_chip_gap:
-                            # Expand output size to ensure coverage
-                            pad_x = int(sci_shape[1] * 0.15) if near_edge else 0
-                            pad_y = int(sci_shape[0] * 0.15) if near_edge else 0
-                            output_width = sci_shape[1] + 2 * pad_x
-                            output_height = sci_shape[0] + 2 * pad_y
-                            self.logger.info(
-                                "Target near %s - expanding SWarp output to %dx%d (was %dx%d)",
-                                "image edge" if near_edge else "chip gap",
-                                output_width, output_height,
-                                sci_shape[1], sci_shape[0]
-                            )
-                    except Exception as e:
-                        self.logger.debug(f"Could not check target edge proximity: {e}")
                 
                 # Force SWARP to always resample both images (removed skip check)
                 science_skip_resample = False
@@ -989,7 +920,7 @@ NNW
                 ref_is_undersampled,
             )
 
-            crossid_radius = max(max(fwhm_sci_arcsec, fwhm_ref_arcsec), 2.0)
+            crossid_radius = max(max(fwhm_sci_arcsec, fwhm_ref_arcsec), 15.0)
             self.logger.info("Using cross-match radius: %.2f arcsec", crossid_radius)
 
             def _do_match(radius_arcsec: float):
@@ -1138,475 +1069,282 @@ NNW
                 ", undersampled" if ref_is_undersampled else "",
             )
 
-            # Align and resample reference image
-            if not resample_only:
-                swarp_config_ref["COMBINE"] = "Y"
-                swarp_config_sci["COMBINE"] = "Y"
+            self.logger.info(
+                "SWarp output grid: CENTER=(%.6f,%.6f) IMAGE_SIZE=(%d,%d) PIXEL_SCALE=%.4f arcsec/px",
+                center_ra, center_dec, output_width, output_height, pix_scale,
+            )
 
-                self.logger.info("Aligning reference image to science grid...")
-                aligned_ref = self.run_scamp_swarp(
-                    ref_sex["catalog_path"],
-                    sci_sex["catalog_path"],
-                    ref_image_copy,
-                    reference_aligned_dir,
-                    ref_is_undersampled,
-                    fwhm_ref_pix,
-                    "Reference image",
-                    scamp_config_ref,
-                    swarp_config_ref,
-                    target_ra=target_ra,
-                    target_dec=target_dec,
+            # Run SCAMP on the reference only, then resample both images together.
+            swarp_config_ref["COMBINE"] = "N"
+            swarp_config_sci["COMBINE"] = "N"
+
+            if reference_already_scamp:
+                self.logger.info(
+                    "Reference header has SCAMP HISTORY; skipping SCAMP, using existing WCS."
                 )
-                if aligned_ref is None:
-                    self.logger.info(
-                        "Failed to align reference image. Falling back to AstroAlign."
-                    )
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
-                    )
-
-                self.logger.info("Resampling science image to the same grid...")
-                aligned_sci = self.run_scamp_swarp(
-                    sci_sex["catalog_path"],
-                    sci_sex["catalog_path"],
-                    sci_image_copy,
-                    science_aligned_dir,
-                    sci_is_undersampled,
-                    fwhm_sci_pix,
-                    "Science image",
-                    scamp_config_sci,
-                    swarp_config_sci,
-                    target_ra=target_ra,
-                    target_dec=target_dec,
-                )
-                if aligned_sci is None:
-                    self.logger.info(
-                        "Failed to resample science image. Using original."
-                    )
-                    aligned_sci = sci_image_copy
-
-                # Validate WCS of aligned images before overwriting originals
-                # Test both pix2world and world2pix to ensure WCS is fully invertible
-                try:
-                    with fits.open(aligned_ref) as hdul:
-                        ref_wcs = get_wcs(hdul[0].header)
-                        cx, cy = hdul[0].data.shape[1]/2, hdul[0].data.shape[0]/2
-                        # Test pix2world
-                        ref_ra, ref_dec = ref_wcs.all_pix2world([cx], [cy], 1)
-                        if not (np.isfinite(ref_ra[0]) and np.isfinite(ref_dec[0])):
-                            self.logger.error(
-                                f"SWarp-aligned reference has invalid WCS pix2world: RA={ref_ra[0]}, Dec={ref_dec[0]}. "
-                                f"Falling back to AstroAlign."
-                            )
-                            return self._align_fallback_reproject_then_astroalign(
-                                science_image, reference_image, output_dir
-                            )
-                        # Test world2pix (critical for Cutout2D)
-                        test_px, test_py = ref_wcs.all_world2pix(ref_ra[0], ref_dec[0], 1)
-                        if not (np.isfinite(test_px) and np.isfinite(test_py)):
-                            self.logger.error(
-                                f"SWarp-aligned reference has non-invertible WCS: world2pix returned NaN/Inf. "
-                                f"Falling back to AstroAlign."
-                            )
-                            return self._align_fallback_reproject_then_astroalign(
-                                science_image, reference_image, output_dir
-                            )
-                except Exception as e:
-                    self.logger.error(f"Failed to validate WCS of SWarp-aligned reference: {e}")
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
-                    )
-                
-                try:
-                    with fits.open(aligned_sci) as hdul:
-                        sci_wcs = get_wcs(hdul[0].header)
-                        cx, cy = hdul[0].data.shape[1]/2, hdul[0].data.shape[0]/2
-                        # Test pix2world
-                        sci_ra, sci_dec = sci_wcs.all_pix2world([cx], [cy], 1)
-                        if not (np.isfinite(sci_ra[0]) and np.isfinite(sci_dec[0])):
-                            self.logger.error(
-                                f"SWarp-aligned science has invalid WCS pix2world: RA={sci_ra[0]}, Dec={sci_dec[0]}. "
-                                f"Falling back to AstroAlign."
-                            )
-                            return self._align_fallback_reproject_then_astroalign(
-                                science_image, reference_image, output_dir
-                            )
-                        # Test world2pix (critical for Cutout2D)
-                        test_px, test_py = sci_wcs.all_world2pix(sci_ra[0], sci_dec[0], 1)
-                        if not (np.isfinite(test_px) and np.isfinite(test_py)):
-                            self.logger.error(
-                                f"SWarp-aligned science has non-invertible WCS: world2pix returned NaN/Inf. "
-                                f"Falling back to AstroAlign."
-                            )
-                            return self._align_fallback_reproject_then_astroalign(
-                                science_image, reference_image, output_dir
-                            )
-                except Exception as e:
-                    self.logger.error(f"Failed to validate WCS of SWarp-aligned science: {e}")
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
-                    )
-
-                # Save aligned images - science overwritten, template saved as new file
-                # to prevent crosstalk between different science images using same template
-                try:
-                    shutil.copyfile(aligned_ref, aligned_reference_fpath)
-                    self.logger.debug(
-                        "Saved aligned reference image to: %s",
-                        aligned_reference_fpath,
-                    )
-                except Exception as e:
-                    self.logger.warning(
-                        "Could not save aligned reference image %s: %s", aligned_reference_fpath, e
-                    )
-                try:
-                    shutil.copyfile(aligned_sci, science_image)
-                    self.logger.debug(
-                        "Overwrote science image with aligned version: %s",
-                        science_image,
-                    )
-                except Exception as e:
-                    self.logger.warning(
-                        "Could not overwrite science image %s: %s", science_image, e
-                    )
-
+                scamp_ref = {}
             else:
-                # Run SCAMP for both images
-                swarp_config_ref["COMBINE"] = "N"
-                swarp_config_sci["COMBINE"] = "N"
-
-                if reference_already_scamp:
-                    self.logger.info(
-                        "Reference header has SCAMP HISTORY; skipping SCAMP, using existing WCS."
-                    )
-                    scamp_ref = {}
-                    scamp_sci = {}
-                else:
-                    self.logger.info("Running SCAMP for reference image...")
-                    scamp_ref = self.run_scamp(
-                        ref_sex["catalog_path"],
-                        reference_cat=sci_sex["catalog_path"],
-                        output_dir=str(reference_aligned_dir),
-                        config=scamp_config_ref,
-                    )
-                    if scamp_ref is None:
-                        self.logger.info(
-                            "SCAMP failed for reference image. Falling back to AstroAlign."
-                        )
-                        return self._align_fallback_reproject_then_astroalign(
-                            science_image, reference_image, output_dir
-                        )
-
-                    self.logger.info("Running SCAMP for science image...")
-                    scamp_sci = self.run_scamp(
-                        sci_sex["catalog_path"],
-                        reference_cat=sci_sex["catalog_path"],
-                        output_dir=str(science_aligned_dir),
-                        config=scamp_config_sci,
-                    )
-                    if scamp_sci is None:
-                        self.logger.warning(
-                            "SCAMP failed for science image; continuing without science WCS refinement."
-                        )
-                        scamp_sci = {}
-
-                # Place .head files next to their respective FITS so SWarp uses
-                # the SCAMP-refined WCS for BOTH images during resampling.
-                ref_head = scamp_ref.get("head_file") if isinstance(scamp_ref, dict) else None
-                if ref_head and Path(ref_head).exists():
-                    ref_head_dst = ref_image_copy.with_suffix(".head")
-                    if Path(ref_head).resolve() != ref_head_dst.resolve():
-                        try:
-                            shutil.copy2(ref_head, ref_head_dst)
-                            self.logger.info("Copied SCAMP .head (reference) to %s for SWarp.", ref_head_dst)
-                        except Exception as e:
-                            log_warning_from_exception(self.logger, "Could not copy reference .head for SWarp", e)
-
-                sci_head_file = scamp_sci.get("head_file") if isinstance(scamp_sci, dict) else None
-                if sci_head_file and Path(sci_head_file).exists():
-                    sci_head_dst = sci_image_copy.with_suffix(".head")
-                    if Path(sci_head_file).resolve() != sci_head_dst.resolve():
-                        try:
-                            shutil.copy2(sci_head_file, sci_head_dst)
-                            self.logger.info("Copied SCAMP .head (science) to %s for SWarp.", sci_head_dst)
-                        except Exception as e:
-                            log_warning_from_exception(self.logger, "Could not copy science .head for SWarp", e)
-
-                resample_dir = science_aligned_dir / "resampled_output"
-                resample_dir.mkdir(parents=True, exist_ok=True)
-                swarp_res = None
-
-                if science_skip_resample and reference_skip_resample:
-                    # Both already resampled: skip SWarp entirely to avoid double resampling.
-                    self.logger.info(
-                        "Science and reference already resampled (header/flag); skipping SWarp."
-                    )
-                    resampled_sub = resample_dir / "resampled"
-                    resampled_sub.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(
-                        sci_image_copy, resampled_sub / "science_image.resamp.fits"
-                    )
-                    shutil.copy2(
-                        ref_image_copy, resampled_sub / "reference_image.resamp.fits"
-                    )
-                    resampled_dir = resampled_sub
-                elif science_skip_resample:
-                    self.logger.info(
-                        "Science already resampled; running SWarp on reference only."
-                    )
-                    swarp_res = self.run_swarp(
-                        [str(ref_image_copy)],
-                        scamp_results=scamp_ref,
-                        output_dir=str(resample_dir),
-                        config=swarp_config,
-                    )
-                    if swarp_res is None:
-                        self.logger.info("SWarp failed. Falling back to AstroAlign.")
-                        return self._align_fallback_reproject_then_astroalign(
-                            science_image, reference_image, output_dir
-                        )
-                    resampled_dir = Path(swarp_res["resampled_dir"])
-                    shutil.copy2(
-                        sci_image_copy, resampled_dir / "science_image.resamp.fits"
-                    )
-                elif reference_skip_resample:
-                    self.logger.info(
-                        "Reference already resampled; running SWarp on science only."
-                    )
-                    swarp_res = self.run_swarp(
-                        [str(sci_image_copy)],
-                        scamp_results=scamp_ref,
-                        output_dir=str(resample_dir),
-                        config=swarp_config,
-                    )
-                    if swarp_res is None:
-                        self.logger.info("SWarp failed. Falling back to AstroAlign.")
-                        return self._align_fallback_reproject_then_astroalign(
-                            science_image, reference_image, output_dir
-                        )
-                    resampled_dir = Path(swarp_res["resampled_dir"])
-                    shutil.copy2(
-                        ref_image_copy, resampled_dir / "reference_image.resamp.fits"
-                    )
-                else:
-                    self.logger.debug("Running SWarp on both images simultaneously...")
-                    swarp_res = self.run_swarp(
-                        [str(sci_image_copy), str(ref_image_copy)],
-                        scamp_results=scamp_ref,
-                        output_dir=str(resample_dir),
-                        config=swarp_config,
-                    )
-                    if swarp_res is None:
-                        self.logger.info("SWarp failed. Falling back to AstroAlign.")
-                        return self._align_fallback_reproject_then_astroalign(
-                            science_image, reference_image, output_dir
-                        )
-                    resampled_dir = Path(swarp_res["resampled_dir"])
-
-                self.logger.debug("Looking for resampled images in %s", resampled_dir)
-                aligned_sci = next(
-                    resampled_dir.glob("science_image.resamp.fits"), None
+                self.logger.info("Running SCAMP for reference image...")
+                scamp_ref = self.run_scamp(
+                    ref_sex["catalog_path"],
+                    reference_cat=sci_sex["catalog_path"],
+                    output_dir=str(reference_aligned_dir),
+                    config=scamp_config_ref,
                 )
-                aligned_ref = next(
-                    resampled_dir.glob("reference_image.resamp.fits"), None
-                )
-
-                if aligned_sci is None or aligned_ref is None:
+                if scamp_ref is None:
                     self.logger.info(
-                        "Could not find resampled images. Falling back to AstroAlign."
+                        "SCAMP failed for reference image. Falling back to AstroAlign."
                     )
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
 
-                # Save aligned images to science directory (not overwriting original template)
-                # to prevent crosstalk when multiple science images use the same template
-                aligned_science_fpath = science_image
-                sci_dir = Path(science_image).parent
-                ref_name = Path(reference_image).name
-                aligned_reference_fpath = str(sci_dir / f"aligned_{ref_name}")
+                # Science image already has an accurate WCS from solve-field/SCAMP
+                # at the top of the pipeline. Running SCAMP against its own catalog
+                # (self-referencing) produces a meaningless .head that offsets the
+                # science during SWarp resampling and breaks co-registration.
+                # Do not run SCAMP on the science image here.
 
-                # Strip all distortion and conflicting WCS terms from a header,
-                # leaving only the linear WCS (CRPIX, CRVAL, CD, CTYPE).
-                # This makes the result independent of whether the source had SIP or TPV.
-                _DISTORTION_PREFIXES = (
-                    "A_", "B_", "AP_", "BP_",   # SIP
-                    "PV",                          # TPV / PV
-                    "PROJP",                       # older TPV alias
-                )
-                _CONFLICT_KEYS = (
-                    "CDELT1", "CDELT2",
-                    "PC1_1", "PC1_2", "PC2_1", "PC2_2",
-                    "CROTA1", "CROTA2",
-                    "LONPOLE", "LATPOLE",
-                )
-
-                def _strip_distortion(hdr):
-                    """Remove distortion and conflicting linear-WCS keys in-place."""
-                    for key in list(hdr.keys()):
-                        if any(key.startswith(p) for p in _DISTORTION_PREFIXES):
-                            try:
-                                del hdr[key]
-                            except Exception:
-                                pass
-                    for key in _CONFLICT_KEYS:
-                        hdr.pop(key, None)
-
-                def _inject_scamp_wcs(img_path, head_path, label):
-                    """Replace the WCS in img_path with the full SCAMP WCS including distortions.
-
-                    Copy SCAMP's complete WCS solution (CRPIX, CRVAL, CD matrix, SIP/TPV)
-                    to preserve all distortion corrections for maximum accuracy.
-                    Only NAXIS1/2 are updated from the resampled image.
-                    """
+            # Place .head files next to their respective FITS so SWarp uses
+            # the SCAMP-refined WCS for BOTH images during resampling.
+            ref_head = scamp_ref.get("head_file") if isinstance(scamp_ref, dict) else None
+            if ref_head and Path(ref_head).exists():
+                ref_head_dst = ref_image_copy.with_suffix(".head")
+                if Path(ref_head).resolve() != ref_head_dst.resolve():
                     try:
-                        from astropy.wcs import WCS as _WCS
-                        scamp_hdr = fits.Header.fromtextfile(head_path)
-                        with fits.open(img_path, mode="update") as hdul:
-                            hdr = hdul[0].header
-                            res_ny, res_nx = hdul[0].data.shape
-                            # Copy SCAMP's complete WCS including distortion terms
-                            wcs_keys_to_copy = [
-                                "CRPIX1", "CRPIX2",
-                                "CRVAL1", "CRVAL2",
-                                "CD1_1", "CD1_2", "CD2_1", "CD2_2",
-                                "CTYPE1", "CTYPE2",
-                            ]
-                            # Copy distortion prefixes (SIP/TPV)
-                            for prefix in _DISTORTION_PREFIXES:
-                                for key in scamp_hdr:
-                                    if key.startswith(prefix):
-                                        wcs_keys_to_copy.append(key)
-                            # Remove conflicting keys first
-                            for key in _CONFLICT_KEYS:
-                                hdr.pop(key, None)
-                            # Copy SCAMP WCS keys
-                            for key in wcs_keys_to_copy:
-                                if key in scamp_hdr:
-                                    hdr[key] = scamp_hdr[key]
-                            # Update NAXIS from resampled image
-                            hdr["NAXIS1"] = res_nx
-                            hdr["NAXIS2"] = res_ny
-                            hdul.flush()
-                        # Log what was copied
-                        crpix1 = float(scamp_hdr.get("CRPIX1", 0))
-                        crpix2 = float(scamp_hdr.get("CRPIX2", 0))
-                        crval1 = float(scamp_hdr.get("CRVAL1", 0))
-                        crval2 = float(scamp_hdr.get("CRVAL2", 0))
-                        ctype1 = str(scamp_hdr.get("CTYPE1", ""))
-                        ctype2 = str(scamp_hdr.get("CTYPE2", ""))
-                        distortion_count = sum(1 for k in scamp_hdr if any(k.startswith(p) for p in _DISTORTION_PREFIXES))
-                        self.logger.info(
-                            "Injected full SCAMP WCS into %s: CRPIX=(%.2f, %.2f), "
-                            "CRVAL=(%.6f, %.6f), CTYPE=(%s, %s), %d distortion terms",
-                            label, crpix1, crpix2, crval1, crval2, ctype1, ctype2, distortion_count,
-                        )
+                        shutil.copy2(ref_head, ref_head_dst)
+                        self.logger.info("Copied SCAMP .head (reference) to %s for SWarp.", ref_head_dst)
                     except Exception as e:
-                        self.logger.warning("Could not inject SCAMP WCS into %s: %s", label, e)
+                        log_warning_from_exception(self.logger, "Could not copy reference .head for SWarp", e)
 
-                # Only inject SCAMP WCS into the reference image.
-                # SCAMP here does relative alignment (reference -> science catalog),
-                # so its .head WCS maps the reference onto the science coordinate frame.
-                # The science image's WCS (from solve-field/astrometry.net) is the
-                # absolute astrometric ground truth and must NOT be overwritten.
-                ref_head = scamp_ref.get("head_file") if isinstance(scamp_ref, dict) else None
-                if aligned_ref and ref_head and Path(ref_head).exists():
-                    _inject_scamp_wcs(str(aligned_ref), ref_head, "reference")
+            # No .head for science: science WCS is the astrometric reference frame.
+            # SWarp will use the existing FITS WCS from the science image directly.
 
-                # Restore the science image WCS using SCAMP result with full distortion corrections.
-                # Both science and reference use SCAMP's complete WCS solution for maximum accuracy.
-                sci_head_file = scamp_sci.get("head_file") if isinstance(scamp_sci, dict) else None
-                if aligned_sci and sci_head_file and Path(sci_head_file).exists():
-                    _inject_scamp_wcs(str(aligned_sci), sci_head_file, "science")
-                elif aligned_sci:
-                    self.logger.warning(
-                        "Science SCAMP head file not available; skipping WCS restoration for science image"
-                    )
+            resample_dir = science_aligned_dir / "resampled_output"
+            resample_dir.mkdir(parents=True, exist_ok=True)
+            swarp_res = None
 
-                # Validate WCS of aligned images before overwriting originals
-                # Test both pix2world and world2pix to ensure WCS is fully invertible
-                try:
-                    with fits.open(aligned_ref) as hdul:
-                        ref_wcs = get_wcs(hdul[0].header)
-                        cx, cy = hdul[0].data.shape[1]/2, hdul[0].data.shape[0]/2
-                        ref_ra, ref_dec = ref_wcs.all_pix2world([cx], [cy], 1)
-                        if not (np.isfinite(ref_ra[0]) and np.isfinite(ref_dec[0])):
-                            self.logger.error(
-                                f"SWarp-aligned reference has invalid WCS pix2world: RA={ref_ra[0]}, Dec={ref_dec[0]}. "
-                                f"Falling back to AstroAlign."
-                            )
-                            return self._align_fallback_reproject_then_astroalign(
-                                science_image, reference_image, output_dir
-                            )
-                        # Test world2pix (critical for Cutout2D)
-                        test_px, test_py = ref_wcs.all_world2pix(ref_ra[0], ref_dec[0], 1)
-                        if not (np.isfinite(test_px) and np.isfinite(test_py)):
-                            self.logger.error(
-                                f"SWarp-aligned reference has non-invertible WCS: world2pix returned NaN/Inf. "
-                                f"Falling back to AstroAlign."
-                            )
-                            return self._align_fallback_reproject_then_astroalign(
-                                science_image, reference_image, output_dir
-                            )
-                except Exception as e:
-                    self.logger.error(f"Failed to validate WCS of SWarp-aligned reference: {e}")
+            if science_skip_resample and reference_skip_resample:
+                # Both already resampled: skip SWarp entirely to avoid double resampling.
+                self.logger.info(
+                    "Science and reference already resampled (header/flag); skipping SWarp."
+                )
+                resampled_sub = resample_dir / "resampled"
+                resampled_sub.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(
+                    sci_image_copy, resampled_sub / "science_image.resamp.fits"
+                )
+                shutil.copy2(
+                    ref_image_copy, resampled_sub / "reference_image.resamp.fits"
+                )
+                resampled_dir = resampled_sub
+            elif science_skip_resample:
+                self.logger.info(
+                    "Science already resampled; running SWarp on reference only."
+                )
+                swarp_res = self.run_swarp(
+                    [str(ref_image_copy)],
+                    scamp_results=scamp_ref,
+                    output_dir=str(resample_dir),
+                    config=swarp_config,
+                )
+                if swarp_res is None:
+                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
-                
-                try:
-                    with fits.open(aligned_sci) as hdul:
-                        sci_wcs = get_wcs(hdul[0].header)
-                        cx, cy = hdul[0].data.shape[1]/2, hdul[0].data.shape[0]/2
-                        sci_ra, sci_dec = sci_wcs.all_pix2world([cx], [cy], 1)
-                        if not (np.isfinite(sci_ra[0]) and np.isfinite(sci_dec[0])):
-                            self.logger.error(
-                                f"SWarp-aligned science has invalid WCS pix2world: RA={sci_ra[0]}, Dec={sci_dec[0]}. "
-                                f"Falling back to AstroAlign."
-                            )
-                            return self._align_fallback_reproject_then_astroalign(
-                                science_image, reference_image, output_dir
-                            )
-                        # Test world2pix (critical for Cutout2D)
-                        test_px, test_py = sci_wcs.all_world2pix(sci_ra[0], sci_dec[0], 1)
-                        if not (np.isfinite(test_px) and np.isfinite(test_py)):
-                            self.logger.error(
-                                f"SWarp-aligned science has non-invertible WCS: world2pix returned NaN/Inf. "
-                                f"Falling back to AstroAlign."
-                            )
-                            return self._align_fallback_reproject_then_astroalign(
-                                science_image, reference_image, output_dir
-                            )
-                except Exception as e:
-                    self.logger.error(f"Failed to validate WCS of SWarp-aligned science: {e}")
+                resampled_dir = Path(swarp_res["resampled_dir"])
+                shutil.copy2(
+                    sci_image_copy, resampled_dir / "science_image.resamp.fits"
+                )
+            elif reference_skip_resample:
+                self.logger.info(
+                    "Reference already resampled; running SWarp on science only."
+                )
+                swarp_res = self.run_swarp(
+                    [str(sci_image_copy)],
+                    scamp_results=scamp_ref,
+                    output_dir=str(resample_dir),
+                    config=swarp_config,
+                )
+                if swarp_res is None:
+                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
-                
+                resampled_dir = Path(swarp_res["resampled_dir"])
+                shutil.copy2(
+                    ref_image_copy, resampled_dir / "reference_image.resamp.fits"
+                )
+            else:
+                self.logger.debug("Running SWarp on both images simultaneously...")
+                swarp_res = self.run_swarp(
+                    [str(sci_image_copy), str(ref_image_copy)],
+                    scamp_results=scamp_ref,
+                    output_dir=str(resample_dir),
+                    config=swarp_config,
+                )
+                if swarp_res is None:
+                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
+                resampled_dir = Path(swarp_res["resampled_dir"])
+
+            self.logger.debug("Looking for resampled images in %s", resampled_dir)
+            aligned_sci = next(
+                resampled_dir.glob("science_image.resamp.fits"), None
+            )
+            aligned_ref = next(
+                resampled_dir.glob("reference_image.resamp.fits"), None
+            )
+
+            if aligned_sci is None or aligned_ref is None:
+                self.logger.info(
+                    "Could not find resampled images. Falling back to AstroAlign."
+                )
+                return self._align_fallback_reproject_then_astroalign(
+                    science_image, reference_image, output_dir
+                )
+
+            # Log SWarp output WCS for both images so alignment can be verified.
+            # Since CENTER = science pixel center and IMAGE_SIZE = science shape,
+            # both outputs should have identical shapes.
+            for _label, _path in [("science", aligned_sci), ("reference", aligned_ref)]:
                 try:
-                    shutil.copyfile(aligned_ref, aligned_reference_fpath)
-                    self.logger.debug(
-                        "Saved aligned reference image to: %s",
-                        aligned_reference_fpath,
+                    with fits.open(_path) as _hdul:
+                        _hdr = _hdul[0].header
+                        _ny, _nx = _hdul[0].data.shape
+                    self.logger.info(
+                        "SWarp output WCS [%s]: shape=(%d,%d) CRPIX=(%.2f,%.2f) "
+                        "CRVAL=(%.6f,%.6f) CTYPE=(%s,%s)",
+                        _label, _ny, _nx,
+                        float(_hdr.get("CRPIX1", 0)), float(_hdr.get("CRPIX2", 0)),
+                        float(_hdr.get("CRVAL1", 0)), float(_hdr.get("CRVAL2", 0)),
+                        _hdr.get("CTYPE1", "?"), _hdr.get("CTYPE2", "?"),
                     )
-                except Exception as e:
+                except Exception as _e:
+                    self.logger.debug("Could not read WCS from SWarp output [%s]: %s", _label, _e)
+
+            # Verify shapes match — they should by construction.
+            try:
+                with fits.open(aligned_sci) as _h:
+                    _sci_shape = _h[0].data.shape
+                with fits.open(aligned_ref) as _h:
+                    _ref_shape = _h[0].data.shape
+                if _sci_shape != _ref_shape:
                     self.logger.warning(
-                        "Could not save aligned reference image %s: %s",
-                        aligned_reference_fpath,
-                        e,
+                        "SWarp outputs have different shapes after resampling "
+                        "(sci=%s, ref=%s). This should not happen with CENTER=sci_center "
+                        "and IMAGE_SIZE=sci_shape — check SWarp configuration.",
+                        _sci_shape, _ref_shape,
                     )
-                try:
-                    shutil.copyfile(aligned_sci, aligned_science_fpath)
-                    self.logger.debug(
-                        "Overwrote science image with aligned version: %s",
-                        aligned_science_fpath,
+                else:
+                    self.logger.info(
+                        "SWarp outputs match: both images shape=%s.", _sci_shape,
                     )
-                except Exception as e:
-                    self.logger.warning(
-                        "Could not overwrite science image %s: %s",
-                        aligned_science_fpath,
-                        e,
-                    )
+            except Exception as _e:
+                self.logger.debug("Could not verify SWarp output shapes: %s", _e)
+
+            # Save aligned images to science directory (not overwriting original template)
+            # to prevent crosstalk when multiple science images use the same template
+            aligned_science_fpath = science_image
+            sci_dir = Path(science_image).parent
+            ref_name = Path(reference_image).name
+            aligned_reference_fpath = str(sci_dir / f"aligned_{ref_name}")
+
+            # SWarp reads the SCAMP .head file next to the input FITS during resampling
+            # and writes the correct aligned WCS into the .resamp.fits output.
+            # No post-SWarp WCS injection is needed or correct: the SCAMP .head has
+            # CRPIX/CRVAL from the original (pre-resample) image space, so injecting
+            # it after SWarp would overwrite the valid resampled-grid WCS with
+            # coordinates from the wrong pixel space.
+
+            # Validate WCS of aligned images before overwriting originals
+            # Test both pix2world and world2pix to ensure WCS is fully invertible
+            try:
+                with fits.open(aligned_ref) as hdul:
+                    ref_wcs = get_wcs(hdul[0].header)
+                    cx, cy = hdul[0].data.shape[1]/2, hdul[0].data.shape[0]/2
+                    ref_ra, ref_dec = ref_wcs.all_pix2world([cx], [cy], 0)
+                    if not (np.isfinite(ref_ra[0]) and np.isfinite(ref_dec[0])):
+                        self.logger.error(
+                            f"SWarp-aligned reference has invalid WCS pix2world: RA={ref_ra[0]}, Dec={ref_dec[0]}. "
+                            f"Falling back to AstroAlign."
+                        )
+                        return self._align_fallback_reproject_then_astroalign(
+                            science_image, reference_image, output_dir
+                        )
+                    # Test world2pix (critical for Cutout2D)
+                    test_px, test_py = ref_wcs.all_world2pix(ref_ra[0], ref_dec[0], 0)
+                    if not (np.isfinite(test_px) and np.isfinite(test_py)):
+                        self.logger.error(
+                            f"SWarp-aligned reference has non-invertible WCS: world2pix returned NaN/Inf. "
+                            f"Falling back to AstroAlign."
+                        )
+                        return self._align_fallback_reproject_then_astroalign(
+                            science_image, reference_image, output_dir
+                        )
+            except Exception as e:
+                self.logger.error(f"Failed to validate WCS of SWarp-aligned reference: {e}")
+                return self._align_fallback_reproject_then_astroalign(
+                    science_image, reference_image, output_dir
+                )
+
+            try:
+                with fits.open(aligned_sci) as hdul:
+                    sci_wcs = get_wcs(hdul[0].header)
+                    cx, cy = hdul[0].data.shape[1]/2, hdul[0].data.shape[0]/2
+                    sci_ra, sci_dec = sci_wcs.all_pix2world([cx], [cy], 0)
+                    if not (np.isfinite(sci_ra[0]) and np.isfinite(sci_dec[0])):
+                        self.logger.error(
+                            f"SWarp-aligned science has invalid WCS pix2world: RA={sci_ra[0]}, Dec={sci_dec[0]}. "
+                            f"Falling back to AstroAlign."
+                        )
+                        return self._align_fallback_reproject_then_astroalign(
+                            science_image, reference_image, output_dir
+                        )
+                    # Test world2pix (critical for Cutout2D)
+                    test_px, test_py = sci_wcs.all_world2pix(sci_ra[0], sci_dec[0], 0)
+                    if not (np.isfinite(test_px) and np.isfinite(test_py)):
+                        self.logger.error(
+                            f"SWarp-aligned science has non-invertible WCS: world2pix returned NaN/Inf. "
+                            f"Falling back to AstroAlign."
+                        )
+                        return self._align_fallback_reproject_then_astroalign(
+                            science_image, reference_image, output_dir
+                        )
+            except Exception as e:
+                self.logger.error(f"Failed to validate WCS of SWarp-aligned science: {e}")
+                return self._align_fallback_reproject_then_astroalign(
+                    science_image, reference_image, output_dir
+                )
+
+            try:
+                shutil.copyfile(aligned_ref, aligned_reference_fpath)
+                self.logger.debug(
+                    "Saved aligned reference image to: %s",
+                    aligned_reference_fpath,
+                )
+            except Exception as e:
+                self.logger.warning(
+                    "Could not save aligned reference image %s: %s",
+                    aligned_reference_fpath,
+                    e,
+                )
+
+            try:
+                shutil.copyfile(aligned_sci, aligned_science_fpath)
+                self.logger.debug(
+                    "Overwrote science image with aligned version: %s",
+                    aligned_science_fpath,
+                )
+            except Exception as e:
+                self.logger.warning(
+                    "Could not overwrite science image %s: %s",
+                    aligned_science_fpath,
+                    e,
+                )
 
             # Remove the aligned working directory after copying aligned images over the originals.
             if science_aligned_dir.exists():
@@ -1831,7 +1569,7 @@ NNW
             fwhm_ref_pix = float(ref_sex.get("fwhm", 2.5))
             fwhm_sci_arcsec = fwhm_sci_pix * sci_pix_scale
             fwhm_ref_arcsec = fwhm_ref_pix * ref_pix_scale
-            crossid_radius = max(max(fwhm_sci_arcsec, fwhm_ref_arcsec), 2.0)
+            crossid_radius = max(max(fwhm_sci_arcsec, fwhm_ref_arcsec), 15.0)
 
             def _load_matched_catalogs(sci_cat_path, ref_cat_path):
                 with fits.open(sci_cat_path) as hs, fits.open(ref_cat_path) as hr:
@@ -2515,18 +2253,13 @@ NNW
             target_ra: Optional target RA (degrees).
             target_dec: Optional target Dec (degrees).
         """
-        # Run SCAMP to compute WCS solution
+        # Run SCAMP to compute WCS solution for image_path aligned to ref_cat_path.
+        # run_scamp signature: (catalog_path, reference_cat, output_dir, config)
         scamp_res = self.run_scamp(
-            cat_path,
-            ref_cat_path,
-            image_path,
-            out_dir,
-            is_undersampled,
-            fwhm_pixels,
-            image_type,
-            scamp_config,
-            target_ra=target_ra,
-            target_dec=target_dec,
+            catalog_path=cat_path,
+            reference_cat=ref_cat_path,
+            output_dir=str(out_dir),
+            config=scamp_config,
         )
         if scamp_res is None:
             self.logger.info("SCAMP failed. Check logs for details.")
@@ -2538,6 +2271,20 @@ NNW
             return None
 
         self.logger.debug("SCAMP produced .head file: %s", head_file)
+
+        # SWarp looks for <stem>.head next to the input FITS to pick up the SCAMP WCS.
+        # Copy the .head file to sit next to image_path so SWarp finds it automatically.
+        image_head_dst = Path(image_path).with_suffix(".head")
+        try:
+            if head_file.resolve() != image_head_dst.resolve():
+                shutil.copy2(str(head_file), str(image_head_dst))
+                self.logger.info(
+                    "Copied SCAMP .head to %s for SWarp to use.", image_head_dst
+                )
+        except Exception as _he:
+            log_warning_from_exception(
+                self.logger, f"Could not copy SCAMP .head next to {image_path}", _he
+            )
 
         self.logger.debug("Running SWarp on %s", image_path)
         swarp_res = self.run_swarp(
@@ -3018,7 +2765,9 @@ NNW
             ref_cat_matched = ref_cat_filtered[:0]
             sci_cat_matched["MATCH_ID"] = np.array([], dtype=int)
             ref_cat_matched["MATCH_ID"] = np.array([], dtype=int)
-        if len(sci_cat_matched) >= 10:
+        # Only apply RANSAC mag filtering if we have many initial matches (>= 50)
+        # For fewer matches, use all matched sources to avoid over-filtering
+        if len(sci_cat_matched) >= 50:
             sci_mag = np.array(sci_cat_matched["MAG_APER"], dtype=float)
             ref_mag = np.array(ref_cat_matched["MAG_APER"], dtype=float)
             valid = np.isfinite(sci_mag) & np.isfinite(ref_mag)
@@ -3028,11 +2777,12 @@ NNW
                 intercept = None
                 try:
                     # Use RANSAC for alignment matching
+                    # residual_threshold=2.0 mag is more permissive to handle different zero points
                     ransac = RANSACRegressor(
                         estimator=ConstrainedSlopeRegressor(
                             slope_constraint=1.0, slope_tolerance=0.0
                         ),
-                        residual_threshold=0.5,
+                        residual_threshold=2.0,
                         max_trials=500,
                         min_samples=2,
                     )
@@ -3068,6 +2818,19 @@ NNW
                         self.logger.info(
                             f"Median fallback kept {len(sci_cat_matched)} sources"
                         )
+        else:
+            # For fewer than 50 initial matches, skip RANSAC to avoid over-filtering
+            self.logger.info(
+                f"Skipping RANSAC mag filter (only {len(sci_cat_matched)} initial matches < 50 threshold)"
+            )
+            # Calculate simple intercept for plotting
+            sci_mag = np.array(sci_cat_matched["MAG_APER"], dtype=float)
+            ref_mag = np.array(ref_cat_matched["MAG_APER"], dtype=float)
+            valid = np.isfinite(sci_mag) & np.isfinite(ref_mag)
+            if np.sum(valid) >= 2:
+                intercept = np.median(sci_mag[valid] - ref_mag[valid])
+            else:
+                intercept = None
 
         if len(sci_cat_matched) >= 5 and intercept is not None:
             from functions import set_size

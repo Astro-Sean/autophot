@@ -1319,7 +1319,7 @@ class Catalog:
                             corners_y = np.array(
                                 [0.0, 0.0, float(ny - 1), float(ny - 1)], dtype=float
                             )
-                            cra, cde = image_wcs.all_pix2world(corners_x, corners_y, 1)
+                            cra, cde = image_wcs.all_pix2world(corners_x, corners_y, 0)
                             sc_cen = SkyCoord(
                                 cen_ra * u.deg, cen_dec * u.deg, frame="icrs"
                             )

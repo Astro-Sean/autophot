@@ -110,6 +110,36 @@ def fix_panstarrs_header(h):
         if mjd is not None:
             h["OBSMJD"] = mjd
 
+    # --- WCS keywords (for template alignment) ---
+    # Copy WCS keywords if present in header but not in standard locations
+    wcs_keywords = [
+        'CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2',
+        'CTYPE1', 'CTYPE2', 'CD1_1', 'CD1_2', 'CD2_1', 'CD2_2',
+        'CDELT1', 'CDELT2', 'CROTA2', 'CUNIT1', 'CUNIT2',
+        'PV1_0', 'PV1_1', 'PV1_2', 'PV1_3', 'PV1_4', 'PV1_5',
+        'PV1_6', 'PV1_7', 'PV1_8', 'PV1_9', 'PV1_10',
+        'PV1_11', 'PV1_12', 'PV1_13', 'PV1_14', 'PV1_15',
+        'PV1_16', 'PV1_17', 'PV1_18', 'PV1_19', 'PV1_20',
+        'PV2_0', 'PV2_1', 'PV2_2', 'PV2_3', 'PV2_4', 'PV2_5',
+        'PV2_6', 'PV2_7', 'PV2_8', 'PV2_9', 'PV2_10',
+        'PV2_11', 'PV2_12', 'PV2_13', 'PV2_14', 'PV2_15',
+        'PV2_16', 'PV2_17', 'PV2_18', 'PV2_19', 'PV2_20',
+        'SIPNAME', 'A_ORDER', 'B_ORDER', 'AP_ORDER', 'BP_ORDER',
+    ]
+    # Also check for HIERARCH versions of WCS keywords
+    for key in list(h.keys()):
+        key_str = str(key)
+        if key_str.startswith('HIERARCH'):
+            # Extract the base keyword after HIERARCH
+            parts = key_str.split()
+            if len(parts) > 1:
+                base_key = parts[1]
+                if base_key not in wcs_keywords:
+                    wcs_keywords.append(base_key)
+                # Copy to standard keyword name if not already present
+                if base_key not in h and key in h:
+                    h[base_key] = h[key]
+
 
 def main(root, recursive=False):
     root = Path(root).expanduser().resolve()

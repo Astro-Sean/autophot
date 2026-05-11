@@ -621,12 +621,48 @@ class Zeropoint:
                         nonlin_peak_frac,
                     )
 
+            # Reject sources with bad SExtractor FLAGS (blended, truncated, etc.)
+            zp_max_flags = int(zp_cfg.get("max_flags", 2))
+            flags_mask = np.zeros(len(sources), dtype=bool)
+            for _flags_col in ("flags", "FLAGS", "flags_normal"):
+                if _flags_col in sources.columns:
+                    _f = pd.to_numeric(sources[_flags_col], errors="coerce").fillna(0).astype(int)
+                    flags_mask = flags_mask | (_f > zp_max_flags)
+                    break
+            n_flags = int(flags_mask.sum())
+            if n_flags > 0:
+                logger.info(
+                    "Removing %d sources with FLAGS > %d from zeropoint calibration.",
+                    n_flags, zp_max_flags,
+                )
+
+            # Reject sources where PSF inst mag deviates strongly from AP inst mag —
+            # these are blended or failed PSF fits that corrupt the PSF zeropoint.
+            psf_ap_mask = np.zeros(len(sources), dtype=bool)
+            max_psf_ap_delta = float(zp_cfg.get("max_psf_ap_delta", 0.5))
+            _filter = self.input_yaml.get("imageFilter", "")
+            _inst_ap_col = f"inst_{_filter}_AP"
+            _inst_psf_col = f"inst_{_filter}_PSF"
+            if _inst_ap_col in sources.columns and _inst_psf_col in sources.columns:
+                _ap = pd.to_numeric(sources[_inst_ap_col], errors="coerce")
+                _psf = pd.to_numeric(sources[_inst_psf_col], errors="coerce")
+                _delta = (_ap - _psf).abs()
+                psf_ap_mask = (_delta > max_psf_ap_delta) & _ap.notna() & _psf.notna()
+                n_psf_ap = int(psf_ap_mask.sum())
+                if n_psf_ap > 0:
+                    logger.info(
+                        "Removing %d sources with |inst_AP - inst_PSF| > %.2f mag from zeropoint calibration.",
+                        n_psf_ap, max_psf_ap_delta,
+                    )
+
             mask = (
                 valid_mags
                 & (sources[filter_col] >= upperMaglimit)
                 & (sources[filter_col] <= lowerMaglimit)
                 & (sources["threshold"] >= threshold_limit)
                 & (~non_linear_mask)
+                & (~flags_mask)
+                & (~psf_ap_mask)
             )
             cleaned = sources.loc[mask].copy()
             logger.info("%d sources remaining after quality cuts", len(cleaned))

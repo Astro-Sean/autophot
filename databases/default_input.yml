@@ -180,13 +180,6 @@ default_input:
     # telescope/subarray headers better and can improve photometry vs a forced-center solved WCS.
     solve_field_crpix_center: False # bool --- If True, pass astrometry.net `--crpix-center` (forces CRPIX at image center).
     refine_after_solve: False # bool --- If True, run an additional WCS refinement pass after a successful solve.
-    # Final small linear correction after solve-field/SCAMP, estimated from matched stars.
-    # This only nudges CRPIX and is applied only when the residual improvement is measurable.
-    post_scamp_linear_refine: True # bool --- Enable post-solve CRPIX micro-alignment.
-    post_scamp_linear_refine_min_points: 30 # int --- Minimum matched stars required for the micro-alignment estimate.
-    post_scamp_linear_refine_max_shift_px: 2.0 # float --- Maximum allowed CRPIX nudge magnitude in pixels.
-    post_scamp_linear_refine_min_improve_px: 0.03 # float --- Require at least this absolute median residual improvement (pixels).
-    post_scamp_linear_refine_min_improve_frac: 0.02 # float --- Also require this fractional improvement (e.g. 0.02 = 2%).
 
     scamp_exe_loc: null # str|null --- Optional explicit path to `scamp` executable.
     sextractor_exe_loc: null # str|null --- Optional explicit path to SExtractor executable.
@@ -362,7 +355,6 @@ default_input:
     alignment_method: swarp # str --- Science-template registration method (reproject, swarp, astroalign).
     alignment_use_extended_sources: False # bool --- If True, allow large/extended sources (galaxies) in SCAMP matching catalogs.
     alignment_max_fwhm_pix: 50.0 # float --- Max FWHM (pixels) kept when alignment_use_extended_sources=False.
-    alignment_set_crval_to_target: True # bool --- If True, set CRVAL1/CRVAL2 to target RA/Dec before alignment to center WCS on transient.
     method: sfft # str --- Subtraction backend (sfft default; hotpants or zogy optional where available).
     kernel_order: 0 # int --- Polynomial order for the SFFT kernel flux scaling model.
     download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).

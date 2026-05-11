@@ -452,6 +452,8 @@ class SExtractorWrapper:
         try:
             phot_cfg = self.config.setdefault("photometry", {})
             phot_cfg["last_source_detection_raw_count"] = int(n0)
+            # Store raw catalog for isolation checks against all detections
+            phot_cfg["last_raw_sex_catalog"] = sources.copy()
         except Exception:
             # Config is best-effort; never break filtering if this fails.
             pass
