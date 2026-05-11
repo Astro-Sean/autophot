@@ -1264,20 +1264,53 @@ NNW
                     self.logger.debug("Could not read WCS from SWarp output [%s]: %s", _label, _e)
 
             # Verify shapes match — they should by construction.
+            # Small (<=2 px) discrepancies arise from SWarp floating-point rounding
+            # in the WCS projection and can be fixed by NaN-padding the smaller image.
+            # Larger mismatches indicate a genuine coverage gap and require fallback.
+            _SHAPE_PAD_TOLERANCE = 2
             try:
                 with fits.open(aligned_sci) as _h:
                     _sci_shape = _h[0].data.shape
                 with fits.open(aligned_ref) as _h:
                     _ref_shape = _h[0].data.shape
                 if _sci_shape != _ref_shape:
-                    self.logger.warning(
-                        "SWarp outputs have different shapes after resampling "
-                        "(sci=%s, ref=%s). Falling back to reproject alignment.",
-                        _sci_shape, _ref_shape,
-                    )
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
-                    )
+                    _dy = abs(_sci_shape[0] - _ref_shape[0])
+                    _dx = abs(_sci_shape[1] - _ref_shape[1])
+                    if _dy <= _SHAPE_PAD_TOLERANCE and _dx <= _SHAPE_PAD_TOLERANCE:
+                        # Pad the smaller output with NaNs to match the science shape.
+                        _target_shape = _sci_shape
+                        self.logger.info(
+                            "SWarp shape mismatch (sci=%s, ref=%s) within tolerance "
+                            "(%d px); NaN-padding reference to match science shape.",
+                            _sci_shape, _ref_shape, _SHAPE_PAD_TOLERANCE,
+                        )
+                        try:
+                            with fits.open(aligned_ref, mode="update", memmap=False) as _hdul:
+                                _data = np.asarray(_hdul[0].data, dtype=np.float32)
+                                _padded = np.full(_target_shape, np.nan, dtype=np.float32)
+                                _cy = min(_data.shape[0], _target_shape[0])
+                                _cx = min(_data.shape[1], _target_shape[1])
+                                _padded[:_cy, :_cx] = _data[:_cy, :_cx]
+                                _hdul[0].data = _padded
+                                _hdul[0].header["NAXIS1"] = _target_shape[1]
+                                _hdul[0].header["NAXIS2"] = _target_shape[0]
+                                _hdul.flush()
+                        except Exception as _pad_e:
+                            log_warning_from_exception(
+                                self.logger, "Could not NaN-pad reference to match science shape", _pad_e
+                            )
+                            return self._align_fallback_reproject_then_astroalign(
+                                science_image, reference_image, output_dir
+                            )
+                    else:
+                        self.logger.warning(
+                            "SWarp outputs have different shapes after resampling "
+                            "(sci=%s, ref=%s). Falling back to reproject alignment.",
+                            _sci_shape, _ref_shape,
+                        )
+                        return self._align_fallback_reproject_then_astroalign(
+                            science_image, reference_image, output_dir
+                        )
                 else:
                     self.logger.info(
                         "SWarp outputs match: both images shape=%s.", _sci_shape,
