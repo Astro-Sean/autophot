@@ -1115,7 +1115,7 @@ NNW
                 )
                 scamp_result = self.run_scamp(
                     [sci_sex["catalog_path"], ref_sex["catalog_path"]],
-                    reference_cat=None,
+                    reference_cat=sci_sex["catalog_path"],
                     output_dir=str(reference_aligned_dir),
                     config=scamp_config_both,
                 )
@@ -2236,10 +2236,8 @@ NNW
             "NTHREADS": self.default_threads,
             **(config or {}),
         }
-        # When multiple catalogs are passed, ensure COMBINE=N so SCAMP produces
-        # one .head per input catalog rather than combining them.
-        if len(catalog_paths) > 1:
-            final_config["COMBINE"] = "N"
+        # COMBINE is a SWarp keyword, not a SCAMP keyword. Do not pass it to SCAMP.
+        final_config.pop("COMBINE", None)
         final_config = {k: v for k, v in final_config.items() if v is not None}
 
         config_file = (
