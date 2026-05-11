@@ -242,8 +242,9 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
             wcs = wcs.celestial
 
         # Test transformation
+        # CRPIX is FITS 1-based; pixel_to_world uses 0-based numpy convention -> subtract 1.
         try:
-            test_x, test_y = float(header['CRPIX1']), float(header['CRPIX2'])
+            test_x, test_y = float(header['CRPIX1']) - 1.0, float(header['CRPIX2']) - 1.0
             test_world = wcs.pixel_to_world(test_x, test_y)
             if test_world is None:
                 logger.warning("get_wcs: WCS transformation test failed - returned None")
@@ -1804,9 +1805,9 @@ class WCSSolver:
                 if test_wcs is not None:
                     # Test transform at image center - if this fails, the distortion is too extreme
                     cx, cy = best_trial_header.get("NAXIS1", 1000) / 2, best_trial_header.get("NAXIS2", 1000) / 2
-                    ra_test, dec_test = test_wcs.all_pix2world(cx, cy, 1)
+                    ra_test, dec_test = test_wcs.all_pix2world(cx, cy, 0)
                     # Round-trip test: world->pix->world should converge
-                    x_back, y_back = test_wcs.all_world2pix(ra_test, dec_test, 1, maxiter=50)
+                    x_back, y_back = test_wcs.all_world2pix(ra_test, dec_test, 0, maxiter=50)
                     if not (np.isfinite(x_back) and np.isfinite(y_back)):
                         raise ValueError("WCS round-trip failed")
                     logger.debug("SCAMP WCS passed invertibility test at image center")
