@@ -1094,7 +1094,6 @@ NNW
             # metadata (e.g., FILTER) and only writes one .head per instrument.
             # To force SCAMP to write separate .head files for both catalogs,
             # create temporary copies with different FILTER values.
-            swarp_config["COMBINE"] = "N"
 
             if reference_already_scamp:
                 self.logger.info(
@@ -1129,7 +1128,7 @@ NNW
                         )
                     
                     self.logger.info(
-                        "Running SCAMP on both catalogs (science + reference, COMBINE=N)..."
+                        "Running SCAMP on both catalogs (science + reference)..."
                     )
                     scamp_result = self.run_scamp(
                         [str(sci_cat_tmp), str(ref_cat_tmp)],
@@ -2255,10 +2254,9 @@ NNW
         Parameters
         ----------
         catalog_paths : str or list of str
-            One or more LDAC catalog paths to pass to SCAMP.  When multiple
-            catalogs are supplied, SCAMP is invoked with COMBINE=N so that
-            it produces one .head file per catalog, all solved on the same
-            astrometric grid — guaranteeing pixel-level co-registration.
+            One or more LDAC catalog paths to pass to SCAMP. When multiple
+            catalogs are supplied, SCAMP solves them together on the same
+            astrometric grid and produces one .head file per catalog.
         reference_cat : str, optional
             Path to the astrometric reference catalog (ASTREF_CATALOG=FILE).
             When None, GAIA-DR3 is used.
