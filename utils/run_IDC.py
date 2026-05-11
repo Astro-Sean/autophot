@@ -1274,9 +1274,32 @@ NNW
                     # Trim both to the minimum shape.
                     _ny = min(_sci_shape[0], _ref_shape[0])
                     _nx = min(_sci_shape[1], _ref_shape[1])
+
+                    # Verify the target stays within the trimmed bounds.
+                    # center_ra/center_dec is the science pixel centre passed as
+                    # CENTER to SWarp, which is also the expected target location.
+                    try:
+                        with fits.open(aligned_sci, memmap=False) as _hdul_chk:
+                            _chk_wcs = get_wcs(_hdul_chk[0].header)
+                        if _chk_wcs is not None:
+                            _tgt_x, _tgt_y = _chk_wcs.all_world2pix(
+                                [[center_ra, center_dec]], 0
+                            )[0]
+                            if _tgt_x >= _nx or _tgt_y >= _ny or _tgt_x < 0 or _tgt_y < 0:
+                                self.logger.warning(
+                                    "Target (%.1f, %.1f) falls outside trimmed shape "
+                                    "(%d,%d) — falling back to reproject.",
+                                    _tgt_x, _tgt_y, _ny, _nx,
+                                )
+                                return self._align_fallback_reproject_then_astroalign(
+                                    science_image, reference_image, output_dir
+                                )
+                    except Exception:
+                        pass  # non-fatal: proceed with trim
+
                     self.logger.info(
                         "SWarp shape mismatch (sci=%s, ref=%s); trimming both "
-                        "to minimum shape (%d,%d) — WCS unchanged.",
+                        "to minimum shape (%d,%d) — WCS unchanged, target within bounds.",
                         _sci_shape, _ref_shape, _ny, _nx,
                     )
                     for _trim_path in [aligned_sci, aligned_ref]:
