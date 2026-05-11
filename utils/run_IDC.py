@@ -1285,6 +1285,10 @@ NNW
                             _sci_shape, _ref_shape, _SHAPE_PAD_TOLERANCE,
                         )
                         try:
+                            # Read science CRPIX to synchronise the reference WCS after padding.
+                            with fits.open(aligned_sci, memmap=False) as _hdul_sci:
+                                _sci_crpix1 = _hdul_sci[0].header.get("CRPIX1")
+                                _sci_crpix2 = _hdul_sci[0].header.get("CRPIX2")
                             with fits.open(aligned_ref, mode="update", memmap=False) as _hdul:
                                 _data = np.asarray(_hdul[0].data, dtype=np.float32)
                                 _padded = np.full(_target_shape, np.nan, dtype=np.float32)
@@ -1294,6 +1298,13 @@ NNW
                                 _hdul[0].data = _padded
                                 _hdul[0].header["NAXIS1"] = _target_shape[1]
                                 _hdul[0].header["NAXIS2"] = _target_shape[0]
+                                # Both images share the same output grid (CENTER, PIXEL_SCALE,
+                                # IMAGE_SIZE) so CRPIX must be identical. The 1-px CRPIX
+                                # discrepancy is purely a SWarp rounding artefact — correct it.
+                                if _sci_crpix1 is not None:
+                                    _hdul[0].header["CRPIX1"] = float(_sci_crpix1)
+                                if _sci_crpix2 is not None:
+                                    _hdul[0].header["CRPIX2"] = float(_sci_crpix2)
                                 _hdul.flush()
                         except Exception as _pad_e:
                             log_warning_from_exception(
