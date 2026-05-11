@@ -852,8 +852,10 @@ NNW
                 
                 # Compute optimal output size as intersection of valid (non-NaN) regions
                 # from both images. This reduces computation when coverage differs.
+                # Ensure the target (center_ra, center_dec) is always included in output.
                 output_width, output_height = self._compute_optimal_output_shape(
-                    sci_data, sci_wcs, ref_data, ref_wcs, sci_pix_scale
+                    sci_data, sci_wcs, ref_data, ref_wcs, sci_pix_scale,
+                    target_ra=center_ra, target_dec=center_dec
                 )
                 self.logger.info(
                     "Optimal output shape: %dx%d (science was %dx%d, reference was %dx%d)",
@@ -1615,6 +1617,8 @@ NNW
         ref_data: np.ndarray,
         ref_wcs,
         pix_scale: float,
+        target_ra: Optional[float] = None,
+        target_dec: Optional[float] = None,
     ) -> Tuple[int, int]:
         """Compute optimal output shape as intersection of valid (non-NaN) regions.
         
@@ -1629,6 +1633,9 @@ NNW
             World coordinate systems for each image
         pix_scale : float
             Output pixel scale in arcsec/pixel
+        target_ra, target_dec : float, optional
+            Target position in degrees. If provided, the output shape is guaranteed
+            to include this position (expanded if necessary, up to science image bounds).
             
         Returns
         -------
@@ -1694,6 +1701,43 @@ NNW
             # Ensure minimum size and add small margin
             width = max(width, 100)
             height = max(height, 100)
+            
+            # Ensure target is included in output (if target position provided)
+            if target_ra is not None and target_dec is not None:
+                # Convert target world coords to pixel coords in output grid
+                # Output grid center is at (width/2, height/2) in pixel coords
+                # with pix_scale arcsec/pixel
+                cos_dec = np.cos(np.radians(target_dec))
+                
+                # Target offset from center in arcsec
+                dra_arcsec = (target_ra - (ra_min + ra_max) / 2) * cos_dec * 3600
+                ddec_arcsec = (target_dec - (dec_min + dec_max) / 2) * 3600
+                
+                # Convert to pixels
+                dx_pix = dra_arcsec / pix_scale
+                dy_pix = ddec_arcsec / pix_scale
+                
+                # Check if target falls within current output bounds
+                half_w = width / 2
+                half_h = height / 2
+                
+                # Expand width if needed
+                if abs(dx_pix) >= half_w - 5:  # 5 pixel margin
+                    new_half_w = abs(dx_pix) + 10  # Add margin
+                    width = int(2 * new_half_w)
+                    self.logger.debug(
+                        "Expanded output width to include target: %d -> %d", 
+                        int(2 * half_w), width
+                    )
+                
+                # Expand height if needed
+                if abs(dy_pix) >= half_h - 5:  # 5 pixel margin
+                    new_half_h = abs(dy_pix) + 10  # Add margin
+                    height = int(2 * new_half_h)
+                    self.logger.debug(
+                        "Expanded output height to include target: %d -> %d",
+                        int(2 * half_h), height
+                    )
             
             # Cap at original science size (don't expand beyond input)
             width = min(width, sci_data.shape[1])
