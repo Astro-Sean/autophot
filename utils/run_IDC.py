@@ -1088,10 +1088,12 @@ NNW
                 center_ra, center_dec, output_width, output_height, pix_scale,
             )
 
-            # Run SCAMP on the reference only, using the science catalog as reference.
-            # The science image already has an accurate solve-field WCS; running SCAMP
-            # on it (self-referencing) produces meaningless offsets.  Only the
-            # reference gets SCAMP refinement.
+            # Run SCAMP on BOTH catalogs with COMBINE=N.
+            # SCAMP solves both on the same astrometric grid and writes one .head
+            # per input catalog.  However, SCAMP 2.14.0 groups catalogs by instrument
+            # metadata (e.g., FILTER) and only writes one .head per instrument.
+            # To force SCAMP to write separate .head files for both catalogs,
+            # create temporary copies with different FILTER values.
             swarp_config["COMBINE"] = "N"
 
             if reference_already_scamp:
@@ -1100,32 +1102,107 @@ NNW
                 )
                 scamp_result = {}
             else:
-                self.logger.info("Running SCAMP for reference image...")
-                scamp_result = self.run_scamp(
-                    ref_sex["catalog_path"],
-                    reference_cat=sci_sex["catalog_path"],
-                    output_dir=str(reference_aligned_dir),
-                    config=scamp_config_ref,
-                )
+                # Create temporary catalog copies with distinct FILTER values
+                # to force SCAMP to treat them as different instruments.
+                sci_cat_path = Path(sci_sex["catalog_path"])
+                ref_cat_path = Path(ref_sex["catalog_path"])
+                sci_cat_tmp = reference_aligned_dir / f"{sci_cat_path.stem}_sci.cat"
+                ref_cat_tmp = reference_aligned_dir / f"{ref_cat_path.stem}_ref.cat"
+                
+                try:
+                    # Copy and modify FILTER headers in LDAC catalogs
+                    from astropy.io import fits
+                    
+                    for cat_path, cat_tmp, filter_val in [
+                        (sci_cat_path, sci_cat_tmp, "w_sci"),
+                        (ref_cat_path, ref_cat_tmp, "w_ref"),
+                    ]:
+                        with fits.open(cat_path, memmap=False) as hdul:
+                            # LDAC catalogs have the header in the first extension
+                            if len(hdul) > 1 and "FILTER" in hdul[1].header:
+                                hdul[1].header["FILTER"] = filter_val
+                            elif len(hdul) > 0 and "FILTER" in hdul[0].header:
+                                hdul[0].header["FILTER"] = filter_val
+                            hdul.writeto(cat_tmp, overwrite=True)
+                        self.logger.debug(
+                            "Created temporary catalog with FILTER=%s: %s", filter_val, cat_tmp
+                        )
+                    
+                    self.logger.info(
+                        "Running SCAMP on both catalogs (science + reference, COMBINE=N)..."
+                    )
+                    scamp_result = self.run_scamp(
+                        [str(sci_cat_tmp), str(ref_cat_tmp)],
+                        reference_cat=None,
+                        output_dir=str(reference_aligned_dir),
+                        config=scamp_config_both,
+                    )
+                    
+                    # Clean up temporary catalogs
+                    for cat_tmp in [sci_cat_tmp, ref_cat_tmp]:
+                        try:
+                            cat_tmp.unlink(missing_ok=True)
+                        except Exception as e:
+                            self.logger.debug("Could not remove temp catalog %s: %s", cat_tmp, e)
+                    
+                except Exception as e:
+                    self.logger.error("Failed to create temporary catalogs for SCAMP: %s", e)
+                    # Fallback to single-catalog SCAMP
+                    self.logger.info("Falling back to single-catalog SCAMP on reference...")
+                    scamp_result = self.run_scamp(
+                        ref_sex["catalog_path"],
+                        reference_cat=sci_sex["catalog_path"],
+                        output_dir=str(reference_aligned_dir),
+                        config=scamp_config_ref,
+                    )
+                    
                 if scamp_result is None:
                     self.logger.info(
-                        "SCAMP failed for reference image. Falling back to AstroAlign."
+                        "SCAMP failed. Falling back to AstroAlign."
                     )
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
 
-            # Copy the SCAMP .head file next to the reference FITS.
-            # The science image keeps its original solve-field WCS (no .head needed).
-            ref_head = scamp_result.get("head_file") if isinstance(scamp_result, dict) else None
-            if ref_head and Path(ref_head).exists():
-                ref_head_dst = ref_image_copy.with_suffix(".head")
-                if Path(ref_head).resolve() != ref_head_dst.resolve():
-                    try:
-                        shutil.copy2(ref_head, ref_head_dst)
-                        self.logger.info("Copied SCAMP .head (reference) to %s for SWarp.", ref_head_dst)
-                    except Exception as e:
-                        log_warning_from_exception(self.logger, "Could not copy reference .head for SWarp", e)
+            # Copy each .head file next to its FITS so SWarp picks it up.
+            head_by_stem = (
+                scamp_result.get("head_files_by_stem", {})
+                if isinstance(scamp_result, dict)
+                else {}
+            )
+            sci_cat_stem = Path(sci_sex["catalog_path"]).stem
+            ref_cat_stem = Path(ref_sex["catalog_path"]).stem
+
+            for cat_stem, fits_copy in [
+                (sci_cat_stem, sci_image_copy),
+                (ref_cat_stem, ref_image_copy),
+            ]:
+                head_src = head_by_stem.get(cat_stem)
+                if head_src and Path(head_src).exists():
+                    head_dst = fits_copy.with_suffix(".head")
+                    if Path(head_src).resolve() != head_dst.resolve():
+                        try:
+                            shutil.copy2(head_src, head_dst)
+                            self.logger.info(
+                                "Copied SCAMP .head (%s) to %s for SWarp.",
+                                cat_stem, head_dst,
+                            )
+                        except Exception as e:
+                            log_warning_from_exception(
+                                self.logger, f"Could not copy .head for {cat_stem}", e
+                            )
+            
+            # If only one .head was produced (fallback path), copy it to reference only
+            if not head_by_stem:
+                head_src = scamp_result.get("head_file") if isinstance(scamp_result, dict) else None
+                if head_src and Path(head_src).exists():
+                    ref_head_dst = ref_image_copy.with_suffix(".head")
+                    if Path(head_src).resolve() != ref_head_dst.resolve():
+                        try:
+                            shutil.copy2(head_src, ref_head_dst)
+                            self.logger.info("Copied SCAMP .head (reference only) to %s for SWarp.", ref_head_dst)
+                        except Exception as e:
+                            log_warning_from_exception(self.logger, "Could not copy reference .head for SWarp", e)
 
             resample_dir = science_aligned_dir / "resampled_output"
             resample_dir.mkdir(parents=True, exist_ok=True)
@@ -1247,13 +1324,11 @@ NNW
                     self.logger.debug("Could not read WCS from SWarp output [%s]: %s", _label, _e)
 
             # Reconcile output shapes.
-            # SWarp floating-point WCS arithmetic can produce outputs differing by
-            # several px when images have asymmetric NaN/coverage regions, even with
-            # identical IMAGE_SIZE.  When the mismatch is small, trim both outputs to
-            # the minimum shape by removing rows/cols from the END — this preserves
-            # the pixel origin so CRPIX and the full WCS are unchanged.  Only fall back
-            # for genuinely large mismatches (>10 px) indicating a coverage gap.
-            _SHAPE_TOL = 10
+            # When both images have SCAMP-refined .head files and are resampled
+            # by the same SWarp call with identical CENTER/IMAGE_SIZE/PIXEL_SCALE,
+            # the outputs should be identical.  A small tolerance (2 px) is kept
+            # only as a safety net for floating-point edge cases.
+            _SHAPE_TOL = 2
             try:
                 with fits.open(aligned_sci) as _h:
                     _sci_shape = _h[0].data.shape
