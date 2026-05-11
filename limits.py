@@ -1597,30 +1597,48 @@ class Limits:
                 )
                 return np.nan
 
-            # Measure existing S/N at each candidate site.
+            # Generate jitters for each candidate and measure S/N at all jittered positions.
+            # This ensures jittered positions are validated as quiet before selection.
+            # Total measurements = n_candidates * redo_default.
+            _jitter_rng = np.random.default_rng(42)
+            _jitter_dx = _jitter_rng.uniform(-0.5, 0.5, (len(cand_df), redo_default))
+            _jitter_dy = _jitter_rng.uniform(-0.5, 0.5, (len(cand_df), redo_default))
+            
+            # Flatten all jittered positions into a single DataFrame for batch measurement
+            jittered_rows = []
+            for i, (x0, y0) in enumerate(zip(cand_df["x_pix"], cand_df["y_pix"])):
+                for j in range(redo_default):
+                    jittered_rows.append({
+                        "x_pix": x0 + _jitter_dx[i, j],
+                        "y_pix": y0 + _jitter_dy[i, j],
+                        "_cand_idx": i,  # Track which candidate this jitter belongs to
+                        "_jitter_idx": j,
+                    })
+            jittered_df = pd.DataFrame(jittered_rows)
+            
+            # Measure S/N at all jittered positions
             ini_ap = Aperture(input_yaml=local_input_yaml, image=cutout)
-            cand_df = ini_ap.measure(
-                sources=cand_df,
+            jittered_df = ini_ap.measure(
+                sources=jittered_df,
                 plot=False,
                 background_rms=cutout_rms,
                 verbose=0,
             )
-            cand_df = _robust_site_snr(cand_df)
-
-            # Use the SNR column from Aperture.measure (with NaNs filled by _robust_site_snr).
-            # Score candidates by |SNR| so we choose the quietest background-like sites.
-            snr_col = np.asarray(cand_df.get("SNR", np.nan), dtype=float)
-            cand_df = cand_df.assign(_snr_score=snr_col)
+            jittered_df = _robust_site_snr(jittered_df)
+            
+            # Aggregate S/N per candidate (median absolute S/N across jitters)
+            jittered_df["_abs_snr"] = np.abs(jittered_df["SNR"])
+            cand_snr_agg = jittered_df.groupby("_cand_idx")["_abs_snr"].median()
+            cand_df = cand_df.assign(_snr_score=cand_snr_agg.values)
             cand_df = cand_df[np.isfinite(cand_df["_snr_score"])].copy()
+            
             if len(cand_df) == 0:
                 logger.warning(
-                    "All candidate sites have non-finite S/N; cannot find injection sites."
+                    "All candidate sites have non-finite S/N after jitter measurement; cannot find injection sites."
                 )
                 return np.nan
 
-            # Prefer truly "quiet" sites (|S/N| <= limit). If none exist in the
-            # environment, fall back to the lowest-|S/N| sites anyway so injection
-            # can proceed (this yields a more conservative limiting magnitude).
+            # Select quietest candidates based on jittered S/N score
             cand_df = cand_df.sort_values("_snr_score", ascending=True)
             quiet_mask = cand_df["_snr_score"] <= float(effective_snr_limit)
             cand_quiet = cand_df[quiet_mask].copy()
@@ -1645,7 +1663,7 @@ class Limits:
                         chosen_indices.append(np.argmin(distances))
                     chosen = pool.iloc[chosen_indices].copy()
                     logger.info(
-                        "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; "
+                        "Quiet-site selection: found %d/%d candidates with median |S/N|<=%.3g (jittered); "
                         "selected %d spatially uniform sites via K-means from pool of %d.",
                         int(len(cand_quiet)),
                         int(len(cand_df)),
@@ -1661,7 +1679,7 @@ class Limits:
                     )
                     chosen = cand_quiet.head(n_quiet)
                     logger.info(
-                        "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; using the lowest %d.",
+                        "Quiet-site selection: found %d/%d candidates with median |S/N|<=%.3g (jittered); using the lowest %d.",
                         int(len(cand_quiet)),
                         int(len(cand_df)),
                         float(effective_snr_limit),
@@ -1671,7 +1689,7 @@ class Limits:
                 # Not enough quiet candidates for spatial selection, just take what we have
                 chosen = cand_quiet.head(min(n_quiet, len(cand_quiet)))
                 logger.info(
-                    "Quiet-site selection: found %d/%d candidates with |S/N|<=%.3g; "
+                    "Quiet-site selection: found %d/%d candidates with median |S/N|<=%.3g (jittered); "
                     "using all %d (insufficient for spatial selection).",
                     int(len(cand_quiet)),
                     int(len(cand_df)),
@@ -1681,17 +1699,14 @@ class Limits:
             else:
                 # No quiet sites, fall back to lowest-|S/N| sites
                 chosen = cand_df.head(n_quiet)
-                # Not a fatal condition: proceed using the lowest-|S/N| sites anyway.
-                # This usually means the local environment is structured everywhere
-                # in the allowed annulus (common in difference images near bright hosts).
                 try:
                     q = np.nanpercentile(np.asarray(cand_df["_snr_score"], float), [5, 25, 50, 75, 95])
                     q_str = " / ".join(f"{v:.3g}" for v in q)
                 except Exception:
                     q_str = "n/a"
                 logger.info(
-                    "No candidates with |S/N|<=%.3g in local environment; using the lowest %d sites anyway "
-                    "(min/med/max |S/N| = %.3g / %.3g / %.3g; |S/N| quantiles [5,25,50,75,95]=%s).",
+                    "No candidates with median |S/N|<=%.3g (jittered) in local environment; using the lowest %d sites anyway "
+                    "(min/med/max median |S/N| = %.3g / %.3g / %.3g; quantiles [5,25,50,75,95]=%s).",
                     float(effective_snr_limit),
                     int(min(n_quiet, len(cand_df))),
                     float(np.nanmin(chosen["_snr_score"])),
@@ -1700,15 +1715,21 @@ class Limits:
                     q_str,
                 )
 
-            injection_df = chosen.drop(columns=["_snr_score"]).reset_index(drop=True)
+            # Extract jittered positions for selected candidates directly
+            chosen_cand_indices = chosen.index.tolist()
+            selected_jittered = jittered_df[jittered_df["_cand_idx"].isin(chosen_cand_indices)].copy()
+            injection_df = selected_jittered[["x_pix", "y_pix"]].reset_index(drop=True)
 
             logger.info(
-                "Quiet-site selection: sampled %d candidates -> using %d sites for injection.",
+                "Quiet-site selection: sampled %d candidates -> selected %d candidates -> "
+                "using %d jittered positions for injection (%d jitters per candidate).",
                 int(n_candidates),
+                int(len(chosen)),
                 int(len(injection_df)),
+                int(redo_default),
             )
 
-            # Use only these quiet sites for injection trials.
+            # Use only these jittered positions for injection trials.
             sourceNum = int(len(injection_df))
 
             H_final, W_final = cutout.shape
@@ -1724,7 +1745,7 @@ class Limits:
             r_max_eff = min(r_max, max(r_min, float(max_safe_r)))
             r_base_eff = float(np.clip(r_base, r_min, r_max_eff))
 
-            # injection_df is already built in cutout coordinates
+            # injection_df contains jittered positions from quiet-site selection
             x_pix_arr = injection_df["x_pix"].to_numpy()
             y_pix_arr = injection_df["y_pix"].to_numpy()
             n_sites = len(injection_df)
@@ -1747,18 +1768,13 @@ class Limits:
                 logger.warning("No valid injection sites after bounds filtering; aborting.")
                 return np.nan
 
-            # Pre-generate all jittered positions once so every magnitude
-            # evaluation uses the exact same set of (site, jitter) pairs.
-            # Total trials per magnitude = n_sites * redo_default.
-            _jitter_rng = np.random.default_rng(42)
-            _jitter_dx = _jitter_rng.uniform(-0.5, 0.5, (n_sites, redo_default))
-            _jitter_dy = _jitter_rng.uniform(-0.5, 0.5, (n_sites, redo_default))
-            _k_idx, _j_idx = np.divmod(np.arange(n_sites * redo_default), redo_default)
-            _x_inj_all = x_pix_arr[_k_idx] + _jitter_dx[_k_idx, _j_idx]
-            _y_inj_all = y_pix_arr[_k_idx] + _jitter_dy[_k_idx, _j_idx]
+            # injection_df already contains jittered positions from quiet-site selection,
+            # so x_pix_arr/y_pix_arr are the final trial positions (no further jittering needed).
+            _x_inj_all = x_pix_arr
+            _y_inj_all = y_pix_arr
             logger.info(
-                "Injection trial grid: %d sites x %d jitters = %d total trials per magnitude.",
-                int(n_sites), int(redo_default), int(n_sites * redo_default),
+                "Injection trial grid: %d total trials per magnitude (jittered during quiet-site selection).",
+                int(n_sites),
             )
 
             # Default serial; cap workers to avoid HPC fork/resource limits.
@@ -1775,8 +1791,10 @@ class Limits:
 
             def run_trials_at_mag(m: float, redo: int = None, pool=None, *, return_flags: bool = False):
                 """
-                Inject at *m* at all sites with *redo* sub-pixel jitter
-                repetitions and return summary statistics.
+                Inject at *m* at all pre-jittered sites and return summary statistics.
+
+                Jittering is done during quiet-site selection, so the positions in
+                _x_inj_all/_y_inj_all are already the final trial positions.
 
                 To keep memory bounded during bracketing/bisection, we cache only
                 scalars per magnitude (detection rate + median beta + median
@@ -1784,31 +1802,16 @@ class Limits:
                 the per-trial detection flags (needed for the optional logistic
                 fit), but we still avoid caching large per-trial arrays.
                 """
-                cache_key = f"{round(m, 4)}_{int(redo if redo is not None else redo_default)}"
+                cache_key = f"{round(m, 4)}"
                 if cache_key in _trial_cache:
                     cached = _trial_cache[cache_key]
                     if return_flags:
                         return cached
                     return cached[:3]
 
-                redo = int(redo_default if redo is None else redo)
-                redo = max(1, min(redo, 50))
                 F = flux_for_mag(m)
-
-                # Use pre-generated jitter positions when redo matches redo_default;
-                # fall back to on-the-fly generation only for non-default redo values
-                # (e.g. logistic_emcee solver).
-                if redo == redo_default:
-                    x_inj_all = _x_inj_all
-                    y_inj_all = _y_inj_all
-                else:
-                    seed = int(abs(hash(round(m, 4)))) % (2**31)
-                    local_rng = np.random.default_rng(seed)
-                    dx = local_rng.random((n_sites, redo)) - 0.5
-                    dy = local_rng.random((n_sites, redo)) - 0.5
-                    k_idx, j_idx = np.divmod(np.arange(n_sites * redo), redo)
-                    x_inj_all = x_pix_arr[k_idx] + dx[k_idx, j_idx]
-                    y_inj_all = y_pix_arr[k_idx] + dy[k_idx, j_idx]
+                x_inj_all = _x_inj_all
+                y_inj_all = _y_inj_all
 
                 tasks = [
                     (
