@@ -1656,24 +1656,53 @@ class Limits:
             )
             jittered_df = _robust_site_snr(jittered_df)
             
-            # Select the 100 quietest jittered positions by |S/N|
+            # Select the quietest jittered positions by |S/N|, then apply spatial uniformity
             jittered_df["_abs_snr"] = np.abs(jittered_df["SNR"])
             jittered_df = jittered_df[np.isfinite(jittered_df["_abs_snr"])].copy()
             jittered_df = jittered_df.sort_values("_abs_snr", ascending=True)
             
-            # Take the 100 quietest jittered positions (or fewer if not enough)
-            n_jitter_quiet = min(n_quiet, len(jittered_df))
-            jittered_chosen = jittered_df.head(n_jitter_quiet)
-            injection_df = jittered_chosen[["x_pix", "y_pix"]].reset_index(drop=True)
+            # Take a larger pool (3x n_quiet) to allow spatial selection, then use K-means
+            pool_size = min(3 * n_quiet, len(jittered_df))
+            pool = jittered_df.head(pool_size).copy()
             
-            logger.info(
-                "Stage 2 jittered quiet selection: %d candidates x %d jitters = %d jittered positions -> "
-                "selected %d quietest jittered positions for injection.",
-                int(len(stage1_chosen)),
-                int(redo_default),
-                int(len(jittered_df)),
-                int(len(injection_df)),
-            )
+            # Use K-means to select spatially uniform sites around the target
+            try:
+                from sklearn.cluster import KMeans
+                coords = np.column_stack([pool["x_pix"].values, pool["y_pix"].values])
+                kmeans = KMeans(n_clusters=n_quiet, random_state=42, n_init=10)
+                kmeans.fit(coords)
+                # Find the closest point to each cluster center
+                chosen_indices = []
+                for center in kmeans.cluster_centers_:
+                    distances = np.sum((coords - center) ** 2, axis=1)
+                    chosen_indices.append(np.argmin(distances))
+                jittered_chosen = pool.iloc[chosen_indices].copy()
+                logger.info(
+                    "Stage 2 jittered quiet selection: %d candidates x %d jitters = %d jittered positions -> "
+                    "selected %d spatially uniform sites via K-means from pool of %d quietest.",
+                    int(len(stage1_chosen)),
+                    int(redo_default),
+                    int(len(jittered_df)),
+                    int(len(jittered_chosen)),
+                    int(pool_size),
+                )
+            except Exception as exc:
+                # Fallback to simple selection if clustering fails
+                logger.warning(
+                    "K-means spatial selection failed (%s); falling back to simple selection.",
+                    str(exc),
+                )
+                jittered_chosen = pool.head(n_quiet)
+                logger.info(
+                    "Stage 2 jittered quiet selection: %d candidates x %d jitters = %d jittered positions -> "
+                    "using the lowest %d (K-means fallback).",
+                    int(len(stage1_chosen)),
+                    int(redo_default),
+                    int(len(jittered_df)),
+                    int(len(jittered_chosen)),
+                )
+            
+            injection_df = jittered_chosen[["x_pix", "y_pix"]].reset_index(drop=True)
 
             # Use only these jittered positions for injection trials.
             sourceNum = int(len(injection_df))
