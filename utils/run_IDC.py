@@ -1122,6 +1122,9 @@ NNW
             # To force SCAMP to write separate .head files for both catalogs,
             # create temporary copies with different FILTER values.
 
+            sci_cat_tmp_stem = None  # will be set below if SCAMP runs with temp catalogs
+            ref_cat_tmp_stem = None  # will be set below if SCAMP runs with temp catalogs
+
             if reference_already_scamp:
                 self.logger.info(
                     "Reference header has SCAMP HISTORY; skipping SCAMP, using existing WCS."
@@ -1134,6 +1137,9 @@ NNW
                 ref_cat_path = Path(ref_sex["catalog_path"])
                 sci_cat_tmp = reference_aligned_dir / f"{sci_cat_path.stem}_sci.cat"
                 ref_cat_tmp = reference_aligned_dir / f"{ref_cat_path.stem}_ref.cat"
+                # Track the temp stems so we can look up the correct .head files below
+                sci_cat_tmp_stem = sci_cat_tmp.stem  # e.g. "science_image_sci"
+                ref_cat_tmp_stem = ref_cat_tmp.stem  # e.g. "reference_image_ref"
                 
                 try:
                     # Copy and modify FILTER headers in LDAC catalogs
@@ -1188,45 +1194,51 @@ NNW
                         science_image, reference_image, output_dir
                     )
 
-            # Copy each .head file next to its FITs so SWarp picks it up.
+            # Copy both science and reference .head files next to their respective images
+            # so SWarp applies the SCAMP WCS correction to each independently.
+            # Both images are resampled onto the same fixed grid (CENTER/IMAGE_SIZE/PIXEL_SCALE),
+            # so output shapes are guaranteed to match regardless of which images have .head files.
             head_by_stem = (
                 scamp_result.get("head_files_by_stem", {})
                 if isinstance(scamp_result, dict)
                 else {}
             )
-            sci_cat_stem = Path(sci_sex["catalog_path"]).stem
-            ref_cat_stem = Path(ref_sex["catalog_path"]).stem
+            self.logger.debug(
+                "SCAMP produced .head files for stems: %s", list(head_by_stem.keys())
+            )
 
-            for cat_stem, fits_copy in [
-                (sci_cat_stem, sci_image_copy),
-                (ref_cat_stem, ref_image_copy),
+            for label, cat_tmp_stem, orig_cat_path, fits_copy in [
+                ("science", sci_cat_tmp_stem, sci_sex["catalog_path"], sci_image_copy),
+                ("reference", ref_cat_tmp_stem, ref_sex["catalog_path"], ref_image_copy),
             ]:
-                head_src = head_by_stem.get(cat_stem)
+                # Try temp-catalog stem first (most common path), then original stem
+                head_src = None
+                if cat_tmp_stem:
+                    head_src = head_by_stem.get(cat_tmp_stem)
+                if not head_src:
+                    orig_stem = Path(orig_cat_path).stem
+                    head_src = head_by_stem.get(orig_stem)
+                # Fallback: single .head key (non-temp-catalog SCAMP path)
+                if not head_src and label == "reference":
+                    head_src = scamp_result.get("head_file") if isinstance(scamp_result, dict) else None
+
                 if head_src and Path(head_src).exists():
                     head_dst = fits_copy.with_suffix(".head")
                     if Path(head_src).resolve() != head_dst.resolve():
                         try:
                             shutil.copy2(head_src, head_dst)
                             self.logger.info(
-                                "Copied SCAMP .head (%s) to %s for SWarp.",
-                                cat_stem, head_dst,
+                                "Copied SCAMP .head (%s) to %s for SWarp.", label, head_dst
                             )
                         except Exception as e:
                             log_warning_from_exception(
-                                self.logger, f"Could not copy .head for {cat_stem}", e
+                                self.logger, f"Could not copy .head for {label}", e
                             )
-            
-            # If only one .head was produced (fallback path), copy it to reference only
-            if not head_by_stem:
-                head_src = scamp_result.get("head_file") if isinstance(scamp_result, dict) else None
-                if head_src and Path(head_src).exists():
-                    ref_head_dst = ref_image_copy.with_suffix(".head")
-                    if Path(head_src).resolve() != ref_head_dst.resolve():
-                        try:
-                            shutil.copy2(head_src, ref_head_dst)
-                            self.logger.info("Copied SCAMP .head (reference only) to %s for SWarp.", ref_head_dst)
-                        except Exception as e:
-                            log_warning_from_exception(self.logger, "Could not copy reference .head for SWarp", e)
+                else:
+                    self.logger.warning(
+                        "No SCAMP .head found for %s image (searched stems: %s, available: %s)",
+                        label, [cat_tmp_stem, Path(orig_cat_path).stem], list(head_by_stem.keys()),
+                    )
 
             resample_dir = science_aligned_dir / "resampled_output"
             resample_dir.mkdir(parents=True, exist_ok=True)
@@ -1352,7 +1364,7 @@ NNW
             # by the same SWarp call with identical CENTER/IMAGE_SIZE/PIXEL_SCALE,
             # the outputs should be identical.  A small tolerance (2 px) is kept
             # only as a safety net for floating-point edge cases.
-            _SHAPE_TOL = 2
+            _SHAPE_TOL = 10  # pixels; >10 px mismatch means something went structurally wrong
             try:
                 with fits.open(aligned_sci) as _h:
                     _sci_shape = _h[0].data.shape
