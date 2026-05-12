@@ -999,12 +999,14 @@ class Catalog:
                         "SR": radius_deg,
                         "RESPONSEFORMAT": "VOTABLE",
                     }
-                    with open("temp.vot", "wb") as f:
+                    # Write temp file to target_dir instead of cwd to avoid wrong directory writes
+                    temp_vot_path = os.path.join(target_dir, "temp.vot")
+                    with open(temp_vot_path, "wb") as f:
                         logger.info("Downloading Sequence Stars from SkyMapper")
                         response = requests.get(server, params=params)
                         f.write(response.content)
                     selectedCatalog = (
-                        parse_single_table("temp.vot")
+                        parse_single_table(temp_vot_path)
                         .to_table(use_names_over_ids=True)
                         .to_pandas()
                     )
@@ -1012,7 +1014,7 @@ class Catalog:
                         selectedCatalog["class_star"] > 0.8
                     ]
                     selectedCatalog = selectedCatalog[selectedCatalog["flags"] <= 1]
-                    os.remove("temp.vot")
+                    os.remove(temp_vot_path)
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
