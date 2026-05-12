@@ -854,11 +854,9 @@ class Catalog:
 
                     # Build final catalog table
                     selectedCatalog = result[available_cols].to_pandas()
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
-                    )
+                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName == "gaia":
                     # For Gaia DR3+XP, use a smaller radius than the full catalog
@@ -892,11 +890,9 @@ class Catalog:
 
                     # Build final catalog table
                     selectedCatalog = result
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
-                    )
+                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName == "refcat":
 
@@ -943,11 +939,9 @@ class Catalog:
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
-                    )
+                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName == "legacy":
 
@@ -962,11 +956,9 @@ class Catalog:
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
-                    )
+                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName in ["apass", "2mass", "sdss"]:
                     Vizier.ROW_LIMIT = -1
@@ -989,13 +981,9 @@ class Catalog:
                             selectedCatalog = selectedCatalog[
                                 selectedCatalog["cl"] == 6
                             ]
-                        selectedCatalog.to_csv(
-                            f"{fname}.csv", index=False, na_rep=np.nan
-                        )
-                        shutil.move(
-                            os.path.join(os.getcwd(), f"{fname}.csv"),
-                            os.path.join(target_dir, f"{fname}.csv"),
-                        )
+                        # Write directly to target directory instead of cwd to avoid wrong directory writes
+                        csv_path = os.path.join(target_dir, f"{fname}.csv")
+                        selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
@@ -1028,11 +1016,9 @@ class Catalog:
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
-                    )
+                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName == "pan_starrs":
                     logger.info(
@@ -1113,11 +1099,9 @@ class Catalog:
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
-                    selectedCatalog.to_csv(f"{fname}.csv", index=False, na_rep=np.nan)
-                    shutil.move(
-                        os.path.join(os.getcwd(), f"{fname}.csv"),
-                        os.path.join(target_dir, f"{fname}.csv"),
-                    )
+                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 else:
                     logger.critical("Catalog %s is not recognized.", catalogName)

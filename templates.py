@@ -854,7 +854,7 @@ def flux_to_mag(
     return mag, mag_err
 
 
-def clean_fits_nans(fpath: str) -> str:
+def clean_fits_nans(fpath: str, output_dir: str = None) -> str:
     """
     Replace NaN / Inf pixels in a FITS image with NO_DATA_SENTINEL.
     
@@ -863,6 +863,10 @@ def clean_fits_nans(fpath: str) -> str:
 
     This is necessary before feeding images to external tools (HOTPANTS, SFFT)
     that cannot handle IEEE special values.
+    
+    Args:
+        fpath: Path to the input FITS file.
+        output_dir: Directory for the temporary file. If None, uses the parent directory of fpath.
     
     Returns:
         str: Path to the cleaned temporary file.
@@ -875,8 +879,10 @@ def clean_fits_nans(fpath: str) -> str:
             data[bad] = NO_DATA_SENTINEL
     
     # Write to a temporary file instead of modifying the original
-    # Use a safer location (current working dir instead of /tmp) to avoid access issues
-    fd, tmp_path = tempfile.mkstemp(suffix=".fits", prefix="cleaned_", dir=".")
+    # Use the parent directory of the input file or specified output_dir
+    if output_dir is None:
+        output_dir = str(Path(fpath).parent)
+    fd, tmp_path = tempfile.mkstemp(suffix=".fits", prefix="cleaned_", dir=output_dir)
     try:
         with os.fdopen(fd, 'wb') as f:
             hdu = fits.PrimaryHDU(data, header=header)
@@ -4221,8 +4227,8 @@ class Templates:
             if method == "sfft":
                 # Clean input files to prevent SFFT from modifying originals in-place
                 # (matches HOTPANTS behavior and prevents crosstalk)
-                sci_clean = clean_fits_nans(scienceFpath)
-                ref_clean = clean_fits_nans(template_work_fpath)
+                sci_clean = clean_fits_nans(scienceFpath, str(scienceDir))
+                ref_clean = clean_fits_nans(template_work_fpath, str(scienceDir))
                 method = self._subtract_sfft(
                     sci_clean,
                     ref_clean,
@@ -4808,8 +4814,8 @@ class Templates:
             # Sanitise inputs
             original_sci_path = scienceFpath
             original_ref_path = templateFpath
-            scienceFpath = clean_fits_nans(scienceFpath)
-            templateFpath = clean_fits_nans(templateFpath)
+            scienceFpath = clean_fits_nans(scienceFpath, str(scienceDir))
+            templateFpath = clean_fits_nans(templateFpath, str(scienceDir))
 
             hotpants_fwhm = ensure_odd(
                 int(max(np.ceil(template_fwhm), np.ceil(science_fwhm)))
