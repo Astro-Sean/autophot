@@ -875,10 +875,15 @@ def clean_fits_nans(fpath: str) -> str:
             data[bad] = NO_DATA_SENTINEL
     
     # Write to a temporary file instead of modifying the original
-    fd, tmp_path = tempfile.mkstemp(suffix=".fits", prefix="cleaned_")
-    os.close(fd)
-    hdu = fits.PrimaryHDU(data, header=header)
-    hdu.writeto(tmp_path, overwrite=True, output_verify="silentfix+ignore")
+    # Use a safer location (current working dir instead of /tmp) to avoid access issues
+    fd, tmp_path = tempfile.mkstemp(suffix=".fits", prefix="cleaned_", dir=".")
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            hdu = fits.PrimaryHDU(data, header=header)
+            hdu.writeto(f, output_verify="silentfix+ignore")
+    except Exception:
+        os.close(fd)
+        raise
     return tmp_path
 
 
