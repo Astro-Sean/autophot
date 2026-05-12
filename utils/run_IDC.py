@@ -1359,12 +1359,9 @@ NNW
                 except Exception as _e:
                     self.logger.debug("Could not read WCS from SWarp output [%s]: %s", _label, _e)
 
-            # Reconcile output shapes.
-            # When both images have SCAMP-refined .head files and are resampled
-            # by the same SWarp call with identical CENTER/IMAGE_SIZE/PIXEL_SCALE,
-            # the outputs should be identical.  A small tolerance (2 px) is kept
-            # only as a safety net for floating-point edge cases.
-            _SHAPE_TOL = 10  # pixels; >10 px mismatch means something went structurally wrong
+            # Verify output shapes match. With both SCAMP .head files placed and
+            # SWarp using a fixed CENTER/IMAGE_SIZE/PIXEL_SCALE grid, both outputs
+            # must be identical. A mismatch means something went structurally wrong.
             try:
                 with fits.open(aligned_sci) as _h:
                     _sci_shape = _h[0].data.shape
@@ -1372,61 +1369,20 @@ NNW
                     _ref_shape = _h[0].data.shape
 
                 if _sci_shape != _ref_shape:
-                    _dy = abs(_sci_shape[0] - _ref_shape[0])
-                    _dx = abs(_sci_shape[1] - _ref_shape[1])
-                    if _dy > _SHAPE_TOL or _dx > _SHAPE_TOL:
-                        self.logger.warning(
-                            "SWarp outputs have different shapes after resampling "
-                            "(sci=%s, ref=%s) — mismatch too large, falling back.",
-                            _sci_shape, _ref_shape,
-                        )
-                        return self._align_fallback_reproject_then_astroalign(
-                            science_image, reference_image, output_dir
-                        )
-                    # Trim both to the minimum shape.
-                    _ny = min(_sci_shape[0], _ref_shape[0])
-                    _nx = min(_sci_shape[1], _ref_shape[1])
-
-                    # Verify the target stays within the trimmed bounds.
-                    # center_ra/center_dec is the science pixel centre passed as
-                    # CENTER to SWarp, which is also the expected target location.
-                    try:
-                        with fits.open(aligned_sci, memmap=False) as _hdul_chk:
-                            _chk_wcs = get_wcs(_hdul_chk[0].header)
-                        if _chk_wcs is not None:
-                            _tgt_x, _tgt_y = _chk_wcs.all_world2pix(
-                                [[center_ra, center_dec]], 0
-                            )[0]
-                            if _tgt_x >= _nx or _tgt_y >= _ny or _tgt_x < 0 or _tgt_y < 0:
-                                self.logger.warning(
-                                    "Target (%.1f, %.1f) falls outside trimmed shape "
-                                    "(%d,%d) — falling back to reproject.",
-                                    _tgt_x, _tgt_y, _ny, _nx,
-                                )
-                                return self._align_fallback_reproject_then_astroalign(
-                                    science_image, reference_image, output_dir
-                                )
-                    except Exception:
-                        pass  # non-fatal: proceed with trim
-
-                    self.logger.info(
-                        "SWarp shape mismatch (sci=%s, ref=%s); trimming both "
-                        "to minimum shape (%d,%d) — WCS unchanged, target within bounds.",
-                        _sci_shape, _ref_shape, _ny, _nx,
+                    self.logger.warning(
+                        "SWarp outputs have different shapes (sci=%s, ref=%s) — "
+                        "SCAMP/SWarp alignment failed, falling back.",
+                        _sci_shape, _ref_shape,
                     )
-                    for _trim_path in [aligned_sci, aligned_ref]:
-                        with fits.open(_trim_path, mode="update", memmap=False) as _hdul:
-                            _d = np.asarray(_hdul[0].data, dtype=np.float32)
-                            _hdul[0].data = _d[:_ny, :_nx]
-                            _hdul[0].header["NAXIS1"] = _nx
-                            _hdul[0].header["NAXIS2"] = _ny
-                            _hdul.flush()
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
                 else:
                     self.logger.info(
                         "SWarp outputs match: both images shape=%s.", _sci_shape,
                     )
             except Exception as _e:
-                self.logger.debug("Could not verify/reconcile SWarp output shapes: %s", _e)
+                self.logger.debug("Could not verify SWarp output shapes: %s", _e)
 
             # Overwrite the reference_image path in-place with the aligned version.
             # reference_image is already a per-science-image copy so overwriting it
