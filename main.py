@@ -4072,18 +4072,24 @@ def run_photometry():
                 from scipy.spatial import cKDTree
                 tree = cKDTree(masked_pixels)
                 source_coords = matched_df[["x_pix", "y_pix"]].values
+                # Configurable proximity threshold for masked regions (default: FWHM * 1.5 instead of 3.0)
+                # Can be configured via photometry.masked_region_proximity_fwhm_mult in input_yaml
+                proximity_fwhm_mult = float(
+                    (input_yaml.get("photometry", {}) or {}).get("masked_region_proximity_fwhm_mult", 1.5)
+                )
+                proximity_threshold = ImageFWHM * proximity_fwhm_mult
                 # Query the tree for the minimum distance to any masked pixel for each source
                 min_distances, _ = tree.query(
-                    source_coords, k=1, distance_upper_bound=scale
+                    source_coords, k=1, distance_upper_bound=proximity_threshold
                 )
 
-                excluded_sources = matched_df[min_distances <= scale]
-                matched_df = matched_df[min_distances > scale]
+                excluded_sources = matched_df[min_distances <= proximity_threshold]
+                matched_df = matched_df[min_distances > proximity_threshold]
 
                 if not excluded_sources.empty:
                     logging.info(
                         f"Excluded {len(excluded_sources)} sources due to proximity to a nan/masked region "
-                        f"(threshold: {scale:.2f} pixels)."
+                        f"(threshold: {proximity_threshold:.2f} pixels = FWHM x {proximity_fwhm_mult:.1f})."
                     )
 
             df_zogy_science = None
@@ -4156,8 +4162,11 @@ def run_photometry():
                 )
 
                 #  NEW: Centroid Check for Each Source
-                # Define a tolerance for positional alignment (e.g., 1 pixels)
-                POSITION_TOLERANCE = 3
+                # Define a tolerance for positional alignment (increased from 3 to 5 for sparse fields)
+                # Can be configured via photometry.centroid_tolerance in input_yaml
+                POSITION_TOLERANCE = float(
+                    (input_yaml.get("photometry", {}) or {}).get("centroid_tolerance", 5.0)
+                )
 
                 # Centroid each source in the template image
                 template_sources["x_centroid"] = np.nan
