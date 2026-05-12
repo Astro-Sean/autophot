@@ -4365,13 +4365,15 @@ class Templates:
                 try:
                     if sci_clean and os.path.exists(sci_clean):
                         os.remove(sci_clean)
-                except (OSError, NameError, UnboundLocalError):
-                    pass
+                        logger.debug(f"Cleaned up temp file: {sci_clean}")
+                except (OSError, NameError, UnboundLocalError) as e:
+                    logger.warning(f"Failed to clean up sci_clean temp file: {e}")
                 try:
                     if ref_clean and os.path.exists(ref_clean):
                         os.remove(ref_clean)
-                except (OSError, NameError, UnboundLocalError):
-                    pass
+                        logger.debug(f"Cleaned up temp file: {ref_clean}")
+                except (OSError, NameError, UnboundLocalError) as e:
+                    logger.warning(f"Failed to clean up ref_clean temp file: {e}")
             elif method == "hotpants":
                 # HOTPANTS also uses clean_fits_nans but modifies the local variables
                 # We need to track and clean those too
@@ -4895,10 +4897,12 @@ class Templates:
             try:
                 if scienceFpath != original_sci_path and os.path.exists(scienceFpath):
                     os.remove(scienceFpath)
-            except (OSError, NameError):
-                pass
+                    logger.debug(f"Cleaned up HOTPANTS temp file: {scienceFpath}")
+            except (OSError, NameError) as e:
+                logger.warning(f"Failed to clean up HOTPANTS science temp file: {e}")
             try:
                 if templateFpath != original_ref_path and os.path.exists(templateFpath):
                     os.remove(templateFpath)
-            except (OSError, NameError):
-                pass
+                    logger.debug(f"Cleaned up HOTPANTS temp file: {templateFpath}")
+            except (OSError, NameError) as e:
+                logger.warning(f"Failed to clean up HOTPANTS template temp file: {e}")
