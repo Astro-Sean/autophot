@@ -3388,7 +3388,7 @@ class Templates:
                 )
 
             return (
-                full[full["is_inlier"]].reset_index(drop=True),
+                full[full["is_inlier"]],
                 (mag_slope, flux_scale),
             )
 
