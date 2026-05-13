@@ -109,6 +109,7 @@ class ImageDistortionCorrector:
         "STABILITY_TYPE": "EXPOSURE",
         "SN_THRESHOLDS": "3.0,100000.0",
     }
+
     DEFAULT_SWARP_CONFIG = {
         "COMBINE": "N",
         "COMBINE_TYPE": "MEDIAN",
@@ -121,10 +122,14 @@ class ImageDistortionCorrector:
         "WRITE_XML": "Y",
         "VERBOSE_TYPE": "LOG",
         "BLANK_BADPIXELS": "Y",
+        "FILL_VALUE": "NAN",
+        "EDGE_THRESH": 0.0,
         "CELESTIAL_TYPE": "NATIVE",
         "PROJECTION_TYPE": "TAN",
         "FSCALASTRO_TYPE": "NONE",
         "COPY_KEYWORDS": "TELESCOP,FILTER,INSTRUME,EXPTIME,GAIN,OBSMJD,RDNOISE,APER,FWHM",
+        # Allow full WCS transformations including rotation
+        "ROTATE": "Y",
     }
 
     # ---------------------------- Constructor / logger ----------------------------
@@ -272,7 +277,7 @@ NNW
         image_path: str,
         catalog_path: str,
         output_plot_path: str = "sextractor_sources.png",
-        cmap: str = "gray",
+        cmap: str = "viridis",
         figsize: Optional[tuple] = None,
         max_sources: int = 1000,
         **imshow_kwargs,
@@ -988,10 +993,7 @@ NNW
                 "Proceeding with SCAMP + SWarp alignment (%d matched sources).",
                 _num_matched,
             )
-            # Round PIXEL_SCALE to 4 decimal places to ensure consistency between
-            # output shape computation and SWarp resampling. SWarp's internal
-            # computation can differ, causing WCS mismatches.
-            pix_scale = round(sci_pix_scale, 4)
+            pix_scale = sci_pix_scale
 
             # SCAMP: derive parameters from FWHM and pixel scale
             crossid_arcsec = max(
@@ -1076,20 +1078,19 @@ NNW
                     override_ref.strip().upper(),
                 )
                 ref_resampling_method = override_ref.strip().upper()
-                
-            # SWarp PROJECTION_TYPE=NATIVE preserves the projection type from the
-            # SCAMP .head files (TPV with PV coefficients). Do not override it here.
+
             swarp_config = {
                 "CENTER_TYPE": "MANUAL",
-                "CENTER": f"{center_ra:.6f},{center_dec:.6f}",
-                "PIXEL_SCALE": pix_scale,  # Use science image pixel scale
-                "PIXELSCALE_TYPE": "MANUAL",  # Force use of specified PIXEL_SCALE
+                "CENTER": f"{center_ra:.8f},{center_dec:.8f}",
+                "PIXEL_SCALE": pix_scale,
+                "PIXELSCALE_TYPE": "MANUAL",
                 "IMAGE_SIZE": f"{output_width},{output_height}",
-                "BLANK_BADPIXELS": "N",  # Prevent SWarp from adjusting output based on blank/bad pixels
                 "RESAMPLING_TYPE": sci_resampling_method,
+                # OVERSAMPLING>0 causes SWarp to compute grid extents at N× sub-pixel
+                # resolution internally then round back, producing off-by-one shape
+                # mismatches when two images are resampled onto the same grid.
+                # OVERSAMPLING=0 disables this entirely.
                 "OVERSAMPLING": 0,
-                # PROJECTION_TYPE is set to NATIVE in DEFAULT_SWARP_CONFIG to preserve
-                # the projection from SCAMP .head files (TPV with PV coefficients).
             }
             swarp_config_sci = {
                 **swarp_config,
@@ -1115,24 +1116,15 @@ NNW
                 center_ra, center_dec, output_width, output_height, pix_scale,
             )
 
-            # Run SCAMP on BOTH catalogs with science catalog as reference.
-            # Both science and reference images get SCAMP distortion corrections.
-            # Science SExtractor catalog is used as SCAMP's astrometric reference for
-            # alignment. Validate it exists before proceeding — a missing catalog must
-            # be a hard failure, not silently replaced by GAIA-DR3.
-            _sci_cat_for_scamp = sci_sex.get("catalog_path") if isinstance(sci_sex, dict) else None
-            if not _sci_cat_for_scamp or not Path(_sci_cat_for_scamp).exists():
-                self.logger.error(
-                    "Science SExtractor catalog missing or not found at '%s'; "
-                    "cannot use it as SCAMP reference — falling back to AstroAlign.",
-                    _sci_cat_for_scamp,
-                )
-                return self._align_fallback_reproject_then_astroalign(
-                    science_image, reference_image, output_dir
-                )
-            self.logger.info(
-                "SCAMP astrometric reference (science catalog): %s", _sci_cat_for_scamp
-            )
+            # Run SCAMP on BOTH catalogs with the science catalog as reference.
+            # SCAMP solves both on the same astrometric grid and writes one .head
+            # per input catalog.  However, SCAMP 2.14.0 groups catalogs by instrument
+            # metadata (e.g., FILTER) and only writes one .head per instrument.
+            # To force SCAMP to write separate .head files for both catalogs,
+            # create temporary copies with different FILTER values.
+
+            sci_cat_tmp_stem = None  # will be set below if SCAMP runs with temp catalogs
+            ref_cat_tmp_stem = None  # will be set below if SCAMP runs with temp catalogs
 
             if reference_already_scamp:
                 self.logger.info(
@@ -1153,24 +1145,11 @@ NNW
                 ref_cat_tmp_stem = ref_cat_tmp.stem
 
                 try:
-                    for cat_path, cat_tmp, filter_suffix in [
+                    for cat_path, cat_tmp, filter_val in [
                         (sci_cat_path, sci_cat_tmp, "w_sci"),
                         (ref_cat_path, ref_cat_tmp, "w_ref"),
                     ]:
                         with fits.open(cat_path, memmap=False) as hdul:
-                            # Build FILTER value: preserve existing filter name and append suffix
-                            # This ensures SCAMP can distinguish catalogs while keeping original info
-                            base_filter = None
-                            if len(hdul) > 1 and "FILTER" in hdul[1].header:
-                                base_filter = hdul[1].header["FILTER"]
-                            elif len(hdul) > 0 and "FILTER" in hdul[0].header:
-                                base_filter = hdul[0].header["FILTER"]
-                            
-                            if base_filter and base_filter.strip():
-                                filter_val = f"{base_filter.strip()}_{filter_suffix}"
-                            else:
-                                filter_val = filter_suffix
-                            
                             if len(hdul) > 1 and "FILTER" in hdul[1].header:
                                 hdul[1].header["FILTER"] = filter_val
                             elif len(hdul) > 0 and "FILTER" in hdul[0].header:
@@ -1181,11 +1160,11 @@ NNW
                         )
 
                     self.logger.info(
-                        "Running SCAMP on both catalogs (science + reference) to align based on science image stars..."
+                        "Running SCAMP on both catalogs (science + reference)..."
                     )
                     scamp_result = self.run_scamp(
                         [str(sci_cat_tmp), str(ref_cat_tmp)],
-                        reference_cat=_sci_cat_for_scamp,
+                        reference_cat=sci_sex["catalog_path"],
                         output_dir=str(reference_aligned_dir),
                         config=scamp_config_both,
                     )
@@ -1201,7 +1180,7 @@ NNW
                     self.logger.info("Falling back to single-catalog SCAMP on reference...")
                     scamp_result = self.run_scamp(
                         ref_sex["catalog_path"],
-                        reference_cat=_sci_cat_for_scamp,
+                        reference_cat=sci_sex["catalog_path"],
                         output_dir=str(reference_aligned_dir),
                         config=scamp_config_ref,
                     )
@@ -1214,6 +1193,10 @@ NNW
                         science_image, reference_image, output_dir
                     )
 
+            # Copy both science and reference .head files next to their respective images
+            # so SWarp applies the SCAMP WCS correction to each independently.
+            # Both images are resampled onto the same fixed grid (CENTER/IMAGE_SIZE/PIXEL_SCALE),
+            # so output shapes are guaranteed to match regardless of which images have .head files.
             head_by_stem = (
                 scamp_result.get("head_files_by_stem", {})
                 if isinstance(scamp_result, dict)
@@ -1223,10 +1206,6 @@ NNW
                 "SCAMP produced .head files for stems: %s", list(head_by_stem.keys())
             )
 
-            # Copy SCAMP .head files to both science and reference images
-            # so SWarp applies the SCAMP WCS correction to each independently.
-            # Both images are resampled onto the same fixed grid (CENTER/IMAGE_SIZE/PIXEL_SCALE),
-            # so output shapes are guaranteed to match.
             for label, cat_tmp_stem, orig_cat_path, fits_copy in [
                 ("science", sci_cat_tmp_stem, sci_sex["catalog_path"], sci_image_copy),
                 ("reference", ref_cat_tmp_stem, ref_sex["catalog_path"], ref_image_copy),
@@ -1239,7 +1218,7 @@ NNW
                     orig_stem = Path(orig_cat_path).stem
                     head_src = head_by_stem.get(orig_stem)
                 # Fallback: single .head key (non-temp-catalog SCAMP path)
-                if not head_src:
+                if not head_src and label == "reference":
                     head_src = scamp_result.get("head_file") if isinstance(scamp_result, dict) else None
 
                 if head_src and Path(head_src).exists():
@@ -1286,11 +1265,11 @@ NNW
                     [str(ref_image_copy)],
                     scamp_results=scamp_result,
                     output_dir=str(resample_dir),
-                    config=swarp_config_ref,
+                    config=swarp_config,
                 )
                 if swarp_res is None:
-                    self.logger.info("SWarp failed. Falling back to reproject.")
-                    return self.align_with_reproject(
+                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
+                    return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
                 resampled_dir = Path(swarp_res["resampled_dir"])
@@ -1305,11 +1284,11 @@ NNW
                     [str(sci_image_copy)],
                     scamp_results=None,
                     output_dir=str(resample_dir),
-                    config=swarp_config_sci,
+                    config=swarp_config,
                 )
                 if swarp_res is None:
-                    self.logger.info("SWarp failed. Falling back to reproject.")
-                    return self.align_with_reproject(
+                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
+                    return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
                 resampled_dir = Path(swarp_res["resampled_dir"])
@@ -1317,29 +1296,52 @@ NNW
                     ref_image_copy, resampled_dir / "reference_image.resamp.fits"
                 )
             else:
-                # Resample both images onto the same grid in a single SWarp call.
-                # This guarantees identical output shapes because SWarp computes the
-                # output grid once for all inputs. The .head files are placed next to
-                # both images, so SWarp applies the SCAMP corrections to each before
-                # resampling onto the common CENTER/IMAGE_SIZE grid.
-                # Note: SWarp uses one RESAMPLING_TYPE for all inputs; we use the
-                # science image's method as it determines the output grid quality.
-                self.logger.info("Running SWarp on both images together (single call)...")
-                swarp_res = self.run_swarp(
-                    [str(sci_image_copy), str(ref_image_copy)],
+                # Resample both images onto the same grid in separate SWarp calls.
+                # Science has no .head file (it defines the output grid — applying a
+                # SCAMP self-reference .head would shift pixels off the grid -> all NaN).
+                # Reference has its SCAMP .head placed next to it so SWarp applies the
+                # WCS correction before resampling onto the fixed CENTER/IMAGE_SIZE grid.
+                resample_dir_sci = resample_dir / "sci"
+                resample_dir_ref = resample_dir / "ref"
+                resample_dir_sci.mkdir(parents=True, exist_ok=True)
+                resample_dir_ref.mkdir(parents=True, exist_ok=True)
+
+                self.logger.debug("Running SWarp on science image...")
+                swarp_res_sci = self.run_swarp(
+                    [str(sci_image_copy)],
                     scamp_results=None,
-                    output_dir=str(resample_dir),
+                    output_dir=str(resample_dir_sci),
                     config=swarp_config_sci,
                     no_weight_maps=True,
                 )
+                self.logger.debug("Running SWarp on reference image...")
+                swarp_res_ref = self.run_swarp(
+                    [str(ref_image_copy)],
+                    scamp_results=None,
+                    output_dir=str(resample_dir_ref),
+                    config=swarp_config_ref,
+                    no_weight_maps=True,
+                )
 
-                if swarp_res is None:
-                    self.logger.info("SWarp failed. Falling back to reproject.")
-                    return self.align_with_reproject(
+                if swarp_res_sci is None or swarp_res_ref is None:
+                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
+                    return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
 
-                resampled_dir = Path(swarp_res["resampled_dir"])
+                sci_resamp = next(Path(swarp_res_sci["resampled_dir"]).glob("*.resamp.fits"), None)
+                ref_resamp = next(Path(swarp_res_ref["resampled_dir"]).glob("*.resamp.fits"), None)
+                if sci_resamp is None or ref_resamp is None:
+                    self.logger.info("SWarp resampled outputs not found. Falling back.")
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
+
+                canonical_dir = resample_dir / "resampled"
+                canonical_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(sci_resamp, canonical_dir / "science_image.resamp.fits")
+                shutil.copy2(ref_resamp, canonical_dir / "reference_image.resamp.fits")
+                resampled_dir = canonical_dir
 
             self.logger.debug("Looking for resampled images in %s", resampled_dir)
             aligned_sci = next(
@@ -1351,9 +1353,9 @@ NNW
 
             if aligned_sci is None or aligned_ref is None:
                 self.logger.info(
-                    "Could not find resampled images. Falling back to reproject."
+                    "Could not find resampled images. Falling back to AstroAlign."
                 )
-                return self.align_with_reproject(
+                return self._align_fallback_reproject_then_astroalign(
                     science_image, reference_image, output_dir
                 )
 
@@ -1376,14 +1378,14 @@ NNW
                 except Exception as _e:
                     self.logger.debug("Could not read WCS from SWarp output [%s]: %s", _label, _e)
 
-            # Verify output shapes match. With SWarp using a fixed
-            # CENTER/IMAGE_SIZE/PIXEL_SCALE grid, both outputs should be identical.
-            # If they differ, use Cutout2D to extend both to the maximum dimensions.
+            # Verify output shapes match. With both SCAMP .head files placed and
+            # SWarp using a fixed CENTER/IMAGE_SIZE/PIXEL_SCALE grid, both outputs
+            # must be identical. A mismatch indicates SWarp rounding differences;
+            # adjust reference to match science shape using Cutout2D.
             try:
                 with fits.open(aligned_sci) as _h:
                     _sci_data = _h[0].data
                     _sci_header = _h[0].header
-                    _sci_wcs = get_wcs(_sci_header)
                     _sci_shape = _sci_data.shape
                 with fits.open(aligned_ref) as _h:
                     _ref_data = _h[0].data
@@ -1437,9 +1439,9 @@ NNW
                     )
             except Exception as _e:
                 self.logger.error(
-                    "Could not verify or fix SWarp output shapes: %s. Falling back to reproject.", _e
+                    "Could not verify or fix SWarp output shapes: %s. Falling back.", _e
                 )
-                return self.align_with_reproject(
+                return self._align_fallback_reproject_then_astroalign(
                     science_image, reference_image, output_dir
                 )
 
@@ -1466,9 +1468,9 @@ NNW
                     if not (np.isfinite(ref_ra[0]) and np.isfinite(ref_dec[0])):
                         self.logger.error(
                             f"SWarp-aligned reference has invalid WCS pix2world: RA={ref_ra[0]}, Dec={ref_dec[0]}. "
-                            f"Falling back to reproject."
+                            f"Falling back to AstroAlign."
                         )
-                        return self.align_with_reproject(
+                        return self._align_fallback_reproject_then_astroalign(
                             science_image, reference_image, output_dir
                         )
                     # Test world2pix (critical for Cutout2D)
@@ -1476,14 +1478,14 @@ NNW
                     if not (np.isfinite(test_px) and np.isfinite(test_py)):
                         self.logger.error(
                             f"SWarp-aligned reference has non-invertible WCS: world2pix returned NaN/Inf. "
-                            f"Falling back to reproject."
+                            f"Falling back to AstroAlign."
                         )
-                        return self.align_with_reproject(
+                        return self._align_fallback_reproject_then_astroalign(
                             science_image, reference_image, output_dir
                         )
             except Exception as e:
                 self.logger.error(f"Failed to validate WCS of SWarp-aligned reference: {e}")
-                return self.align_with_reproject(
+                return self._align_fallback_reproject_then_astroalign(
                     science_image, reference_image, output_dir
                 )
 
@@ -1495,9 +1497,9 @@ NNW
                     if not (np.isfinite(sci_ra[0]) and np.isfinite(sci_dec[0])):
                         self.logger.error(
                             f"SWarp-aligned science has invalid WCS pix2world: RA={sci_ra[0]}, Dec={sci_dec[0]}. "
-                            f"Falling back to reproject."
+                            f"Falling back to AstroAlign."
                         )
-                        return self.align_with_reproject(
+                        return self._align_fallback_reproject_then_astroalign(
                             science_image, reference_image, output_dir
                         )
                     # Test world2pix (critical for Cutout2D)
@@ -1505,14 +1507,14 @@ NNW
                     if not (np.isfinite(test_px) and np.isfinite(test_py)):
                         self.logger.error(
                             f"SWarp-aligned science has non-invertible WCS: world2pix returned NaN/Inf. "
-                            f"Falling back to reproject."
+                            f"Falling back to AstroAlign."
                         )
-                        return self.align_with_reproject(
+                        return self._align_fallback_reproject_then_astroalign(
                             science_image, reference_image, output_dir
                         )
             except Exception as e:
                 self.logger.error(f"Failed to validate WCS of SWarp-aligned science: {e}")
-                return self.align_with_reproject(
+                return self._align_fallback_reproject_then_astroalign(
                     science_image, reference_image, output_dir
                 )
 
@@ -1663,11 +1665,11 @@ NNW
         target_ra: Optional[float] = None,
         target_dec: Optional[float] = None,
     ) -> Tuple[int, int]:
-        """Compute output shape as intersection of valid (non-NaN) regions.
-
-        This reduces output size to only the overlapping valid data region,
-        ensuring both images are resampled to the same grid with no NaN boundaries.
-
+        """Compute optimal output shape as intersection of valid (non-NaN) regions.
+        
+        This reduces output size when images have different coverage or significant
+        masked edges, avoiding computation on regions where only one image has data.
+        
         Parameters
         ----------
         sci_data, ref_data : ndarray
@@ -1675,20 +1677,21 @@ NNW
         sci_wcs, ref_wcs : WCS
             World coordinate systems for each image
         pix_scale : float
-            Output pixel scale in arcsec/pixel (unused, kept for API compatibility)
+            Output pixel scale in arcsec/pixel
         target_ra, target_dec : float, optional
-            Target position in degrees (unused, kept for API compatibility)
-
+            Target position in degrees. If provided, the output shape is guaranteed
+            to include this position (expanded if necessary, up to science image bounds).
+            
         Returns
         -------
         (width, height) : tuple of int
-            Intersection dimensions in pixels
+            Optimal output dimensions in pixels
         """
         try:
             # Find valid (finite) pixel regions in each image
             sci_valid = np.isfinite(sci_data)
             ref_valid = np.isfinite(ref_data)
-
+            
             # Get bounding boxes of valid regions
             def _valid_bbox(valid_mask):
                 rows = np.any(valid_mask, axis=1)
@@ -1698,26 +1701,95 @@ NNW
                 rmin, rmax = np.where(rows)[0][[0, -1]]
                 cmin, cmax = np.where(cols)[0][[0, -1]]
                 return (cmin, rmin, cmax, rmax)  # x1,y1,x2,y2 in pixel coords
-
+            
             sci_bbox = _valid_bbox(sci_valid)
             ref_bbox = _valid_bbox(ref_valid)
-
+            
             if sci_bbox is None or ref_bbox is None:
                 # Fall back to science shape if no valid data found
                 return sci_data.shape[1], sci_data.shape[0]
-
-            # Compute intersection of bounding boxes
-            cmin = max(sci_bbox[0], ref_bbox[0])
-            rmin = max(sci_bbox[1], ref_bbox[1])
-            cmax = min(sci_bbox[2], ref_bbox[2])
-            rmax = min(sci_bbox[3], ref_bbox[3])
-
-            # Ensure positive dimensions
-            width = max(cmax - cmin, 100)
-            height = max(rmax - rmin, 100)
-
+            
+            # Convert bounding box corners to world coordinates
+            def _bbox_corners(bbox):
+                x1, y1, x2, y2 = bbox
+                return np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+            
+            sci_corners = _bbox_corners(sci_bbox)
+            ref_corners = _bbox_corners(ref_bbox)
+            
+            # Convert to RA/Dec
+            sci_world = sci_wcs.all_pix2world(sci_corners, 0)
+            ref_world = ref_wcs.all_pix2world(ref_corners, 0)
+            
+            # Find overlapping RA/Dec region
+            ra_min = max(np.min(sci_world[:, 0]), np.min(ref_world[:, 0]))
+            ra_max = min(np.max(sci_world[:, 0]), np.max(ref_world[:, 0]))
+            dec_min = max(np.min(sci_world[:, 1]), np.min(ref_world[:, 1]))
+            dec_max = min(np.max(sci_world[:, 1]), np.max(ref_world[:, 1]))
+            
+            # Check if there is any overlap
+            if ra_min >= ra_max or dec_min >= dec_max:
+                self.logger.warning(
+                    "No overlap in valid regions; using science image shape."
+                )
+                return sci_data.shape[1], sci_data.shape[0]
+            
+            # Convert overlap size to pixels at output pixel scale
+            # cos(dec) factor for RA separation
+            cos_dec = np.cos(np.radians((dec_min + dec_max) / 2))
+            ra_sep = (ra_max - ra_min) * cos_dec * 3600  # arcsec
+            dec_sep = (dec_max - dec_min) * 3600  # arcsec
+            
+            width = int(ra_sep / pix_scale)
+            height = int(dec_sep / pix_scale)
+            
+            # Ensure minimum size and add small margin
+            width = max(width, 100)
+            height = max(height, 100)
+            
+            # Ensure target is included in output (if target position provided)
+            if target_ra is not None and target_dec is not None:
+                # Convert target world coords to pixel coords in output grid
+                # Output grid center is at (width/2, height/2) in pixel coords
+                # with pix_scale arcsec/pixel
+                cos_dec = np.cos(np.radians(target_dec))
+                
+                # Target offset from center in arcsec
+                dra_arcsec = (target_ra - (ra_min + ra_max) / 2) * cos_dec * 3600
+                ddec_arcsec = (target_dec - (dec_min + dec_max) / 2) * 3600
+                
+                # Convert to pixels
+                dx_pix = dra_arcsec / pix_scale
+                dy_pix = ddec_arcsec / pix_scale
+                
+                # Check if target falls within current output bounds
+                half_w = width / 2
+                half_h = height / 2
+                
+                # Expand width if needed
+                if abs(dx_pix) >= half_w - 5:  # 5 pixel margin
+                    new_half_w = abs(dx_pix) + 10  # Add margin
+                    width = int(2 * new_half_w)
+                    self.logger.debug(
+                        "Expanded output width to include target: %d -> %d", 
+                        int(2 * half_w), width
+                    )
+                
+                # Expand height if needed
+                if abs(dy_pix) >= half_h - 5:  # 5 pixel margin
+                    new_half_h = abs(dy_pix) + 10  # Add margin
+                    height = int(2 * new_half_h)
+                    self.logger.debug(
+                        "Expanded output height to include target: %d -> %d",
+                        int(2 * half_h), height
+                    )
+            
+            # Cap at original science size (don't expand beyond input)
+            width = min(width, sci_data.shape[1])
+            height = min(height, sci_data.shape[0])
+            
             return width, height
-
+            
         except Exception as e:
             self.logger.warning(
                 "Could not compute optimal output shape: %s. Using science shape.", e
@@ -2400,23 +2472,6 @@ NNW
         wcs_cfg = iy.get("wcs", {}) if isinstance(iy, dict) else {}
         distort_degrees = int(wcs_cfg.get("scamp_distort_degrees", 4))
 
-        # Validate reference_cat: it must exist on disk when provided.
-        # An absent or unreadable catalog silently causes SCAMP to use GAIA-DR3 instead,
-        # which would align to the sky rather than to the science image frame.
-        if reference_cat is not None and not Path(reference_cat).exists():
-            self.logger.error(
-                "run_scamp: reference_cat path does not exist: '%s'. "
-                "SCAMP would fall back to GAIA-DR3 — aborting to prevent silent misalignment.",
-                reference_cat,
-            )
-            return None
-
-        if reference_cat is None:
-            self.logger.warning(
-                "run_scamp: no reference_cat provided — using GAIA-DR3 as astrometric reference. "
-                "For image-to-image alignment the science SExtractor catalog should always be supplied."
-            )
-
         final_config = {
             **self.DEFAULT_SCAMP_CONFIG,
             "DISTORT_DEGREES": distort_degrees,
@@ -2681,7 +2736,7 @@ NNW
         label_color: str = "#FF0000",
         label_fontsize: int = 8,
         figsize: Optional[tuple] = None,
-        cmap: str = "gray",
+        cmap: str = "viridis",
         draw_lines: bool = True,
         line_color: str = "#FF0000",
         line_alpha: float = 0.5,
