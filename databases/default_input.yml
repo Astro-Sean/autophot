@@ -380,7 +380,7 @@ default_input:
     sextractor_crowded: False # bool --- Use crowded-field SExtractor settings for subtraction/source selection (if supported).
     sfft_crowded_method: False # bool --- Force SFFT crowded-field configuration (overrides auto logic). Default False (sparse) for better performance.
     sfft_const_phot_ratio: False # bool --- SFFT ConstPhotRatio; True enforces constant photometric ratio. Default False (like HOTPANTS) for spatially-varying scaling.
-    sfft_only_flags: [0, 1, 2] # list[int]|null --- SExtractor FLAGS values kept by SFFT source selection (null disables flag filtering).
+    sfft_only_flags: null # list[int]|null --- SExtractor FLAGS values kept by SFFT source selection (null disables flag filtering).
     sfft_allow_crowded_bg_order_override: False # bool --- If True, crowded SFFT may override bg_order=0 to 2 for stability.
     sfft_cvrej_magd_thresh: 0.12 # float --- Coarse variable-rejection magnitude-difference threshold (lower is stricter).
     sfft_evrej_ratio_thresh: 6.0 # float --- Elaborate variable-rejection ratio threshold (lower is stricter).

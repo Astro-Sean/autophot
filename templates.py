@@ -4583,7 +4583,7 @@ class Templates:
                     cmd_local += ["-backphototype", str(back_phototype).upper()]
 
                 # Robust SFFT source rejection controls.
-                only_flags_cfg = ts_sub.get("sfft_only_flags", [0, 1, 2])
+                only_flags_cfg = ts_sub.get("sfft_only_flags", None)
                 if only_flags_cfg is None:
                     cmd_local += ["-only_flags", "none"]
                 elif isinstance(only_flags_cfg, (list, tuple)):
