@@ -1849,13 +1849,13 @@ class WCSSolver:
         """
         wcs_cfg = self.default_input.get("wcs") or {}
         redo_requested = bool(wcs_cfg.get("redo_wcs", True))
-        projection_type = str(wcs_cfg.get("projection_type", "TPV")).strip().upper()
+        projection_type = str(wcs_cfg.get("projection_type", "SIP")).strip().upper()
         if projection_type not in {"TPV", "SIP"}:
             logger.warning(
-                "Unknown wcs.projection_type=%r; defaulting to TPV flow.",
+                "Unknown wcs.projection_type=%r; defaulting to SIP flow.",
                 projection_type,
             )
-            projection_type = "TPV"
+            projection_type = "SIP"
         use_tpv_flow = projection_type == "TPV"
         logger.info(
             "WCS projection_type=%s (%s)",
