@@ -1630,11 +1630,10 @@ NNW
         target_ra: Optional[float] = None,
         target_dec: Optional[float] = None,
     ) -> Tuple[int, int]:
-        """Compute output shape as the science image shape.
+        """Compute output shape as intersection of valid (non-NaN) regions.
 
-        Using the science image shape ensures both images are resampled to exactly
-        the same grid, avoiding complex intersection logic that can cause shape
-        mismatches when images have different NaN boundaries or valid regions.
+        This reduces output size to only the overlapping valid data region,
+        ensuring both images are resampled to the same grid with no NaN boundaries.
 
         Parameters
         ----------
@@ -1650,13 +1649,47 @@ NNW
         Returns
         -------
         (width, height) : tuple of int
-            Science image dimensions in pixels
+            Intersection dimensions in pixels
         """
-        # Simply return the science image shape to ensure both images are
-        # resampled to exactly the same grid. This avoids shape mismatches
-        # caused by complex intersection logic when images have different
-        # NaN boundaries or valid regions.
-        return sci_data.shape[1], sci_data.shape[0]
+        try:
+            # Find valid (finite) pixel regions in each image
+            sci_valid = np.isfinite(sci_data)
+            ref_valid = np.isfinite(ref_data)
+
+            # Get bounding boxes of valid regions
+            def _valid_bbox(valid_mask):
+                rows = np.any(valid_mask, axis=1)
+                cols = np.any(valid_mask, axis=0)
+                if not np.any(rows) or not np.any(cols):
+                    return None
+                rmin, rmax = np.where(rows)[0][[0, -1]]
+                cmin, cmax = np.where(cols)[0][[0, -1]]
+                return (cmin, rmin, cmax, rmax)  # x1,y1,x2,y2 in pixel coords
+
+            sci_bbox = _valid_bbox(sci_valid)
+            ref_bbox = _valid_bbox(ref_valid)
+
+            if sci_bbox is None or ref_bbox is None:
+                # Fall back to science shape if no valid data found
+                return sci_data.shape[1], sci_data.shape[0]
+
+            # Compute intersection of bounding boxes
+            cmin = max(sci_bbox[0], ref_bbox[0])
+            rmin = max(sci_bbox[1], ref_bbox[1])
+            cmax = min(sci_bbox[2], ref_bbox[2])
+            rmax = min(sci_bbox[3], ref_bbox[3])
+
+            # Ensure positive dimensions
+            width = max(cmax - cmin, 100)
+            height = max(rmax - rmin, 100)
+
+            return width, height
+
+        except Exception as e:
+            self.logger.warning(
+                "Could not compute optimal output shape: %s. Using science shape.", e
+            )
+            return sci_data.shape[1], sci_data.shape[0]
 
     def _align_fallback_reproject_then_astroalign(
         self,
