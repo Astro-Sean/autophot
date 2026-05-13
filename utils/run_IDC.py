@@ -1265,8 +1265,8 @@ NNW
                     config=swarp_config,
                 )
                 if swarp_res is None:
-                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
-                    return self._align_fallback_reproject_then_astroalign(
+                    self.logger.info("SWarp failed. Falling back to reproject.")
+                    return self.align_with_reproject(
                         science_image, reference_image, output_dir
                     )
                 resampled_dir = Path(swarp_res["resampled_dir"])
@@ -1284,8 +1284,8 @@ NNW
                     config=swarp_config,
                 )
                 if swarp_res is None:
-                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
-                    return self._align_fallback_reproject_then_astroalign(
+                    self.logger.info("SWarp failed. Falling back to reproject.")
+                    return self.align_with_reproject(
                         science_image, reference_image, output_dir
                     )
                 resampled_dir = Path(swarp_res["resampled_dir"])
@@ -1309,8 +1309,8 @@ NNW
                 )
 
                 if swarp_res is None:
-                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
-                    return self._align_fallback_reproject_then_astroalign(
+                    self.logger.info("SWarp failed. Falling back to reproject.")
+                    return self.align_with_reproject(
                         science_image, reference_image, output_dir
                     )
 
@@ -1326,9 +1326,9 @@ NNW
 
             if aligned_sci is None or aligned_ref is None:
                 self.logger.info(
-                    "Could not find resampled images. Falling back to AstroAlign."
+                    "Could not find resampled images. Falling back to reproject."
                 )
-                return self._align_fallback_reproject_then_astroalign(
+                return self.align_with_reproject(
                     science_image, reference_image, output_dir
                 )
 
@@ -1439,9 +1439,9 @@ NNW
                     if not (np.isfinite(ref_ra[0]) and np.isfinite(ref_dec[0])):
                         self.logger.error(
                             f"SWarp-aligned reference has invalid WCS pix2world: RA={ref_ra[0]}, Dec={ref_dec[0]}. "
-                            f"Falling back to AstroAlign."
+                            f"Falling back to reproject."
                         )
-                        return self._align_fallback_reproject_then_astroalign(
+                        return self.align_with_reproject(
                             science_image, reference_image, output_dir
                         )
                     # Test world2pix (critical for Cutout2D)
@@ -1449,14 +1449,14 @@ NNW
                     if not (np.isfinite(test_px) and np.isfinite(test_py)):
                         self.logger.error(
                             f"SWarp-aligned reference has non-invertible WCS: world2pix returned NaN/Inf. "
-                            f"Falling back to AstroAlign."
+                            f"Falling back to reproject."
                         )
-                        return self._align_fallback_reproject_then_astroalign(
+                        return self.align_with_reproject(
                             science_image, reference_image, output_dir
                         )
             except Exception as e:
                 self.logger.error(f"Failed to validate WCS of SWarp-aligned reference: {e}")
-                return self._align_fallback_reproject_then_astroalign(
+                return self.align_with_reproject(
                     science_image, reference_image, output_dir
                 )
 
@@ -1468,9 +1468,9 @@ NNW
                     if not (np.isfinite(sci_ra[0]) and np.isfinite(sci_dec[0])):
                         self.logger.error(
                             f"SWarp-aligned science has invalid WCS pix2world: RA={sci_ra[0]}, Dec={sci_dec[0]}. "
-                            f"Falling back to AstroAlign."
+                            f"Falling back to reproject."
                         )
-                        return self._align_fallback_reproject_then_astroalign(
+                        return self.align_with_reproject(
                             science_image, reference_image, output_dir
                         )
                     # Test world2pix (critical for Cutout2D)
@@ -1478,14 +1478,14 @@ NNW
                     if not (np.isfinite(test_px) and np.isfinite(test_py)):
                         self.logger.error(
                             f"SWarp-aligned science has non-invertible WCS: world2pix returned NaN/Inf. "
-                            f"Falling back to AstroAlign."
+                            f"Falling back to reproject."
                         )
-                        return self._align_fallback_reproject_then_astroalign(
+                        return self.align_with_reproject(
                             science_image, reference_image, output_dir
                         )
             except Exception as e:
                 self.logger.error(f"Failed to validate WCS of SWarp-aligned science: {e}")
-                return self._align_fallback_reproject_then_astroalign(
+                return self.align_with_reproject(
                     science_image, reference_image, output_dir
                 )
 
