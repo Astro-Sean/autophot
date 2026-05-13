@@ -2967,11 +2967,34 @@ class PSF:
         # Storing it here lets us trigger the inverted retry before MCMC runs.
         _bootstrap_flux_e = flux_e_frame.copy()  # unclipped, may be negative
 
+        # Sanity check: ensure initial flux guesses are reasonable
+        # For very faint sources, flux can be close to background - clip to minimum reasonable value
+        flux_clipped = np.clip(flux_e_frame, 1e-6, 1e12)
+        
+        # Additional sanity: if flux is too low relative to background RMS, boost it
+        # This prevents convergence issues for extremely faint sources
+        if is_target_fit and len(flux_clipped) == 1:
+            data_e = np.asarray(ndimage.data, dtype=float)
+            if data_e.ndim == 2:
+                finite_vals = data_e[np.isfinite(data_e)]
+                if len(finite_vals) > 0:
+                    bkg_rms = float(np.std(finite_vals))
+                    min_reasonable_flux = 3.0 * bkg_rms  # Minimum 3-sigma above background
+                    if flux_clipped[0] < min_reasonable_flux:
+                        log.warning(
+                            "Target PSF init: flux=%.3g is below 3-sigma threshold (%.3g); "
+                            "boosting to %.3g to improve convergence.",
+                            flux_clipped[0],
+                            min_reasonable_flux,
+                            min_reasonable_flux,
+                        )
+                        flux_clipped[0] = min_reasonable_flux
+
         init_params = QTable(
             {
                 "x": x,
                 "y": y,
-                "flux": u.Quantity(np.clip(flux_e_frame, 1e-6, 1e12), u.electron),
+                "flux": u.Quantity(flux_clipped, u.electron),
                 "__row": idx_keep,
             }
         )
