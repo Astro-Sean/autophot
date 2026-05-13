@@ -93,7 +93,6 @@ class ImageDistortionCorrector:
         "REF_TIMEOUT": 60,
         "REF_SERVER": "vizier.cfa.harvard.edu",
         "DISTORT_DEGREES": None,  # Will be set from config
-        "DISTORT_POLYNOMIALS": "SIP",  # SIP is better supported by SWarp than TPV
         "MATCH": "Y",
         "MATCH_RESOL": 0,
         "MATCH_FLIPPED": "Y",
@@ -110,7 +109,6 @@ class ImageDistortionCorrector:
         "STABILITY_TYPE": "EXPOSURE",
         "SN_THRESHOLDS": "3.0,100000.0",
     }
-
     DEFAULT_SWARP_CONFIG = {
         "COMBINE": "N",
         "COMBINE_TYPE": "MEDIAN",
@@ -1087,10 +1085,6 @@ NNW
                 "IMAGE_SIZE": f"{output_width},{output_height}",
                 "BLANK_BADPIXELS": "N",  # Prevent SWarp from adjusting output based on blank/bad pixels
                 "RESAMPLING_TYPE": sci_resampling_method,
-                # OVERSAMPLING>0 causes SWarp to compute grid extents at N× sub-pixel
-                # resolution internally then round back, producing off-by-one shape
-                # mismatches when two images are resampled onto the same grid.
-                # OVERSAMPLING=0 disables this entirely.
                 "OVERSAMPLING": 0,
                 # PROJECTION_TYPE is set to NATIVE in DEFAULT_SWARP_CONFIG to preserve
                 # the projection from SCAMP .head files (TPV with PV coefficients).
