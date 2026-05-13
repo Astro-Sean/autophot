@@ -2274,7 +2274,7 @@ class Templates:
                 logger.warning("create_image_mask: source catalog is empty; returning empty mask.")
                 return mask, masked_centres
 
-            # Flag categories
+            # Flag categories (these are the bad sources we want to mask)
             is_saturated = tbl["max_value"] > sat_lvl
             is_negative = tbl["max_value"] < 0
 
@@ -2285,9 +2285,11 @@ class Templates:
                     is_large = clipped.mask
                 else:
                     is_large = np.zeros(len(tbl), dtype=bool)
-                tbl = tbl[is_saturated | is_negative | is_large]
+                # Keep all sources EXCEPT the bad ones (saturated, negative, or large)
+                tbl = tbl[~(is_saturated | is_negative | is_large)]
             else:
-                tbl = tbl[is_saturated | is_negative]
+                # Keep all sources EXCEPT the bad ones (saturated or negative)
+                tbl = tbl[~(is_saturated | is_negative)]
 
             # Check if all sources were filtered out
             if len(tbl) == 0:
