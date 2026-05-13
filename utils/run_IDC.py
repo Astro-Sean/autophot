@@ -1088,6 +1088,7 @@ NNW
                 "PIXEL_SCALE": pix_scale,
                 "PIXELSCALE_TYPE": "MANUAL",
                 "IMAGE_SIZE": f"{output_width},{output_height}",
+                "IMAGE_SIZE_TYPE": "MANUAL",  # Force exact IMAGE_SIZE, don't adjust based on input WCS
                 "RESAMPLING_TYPE": sci_resampling_method,
                 # OVERSAMPLING>0 causes SWarp to compute grid extents at N× sub-pixel
                 # resolution internally then round back, producing off-by-one shape
