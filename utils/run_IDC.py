@@ -1375,7 +1375,7 @@ NNW
 
             # Verify output shapes match. With both SCAMP .head files placed and
             # SWarp using a fixed CENTER/IMAGE_SIZE/PIXEL_SCALE grid, both outputs
-            # must be identical. If they differ, use cutout2d to crop to intersection.
+            # must be identical. If they differ, pad the smaller image with NaNs.
             try:
                 with fits.open(aligned_sci) as _h:
                     _sci_data = _h[0].data
@@ -1391,35 +1391,45 @@ NNW
                 if _sci_shape != _ref_shape:
                     self.logger.warning(
                         "SWarp outputs have different shapes (sci=%s, ref=%s) — "
-                        "using cutout2d to crop to intersection.",
+                        "padding smaller image with NaNs.",
                         _sci_shape, _ref_shape,
                     )
-                    # Compute intersection of shapes
-                    ny_min = min(_sci_shape[0], _ref_shape[0])
-                    nx_min = min(_sci_shape[1], _ref_shape[1])
+                    # Compute maximum dimensions
+                    ny_max = max(_sci_shape[0], _ref_shape[0])
+                    nx_max = max(_sci_shape[1], _ref_shape[1])
                     
-                    # Crop both images to intersection using cutout2d
-                    from astropy.nddata.utils import Cutout2D
+                    # Pad images with NaNs to match maximum dimensions
+                    def _pad_with_nans(data, target_shape):
+                        ny, nx = data.shape
+                        ny_pad = target_shape[0] - ny
+                        nx_pad = target_shape[1] - nx
+                        # Pad bottom and right with NaNs
+                        padded = np.pad(
+                            data,
+                            ((0, ny_pad), (0, nx_pad)),
+                            mode='constant',
+                            constant_values=np.nan
+                        )
+                        return padded
                     
-                    sci_cutout = Cutout2D(
-                        _sci_data, (nx_min/2, ny_min/2), (nx_min, ny_min),
-                        wcs=_sci_wcs, mode='trim'
-                    )
-                    ref_cutout = Cutout2D(
-                        _ref_data, (nx_min/2, ny_min/2), (nx_min, ny_min),
-                        wcs=_ref_wcs, mode='trim'
-                    )
+                    # Pad both images to maximum dimensions
+                    _sci_data_padded = _pad_with_nans(_sci_data, (ny_max, nx_max))
+                    _ref_data_padded = _pad_with_nans(_ref_data, (ny_max, nx_max))
                     
-                    # Update headers with new WCS
-                    _sci_header.update(sci_cutout.wcs.to_header())
-                    _ref_header.update(ref_cutout.wcs.to_header())
+                    # Update CRPIX in headers to account for padding
+                    # CRPIX is 1-indexed, so no change needed for padding on bottom/right
+                    # Only need to update NAXIS keywords
+                    _sci_header['NAXIS1'] = nx_max
+                    _sci_header['NAXIS2'] = ny_max
+                    _ref_header['NAXIS1'] = nx_max
+                    _ref_header['NAXIS2'] = ny_max
                     
-                    # Write cropped images back
-                    fits.writeto(aligned_sci, sci_cutout.data, _sci_header, overwrite=True)
-                    fits.writeto(aligned_ref, ref_cutout.data, _ref_header, overwrite=True)
+                    # Write padded images back
+                    fits.writeto(aligned_sci, _sci_data_padded, _sci_header, overwrite=True)
+                    fits.writeto(aligned_ref, _ref_data_padded, _ref_header, overwrite=True)
                     
                     self.logger.info(
-                        "Cropped both images to intersection shape=%s.", (ny_min, nx_min),
+                        "Padded both images to maximum shape=%s.", (ny_max, nx_max),
                     )
                 else:
                     self.logger.info(
