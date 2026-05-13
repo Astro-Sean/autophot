@@ -2459,7 +2459,7 @@ class PSF:
         im = ax_right.imshow(
             np.ma.array(psf_model_plot, mask=~np.isfinite(psf_model_plot)),
             origin="lower",
-            cmap='gray',
+            cmap='viridis',
             norm=norm_p,
             interpolation="none",
         )
