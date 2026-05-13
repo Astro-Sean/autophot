@@ -251,10 +251,11 @@ class SExtractorWrapper:
         )
 
         if fwhm_pixels > 0:
-            fp = float(max(3.0, min(fwhm_pixels, 10.0)))
+            fp = float(max(1.0, min(fwhm_pixels, 15.0)))
             kernel_size = max(3, int(np.ceil(fp * 3)))
             if kernel_size % 2 == 0:
                 kernel_size += 1  # Ensure odd size
+            kernel_size = min(kernel_size, 21)  # SExtractor hard limit
             center = kernel_size // 2
             sigma = fp / 2.355  # FWHM = 2.355 * sigma
             # ogrid returns two broadcastable arrays (not one ndarray); subtract center after unpack.

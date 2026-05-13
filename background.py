@@ -411,11 +411,12 @@ class BackgroundSubtractor:
 
         sigma = fwhm_val * gaussian_fwhm_to_sigma
         size = int(max(3.0, 4.0 * fwhm_val)) | 1
+        size = min(size, 61)  # cap at 61x61 to avoid runaway memory for large PSFs
         kern = Gaussian2DKernel(sigma, x_size=size, y_size=size)
         kern.normalize()
 
         # Dilation structuring element (cached).
-        r_dilate = max(2, int(dilate_factor * fwhm_pixels))
+        r_dilate = min(max(2, int(dilate_factor * fwhm_pixels)), 30)  # cap dilation radius
         selem = _disk_structuring_element(r_dilate)
 
         cfg_bkg = (

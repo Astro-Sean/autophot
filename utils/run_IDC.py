@@ -207,13 +207,14 @@ class ImageDistortionCorrector:
             fwhm_pixels: FWHM in pixels, used to optimize the kernel size.
         """
 
-        fwhm_pixels = max(3, min(fwhm_pixels, 10))
+        fwhm_pixels = float(max(1.0, min(fwhm_pixels, 15.0)))
         kernel_size = max(3, int(np.ceil(fwhm_pixels * 2)))
+        if kernel_size % 2 == 0:
+            kernel_size += 1  # Ensure odd size
+        kernel_size = min(kernel_size, 21)  # SExtractor hard limit
         self.logger.info(
             f"Creating Convolution Kernel with FWHM: {fwhm_pixels:.1f} pixels"
         )
-        if kernel_size % 2 == 0:
-            kernel_size += 1  # Ensure odd size
         center = kernel_size // 2
         sigma = fwhm_pixels / 2.355  # FWHM = 2.355 * sigma
         conv_text = f"CONV NORM\n# {kernel_size}x{kernel_size} convolution mask with FWHM = {fwhm_pixels:.1f} pixels\n"
