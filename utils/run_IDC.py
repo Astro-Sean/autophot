@@ -994,7 +994,10 @@ NNW
                 "Proceeding with SCAMP + SWarp alignment (%d matched sources).",
                 _num_matched,
             )
-            pix_scale = sci_pix_scale
+            # Round PIXEL_SCALE to 4 decimal places to avoid floating-point precision
+            # issues that cause SWarp to compute slightly different output grids for
+            # each image, resulting in shape mismatches.
+            pix_scale = round(sci_pix_scale, 4)
 
             # SCAMP: derive parameters from FWHM and pixel scale
             crossid_arcsec = max(
