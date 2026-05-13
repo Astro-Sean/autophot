@@ -1373,28 +1373,58 @@ NNW
 
             # Verify output shapes match. With both SCAMP .head files placed and
             # SWarp using a fixed CENTER/IMAGE_SIZE/PIXEL_SCALE grid, both outputs
-            # must be identical. A mismatch means something went structurally wrong.
+            # must be identical. If they differ, use cutout2d to crop to intersection.
             try:
                 with fits.open(aligned_sci) as _h:
-                    _sci_shape = _h[0].data.shape
+                    _sci_data = _h[0].data
+                    _sci_header = _h[0].header
+                    _sci_wcs = get_wcs(_sci_header)
+                    _sci_shape = _sci_data.shape
                 with fits.open(aligned_ref) as _h:
-                    _ref_shape = _h[0].data.shape
+                    _ref_data = _h[0].data
+                    _ref_header = _h[0].header
+                    _ref_wcs = get_wcs(_ref_header)
+                    _ref_shape = _ref_data.shape
 
                 if _sci_shape != _ref_shape:
                     self.logger.warning(
                         "SWarp outputs have different shapes (sci=%s, ref=%s) — "
-                        "SCAMP/SWarp alignment failed, falling back.",
+                        "using cutout2d to crop to intersection.",
                         _sci_shape, _ref_shape,
                     )
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
+                    # Compute intersection of shapes
+                    ny_min = min(_sci_shape[0], _ref_shape[0])
+                    nx_min = min(_sci_shape[1], _ref_shape[1])
+                    
+                    # Crop both images to intersection using cutout2d
+                    from astropy.nddata.utils import Cutout2D
+                    
+                    sci_cutout = Cutout2D(
+                        _sci_data, (nx_min/2, ny_min/2), (nx_min, ny_min),
+                        wcs=_sci_wcs, mode='trim'
+                    )
+                    ref_cutout = Cutout2D(
+                        _ref_data, (nx_min/2, ny_min/2), (nx_min, ny_min),
+                        wcs=_ref_wcs, mode='trim'
+                    )
+                    
+                    # Update headers with new WCS
+                    _sci_header.update(sci_cutout.wcs.to_header())
+                    _ref_header.update(ref_cutout.wcs.to_header())
+                    
+                    # Write cropped images back
+                    fits.writeto(aligned_sci, sci_cutout.data, _sci_header, overwrite=True)
+                    fits.writeto(aligned_ref, ref_cutout.data, _ref_header, overwrite=True)
+                    
+                    self.logger.info(
+                        "Cropped both images to intersection shape=%s.", (ny_min, nx_min),
                     )
                 else:
                     self.logger.info(
                         "SWarp outputs match: both images shape=%s.", _sci_shape,
                     )
             except Exception as _e:
-                self.logger.debug("Could not verify SWarp output shapes: %s", _e)
+                self.logger.debug("Could not verify or fix SWarp output shapes: %s", _e)
 
             # Overwrite the reference_image path in-place with the aligned version.
             # reference_image is already a per-science-image copy so overwriting it
