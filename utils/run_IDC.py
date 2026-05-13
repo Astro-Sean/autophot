@@ -994,10 +994,10 @@ NNW
                 "Proceeding with SCAMP + SWarp alignment (%d matched sources).",
                 _num_matched,
             )
-            # Let SWarp compute the pixel scale internally from input images.
-            # This is more robust than computing from WCS and avoids floating-point
-            # precision issues that cause shape mismatches.
-            pix_scale = sci_pix_scale  # Kept for SCAMP calculations only
+            # Round PIXEL_SCALE to 4 decimal places to ensure consistency between
+            # output shape computation and SWarp resampling. SWarp's internal
+            # computation can differ, causing WCS mismatches.
+            pix_scale = round(sci_pix_scale, 4)
 
             # SCAMP: derive parameters from FWHM and pixel scale
             crossid_arcsec = max(
@@ -1088,7 +1088,8 @@ NNW
             swarp_config = {
                 "CENTER_TYPE": "MANUAL",
                 "CENTER": f"{center_ra:.6f},{center_dec:.6f}",
-                "PIXELSCALE_TYPE": "MEDIAN",  # Let SWarp compute pixel scale from input images
+                "PIXEL_SCALE": pix_scale,
+                "PIXELSCALE_TYPE": "MANUAL",
                 "IMAGE_SIZE": f"{output_width},{output_height}",
                 "IMAGE_SIZE_TYPE": "MANUAL",  # Force exact IMAGE_SIZE, don't adjust based on input WCS
                 "RESAMPLING_TYPE": sci_resampling_method,
@@ -1120,8 +1121,8 @@ NNW
             )
 
             self.logger.info(
-                "SWarp output grid: CENTER=(%.6f,%.6f) IMAGE_SIZE=(%d,%d) PIXEL_SCALE=MEDIAN (computed by SWarp)",
-                center_ra, center_dec, output_width, output_height,
+                "SWarp output grid: CENTER=(%.6f,%.6f) IMAGE_SIZE=(%d,%d) PIXEL_SCALE=%.4f arcsec/px",
+                center_ra, center_dec, output_width, output_height, pix_scale,
             )
 
             # Run SCAMP on BOTH catalogs with the science catalog as reference.
