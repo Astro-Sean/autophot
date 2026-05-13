@@ -834,7 +834,7 @@ class Plot:
                 image, interval=ZScaleInterval(), stretch=LinearStretch()
             )
             # Set NaN values to display as white
-            cmap = plt.get_cmap("viridis")
+            cmap = plt.get_cmap("gray")
             cmap.set_bad(color='white')
             im = ax1.imshow(
                 image,
