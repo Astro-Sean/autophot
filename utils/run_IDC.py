@@ -93,6 +93,7 @@ class ImageDistortionCorrector:
         "REF_TIMEOUT": 60,
         "REF_SERVER": "vizier.cfa.harvard.edu",
         "DISTORT_DEGREES": None,  # Will be set from config
+        "DISTORT_POLYNOMIALS": "SIP",  # SIP is better supported by SWarp than TPV
         "MATCH": "Y",
         "MATCH_RESOL": 0,
         "MATCH_FLIPPED": "Y",
