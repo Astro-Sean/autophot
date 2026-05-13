@@ -1394,7 +1394,7 @@ NNW
                 if _sci_shape != _ref_shape:
                     self.logger.warning(
                         "SWarp outputs have different shapes (sci=%s, ref=%s) — "
-                        "padding smaller image(s) with NaNs to match science shape.",
+                        "adjusting reference to match science shape.",
                         _sci_shape, _ref_shape,
                     )
                     # Science image determines the output shape (it's the photometric reference)
@@ -1402,55 +1402,34 @@ NNW
                     
                     from astropy.nddata.utils import Cutout2D
                     
-                    # Science image: keep as-is (already target shape)
-                    if _sci_shape == (ny_target, nx_target):
-                        _sci_data_padded = _sci_data
-                        # Update NAXIS to ensure consistency
-                        _sci_header['NAXIS1'] = nx_target
-                        _sci_header['NAXIS2'] = ny_target
-                    else:
-                        # Extend science to target shape (centered, pad with NaN)
-                        sci_cutout = Cutout2D(
-                            _sci_data,
-                            (_sci_shape[1]/2, _sci_shape[0]/2),  # Center of original science
-                            (nx_target, ny_target),
-                            wcs=_sci_wcs,
-                            mode='partial'
-                        )
-                        _sci_data_padded = sci_cutout.data
-                        sci_wcs_header = sci_cutout.wcs.to_header()
-                        _sci_header['CRPIX1'] = sci_wcs_header.get('CRPIX1', _sci_header.get('CRPIX1'))
-                        _sci_header['CRPIX2'] = sci_wcs_header.get('CRPIX2', _sci_header.get('CRPIX2'))
-                        _sci_header['NAXIS1'] = nx_target
-                        _sci_header['NAXIS2'] = ny_target
+                    # Science image: keep as-is, just update header for consistency
+                    _sci_header['NAXIS1'] = nx_target
+                    _sci_header['NAXIS2'] = ny_target
                     
-                    # Reference image: pad to match science shape
-                    if _ref_shape == (ny_target, nx_target):
-                        _ref_data_padded = _ref_data
-                        _ref_header['NAXIS1'] = nx_target
-                        _ref_header['NAXIS2'] = ny_target
-                    else:
-                        # Extend reference to match science shape (centered on ref, pad with NaN)
-                        ref_cutout = Cutout2D(
-                            _ref_data,
-                            (_ref_shape[1]/2, _ref_shape[0]/2),  # Center of original reference
-                            (nx_target, ny_target),
-                            wcs=_ref_wcs,
-                            mode='partial'
-                        )
-                        _ref_data_padded = ref_cutout.data
-                        ref_wcs_header = ref_cutout.wcs.to_header()
-                        _ref_header['CRPIX1'] = ref_wcs_header.get('CRPIX1', _ref_header.get('CRPIX1'))
-                        _ref_header['CRPIX2'] = ref_wcs_header.get('CRPIX2', _ref_header.get('CRPIX2'))
-                        _ref_header['NAXIS1'] = nx_target
-                        _ref_header['NAXIS2'] = ny_target
+                    # Reference image: adjust to match science shape
+                    # Use 'partial' mode which both pads (with NaN) if smaller AND trims if larger
+                    ref_cutout = Cutout2D(
+                        _ref_data,
+                        (_ref_shape[1]/2, _ref_shape[0]/2),  # Center of original reference
+                        (nx_target, ny_target),
+                        wcs=_ref_wcs,
+                        mode='partial'
+                    )
+                    _ref_data_adjusted = ref_cutout.data
+                    # Preserve original distortion model; only update CRPIX and NAXIS
+                    ref_wcs_header = ref_cutout.wcs.to_header()
+                    _ref_header['CRPIX1'] = ref_wcs_header.get('CRPIX1', _ref_header.get('CRPIX1'))
+                    _ref_header['CRPIX2'] = ref_wcs_header.get('CRPIX2', _ref_header.get('CRPIX2'))
+                    _ref_header['NAXIS1'] = nx_target
+                    _ref_header['NAXIS2'] = ny_target
                     
-                    # Write extended images back
-                    fits.writeto(aligned_sci, _sci_data_padded, _sci_header, overwrite=True)
-                    fits.writeto(aligned_ref, _ref_data_padded, _ref_header, overwrite=True)
+                    # Write images back (science unchanged, reference adjusted)
+                    fits.writeto(aligned_sci, _sci_data, _sci_header, overwrite=True)
+                    fits.writeto(aligned_ref, _ref_data_adjusted, _ref_header, overwrite=True)
                     
                     self.logger.info(
-                        "Padded images to science shape=%s with NaN fill. Alignment preserved.", (ny_target, nx_target),
+                        "Reference adjusted to science shape=%s (pad with NaN if smaller, trim if larger).", 
+                        (ny_target, nx_target),
                     )
                 else:
                     self.logger.info(
