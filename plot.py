@@ -197,7 +197,7 @@ class Plot:
                 logger.info(f"subtraction_check: {title} shape={images[title].shape}")
             for i, (ax, title) in enumerate(zip(axes, image_titles)):
                 img_data = images[title]
-                cmap = plt.get_cmap("gray").copy()
+                cmap = plt.get_cmap("viridis").copy()
                 cmap.set_bad(color="white")
                 ax.imshow(
                     img_data,
@@ -396,7 +396,7 @@ class Plot:
 
                     # Inset
                     ax_inset = inset_axes(ax, width="30%", height="30%", loc=inset_loc)
-                    cmap = plt.get_cmap("gray").copy()
+                    cmap = plt.get_cmap("viridis").copy()
                     cmap.set_bad(color="white")
                     ax_inset.imshow(
                         img_data,
@@ -626,7 +626,7 @@ class Plot:
         ty = cy - y0
 
         # Panel 1
-        cmap_vir = plt.get_cmap("gray").copy()
+        cmap_vir = plt.get_cmap("viridis").copy()
         cmap_vir.set_bad(color="white")
         axes[0].imshow(
             cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax

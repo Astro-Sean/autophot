@@ -1897,7 +1897,7 @@ class BackgroundSubtractor:
         for i, (ax, data, title) in enumerate(zip(axes, arrays, titles)):
             vmin, vmax = self._safe_zlimits(data, interval)
             # Render NaNs as white "no data" regions.
-            cmap = plt.get_cmap("gray").copy()
+            cmap = plt.get_cmap("viridis").copy()
             cmap.set_bad(color="white")
 
             im = ax.imshow(
@@ -1961,7 +1961,7 @@ class BackgroundSubtractor:
         for i, (ax, data, title) in enumerate(zip(axes, arrays, titles)):
             vmin, vmax = self._safe_zlimits(data, interval)
             # Render NaNs as white "no data" regions.
-            cmap = plt.get_cmap("gray").copy()
+            cmap = plt.get_cmap("viridis").copy()
             cmap.set_bad(color="white")
 
             im = ax.imshow(
