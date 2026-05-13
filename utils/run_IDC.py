@@ -1286,7 +1286,7 @@ NNW
                     [str(ref_image_copy)],
                     scamp_results=scamp_result,
                     output_dir=str(resample_dir),
-                    config=swarp_config,
+                    config=swarp_config_ref,
                 )
                 if swarp_res is None:
                     self.logger.info("SWarp failed. Falling back to reproject.")
@@ -1305,7 +1305,7 @@ NNW
                     [str(sci_image_copy)],
                     scamp_results=None,
                     output_dir=str(resample_dir),
-                    config=swarp_config,
+                    config=swarp_config_sci,
                 )
                 if swarp_res is None:
                     self.logger.info("SWarp failed. Falling back to reproject.")
@@ -1322,12 +1322,14 @@ NNW
                 # output grid once for all inputs. The .head files are placed next to
                 # both images, so SWarp applies the SCAMP corrections to each before
                 # resampling onto the common CENTER/IMAGE_SIZE grid.
+                # Note: SWarp uses one RESAMPLING_TYPE for all inputs; we use the
+                # science image's method as it determines the output grid quality.
                 self.logger.info("Running SWarp on both images together (single call)...")
                 swarp_res = self.run_swarp(
                     [str(sci_image_copy), str(ref_image_copy)],
                     scamp_results=None,
                     output_dir=str(resample_dir),
-                    config=swarp_config,
+                    config=swarp_config_sci,
                     no_weight_maps=True,
                 )
 
