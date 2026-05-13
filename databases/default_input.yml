@@ -390,6 +390,7 @@ default_input:
     sfft_post_anomaly_min_count: 1 # int --- Minimum number of post-anomaly sources required before feedback retry is triggered.
     sfft_post_anomaly_max_fraction: 0.80 # float --- Skip feedback retry if post-anomaly count exceeds this fraction of prior-selected sources.
     sfft_post_anomaly_match_radius_px: 1.5 # float --- Radius (pixels) for removing prior-selected matches near post-anomaly sources on retry.
+    sfft_manual_matching_sources: null # list[list[float]]|null --- Optional list of [x, y] pixel coordinates to use as prior matching sources for SFFT. If provided, overrides automatic source matching. Example: [[100.5, 200.3], [150.2, 300.1]]
 
     inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).
     inpaint_method: biharmonic # str --- Inpainting algorithm name (e.g. biharmonic).

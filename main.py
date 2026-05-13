@@ -4428,6 +4428,17 @@ def run_photometry():
                 MatchingSources = pd.DataFrame(columns=["x_pix", "y_pix"])
                 logging.info("Insufficient sources for matching ")
 
+            # Allow manual override of matching sources via YAML config
+            manual_sources = input_yaml["template_subtraction"].get("sfft_manual_matching_sources")
+            if manual_sources is not None and len(manual_sources) > 0:
+                logging.info(
+                    f"Using {len(manual_sources)} manual matching sources from config (sfft_manual_matching_sources)"
+                )
+                ConsistentSources = [[float(x), float(y)] for x, y in manual_sources]
+                # Create MatchingSources DataFrame for compatibility
+                if MatchingSources is None or len(MatchingSources) == 0:
+                    MatchingSources = pd.DataFrame(ConsistentSources, columns=["x_pix", "y_pix"])
+
             #  Variable Sources
             # Handles variable sources if present.
             # stamp_loc = None
