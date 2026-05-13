@@ -125,7 +125,7 @@ class ImageDistortionCorrector:
         "FILL_VALUE": "NAN",
         "EDGE_THRESH": 0.0,
         "CELESTIAL_TYPE": "NATIVE",
-        "PROJECTION_TYPE": "TAN-TPV",
+        "PROJECTION_TYPE": "NATIVE",
         "FSCALASTRO_TYPE": "NONE",
         "COPY_KEYWORDS": "TELESCOP,FILTER,INSTRUME,EXPTIME,GAIN,OBSMJD,RDNOISE,APER,FWHM",
         # Allow full WCS transformations including rotation
@@ -1079,17 +1079,8 @@ NNW
                 )
                 ref_resampling_method = override_ref.strip().upper()
 
-            # Derive SWarp PROJECTION_TYPE from the pipeline WCS config so that it
-            # matches what SCAMP writes in the .head files (TPV -> TAN-TPV, else TAN).
-            _wcs_proj = str(
-                (iy.get("wcs", {}) or {}).get("projection_type", "TPV")
-            ).strip().upper()
-            swarp_proj_type = "TAN-TPV" if _wcs_proj == "TPV" else "TAN"
-            self.logger.info(
-                "SWarp PROJECTION_TYPE=%s (from wcs.projection_type=%s)",
-                swarp_proj_type, _wcs_proj,
-            )
-
+            # SWarp PROJECTION_TYPE=NATIVE preserves the projection type from the
+            # SCAMP .head files (TPV with PV coefficients). Do not override it here.
             swarp_config = {
                 "CENTER_TYPE": "MANUAL",
                 "CENTER": f"{center_ra:.8f},{center_dec:.8f}",
