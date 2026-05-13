@@ -938,6 +938,7 @@ def create_conv_file(path: str, fwhm_pixels: float = 3.0, force: bool = False) -
     kernel_size = max(3, int(np.ceil(fwhm_pixels * 3)))
     if kernel_size % 2 == 0:
         kernel_size += 1  # Ensure odd size
+    kernel_size = min(kernel_size, 7)  # SExtractor hard limit; filename is gaussian_7x7.conv
     center = kernel_size // 2
     sigma = fwhm_pixels / 2.355  # FWHM = 2.355 * sigma
     conv_text = f"CONV NORM\n# {kernel_size}x{kernel_size} convolution mask with FWHM = {fwhm_pixels:.1f} pixels\n"

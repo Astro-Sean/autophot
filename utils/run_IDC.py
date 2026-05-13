@@ -1122,7 +1122,6 @@ NNW
             # To force SCAMP to write separate .head files for both catalogs,
             # create temporary copies with different FILTER values.
 
-            sci_cat_tmp_stem = None  # will be set below if SCAMP runs with temp catalogs
             ref_cat_tmp_stem = None  # will be set below if SCAMP runs with temp catalogs
 
             if reference_already_scamp:
@@ -1131,53 +1130,39 @@ NNW
                 )
                 scamp_result = {}
             else:
-                # Create temporary catalog copies with distinct FILTER values
-                # to force SCAMP to treat them as different instruments.
-                sci_cat_path = Path(sci_sex["catalog_path"])
+                # Run SCAMP on the reference catalog only, using the science catalog as
+                # the astrometric reference. Only the reference needs a .head — the science
+                # image is never passed to SWarp (it defines the output grid as-is).
                 ref_cat_path = Path(ref_sex["catalog_path"])
-                sci_cat_tmp = reference_aligned_dir / f"{sci_cat_path.stem}_sci.cat"
                 ref_cat_tmp = reference_aligned_dir / f"{ref_cat_path.stem}_ref.cat"
-                # Track the temp stems so we can look up the correct .head files below
-                sci_cat_tmp_stem = sci_cat_tmp.stem  # e.g. "science_image_sci"
                 ref_cat_tmp_stem = ref_cat_tmp.stem  # e.g. "reference_image_ref"
-                
+
                 try:
-                    # Copy and modify FILTER headers in LDAC catalogs
-                    for cat_path, cat_tmp, filter_val in [
-                        (sci_cat_path, sci_cat_tmp, "w_sci"),
-                        (ref_cat_path, ref_cat_tmp, "w_ref"),
-                    ]:
-                        with fits.open(cat_path, memmap=False) as hdul:
-                            # LDAC catalogs have the header in the first extension
-                            if len(hdul) > 1 and "FILTER" in hdul[1].header:
-                                hdul[1].header["FILTER"] = filter_val
-                            elif len(hdul) > 0 and "FILTER" in hdul[0].header:
-                                hdul[0].header["FILTER"] = filter_val
-                            hdul.writeto(cat_tmp, overwrite=True)
-                        self.logger.debug(
-                            "Created temporary catalog with FILTER=%s: %s", filter_val, cat_tmp
-                        )
-                    
-                    self.logger.info(
-                        "Running SCAMP on both catalogs (science + reference)..."
-                    )
+                    # Copy reference catalog with a distinct FILTER to avoid any
+                    # instrument-grouping issues in SCAMP.
+                    with fits.open(ref_cat_path, memmap=False) as hdul:
+                        if len(hdul) > 1 and "FILTER" in hdul[1].header:
+                            hdul[1].header["FILTER"] = "w_ref"
+                        elif len(hdul) > 0 and "FILTER" in hdul[0].header:
+                            hdul[0].header["FILTER"] = "w_ref"
+                        hdul.writeto(ref_cat_tmp, overwrite=True)
+                    self.logger.debug("Created temporary reference catalog: %s", ref_cat_tmp)
+
+                    self.logger.info("Running SCAMP on reference catalog (science catalog as reference)...")
                     scamp_result = self.run_scamp(
-                        [str(sci_cat_tmp), str(ref_cat_tmp)],
-                        reference_cat=sci_sex["catalog_path"],  # Science catalog as reference
+                        str(ref_cat_tmp),
+                        reference_cat=sci_sex["catalog_path"],
                         output_dir=str(reference_aligned_dir),
-                        config=scamp_config_both,
+                        config=scamp_config_ref,
                     )
-                    
-                    # Clean up temporary catalogs
-                    for cat_tmp in [sci_cat_tmp, ref_cat_tmp]:
-                        try:
-                            cat_tmp.unlink(missing_ok=True)
-                        except Exception as e:
-                            self.logger.debug("Could not remove temp catalog %s: %s", cat_tmp, e)
-                    
+
+                    try:
+                        ref_cat_tmp.unlink(missing_ok=True)
+                    except Exception as e:
+                        self.logger.debug("Could not remove temp catalog %s: %s", ref_cat_tmp, e)
+
                 except Exception as e:
-                    self.logger.error("Failed to create temporary catalogs for SCAMP: %s", e)
-                    # Fallback to single-catalog SCAMP
+                    self.logger.error("Failed to prepare reference catalog for SCAMP: %s", e)
                     self.logger.info("Falling back to single-catalog SCAMP on reference...")
                     scamp_result = self.run_scamp(
                         ref_sex["catalog_path"],
@@ -1208,7 +1193,8 @@ NNW
             )
 
             for label, cat_tmp_stem, orig_cat_path, fits_copy in [
-                ("science", sci_cat_tmp_stem, sci_sex["catalog_path"], sci_image_copy),
+                # Science image is NOT resampled by SWarp (it defines the output grid),
+                # so its .head file is not needed. Only the reference needs its .head.
                 ("reference", ref_cat_tmp_stem, ref_sex["catalog_path"], ref_image_copy),
             ]:
                 # Try temp-catalog stem first (most common path), then original stem
@@ -1297,27 +1283,16 @@ NNW
                     ref_image_copy, resampled_dir / "reference_image.resamp.fits"
                 )
             else:
-                # Run SWarp separately on each image with identical grid parameters.
-                # A single SWarp call with COMBINE=N can still produce different output
-                # shapes per image when the reference WCS (from the SCAMP .head) places
-                # the image off-center relative to CENTER — SWarp clips the output to
-                # actual pixel coverage in that case.  Running each image independently
-                # forces SWarp to fill the full IMAGE_SIZE grid with NaN where no data
-                # exists, guaranteeing identical output shapes.
-                resample_dir_sci = resample_dir / "sci"
+                # Only resample the reference image onto the science grid.
+                # The science image already defines the output grid (CENTER/IMAGE_SIZE),
+                # so resampling it would apply the SCAMP self-referencing correction
+                # (science vs science catalog = zero or noise offset) which can shift
+                # pixels off the grid and produce a fully-NaN output. Instead, copy
+                # the science image copy directly as the science output.
                 resample_dir_ref = resample_dir / "ref"
-                resample_dir_sci.mkdir(parents=True, exist_ok=True)
                 resample_dir_ref.mkdir(parents=True, exist_ok=True)
 
-                self.logger.debug("Running SWarp on science image...")
-                swarp_res_sci = self.run_swarp(
-                    [str(sci_image_copy)],
-                    scamp_results=None,
-                    output_dir=str(resample_dir_sci),
-                    config=swarp_config_sci,
-                    no_weight_maps=True,
-                )
-                self.logger.debug("Running SWarp on reference image...")
+                self.logger.debug("Running SWarp on reference image (science image is the grid definition)...")
                 swarp_res_ref = self.run_swarp(
                     [str(ref_image_copy)],
                     scamp_results=None,
@@ -1326,23 +1301,23 @@ NNW
                     no_weight_maps=True,
                 )
 
-                if swarp_res_sci is None or swarp_res_ref is None:
+                if swarp_res_ref is None:
                     self.logger.info("SWarp failed. Falling back to AstroAlign.")
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
 
-                # Move outputs into a single resampled_dir with canonical names
-                sci_resamp = next(Path(swarp_res_sci["resampled_dir"]).glob("*.resamp.fits"), None)
                 ref_resamp = next(Path(swarp_res_ref["resampled_dir"]).glob("*.resamp.fits"), None)
-                if sci_resamp is None or ref_resamp is None:
-                    self.logger.info("SWarp resampled outputs not found. Falling back.")
+                if ref_resamp is None:
+                    self.logger.info("SWarp resampled output for reference not found. Falling back.")
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
+
                 canonical_dir = resample_dir / "resampled"
                 canonical_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(sci_resamp, canonical_dir / "science_image.resamp.fits")
+                # Science image is already on the correct grid — use it as-is
+                shutil.copy2(sci_image_copy, canonical_dir / "science_image.resamp.fits")
                 shutil.copy2(ref_resamp, canonical_dir / "reference_image.resamp.fits")
                 resampled_dir = canonical_dir
 
