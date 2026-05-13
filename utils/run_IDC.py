@@ -1094,7 +1094,7 @@ NNW
                 "IMAGE_SIZE_TYPE": "MANUAL",  # Force exact IMAGE_SIZE, don't adjust based on input WCS
                 "BLANK_BADPIXELS": "N",  # Prevent SWarp from adjusting output based on blank/bad pixels
                 "EDGE_THRESH": "0.0",  # Prevent SWarp from trimming edges
-                "ROTATE": "N",  # Prevent rotation-induced size changes
+                "ROTATE": "Y",  # Allow full WCS transformations including rotation
                 "RESAMPLING_TYPE": sci_resampling_method,
                 # OVERSAMPLING>0 causes SWarp to compute grid extents at N× sub-pixel
                 # resolution internally then round back, producing off-by-one shape
