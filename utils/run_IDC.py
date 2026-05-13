@@ -1093,6 +1093,8 @@ NNW
                 "IMAGE_SIZE": f"{output_width},{output_height}",
                 "IMAGE_SIZE_TYPE": "MANUAL",  # Force exact IMAGE_SIZE, don't adjust based on input WCS
                 "BLANK_BADPIXELS": "N",  # Prevent SWarp from adjusting output based on blank/bad pixels
+                "EDGE_THRESH": "0.0",  # Prevent SWarp from trimming edges
+                "ROTATE": "N",  # Prevent rotation-induced size changes
                 "RESAMPLING_TYPE": sci_resampling_method,
                 # OVERSAMPLING>0 causes SWarp to compute grid extents at N× sub-pixel
                 # resolution internally then round back, producing off-by-one shape
@@ -1233,37 +1235,42 @@ NNW
                 "SCAMP produced .head files for stems: %s", list(head_by_stem.keys())
             )
 
-            # Use the same SCAMP .head file (science) for both images to ensure
-            # identical WCS transformation and prevent shape mismatches. Since SCAMP
-            # solves both catalogs on the same astrometric grid, the science .head
-            # is valid for both images.
-            sci_head_src = None
-            if sci_cat_tmp_stem:
-                sci_head_src = head_by_stem.get(sci_cat_tmp_stem)
-            if not sci_head_src:
-                sci_head_src = head_by_stem.get(Path(sci_sex["catalog_path"]).stem)
-            # Fallback: single .head key (non-temp-catalog SCAMP path)
-            if not sci_head_src:
-                sci_head_src = scamp_result.get("head_file") if isinstance(scamp_result, dict) else None
+            # Copy both science and reference .head files next to their respective images
+            # so SWarp applies the SCAMP WCS correction to each independently.
+            # Both images are resampled onto the same fixed grid (CENTER/IMAGE_SIZE/PIXEL_SCALE),
+            # so output shapes are guaranteed to match regardless of which images have .head files.
+            for label, cat_tmp_stem, orig_cat_path, fits_copy in [
+                ("science", sci_cat_tmp_stem, sci_sex["catalog_path"], sci_image_copy),
+                ("reference", ref_cat_tmp_stem, ref_sex["catalog_path"], ref_image_copy),
+            ]:
+                # Try temp-catalog stem first (most common path), then original stem
+                head_src = None
+                if cat_tmp_stem:
+                    head_src = head_by_stem.get(cat_tmp_stem)
+                if not head_src:
+                    orig_stem = Path(orig_cat_path).stem
+                    head_src = head_by_stem.get(orig_stem)
+                # Fallback: single .head key (non-temp-catalog SCAMP path)
+                if not head_src and label == "reference":
+                    head_src = scamp_result.get("head_file") if isinstance(scamp_result, dict) else None
 
-            if sci_head_src and Path(sci_head_src).exists():
-                for label, fits_copy in [("science", sci_image_copy), ("reference", ref_image_copy)]:
+                if head_src and Path(head_src).exists():
                     head_dst = fits_copy.with_suffix(".head")
-                    if Path(sci_head_src).resolve() != head_dst.resolve():
+                    if Path(head_src).resolve() != head_dst.resolve():
                         try:
-                            shutil.copy2(sci_head_src, head_dst)
+                            shutil.copy2(head_src, head_dst)
                             self.logger.info(
-                                "Copied SCAMP .head (science) to %s for SWarp.", head_dst
+                                "Copied SCAMP .head (%s) to %s for SWarp.", label, head_dst
                             )
                         except Exception as e:
                             log_warning_from_exception(
                                 self.logger, f"Could not copy .head for {label}", e
                             )
-            else:
-                self.logger.warning(
-                    "No SCAMP .head found for science image (searched stems: %s, available: %s)",
-                    [sci_cat_tmp_stem, Path(sci_sex["catalog_path"]).stem], list(head_by_stem.keys()),
-                )
+                else:
+                    self.logger.warning(
+                        "No SCAMP .head found for %s image (searched stems: %s, available: %s)",
+                        label, [cat_tmp_stem, Path(orig_cat_path).stem], list(head_by_stem.keys()),
+                    )
 
             resample_dir = science_aligned_dir / "resampled_output"
             resample_dir.mkdir(parents=True, exist_ok=True)
