@@ -1391,45 +1391,45 @@ NNW
                 if _sci_shape != _ref_shape:
                     self.logger.warning(
                         "SWarp outputs have different shapes (sci=%s, ref=%s) — "
-                        "padding smaller image with NaNs.",
+                        "using Cutout2D to extend to common shape.",
                         _sci_shape, _ref_shape,
                     )
                     # Compute maximum dimensions
                     ny_max = max(_sci_shape[0], _ref_shape[0])
                     nx_max = max(_sci_shape[1], _ref_shape[1])
                     
-                    # Pad images with NaNs to match maximum dimensions
-                    def _pad_with_nans(data, target_shape):
-                        ny, nx = data.shape
-                        ny_pad = target_shape[0] - ny
-                        nx_pad = target_shape[1] - nx
-                        # Pad bottom and right with NaNs
-                        padded = np.pad(
-                            data,
-                            ((0, ny_pad), (0, nx_pad)),
-                            mode='constant',
-                            constant_values=np.nan
-                        )
-                        return padded
+                    # Use Cutout2D to extend both images to maximum dimensions
+                    # Cutout2D handles WCS updates automatically when extending
+                    from astropy.nddata.utils import Cutout2D
                     
-                    # Pad both images to maximum dimensions
-                    _sci_data_padded = _pad_with_nans(_sci_data, (ny_max, nx_max))
-                    _ref_data_padded = _pad_with_nans(_ref_data, (ny_max, nx_max))
+                    # Extend science image
+                    sci_cutout = Cutout2D(
+                        _sci_data,
+                        (nx_max/2, ny_max/2),
+                        (nx_max, ny_max),
+                        wcs=_sci_wcs,
+                        mode='partial'
+                    )
+                    _sci_data_padded = sci_cutout.data
+                    _sci_header.update(sci_cutout.wcs.to_header())
                     
-                    # Update WCS headers to account for new image dimensions
-                    # Since we're padding on bottom/right, CRPIX doesn't need to change,
-                    # but we need to update the WCS object and regenerate the header
-                    _sci_wcs.pixel_shape = (ny_max, nx_max)
-                    _sci_header.update(_sci_wcs.to_header())
-                    _ref_wcs.pixel_shape = (ny_max, nx_max)
-                    _ref_header.update(_ref_wcs.to_header())
+                    # Extend reference image
+                    ref_cutout = Cutout2D(
+                        _ref_data,
+                        (nx_max/2, ny_max/2),
+                        (nx_max, ny_max),
+                        wcs=_ref_wcs,
+                        mode='partial'
+                    )
+                    _ref_data_padded = ref_cutout.data
+                    _ref_header.update(ref_cutout.wcs.to_header())
                     
-                    # Write padded images back
+                    # Write extended images back
                     fits.writeto(aligned_sci, _sci_data_padded, _sci_header, overwrite=True)
                     fits.writeto(aligned_ref, _ref_data_padded, _ref_header, overwrite=True)
                     
                     self.logger.info(
-                        "Padded both images to maximum shape=%s.", (ny_max, nx_max),
+                        "Extended both images to maximum shape=%s.", (ny_max, nx_max),
                     )
                 else:
                     self.logger.info(
