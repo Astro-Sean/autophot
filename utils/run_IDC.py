@@ -1351,9 +1351,9 @@ NNW
                 except Exception as _e:
                     self.logger.debug("Could not read WCS from SWarp output [%s]: %s", _label, _e)
 
-            # Verify output shapes match. With both SCAMP .head files placed and
-            # SWarp using a fixed CENTER/IMAGE_SIZE/PIXEL_SCALE grid, both outputs
-            # must be identical. If they differ, pad the smaller image with NaNs.
+            # Verify output shapes match. With SWarp using a fixed
+            # CENTER/IMAGE_SIZE/PIXEL_SCALE grid, both outputs should be identical.
+            # If they differ, use Cutout2D to extend both to the maximum dimensions.
             try:
                 with fits.open(aligned_sci) as _h:
                     _sci_data = _h[0].data
@@ -1414,7 +1414,12 @@ NNW
                         "SWarp outputs match: both images shape=%s.", _sci_shape,
                     )
             except Exception as _e:
-                self.logger.debug("Could not verify or fix SWarp output shapes: %s", _e)
+                self.logger.error(
+                    "Could not verify or fix SWarp output shapes: %s. Falling back to reproject.", _e
+                )
+                return self.align_with_reproject(
+                    science_image, reference_image, output_dir
+                )
 
             # Overwrite the reference_image path in-place with the aligned version.
             # reference_image is already a per-science-image copy so overwriting it
