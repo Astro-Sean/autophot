@@ -1122,6 +1122,7 @@ NNW
             # To force SCAMP to write separate .head files for both catalogs,
             # create temporary copies with different FILTER values.
 
+            sci_cat_tmp_stem = None  # will be set below if SCAMP runs with temp catalogs
             ref_cat_tmp_stem = None  # will be set below if SCAMP runs with temp catalogs
 
             if reference_already_scamp:
@@ -1130,39 +1131,51 @@ NNW
                 )
                 scamp_result = {}
             else:
-                # Run SCAMP on the reference catalog only, using the science catalog as
-                # the astrometric reference. Only the reference needs a .head — the science
-                # image is never passed to SWarp (it defines the output grid as-is).
+                # Run SCAMP on both catalogs with distinct FILTER values so SCAMP
+                # produces a separate .head file for each.  The science .head corrects
+                # the science WCS; the reference .head corrects the reference WCS.
+                # Both are placed next to their respective images before SWarp so
+                # each is resampled with its SCAMP-refined WCS onto the same fixed grid.
+                sci_cat_path = Path(sci_sex["catalog_path"])
                 ref_cat_path = Path(ref_sex["catalog_path"])
+                sci_cat_tmp = reference_aligned_dir / f"{sci_cat_path.stem}_sci.cat"
                 ref_cat_tmp = reference_aligned_dir / f"{ref_cat_path.stem}_ref.cat"
-                ref_cat_tmp_stem = ref_cat_tmp.stem  # e.g. "reference_image_ref"
+                sci_cat_tmp_stem = sci_cat_tmp.stem
+                ref_cat_tmp_stem = ref_cat_tmp.stem
 
                 try:
-                    # Copy reference catalog with a distinct FILTER to avoid any
-                    # instrument-grouping issues in SCAMP.
-                    with fits.open(ref_cat_path, memmap=False) as hdul:
-                        if len(hdul) > 1 and "FILTER" in hdul[1].header:
-                            hdul[1].header["FILTER"] = "w_ref"
-                        elif len(hdul) > 0 and "FILTER" in hdul[0].header:
-                            hdul[0].header["FILTER"] = "w_ref"
-                        hdul.writeto(ref_cat_tmp, overwrite=True)
-                    self.logger.debug("Created temporary reference catalog: %s", ref_cat_tmp)
+                    for cat_path, cat_tmp, filter_val in [
+                        (sci_cat_path, sci_cat_tmp, "w_sci"),
+                        (ref_cat_path, ref_cat_tmp, "w_ref"),
+                    ]:
+                        with fits.open(cat_path, memmap=False) as hdul:
+                            if len(hdul) > 1 and "FILTER" in hdul[1].header:
+                                hdul[1].header["FILTER"] = filter_val
+                            elif len(hdul) > 0 and "FILTER" in hdul[0].header:
+                                hdul[0].header["FILTER"] = filter_val
+                            hdul.writeto(cat_tmp, overwrite=True)
+                        self.logger.debug(
+                            "Created temporary catalog with FILTER=%s: %s", filter_val, cat_tmp
+                        )
 
-                    self.logger.info("Running SCAMP on reference catalog (science catalog as reference)...")
+                    self.logger.info(
+                        "Running SCAMP on both catalogs (science + reference)..."
+                    )
                     scamp_result = self.run_scamp(
-                        str(ref_cat_tmp),
+                        [str(sci_cat_tmp), str(ref_cat_tmp)],
                         reference_cat=sci_sex["catalog_path"],
                         output_dir=str(reference_aligned_dir),
-                        config=scamp_config_ref,
+                        config=scamp_config_both,
                     )
 
-                    try:
-                        ref_cat_tmp.unlink(missing_ok=True)
-                    except Exception as e:
-                        self.logger.debug("Could not remove temp catalog %s: %s", ref_cat_tmp, e)
+                    for cat_tmp in [sci_cat_tmp, ref_cat_tmp]:
+                        try:
+                            cat_tmp.unlink(missing_ok=True)
+                        except Exception as e:
+                            self.logger.debug("Could not remove temp catalog %s: %s", cat_tmp, e)
 
                 except Exception as e:
-                    self.logger.error("Failed to prepare reference catalog for SCAMP: %s", e)
+                    self.logger.error("Failed to create temporary catalogs for SCAMP: %s", e)
                     self.logger.info("Falling back to single-catalog SCAMP on reference...")
                     scamp_result = self.run_scamp(
                         ref_sex["catalog_path"],
@@ -1193,8 +1206,7 @@ NNW
             )
 
             for label, cat_tmp_stem, orig_cat_path, fits_copy in [
-                # Science image is NOT resampled by SWarp (it defines the output grid),
-                # so its .head file is not needed. Only the reference needs its .head.
+                ("science", sci_cat_tmp_stem, sci_sex["catalog_path"], sci_image_copy),
                 ("reference", ref_cat_tmp_stem, ref_sex["catalog_path"], ref_image_copy),
             ]:
                 # Try temp-catalog stem first (most common path), then original stem
