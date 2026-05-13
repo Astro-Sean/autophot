@@ -2921,7 +2921,7 @@ class Catalog:
                 interval = ZScaleInterval()
                 vmin, vmax = interval.get_limits(np.asarray(stars[i]))
                 norm = ImageNormalize(vmin=vmin, vmax=vmax)
-                cmap = plt.get_cmap("gray_r").copy()
+                cmap = plt.get_cmap("gray").copy()
                 cmap.set_bad(color="white")
                 ax.imshow(
                     stars[i],

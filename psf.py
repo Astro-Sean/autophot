@@ -2409,7 +2409,7 @@ class PSF:
             ax.imshow(
                 np.ma.array(stars[i], mask=~np.isfinite(stars[i])),
                 origin="lower",
-                cmap='gray_r',
+                cmap='gray',
                 norm=norm_i,
                 interpolation="none",
             )
@@ -2459,7 +2459,7 @@ class PSF:
         im = ax_right.imshow(
             np.ma.array(psf_model_plot, mask=~np.isfinite(psf_model_plot)),
             origin="lower",
-            cmap='gray_r',
+            cmap='gray',
             norm=norm_p,
             interpolation="none",
         )
@@ -4187,7 +4187,7 @@ class PSF:
             im1 = ax1.imshow(
                 np.ma.array(first_image, mask=~np.isfinite(first_image)),
                 origin="lower",
-                cmap='gray_r',
+                cmap='gray',
                 norm=norm1,
                 interpolation=None,
             )
@@ -4397,7 +4397,7 @@ class PSF:
                 im2 = ax2.imshow(
                 np.ma.array(second_image, mask=~np.isfinite(second_image)),
                 origin="lower",
-                cmap='gray_r',
+                cmap='gray',
                     norm=norm2,
                     interpolation=None,
                 )
@@ -4451,7 +4451,7 @@ class PSF:
                 im3 = ax3.imshow(
                 np.ma.array(epsf.data, mask=~np.isfinite(epsf.data)),
                 origin="lower",
-                cmap='gray_r',
+                cmap='gray',
                     norm=norm3,
                     interpolation=None,
                 )

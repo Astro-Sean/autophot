@@ -3088,7 +3088,7 @@ class Limits:
                         vmin, vmax = zscale.get_limits(np.clip(injected_disp, lower, upper))
                     else:
                         vmin, vmax = np.nanmin(injected_disp), np.nanmax(injected_disp)
-                    cmap = plt.get_cmap("gray_r").copy()
+                    cmap = plt.get_cmap("gray").copy()
                     cmap.set_bad(color="white")
                     im = ax_inject.imshow(
                         np.ma.array(injected_disp, mask=~np.isfinite(injected_disp)),
@@ -3272,7 +3272,7 @@ class Limits:
                     ny, nx = cutout.shape
                     from astropy.visualization import simple_norm
                     norm = simple_norm(cutout, 'sqrt', percent=99.5)
-                    cmap = plt.get_cmap("gray_r").copy()
+                    cmap = plt.get_cmap("gray").copy()
                     cmap.set_bad(color="white")
                     plot_zero_as_nan = bool((self.input_yaml.get("limiting_magnitude") or {}).get("plot_zero_as_nan", True))
                     cut_disp = np.asarray(cutout, dtype=float).copy()

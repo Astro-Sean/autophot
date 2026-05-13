@@ -1108,7 +1108,7 @@ class Aperture:
                 f"Zoom region too small for profile plotting: {zoom_image.shape}"
             )
             norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
-            cmap = plt.get_cmap("gray_r").copy()
+            cmap = plt.get_cmap("gray").copy()
             cmap.set_bad(color="white")
             plot_zero_as_nan = bool(
                 (self.input_yaml.get("plotting") or {}).get("plot_zero_as_nan", True)

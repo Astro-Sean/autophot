@@ -238,7 +238,7 @@ class Find_FWHM:
             zscale = ZScaleInterval()
             norm = ImageNormalize(image, interval=zscale)
             fig, ax = plt.subplots(figsize=set_size(540, aspect=1.3))
-            cmap = plt.get_cmap("gray_r").copy()
+            cmap = plt.get_cmap("gray").copy()
             cmap.set_bad(color="white")
             ax.imshow(image, cmap=cmap, origin="lower", norm=norm)
             ax.contour(
