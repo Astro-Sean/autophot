@@ -123,14 +123,10 @@ class ImageDistortionCorrector:
         "WRITE_XML": "Y",
         "VERBOSE_TYPE": "LOG",
         "BLANK_BADPIXELS": "Y",
-        "FILL_VALUE": "NAN",
-        "EDGE_THRESH": 0.0,
         "CELESTIAL_TYPE": "NATIVE",
         "PROJECTION_TYPE": "TAN",
         "FSCALASTRO_TYPE": "NONE",
         "COPY_KEYWORDS": "TELESCOP,FILTER,INSTRUME,EXPTIME,GAIN,OBSMJD,RDNOISE,APER,FWHM",
-        # Allow full WCS transformations including rotation
-        "ROTATE": "Y",
     }
 
     # ---------------------------- Constructor / logger ----------------------------
@@ -1092,8 +1088,6 @@ NNW
                 "PIXELSCALE_TYPE": "MANUAL",
                 "IMAGE_SIZE": f"{output_width},{output_height}",
                 "BLANK_BADPIXELS": "N",  # Prevent SWarp from adjusting output based on blank/bad pixels
-                "EDGE_THRESH": "0.0",  # Prevent SWarp from trimming edges
-                "ROTATE": "Y",  # Allow full WCS transformations including rotation
                 "RESAMPLING_TYPE": sci_resampling_method,
                 # OVERSAMPLING>0 causes SWarp to compute grid extents at N× sub-pixel
                 # resolution internally then round back, producing off-by-one shape
