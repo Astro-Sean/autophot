@@ -1153,11 +1153,24 @@ NNW
                 ref_cat_tmp_stem = ref_cat_tmp.stem
 
                 try:
-                    for cat_path, cat_tmp, filter_val in [
+                    for cat_path, cat_tmp, filter_suffix in [
                         (sci_cat_path, sci_cat_tmp, "w_sci"),
                         (ref_cat_path, ref_cat_tmp, "w_ref"),
                     ]:
                         with fits.open(cat_path, memmap=False) as hdul:
+                            # Build FILTER value: preserve existing filter name and append suffix
+                            # This ensures SCAMP can distinguish catalogs while keeping original info
+                            base_filter = None
+                            if len(hdul) > 1 and "FILTER" in hdul[1].header:
+                                base_filter = hdul[1].header["FILTER"]
+                            elif len(hdul) > 0 and "FILTER" in hdul[0].header:
+                                base_filter = hdul[0].header["FILTER"]
+                            
+                            if base_filter and base_filter.strip():
+                                filter_val = f"{base_filter.strip()}_{filter_suffix}"
+                            else:
+                                filter_val = filter_suffix
+                            
                             if len(hdul) > 1 and "FILTER" in hdul[1].header:
                                 hdul[1].header["FILTER"] = filter_val
                             elif len(hdul) > 0 and "FILTER" in hdul[0].header:
