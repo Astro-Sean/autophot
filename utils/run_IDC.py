@@ -994,10 +994,13 @@ NNW
                 "Proceeding with SCAMP + SWarp alignment (%d matched sources).",
                 _num_matched,
             )
-            # Round PIXEL_SCALE to 4 decimal places to ensure consistency between
-            # output shape computation and SWarp resampling. SWarp's internal
-            # computation can differ, causing WCS mismatches.
+            # Round PIXEL_SCALE to 4 decimal places and force to exactly 0.25 if
+            # close to that value (within 0.001 arcsec/pixel). This handles the
+            # common case where Pan-STARRS images have a nominal 0.25 arcsec/pixel
+            # scale but WCS computation gives slightly different values (e.g., 0.2502).
             pix_scale = round(sci_pix_scale, 4)
+            if abs(pix_scale - 0.25) < 0.001:
+                pix_scale = 0.25
 
             # SCAMP: derive parameters from FWHM and pixel scale
             crossid_arcsec = max(
