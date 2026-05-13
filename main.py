@@ -5104,12 +5104,14 @@ def run_photometry():
                     image_data = np.array(target_cutout, dtype=float, copy=True) * gain
                 else:
                     image_data = np.array(image, dtype=float, copy=True) * gain
-                
-                # Subtract 2x background and take absolute value
-                # This flips negative PSF dips to positive peaks while keeping background at zero
-                inv_data = np.abs(image_data - 2.0 * bkg_median * gain)
+
+                # Negate and zero-clip: only negative dips become positive peaks.
+                # abs(data - 2*bkg) maps positive peaks symmetrically too, which
+                # would mis-flag bright sources as inverted detections.
+                bkg_e = bkg_median * gain
+                inv_data = np.clip(-(image_data - bkg_e), 0.0, None)
                 inverted_image = inv_data
-                logging.info("Created inverted image for negative PSF detection (subtract 2xbkg, abs).")
+                logging.info("Created inverted image for negative PSF detection (clip(-bkg_sub, 0)).")
             except Exception as exc:
                 logging.warning(f"Failed to create inverted image: {exc}")
                 inverted_image = None

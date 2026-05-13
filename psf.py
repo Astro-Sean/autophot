@@ -2827,11 +2827,13 @@ class PSF:
                 # Estimate background level from the image
                 image_data = np.array(ndimage.data, dtype=float, copy=True)
                 bkg_median = float(np.nanmedian(image_data))
-                # Subtract 2x background and take absolute value
-                # This flips negative PSF dips to positive peaks while keeping background at zero
-                inv_data = np.abs(image_data - 2.0 * bkg_median)
+                # Negate and zero-clip: only negative dips become positive peaks.
+                # abs(data - 2*bkg) symmetrically maps positive peaks to positive peaks too,
+                # which would mis-flag a bright source as an inverted detection.
+                bkg_sub = image_data - bkg_median
+                inv_data = np.clip(-bkg_sub, 0.0, None)
                 ndimage_inverted = _nddata_clone(ndimage, data=inv_data)
-                log.info("Target PSF: will also fit on inverted image (subtract 2xbkg, abs) for negative PSF detection.")
+                log.info("Target PSF: inverted image built as clip(-bkg_sub, 0) — only negative dips become positive peaks.")
             except Exception as exc:
                 log_warning_from_exception(log, "Failed to create inverted image for PSF fitting", exc)
                 ndimage_inverted = None
@@ -3541,20 +3543,22 @@ class PSF:
         # Only retry for SNR <= -3 (significant negative detection, not just small negative noise)
         needs_inverted_retry = np.zeros(len(combined), dtype=bool)
         if check_inverted and ndimage_inverted is not None and is_target_fit:
-            # Check SNR from sources using idx_out mapping
-            if "SNR" in sources.columns:
-                snr_arr = np.asarray(sources["SNR"].iloc[idx_out], float)
-                # Trigger for significant negative SNR (<= -3), small negatives (-3 < SNR < 0) are okay
-                significant_negative = np.isfinite(snr_arr) & (snr_arr <= -3)
-                needs_inverted_retry = significant_negative
-                if np.any(needs_inverted_retry):
-                    log.info(
-                        "Target PSF: %d/%d fits have SNR <= -3; retrying on inverted image.",
-                        int(np.sum(needs_inverted_retry)),
-                        len(combined)
-                    )
+            # Trigger on post-fit flux_fit < 0 from combined, not pre-fit aperture SNR.
+            # Pre-fit SNR can be negative due to background drift in difference images even
+            # for non-detections; flux_fit from the PSF fit is the correct discriminant.
+            flux_fit_arr = np.asarray(
+                self._first_present(combined, ["flux_fit", "flux"], unit=u.electron), float
+            )
+            significant_negative = np.isfinite(flux_fit_arr) & (flux_fit_arr < 0)
+            needs_inverted_retry = significant_negative
+            if np.any(needs_inverted_retry):
+                log.info(
+                    "Target PSF: %d/%d fits have flux_fit < 0; retrying on inverted image.",
+                    int(np.sum(needs_inverted_retry)),
+                    len(combined)
+                )
             else:
-                log.warning("check_inverted enabled but SNR not in sources; cannot determine inverted retry candidates.")
+                log.info("Target PSF: flux_fit >= 0 for all fits; no inverted retry needed.")
 
         # ---- Inverted image fit (fallback for negative/problematic PSF) ------
         results_inverted = []
