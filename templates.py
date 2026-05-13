@@ -4288,7 +4288,7 @@ class Templates:
             # Filter matching sources that fall on masked pixels
             # Check not just the center but also the aperture region around each source
             # to ensure the full PSF is usable for kernel fitting
-            aperture_check_radius = max(5.0, ImageFWHM)  # At least 5px or 1x FWHM
+            aperture_check_radius = max(5.0, science_fwhm)  # At least 5px or 1x FWHM
             
             def _source_is_masked(x, y, mask, radius):
                 """Check if any pixel within radius of (x,y) is masked."""
