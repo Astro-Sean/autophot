@@ -1624,11 +1624,12 @@ NNW
         target_ra: Optional[float] = None,
         target_dec: Optional[float] = None,
     ) -> Tuple[int, int]:
-        """Compute optimal output shape as intersection of valid (non-NaN) regions.
-        
-        This reduces output size when images have different coverage or significant
-        masked edges, avoiding computation on regions where only one image has data.
-        
+        """Compute output shape as the science image shape.
+
+        Using the science image shape ensures both images are resampled to exactly
+        the same grid, avoiding complex intersection logic that can cause shape
+        mismatches when images have different NaN boundaries or valid regions.
+
         Parameters
         ----------
         sci_data, ref_data : ndarray
@@ -1636,124 +1637,20 @@ NNW
         sci_wcs, ref_wcs : WCS
             World coordinate systems for each image
         pix_scale : float
-            Output pixel scale in arcsec/pixel
+            Output pixel scale in arcsec/pixel (unused, kept for API compatibility)
         target_ra, target_dec : float, optional
-            Target position in degrees. If provided, the output shape is guaranteed
-            to include this position (expanded if necessary, up to science image bounds).
-            
+            Target position in degrees (unused, kept for API compatibility)
+
         Returns
         -------
         (width, height) : tuple of int
-            Optimal output dimensions in pixels
+            Science image dimensions in pixels
         """
-        try:
-            # Find valid (finite) pixel regions in each image
-            sci_valid = np.isfinite(sci_data)
-            ref_valid = np.isfinite(ref_data)
-            
-            # Get bounding boxes of valid regions
-            def _valid_bbox(valid_mask):
-                rows = np.any(valid_mask, axis=1)
-                cols = np.any(valid_mask, axis=0)
-                if not np.any(rows) or not np.any(cols):
-                    return None
-                rmin, rmax = np.where(rows)[0][[0, -1]]
-                cmin, cmax = np.where(cols)[0][[0, -1]]
-                return (cmin, rmin, cmax, rmax)  # x1,y1,x2,y2 in pixel coords
-            
-            sci_bbox = _valid_bbox(sci_valid)
-            ref_bbox = _valid_bbox(ref_valid)
-            
-            if sci_bbox is None or ref_bbox is None:
-                # Fall back to science shape if no valid data found
-                return sci_data.shape[1], sci_data.shape[0]
-            
-            # Convert bounding box corners to world coordinates
-            def _bbox_corners(bbox):
-                x1, y1, x2, y2 = bbox
-                return np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
-            
-            sci_corners = _bbox_corners(sci_bbox)
-            ref_corners = _bbox_corners(ref_bbox)
-            
-            # Convert to RA/Dec
-            sci_world = sci_wcs.all_pix2world(sci_corners, 0)
-            ref_world = ref_wcs.all_pix2world(ref_corners, 0)
-            
-            # Find overlapping RA/Dec region
-            ra_min = max(np.min(sci_world[:, 0]), np.min(ref_world[:, 0]))
-            ra_max = min(np.max(sci_world[:, 0]), np.max(ref_world[:, 0]))
-            dec_min = max(np.min(sci_world[:, 1]), np.min(ref_world[:, 1]))
-            dec_max = min(np.max(sci_world[:, 1]), np.max(ref_world[:, 1]))
-            
-            # Check if there is any overlap
-            if ra_min >= ra_max or dec_min >= dec_max:
-                self.logger.warning(
-                    "No overlap in valid regions; using science image shape."
-                )
-                return sci_data.shape[1], sci_data.shape[0]
-            
-            # Convert overlap size to pixels at output pixel scale
-            # cos(dec) factor for RA separation
-            cos_dec = np.cos(np.radians((dec_min + dec_max) / 2))
-            ra_sep = (ra_max - ra_min) * cos_dec * 3600  # arcsec
-            dec_sep = (dec_max - dec_min) * 3600  # arcsec
-            
-            width = int(ra_sep / pix_scale)
-            height = int(dec_sep / pix_scale)
-            
-            # Ensure minimum size and add small margin
-            width = max(width, 100)
-            height = max(height, 100)
-            
-            # Ensure target is included in output (if target position provided)
-            if target_ra is not None and target_dec is not None:
-                # Convert target world coords to pixel coords in output grid
-                # Output grid center is at (width/2, height/2) in pixel coords
-                # with pix_scale arcsec/pixel
-                cos_dec = np.cos(np.radians(target_dec))
-                
-                # Target offset from center in arcsec
-                dra_arcsec = (target_ra - (ra_min + ra_max) / 2) * cos_dec * 3600
-                ddec_arcsec = (target_dec - (dec_min + dec_max) / 2) * 3600
-                
-                # Convert to pixels
-                dx_pix = dra_arcsec / pix_scale
-                dy_pix = ddec_arcsec / pix_scale
-                
-                # Check if target falls within current output bounds
-                half_w = width / 2
-                half_h = height / 2
-                
-                # Expand width if needed
-                if abs(dx_pix) >= half_w - 5:  # 5 pixel margin
-                    new_half_w = abs(dx_pix) + 10  # Add margin
-                    width = int(2 * new_half_w)
-                    self.logger.debug(
-                        "Expanded output width to include target: %d -> %d", 
-                        int(2 * half_w), width
-                    )
-                
-                # Expand height if needed
-                if abs(dy_pix) >= half_h - 5:  # 5 pixel margin
-                    new_half_h = abs(dy_pix) + 10  # Add margin
-                    height = int(2 * new_half_h)
-                    self.logger.debug(
-                        "Expanded output height to include target: %d -> %d",
-                        int(2 * half_h), height
-                    )
-            
-            # Cap at original science size (don't expand beyond input)
-            width = min(width, sci_data.shape[1])
-            height = min(height, sci_data.shape[0])
-            
-            return width, height
-            
-        except Exception as e:
-            self.logger.warning(
-                "Could not compute optimal output shape: %s. Using science shape.", e
-            )
-            return sci_data.shape[1], sci_data.shape[0]
+        # Simply return the science image shape to ensure both images are
+        # resampled to exactly the same grid. This avoids shape mismatches
+        # caused by complex intersection logic when images have different
+        # NaN boundaries or valid regions.
+        return sci_data.shape[1], sci_data.shape[0]
 
     def _align_fallback_reproject_then_astroalign(
         self,
