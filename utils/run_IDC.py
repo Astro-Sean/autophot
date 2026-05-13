@@ -1176,13 +1176,13 @@ NNW
                         )
 
                     self.logger.info(
-                        "Running SCAMP on both catalogs (science + reference)..."
+                        "Running SCAMP on reference catalog against science catalog as reference..."
                     )
                     scamp_result = self.run_scamp(
-                        [str(sci_cat_tmp), str(ref_cat_tmp)],
+                        ref_sex["catalog_path"],
                         reference_cat=_sci_cat_for_scamp,
                         output_dir=str(reference_aligned_dir),
-                        config=scamp_config_both,
+                        config=scamp_config_ref,
                     )
 
                     for cat_tmp in [sci_cat_tmp, ref_cat_tmp]:
@@ -1222,12 +1222,13 @@ NNW
                 "SCAMP produced .head files for stems: %s", list(head_by_stem.keys())
             )
 
-            # Copy both science and reference .head files next to their respective images
-            # so SWarp applies the SCAMP WCS correction to each independently.
+            # Copy SCAMP .head file next to reference image only.
+            # Science image uses its original WCS without SCAMP correction
+            # (self-referencing produces meaningless WCS offsets).
+            # Only reference goes through SCAMP against science catalog.
             # Both images are resampled onto the same fixed grid (CENTER/IMAGE_SIZE/PIXEL_SCALE),
-            # so output shapes are guaranteed to match regardless of which images have .head files.
+            # so output shapes are guaranteed to match.
             for label, cat_tmp_stem, orig_cat_path, fits_copy in [
-                ("science", sci_cat_tmp_stem, sci_sex["catalog_path"], sci_image_copy),
                 ("reference", ref_cat_tmp_stem, ref_sex["catalog_path"], ref_image_copy),
             ]:
                 # Try temp-catalog stem first (most common path), then original stem
@@ -1238,7 +1239,7 @@ NNW
                     orig_stem = Path(orig_cat_path).stem
                     head_src = head_by_stem.get(orig_stem)
                 # Fallback: single .head key (non-temp-catalog SCAMP path)
-                if not head_src and label == "reference":
+                if not head_src:
                     head_src = scamp_result.get("head_file") if isinstance(scamp_result, dict) else None
 
                 if head_src and Path(head_src).exists():
