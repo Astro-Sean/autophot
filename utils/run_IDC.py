@@ -1283,16 +1283,25 @@ NNW
                     ref_image_copy, resampled_dir / "reference_image.resamp.fits"
                 )
             else:
-                # Only resample the reference image onto the science grid.
-                # The science image already defines the output grid (CENTER/IMAGE_SIZE),
-                # so resampling it would apply the SCAMP self-referencing correction
-                # (science vs science catalog = zero or noise offset) which can shift
-                # pixels off the grid and produce a fully-NaN output. Instead, copy
-                # the science image copy directly as the science output.
+                # Resample both images onto the same grid in separate SWarp calls.
+                # Science has no .head file (it defines the output grid — applying a
+                # SCAMP self-reference .head would shift pixels off the grid -> all NaN).
+                # Reference has its SCAMP .head placed next to it so SWarp applies the
+                # WCS correction before resampling onto the fixed CENTER/IMAGE_SIZE grid.
+                resample_dir_sci = resample_dir / "sci"
                 resample_dir_ref = resample_dir / "ref"
+                resample_dir_sci.mkdir(parents=True, exist_ok=True)
                 resample_dir_ref.mkdir(parents=True, exist_ok=True)
 
-                self.logger.debug("Running SWarp on reference image (science image is the grid definition)...")
+                self.logger.debug("Running SWarp on science image...")
+                swarp_res_sci = self.run_swarp(
+                    [str(sci_image_copy)],
+                    scamp_results=None,
+                    output_dir=str(resample_dir_sci),
+                    config=swarp_config_sci,
+                    no_weight_maps=True,
+                )
+                self.logger.debug("Running SWarp on reference image...")
                 swarp_res_ref = self.run_swarp(
                     [str(ref_image_copy)],
                     scamp_results=None,
@@ -1301,23 +1310,23 @@ NNW
                     no_weight_maps=True,
                 )
 
-                if swarp_res_ref is None:
+                if swarp_res_sci is None or swarp_res_ref is None:
                     self.logger.info("SWarp failed. Falling back to AstroAlign.")
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
 
+                sci_resamp = next(Path(swarp_res_sci["resampled_dir"]).glob("*.resamp.fits"), None)
                 ref_resamp = next(Path(swarp_res_ref["resampled_dir"]).glob("*.resamp.fits"), None)
-                if ref_resamp is None:
-                    self.logger.info("SWarp resampled output for reference not found. Falling back.")
+                if sci_resamp is None or ref_resamp is None:
+                    self.logger.info("SWarp resampled outputs not found. Falling back.")
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
 
                 canonical_dir = resample_dir / "resampled"
                 canonical_dir.mkdir(parents=True, exist_ok=True)
-                # Science image is already on the correct grid — use it as-is
-                shutil.copy2(sci_image_copy, canonical_dir / "science_image.resamp.fits")
+                shutil.copy2(sci_resamp, canonical_dir / "science_image.resamp.fits")
                 shutil.copy2(ref_resamp, canonical_dir / "reference_image.resamp.fits")
                 resampled_dir = canonical_dir
 
