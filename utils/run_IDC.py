@@ -1377,7 +1377,9 @@ NNW
                     nx_max = max(_sci_shape[1], _ref_shape[1])
                     
                     # Use Cutout2D to extend both images to maximum dimensions
-                    # Cutout2D handles WCS updates automatically when extending
+                    # CRITICAL: Cutout2D.wcs.to_header() strips higher-order distortion terms
+                    # (SIP, PV coefficients). We must preserve the original header's distortion
+                    # model and only update the essential WCS keywords (CRPIX, NAXIS).
                     from astropy.nddata.utils import Cutout2D
                     
                     # Extend science image
@@ -1389,7 +1391,14 @@ NNW
                         mode='partial'
                     )
                     _sci_data_padded = sci_cutout.data
-                    _sci_header.update(sci_cutout.wcs.to_header())
+                    # Preserve original distortion model; only update CRPIX and image dimensions
+                    # cutout.wcs.to_header() strips SIP/PV terms, so we manually update only
+                    # the linear WCS parameters that changed
+                    sci_wcs_header = sci_cutout.wcs.to_header()
+                    _sci_header['CRPIX1'] = sci_wcs_header.get('CRPIX1', _sci_header.get('CRPIX1'))
+                    _sci_header['CRPIX2'] = sci_wcs_header.get('CRPIX2', _sci_header.get('CRPIX2'))
+                    _sci_header['NAXIS1'] = nx_max
+                    _sci_header['NAXIS2'] = ny_max
                     
                     # Extend reference image
                     ref_cutout = Cutout2D(
@@ -1400,7 +1409,12 @@ NNW
                         mode='partial'
                     )
                     _ref_data_padded = ref_cutout.data
-                    _ref_header.update(ref_cutout.wcs.to_header())
+                    # Preserve original distortion model; only update CRPIX and image dimensions
+                    ref_wcs_header = ref_cutout.wcs.to_header()
+                    _ref_header['CRPIX1'] = ref_wcs_header.get('CRPIX1', _ref_header.get('CRPIX1'))
+                    _ref_header['CRPIX2'] = ref_wcs_header.get('CRPIX2', _ref_header.get('CRPIX2'))
+                    _ref_header['NAXIS1'] = nx_max
+                    _ref_header['NAXIS2'] = ny_max
                     
                     # Write extended images back
                     fits.writeto(aligned_sci, _sci_data_padded, _sci_header, overwrite=True)
