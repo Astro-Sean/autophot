@@ -1082,6 +1082,8 @@ NNW
             swarp_config = {
                 "CENTER_TYPE": "MANUAL",
                 "CENTER": f"{center_ra:.6f},{center_dec:.6f}",
+                "PIXEL_SCALE": pix_scale,  # Use science image pixel scale
+                "PIXELSCALE_TYPE": "MANUAL",  # Force use of specified PIXEL_SCALE
                 "IMAGE_SIZE": f"{output_width},{output_height}",
                 "BLANK_BADPIXELS": "N",  # Prevent SWarp from adjusting output based on blank/bad pixels
                 "RESAMPLING_TYPE": sci_resampling_method,
