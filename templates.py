@@ -4194,19 +4194,45 @@ class Templates:
             # 4b. SFFT: default is sparse (ESP) for better performance; crowded (ECP) only if explicitly enabled.
 
             # Filter matching sources that fall on masked pixels
+            # Check not just the center but also the aperture region around each source
+            # to ensure the full PSF is usable for kernel fitting
+            aperture_check_radius = max(5.0, ImageFWHM)  # At least 5px or 1x FWHM
+            
+            def _source_is_masked(x, y, mask, radius):
+                """Check if any pixel within radius of (x,y) is masked."""
+                if not np.isfinite(x) or not np.isfinite(y):
+                    return True
+                x_int, y_int = int(x), int(y)
+                ny, nx = mask.shape
+                
+                # Check bounds
+                if x_int < 0 or x_int >= nx or y_int < 0 or y_int >= ny:
+                    return True
+                
+                # Check center pixel first (fast path)
+                if mask[y_int, x_int]:
+                    return True
+                
+                # Check circular aperture region
+                y_range = slice(max(0, y_int - int(radius)), min(ny, y_int + int(radius) + 1))
+                x_range = slice(max(0, x_int - int(radius)), min(nx, x_int + int(radius) + 1))
+                
+                y_coords, x_coords = np.mgrid[y_range, x_range]
+                dist_sq = (x_coords - x)**2 + (y_coords - y)**2
+                in_circle = dist_sq <= radius**2
+                
+                return np.any(mask[y_range, x_range][in_circle])
+            
             filtered_matching_sources = [
                 (x, y)
                 for x, y in matching_sources
-                if (
-                    np.isfinite(x)
-                    and np.isfinite(y)
-                    and not universal_mask[int(y), int(x)]
-                )
+                if not _source_is_masked(x, y, universal_mask, aperture_check_radius)
             ]
             matching_sources = filtered_matching_sources
             logger.info(
-                "%d matching sources remain after mask filtering",
+                "%d matching sources remain after aperture mask filtering (checked %d px radius)",
                 len(matching_sources),
+                aperture_check_radius,
             )
 
             # =============================================================
