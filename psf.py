@@ -2961,6 +2961,12 @@ class PSF:
         x, y, flux_e_frame = x_all[valid], y_all[valid], flux_all[valid]
         idx_keep = orig_idx[valid]
 
+        # Preserve the raw bootstrap flux (before positive-clip) for the inverted-retry
+        # trigger.  The MCMC prior hard-rejects flux < 0 and init_params clips to 1e-6,
+        # so by the time combined is built the negative bootstrap signal is gone.
+        # Storing it here lets us trigger the inverted retry before MCMC runs.
+        _bootstrap_flux_e = flux_e_frame.copy()  # unclipped, may be negative
+
         init_params = QTable(
             {
                 "x": x,
@@ -3543,22 +3549,43 @@ class PSF:
         # Only retry for SNR <= -3 (significant negative detection, not just small negative noise)
         needs_inverted_retry = np.zeros(len(combined), dtype=bool)
         if check_inverted and ndimage_inverted is not None and is_target_fit:
-            # Trigger on post-fit flux_fit < 0 from combined, not pre-fit aperture SNR.
-            # Pre-fit SNR can be negative due to background drift in difference images even
-            # for non-detections; flux_fit from the PSF fit is the correct discriminant.
+            # Primary trigger: post-fit flux_fit < 0.
+            # Note: the MCMC prior hard-rejects flux < 0 (log_prior returns -inf) and
+            # init_params clips flux to 1e-6, so when MCMC was used the post-fit flux_fit
+            # will never be negative even for a genuinely negative PSF.  We therefore
+            # also check the pre-fit bootstrap flux stored in _bootstrap_flux_e.
             flux_fit_arr = np.asarray(
                 self._first_present(combined, ["flux_fit", "flux"], unit=u.electron), float
             )
-            significant_negative = np.isfinite(flux_fit_arr) & (flux_fit_arr < 0)
-            needs_inverted_retry = significant_negative
-            if np.any(needs_inverted_retry):
+            significant_negative_fit = np.isfinite(flux_fit_arr) & (flux_fit_arr < 0)
+
+            # Bootstrap-flux fallback: build a per-row mask aligned to idx_out.
+            # _bootstrap_flux_e is indexed by idx_keep; map it to idx_out.
+            bootstrap_negative = np.zeros(len(combined), dtype=bool)
+            try:
+                for i, row_idx in enumerate(idx_out):
+                    pos = np.where(idx_keep == row_idx)[0]
+                    if len(pos) > 0 and np.isfinite(_bootstrap_flux_e[pos[0]]) and _bootstrap_flux_e[pos[0]] < 0:
+                        bootstrap_negative[i] = True
+            except Exception as _exc:
+                log.debug("Bootstrap-flux inverted trigger failed: %s", _exc)
+
+            needs_inverted_retry = significant_negative_fit | bootstrap_negative
+            if np.any(bootstrap_negative) and not np.any(significant_negative_fit):
+                log.info(
+                    "Target PSF: flux_fit >= 0 (MCMC prior forces positive), but bootstrap "
+                    "flux was negative for %d/%d fit(s) — triggering inverted retry.",
+                    int(np.sum(bootstrap_negative)),
+                    len(combined),
+                )
+            elif np.any(needs_inverted_retry):
                 log.info(
                     "Target PSF: %d/%d fits have flux_fit < 0; retrying on inverted image.",
                     int(np.sum(needs_inverted_retry)),
                     len(combined)
                 )
             else:
-                log.info("Target PSF: flux_fit >= 0 for all fits; no inverted retry needed.")
+                log.info("Target PSF: flux_fit >= 0 and bootstrap flux >= 0; no inverted retry needed.")
 
         # ---- Inverted image fit (fallback for negative/problematic PSF) ------
         results_inverted = []
