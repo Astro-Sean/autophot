@@ -2409,7 +2409,7 @@ class PSF:
             ax.imshow(
                 np.ma.array(stars[i], mask=~np.isfinite(stars[i])),
                 origin="lower",
-                cmap=cmap_vir,
+                cmap='gray_r',
                 norm=norm_i,
                 interpolation="none",
             )
@@ -2459,7 +2459,7 @@ class PSF:
         im = ax_right.imshow(
             np.ma.array(psf_model_plot, mask=~np.isfinite(psf_model_plot)),
             origin="lower",
-            cmap=cmap_vir,
+            cmap='gray_r',
             norm=norm_p,
             interpolation="none",
         )
@@ -3154,7 +3154,7 @@ class PSF:
         def _psf_fit(mask, inner_r, outer_r, fit_shape, fitter, use_emcee_this_tier, nd_override=None):
             if not np.any(mask):
                 return None, None
-            # For the target, keep the PSF local background estimator aligned with
+            # For the target (single source), keep the PSF local background estimator aligned with
             # aperture photometry (annulus median). MMM can behave differently on
             # structured difference-image residuals and produce large AP-vs-PSF flux offsets.
             # Using MedianBackground consistently across all tiers for robust sky estimation.
@@ -3455,7 +3455,7 @@ class PSF:
         psfphot_last = None
         # In crowded fields, push the background annulus further out from the core
         # and narrow its width so it samples background rather than neighbour PSF wings.
-        phot_cfg = self.input_yaml.get("photometry", {}) or {}
+        phot_cfg = self.input_yaml.get("photometry", {})
         crowded_field = bool(phot_cfg.get("crowded_field", False))
 
         # Use configurable annulus radii (same defaults as aperture.py)
@@ -4187,7 +4187,7 @@ class PSF:
             im1 = ax1.imshow(
                 np.ma.array(first_image, mask=~np.isfinite(first_image)),
                 origin="lower",
-                cmap=cmap_vir,
+                cmap='gray_r',
                 norm=norm1,
                 interpolation=None,
             )
@@ -4395,9 +4395,9 @@ class PSF:
                 cmap_vir = plt.get_cmap("viridis").copy()
                 cmap_vir.set_bad(color="white")
                 im2 = ax2.imshow(
-                    np.ma.array(second_image, mask=~np.isfinite(second_image)),
-                    origin="lower",
-                    cmap=cmap_vir,
+                np.ma.array(second_image, mask=~np.isfinite(second_image)),
+                origin="lower",
+                cmap='gray_r',
                     norm=norm2,
                     interpolation=None,
                 )
@@ -4449,9 +4449,9 @@ class PSF:
                 cmap_vir = plt.get_cmap("viridis").copy()
                 cmap_vir.set_bad(color="white")
                 im3 = ax3.imshow(
-                    np.ma.array(epsf.data, mask=~np.isfinite(epsf.data)),
-                    origin="lower",
-                    cmap=cmap_vir,
+                np.ma.array(epsf.data, mask=~np.isfinite(epsf.data)),
+                origin="lower",
+                cmap='gray_r',
                     norm=norm3,
                     interpolation=None,
                 )
