@@ -327,16 +327,16 @@ class FluxMatchParams:
     flux_key_err: str = "flux_AP_err"
     """Column name for aperture flux uncertainty."""
 
-    mag_residual_threshold: float = 0.4
+    mag_residual_threshold: float = 0.8
     """Maximum allowed magnitude residual for an inlier (more relaxed by default)."""
 
-    min_samples_fraction: float = 0.33
+    min_samples_fraction: float = 0.25
     """Minimum fraction of sources required by RANSAC."""
 
     max_trials: int = 500
     """RANSAC maximum iteration count."""
 
-    min_absolute_samples: int = 3
+    min_absolute_samples: int = 2
     """Hard floor on the number of RANSAC samples."""
 
     use_percentile_cut: bool = False
@@ -3703,6 +3703,8 @@ class Templates:
 
         prepared_template_fpath: Optional[str] = None
         template_work_fpath: str = str(templateFpath)
+        _sci_clean_path: Optional[str] = None
+        _ref_clean_path: Optional[str] = None
 
         try:
             # =============================================================
@@ -4229,6 +4231,8 @@ class Templates:
                 # (matches HOTPANTS behavior and prevents crosstalk)
                 sci_clean = clean_fits_nans(scienceFpath, str(scienceDir))
                 ref_clean = clean_fits_nans(template_work_fpath, str(scienceDir))
+                _sci_clean_path = sci_clean
+                _ref_clean_path = ref_clean
                 method = self._subtract_sfft(
                     sci_clean,
                     ref_clean,
@@ -4365,30 +4369,16 @@ class Templates:
                     os.remove(prepared_template_fpath)
                 except OSError:
                     pass
-            # Clean up temporary files created by clean_fits_nans to prevent
-            # filesystem slowdown from accumulating temporary files across runs
-            if method == "sfft":
+            # Clean up temporary cleaned_ files created by clean_fits_nans.
+            # Use the dedicated path variables (not `method`) so cleanup is
+            # unconditional even when _subtract_sfft mutates `method` on fallback.
+            for _tmp in (_sci_clean_path, _ref_clean_path):
                 try:
-                    if sci_clean and os.path.exists(sci_clean):
-                        os.remove(sci_clean)
-                        logger.debug(f"Cleaned up temp file: {sci_clean}")
+                    if _tmp and os.path.exists(_tmp):
+                        os.remove(_tmp)
+                        logger.debug("Cleaned up temp file: %s", _tmp)
                 except (OSError, NameError, UnboundLocalError) as e:
-                    logger.warning(f"Failed to clean up sci_clean temp file: {e}")
-                try:
-                    if ref_clean and os.path.exists(ref_clean):
-                        os.remove(ref_clean)
-                        logger.debug(f"Cleaned up temp file: {ref_clean}")
-                except (OSError, NameError, UnboundLocalError) as e:
-                    logger.warning(f"Failed to clean up ref_clean temp file: {e}")
-            elif method == "hotpants":
-                # HOTPANTS also uses clean_fits_nans but modifies the local variables
-                # We need to track and clean those too
-                try:
-                    # The _subtract_hotpants method creates cleaned files locally
-                    # We can't access them here, so we should add cleanup there
-                    pass
-                except (OSError, NameError, UnboundLocalError):
-                    pass
+                    logger.warning("Failed to clean up temp file %s: %s", _tmp, e)
 
     # ----- Private subtraction-backend methods -----
 
