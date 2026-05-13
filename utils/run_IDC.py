@@ -1093,7 +1093,8 @@ NNW
                 # mismatches when two images are resampled onto the same grid.
                 # OVERSAMPLING=0 disables this entirely.
                 "OVERSAMPLING": 0,
-                "PROJECTION_TYPE": swarp_proj_type,
+                # PROJECTION_TYPE is set to NATIVE in DEFAULT_SWARP_CONFIG to preserve
+                # the projection from SCAMP .head files (TPV with PV coefficients).
             }
             swarp_config_sci = {
                 **swarp_config,
