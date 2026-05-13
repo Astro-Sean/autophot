@@ -1126,6 +1126,23 @@ NNW
             sci_cat_tmp_stem = None  # will be set below if SCAMP runs with temp catalogs
             ref_cat_tmp_stem = None  # will be set below if SCAMP runs with temp catalogs
 
+            # Science SExtractor catalog is used as SCAMP's astrometric reference for
+            # alignment. Validate it exists before proceeding — a missing catalog must
+            # be a hard failure, not silently replaced by GAIA-DR3.
+            _sci_cat_for_scamp = sci_sex.get("catalog_path") if isinstance(sci_sex, dict) else None
+            if not _sci_cat_for_scamp or not Path(_sci_cat_for_scamp).exists():
+                self.logger.error(
+                    "Science SExtractor catalog missing or not found at '%s'; "
+                    "cannot use it as SCAMP reference — falling back to AstroAlign.",
+                    _sci_cat_for_scamp,
+                )
+                return self._align_fallback_reproject_then_astroalign(
+                    science_image, reference_image, output_dir
+                )
+            self.logger.info(
+                "SCAMP astrometric reference (science catalog): %s", _sci_cat_for_scamp
+            )
+
             if reference_already_scamp:
                 self.logger.info(
                     "Reference header has SCAMP HISTORY; skipping SCAMP, using existing WCS."
@@ -1164,7 +1181,7 @@ NNW
                     )
                     scamp_result = self.run_scamp(
                         [str(sci_cat_tmp), str(ref_cat_tmp)],
-                        reference_cat=sci_sex["catalog_path"],
+                        reference_cat=_sci_cat_for_scamp,
                         output_dir=str(reference_aligned_dir),
                         config=scamp_config_both,
                     )
@@ -1180,7 +1197,7 @@ NNW
                     self.logger.info("Falling back to single-catalog SCAMP on reference...")
                     scamp_result = self.run_scamp(
                         ref_sex["catalog_path"],
-                        reference_cat=sci_sex["catalog_path"],
+                        reference_cat=_sci_cat_for_scamp,
                         output_dir=str(reference_aligned_dir),
                         config=scamp_config_ref,
                     )
@@ -2429,6 +2446,23 @@ NNW
         iy = getattr(self, "input_yaml", None) or {}
         wcs_cfg = iy.get("wcs", {}) if isinstance(iy, dict) else {}
         distort_degrees = int(wcs_cfg.get("scamp_distort_degrees", 4))
+
+        # Validate reference_cat: it must exist on disk when provided.
+        # An absent or unreadable catalog silently causes SCAMP to use GAIA-DR3 instead,
+        # which would align to the sky rather than to the science image frame.
+        if reference_cat is not None and not Path(reference_cat).exists():
+            self.logger.error(
+                "run_scamp: reference_cat path does not exist: '%s'. "
+                "SCAMP would fall back to GAIA-DR3 — aborting to prevent silent misalignment.",
+                reference_cat,
+            )
+            return None
+
+        if reference_cat is None:
+            self.logger.warning(
+                "run_scamp: no reference_cat provided — using GAIA-DR3 as astrometric reference. "
+                "For image-to-image alignment the science SExtractor catalog should always be supplied."
+            )
 
         final_config = {
             **self.DEFAULT_SCAMP_CONFIG,
