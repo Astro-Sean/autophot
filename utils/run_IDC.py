@@ -1091,7 +1091,6 @@ NNW
                 "PIXEL_SCALE": pix_scale,
                 "PIXELSCALE_TYPE": "MANUAL",
                 "IMAGE_SIZE": f"{output_width},{output_height}",
-                "IMAGE_SIZE_TYPE": "MANUAL",  # Force exact IMAGE_SIZE, don't adjust based on input WCS
                 "BLANK_BADPIXELS": "N",  # Prevent SWarp from adjusting output based on blank/bad pixels
                 "EDGE_THRESH": "0.0",  # Prevent SWarp from trimming edges
                 "ROTATE": "Y",  # Allow full WCS transformations including rotation
