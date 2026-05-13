@@ -1084,7 +1084,7 @@ NNW
             # SCAMP .head files (TPV with PV coefficients). Do not override it here.
             swarp_config = {
                 "CENTER_TYPE": "MANUAL",
-                "CENTER": f"{center_ra:.8f},{center_dec:.8f}",
+                "CENTER": f"{center_ra:.6f},{center_dec:.6f}",
                 "PIXEL_SCALE": pix_scale,
                 "PIXELSCALE_TYPE": "MANUAL",
                 "IMAGE_SIZE": f"{output_width},{output_height}",
