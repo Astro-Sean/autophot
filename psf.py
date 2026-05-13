@@ -3764,6 +3764,7 @@ class PSF:
                     plotTarget=True,
                     scale=scale,
                     aperture_radius=aperture_radius,
+                    is_inverted=True,  # Use percentile-based normalization for inverted image
                 )
                 # Rename the output file to indicate it's the inverted fit
                 fpath = self.input_yaml["fpath"]
@@ -4055,9 +4056,15 @@ class PSF:
         plotTarget: bool = False,
         scale: float = 1.0,
         aperture_radius: float = 7.0,
+        is_inverted: bool = False,
     ) -> None:
         """
         Multi-panel diagnostic: science image, PSF residual, ePSF model.
+
+        Args:
+            is_inverted: If True, the image is an inverted PSF image (mostly zeros with
+                        positive peaks). Uses percentile-based normalization instead of
+                        sigma-clipped to better show the peaks.
         """
         fpath = self.input_yaml["fpath"]
         base = os.path.splitext(os.path.basename(fpath))[0]
@@ -4159,11 +4166,17 @@ class PSF:
             unc_cut = uncertainty[y0:y1, x0:x1]
 
             if plotTarget:
-                # Scale to +/- 3 sigma (robust) so faint PSF is visible despite bright contaminants
-                _, med1, std1 = sigma_clipped_stats(cutout1, sigma=3, maxiters=5)
-                std1 = max(std1, np.finfo(float).tiny)
-                vmin1 = med1 - 3 * std1
-                vmax1 = med1 + 3 * std1
+                if is_inverted:
+                    # Inverted images are mostly zeros with positive peaks.
+                    # Use percentile-based normalization to show the peaks clearly.
+                    vmin1 = np.percentile(cutout1, 1)
+                    vmax1 = np.percentile(cutout1, 99)
+                else:
+                    # Scale to +/- 3 sigma (robust) so faint PSF is visible despite bright contaminants
+                    _, med1, std1 = sigma_clipped_stats(cutout1, sigma=3, maxiters=5)
+                    std1 = max(std1, np.finfo(float).tiny)
+                    vmin1 = med1 - 3 * std1
+                    vmax1 = med1 + 3 * std1
                 norm1 = ImageNormalize(vmin=vmin1, vmax=vmax1, stretch=LinearStretch())
             else:
                 norm1 = ImageNormalize(
