@@ -4254,9 +4254,6 @@ def run_photometry():
                         template_obj.find_flux_consistent_sources(
                             image_sources,
                             template_sources,
-                            science_image=science_image,
-                            template_image=template_image,
-                            aperture_radius=ImageFWHM,
                         )
                     )
                     # offset_params = (mag_slope, flux_scale); use flux_scale to

@@ -23,7 +23,6 @@ SCIENTIFIC_PALETTE = {
     'all_sources': '#D3D3D3',  # Light gray for background/all data
     'inliers': '#8ec1da',  # Blue for good data points
     'outliers': '#e02b25',  # Vermilion/Orange-red for rejected points
-    'warning': '#E69F00',  # Orange for warnings (e.g., NaN in aperture)
     'fit': '#000000',  # Black for fit lines
     'robust': '#009E73',  # Bluish green for robust candidates
     'error_region': '#000000',  # Black with alpha for error regions

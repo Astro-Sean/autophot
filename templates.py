@@ -3099,9 +3099,6 @@ class Templates:
         catalog_tpl: pd.DataFrame,
         params: Optional[FluxMatchParams] = None,
         make_plot: bool = True,
-        science_image: Optional[np.ndarray] = None,
-        template_image: Optional[np.ndarray] = None,
-        aperture_radius: float = 5.0,
     ) -> Tuple[pd.DataFrame, Tuple[float, float]]:
         """
         Cross-match science and template photometric catalogs, rejecting
@@ -3111,10 +3108,9 @@ class Templates:
           1. Convert aperture fluxes to instrumental magnitudes.
           2. Apply error and positivity cuts.
           3. Remove rolling-window outliers.
-          4. Check for NaN pixels within source apertures (if images provided).
-          5. Fit a constrained linear relation (slope ~ 1) with RANSAC.
-          6. Optionally trim to a central percentile range and re-fit.
-          7. Return inlier catalog rows and a compact fit tuple
+          4. Fit a constrained linear relation (slope ~ 1) with RANSAC.
+          5. Optionally trim to a central percentile range and re-fit.
+          6. Return inlier catalog rows and a compact fit tuple
              ``(mag_slope, flux_scale)`` where:
              - ``mag_slope`` is the fitted slope in magnitude space
              - ``flux_scale`` is ``10**(-0.4 * intercept)``, i.e. the multiplicative
@@ -3128,12 +3124,6 @@ class Templates:
             Structured parameters.  Uses defaults if None.
         make_plot : bool
             Save a diagnostic PDF alongside the science image.
-        science_image : np.ndarray, optional
-            Science image array to check for NaN pixels in source apertures.
-        template_image : np.ndarray, optional
-            Template image array to check for NaN pixels in source apertures.
-        aperture_radius : float, default 5.0
-            Radius in pixels to check for NaN pixels around each source.
 
         Returns
         -------
@@ -3228,53 +3218,6 @@ class Templates:
                     idx_r = idx_r[spatial_mask]
                     x_pos = x_pos[spatial_mask]
                     y_pos = y_pos[spatial_mask]
-
-            # --- Check for NaN pixels within source apertures ---
-            has_nan_aperture = np.zeros(len(idx_r), dtype=bool)
-            if (science_image is not None or template_image is not None) and {"x", "y"}.issubset(catalog_img.columns):
-                # Get positions for remaining sources
-                x_pos = catalog_img.loc[idx_r, "x_pix"].to_numpy(dtype=float)
-                y_pos = catalog_img.loc[idx_r, "y_pix"].to_numpy(dtype=float)
-                
-                for i, (x, y) in enumerate(zip(x_pos, y_pos)):
-                    x_int, y_int = int(x), int(y)
-                    
-                    # Check science image
-                    if science_image is not None:
-                        ny, nx = science_image.shape
-                        y_min = max(0, y_int - int(aperture_radius))
-                        y_max = min(ny, y_int + int(aperture_radius) + 1)
-                        x_min = max(0, x_int - int(aperture_radius))
-                        x_max = min(nx, x_int + int(aperture_radius) + 1)
-                        
-                        if y_min < y_max and x_min < x_max:
-                            sci_cutout = science_image[y_min:y_max, x_min:x_max]
-                            y_coords, x_coords = np.mgrid[y_min:y_max, x_min:x_max]
-                            dist_sq = (x_coords - x)**2 + (y_coords - y)**2
-                            in_circle = dist_sq <= aperture_radius**2
-                            if np.any(~np.isfinite(sci_cutout[in_circle])):
-                                has_nan_aperture[i] = True
-                                continue
-                    
-                    # Check template image
-                    if template_image is not None and not has_nan_aperture[i]:
-                        ny, nx = template_image.shape
-                        y_min = max(0, y_int - int(aperture_radius))
-                        y_max = min(ny, y_int + int(aperture_radius) + 1)
-                        x_min = max(0, x_int - int(aperture_radius))
-                        x_max = min(nx, x_int + int(aperture_radius) + 1)
-                        
-                        if y_min < y_max and x_min < x_max:
-                            tpl_cutout = template_image[y_min:y_max, x_min:x_max]
-                            y_coords, x_coords = np.mgrid[y_min:y_max, x_min:x_max]
-                            dist_sq = (x_coords - x)**2 + (y_coords - y)**2
-                            in_circle = dist_sq <= aperture_radius**2
-                            if np.any(~np.isfinite(tpl_cutout[in_circle])):
-                                has_nan_aperture[i] = True
-                
-                n_nan = np.sum(has_nan_aperture)
-                if n_nan > 0:
-                    logger.info(f"{n_nan} sources have NaN pixels within {aperture_radius}px aperture")
 
             if len(mag_img_r) < params.min_absolute_samples:
                 logger.info("Too few sources after robust filtering")
@@ -3390,17 +3333,11 @@ class Templates:
                     pass
 
             # --- Build result DataFrame ---
-            # Mark sources with NaN pixels in aperture as outliers (not inliers)
-            if has_nan_aperture.any():
-                final_inliers = final_inliers & ~has_nan_aperture
-                logger.info(f"{has_nan_aperture.sum()} sources with NaN aperture pixels marked as outliers")
-            
             result = catalog_img.loc[idx_r].copy()
             result["mag_img"] = mag_img_r
             result["mag_tpl"] = mag_tpl_r
             result["mag_residual"] = y - (slope * mag_img_r + intercept)
             result["is_inlier"] = final_inliers
-            result["has_nan_aperture"] = has_nan_aperture  # Track NaN sources for plotting
             result["is_robust"] = True
 
             non_robust_idx = indices[~robust_mask]
@@ -3409,7 +3346,6 @@ class Templates:
             nr["mag_tpl"] = mag_tpl[~robust_mask]
             nr["mag_residual"] = np.nan
             nr["is_inlier"] = False
-            nr["has_nan_aperture"] = False  # Non-robust sources not checked
             nr["is_robust"] = False
 
             full = pd.concat([result, nr])
@@ -3506,49 +3442,23 @@ class Templates:
             alpha=get_alpha('dark'),
             label=f"Inliers [{np.sum(sel)}]",
         )
-        # Rejected robust points - separate into NaN aperture sources and other outliers
-        has_nan_col = "has_nan_aperture" in robust.columns
-        
-        if has_nan_col:
-            # Sources with NaN pixels in aperture (marked as special outliers)
-            nan_mask = robust["has_nan_aperture"].to_numpy(bool) & ~sel
-            if nan_mask.any():
-                ax.errorbar(
-                    robust.loc[nan_mask, "mag_img"],
-                    robust.loc[nan_mask, "mag_tpl"],
-                    xerr=mag_err_robust[nan_mask],
-                    yerr=mag_err_robust[nan_mask],
-                    fmt="*",
-                    color=get_color('warning'),
-                    ecolor="orange",
-                    alpha=get_alpha('medium'),
-                    lw=get_line_width('thin'),
-                    markersize=get_marker_size('large'),
-                    capsize=0,
-                    elinewidth=0.4,
-                    label=f"NaN in aperture [{np.sum(nan_mask)}]",
-                )
-            # Other outliers (not inliers, no NaN)
-            rej = ~sel & ~nan_mask
-        else:
-            rej = ~sel
-            
-        if rej.any():
-            ax.errorbar(
-                robust.loc[rej, "mag_img"],
-                robust.loc[rej, "mag_tpl"],
-                xerr=mag_err_robust[rej],
-                yerr=mag_err_robust[rej],
-                fmt="x",
-                color=get_color('outliers'),
-                ecolor="lightgrey",
-                alpha=get_alpha('medium'),
-                lw=get_line_width('thin'),
-                markersize=get_marker_size('medium'),
-                capsize=0,
-                elinewidth=0.4,
-                label=f"Outliers [{np.sum(rej)}]",
-            )
+        # Rejected robust points
+        rej = ~sel
+        ax.errorbar(
+            robust.loc[rej, "mag_img"],
+            robust.loc[rej, "mag_tpl"],
+            xerr=mag_err_robust[rej],
+            yerr=mag_err_robust[rej],
+            fmt="x",
+            color=get_color('outliers'),
+            ecolor="lightgrey",
+            alpha=get_alpha('medium'),
+            lw=get_line_width('thin'),
+            markersize=get_marker_size('medium'),
+            capsize=0,
+            elinewidth=0.4,
+            label=f"Outliers [{np.sum(rej)}]",
+        )
         xx = np.linspace(mag_img_robust.min(), mag_img_robust.max(), 100)
         yy = slope * xx + intercept
         if np.isfinite(slope) and abs(float(slope) - 1.0) < 0.02:
@@ -4284,48 +4194,6 @@ class Templates:
                 kernel_order = int(user_kernel)
 
             # 4b. SFFT: default is sparse (ESP) for better performance; crowded (ECP) only if explicitly enabled.
-
-            # Filter matching sources that fall on masked pixels
-            # Check not just the center but also the aperture region around each source
-            # to ensure the full PSF is usable for kernel fitting
-            aperture_check_radius = max(5.0, science_fwhm)  # At least 5px or 1x FWHM
-            
-            def _source_is_masked(x, y, mask, radius):
-                """Check if any pixel within radius of (x,y) is masked."""
-                if not np.isfinite(x) or not np.isfinite(y):
-                    return True
-                x_int, y_int = int(x), int(y)
-                ny, nx = mask.shape
-                
-                # Check bounds
-                if x_int < 0 or x_int >= nx or y_int < 0 or y_int >= ny:
-                    return True
-                
-                # Check center pixel first (fast path)
-                if mask[y_int, x_int]:
-                    return True
-                
-                # Check circular aperture region
-                y_range = slice(max(0, y_int - int(radius)), min(ny, y_int + int(radius) + 1))
-                x_range = slice(max(0, x_int - int(radius)), min(nx, x_int + int(radius) + 1))
-                
-                y_coords, x_coords = np.mgrid[y_range, x_range]
-                dist_sq = (x_coords - x)**2 + (y_coords - y)**2
-                in_circle = dist_sq <= radius**2
-                
-                return np.any(mask[y_range, x_range][in_circle])
-            
-            filtered_matching_sources = [
-                (x, y)
-                for x, y in matching_sources
-                if not _source_is_masked(x, y, universal_mask, aperture_check_radius)
-            ]
-            matching_sources = filtered_matching_sources
-            logger.info(
-                "%d matching sources remain after aperture mask filtering (checked %d px radius)",
-                len(matching_sources),
-                aperture_check_radius,
-            )
 
             # =============================================================
             # 5. Run subtraction backend
