@@ -2297,8 +2297,8 @@ class PSF:
             )
 
             cx, cy = nx // 2, ny // 2
-            ax.axvline(cx, color="white", lw=0.5, alpha=0.8, ls="--")
-            ax.axhline(cy, color="white", lw=0.5, alpha=0.8, ls="--")
+            ax.axvline(cx, color="#00FFFF", lw=0.5, alpha=0.8, ls="--")
+            ax.axhline(cy, color="#00FFFF", lw=0.5, alpha=0.8, ls="--")
             ax.set_title(f"Oversample={oversample}x", fontsize=8, pad=2)
             ax.set_xlabel("Pixels")
             ax.set_ylabel("Pixels")
@@ -2310,10 +2310,10 @@ class PSF:
             hx = np.nanmean(np.asarray(data, dtype=float), axis=0)
             hy = np.nanmean(np.asarray(data, dtype=float), axis=1)
 
-            ax_B.step(x_phys, hx, color="black", lw=0.5, where="mid")
-            ax_R.step(hy, y_phys, color="black", lw=0.5, where="mid")
-            ax_B.axvline(cx, color="black", lw=0.5, alpha=0.8, ls="--")
-            ax_R.axhline(cy, color="black", lw=0.5, alpha=0.8, ls="--")
+            ax_B.step(x_phys, hx, color="#00FF00", lw=0.5, where="mid")
+            ax_R.step(hy, y_phys, color="#00FF00", lw=0.5, where="mid")
+            ax_B.axvline(cx, color="#00FFFF", lw=0.5, alpha=0.8, ls="--")
+            ax_R.axhline(cy, color="#00FFFF", lw=0.5, alpha=0.8, ls="--")
             ax_B.set_ylabel("Intensity")
             ax_B.set_xlabel("X Pixels")
             ax_R.yaxis.tick_right()
@@ -2418,7 +2418,7 @@ class PSF:
                 Circle(
                     ctr,
                     aperture_radius,
-                    color="#FF0000",
+                    color="#FF00FF",
                     ls="-",
                     fill=False,
                     lw=0.5,
@@ -2431,7 +2431,7 @@ class PSF:
                 transform=ax.transAxes,
                 va="top",
                 ha="right",
-                color="white",
+                color="#0000FF",
                 fontsize=6,
             )
             ax.set_xticks([])
@@ -2471,7 +2471,7 @@ class PSF:
             Circle(
                 ctr,
                 aperture_radius,
-                color="#FF0000",
+                color="#FF00FF",
                 ls="-",
                 fill=False,
                 lw=0.5,
@@ -4200,7 +4200,7 @@ class PSF:
                         Circle(
                             (row["x_pix"], row["y_pix"]),
                             r,
-                            edgecolor="red",
+                            edgecolor="#FF00FF",
                             facecolor="none",
                             lw=1.2,
                             alpha=0.9,
@@ -4417,7 +4417,7 @@ class PSF:
                     eyh2 = np.sqrt(np.sum(unc2_2, axis=1)) / np.where(n_row2 > 0, n_row2, np.nan)
                 ax2_B.fill_between(np.arange(x0, x1), hx2 - exh2, hx2 + exh2, **kw_bottom)
                 ax2_R.fill_betweenx(y_vals, hy2 - eyh2, hy2 + eyh2, **kw_right)
-                _draw_right_step(ax2_R, hy2, y0, y1, color="dodgerblue")
+                _draw_right_step(ax2_R, hy2, y0, y1, color="#00FFFF")
 
                 # Zoom bottom and right panels onto the fit profile (scale to data range).
                 _lo_b = np.nanmin(hx2 - exh2)
