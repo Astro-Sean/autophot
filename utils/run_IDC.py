@@ -1416,13 +1416,13 @@ NNW
                     _sci_data_padded = _pad_with_nans(_sci_data, (ny_max, nx_max))
                     _ref_data_padded = _pad_with_nans(_ref_data, (ny_max, nx_max))
                     
-                    # Update CRPIX in headers to account for padding
-                    # CRPIX is 1-indexed, so no change needed for padding on bottom/right
-                    # Only need to update NAXIS keywords
-                    _sci_header['NAXIS1'] = nx_max
-                    _sci_header['NAXIS2'] = ny_max
-                    _ref_header['NAXIS1'] = nx_max
-                    _ref_header['NAXIS2'] = ny_max
+                    # Update WCS headers to account for new image dimensions
+                    # Since we're padding on bottom/right, CRPIX doesn't need to change,
+                    # but we need to update the WCS object and regenerate the header
+                    _sci_wcs.pixel_shape = (ny_max, nx_max)
+                    _sci_header.update(_sci_wcs.to_header())
+                    _ref_wcs.pixel_shape = (ny_max, nx_max)
+                    _ref_header.update(_ref_wcs.to_header())
                     
                     # Write padded images back
                     fits.writeto(aligned_sci, _sci_data_padded, _sci_header, overwrite=True)
