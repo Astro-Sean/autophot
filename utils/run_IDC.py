@@ -1115,8 +1115,8 @@ NNW
                 center_ra, center_dec, output_width, output_height, pix_scale,
             )
 
-            # Run SCAMP on reference catalog only with science catalog as reference.
-            # Science image uses its original WCS; reference gets SCAMP correction.
+            # Run SCAMP on BOTH catalogs with science catalog as reference.
+            # Both science and reference images get SCAMP distortion corrections.
             # Science SExtractor catalog is used as SCAMP's astrometric reference for
             # alignment. Validate it exists before proceeding — a missing catalog must
             # be a hard failure, not silently replaced by GAIA-DR3.
@@ -1140,39 +1140,48 @@ NNW
                 )
                 scamp_result = {}
             else:
-                # Run SCAMP on reference catalog only (using science catalog as reference).
-                # The reference .head corrects the reference WCS to align with science stars.
-                # Science image uses its original WCS without modification.
+                # Run SCAMP on both catalogs with distinct FILTER values so SCAMP
+                # produces a separate .head file for each.  The science .head corrects
+                # the science WCS; the reference .head corrects the reference WCS.
+                # Both are placed next to their respective images before SWarp so
+                # each is resampled with its SCAMP-refined WCS onto the same fixed grid.
+                sci_cat_path = Path(sci_sex["catalog_path"])
                 ref_cat_path = Path(ref_sex["catalog_path"])
+                sci_cat_tmp = reference_aligned_dir / f"{sci_cat_path.stem}_sci.cat"
                 ref_cat_tmp = reference_aligned_dir / f"{ref_cat_path.stem}_ref.cat"
+                sci_cat_tmp_stem = sci_cat_tmp.stem
                 ref_cat_tmp_stem = ref_cat_tmp.stem
 
                 try:
-                    # Create temporary reference catalog with distinct FILTER value
-                    with fits.open(ref_cat_path, memmap=False) as hdul:
-                        if len(hdul) > 1 and "FILTER" in hdul[1].header:
-                            hdul[1].header["FILTER"] = "w_ref"
-                        elif len(hdul) > 0 and "FILTER" in hdul[0].header:
-                            hdul[0].header["FILTER"] = "w_ref"
-                        hdul.writeto(ref_cat_tmp, overwrite=True)
-                    self.logger.debug(
-                        "Created temporary reference catalog: %s", ref_cat_tmp
-                    )
+                    for cat_path, cat_tmp, filter_val in [
+                        (sci_cat_path, sci_cat_tmp, "w_sci"),
+                        (ref_cat_path, ref_cat_tmp, "w_ref"),
+                    ]:
+                        with fits.open(cat_path, memmap=False) as hdul:
+                            if len(hdul) > 1 and "FILTER" in hdul[1].header:
+                                hdul[1].header["FILTER"] = filter_val
+                            elif len(hdul) > 0 and "FILTER" in hdul[0].header:
+                                hdul[0].header["FILTER"] = filter_val
+                            hdul.writeto(cat_tmp, overwrite=True)
+                        self.logger.debug(
+                            "Created temporary catalog with FILTER=%s: %s", filter_val, cat_tmp
+                        )
 
                     self.logger.info(
-                        "Running SCAMP on reference catalog only (using science stars as astrometric reference)..."
+                        "Running SCAMP on both catalogs (science + reference) to align based on science image stars..."
                     )
                     scamp_result = self.run_scamp(
-                        str(ref_cat_tmp),
+                        [str(sci_cat_tmp), str(ref_cat_tmp)],
                         reference_cat=_sci_cat_for_scamp,
                         output_dir=str(reference_aligned_dir),
-                        config=scamp_config_ref,
+                        config=scamp_config_both,
                     )
 
-                    try:
-                        ref_cat_tmp.unlink(missing_ok=True)
-                    except Exception as e:
-                        self.logger.debug("Could not remove temp catalog %s: %s", ref_cat_tmp, e)
+                    for cat_tmp in [sci_cat_tmp, ref_cat_tmp]:
+                        try:
+                            cat_tmp.unlink(missing_ok=True)
+                        except Exception as e:
+                            self.logger.debug("Could not remove temp catalog %s: %s", cat_tmp, e)
 
                 except Exception as e:
                     self.logger.error("Failed to create temporary catalogs for SCAMP: %s", e)
@@ -1201,10 +1210,12 @@ NNW
                 "SCAMP produced .head files for stems: %s", list(head_by_stem.keys())
             )
 
-            # Copy SCAMP .head file to reference image only.
-            # Science image uses its original WCS without SCAMP correction.
-            # Only reference gets SCAMP correction to align to science stars.
+            # Copy SCAMP .head files to both science and reference images
+            # so SWarp applies the SCAMP WCS correction to each independently.
+            # Both images are resampled onto the same fixed grid (CENTER/IMAGE_SIZE/PIXEL_SCALE),
+            # so output shapes are guaranteed to match.
             for label, cat_tmp_stem, orig_cat_path, fits_copy in [
+                ("science", sci_cat_tmp_stem, sci_sex["catalog_path"], sci_image_copy),
                 ("reference", ref_cat_tmp_stem, ref_sex["catalog_path"], ref_image_copy),
             ]:
                 # Try temp-catalog stem first (most common path), then original stem
@@ -1295,10 +1306,9 @@ NNW
             else:
                 # Resample both images onto the same grid in a single SWarp call.
                 # This guarantees identical output shapes because SWarp computes the
-                # output grid once for all inputs. The .head file is placed next to
-                # the reference image, so SWarp applies the SCAMP correction to reference
-                # before resampling onto the common CENTER/IMAGE_SIZE grid. Science image
-                # uses its original WCS without modification.
+                # output grid once for all inputs. The .head files are placed next to
+                # both images, so SWarp applies the SCAMP corrections to each before
+                # resampling onto the common CENTER/IMAGE_SIZE grid.
                 self.logger.info("Running SWarp on both images together (single call)...")
                 swarp_res = self.run_swarp(
                     [str(sci_image_copy), str(ref_image_copy)],
