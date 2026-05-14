@@ -2879,14 +2879,16 @@ class PSF:
                         bkg_median,
                     )
                 
-                # Subtract background and negate to properly flip the image
-                # Negative dips (below background) become positive peaks
-                # Positive peaks (above background) become negative values
-                # Background pixels become zero
+                # Double background subtraction: subtract once to zero, again to negative, then flip
+                # Formula: -(image_data - 2*bkg_median)
+                # Background pixels: -(bkg - 2*bkg) = bkg (positive)
+                # Pixels below bg: -(bkg - delta - 2*bkg) = bkg + delta (more positive)
+                # Pixels above bg: -(bkg + delta - 2*bkg) = bkg - delta (less positive)
                 bkg_sub = image_data - bkg_median
-                inv_data = -bkg_sub  # = bkg_median - image_data
+                bkg_sub2 = bkg_sub - bkg_median
+                inv_data = -bkg_sub2
                 ndimage_inverted = _nddata_clone(ndimage, data=inv_data)
-                log.info("Target PSF: inverted image built as -(data - bkg) — single subtraction, properly flipped.")
+                log.info("Target PSF: inverted image built as -(data - 2*bkg) — double subtraction, keeping all values.")
             except Exception as exc:
                 log_warning_from_exception(log, "Failed to create inverted image for PSF fitting", exc)
                 ndimage_inverted = None
@@ -4243,10 +4245,11 @@ class PSF:
 
             if plotTarget:
                 if is_inverted:
-                    # Inverted images are mostly zeros with positive peaks.
-                    # Use percentile-based normalization to show the peaks clearly.
-                    vmin1 = np.percentile(cutout1, 1)
-                    vmax1 = np.percentile(cutout1, 99)
+                    # Inverted images have full range with negative and positive values.
+                    # Use min/max to ensure no clipping of negative values.
+                    finite_cutout = cutout1[np.isfinite(cutout1)]
+                    vmin1 = float(np.nanmin(finite_cutout)) if len(finite_cutout) > 0 else 0.0
+                    vmax1 = float(np.nanmax(finite_cutout)) if len(finite_cutout) > 0 else 1.0
                 else:
                     # Scale to +/- 3 sigma (robust) so faint PSF is visible despite bright contaminants
                     _, med1, std1 = sigma_clipped_stats(cutout1, sigma=3, maxiters=5)
