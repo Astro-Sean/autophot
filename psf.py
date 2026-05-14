@@ -2824,16 +2824,71 @@ class PSF:
             log.info("Target PSF: using external inverted image from main.py for negative PSF detection.")
         elif check_inverted:
             try:
-                # Estimate background level from the image
+                # Estimate background level from the target's annulus region
                 image_data = np.array(ndimage.data, dtype=float, copy=True)
-                bkg_median = float(np.nanmedian(image_data))
-                # Negate and zero-clip: only negative dips become positive peaks.
-                # abs(data - 2*bkg) symmetrically maps positive peaks to positive peaks too,
-                # which would mis-flag a bright source as an inverted detection.
+                ny, nx = image_data.shape
+                
+                # Get annulus parameters (same as used for PSF fitting)
+                phot_cfg = self.input_yaml.get("photometry", {})
+                crowded_field = bool(phot_cfg.get("crowded_field", False))
+                gap_fwhm = float(phot_cfg.get("annulus_gap_fwhm", 0.75 if not crowded_field else 0.5))
+                width_fwhm = float(phot_cfg.get("annulus_width_fwhm", 2.0 if not crowded_field else 1.5))
+                fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                
+                try:
+                    ap_size = float(phot_cfg.get("aperture_radius", aperture_radius))
+                except Exception:
+                    ap_size = float(aperture_radius)
+                
+                annulusIN = float(np.ceil(ap_size + gap_fwhm * fwhm))
+                annulusOUT = float(np.ceil(annulusIN + width_fwhm * fwhm))
+                
+                # Get target position
+                if is_target_fit and len(sources) == 1:
+                    x_target = float(sources["x_pix"].iloc[0])
+                    y_target = float(sources["y_pix"].iloc[0])
+                else:
+                    # Fallback to image center for non-target fits
+                    x_target = nx / 2.0
+                    y_target = ny / 2.0
+                
+                # Create annulus mask
+                yy, xx = np.ogrid[:ny, :nx]
+                r2 = (xx - x_target)**2 + (yy - y_target)**2
+                in_annulus = (r2 >= annulusIN**2) & (r2 < annulusOUT**2)
+                
+                # Extract background from annulus
+                annulus_pixels = image_data[in_annulus]
+                finite_pixels = annulus_pixels[np.isfinite(annulus_pixels)]
+                
+                if len(finite_pixels) > 0:
+                    bkg_median = float(np.median(finite_pixels))
+                    log.info(
+                        "Target PSF: inverted image using annulus background (r_in=%.1f, r_out=%.1f, bkg=%.3g) "
+                        "from %d pixels.",
+                        annulusIN,
+                        annulusOUT,
+                        bkg_median,
+                        len(finite_pixels),
+                    )
+                else:
+                    # Fallback to global background if annulus is empty
+                    bkg_median = float(np.nanmedian(image_data))
+                    log.warning(
+                        "Target PSF: annulus has no finite pixels; falling back to global background bkg=%.3g.",
+                        bkg_median,
+                    )
+                
+                # Subtract background twice to return cutout to non-zero background level
+                # First subtraction: remove background
                 bkg_sub = image_data - bkg_median
-                inv_data = np.clip(-bkg_sub, 0.0, None)
+                # Second subtraction: remove background again to shift baseline
+                bkg_sub2 = bkg_sub - bkg_median
+                
+                # Negate and zero-clip: only negative dips become positive peaks
+                inv_data = np.clip(-bkg_sub2, 0.0, None)
                 ndimage_inverted = _nddata_clone(ndimage, data=inv_data)
-                log.info("Target PSF: inverted image built as clip(-bkg_sub, 0) — only negative dips become positive peaks.")
+                log.info("Target PSF: inverted image built as clip(-(data - 2*bkg), 0) — subtracted background twice.")
             except Exception as exc:
                 log_warning_from_exception(log, "Failed to create inverted image for PSF fitting", exc)
                 ndimage_inverted = None
