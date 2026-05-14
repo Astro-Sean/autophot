@@ -2879,13 +2879,14 @@ class PSF:
                         bkg_median,
                     )
                 
-                # Subtract background and negate to flip the image
+                # Subtract background and negate to properly flip the image
                 # Negative dips (below background) become positive peaks
                 # Positive peaks (above background) become negative values
+                # Background pixels become zero
                 bkg_sub = image_data - bkg_median
                 inv_data = -bkg_sub  # = bkg_median - image_data
                 ndimage_inverted = _nddata_clone(ndimage, data=inv_data)
-                log.info("Target PSF: inverted image built as -(data - bkg) — single background subtraction, properly flipped.")
+                log.info("Target PSF: inverted image built as -(data - bkg) — single subtraction, properly flipped.")
             except Exception as exc:
                 log_warning_from_exception(log, "Failed to create inverted image for PSF fitting", exc)
                 ndimage_inverted = None
