@@ -4540,13 +4540,15 @@ class PSF:
 
             # ---- Colorbars -------------------------------------------------
             cbar1 = fig.colorbar(im1, cax=cax_list[0], orientation="horizontal")
-            cbar1.set_label("Science Flux")
+            cbar1.set_label("Inverted Science Flux" if is_inverted else "Science Flux")
             cax_list[0].xaxis.set_ticks_position("top")
             cax_list[0].xaxis.set_label_position("top")
 
             if psfphot is not None:
                 cbar2 = fig.colorbar(im2, cax=cax_list[1], orientation="horizontal")
-                cbar2.set_label(second_label)
+                cbar2.set_label(
+                    "Inverted Residual Flux" if is_inverted else second_label
+                )
                 cax_list[1].xaxis.set_ticks_position("top")
                 cax_list[1].xaxis.set_label_position("top")
 

@@ -5635,6 +5635,10 @@ def run_photometry():
             f"\tTotal separation: {separation:.3f} +/- {fitting_error_arcsec:.3f} arcseconds"
         )
 
+        # Store fitted RA/Dec for output
+        fitted_ra_deg = fitted_sky.ra.degree
+        fitted_dec_deg = fitted_sky.dec.degree
+
         # =============================================================================
         # Calibration and Output
         # =============================================================================
@@ -5987,6 +5991,8 @@ def run_photometry():
             "filter": input_yaml["imageFilter"],
             "xpix": TargetPosition.at[idx, "x_fit"],
             "ypix": TargetPosition.at[idx, "y_fit"],
+            "ra": fitted_ra_deg,
+            "dec": fitted_dec_deg,
             "xpix_err": (
                 TargetPosition.at[idx, "x_fit_err"]
                 if "x_fit_err" in TargetPosition.columns
