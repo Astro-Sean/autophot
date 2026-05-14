@@ -2885,10 +2885,10 @@ class PSF:
                 # Second subtraction: remove background again to shift baseline
                 bkg_sub2 = bkg_sub - bkg_median
                 
-                # Negate and zero-clip: only negative dips become positive peaks
-                inv_data = np.clip(-bkg_sub2, 0.0, None)
+                # Negate without clipping to keep full range
+                inv_data = -bkg_sub2
                 ndimage_inverted = _nddata_clone(ndimage, data=inv_data)
-                log.info("Target PSF: inverted image built as clip(-(data - 2*bkg), 0) — subtracted background twice.")
+                log.info("Target PSF: inverted image built as -(data - 2*bkg) — subtracted background twice, no clipping.")
             except Exception as exc:
                 log_warning_from_exception(log, "Failed to create inverted image for PSF fitting", exc)
                 ndimage_inverted = None
