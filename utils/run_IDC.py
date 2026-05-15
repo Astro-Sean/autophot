@@ -860,6 +860,7 @@ NNW
                         # Try to get from WCS
                         try:
                             from astropy.wcs import WCS
+                            from astropy.wcs.utils import proj_plane_pixel_scales
                             wcs = WCS(sci_head)
                             scales = proj_plane_pixel_scales(wcs)
                             pixel_scale = scales[0] * 3600  # Convert deg to arcsec
