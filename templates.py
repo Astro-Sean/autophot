@@ -4078,32 +4078,14 @@ class Templates:
 
             universal_mask_full = (mask_essential | mask_sources).astype(np.int32)
 
-            # Dynamic mask cap: if the full mask would leave too few good pixels for
-            # subtraction (e.g. HOTPANTS needs usable stamps), use only the essential
-            # (NaN/invalid) mask so that source masks are effectively excluded.
-            ts_cfg_early = self.input_yaml.get("template_subtraction", {})
-            max_masked_frac = float(
-                ts_cfg_early.get("subtraction_max_masked_fraction", 0.95)
+            # Use only NaN/invalid mask for subtraction to avoid masking flux calibration sources
+            # Source masks are still computed for visualization (red x markers) but not applied to subtraction
+            universal_mask = np.where(mask_essential, 1, 0).astype(np.int32)
+            logger.info(
+                "Using only NaN/invalid mask for subtraction (%.1f%% masked) to preserve flux calibration sources. "
+                "Source masks are still computed for visualization (red x markers).",
+                np.sum(universal_mask) / universal_mask.size * 100.0
             )
-            total_pix = universal_mask_full.size
-            full_masked_frac = (
-                np.sum(universal_mask_full) / total_pix if total_pix > 0 else 0.0
-            )
-
-            if full_masked_frac > max_masked_frac:
-                universal_mask = np.where(mask_essential, 1, 0).astype(np.int32)
-                reduced_frac = (
-                    np.sum(universal_mask) / total_pix if total_pix > 0 else 0.0
-                )
-                logger.info(
-                    "Subtraction mask capped: full mask would mask %.1f%% (limit %.0f%%); "
-                    "using only NaN/invalid mask (%.1f%% masked) so subtraction has enough good pixels.",
-                    full_masked_frac * 100.0,
-                    max_masked_frac * 100.0,
-                    reduced_frac * 100.0,
-                )
-            else:
-                universal_mask = universal_mask_full
 
             # For visualization (subtraction check plot), use only NaN/invalid mask
             # to avoid masking point sources with red regions
