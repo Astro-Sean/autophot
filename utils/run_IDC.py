@@ -836,14 +836,47 @@ NNW
                 )
                 # Run SWarp on the science image only to apply distortion correction
                 # SWarp can use the SIP/TPV WCS directly to resample the image
+                # Need to specify output grid parameters for SWarp to know what grid to resample to
+                with fits.open(sci_image_copy) as hdul:
+                    sci_head = hdul[0].header
+                    # Get WCS parameters for output grid
+                    crval1 = sci_head.get("CRVAL1")
+                    crval2 = sci_head.get("CRVAL2")
+                    cdelt1 = sci_head.get("CDELT1")
+                    cdelt2 = sci_head.get("CDELT2")
+                    naxis1 = sci_head.get("NAXIS1")
+                    naxis2 = sci_head.get("NAXIS2")
+
+                # Calculate pixel scale from CDELT if available, otherwise from WCS
+                pixel_scale = None
+                if cdelt1 is not None and cdelt2 is not None:
+                    pixel_scale = abs(cdelt1) * 3600  # Convert deg to arcsec
+                else:
+                    # Try to get from WCS
+                    try:
+                        from astropy.wcs import WCS
+                        wcs = WCS(sci_head)
+                        scales = proj_plane_pixel_scales(wcs)
+                        pixel_scale = scales[0] * 3600  # Convert deg to arcsec
+                    except Exception:
+                        pixel_scale = 0.25  # Fallback to default
+
+                swarp_config = {
+                    "COMBINE": "N",  # Don't combine, just resample
+                    "RESAMPLE": "Y",
+                    "RESAMPLE_DIR": str(science_aligned_dir),
+                    "CENTER_TYPE": "MANUAL",
+                    "CENTER": f"{crval1},{crval2}" if crval1 is not None and crval2 is not None else None,
+                    "PIXEL_SCALE": str(pixel_scale) if pixel_scale is not None else None,
+                    "IMAGE_SIZE": f"{naxis1},{naxis2}" if naxis1 is not None and naxis2 is not None else None,
+                }
+                # Remove None values
+                swarp_config = {k: v for k, v in swarp_config.items() if v is not None}
+
                 swarp_result = self.run_swarp(
                     input_images=[str(sci_image_copy)],
                     output_dir=str(science_aligned_dir),
-                    config={
-                        "COMBINE": "N",  # Don't combine, just resample
-                        "RESAMPLE": "Y",
-                        "RESAMPLE_DIR": str(science_aligned_dir),
-                    },
+                    config=swarp_config,
                 )
 
                 # SWarp creates output.fits in output_dir
