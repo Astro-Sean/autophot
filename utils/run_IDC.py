@@ -889,17 +889,23 @@ NNW
 
                     self.logger.info(f"SWarp result: {swarp_result}")
 
-                    # SWarp creates output.fits in output_dir
-                    swarp_output_path = science_aligned_dir / "output.fits"
-                    if swarp_result and os.path.exists(swarp_output_path):
-                        # Replace sci_image_copy with distortion-corrected version
-                        shutil.move(str(swarp_output_path), str(sci_image_copy))
-                        self.logger.info(
-                            f"SWarp distortion-corrected science image: {swarp_output_path} -> {sci_image_copy}"
-                        )
+                    # SWarp creates output in resampled/ directory with .resamp.fits suffix
+                    # The path is in swarp_result['corrected_image']
+                    if swarp_result and "corrected_image" in swarp_result:
+                        swarp_output_path = Path(swarp_result["corrected_image"])
+                        if os.path.exists(swarp_output_path):
+                            # Replace sci_image_copy with distortion-corrected version
+                            shutil.move(str(swarp_output_path), str(sci_image_copy))
+                            self.logger.info(
+                                f"SWarp distortion-corrected science image: {swarp_output_path} -> {sci_image_copy}"
+                            )
+                        else:
+                            self.logger.warning(
+                                f"SWarp distortion correction failed: output file does not exist at {swarp_output_path}"
+                            )
                     else:
                         self.logger.warning(
-                            f"SWarp distortion correction failed: result={swarp_result}, output_exists={os.path.exists(swarp_output_path) if swarp_output_path else 'N/A'}"
+                            f"SWarp distortion correction failed: no corrected_image in result"
                         )
                 except Exception as exc:
                     self.logger.warning(f"SWarp distortion correction raised exception: {exc}")
