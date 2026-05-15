@@ -414,12 +414,14 @@ class Find_FWHM:
             X = df["m_inst"].values.reshape(-1, 1)
             y = delta.values
             n_pts = len(df)
-            min_samples = min(10, max(2, n_pts))
+            # Increased min_samples to avoid focusing on clustered points
+            min_samples = min(15, max(5, int(0.5 * n_pts)))
             if n_pts < 2:
                 logger.warning("Too few points for linearity RANSAC (need at least 2).")
                 return catalog, fit_params, saturation_range
 
-            max_trials = int(min(300, max(80, 12 * n_pts)))
+            # Increased max_trials for better sampling
+            max_trials = int(min(500, max(100, 15 * n_pts)))
             ransac = RANSACRegressor(
                 estimator=ConstantOffsetRegressor(),
                 residual_threshold=residual_threshold,
@@ -431,6 +433,20 @@ class Find_FWHM:
             b = float(ransac.estimator_.intercept_)
 
             inlier_mask = ransac.inlier_mask_.copy()
+
+            # Check if inliers are overly clustered in magnitude space
+            # If inliers are concentrated in a small range, the fit may be biased
+            if inlier_mask.sum() >= 10:
+                mag_range = np.nanpercentile(df["m_inst"].values[inlier_mask], [5, 95])
+                mag_span = mag_range[1] - mag_range[0]
+                total_mag_range = np.nanpercentile(df["m_inst"].values, [5, 95])
+                total_mag_span = total_mag_range[1] - total_mag_range[0]
+                if total_mag_span > 0 and mag_span / total_mag_span < 0.3:
+                    logger.warning(
+                        f"RANSAC inliers are clustered in magnitude space (span={mag_span:.2f} vs total={total_mag_span:.2f}); using median offset instead"
+                    )
+                    b = float(np.nanmedian(y))
+                    inlier_mask = np.abs(y - b) < residual_threshold
 
             # Bin-wise majority filter: in low-S/N magnitude bins, reject the bin
             # unless the majority of sources in that bin are inliers (avoids

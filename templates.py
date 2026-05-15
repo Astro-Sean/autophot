@@ -330,14 +330,14 @@ class FluxMatchParams:
     mag_residual_threshold: float = 0.8
     """Maximum allowed magnitude residual for an inlier (more relaxed by default)."""
 
-    min_samples_fraction: float = 0.25
-    """Minimum fraction of sources required by RANSAC."""
+    min_samples_fraction: float = 0.5
+    """Minimum fraction of sources required by RANSAC (increased to avoid clustering)."""
 
-    max_trials: int = 500
-    """RANSAC maximum iteration count."""
+    max_trials: int = 1000
+    """RANSAC maximum iteration count (increased for better sampling)."""
 
-    min_absolute_samples: int = 2
-    """Hard floor on the number of RANSAC samples."""
+    min_absolute_samples: int = 5
+    """Hard floor on the number of RANSAC samples (increased to avoid clustering)."""
 
     use_percentile_cut: bool = False
     """Whether to apply a brightness percentile trim after RANSAC."""
@@ -3257,6 +3257,24 @@ class Templates:
                         slope = ransac.estimator_.slope_
                         intercept = ransac.estimator_.intercept_
                         method_used = "RANSAC"
+
+                        # Check if inliers are overly clustered in parameter space
+                        # If inliers are concentrated in a small range of magnitudes,
+                        # the fit may be biased. Fall back to median offset if so.
+                        if inliers.sum() >= 10:
+                            mag_range = np.nanpercentile(mag_img_r[inliers], [5, 95])
+                            mag_span = mag_range[1] - mag_range[0]
+                            total_mag_range = np.nanpercentile(mag_img_r, [5, 95])
+                            total_mag_span = total_mag_range[1] - total_mag_range[0]
+                            if total_mag_span > 0 and mag_span / total_mag_span < 0.3:
+                                logger.warning(
+                                    f"RANSAC inliers are clustered in magnitude space (span={mag_span:.2f} vs total={total_mag_span:.2f}); falling back to median offset"
+                                )
+                                diffs = y - X.ravel()
+                                median_diff = np.nanmedian(diffs)
+                                inliers = np.abs(diffs - median_diff) < params.mag_residual_threshold
+                                slope, intercept = 1.0, median_diff
+                                method_used = "Median offset (RANSAC clustered)"
                 except Exception as exc:
                     logger.debug("RANSAC failed: %s", exc)
 
