@@ -832,8 +832,9 @@ NNW
             if has_distortion:
                 distortion_type = "SIP" if has_sip else "TPV/PV" if has_pv else "CTYPE-based"
                 self.logger.info(
-                    f"Science image has {distortion_type} distortion parameters from solve-field/SCAMP; running SWarp to remove distortions"
+                    f"Science image has {distortion_type} distortion parameters from solve-field/SCAMP"
                 )
+                self.logger.info("Distortion correcting science image with SWarp...")
                 # Run SWarp on the science image only to apply distortion correction
                 # SWarp can use the SIP/TPV WCS directly to resample the image
                 # Need to specify output grid parameters for SWarp to know what grid to resample to
@@ -847,10 +848,6 @@ NNW
                         cdelt2 = sci_head.get("CDELT2")
                         naxis1 = sci_head.get("NAXIS1")
                         naxis2 = sci_head.get("NAXIS2")
-
-                    self.logger.info(
-                        f"WCS parameters: CRVAL=({crval1}, {crval2}), CDELT=({cdelt1}, {cdelt2}), NAXIS=({naxis1}, {naxis2})"
-                    )
 
                     # Calculate pixel scale from CDELT if available, otherwise from WCS
                     pixel_scale = None
@@ -880,15 +877,11 @@ NNW
                     # Remove None values
                     swarp_config = {k: v for k, v in swarp_config.items() if v is not None}
 
-                    self.logger.info(f"SWarp config for distortion correction: {swarp_config}")
-
                     swarp_result = self.run_swarp(
                         input_images=[str(sci_image_copy)],
                         output_dir=str(science_aligned_dir),
                         config=swarp_config,
                     )
-
-                    self.logger.info(f"SWarp result: {swarp_result}")
 
                     # SWarp creates output in resampled/ directory with .resamp.fits suffix
                     # The path is in swarp_result['corrected_image']
@@ -897,9 +890,7 @@ NNW
                         if os.path.exists(swarp_output_path):
                             # Replace sci_image_copy with distortion-corrected version
                             shutil.move(str(swarp_output_path), str(sci_image_copy))
-                            self.logger.info(
-                                f"SWarp distortion-corrected science image: {swarp_output_path} -> {sci_image_copy}"
-                            )
+                            self.logger.info("Distortion correction succeeded")
                         else:
                             self.logger.warning(
                                 f"SWarp distortion correction failed: output file does not exist at {swarp_output_path}"
@@ -922,6 +913,7 @@ NNW
             if has_distortion:
                 sci_w = None
                 self.logger.info("Skipping weight map after distortion correction (image size may have changed)")
+                self.logger.info("Performing source extraction on distortion-corrected science image...")
             else:
                 sci_w = self._guess_map_weight_path(str(sci_image_copy))
                 if sci_w:
