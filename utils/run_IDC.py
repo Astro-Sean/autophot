@@ -920,7 +920,15 @@ NNW
                     "Science image has no distortion parameters; skipping distortion correction"
                 )
 
-            # Extract sources from both images
+            # After distortion correction, skip weight map since image size may have changed
+            # SWarp handles NaN preservation through its own weight map mechanism
+            if has_distortion:
+                sci_w = None
+                self.logger.info("Skipping weight map after distortion correction (image size may have changed)")
+            else:
+                sci_w = self._guess_map_weight_path(str(sci_image_copy))
+                if sci_w:
+                    self.logger.info("Alignment SExtractor: using science MAP_WEIGHT %s", sci_w)
             with (
                 fits.open(sci_image_copy) as hdul,
                 fits.open(ref_image_copy) as hdul_ref,
@@ -989,10 +997,12 @@ NNW
             sextractor_crowded = ts.get(
                 "sextractor_crowded", templates_cfg.get("crowded_field", phot_crowded)
             )
-            sci_w = self._guess_map_weight_path(str(science_image))
+            # sci_w is already set above based on has_distortion flag
+            if not has_distortion:
+                sci_w = self._guess_map_weight_path(str(science_image))
+                if sci_w:
+                    self.logger.info("Alignment SExtractor: using science MAP_WEIGHT %s", sci_w)
             ref_w = self._guess_map_weight_path(str(reference_image))
-            if sci_w:
-                self.logger.info("Alignment SExtractor: using science MAP_WEIGHT %s", sci_w)
             if ref_w:
                 self.logger.info("Alignment SExtractor: using reference MAP_WEIGHT %s", ref_w)
 
