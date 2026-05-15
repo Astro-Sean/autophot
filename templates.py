@@ -4105,6 +4105,10 @@ class Templates:
             else:
                 universal_mask = universal_mask_full
 
+            # For visualization (subtraction check plot), use only NaN/invalid mask
+            # to avoid masking point sources with red regions
+            visualization_mask = np.where(mask_essential, 1, 0).astype(np.int32)
+
             # Save mask to scienceDir (not templateDir) to prevent crosstalk
             # when multiple science images use the same template
             mask_loc = os.path.join(scienceDir, f"universal_mask_{base_name}")
@@ -4346,7 +4350,7 @@ class Templates:
             elapsed = time.time() - t0
             logger.info("Image subtraction completed in %.1f s", elapsed)
 
-            return differenceFpath, universal_mask, matching_sources
+            return differenceFpath, visualization_mask, matching_sources
 
         except Exception:
             logger.exception("Unhandled error in subtract()")
