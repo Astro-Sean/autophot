@@ -2692,6 +2692,26 @@ def run_photometry():
         height = image.shape[0]
         border = 11
 
+        # Recalculate catalog pixel coordinates using post-alignment WCS
+        # The catalog was downloaded before alignment, so its pixel coordinates
+        # are based on the pre-alignment WCS. After SCAMP+SWarp alignment,
+        # the image is resampled and the WCS changes, so we must recalculate.
+        if "RA" in unCatalogSources.columns and "DEC" in unCatalogSources.columns:
+            try:
+                from astropy.coordinates import SkyCoord
+                import astropy.units as u
+                coords = SkyCoord(
+                    ra=unCatalogSources["RA"].values * u.deg,
+                    dec=unCatalogSources["DEC"].values * u.deg,
+                    frame="icrs"
+                )
+                x_pix, y_pix = imageWCS.world_to_pixel(coords)
+                unCatalogSources["x_pix"] = np.asarray(x_pix, dtype=float).ravel()
+                unCatalogSources["y_pix"] = np.asarray(y_pix, dtype=float).ravel()
+                logging.info("Recalculated catalog pixel coordinates using post-alignment WCS")
+            except Exception as e:
+                logging.warning(f"Failed to recatalog pixel coordinates: {e}")
+
         CatalogSources = Calibrate_Catalog.clean(
             selectedCatalog=unCatalogSources,
             image_wcs=imageWCS,
