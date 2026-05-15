@@ -422,17 +422,39 @@ class Find_FWHM:
 
             # Increased max_trials for better sampling
             max_trials = int(min(500, max(100, 15 * n_pts)))
-            ransac = RANSACRegressor(
-                estimator=ConstantOffsetRegressor(),
-                residual_threshold=residual_threshold,
-                max_trials=max_trials,
-                min_samples=min_samples,
-                random_state=42,
-            )
-            ransac.fit(X, y)
-            b = float(ransac.estimator_.intercept_)
 
-            inlier_mask = ransac.inlier_mask_.copy()
+            # Prioritize brighter sources (lower m_inst) to avoid fitting to low-brightness clusters
+            # Use the brighter 70% of sources (lower magnitudes)
+            mag_percentile_70 = np.nanpercentile(df["m_inst"].values, 30)
+            bright_mask = df["m_inst"].values <= mag_percentile_70
+            if bright_mask.sum() >= 2:
+                X_bright = X[bright_mask]
+                y_bright = y[bright_mask]
+                ransac = RANSACRegressor(
+                    estimator=ConstantOffsetRegressor(),
+                    residual_threshold=residual_threshold,
+                    max_trials=max_trials,
+                    min_samples=min(15, max(5, int(0.5 * len(y_bright)))),
+                    random_state=42,
+                )
+                ransac.fit(X_bright, y_bright)
+                b = float(ransac.estimator_.intercept_)
+                # Map inliers back to full array
+                inlier_mask_full = np.zeros(n_pts, dtype=bool)
+                inlier_mask_full[bright_mask] = ransac.inlier_mask_
+                inlier_mask = inlier_mask_full
+            else:
+                # Fallback to all sources if not enough bright sources
+                ransac = RANSACRegressor(
+                    estimator=ConstantOffsetRegressor(),
+                    residual_threshold=residual_threshold,
+                    max_trials=max_trials,
+                    min_samples=min_samples,
+                    random_state=42,
+                )
+                ransac.fit(X, y)
+                b = float(ransac.estimator_.intercept_)
+                inlier_mask = ransac.inlier_mask_.copy()
 
             # Check if inliers are overly clustered in magnitude space
             # If inliers are concentrated in a small range, the fit may be biased

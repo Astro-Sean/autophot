@@ -3240,41 +3240,71 @@ class Templates:
                         enforce=True,
                         fixed_slope=1.0,
                     )
-                    ransac = RANSACRegressor(
-                        estimator=base_est,
-                        residual_threshold=thresh,
-                        max_trials=params.max_trials,
-                        min_samples=max(
-                            int(params.min_samples_fraction * len(y)),
-                            params.min_absolute_samples,
-                            4,
-                        ),
-                        random_state=42,
-                    )
-                    ransac.fit(X, y)
-                    inliers = ransac.inlier_mask_
-                    if inliers.any():
-                        slope = ransac.estimator_.slope_
-                        intercept = ransac.estimator_.intercept_
-                        method_used = "RANSAC"
 
-                        # Check if inliers are overly clustered in parameter space
-                        # If inliers are concentrated in a small range of magnitudes,
-                        # the fit may be biased. Fall back to median offset if so.
-                        if inliers.sum() >= 10:
-                            mag_range = np.nanpercentile(mag_img_r[inliers], [5, 95])
-                            mag_span = mag_range[1] - mag_range[0]
-                            total_mag_range = np.nanpercentile(mag_img_r, [5, 95])
-                            total_mag_span = total_mag_range[1] - total_mag_range[0]
-                            if total_mag_span > 0 and mag_span / total_mag_span < 0.3:
-                                logger.warning(
-                                    f"RANSAC inliers are clustered in magnitude space (span={mag_span:.2f} vs total={total_mag_span:.2f}); falling back to median offset"
-                                )
-                                diffs = y - X.ravel()
-                                median_diff = np.nanmedian(diffs)
-                                inliers = np.abs(diffs - median_diff) < params.mag_residual_threshold
-                                slope, intercept = 1.0, median_diff
-                                method_used = "Median offset (RANSAC clustered)"
+                    # Prioritize brighter sources by pre-filtering to the brighter 70%
+                    # This prevents RANSAC from focusing on low-brightness clusters
+                    mag_percentile_70 = np.nanpercentile(mag_img_r, 30)  # brighter sources have lower mag
+                    bright_mask = mag_img_r <= mag_percentile_70
+                    if bright_mask.sum() >= 4:
+                        X_bright = X[bright_mask]
+                        y_bright = y[bright_mask]
+                        ransac = RANSACRegressor(
+                            estimator=base_est,
+                            residual_threshold=thresh,
+                            max_trials=params.max_trials,
+                            min_samples=max(
+                                int(params.min_samples_fraction * len(y_bright)),
+                                params.min_absolute_samples,
+                                4,
+                            ),
+                            random_state=42,
+                        )
+                        ransac.fit(X_bright, y_bright)
+                        # Map inliers back to full array
+                        inliers_full = np.zeros(len(y), dtype=bool)
+                        inliers_full[bright_mask] = ransac.inlier_mask_
+                        inliers = inliers_full
+                        if inliers.any():
+                            slope = ransac.estimator_.slope_
+                            intercept = ransac.estimator_.intercept_
+                            method_used = "RANSAC (brighter sources)"
+                    else:
+                        # Fallback to all sources if not enough bright sources
+                        ransac = RANSACRegressor(
+                            estimator=base_est,
+                            residual_threshold=thresh,
+                            max_trials=params.max_trials,
+                            min_samples=max(
+                                int(params.min_samples_fraction * len(y)),
+                                params.min_absolute_samples,
+                                4,
+                            ),
+                            random_state=42,
+                        )
+                        ransac.fit(X, y)
+                        inliers = ransac.inlier_mask_
+                        if inliers.any():
+                            slope = ransac.estimator_.slope_
+                            intercept = ransac.estimator_.intercept_
+                            method_used = "RANSAC (all sources)"
+
+                    # Check if inliers are overly clustered in parameter space
+                    # If inliers are concentrated in a small range of magnitudes,
+                    # the fit may be biased. Fall back to median offset if so.
+                    if inliers.sum() >= 10:
+                        mag_range = np.nanpercentile(mag_img_r[inliers], [5, 95])
+                        mag_span = mag_range[1] - mag_range[0]
+                        total_mag_range = np.nanpercentile(mag_img_r, [5, 95])
+                        total_mag_span = total_mag_range[1] - total_mag_range[0]
+                        if total_mag_span > 0 and mag_span / total_mag_span < 0.3:
+                            logger.warning(
+                                f"RANSAC inliers are clustered in magnitude space (span={mag_span:.2f} vs total={total_mag_span:.2f}); falling back to median offset"
+                            )
+                            diffs = y - X.ravel()
+                            median_diff = np.nanmedian(diffs)
+                            inliers = np.abs(diffs - median_diff) < params.mag_residual_threshold
+                            slope, intercept = 1.0, median_diff
+                            method_used = "Median offset (RANSAC clustered)"
                 except Exception as exc:
                     logger.debug("RANSAC failed: %s", exc)
 
