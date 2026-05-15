@@ -2739,18 +2739,29 @@ def run_photometry():
                 )
                 mask = (mask_x) & (mask_y)
                 n_before = len(CatalogSources)
-                CatalogSources = CatalogSources[mask]
-                n_after = len(CatalogSources)
+                CatalogSources_filtered = CatalogSources[mask]
+                n_after = len(CatalogSources_filtered)
+                removed_fraction = (n_before - n_after) / n_before if n_before > 0 else 0
+
                 if n_after < n_before:
                     logging.info(
                         f"Border filtering: removed {n_before - n_after} sources outside border, {n_after} sources remaining"
                     )
-                if n_after == 0:
+
+                # Skip border filtering if it removes more than 50% of sources
+                # This can happen when WCS alignment changes the image geometry significantly
+                if removed_fraction > 0.5:
                     logging.warning(
-                        f"All catalog sources removed by border filter (border={border}, image={width}x{height})"
+                        f"Border filtering removed {removed_fraction*100:.1f}% of sources; skipping border filter to preserve catalog sources"
                     )
-                    CatalogSources = None
+                    CatalogSources = CatalogSources  # Keep original unfiltered catalog
+                elif n_after == 0:
+                    logging.warning(
+                        f"All catalog sources removed by border filter (border={border}, image={width}x{height}); skipping border filter"
+                    )
+                    CatalogSources = CatalogSources  # Keep original unfiltered catalog
                 else:
+                    CatalogSources = CatalogSources_filtered
                     # De-duplicate catalog entries. Some catalogs can contain repeated
                     # sources (overlapping tiles / duplicate IDs) which can look like
                     # rows were "appended" downstream even when they were not.
