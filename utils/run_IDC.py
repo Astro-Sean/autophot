@@ -844,10 +844,23 @@ NNW
             wcs_cfg = iy.get("wcs", {}) if isinstance(iy, dict) else {}
             redo_wcs = bool(wcs_cfg.get("redo_wcs", True))
 
-            # Check if science image has a valid WCS
+            # Check if science image has a valid WCS and get pixel scale
             with fits.open(sci_image_copy) as hdul:
                 sci_head_initial = hdul[0].header
             has_wcs = _has_valid_wcs(sci_head_initial)
+
+            # Get pixel scale from header if available
+            pixel_scale = None
+            if "CDELT1" in sci_head_initial:
+                try:
+                    pixel_scale = abs(float(sci_head_initial["CDELT1"])) * 3600.0  # deg to arcsec
+                except (TypeError, ValueError):
+                    pass
+            if pixel_scale is None and "PIXSCALE" in sci_head_initial:
+                try:
+                    pixel_scale = float(sci_head_initial["PIXSCALE"])
+                except (TypeError, ValueError):
+                    pass
 
             if not has_wcs or redo_wcs:
                 self.logger.info(
@@ -857,7 +870,7 @@ NNW
                     image_path=str(sci_image_copy),
                     output_dir=str(science_aligned_dir),
                     wcs_cfg=wcs_cfg,
-                    pixel_scale=None,  # Will be determined from header later
+                    pixel_scale=pixel_scale,
                     timeout_sec=90.0,
                 )
 
