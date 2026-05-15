@@ -6389,11 +6389,16 @@ def run_photometry():
             
             # Self-match: find each source's nearest neighbour (excluding itself)
             # This is O(N log N) instead of O(N²) nested loop
-            idx_match, sep, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
-            keep_mask = sep > 1.0 * u.arcsec  # Keep sources with no close neighbour
-            CatalogSources_dedup = CatalogSources[keep_mask].reset_index(drop=True)
-            n_removed = len(CatalogSources) - len(CatalogSources_dedup)
-            logging.info(f"Removed {n_removed} duplicate sources from CALIB catalog")
+            # Only run if there are at least 2 sources (nthneighbor=2 requires at least 2)
+            if len(coords) >= 2:
+                idx_match, sep, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
+                keep_mask = sep > 1.0 * u.arcsec  # Keep sources with no close neighbour
+                CatalogSources_dedup = CatalogSources[keep_mask].reset_index(drop=True)
+                n_removed = len(CatalogSources) - len(CatalogSources_dedup)
+                logging.info(f"Removed {n_removed} duplicate sources from CALIB catalog")
+            else:
+                CatalogSources_dedup = CatalogSources.reset_index(drop=True)
+                logging.info(f"Skipping duplicate removal: only {len(coords)} source(s) in CALIB catalog")
             
             with open(calibration_file, "a") as file:
                 file.write("\n# Sequence star catalog used for calibration\n")
