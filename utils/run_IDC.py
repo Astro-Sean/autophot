@@ -1645,23 +1645,11 @@ NNW
                     e,
                 )
 
-            # Remove SIP/TPV distortion coefficients from header since image is now distortion-corrected
-            # SWarp outputs TAN projection (CTYPE="RA---TAN") but may leave old SIP coefficients in header
-            # This causes astropy warnings about inconsistent SIP information
-            try:
-                with fits.open(aligned_science_fpath, mode='update') as hdul:
-                    header = hdul[0].header
-                    # Remove SIP keywords
-                    sip_keywords = [key for key in header if key.startswith(('A_', 'B_', 'AP_', 'BP_')) or key in ['A_ORDER', 'B_ORDER', 'AP_ORDER', 'BP_ORDER']]
-                    for key in sip_keywords:
-                        del header[key]
-                    # Remove TPV/PV keywords
-                    pv_keywords = [key for key in header if key.startswith('PV_')]
-                    for key in pv_keywords:
-                        del header[key]
-                self.logger.debug("Removed SIP/TPV distortion coefficients from aligned science image header")
-            except Exception as exc:
-                self.logger.warning(f"Could not remove SIP/TPV coefficients from header: {exc}")
+            # Keep SIP/TPV distortion coefficients in header to preserve distortion correction
+            # SWarp outputs TAN projection but the distortion model is still needed for accurate WCS
+            # Removing SIP coefficients causes systematic WCS errors across the field
+            # SWarp resampling does not inherently correct distortion - it just applies linear transforms
+            self.logger.debug("Preserving SIP/TPV distortion coefficients in aligned science image header")
 
             # Remove the aligned working directory after copying aligned images over the originals.
             if science_aligned_dir.exists():
