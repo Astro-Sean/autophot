@@ -41,6 +41,26 @@ sys.path.append(str(Path(__file__).parent.parent))
 from functions import remove_wcs_from_header, log_warning_from_exception
 from wcs import get_wcs
 
+
+def _has_valid_wcs(header: fits.Header) -> bool:
+    """Check if a FITS header has a valid WCS.
+
+    Args:
+        header: FITS header to check.
+
+    Returns:
+        True if header has valid WCS keywords, False otherwise.
+    """
+    # Check for essential WCS keywords
+    required_keys = ["CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2", "CD1_1", "CD1_2", "CD2_1", "CD2_2"]
+    # Alternative: CDELT1, CDELT2, PC matrix
+    alt_keys = ["CDELT1", "CDELT2", "PC1_1", "PC1_2", "PC2_1", "PC2_2"]
+
+    has_required = all(key in header for key in required_keys)
+    has_alt = all(key in header for key in alt_keys)
+
+    return has_required or has_alt
+
 try:
     from reproject import reproject_interp
 
@@ -817,6 +837,57 @@ NNW
 
             # self.clean_image(sci_image_copy)
             # self.clean_image(ref_image_copy)
+
+            # Check if solve-field should run on science image for SIP distortion correction
+            # Run if: no WCS available OR redo_wcs is true
+            iy = getattr(self, "input_yaml", None) or {}
+            wcs_cfg = iy.get("wcs", {}) if isinstance(iy, dict) else {}
+            redo_wcs = bool(wcs_cfg.get("redo_wcs", True))
+
+            # Check if science image has a valid WCS
+            with fits.open(sci_image_copy) as hdul:
+                sci_head_initial = hdul[0].header
+            has_wcs = _has_valid_wcs(sci_head_initial)
+
+            if not has_wcs or redo_wcs:
+                self.logger.info(
+                    f"Solve-field check: has_wcs={has_wcs}, redo_wcs={redo_wcs} -> running solve-field on science image"
+                )
+                solve_result = self._run_solve_field(
+                    image_path=str(sci_image_copy),
+                    output_dir=str(science_aligned_dir),
+                    wcs_cfg=wcs_cfg,
+                    pixel_scale=None,  # Will be determined from header later
+                    timeout_sec=90.0,
+                )
+
+                if solve_result is not None:
+                    # Apply distortion correction using solve-field WCS
+                    corrected_image_path = science_aligned_dir / "science_image_distcorr.fits"
+                    correction_success = self._apply_distortion_correction(
+                        image_path=str(sci_image_copy),
+                        wcs_header=solve_result["wcs_header"],
+                        output_path=str(corrected_image_path),
+                    )
+
+                    if correction_success:
+                        # Replace sci_image_copy with distortion-corrected version
+                        shutil.move(str(corrected_image_path), str(sci_image_copy))
+                        self.logger.info(
+                            f"Distortion-corrected science image: {corrected_image_path} -> {sci_image_copy}"
+                        )
+                    else:
+                        self.logger.warning(
+                            "Distortion correction failed; proceeding with original image"
+                        )
+                else:
+                    self.logger.warning(
+                        "solve-field failed; proceeding with original image for alignment"
+                    )
+            else:
+                self.logger.info(
+                    "Science image has valid WCS and redo_wcs=False; skipping solve-field"
+                )
 
             # Extract sources from both images
             with (
@@ -3199,7 +3270,6 @@ NNW
                 intercept = np.median(sci_mag[valid] - ref_mag[valid])
             else:
                 intercept = None
-
         if len(sci_cat_matched) >= 5 and intercept is not None:
             from functions import set_size
             from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
@@ -3293,3 +3363,186 @@ NNW
             f"Final matched sources: {len(sci_cat_matched)}, match radius={match_radius_arcsec:.1f} arcsec"
         )
         return len(sci_cat_matched), match_radius_arcsec
+
+    def _run_solve_field(
+        self,
+        image_path: str,
+        output_dir: str,
+        wcs_cfg: dict,
+        pixel_scale: float = None,
+        timeout_sec: float = 90.0,
+    ) -> Optional[Dict]:
+        """Run solve-field on an image to fit SIP distortions.
+
+        Args:
+            image_path: Path to the FITS image to solve.
+            output_dir: Directory for solve-field outputs.
+            wcs_cfg: WCS configuration from input_yaml.
+            pixel_scale: Pixel scale in arcsec/pix (optional hint).
+            timeout_sec: Timeout for solve-field execution.
+
+        Returns:
+            Dictionary with solved WCS header and output paths, or None on failure.
+        """
+        solvefield_exe = wcs_cfg.get("solve_field_exe_loc") or shutil.which("solve-field")
+        if not solvefield_exe:
+            self.logger.warning(
+                "solve-field executable not found; skipping SIP distortion fitting. "
+                "Install with: conda install -c conda-forge astrometry"
+            )
+            return None
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        base = Path(image_path).stem
+        wcs_file = str(output_dir / f"{base}.wcs.fits")
+        log_file = str(output_dir / f"{base}_solve_field.log")
+        new_fits = str(output_dir / f"{base}_solved.fits")
+
+        # Build solve-field command
+        args = [
+            str(solvefield_exe),
+            "--no-remove-lines",
+            "--overwrite",
+            "--wcs",
+            wcs_file,
+            "--new-fits",
+            new_fits,
+            "--no-plots",
+            "--cpulimit",
+            str(int(timeout_sec)),
+            str(image_path),
+        ]
+
+        # Add scale constraints if pixel scale is known
+        if pixel_scale and pixel_scale > 0:
+            scale_low = pixel_scale * 0.6
+            scale_high = pixel_scale * 1.5
+            args += [
+                "--scale-units",
+                "arcsecperpix",
+                "--scale-low",
+                str(scale_low),
+                "--scale-high",
+                str(scale_high),
+            ]
+
+        # Add tweak order for SIP distortion
+        tweak_order = int(wcs_cfg.get("solve_field_tweak_order", 4))
+        args += ["--tweak-order", str(tweak_order)]
+
+        # Add crpix-center option
+        if bool(wcs_cfg.get("solve_field_crpix_center", False)):
+            args += ["--crpix-center"]
+
+        # Add downsample
+        downsample = int(wcs_cfg.get("downsample", 2))
+        args += ["--downsample", str(downsample)]
+
+        # Run solve-field
+        try:
+            with open(log_file, "w") as logf:
+                self.logger.info(f"Running solve-field on {image_path}")
+                result = subprocess.run(
+                    args,
+                    stdout=logf,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                    timeout=timeout_sec,
+                )
+            self.clean_log(log_file)
+
+            if result.returncode != 0:
+                self.logger.warning(
+                    f"solve-field failed (code {result.returncode}). See {log_file}"
+                )
+                return None
+
+            if not os.path.isfile(wcs_file):
+                self.logger.warning(f"solve-field did not produce WCS file at {wcs_file}")
+                return None
+
+            # Read solved WCS header
+            with fits.open(wcs_file) as hdul:
+                solved_header = hdul[0].header.copy()
+
+            self.logger.info(
+                f"solve-field succeeded: WCS written to {wcs_file}, corrected image to {new_fits}"
+            )
+
+            return {
+                "wcs_header": solved_header,
+                "wcs_file": wcs_file,
+                "solved_image": new_fits,
+                "log_file": log_file,
+            }
+
+        except subprocess.TimeoutExpired:
+            self.logger.warning(f"solve-field timed out after {timeout_sec}s")
+            return None
+        except Exception as e:
+            log_warning_from_exception(
+                self.logger, f"solve-field execution failed for {image_path}", e
+            )
+            return None
+
+    def _apply_distortion_correction(
+        self,
+        image_path: str,
+        wcs_header: fits.Header,
+        output_path: str,
+    ) -> bool:
+        """Apply distortion correction to an image using a solved WCS header.
+
+        Args:
+            image_path: Path to the original (distorted) FITS image.
+            wcs_header: Solved WCS header from solve-field.
+            output_path: Path for the distortion-corrected output FITS.
+
+        Returns:
+            True on success, False on failure.
+        """
+        if not HAS_REPROJECT:
+            self.logger.warning(
+                "reproject not available; cannot apply distortion correction. "
+                "Install with: pip install reproject"
+            )
+            return False
+
+        try:
+            with fits.open(image_path) as hdul:
+                data = hdul[0].data
+                header = hdul[0].header.copy()
+
+            # Create WCS objects
+            wcs_original = WCS(header)
+            wcs_solved = WCS(wcs_header)
+
+            # Reproject the image using the solved WCS
+            # This resamples the image to remove distortion
+            from reproject import reproject_interp
+
+            output_data, footprint = reproject_interp(
+                (data, wcs_original),
+                wcs_solved,
+                shape_out=data.shape,
+            )
+
+            # Update header with solved WCS
+            output_header = header.copy()
+            for key in wcs_solved.to_header(relax=True):
+                output_header[key] = wcs_solved.to_header(relax=True)[key]
+
+            # Write output
+            fits.writeto(output_path, output_data, output_header, overwrite=True)
+
+            self.logger.info(f"Distortion correction applied: {image_path} -> {output_path}")
+            return True
+
+        except Exception as e:
+            log_warning_from_exception(
+                self.logger, f"Distortion correction failed for {image_path}", e
+            )
+            return None
