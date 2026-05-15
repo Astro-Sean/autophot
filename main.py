@@ -2698,8 +2698,6 @@ def run_photometry():
         # the image is resampled and the WCS changes, so we must recalculate.
         if "RA" in unCatalogSources.columns and "DEC" in unCatalogSources.columns:
             try:
-                from astropy.coordinates import SkyCoord
-                import astropy.units as u
                 coords = SkyCoord(
                     ra=unCatalogSources["RA"].values * u.deg,
                     dec=unCatalogSources["DEC"].values * u.deg,
