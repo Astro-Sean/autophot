@@ -811,21 +811,31 @@ NNW
             # self.clean_image(sci_image_copy)
             # self.clean_image(ref_image_copy)
 
-            # Check if science image has SIP distortion parameters from solve-field
-            # solve-field returns WCS with SIP parameters but doesn't correct the image
-            # We need to run SWarp on the science image to remove distortions using the SIP WCS
+            # Check if science image has SIP or TPV distortion parameters from solve-field/SCAMP
+            # solve-field returns WCS with SIP parameters, SCAMP may convert to TPV/PV
+            # Neither corrects the image data itself
+            # We need to run SWarp on the science image to remove distortions using the distortion WCS
             with fits.open(sci_image_copy) as hdul:
                 sci_head_initial = hdul[0].header
 
-            # Check for SIP distortion keywords
-            has_sip = any(key in sci_head_initial for key in ["A_ORDER", "B_ORDER", "A_0_0", "B_0_0"])
+            # Check for SIP distortion keywords (A_ORDER, B_ORDER, etc.)
+            has_sip = any(key in sci_head_initial for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"])
+            # Check for TPV/PV distortion keywords (PV_*)
+            has_pv = any(key.startswith("PV_") for key in sci_head_initial)
+            # Check CTYPE for distortion projection
+            ctype1 = str(sci_head_initial.get("CTYPE1", "")).upper()
+            ctype2 = str(sci_head_initial.get("CTYPE2", "")).upper()
+            has_distortion_ctype = "TAN-SIP" in ctype1 or "TAN-SIP" in ctype2 or "TPV" in ctype1 or "TPV" in ctype2
 
-            if has_sip:
+            has_distortion = has_sip or has_pv or has_distortion_ctype
+
+            if has_distortion:
+                distortion_type = "SIP" if has_sip else "TPV/PV" if has_pv else "CTYPE-based"
                 self.logger.info(
-                    "Science image has SIP distortion parameters from solve-field; running SWarp to remove distortions"
+                    f"Science image has {distortion_type} distortion parameters from solve-field/SCAMP; running SWarp to remove distortions"
                 )
                 # Run SWarp on the science image only to apply distortion correction
-                # SWarp can use the SIP WCS directly to resample the image
+                # SWarp can use the SIP/TPV WCS directly to resample the image
                 sci_corrected_path = science_aligned_dir / "science_image_corrected.fits"
                 swarp_result = self.run_swarp(
                     image_paths=[str(sci_image_copy)],
@@ -850,7 +860,7 @@ NNW
                     )
             else:
                 self.logger.info(
-                    "Science image has no SIP distortion parameters; skipping distortion correction"
+                    "Science image has no distortion parameters; skipping distortion correction"
                 )
 
             # Extract sources from both images
