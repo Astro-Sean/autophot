@@ -836,11 +836,9 @@ NNW
                 )
                 # Run SWarp on the science image only to apply distortion correction
                 # SWarp can use the SIP/TPV WCS directly to resample the image
-                sci_corrected_path = science_aligned_dir / "science_image_corrected.fits"
                 swarp_result = self.run_swarp(
-                    image_paths=[str(sci_image_copy)],
+                    input_images=[str(sci_image_copy)],
                     output_dir=str(science_aligned_dir),
-                    output_image=str(sci_corrected_path),
                     config={
                         "COMBINE": "N",  # Don't combine, just resample
                         "RESAMPLE": "Y",
@@ -848,11 +846,13 @@ NNW
                     },
                 )
 
-                if swarp_result and os.path.exists(sci_corrected_path):
+                # SWarp creates output.fits in output_dir
+                swarp_output_path = science_aligned_dir / "output.fits"
+                if swarp_result and os.path.exists(swarp_output_path):
                     # Replace sci_image_copy with distortion-corrected version
-                    shutil.move(str(sci_corrected_path), str(sci_image_copy))
+                    shutil.move(str(swarp_output_path), str(sci_image_copy))
                     self.logger.info(
-                        f"SWarp distortion-corrected science image: {sci_corrected_path} -> {sci_image_copy}"
+                        f"SWarp distortion-corrected science image: {swarp_output_path} -> {sci_image_copy}"
                     )
                 else:
                     self.logger.warning(
