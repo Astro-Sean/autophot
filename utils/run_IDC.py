@@ -911,10 +911,6 @@ NNW
                     self.logger.warning(f"SWarp distortion correction raised exception: {exc}")
                     import traceback
                     self.logger.warning(traceback.format_exc())
-                else:
-                    self.logger.warning(
-                        "SWarp distortion correction failed; proceeding with original image"
-                    )
             else:
                 self.logger.info(
                     "Science image has no distortion parameters; skipping distortion correction"
