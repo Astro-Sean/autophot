@@ -4468,13 +4468,14 @@ def run_photometry():
                 )
                 variable_sources["x_pix"] = xpix_variable_sources
                 variable_sources["y_pix"] = ypix_variable_sources
-                # Applies the border mask - only keep sources within image bounds
+                # Applies the border mask.
+                border = 1.5 * ImageFWHM
                 height, width = image.shape
-                mask_x = (variable_sources["x_pix"] >= 0) & (
-                    variable_sources["x_pix"] < width
+                mask_x = (variable_sources["x_pix"] >= border) & (
+                    variable_sources["x_pix"] < width - border
                 )
-                mask_y = (variable_sources["y_pix"] >= 0) & (
-                    variable_sources["y_pix"] < height
+                mask_y = (variable_sources["y_pix"] >= border) & (
+                    variable_sources["y_pix"] < height - border
                 )
                 variable_sources = variable_sources[mask_x & mask_y]
 
@@ -4596,7 +4597,7 @@ def run_photometry():
                 if os.path.exists(sfft_matched_sources):
                     os.remove(sfft_matched_sources)
 
-                fpath, subtraction_mask, _ = Templates(input_yaml=input_yaml).subtract(
+                fpath, subtraction_mask, _, masked_centers = Templates(input_yaml=input_yaml).subtract(
                     scienceFpath=fpath,
                     templateFpath=templateFpath,
                     method=input_yaml["template_subtraction"]["method"],
@@ -5409,6 +5410,7 @@ def run_photometry():
                 wcs_ref=wcs_ref,
                 target_ra=target_ra,
                 target_dec=target_dec,
+                masked_source_centers=masked_centers,
             )
 
         # Target FWHM should reflect the *measured target* width on this frame,

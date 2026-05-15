@@ -4350,11 +4350,11 @@ class Templates:
             elapsed = time.time() - t0
             logger.info("Image subtraction completed in %.1f s", elapsed)
 
-            return differenceFpath, visualization_mask, matching_sources
+            return differenceFpath, visualization_mask, matching_sources, masked_centers
 
         except Exception:
             logger.exception("Unhandled error in subtract()")
-            return None, None, None
+            return None, None, None, None
         finally:
             if prepared_template_fpath:
                 try:

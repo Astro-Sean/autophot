@@ -76,6 +76,7 @@ class Plot:
         wcs_ref=None,
         target_ra=None,
         target_dec=None,
+        masked_source_centers=None,
     ):
         """
         Perform and visualize a subtraction check of astronomical images using zscale with percentile cleaning.
@@ -95,6 +96,7 @@ class Plot:
         wcs_ref (astropy.wcs.WCS or None): WCS object for reference image.
         target_ra (float or None): Target RA in degrees for marking on weight maps.
         target_dec (float or None): Target Dec in degrees for marking on weight maps.
+        masked_source_centers (list or None): List of (x, y) tuples for masked point source centers to mark with red 'x'.
         """
         import matplotlib.pyplot as plt
         from functions import set_size
@@ -321,19 +323,19 @@ class Plot:
                         if not (np.isfinite(x) and np.isfinite(y)):
                             skipped_masked += 1
                             continue
-                        
+
                         # Convert to 0-indexed if needed
                         x_plot = float(x) - 1 if x > 0 else float(x)
                         y_plot = float(y) - 1 if y > 0 else float(y)
-                        
+
                         # Check if coordinates are within image bounds
                         if not (0 <= x_plot < img_width and 0 <= y_plot < img_height):
                             skipped_masked += 1
                             continue
-                        
+
                         x = x_plot
                         y = y_plot
-                        
+
                         if "SN*" in otype:
                             otype = name
                             circle = mpatches.Circle(
@@ -372,6 +374,36 @@ class Plot:
                                 color="#FF0000",
                                 zorder=3,
                             )
+
+            # Plot masked point source centers (from segmentation-based source masks) as red "x"
+            if masked_source_centers is not None and len(masked_source_centers) > 0:
+                cross_len = square_size / 4  # Length of each arm of the cross
+                for x, y in masked_source_centers:
+                    # Skip invalid coordinates
+                    if not (np.isfinite(x) and np.isfinite(y)):
+                        continue
+
+                    # Check if coordinates are within image bounds
+                    if not (0 <= x < img_width and 0 <= y < img_height):
+                        continue
+
+                    # Plot red "x" on all three panels
+                    for ax in axes:
+                        ax.plot(
+                            [x - cross_len, x + cross_len],
+                            [y - cross_len, y + cross_len],
+                            color="#FF0000",
+                            lw=0.5,
+                            zorder=2,
+                        )
+                        ax.plot(
+                            [x - cross_len, x + cross_len],
+                            [y + cross_len, y - cross_len],
+                            color="#FF0000",
+                            lw=0.5,
+                            zorder=2,
+                        )
+                logger.info(f"Plotted {len(masked_source_centers)} masked point source centers as red 'x' markers")
 
             # Add insets and other features
             for i, (title, img_data) in enumerate(images.items()):
