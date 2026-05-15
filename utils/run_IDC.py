@@ -41,6 +41,26 @@ sys.path.append(str(Path(__file__).parent.parent))
 from functions import remove_wcs_from_header, log_warning_from_exception
 from wcs import get_wcs
 
+try:
+    from reproject import reproject_interp
+    HAS_REPROJECT = True
+except ImportError:
+    HAS_REPROJECT = False
+
+
+def _has_sip_distortion(header: fits.Header) -> bool:
+    """Check if a FITS header has SIP distortion parameters.
+
+    Args:
+        header: FITS header to check.
+
+    Returns:
+        True if header has SIP distortion keywords, False otherwise.
+    """
+    # Check for SIP distortion keywords
+    sip_keys = ["A_ORDER", "B_ORDER", "A_0_0", "B_0_0"]
+    return any(key in header for key in sip_keys)
+
 
 class ImageDistortionCorrector:
     """
@@ -811,9 +831,45 @@ NNW
             # self.clean_image(sci_image_copy)
             # self.clean_image(ref_image_copy)
 
+            # Check if science image has SIP distortion parameters from solve-field
+            # solve-field returns WCS with SIP parameters but doesn't correct the image
+            # We need to apply distortion correction before source detection
+            with fits.open(sci_image_copy) as hdul:
+                sci_head_initial = hdul[0].header
+
+            has_sip = _has_sip_distortion(sci_head_initial)
+
+            if has_sip and HAS_REPROJECT:
+                self.logger.info(
+                    "Science image has SIP distortion parameters from solve-field; applying distortion correction"
+                )
+                corrected_image_path = science_aligned_dir / "science_image_distcorr.fits"
+                correction_success = self._apply_sip_distortion_correction(
+                    image_path=str(sci_image_copy),
+                    output_path=str(corrected_image_path),
+                )
+
+                if correction_success:
+                    # Replace sci_image_copy with distortion-corrected version
+                    shutil.move(str(corrected_image_path), str(sci_image_copy))
+                    self.logger.info(
+                        f"Distortion-corrected science image: {corrected_image_path} -> {sci_image_copy}"
+                    )
+                else:
+                    self.logger.warning(
+                        "Distortion correction failed; proceeding with original image for alignment"
+                    )
+            elif has_sip and not HAS_REPROJECT:
+                self.logger.warning(
+                    "Science image has SIP distortion but reproject not available; "
+                    "proceeding with uncorrected image. Install with: pip install reproject"
+                )
+            else:
+                self.logger.info(
+                    "Science image has no SIP distortion parameters; skipping distortion correction"
+                )
+
             # Extract sources from both images
-            # Note: solve-field and distortion correction are handled in main.py before
-            # images are passed to IDC. The science image should already be distortion-corrected.
             with (
                 fits.open(sci_image_copy) as hdul,
                 fits.open(ref_image_copy) as hdul_ref,
@@ -3287,3 +3343,62 @@ NNW
             f"Final matched sources: {len(sci_cat_matched)}, match radius={match_radius_arcsec:.1f} arcsec"
         )
         return len(sci_cat_matched), match_radius_arcsec
+
+    def _apply_sip_distortion_correction(
+        self,
+        image_path: str,
+        output_path: str,
+    ) -> bool:
+        """Apply distortion correction to an image using SIP parameters from WCS.
+
+        Args:
+            image_path: Path to the FITS image with SIP distortion in WCS.
+            output_path: Path for the distortion-corrected output FITS.
+
+        Returns:
+            True on success, False on failure.
+        """
+        if not HAS_REPROJECT:
+            self.logger.warning(
+                "reproject not available; cannot apply distortion correction. "
+                "Install with: pip install reproject"
+            )
+            return False
+
+        try:
+            with fits.open(image_path) as hdul:
+                data = hdul[0].data
+                header = hdul[0].header.copy()
+
+            # Create WCS objects
+            wcs_sip = WCS(header)
+
+            # Create a TAN WCS without distortion (remove SIP parameters)
+            # This is the target WCS we want to reproject to
+            wcs_tan = wcs_sip.deepcopy()
+            wcs_tan.sip = None  # Remove SIP distortion
+
+            # Reproject the image from SIP WCS to TAN WCS
+            # This removes the distortion
+            output_data, footprint = reproject_interp(
+                (data, wcs_sip),
+                wcs_tan,
+                shape_out=data.shape,
+            )
+
+            # Update header with TAN WCS (no SIP parameters)
+            output_header = header.copy()
+            for key in wcs_tan.to_header(relax=True):
+                output_header[key] = wcs_tan.to_header(relax=True)[key]
+
+            # Write output
+            fits.writeto(output_path, output_data, output_header, overwrite=True)
+
+            self.logger.info(f"SIP distortion correction applied: {image_path} -> {output_path}")
+            return True
+
+        except Exception as e:
+            log_warning_from_exception(
+                self.logger, f"SIP distortion correction failed for {image_path}", e
+            )
+            return None
