@@ -3241,35 +3241,38 @@ class Templates:
                         fixed_slope=1.0,
                     )
 
-                    # Prioritize brighter sources by pre-filtering to the brighter 70%
-                    # This prevents RANSAC from focusing on low-brightness clusters
-                    mag_percentile_70 = np.nanpercentile(mag_img_r, 30)  # brighter sources have lower mag
-                    bright_mask = mag_img_r <= mag_percentile_70
-                    if bright_mask.sum() >= 4:
-                        X_bright = X[bright_mask]
-                        y_bright = y[bright_mask]
+                    # Prioritize high S/N sources (S/N > 5) to avoid fitting to low-quality measurements
+                    # Calculate S/N from flux and flux_err (using the arrays extracted earlier)
+                    # We need to re-extract the original flux values for the filtered subset
+                    # For simplicity, use magnitude error as a proxy: S/N ~ 1/me
+                    # me < 0.2 mag corresponds to S/N > 5 (since me = 2.5/ln(10) * fe/f ≈ 1.086 * 1/SNR)
+                    # So me < 0.2 corresponds to SNR > 5.4
+                    snr_mask = mag_err_r < 0.2
+                    if snr_mask.sum() >= 4:
+                        X_snr = X[snr_mask]
+                        y_snr = y[snr_mask]
                         ransac = RANSACRegressor(
                             estimator=base_est,
                             residual_threshold=thresh,
                             max_trials=params.max_trials,
                             min_samples=max(
-                                int(params.min_samples_fraction * len(y_bright)),
+                                int(params.min_samples_fraction * len(y_snr)),
                                 params.min_absolute_samples,
                                 4,
                             ),
                             random_state=42,
                         )
-                        ransac.fit(X_bright, y_bright)
+                        ransac.fit(X_snr, y_snr)
                         # Map inliers back to full array
                         inliers_full = np.zeros(len(y), dtype=bool)
-                        inliers_full[bright_mask] = ransac.inlier_mask_
+                        inliers_full[snr_mask] = ransac.inlier_mask_
                         inliers = inliers_full
                         if inliers.any():
                             slope = ransac.estimator_.slope_
                             intercept = ransac.estimator_.intercept_
-                            method_used = "RANSAC (brighter sources)"
+                            method_used = "RANSAC (S/N > 5)"
                     else:
-                        # Fallback to all sources if not enough bright sources
+                        # Fallback to all sources if not enough high S/N sources
                         ransac = RANSACRegressor(
                             estimator=base_est,
                             residual_threshold=thresh,

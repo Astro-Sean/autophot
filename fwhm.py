@@ -423,28 +423,29 @@ class Find_FWHM:
             # Increased max_trials for better sampling
             max_trials = int(min(500, max(100, 15 * n_pts)))
 
-            # Prioritize brighter sources (lower m_inst) to avoid fitting to low-brightness clusters
-            # Use the brighter 70% of sources (lower magnitudes)
-            mag_percentile_70 = np.nanpercentile(df["m_inst"].values, 30)
-            bright_mask = df["m_inst"].values <= mag_percentile_70
-            if bright_mask.sum() >= 2:
-                X_bright = X[bright_mask]
-                y_bright = y[bright_mask]
+            # Prioritize high S/N sources (S/N > 5) to avoid fitting to low-quality measurements
+            # Use combined magnitude error as proxy: combined_err = sqrt(m_inst_err^2 + m_peak_err^2)
+            # combined_err < 0.3 mag corresponds to S/N > 3.6 (conservative threshold)
+            combined_err = np.sqrt(np.square(df["m_inst_err"].values) + np.square(df["m_peak_err"].values))
+            snr_mask = combined_err < 0.3
+            if snr_mask.sum() >= 2:
+                X_snr = X[snr_mask]
+                y_snr = y[snr_mask]
                 ransac = RANSACRegressor(
                     estimator=ConstantOffsetRegressor(),
                     residual_threshold=residual_threshold,
                     max_trials=max_trials,
-                    min_samples=min(15, max(5, int(0.5 * len(y_bright)))),
+                    min_samples=min(15, max(5, int(0.5 * len(y_snr)))),
                     random_state=42,
                 )
-                ransac.fit(X_bright, y_bright)
+                ransac.fit(X_snr, y_snr)
                 b = float(ransac.estimator_.intercept_)
                 # Map inliers back to full array
                 inlier_mask_full = np.zeros(n_pts, dtype=bool)
-                inlier_mask_full[bright_mask] = ransac.inlier_mask_
+                inlier_mask_full[snr_mask] = ransac.inlier_mask_
                 inlier_mask = inlier_mask_full
             else:
-                # Fallback to all sources if not enough bright sources
+                # Fallback to all sources if not enough high S/N sources
                 ransac = RANSACRegressor(
                     estimator=ConstantOffsetRegressor(),
                     residual_threshold=residual_threshold,
