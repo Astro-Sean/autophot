@@ -375,36 +375,45 @@ class Plot:
                                 zorder=3,
                             )
 
-            # Plot masked point source centers (from segmentation-based source masks) as red "x"
-            # Disabled - segmentation mask was marking too many sources
-            # if masked_source_centers is not None and len(masked_source_centers) > 0:
-            #     cross_len = square_size / 4  # Length of each arm of the cross
-            #     for x, y in masked_source_centers:
-            #         # Skip invalid coordinates
-            #         if not (np.isfinite(x) and np.isfinite(y)):
-            #             continue
-            #
-            #         # Check if coordinates are within image bounds
-            #         if not (0 <= x < img_width and 0 <= y < img_height):
-            #             continue
-            #
-            #         # Plot red "x" on all three panels
-            #         for ax in axes:
-            #             ax.plot(
-            #                 [x - cross_len, x + cross_len],
-            #                 [y - cross_len, y + cross_len],
-            #                 color="#FF0000",
-            #                 lw=0.5,
-            #                 zorder=2,
-            #             )
-            #             ax.plot(
-            #                 [x - cross_len, x + cross_len],
-            #                 [y + cross_len, y - cross_len],
-            #                 color="#FF0000",
-            #                 lw=0.5,
-            #                 zorder=2,
-            #             )
-            #     logger.info(f"Plotted {len(masked_source_centers)} masked point source centers as red 'x' markers")
+            # Plot variable sources (masked from flux calibration) as red "x" markers
+            if masked_sources is not None and len(masked_sources) > 0:
+                cross_len = square_size / 4  # Length of each arm of the cross
+                masked_count = 0
+                if "x_pix" in masked_sources.columns and "y_pix" in masked_sources.columns:
+                    for x, y in zip(masked_sources["x_pix"], masked_sources["y_pix"]):
+                        # Skip invalid coordinates
+                        if not (np.isfinite(x) and np.isfinite(y)):
+                            continue
+
+                        # Convert to 0-indexed if needed
+                        x_plot = float(x) - 1 if x > 0 else float(x)
+                        y_plot = float(y) - 1 if y > 0 else float(y)
+
+                        # Check if coordinates are within image bounds
+                        if not (0 <= x_plot < img_width and 0 <= y_plot < img_height):
+                            continue
+
+                        x = x_plot
+                        y = y_plot
+
+                        # Plot red "x" on all three panels
+                        for ax in axes:
+                            ax.plot(
+                                [x - cross_len, x + cross_len],
+                                [y - cross_len, y + cross_len],
+                                color="#FF0000",
+                                lw=0.5,
+                                zorder=2,
+                            )
+                            ax.plot(
+                                [x - cross_len, x + cross_len],
+                                [y + cross_len, y - cross_len],
+                                color="#FF0000",
+                                lw=0.5,
+                                zorder=2,
+                            )
+                        masked_count += 1
+                logger.info(f"Plotted {masked_count} variable sources (masked from flux calibration) as red 'x' markers")
 
             # Add insets and other features
             for i, (title, img_data) in enumerate(images.items()):
