@@ -4040,14 +4040,14 @@ class Templates:
                 remove_large_sources=False,  # Don't remove large sources in template
                 padding=int(2 * template_fwhm),  # Smaller padding for template
             )
-            # Science: more aggressive masking (remove large sources, normal padding)
+            # Science: less aggressive masking (only saturated/negative, not large sources)
             science_seg_mask, science_seg_centers = self.create_image_mask(
                 scienceImage,
                 sat_lvl=science_saturate,
                 fwhm=science_fwhm,
                 create_source_mask=False,
                 ignore_position=target_location,
-                remove_large_sources=True,
+                remove_large_sources=False,  # Don't remove large sources to avoid masking too many
                 padding=int(DEFAULT_FWHM_PADDING_MULTIPLIER * science_fwhm),
             )
 
