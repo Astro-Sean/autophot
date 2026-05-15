@@ -376,34 +376,35 @@ class Plot:
                             )
 
             # Plot masked point source centers (from segmentation-based source masks) as red "x"
-            if masked_source_centers is not None and len(masked_source_centers) > 0:
-                cross_len = square_size / 4  # Length of each arm of the cross
-                for x, y in masked_source_centers:
-                    # Skip invalid coordinates
-                    if not (np.isfinite(x) and np.isfinite(y)):
-                        continue
-
-                    # Check if coordinates are within image bounds
-                    if not (0 <= x < img_width and 0 <= y < img_height):
-                        continue
-
-                    # Plot red "x" on all three panels
-                    for ax in axes:
-                        ax.plot(
-                            [x - cross_len, x + cross_len],
-                            [y - cross_len, y + cross_len],
-                            color="#FF0000",
-                            lw=0.5,
-                            zorder=2,
-                        )
-                        ax.plot(
-                            [x - cross_len, x + cross_len],
-                            [y + cross_len, y - cross_len],
-                            color="#FF0000",
-                            lw=0.5,
-                            zorder=2,
-                        )
-                logger.info(f"Plotted {len(masked_source_centers)} masked point source centers as red 'x' markers")
+            # Disabled - segmentation mask was marking too many sources
+            # if masked_source_centers is not None and len(masked_source_centers) > 0:
+            #     cross_len = square_size / 4  # Length of each arm of the cross
+            #     for x, y in masked_source_centers:
+            #         # Skip invalid coordinates
+            #         if not (np.isfinite(x) and np.isfinite(y)):
+            #             continue
+            #
+            #         # Check if coordinates are within image bounds
+            #         if not (0 <= x < img_width and 0 <= y < img_height):
+            #             continue
+            #
+            #         # Plot red "x" on all three panels
+            #         for ax in axes:
+            #             ax.plot(
+            #                 [x - cross_len, x + cross_len],
+            #                 [y - cross_len, y + cross_len],
+            #                 color="#FF0000",
+            #                 lw=0.5,
+            #                 zorder=2,
+            #             )
+            #             ax.plot(
+            #                 [x - cross_len, x + cross_len],
+            #                 [y + cross_len, y - cross_len],
+            #                 color="#FF0000",
+            #                 lw=0.5,
+            #                 zorder=2,
+            #             )
+            #     logger.info(f"Plotted {len(masked_source_centers)} masked point source centers as red 'x' markers")
 
             # Add insets and other features
             for i, (title, img_data) in enumerate(images.items()):
