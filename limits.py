@@ -2087,13 +2087,22 @@ class Limits:
             # =================================================================
             elapsed = time.time() - start_time
             if np.isfinite(inject_lmag):
+                # Select appropriate zeropoint for logging (same logic as plotting)
+                log_zeropoint = zeropoint
+                if image_zeropoint is not None:
+                    recovery_method_upper = str(recovery_method).strip().upper() if recovery_method else "AP"
+                    if recovery_method_upper in ("PSF", "EMCEE"):
+                        log_zeropoint = image_zeropoint.get("PSF", {}).get("zeropoint", zeropoint)
+                    else:  # AP method
+                        log_zeropoint = image_zeropoint.get("AP", {}).get("zeropoint", zeropoint)
+                
                 app_str = ""
-                if zeropoint is not None and np.isfinite(zeropoint):
-                    app_mag = float(inject_lmag) + float(zeropoint)
+                if log_zeropoint is not None and np.isfinite(log_zeropoint):
+                    app_mag = float(inject_lmag) + float(log_zeropoint)
                     app_str = f" ({app_mag:.3f} apparent)"
                 zp_log = (
-                    f"{float(zeropoint):.3f}"
-                    if zeropoint is not None and np.isfinite(zeropoint)
+                    f"{float(log_zeropoint):.3f}"
+                    if log_zeropoint is not None and np.isfinite(log_zeropoint)
                     else "n/a"
                 )
                 logger.info(

@@ -3894,22 +3894,39 @@ def run_photometry():
             input_yaml["target_x_pix"] = target_x
             input_yaml["target_y_pix"] = target_y
 
-            # Use both catalog and detected sources for matching: covers poor catalog coverage (detection fills in)
-            # and detection failures or missed sources (catalog fills in).
+            # Use high-quality isolated sources from psf_source_pool for matching.
+            # These sources were detected on the original image before resampling degradation,
+            # then recentered and validated for PSF building. Using them avoids detecting
+            # sources on the degraded resampled image (important for undersampled data like ZTF).
             logging.info(
                 log_step(
                     f"Match sources: {os.path.basename(fpath)} vs {os.path.basename(templateFpath)}"
                 )
             )
-            _, detected_sources, _ = SExtractorWrapper(config=input_yaml).run(
-                fpath,
-                pixel_scale=pixel_scale,
-                masked_sources=variable_sources,
-                weight_path=weight_fpath,
-                use_FWHM=ImageFWHM,
-                crowded=input_yaml.get("photometry", {}).get("crowded_field", False),
-                use_for_matching=True,
-            )
+
+            # Use psf_source_pool if available (high-quality isolated sources)
+            if psf_source_pool is not None and len(psf_source_pool) > 0:
+                detected_sources = psf_source_pool.copy()
+                logging.info(
+                    f"Using {len(detected_sources)} high-quality isolated sources from PSF pool for subtraction matching "
+                    f"(avoiding detection on resampled image for better PSF quality)"
+                )
+            else:
+                # Fallback: detect sources on resampled image if psf_source_pool not available
+                _, detected_sources, _ = SExtractorWrapper(config=input_yaml).run(
+                    fpath,
+                    pixel_scale=pixel_scale,
+                    masked_sources=variable_sources,
+                    weight_path=weight_fpath,
+                    use_FWHM=ImageFWHM,
+                    crowded=input_yaml.get("photometry", {}).get("crowded_field", False),
+                    use_for_matching=True,
+                )
+                logging.info(
+                    f"Detected {len(detected_sources)} sources on resampled image for subtraction matching "
+                    f"(PSF source pool not available)"
+                )
+
             use_catalog = input_yaml.get("template_subtraction", {}).get(
                 "use_catalog_for_matching", True
             )
@@ -3925,10 +3942,10 @@ def run_photometry():
                 MatchingSources = detected_sources.copy()
                 if use_catalog and has_catalog:
                     logging.info(
-                        f"Matching: {len(MatchingSources)} detected sources (catalog available but not concatenated to avoid duplication)"
+                        f"Matching: {len(MatchingSources)} sources (catalog available but not concatenated to avoid duplication)"
                     )
                 else:
-                    logging.info(f"Matching: {len(MatchingSources)} detected sources")
+                    logging.info(f"Matching: {len(MatchingSources)} sources")
             elif use_catalog and has_catalog:
                 # Detection failed or returned no sources; use catalog only.
                 MatchingSources = CatalogSources[["x_pix", "y_pix"]].copy()
@@ -4129,7 +4146,7 @@ def run_photometry():
                 image_sources = matched_df.copy()
                 template_sources = matched_df.copy()
 
-                science_large_aperture = header.get("aper", 10)
+                science_large_aperture = header.get("aper", 10)*2
                 logging.info(
                     f"Using large aperture for science image: {science_large_aperture:.1f} pixels"
                 )
@@ -4147,7 +4164,8 @@ def run_photometry():
                 # Loads the template image and header.
                 template_fwhm = template_header.get("FWHM", 3)
 
-                templatelarge_aperture = template_header.get("aper", 10)
+                templatelarge_aperture = template_header.get("aper", 10)*2
+                
                 logging.info(
                     f"Using large aperture for reference image: {templatelarge_aperture:.1f} pixels"
                 )
@@ -4228,6 +4246,11 @@ def run_photometry():
                 # Filter sources where the centroid is well-aligned with the original pixel position
                 well_aligned_mask = distance < POSITION_TOLERANCE
 
+                # Compute centroid offsets for subpixel correction
+                centroid_offset_x = np.nan
+                centroid_offset_y = np.nan
+                centroid_offset_valid = False
+
                 # Log diagnostic statistics before filtering
                 if np.any(np.isfinite(distance)):
                     mean_offset = float(np.nanmean(distance))
@@ -4237,6 +4260,26 @@ def run_photometry():
                         "Centroid alignment: mean=%.3f, median=%.3f, std=%.3f px (tolerance=%.1f px)",
                         mean_offset, median_offset, std_offset, POSITION_TOLERANCE
                     )
+
+                    # Compute mean offset in x and y for subpixel correction
+                    # Only compute if we have enough well-aligned sources
+                    if np.any(well_aligned_mask):
+                        dx = template_sources.loc[well_aligned_mask, "x_pix"].values - template_sources.loc[well_aligned_mask, "x_centroid"].values
+                        dy = template_sources.loc[well_aligned_mask, "y_pix"].values - template_sources.loc[well_aligned_mask, "y_centroid"].values
+                        if np.sum(np.isfinite(dx)) >= 5 and np.sum(np.isfinite(dy)) >= 5:
+                            centroid_offset_x = float(np.nanmedian(dx))
+                            centroid_offset_y = float(np.nanmedian(dy))
+                            offset_mag = np.sqrt(centroid_offset_x**2 + centroid_offset_y**2)
+                            logging.info(
+                                "Subpixel shift: dx=%.3f, dy=%.3f, total=%.3f px (from %d sources)",
+                                centroid_offset_x, centroid_offset_y, offset_mag, np.sum(np.isfinite(dx))
+                            )
+                            # Only apply if offset is significant (> 0.1 px) but not too large (< 2 px)
+                            if 0.1 <= offset_mag < 2.0:
+                                centroid_offset_valid = True
+                                logging.info("Subpixel shift will be applied to template before subtraction")
+                            else:
+                                logging.info("Subpixel shift magnitude (%.3f px) outside valid range [0.1, 2.0], skipping", offset_mag)
 
                 # If alignment is poor and we reject everything, adaptively relax
                 # the tolerance to keep enough sources for flux-consistent matching.
@@ -4608,7 +4651,7 @@ def run_photometry():
                 if os.path.exists(sfft_matched_sources):
                     os.remove(sfft_matched_sources)
 
-                fpath, subtraction_mask, _, masked_centers = Templates(input_yaml=input_yaml).subtract(
+                fpath, subtraction_mask, masked_centers = Templates(input_yaml=input_yaml).subtract(
                     scienceFpath=fpath,
                     templateFpath=templateFpath,
                     method=input_yaml["template_subtraction"]["method"],
@@ -4619,6 +4662,8 @@ def run_photometry():
                     templateNoise=template_weight_path,
                     background_defects_mask=defects_mask,
                     flux_scale_ref_to_sci=flux_scale_ref_to_sci,
+                    centroid_offset_x=centroid_offset_x if centroid_offset_valid else None,
+                    centroid_offset_y=centroid_offset_y if centroid_offset_valid else None,
                 )
                 if fpath is None:
                     logging.warning(

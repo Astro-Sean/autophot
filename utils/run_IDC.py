@@ -952,10 +952,16 @@ NNW
                 
                 # Compute optimal output size as intersection of valid (non-NaN) regions
                 # from both images. This reduces computation when coverage differs.
-                # Ensure the target (center_ra, center_dec) is always included in output.
+                # Ensure the actual target location (from input_yaml) is always included in output.
+                target_ra = self.input_yaml.get("target_ra", center_ra)
+                target_dec = self.input_yaml.get("target_dec", center_dec)
                 output_width, output_height = self._compute_optimal_output_shape(
                     sci_data, sci_wcs, ref_data, ref_wcs, sci_pix_scale,
-                    target_ra=center_ra, target_dec=center_dec
+                    target_ra=target_ra, target_dec=target_dec
+                )
+                self.logger.info(
+                    "SWARP output: using target (RA=%.6f, Dec=%.6f) for size calculation",
+                    target_ra, target_dec
                 )
                 self.logger.info(
                     "Optimal output shape: %dx%d (science was %dx%d, reference was %dx%d)",
@@ -1146,11 +1152,13 @@ NNW
             )
 
             # SWarp: resampling type from FWHM/undersampling
+            # Use LANCZOS3 for all resampling except undersampled data (< 2 px FWHM)
+            # where NEAREST preserves pixel values without interpolation blur
             def _swarp_resampling_type(is_undersampled: bool, fwhm_pix: float) -> str:
-                if is_undersampled or fwhm_pix < 2.2:
-                    return "BILINEAR"
-                if fwhm_pix < 3.0:
-                    return "LANCZOS2"
+                if is_undersampled or fwhm_pix < 2.0:
+                    # NEAREST for undersampled data to avoid blurring
+                    return "NEAREST"
+                # LANCZOS3 for all well-sampled data
                 return "LANCZOS3"
 
             sci_resampling_method = _swarp_resampling_type(
@@ -1389,51 +1397,85 @@ NNW
                     ref_image_copy, resampled_dir / "reference_image.resamp.fits"
                 )
             else:
-                # Resample both images onto the same grid in separate SWarp calls.
-                # Science has no .head file (it defines the output grid — applying a
-                # SCAMP self-reference .head would shift pixels off the grid -> all NaN).
-                # Reference has its SCAMP .head placed next to it so SWarp applies the
-                # WCS correction before resampling onto the fixed CENTER/IMAGE_SIZE grid.
-                resample_dir_sci = resample_dir / "sci"
-                resample_dir_ref = resample_dir / "ref"
-                resample_dir_sci.mkdir(parents=True, exist_ok=True)
-                resample_dir_ref.mkdir(parents=True, exist_ok=True)
+                # Resample both images onto the same grid in a SINGLE SWarp call.
+                # Using separate calls causes 1-pixel CRPIX offset due to internal rounding differences,
+                # even with identical CENTER/IMAGE_SIZE/PIXEL_SCALE. A single call guarantees identical CRPIX.
+                # Science has no .head file (it defines the output grid).
+                # Reference has its SCAMP .head placed next to it so SWarp applies WCS correction.
+                # Use LANCZOS3 for all resampling except undersampled data (< 2 px FWHM)
+                # where NEAREST preserves pixel values without interpolation blur
+                if sci_is_undersampled or ref_is_undersampled or fwhm_sci_pix < 2.0 or fwhm_ref_pix < 2.0:
+                    combined_resampling_method = "NEAREST"
+                else:
+                    combined_resampling_method = "LANCZOS3"
 
-                self.logger.debug("Running SWarp on science image...")
-                swarp_res_sci = self.run_swarp(
-                    [str(sci_image_copy)],
+                swarp_config_combined = {
+                    **swarp_config,
+                    "RESAMPLING_TYPE": combined_resampling_method,
+                }
+
+                self.logger.info(
+                    "SWarp resampling (single call): method=%s (sci FWHM=%.2f px%s, ref FWHM=%.2f px%s)",
+                    combined_resampling_method,
+                    fwhm_sci_pix,
+                    ", undersampled" if sci_is_undersampled else "",
+                    fwhm_ref_pix,
+                    ", undersampled" if ref_is_undersampled else "",
+                )
+
+                self.logger.debug("Running SWarp on both images together...")
+                swarp_res_combined = self.run_swarp(
+                    [str(sci_image_copy), str(ref_image_copy)],
                     scamp_results=None,
-                    output_dir=str(resample_dir_sci),
-                    config=swarp_config_sci,
+                    output_dir=str(resample_dir),
+                    config=swarp_config_combined,
                     no_weight_maps=True,
                 )
-                self.logger.debug("Running SWarp on reference image...")
-                swarp_res_ref = self.run_swarp(
-                    [str(ref_image_copy)],
-                    scamp_results=None,
-                    output_dir=str(resample_dir_ref),
-                    config=swarp_config_ref,
-                    no_weight_maps=True,
-                )
 
-                if swarp_res_sci is None or swarp_res_ref is None:
+                if swarp_res_combined is None:
                     self.logger.info("SWarp failed. Falling back to AstroAlign.")
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
 
-                sci_resamp = next(Path(swarp_res_sci["resampled_dir"]).glob("*.resamp.fits"), None)
-                ref_resamp = next(Path(swarp_res_ref["resampled_dir"]).glob("*.resamp.fits"), None)
-                if sci_resamp is None or ref_resamp is None:
-                    self.logger.info("SWarp resampled outputs not found. Falling back.")
+                # SWarp produces output files in resampled/resampled/ directory
+                canonical_dir = Path(swarp_res_combined["resampled_dir"])
+                resampled_files = list(canonical_dir.glob("*.resamp.fits"))
+
+                if len(resampled_files) < 2:
+                    self.logger.info(
+                        "SWarp did not produce both resampled outputs (found %d). Falling back.",
+                        len(resampled_files)
+                    )
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
 
-                canonical_dir = resample_dir / "resampled"
-                canonical_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(sci_resamp, canonical_dir / "science_image.resamp.fits")
-                shutil.copy2(ref_resamp, canonical_dir / "reference_image.resamp.fits")
+                # Identify science and reference outputs by filename
+                sci_resamp = None
+                ref_resamp = None
+                for f in resampled_files:
+                    if "science" in f.name.lower() or "sci" in f.name.lower():
+                        sci_resamp = f
+                    elif "reference" in f.name.lower() or "ref" in f.name.lower():
+                        ref_resamp = f
+
+                # If filenames don't match, use order (first = science, second = reference)
+                if sci_resamp is None or ref_resamp is None:
+                    sci_resamp = resampled_files[0]
+                    ref_resamp = resampled_files[1]
+                    self.logger.warning(
+                        "Could not identify outputs by name, using order: sci=%s, ref=%s",
+                        sci_resamp.name, ref_resamp.name
+                    )
+
+                # Rename to standard names for consistency
+                sci_target = canonical_dir / "science_image.resamp.fits"
+                ref_target = canonical_dir / "reference_image.resamp.fits"
+                if sci_resamp != sci_target:
+                    shutil.copy2(sci_resamp, sci_target)
+                if ref_resamp != ref_target:
+                    shutil.copy2(ref_resamp, ref_target)
                 resampled_dir = canonical_dir
 
             self.logger.debug("Looking for resampled images in %s", resampled_dir)
@@ -1455,21 +1497,59 @@ NNW
             # Log SWarp output WCS for both images so alignment can be verified.
             # Since CENTER = science pixel center and IMAGE_SIZE = science shape,
             # both outputs should have identical shapes.
+            sci_wcs_info = None
+            ref_wcs_info = None
             for _label, _path in [("science", aligned_sci), ("reference", aligned_ref)]:
                 try:
                     with fits.open(_path) as _hdul:
                         _hdr = _hdul[0].header
                         _ny, _nx = _hdul[0].data.shape
+                    wcs_info = {
+                        "label": _label,
+                        "shape": (_ny, _nx),
+                        "crpix1": float(_hdr.get("CRPIX1", 0)),
+                        "crpix2": float(_hdr.get("CRPIX2", 0)),
+                        "crval1": float(_hdr.get("CRVAL1", 0)),
+                        "crval2": float(_hdr.get("CRVAL2", 0)),
+                        "ctype1": _hdr.get("CTYPE1", "?"),
+                        "ctype2": _hdr.get("CTYPE2", "?"),
+                    }
+                    if _label == "science":
+                        sci_wcs_info = wcs_info
+                    else:
+                        ref_wcs_info = wcs_info
                     self.logger.info(
                         "SWarp output WCS [%s]: shape=(%d,%d) CRPIX=(%.2f,%.2f) "
                         "CRVAL=(%.6f,%.6f) CTYPE=(%s,%s)",
                         _label, _ny, _nx,
-                        float(_hdr.get("CRPIX1", 0)), float(_hdr.get("CRPIX2", 0)),
-                        float(_hdr.get("CRVAL1", 0)), float(_hdr.get("CRVAL2", 0)),
-                        _hdr.get("CTYPE1", "?"), _hdr.get("CTYPE2", "?"),
+                        wcs_info["crpix1"], wcs_info["crpix2"],
+                        wcs_info["crval1"], wcs_info["crval2"],
+                        wcs_info["ctype1"], wcs_info["ctype2"],
                     )
                 except Exception as _e:
                     self.logger.debug("Could not read WCS from SWarp output [%s]: %s", _label, _e)
+
+            # Verify CRPIX consistency between science and reference outputs
+            if sci_wcs_info and ref_wcs_info:
+                if sci_wcs_info["shape"] != ref_wcs_info["shape"]:
+                    self.logger.warning(
+                        "SWarp output shapes differ: science=%s, reference=%s. This may indicate alignment issues.",
+                        sci_wcs_info["shape"], ref_wcs_info["shape"]
+                    )
+                crpix_diff_x = abs(sci_wcs_info["crpix1"] - ref_wcs_info["crpix1"])
+                crpix_diff_y = abs(sci_wcs_info["crpix2"] - ref_wcs_info["crpix2"])
+                if crpix_diff_x > 0.01 or crpix_diff_y > 0.01:
+                    self.logger.warning(
+                        "SWarp output CRPIX differs: science=(%.2f,%.2f), reference=(%.2f,%.2f). "
+                        "This may indicate sub-pixel alignment issues.",
+                        sci_wcs_info["crpix1"], sci_wcs_info["crpix2"],
+                        ref_wcs_info["crpix1"], ref_wcs_info["crpix2"]
+                    )
+                else:
+                    self.logger.info(
+                        "SWarp output CRPIX consistent: both images have CRPIX=(%.2f,%.2f)",
+                        sci_wcs_info["crpix1"], sci_wcs_info["crpix2"]
+                    )
 
             # Verify output shapes match. With both SCAMP .head files placed and
             # SWarp using a fixed CENTER/IMAGE_SIZE/PIXEL_SCALE grid, both outputs
@@ -1884,8 +1964,28 @@ NNW
                     )
             
             # Cap at original science size (don't expand beyond input)
+            # But ensure target is included even if it means using full science size
             width = min(width, sci_data.shape[1])
             height = min(height, sci_data.shape[0])
+            
+            # Final check: if target is provided, verify it's within the output bounds
+            # If not, use full science image size to ensure target is included
+            if target_ra is not None and target_dec is not None:
+                # Convert target to pixel coords in science image
+                sci_target_x, sci_target_y = sci_wcs.all_world2pix([target_ra], [target_dec], 0)
+                sci_target_x, sci_target_y = float(sci_target_x[0]), float(sci_target_y[0])
+                
+                # Check if target is within output bounds (with margin)
+                margin = 50  # pixels
+                if not (margin <= sci_target_x < width - margin and margin <= sci_target_y < height - margin):
+                    self.logger.warning(
+                        "Target (%.1f, %.1f) is outside output bounds (%dx%d). "
+                        "Using full science image size (%dx%d) to ensure target is included.",
+                        sci_target_x, sci_target_y, width, height,
+                        sci_data.shape[1], sci_data.shape[0]
+                    )
+                    width = sci_data.shape[1]
+                    height = sci_data.shape[0]
             
             return width, height
             

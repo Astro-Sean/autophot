@@ -54,7 +54,7 @@ try:
     from tqdm import tqdm
 except ImportError:
     tqdm = None
-from scipy.ndimage import shift as ndimage_shift
+from scipy.ndimage import shift as ndimage_shift, binary_dilation
 from scipy.optimize import minimize
 from scipy.spatial import cKDTree
 from scipy.stats import median_abs_deviation
@@ -269,6 +269,9 @@ class MaskParams:
 
     saturation_level: float = 2**16
     """Pixel value above which a source is considered saturated."""
+
+    saturate_frac: float = 0.90
+    """Fraction of saturation_level above which a source is considered saturated (for non-linear regime avoidance)."""
 
     fwhm: int = 5
     """Full width at half-maximum of the PSF in pixels."""
@@ -2096,6 +2099,7 @@ class Templates:
         *,
         # Legacy keyword interface (used if params is None)
         sat_lvl: float = 2**16,
+        saturate_frac: float = 0.90,
         fwhm: int = 5,
         npixels: int = 8,
         padding: int = 10,
@@ -2145,6 +2149,7 @@ class Templates:
         # Resolve parameters: prefer dataclass, fall back to kwargs
         if params is not None:
             sat_lvl = params.saturation_level
+            saturate_frac = params.saturate_frac
             fwhm = params.fwhm
             padding = params.padding
             snr_limit = params.snr_limit
@@ -2275,7 +2280,7 @@ class Templates:
                 return mask, masked_centres
 
             # Flag categories (these are the bad sources we want to mask)
-            is_saturated = tbl["max_value"] > sat_lvl
+            is_saturated = tbl["max_value"] > saturate_frac * sat_lvl
             is_negative = tbl["max_value"] < 0
 
             if remove_large_sources:
@@ -2535,6 +2540,8 @@ class Templates:
                     pass
                 method_used = res.get("alignment_method", "scamp_swarp")
                 logger.info("Alignment succeeded (method: %s).", method_used)
+                # Update target coordinates to reflect new WCS after alignment
+                self._update_target_coordinates_after_alignment(sci_al, method_used)
                 return sci_al, ref_al
 
             def _astroalign() -> Tuple[Optional[str], Optional[str]]:
@@ -2557,6 +2564,8 @@ class Templates:
                     pass
                 method_used = res.get("alignment_method", "astroalign")
                 logger.info("Alignment succeeded (method: %s).", method_used)
+                # Update target coordinates to reflect new WCS after alignment
+                self._update_target_coordinates_after_alignment(sci_al, method_used)
                 return sci_al, ref_al
 
             def _reproject() -> Tuple[Optional[str], Optional[str]]:
@@ -2571,6 +2580,10 @@ class Templates:
                 )
                 if result.template_path is None:
                     return None, None
+                # Note: reproject only modifies the template, not the science image
+                # The science image WCS is unchanged, so target coordinates don't need updating
+                method_used = "reproject"
+                logger.info("Alignment succeeded (method: %s).", method_used)
                 return scienceFpath, result.template_path
 
             # ------------------------------------------------------------------
@@ -2631,6 +2644,100 @@ class Templates:
         except Exception:
             logger.exception("Error during alignment")
             return None, None
+
+    def _update_target_coordinates_after_alignment(
+        self, aligned_image_path: str, method_name: str
+    ) -> bool:
+        """
+        Update target pixel coordinates in input_yaml to reflect the WCS after alignment.
+
+        After alignment, the WCS changes (resampling onto a common grid). The target
+        pixel coordinates must be recalculated using the new WCS to ensure subsequent
+        operations (subtraction, photometry) use correct coordinates.
+
+        Args
+        ----
+        aligned_image_path : str
+            Path to the aligned science image.
+        method_name : str
+            Name of the alignment method (for logging).
+
+        Returns
+        -------
+        bool
+            True if update succeeded, False otherwise.
+        """
+        try:
+            # Load aligned image header to get new WCS
+            aligned_data, aligned_header = read_fits(aligned_image_path)
+            aligned_wcs = get_wcs(aligned_header)
+
+            # Validate WCS is valid (not NaN-producing)
+            test_ra, test_dec = aligned_wcs.all_pix2world([0], [0], 0)
+            if not (np.isfinite(test_ra[0]) and np.isfinite(test_dec[0])):
+                logger.error(
+                    "WCS validation failed after %s alignment: WCS produces NaN at pixel (0,0). "
+                    "This indicates a corrupted WCS header.",
+                    method_name
+                )
+                return False
+
+            # Get target RA/Dec from input_yaml (world coordinates don't change)
+            target_ra = self.input_yaml["target_ra"]
+            target_dec = self.input_yaml["target_dec"]
+
+            # Convert world coordinates to pixel coordinates using new WCS
+            new_target_x, new_target_y = aligned_wcs.all_world2pix(
+                target_ra, target_dec, 0
+            )
+
+            # Validate that conversion succeeded
+            if not (np.isfinite(new_target_x) and np.isfinite(new_target_y)):
+                logger.error(
+                    "WCS validation failed after %s alignment: "
+                    "Target RA/Dec conversion produced NaN pixel coordinates "
+                    "(RA=%.6f, Dec=%.6f). This indicates a corrupted WCS header.",
+                    method_name, target_ra, target_dec
+                )
+                return False
+
+            # Store old coordinates for logging
+            old_target_x = self.input_yaml.get("target_x_pix", np.nan)
+            old_target_y = self.input_yaml.get("target_y_pix", np.nan)
+
+            # Update input_yaml with new coordinates
+            self.input_yaml["target_x_pix"] = float(new_target_x)
+            self.input_yaml["target_y_pix"] = float(new_target_y)
+
+            # Validate that target is within image bounds
+            h, w = aligned_data.shape
+            margin = 50  # pixels
+            if not (margin <= new_target_x < w - margin and margin <= new_target_y < h - margin):
+                logger.warning(
+                    "Target after %s alignment is close to image edge: "
+                    "(%.1f, %.1f) in %dx%d image (margin=%d px). "
+                    "This may cause issues with subtraction/photometry.",
+                    method_name, new_target_x, new_target_y, w, h, margin
+                )
+
+            # Log the coordinate change and WCS parameters
+            logger.info(
+                "Target coordinates updated after %s alignment: "
+                "(%.1f, %.1f) -> (%.1f, %.1f). "
+                "WCS CRPIX=(%.1f, %.1f), CRVAL=(%.6f, %.6f)",
+                method_name, old_target_x, old_target_y, new_target_x, new_target_y,
+                aligned_header.get("CRPIX1", np.nan), aligned_header.get("CRPIX2", np.nan),
+                aligned_header.get("CRVAL1", np.nan), aligned_header.get("CRVAL2", np.nan)
+            )
+
+            return True
+
+        except Exception as e:
+            logger.error(
+                "Failed to update target coordinates after %s alignment: %s",
+                method_name, e
+            )
+            return False
 
     # -----------------------------------------------------------------
     # FITS processing helpers
@@ -3702,6 +3809,8 @@ class Templates:
         templateNoise: Optional[str] = None,
         background_defects_mask: Optional[np.ndarray] = None,
         flux_scale_ref_to_sci: Optional[float] = None,
+        centroid_offset_x: Optional[float] = None,
+        centroid_offset_y: Optional[float] = None,
     ) -> Tuple[
         Optional[str], Optional[np.ndarray], Optional[List[Tuple[float, float]]]
     ]:
@@ -3739,7 +3848,7 @@ class Templates:
 
         Returns
         -------
-        (differenceFpath, universal_mask, filtered_matching_sources)
+        (differenceFpath, visualization_mask, masked_centers)
             Paths and arrays, or (None, None, None) on failure.
         """
         if matching_sources is None:
@@ -3857,17 +3966,45 @@ class Templates:
             # flux_scale_ref_to_sci = 10**(-0.4 * intercept), multiplying template
             # brings it to the same photometric scale as the science image.
             if flux_scale_ref_to_sci is not None and np.isfinite(flux_scale_ref_to_sci) and flux_scale_ref_to_sci > 0:
-                templateImage = templateImage * flux_scale_ref_to_sci
+                # Get exposure times from headers to normalize flux scale
+                science_exptime = _hdr_float(scienceHeader, ["EXPTIME", "EXPOSURE", "EXPOSURE_TIME"], 1.0)
+                template_exptime = _hdr_float(templateHeader, ["EXPTIME", "EXPOSURE", "EXPOSURE_TIME"], 1.0)
+                
+                # Calculate exposure time ratio
+                exptime_ratio = science_exptime / template_exptime if template_exptime > 0 else 1.0
+                
+                # Warn if exposure time mismatch is large (> 5x)
+                if exptime_ratio > 5.0 or exptime_ratio < 0.2:
+                    logger.warning(
+                        "Large exposure time mismatch detected: science=%.1fs, template=%.1fs (ratio=%.2fx). "
+                        "This may cause poor subtraction quality if not properly accounted for.",
+                        science_exptime, template_exptime, exptime_ratio
+                    )
+                
+                # Normalize flux scale by exposure time ratio
+                # The flux_scale from find_flux_consistent_sources accounts for zeropoint differences,
+                # but we also need to account for exposure time differences to bring template to science-equivalent units.
+                flux_scale_normalized = flux_scale_ref_to_sci * exptime_ratio
+                
+                logger.info(
+                    "Flux scale normalization: photometric_scale=%.4g, exptime_ratio=%.2f (%.1fs/%.1fs), "
+                    "final_flux_scale=%.4g (%.3f mag offset total)",
+                    flux_scale_ref_to_sci, exptime_ratio, science_exptime, template_exptime,
+                    flux_scale_normalized,
+                    -2.5 * np.log10(flux_scale_normalized)
+                )
+                
+                templateImage = templateImage * flux_scale_normalized
                 if np.isfinite(template_saturate):
-                    template_saturate = float(template_saturate) * flux_scale_ref_to_sci
+                    template_saturate = float(template_saturate) * flux_scale_normalized
                 if np.isfinite(template_gain) and template_gain > 0:
-                    template_gain = float(template_gain) / flux_scale_ref_to_sci
+                    template_gain = float(template_gain) / flux_scale_normalized
                 write_fits(_ensure_prepared_template_path(), templateImage, templateHeader)
                 logger.info(
                     "Applied photometric flux scale to template: flux_scale=%.4g (%.3f mag offset). "
                     "template_gain: %.4g; template_saturate: %s.",
-                    flux_scale_ref_to_sci,
-                    -2.5 * np.log10(flux_scale_ref_to_sci),
+                    flux_scale_normalized,
+                    -2.5 * np.log10(flux_scale_normalized),
                     float(template_gain),
                     f"{template_saturate:.4g}" if np.isfinite(template_saturate) else "inf",
                 )
@@ -3971,6 +4108,53 @@ class Templates:
                 if template_saturate <= 0:
                     template_saturate = np.inf
 
+            # Apply subpixel shift to correct centroid misalignment from WCS alignment
+            # The centroid_offset values represent the mean offset between science source positions
+            # and their centroids in the template image. We shift the template to align with science.
+            if centroid_offset_x is not None and centroid_offset_y is not None:
+                if np.isfinite(centroid_offset_x) and np.isfinite(centroid_offset_y):
+                    shift_mag = np.sqrt(centroid_offset_x**2 + centroid_offset_y**2)
+                    if 0.05 <= shift_mag < 2.0:  # Valid range for subpixel correction
+                        logger.info(
+                            "Applying subpixel shift to template: dx=%.3f, dy=%.3f (total=%.3f px)",
+                            float(centroid_offset_x), float(centroid_offset_y), float(shift_mag)
+                        )
+                        # Apply shift: positive offset means template is shifted right/down,
+                        # so we shift by negative to align with science
+                        # Use 'nearest' mode to replicate edge pixels instead of filling with zeros
+                        # Fill NaN values temporarily to prevent propagation during interpolation
+                        nan_mask = ~np.isfinite(templateImage)
+                        if np.any(nan_mask):
+                            # Fill NaNs with median for shift, then restore as NaN
+                            valid_data = templateImage[np.isfinite(templateImage)]
+                            fill_value = float(np.median(valid_data)) if len(valid_data) > 0 else 0.0
+                            templateImage_filled = np.where(nan_mask, fill_value, templateImage)
+                        else:
+                            templateImage_filled = templateImage
+
+                        templateImage_shifted = ndimage_shift(
+                            templateImage_filled,
+                            shift=(-float(centroid_offset_y), -float(centroid_offset_x)),  # (y, x) order for scipy
+                            order=3,  # Cubic interpolation for smooth subpixel shift
+                            mode='nearest'  # Replicate edge pixels to avoid artificial zeros
+                        )
+
+                        # Restore NaN regions (approximately - they will be slightly expanded)
+                        if np.any(nan_mask):
+                            # Expand NaN mask slightly to account for shift
+                            nan_mask_dilated = binary_dilation(nan_mask, iterations=2)
+                            templateImage = np.where(nan_mask_dilated, np.nan, templateImage_shifted)
+                        else:
+                            templateImage = templateImage_shifted
+
+                        write_fits(_ensure_prepared_template_path(), templateImage, templateHeader)
+                        logger.info("Subpixel shift applied successfully")
+                    else:
+                        logger.info(
+                            "Subpixel shift magnitude (%.3f px) outside valid range [0.05, 2.0], skipping",
+                            float(shift_mag)
+                        )
+
             # Optional: inpaint broken/saturated template cores (cosmetic/robustness).
             # This can reduce subtraction artefacts around very bright stars, but does not
             # recover lost flux. Controlled by YAML to keep default behaviour unchanged.
@@ -3978,6 +4162,10 @@ class Templates:
                 (self.input_yaml.get("template_subtraction") or {})
                 if isinstance(self.input_yaml, dict)
                 else {}
+            )
+            # Get saturation fraction for source filtering (consistent with PSF building)
+            subtraction_saturate_frac = float(
+                ts_cfg_inp.get("subtraction_saturate_fraction", 0.90)
             )
             if _as_bool(ts_cfg_inp.get("inpaint_template_cores", False), False) and np.isfinite(
                 template_saturate
@@ -4036,15 +4224,14 @@ class Templates:
             # (often 0) kernel size into SFFT.
             #
             # Instead, derive SFFT kernel half-width from the measured FWHMs.
-            # HOTPANTS uses 1.5*FWHM for its kernel radius; we match that here
-            # to avoid over-fitting with SFFT's default 2.0*FWHM.
+            # Use 2.0x max FWHM to better capture PSF wings and reduce point source residuals.
             KER_HW_MIN = 3
             KER_HW_MAX = 50
             fwhm_ref = float(template_fwhm)
             fwhm_sci = float(science_fwhm)
-            # Use 1.5x max FWHM like HOTPANTS, with minimum of 5px for stability
+            # Use 2.0x max FWHM for better PSF wing capture, with minimum of 5px for stability
             ker_hw = int(
-                max(KER_HW_MIN, min(KER_HW_MAX, round(1.5 * max(fwhm_ref, fwhm_sci))))
+                max(KER_HW_MIN, min(KER_HW_MAX, round(2.0 * max(fwhm_ref, fwhm_sci))))
             )
             scale = max(ker_hw, 5)
             target_location = [
@@ -4085,6 +4272,7 @@ class Templates:
             template_seg_mask, template_seg_centers = self.create_image_mask(
                 templateImage,
                 sat_lvl=template_saturate,
+                saturate_frac=subtraction_saturate_frac,
                 fwhm=template_fwhm,
                 create_source_mask=False,
                 ignore_position=target_location,
@@ -4095,6 +4283,7 @@ class Templates:
             science_seg_mask, science_seg_centers = self.create_image_mask(
                 scienceImage,
                 sat_lvl=science_saturate,
+                saturate_frac=subtraction_saturate_frac,
                 fwhm=science_fwhm,
                 create_source_mask=False,
                 ignore_position=target_location,
@@ -4225,12 +4414,47 @@ class Templates:
                 ts_cfg["sfft_crowded_method"] = (
                     False  # default to ESP (sparse) for better performance on typical fields
                 )
-            # Kernel polynomial order: default to 0 unless the user explicitly overrides
+            # Kernel polynomial order: default to 0 (constant kernel)
+            # Validate and clamp to reasonable bounds (0-3 typically)
             user_kernel = ts_cfg.get("kernel_order", None)
             if user_kernel is None or user_kernel < 0:
                 kernel_order = 0
             else:
                 kernel_order = int(user_kernel)
+                if kernel_order > 3:
+                    logger.warning(
+                        "Kernel polynomial order %d is unusually high (recommended 0-3). "
+                        "High orders may cause overfitting and edge artifacts.",
+                        kernel_order
+                    )
+                    kernel_order = min(kernel_order, 3)  # Clamp to 3
+
+            # Validate background polynomial order (bg_order)
+            bg_order = ts_cfg.get("sfft_bg_order", 0)
+            if bg_order is None:
+                bg_order = 0
+            else:
+                bg_order = int(bg_order)
+                if bg_order > 2:
+                    logger.warning(
+                        "Background polynomial order %d is unusually high (recommended 0-2). "
+                        "High orders may cause overfitting and instability.",
+                        bg_order
+                    )
+                    bg_order = min(bg_order, 2)  # Clamp to 2
+
+            # Validate StarExt_iter
+            star_ext_iter = ts_cfg.get("sfft_star_ext_iter", None)
+            if star_ext_iter is not None and star_ext_iter > 0:
+                star_ext_iter = int(star_ext_iter)
+                if star_ext_iter > 6:
+                    logger.warning(
+                        "StarExt_iter %d is unusually high (recommended 1-6). "
+                        "High values may cause over-deblending and slow performance.",
+                        star_ext_iter
+                    )
+                    star_ext_iter = min(star_ext_iter, 6)  # Clamp to 6
+                ts_cfg["sfft_star_ext_iter"] = star_ext_iter
 
             # 4b. SFFT: default is sparse (ESP) for better performance; crowded (ECP) only if explicitly enabled.
 
@@ -4339,6 +4563,73 @@ class Templates:
                 )
                 return None, None, None
 
+            # =============================================================
+            # 6a. Subtraction quality validation
+            # =============================================================
+            try:
+                # Mask out NaN, universal mask, and target region for quality checks
+                quality_mask = ~np.isfinite(diff_data) | (np.abs(diff_data) < 1.1e-20) | universal_mask.astype(bool)
+                try:
+                    _tx = float(self.input_yaml.get("target_x_pix", np.nan))
+                    _ty = float(self.input_yaml.get("target_y_pix", np.nan))
+                    _fwhm_excl = float(self.input_yaml.get("fwhm", science_fwhm))
+                    _excl_r = max(3.0 * _fwhm_excl, 15.0)
+                    if np.isfinite(_tx) and np.isfinite(_ty):
+                        yy, xx = np.ogrid[:diff_data.shape[0], :diff_data.shape[1]]
+                        target_mask = (xx - _tx) ** 2 + (yy - _ty) ** 2 < _excl_r ** 2
+                        quality_mask = quality_mask | target_mask
+                except Exception:
+                    pass  # Non-fatal: skip target exclusion if it fails
+
+                # Compute quality metrics on valid pixels
+                valid_pixels = diff_data[~quality_mask]
+                if len(valid_pixels) > 0:
+                    diff_median = np.median(valid_pixels)
+                    diff_std = np.nanstd(valid_pixels)
+                    diff_rms = np.sqrt(np.mean(valid_pixels ** 2))
+
+                    logger.info(
+                        "Subtraction quality: median=%.3f, std=%.3f, rms=%.3f (based on %d valid pixels)",
+                        diff_median, diff_std, diff_rms, len(valid_pixels)
+                    )
+
+                    # Check for systematic offset
+                    if abs(diff_median) > 0.1 * diff_std:
+                        logger.warning(
+                            "Subtraction has systematic offset (median=%.3f, std=%.3f). "
+                            "This may indicate background subtraction issues.",
+                            diff_median, diff_std
+                        )
+
+                    # Check for excessive RMS
+                    if diff_rms > 5.0 * diff_std:
+                        logger.warning(
+                            "Subtraction RMS is high (rms=%.3f, std=%.3f). "
+                            "This may indicate poor subtraction quality.",
+                            diff_rms, diff_std
+                        )
+
+                    # Check for edge artifacts (high residuals at image boundaries)
+                    edge_width = 20  # pixels
+                    if diff_data.shape[0] > 2 * edge_width and diff_data.shape[1] > 2 * edge_width:
+                        edge_mask = np.zeros_like(quality_mask, dtype=bool)
+                        edge_mask[:edge_width, :] = True
+                        edge_mask[-edge_width:, :] = True
+                        edge_mask[:, :edge_width] = True
+                        edge_mask[:, -edge_width:] = True
+                        edge_mask = edge_mask | quality_mask
+                        edge_pixels = diff_data[~edge_mask]
+                        if len(edge_pixels) > 0:
+                            edge_std = np.nanstd(edge_pixels)
+                            if edge_std > 2.0 * diff_std:
+                                logger.warning(
+                                    "Subtraction has edge artifacts (edge std=%.3f, global std=%.3f). "
+                                    "This may indicate kernel or alignment issues at image boundaries.",
+                                    edge_std, diff_std
+                                )
+            except Exception as e:
+                logger.warning("Subtraction quality validation failed (non-fatal): %s", e)
+
             # Zero the difference image background (sigma-clipped median) so it is ~0
             # Exclude: NaN/sentinel pixels, the universal subtraction mask, AND a
             # circular exclusion zone around the target so that a bright transient
@@ -4383,11 +4674,11 @@ class Templates:
             elapsed = time.time() - t0
             logger.info("Image subtraction completed in %.1f s", elapsed)
 
-            return differenceFpath, visualization_mask, matching_sources, masked_centers
+            return differenceFpath, visualization_mask, masked_centers
 
         except Exception:
             logger.exception("Unhandled error in subtract()")
-            return None, None, None, None
+            return None, None, None
         finally:
             if prepared_template_fpath:
                 try:
@@ -4487,6 +4778,13 @@ class Templates:
         """Attempt SFFT subtraction; return next method to try on failure."""
         # Use finite saturation for SFFT (FITS/MeLOn cannot use inf)
         _saturate_fallback = 1e30
+        
+        def _odd(n: int) -> int:
+            """Return n if odd, else n+1."""
+            n = int(n)
+            return n + (n % 2 == 0)
+        
+        
         sat_sci = (
             float(science_saturate)
             if np.isfinite(science_saturate)
@@ -4514,6 +4812,8 @@ class Templates:
             allow_bg_override = _as_bool(
                 ts_sub.get("sfft_allow_crowded_bg_order_override", False), False
             )
+            # Star extension iterations: allow user override for better deblending
+            star_ext_iter = ts_sub.get("sfft_star_ext_iter", 2)
             # Allow user to control photometric scaling behavior.
             # HOTPANTS allows spatially-varying scaling by default; matching this
             # improves subtraction quality for images with spatial PSF/flux variations.
@@ -4553,6 +4853,9 @@ class Templates:
                 "SFFT photometric scaling: ConstPhotRatio=%s",
                 const_phot_ratio,
             )
+            
+            kernel_half_width = _odd(int(max(2*science_fwhm,2*template_fwhm)))
+            
             def _serialize_xy_pairs(xy_list) -> str:
                 if not xy_list:
                     return "[]"
@@ -4592,12 +4895,14 @@ class Templates:
                     str(bg_order),
                     "-allow_crowded_bg_order_override",
                     "true" if allow_bg_override else "false",
+                    "-star_ext_iter",
+                    str(star_ext_iter) if star_ext_iter is not None else "0",
                     "-constphotratio",
                     "true" if const_phot_ratio else "false",
                     "-matching_sources",
                     match_str,
                     "-kernel_half_width",
-                    str(scale),
+                    str(kernel_half_width),
                     "-forceconv",
                     forceconv,
                     "-gain_sci",

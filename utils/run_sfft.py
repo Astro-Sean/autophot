@@ -319,8 +319,8 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-constphotratio",
         type=str,
-        default="true",
-        help="SFFT ConstPhotRatio: 'true' restricts kernel sum (default SFFT behaviour), 'false' fits flux scaling polynomial.",
+        default="false",
+        help="SFFT ConstPhotRatio: 'true' restricts kernel sum (default SFFT behaviour), 'false' fits flux scaling polynomial (default, like HOTPANTS).",
     )
     parser.add_argument(
         "-only_flags",
@@ -357,6 +357,12 @@ def run_sfft() -> Optional[int]:
         type=str,
         default="false",
         help="If true and crowded mode with bg_order=0, override to bg_order=2.",
+    )
+    parser.add_argument(
+        "-star_ext_iter",
+        type=int,
+        default=1,
+        help="SFFT StarExt_iter (source extension iterations). If None, uses defaults (4 for sparse, 2 for crowded). Higher values (6-8) improve deblending but are slower.",
     )
     parser.add_argument(
         "-coarse_var_rejection",
@@ -609,23 +615,26 @@ def run_sfft() -> Optional[int]:
     psf_area_min = np.pi * (fwhm_min) ** 2
     # SFFT defaults use DETECT_MINAREA=5; keep at least that to avoid spurious
     # source selection that can bias the scale/background fit.
-    detect_minarea = max(5, int(np.ceil(psf_area_min * 0.5)))
+    detect_minarea = max(3, int(np.ceil(psf_area_min * 0.5)))
     detect_maxarea = 0
 
-    # Kernel half-width: user override, or auto. Use 2*FWHM so kernel is large enough
-    # KerHWLimit (min, max): SFFT clamps kernel half-width to this range.
-    # Keep max large enough that large sci/ref FWHM differences are not clamped.
-    KER_HW_LIMIT_MIN = 3
-    KER_HW_LIMIT_MAX = 50
+    # Kernel half-width: user override, or auto. Use 1.5*FWHM (HOTPANTS default)
+    # to avoid over-smoothing moderately large sources while still being large enough
+    # to fit both science and template PSFs. KerHWLimit (min, max): SFFT clamps
+    # kernel half-width to this range. Keep max large enough that large sci/ref
+    # FWHM differences are not clamped.
+    KER_HW_LIMIT_MIN = 2
+    KER_HW_LIMIT_MAX = 20
     KerHWLimit = (KER_HW_LIMIT_MIN, KER_HW_LIMIT_MAX)
 
-    # to fit both science and template PSFs (user requirement). HOTPANTS uses 1.5*FWHM;
-    # slightly larger kernel here can improve SFFT stability.
+    # HOTPANTS default is 1.5*FWHM; using this avoids over-smoothing moderately
+    # large sources while still being large enough to fit PSF differences.
     if float(args.kernel_half_width) == 0:
-        kernel_half_width = _odd(max(5, int(np.ceil(FWHM * 2))))
-        log_info(f"Auto kernel half-width: 2 * FWHM = {kernel_half_width} px")
+        kernel_half_width = _odd(max(5, int(np.ceil(FWHM * 1.5))))
+        log_info(f"Auto kernel half-width: 1.5 * FWHM = {kernel_half_width} px")
     else:
         kernel_half_width = float(args.kernel_half_width)
+        # log_info(f" kernel half-width: {kernel_half_width} px")
 
     # Clamp auto/manual width to SFFT limits before any downstream use.
     k_lo, k_hi = KerHWLimit
@@ -641,7 +650,7 @@ def run_sfft() -> Optional[int]:
         kernel_half_width = k_hi
 
     # Ensure integer type throughout (SFFT expects int for GKerHW)
-    kernel_half_width = int(kernel_half_width)
+    kernel_half_width = int(_odd(kernel_half_width))
     log_info(f"Using kernel half width: {kernel_half_width} px")
     boundary = kernel_half_width
 
@@ -719,7 +728,12 @@ def run_sfft() -> Optional[int]:
     )
 
     # sfft defaults: StarExt_iter=2 for crowded; 4 for sparse.
-    StarExt_iter = 2 if is_crowded else 4
+    # Override with user-provided value if given (0 is sentinel for "use defaults").
+    if args.star_ext_iter is not None and args.star_ext_iter > 0:
+        StarExt_iter = int(args.star_ext_iter)
+        log_info(f"Using user-specified StarExt_iter: {StarExt_iter}")
+    else:
+        StarExt_iter = 2 if is_crowded else 4
 
     BACKPHOTO_TYPE = str(getattr(args, "backphototype", "LOCAL")).upper().strip()
     if BACKPHOTO_TYPE not in ("LOCAL", "GLOBAL"):
