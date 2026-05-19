@@ -3287,6 +3287,7 @@ NNW
                 y = y - offset
             return x, y, coord_type
 
+
         sci_x, sci_y, sci_coord_type = get_xy(
             sci_cat_filtered, prefer_win=True, input_origin=1, output_origin=1
         )
@@ -3302,6 +3303,7 @@ NNW
             raise ValueError(
                 "Neither XWIN_WORLD/YWIN_WORLD nor X_WORLD/Y_WORLD found in catalog."
             )
+            
 
         sci_ra, sci_dec = get_ra_dec(sci_cat_filtered)
         ref_ra, ref_dec = get_ra_dec(ref_cat_filtered)

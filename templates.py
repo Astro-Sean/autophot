@@ -354,6 +354,15 @@ class FluxMatchParams:
     fix_slope_to_one: bool = True
     """If True, fix slope to 1 when fitting science vs reference (only fit intercept)."""
 
+    use_spatial_thinning: bool = True
+    """If True, apply spatial thinning to avoid over-clustered regions. Set False to use all available stars."""
+
+    spatial_n_bins: int = 8
+    """Number of bins per axis for spatial grid when use_spatial_thinning=True."""
+
+    spatial_max_per_bin: int = 10
+    """Maximum number of sources to keep per spatial bin when use_spatial_thinning=True."""
+
 
 @dataclass
 class ReprojectConfig:
@@ -3309,15 +3318,15 @@ class Templates:
             idx_r = indices[robust_mask]
 
             # --- Optional spatial thinning to avoid over-clustered regions ---
-            if {"x", "y"}.issubset(catalog_img.columns):
+            if params.use_spatial_thinning and {"x", "y"}.issubset(catalog_img.columns):
                 x_pos = catalog_img.loc[idx_r, "x"].to_numpy(dtype=float)
                 y_pos = catalog_img.loc[idx_r, "y"].to_numpy(dtype=float)
                 spatial_mask = self._spatially_uniform_mask(
                     x_pos,
                     y_pos,
                     value=mag_img_r,
-                    n_bins=8,
-                    max_per_bin=10,
+                    n_bins=params.spatial_n_bins,
+                    max_per_bin=params.spatial_max_per_bin,
                     prefer_small_value=True,
                 )
                 if spatial_mask.any():
@@ -3966,45 +3975,45 @@ class Templates:
             # flux_scale_ref_to_sci = 10**(-0.4 * intercept), multiplying template
             # brings it to the same photometric scale as the science image.
             if flux_scale_ref_to_sci is not None and np.isfinite(flux_scale_ref_to_sci) and flux_scale_ref_to_sci > 0:
-                # Get exposure times from headers to normalize flux scale
+                # Get exposure times from headers for informational purposes only
                 science_exptime = _hdr_float(scienceHeader, ["EXPTIME", "EXPOSURE", "EXPOSURE_TIME"], 1.0)
                 template_exptime = _hdr_float(templateHeader, ["EXPTIME", "EXPOSURE", "EXPOSURE_TIME"], 1.0)
-                
-                # Calculate exposure time ratio
+
+                # Calculate exposure time ratio for informational logging
                 exptime_ratio = science_exptime / template_exptime if template_exptime > 0 else 1.0
-                
+
                 # Warn if exposure time mismatch is large (> 5x)
                 if exptime_ratio > 5.0 or exptime_ratio < 0.2:
                     logger.warning(
                         "Large exposure time mismatch detected: science=%.1fs, template=%.1fs (ratio=%.2fx). "
-                        "This may cause poor subtraction quality if not properly accounted for.",
+                        "Exposure time normalization is NOT applied to flux scale.",
                         science_exptime, template_exptime, exptime_ratio
                     )
-                
-                # Normalize flux scale by exposure time ratio
-                # The flux_scale from find_flux_consistent_sources accounts for zeropoint differences,
-                # but we also need to account for exposure time differences to bring template to science-equivalent units.
-                flux_scale_normalized = flux_scale_ref_to_sci * exptime_ratio
-                
+
+                # Use photometric scale directly (no exposure time normalization)
+                # The flux_scale from find_flux_consistent_sources accounts for zeropoint differences.
+                # Exposure time normalization is removed to avoid extreme flux scale factors that cause SFFT oversubtraction.
+                flux_scale = flux_scale_ref_to_sci
+
                 logger.info(
-                    "Flux scale normalization: photometric_scale=%.4g, exptime_ratio=%.2f (%.1fs/%.1fs), "
-                    "final_flux_scale=%.4g (%.3f mag offset total)",
-                    flux_scale_ref_to_sci, exptime_ratio, science_exptime, template_exptime,
-                    flux_scale_normalized,
-                    -2.5 * np.log10(flux_scale_normalized)
+                    "Flux scale applied: photometric_scale=%.4g (%.3f mag offset). "
+                    "Exposure time ratio=%.2f (%.1fs/%.1fs) - NOT applied to flux scale.",
+                    flux_scale,
+                    -2.5 * np.log10(flux_scale),
+                    exptime_ratio, science_exptime, template_exptime
                 )
-                
-                templateImage = templateImage * flux_scale_normalized
+
+                templateImage = templateImage * flux_scale
                 if np.isfinite(template_saturate):
-                    template_saturate = float(template_saturate) * flux_scale_normalized
+                    template_saturate = float(template_saturate) * flux_scale
                 if np.isfinite(template_gain) and template_gain > 0:
-                    template_gain = float(template_gain) / flux_scale_normalized
+                    template_gain = float(template_gain) / flux_scale
                 write_fits(_ensure_prepared_template_path(), templateImage, templateHeader)
                 logger.info(
                     "Applied photometric flux scale to template: flux_scale=%.4g (%.3f mag offset). "
                     "template_gain: %.4g; template_saturate: %s.",
-                    flux_scale_normalized,
-                    -2.5 * np.log10(flux_scale_normalized),
+                    flux_scale,
+                    -2.5 * np.log10(flux_scale),
                     float(template_gain),
                     f"{template_saturate:.4g}" if np.isfinite(template_saturate) else "inf",
                 )
@@ -4046,6 +4055,8 @@ class Templates:
                     if np.isfinite(sci_std) and np.isfinite(ref_std) and ref_std > 0:
                         scale_fac = sci_std / ref_std
                         # Only apply when the mismatch is large (avoid tiny jitter).
+                        # Note: SFFT performs its own photometric scaling; this pre-scaling
+                        # is only for extreme cases where image-wide flux levels differ significantly.
                         if scale_fac >= 50 or scale_fac <= 0.02:
                             old_gain = (
                                 float(template_gain)
@@ -4224,14 +4235,14 @@ class Templates:
             # (often 0) kernel size into SFFT.
             #
             # Instead, derive SFFT kernel half-width from the measured FWHMs.
-            # Use 2.0x max FWHM to better capture PSF wings and reduce point source residuals.
+            # Use 1.5x max FWHM to match HOTPANTS behavior and reduce oversubtraction risk.
             KER_HW_MIN = 3
             KER_HW_MAX = 50
             fwhm_ref = float(template_fwhm)
             fwhm_sci = float(science_fwhm)
-            # Use 2.0x max FWHM for better PSF wing capture, with minimum of 5px for stability
+            # Use 1.5x max FWHM to match HOTPANTS (avoids over-smoothing that can cause oversubtraction)
             ker_hw = int(
-                max(KER_HW_MIN, min(KER_HW_MAX, round(2.0 * max(fwhm_ref, fwhm_sci))))
+                max(KER_HW_MIN, min(KER_HW_MAX, round(1.5 * max(fwhm_ref, fwhm_sci))))
             )
             scale = max(ker_hw, 5)
             target_location = [
@@ -4493,7 +4504,7 @@ class Templates:
                     masked_centers,
                     matching_sources,
                     kernel_order,
-                    scale,
+                    scale*2,
                     method,
                     science_fwhm,
                     template_fwhm,
@@ -4797,7 +4808,8 @@ class Templates:
         )
         try:
             script = Path(__file__).parent / "utils" / "run_sfft.py"
-            excluded = masked_sources + masked_centers
+            # Only pass masked_sources (variable sources), not masked_centers (segmentation)
+            excluded = masked_sources
             current_excluded = list(excluded)
             current_matching_sources = list(matching_sources)
 
@@ -4815,10 +4827,15 @@ class Templates:
             # Star extension iterations: allow user override for better deblending
             star_ext_iter = ts_sub.get("sfft_star_ext_iter", 2)
             # Allow user to control photometric scaling behavior.
-            # HOTPANTS allows spatially-varying scaling by default; matching this
-            # improves subtraction quality for images with spatial PSF/flux variations.
+            # ConstPhotRatio=False fits flux scaling polynomial (spatially-varying, like HOTPANTS).
+            # ConstPhotRatio=True forces a single global flux scale, which can cause oversubtraction
+            # when flux varies across the image.
             const_phot_ratio = _as_bool(
                 ts_sub.get("sfft_const_phot_ratio", False), False
+            )
+            # Allow user to control whether masked/excluded sources are passed to SFFT
+            pass_masked_sources = _as_bool(
+                ts_sub.get("sfft_pass_masked_sources", False), False
             )
 
             # crowded_field is a shortcut: when True, use SFFT crowded (ECP) unless
@@ -4853,8 +4870,17 @@ class Templates:
                 "SFFT photometric scaling: ConstPhotRatio=%s",
                 const_phot_ratio,
             )
-            
-            kernel_half_width = _odd(int(max(2*science_fwhm,2*template_fwhm)))
+
+            # Calculate kernel half-width from FWHM (same as HOTPANTS)
+            KER_HW_MIN = 3
+            KER_HW_MAX = 50
+            fwhm_ref = float(template_fwhm)
+            fwhm_sci = float(science_fwhm)
+            ker_hw = int(
+                max(KER_HW_MIN, min(KER_HW_MAX, round(1.5 * max(fwhm_ref, fwhm_sci))))
+            )
+            # Use the kernel half-width calculated from FWHM (ker_hw), not the scale parameter
+            kernel_half_width = ker_hw
             
             def _serialize_xy_pairs(xy_list) -> str:
                 if not xy_list:
@@ -4887,8 +4913,13 @@ class Templates:
                     str(diff_fp),
                     "-mask",
                     str(mask_loc),
-                    "-masked_sources",
-                    excl_str,
+                ]
+                
+                # Conditionally add -masked_sources argument based on config
+                if pass_masked_sources:
+                    cmd_local.extend(["-masked_sources", excl_str])
+                
+                cmd_local.extend([
                     "-kernel_order",
                     str(kernel_order),
                     "-bg_order",
@@ -4913,7 +4944,7 @@ class Templates:
                     str(sat_sci),
                     "-saturate_ref",
                     str(sat_ref),
-                ]
+                ])
 
                 # Optional: finer background mesh for SExtractor/SFFT.
                 back_size = ts_sub.get("sfft_back_size", None)

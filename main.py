@@ -4146,9 +4146,11 @@ def run_photometry():
                 image_sources = matched_df.copy()
                 template_sources = matched_df.copy()
 
-                science_large_aperture = header.get("aper", 10)*2
+                # Use standard aperture radius instead of large doubled aperture
+                # Large apertures cause aperture_sum_invalid in highly masked images
+                science_aperture = aperture_radius
                 logging.info(
-                    f"Using large aperture for science image: {science_large_aperture:.1f} pixels"
+                    f"Using aperture for science image: {science_aperture:.1f} pixels"
                 )
 
                 # Photometry on the science image.
@@ -4159,15 +4161,15 @@ def run_photometry():
                 image_sources = aperture_photometry.measure(
                     sources=image_sources[["x_pix", "y_pix"]],
                     exposure_time=exposure_time,
-                    ap_size=science_large_aperture,
+                    ap_size=science_aperture,
                 )
                 # Loads the template image and header.
                 template_fwhm = template_header.get("FWHM", 3)
 
-                templatelarge_aperture = template_header.get("aper", 10)*2
-                
+                # Use standard aperture radius for template as well
+                template_aperture_size = aperture_radius
                 logging.info(
-                    f"Using large aperture for reference image: {templatelarge_aperture:.1f} pixels"
+                    f"Using aperture for reference image: {template_aperture_size:.1f} pixels"
                 )
 
                 # Photometry on the template image (use *template* exposure from its header).
@@ -4203,7 +4205,7 @@ def run_photometry():
                 template_sources = template_aperture.measure(
                     sources=template_sources[["x_pix", "y_pix"]],
                     exposure_time=float(template_exposure),
-                    ap_size=templatelarge_aperture,
+                    ap_size=template_aperture_size,
                     gain=float(template_gain),
                     n_jobs=ap_n_jobs,
                 )
@@ -4322,10 +4324,19 @@ def run_photometry():
                 flux_scale_ref_to_sci = None
                 if len(image_sources) > 5:
                     template_obj = Templates(input_yaml=input_yaml)
+                    # Build flux matching parameters from config
+                    from templates import FluxMatchParams
+                    ts_cfg = input_yaml.get("template_subtraction", {}) or {}
+                    flux_params = FluxMatchParams(
+                        use_spatial_thinning=ts_cfg.get("flux_match_use_spatial_thinning", True),
+                        spatial_n_bins=ts_cfg.get("flux_match_spatial_n_bins", 8),
+                        spatial_max_per_bin=ts_cfg.get("flux_match_spatial_max_per_bin", 10),
+                    )
                     MatchingSources, offset_params = (
                         template_obj.find_flux_consistent_sources(
                             image_sources,
                             template_sources,
+                            params=flux_params,
                         )
                     )
                     # offset_params = (mag_slope, flux_scale); use flux_scale to

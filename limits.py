@@ -952,11 +952,14 @@ class Limits:
                     total = int(vals.size)
                     if total <= 0:
                         continue
+                    # TOLERANT CHECK: Annulus can have some NaNs, but needs minimum valid pixels
+                    # Require at least 50% of annulus pixels to be valid (same as aperture.py)
+                    annulus_valid_fraction = 0.5
                     ok = np.isfinite(vals)
                     if avoid_zero_pixels:
                         ok &= (vals != 0.0)
                     n_ok = int(np.count_nonzero(ok))
-                    if n_ok >= min_pix and (n_ok / float(total)) >= min_frac:
+                    if n_ok >= min_pix and (n_ok / float(total)) >= annulus_valid_fraction:
                         keep[i] = True
                 return df[keep].copy()
 
@@ -1090,7 +1093,16 @@ class Limits:
                             if ann_vals is not None:
                                 ann_vals = np.asarray(ann_vals, dtype=float)
                                 ann_vals = ann_vals[np.isfinite(ann_vals)]
-                            mean_annulus = float(np.median(ann_vals)) if (ann_vals is not None and ann_vals.size >= 4) else 0.0
+                            # TOLERANT CHECK: Require at least 50% of annulus pixels to be valid
+                            annulus_valid_fraction = 0.5
+                            if ann_vals is not None and ann_vals.size >= 4:
+                                total_annulus = ann_vals.size
+                                if ann_vals.size >= (total_annulus * annulus_valid_fraction):
+                                    mean_annulus = float(np.median(ann_vals))
+                                else:
+                                    mean_annulus = 0.0
+                            else:
+                                mean_annulus = 0.0
                         except Exception:
                             mean_annulus = 0.0
                     else:
@@ -1103,11 +1115,19 @@ class Limits:
                             if ann_vals is not None:
                                 ann_vals = np.asarray(ann_vals, dtype=float)
                                 ann_vals = ann_vals[np.isfinite(ann_vals)]
-                            if ann_vals is not None and ann_vals.size >= 8:
-                                mean_annulus = float(np.median(ann_vals))
-                                mad = float(np.median(np.abs(ann_vals - mean_annulus)))
-                                sigma_ref = max(mad * 1.4826, 1e-30)
-                                var_ref = sigma_ref ** 2
+                            # TOLERANT CHECK: Require at least 50% of annulus pixels to be valid
+                            annulus_valid_fraction = 0.5
+                            if ann_vals is not None:
+                                total_annulus = ann_vals.size
+                                if ann_vals.size >= (total_annulus * annulus_valid_fraction):
+                                    mean_annulus = float(np.median(ann_vals))
+                                    mad = float(np.median(np.abs(ann_vals - mean_annulus)))
+                                    sigma_ref = max(mad * 1.4826, 1e-30)
+                                    var_ref = sigma_ref ** 2
+                                else:
+                                    mean_annulus = 0.0
+                                    var_ref = _global_var
+                                    sigma_ref = float(np.sqrt(max(var_ref, 1e-60)))
                             else:
                                 mean_annulus = 0.0
                                 var_ref = _global_var

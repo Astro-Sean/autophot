@@ -356,11 +356,21 @@ def _measure_worker(args):
         # and locally background-subtracted stamps can legitimately contain 0-valued
         # pixels, and `Aperture.measure()` already maps 0.0 -> NaN upstream when
         # zeros are used as an explicit bad-pixel flag in the input image.
-        ap_pix = ap_pix[np.isfinite(ap_pix)]
-        bkg_pix = bkg_pix[np.isfinite(bkg_pix)]
 
-        if ap_pix.size == 0 or bkg_pix.size == 0:
-            return {"idx": i, "fail_reason": "empty_pixels"}
+        # STRICT CHECK: Aperture must have NO NaNs (measurement region must be clean)
+        ap_has_nan = not np.all(np.isfinite(ap_pix))
+        if ap_has_nan:
+            return {"idx": i, "fail_reason": "aperture_has_nan"}
+
+        # TOLERANT CHECK: Annulus can have some NaNs, but needs minimum valid pixels
+        bkg_pix = bkg_pix[np.isfinite(bkg_pix)]
+        # Require at least 50% of annulus pixels to be valid for background estimation
+        annulus_valid_fraction = 0.5
+        if bkg_pix.size < (len(ap_pix) * annulus_valid_fraction):
+            return {"idx": i, "fail_reason": "annulus_too_many_nans"}
+
+        if ap_pix.size == 0:
+            return {"idx": i, "fail_reason": "empty_aperture"}
 
         # Robust background via MAD (handles negatives cleanly).
         bkg_value = np.median(bkg_pix)

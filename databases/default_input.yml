@@ -360,6 +360,11 @@ default_input:
     download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).
     templates_size: 10 # float --- Template cutout size (arcmin) around target when building/using templates.
 
+    # Flux matching parameters for template photometric scaling
+    flux_match_use_spatial_thinning: True # bool --- If True, apply spatial thinning to avoid over-clustered regions. Set False to use all available stars for flux scaling.
+    flux_match_spatial_n_bins: 8 # int --- Number of bins per axis for spatial grid when flux_match_use_spatial_thinning=True.
+    flux_match_spatial_max_per_bin: 10 # int --- Maximum number of sources to keep per spatial bin when flux_match_use_spatial_thinning=True. Increase to use more stars.
+
     hotpants_exe_loc: hotpants # str --- HOTPANTS executable name/path (defaults to `hotpants` on PATH).
     hotpants_timeout: 100 # int --- Timeout (seconds) for HOTPANTS subtraction call.
 
@@ -380,17 +385,18 @@ default_input:
     crowded_field: False # bool --- Global crowded-field flag for subtraction/source selection heuristics.
     sextractor_crowded: False # bool --- Use crowded-field SExtractor settings for subtraction/source selection (if supported).
     sfft_crowded_method: False # bool --- Force SFFT crowded-field configuration (overrides auto logic). Default False (sparse) for better performance.
-    sfft_const_phot_ratio: True # bool --- SFFT ConstPhotRatio; True enforces constant photometric ratio. Default False (like HOTPANTS) for spatially-varying scaling.
+    sfft_const_phot_ratio: False # bool --- SFFT ConstPhotRatio; False fits flux scaling polynomial (spatially-varying, like HOTPANTS). True enforces constant photometric ratio (can cause oversubtraction when flux varies).
     sfft_only_flags: [0, 1, 2] # list[int]|null --- SExtractor FLAGS values kept by SFFT source selection (null disables flag filtering).
     sfft_allow_crowded_bg_order_override: False # bool --- If True, crowded SFFT may override bg_order=0 to 2 for stability.
     sfft_cvrej_magd_thresh: 0.12 # float --- Coarse variable-rejection magnitude-difference threshold (lower is stricter).
     sfft_evrej_ratio_thresh: 6.0 # float --- Elaborate variable-rejection ratio threshold (lower is stricter).
     sfft_evrej_safe_magdev: 0.04 # float --- Safe magnitude-deviation threshold for elaborate rejection.
-    sfft_pac_ratio_thresh: 2.8 # float --- Post-anomaly-check ratio threshold for SFFT source filtering.
+    sfft_pac_ratio_thresh: 4.0 # float --- Post-anomaly-check ratio threshold for SFFT source filtering.
     sfft_use_post_anomaly_feedback: True # bool --- If True, run one extra SFFT pass using MeLOn post-anomaly sources as additional banned priors.
-    sfft_post_anomaly_min_count: 1 # int --- Minimum number of post-anomaly sources required before feedback retry is triggered.
+    sfft_post_anomaly_min_count: 3 # int --- Minimum number of post-anomaly sources required before feedback retry is triggered.
     sfft_post_anomaly_max_fraction: 0.80 # float --- Skip feedback retry if post-anomaly count exceeds this fraction of prior-selected sources.
     sfft_post_anomaly_match_radius_px: 1.5 # float --- Radius (pixels) for removing prior-selected matches near post-anomaly sources on retry.
+    sfft_pass_masked_sources: False # bool --- If True, pass excluded/masked sources to SFFT via -masked_sources argument. If False, SFFT will not receive source bans from the pipeline.
     sfft_manual_matching_sources: null # list[list[float]]|null --- Optional list of [x, y] pixel coordinates to use as prior matching sources for SFFT. If provided, overrides automatic source matching. Example: [[100.5, 200.3], [150.2, 300.1]]
 
     inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).

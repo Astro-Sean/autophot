@@ -630,7 +630,7 @@ def run_sfft() -> Optional[int]:
     # HOTPANTS default is 1.5*FWHM; using this avoids over-smoothing moderately
     # large sources while still being large enough to fit PSF differences.
     if float(args.kernel_half_width) == 0:
-        kernel_half_width = _odd(max(5, int(np.ceil(FWHM * 1.5))))
+        kernel_half_width = _odd(max(5, int(np.ceil(FWHM * 2.5))))
         log_info(f"Auto kernel half-width: 1.5 * FWHM = {kernel_half_width} px")
     else:
         kernel_half_width = float(args.kernel_half_width)
@@ -724,7 +724,7 @@ def run_sfft() -> Optional[int]:
     DEBLEND_MINCON = 0.005
 
     constant_phot_ratio = _parse_bool_str(
-        "constphotratio", getattr(args, "constphotratio", "true")
+        "constphotratio", getattr(args, "constphotratio", "false")
     )
 
     # sfft defaults: StarExt_iter=2 for crowded; 4 for sparse.
