@@ -28,6 +28,13 @@ from astropy.coordinates import SkyCoord, search_around_sky
 from astropy.io import fits
 from astropy.stats import sigma_clip
 from astropy.table import Table
+
+# Check if reproject is available for fallback alignment
+try:
+    from reproject import reproject_interp, reproject_adaptive
+    HAS_REPROJECT = True
+except ImportError:
+    HAS_REPROJECT = False
 from astropy.visualization import ZScaleInterval
 import astropy.wcs as WCS
 from matplotlib.patches import Circle
