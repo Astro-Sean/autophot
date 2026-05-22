@@ -2718,6 +2718,20 @@ class Templates:
             self.input_yaml["target_x_pix"] = float(new_target_x)
             self.input_yaml["target_y_pix"] = float(new_target_y)
 
+            # Fix WCS: anchor CRVAL to target RA/Dec and CRPIX to target pixel position
+            # This ensures the WCS origin is at the target, preventing coordinate shifts
+            # when SWarp uses a different CENTER for resampling
+            aligned_header["CRVAL1"] = target_ra
+            aligned_header["CRVAL2"] = target_dec
+            aligned_header["CRPIX1"] = new_target_x + 1  # FITS uses 1-based indexing
+            aligned_header["CRPIX2"] = new_target_y + 1
+
+            # Write corrected header back to the aligned image
+            write_fits(aligned_image_path, aligned_data, aligned_header, overwrite=True)
+
+            # Reload WCS with corrected header
+            aligned_wcs = get_wcs(aligned_header)
+
             # Validate that target is within image bounds
             h, w = aligned_data.shape
             margin = 50  # pixels
