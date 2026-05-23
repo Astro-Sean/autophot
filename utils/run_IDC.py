@@ -1162,6 +1162,13 @@ NNW
             # Use LANCZOS3 for all resampling except undersampled data (< 2 px FWHM)
             # where NEAREST preserves pixel values without interpolation blur
             def _swarp_resampling_type(is_undersampled: bool, fwhm_pix: float) -> str:
+                # Defensive checks for None/NaN values
+                if is_undersampled is None:
+                    is_undersampled = False
+                if fwhm_pix is None or not np.isfinite(fwhm_pix):
+                    # Default to LANCZOS3 if FWHM is invalid
+                    self.logger.warning("Invalid FWHM (%s), defaulting to LANCZOS3", fwhm_pix)
+                    return "LANCZOS3"
                 if is_undersampled or fwhm_pix < 2.0:
                     # NEAREST for undersampled data to avoid blurring
                     return "NEAREST"
@@ -1411,7 +1418,17 @@ NNW
                 # Reference has its SCAMP .head placed next to it so SWarp applies WCS correction.
                 # Use LANCZOS3 for all resampling except undersampled data (< 2 px FWHM)
                 # where NEAREST preserves pixel values without interpolation blur
-                if sci_is_undersampled or ref_is_undersampled or fwhm_sci_pix < 2.0 or fwhm_ref_pix < 2.0:
+                # Defensive checks for None/NaN values
+                sci_undersampled = sci_is_undersampled if sci_is_undersampled is not None else False
+                ref_undersampled = ref_is_undersampled if ref_is_undersampled is not None else False
+                sci_fwhm_valid = fwhm_sci_pix is not None and np.isfinite(fwhm_sci_pix)
+                ref_fwhm_valid = fwhm_ref_pix is not None and np.isfinite(fwhm_ref_pix)
+                
+                if sci_undersampled or ref_undersampled:
+                    combined_resampling_method = "NEAREST"
+                elif sci_fwhm_valid and fwhm_sci_pix < 2.0:
+                    combined_resampling_method = "NEAREST"
+                elif ref_fwhm_valid and fwhm_ref_pix < 2.0:
                     combined_resampling_method = "NEAREST"
                 else:
                     combined_resampling_method = "LANCZOS3"
