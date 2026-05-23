@@ -91,6 +91,13 @@ output_file = AutomatedPhotometry.run_photometry(default_input=config)
 print(f"Results saved to: {output_file}")
 ```
 
+### Listing All Parameters
+
+```python
+from autophot import list_parameters
+list_parameters()
+```
+
 ---
 
 ## Optional Dependencies
@@ -109,15 +116,14 @@ or install via apt (with sudo rights):
 sudo apt install astrometry.net
 ```
 
+You will also need to get some index files for astrometry.net. You can download them from the [astrometry.net website](https://astrometry.net/data.html)
+```
+
 ### Astromatic Suite (SExtractor, SCAMP, SWarp)
 
 ```bash
 conda install -c conda-forge astromatic-source-extractor astromatic-scamp astromatic-swarp
 ```
-
-> [!TIP]
-> For best template-to-science registration (especially near hosts / chip edges),
-> use SCAMP+SWarp alignment and a TPV/PV distortion model (see “Template subtraction” below).
 
 ### SFFT
 
@@ -237,13 +243,6 @@ output = AutomatedPhotometry.run_photometry(default_input=config, do_photometry=
 from lightcurve import plot_lightcurve, generate_photometry_table
 plot_lightcurve(output, snr_limit=3, method="PSF")
 generate_photometry_table(output, snr_limit=3, method="PSF")
-```
-
-### Listing All Parameters
-
-```python
-from autophot import list_parameters
-list_parameters()
 ```
 
 
