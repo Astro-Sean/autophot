@@ -3598,22 +3598,33 @@ class Templates:
         from matplotlib import pyplot as plt
         from functions import set_size
         from plotting_utils import (
-            apply_autophot_mplstyle,
-            get_color,
-            get_marker_size,
-            get_alpha,
-            get_line_width,
-            ransac_legend_top_outside,
-            set_mag_axes_inverted_xy,
+            apply_autophot_mplstyle, get_ransac_color, get_marker_size,
+            get_alpha, get_line_width, ransac_grid, ransac_savefig,
+            ransac_legend_top_outside, set_mag_axes_inverted_xy,
         )
 
         apply_autophot_mplstyle()
         plt.ioff()
         fig, ax = plt.subplots(figsize=set_size(340, 1))
-        plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
 
-        # Final selected inliers - small outlined markers
-        sel = robust["is_inlier"].to_numpy(bool)
+        # Outliers first so inliers sit on top
+        rej = ~robust["is_inlier"].to_numpy(bool)
+        if rej.any():
+            ax.errorbar(
+                robust.loc[rej, "mag_img"],
+                robust.loc[rej, "mag_tpl"],
+                xerr=mag_err_robust[rej],
+                yerr=mag_err_robust[rej],
+                fmt="x",
+                color=get_ransac_color('outliers'),
+                ecolor="lightgrey",
+                alpha=get_alpha('medium'),
+                markersize=get_marker_size('medium'),
+                capsize=0,
+                elinewidth=0.4,
+                label=f"Outliers [{np.sum(rej)}]",
+            )
+        sel = ~rej
         ax.errorbar(
             robust.loc[sel, "mag_img"],
             robust.loc[sel, "mag_tpl"],
@@ -3621,68 +3632,41 @@ class Templates:
             yerr=mag_err_robust[sel],
             fmt="o",
             markersize=get_marker_size('medium'),
-            mfc="none",
-            mec=get_color('inliers'),
+            color=get_ransac_color('flux_comparison'),
             ecolor="lightgrey",
             elinewidth=0.4,
             capsize=0,
             alpha=get_alpha('dark'),
             label=f"Inliers [{np.sum(sel)}]",
         )
-        # Rejected robust points
-        rej = ~sel
-        ax.errorbar(
-            robust.loc[rej, "mag_img"],
-            robust.loc[rej, "mag_tpl"],
-            xerr=mag_err_robust[rej],
-            yerr=mag_err_robust[rej],
-            fmt="x",
-            color=get_color('outliers'),
-            ecolor="lightgrey",
-            alpha=get_alpha('medium'),
-            lw=get_line_width('thin'),
-            markersize=get_marker_size('medium'),
-            capsize=0,
-            elinewidth=0.4,
-            label=f"Outliers [{np.sum(rej)}]",
-        )
         xx = np.linspace(mag_img_robust.min(), mag_img_robust.max(), 100)
         yy = slope * xx + intercept
         if np.isfinite(slope) and abs(float(slope) - 1.0) < 0.02:
-            fit_lbl = f"Fit: m_ref = m_sci + {intercept:.3f} (slope≈1)"
+            fit_lbl = rf"Fit: $m_{{\rm ref}} = m_{{\rm sci}} + {intercept:.3f}$ (slope$\approx$1)"
         else:
-            fit_lbl = f"Fit: m_ref = {slope:.3f} m_sci + {intercept:.3f}"
+            fit_lbl = rf"Fit: $m_{{\rm ref}} = {slope:.3f}\,m_{{\rm sci}} + {intercept:.3f}$"
+        if sel.sum() > 0:
+            residuals = robust.loc[sel, "mag_tpl"].values - (slope * robust.loc[sel, "mag_img"].values + intercept)
+            intercept_error = np.std(residuals) / np.sqrt(sel.sum())
+            ax.fill_between(
+                xx, yy - intercept_error, yy + intercept_error,
+                color=get_ransac_color('error_band'), alpha=get_alpha('very_light'),
+            )
         ax.plot(
-            xx,
-            yy,
-            color=get_color("fit"),
+            xx, yy,
+            color=get_ransac_color('fit'),
             linestyle="--",
             lw=get_line_width("medium"),
             label=fit_lbl,
         )
-        # Add shaded error region (calculate from residuals)
-        if sel.sum() > 0:
-            residuals = robust.loc[sel, "mag_tpl"].values - (slope * robust.loc[sel, "mag_img"].values + intercept)
-            residual_std = np.std(residuals)
-            n_points = sel.sum()
-            intercept_error = residual_std / np.sqrt(n_points)
-            ax.fill_between(
-                xx,
-                yy - intercept_error,
-                yy + intercept_error,
-                color=get_color('error_region'),
-                alpha=get_alpha('light'),
-            )
         ax.set(xlabel="Science m [mag]", ylabel="Reference m [mag]")
-        ransac_legend_top_outside(ax, ncol=2, fontsize="small")
-        ax.grid(alpha=0.3, ls="--")
+        ransac_legend_top_outside(ax, ncol=2)
+        ransac_grid(ax)
         set_mag_axes_inverted_xy(ax)
 
         base = Path(self.input_yaml["fpath"]).stem
-        out = (
-            Path(self.input_yaml["fpath"]).parent / f"Flux_Comparison_{base}.png"
-        )
-        fig.savefig(str(out), bbox_inches="tight", dpi=150)
+        out = Path(self.input_yaml["fpath"]).parent / f"Flux_Comparison_{base}.png"
+        ransac_savefig(fig, str(out))
         plt.close(fig)
 
     # -----------------------------------------------------------------

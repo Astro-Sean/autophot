@@ -38,6 +38,8 @@ RANSAC_PLOT_COLORS = {
     'color_term':        '#E69F00',  # Okabe orange      — Color-term polynomial plot
     'color_term_piece':  '#CC79A7',  # Okabe reddish-purple — Piecewise color-term plot
     'linearity':         '#D55E00',  # Okabe vermilion   — Linearity check plot
+    'flux_comparison':   '#56B4E9',  # Okabe sky blue    — Template flux comparison plot
+    'alignment':         '#56B4E9',  # Okabe sky blue    — Pre-SCAMP alignment match plot
     'outliers':          '#e02b25',  # Red               — Outliers (all plots)
     'fit':               '#000000',  # Black             — Fit lines (all plots)
     'error_band':        '#999999',  # Gray              — Error shading (all plots)

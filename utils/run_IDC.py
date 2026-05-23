@@ -1055,7 +1055,7 @@ NNW
                 ref_is_undersampled,
             )
 
-            crossid_radius = max(max(fwhm_sci_arcsec, fwhm_ref_arcsec), 15.0)
+            crossid_radius = max(3.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 3.0)
             self.logger.info("Using cross-match radius: %.2f arcsec", crossid_radius)
 
             def _do_match(radius_arcsec: float):
@@ -2133,7 +2133,7 @@ NNW
             fwhm_ref_pix = float(ref_sex.get("fwhm", 2.5))
             fwhm_sci_arcsec = fwhm_sci_pix * sci_pix_scale
             fwhm_ref_arcsec = fwhm_ref_pix * ref_pix_scale
-            crossid_radius = max(max(fwhm_sci_arcsec, fwhm_ref_arcsec), 15.0)
+            crossid_radius = max(3.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 3.0)
 
             def _load_matched_catalogs(sci_cat_path, ref_cat_path):
                 with fits.open(sci_cat_path) as hs, fits.open(ref_cat_path) as hr:
@@ -3426,61 +3426,51 @@ NNW
                 intercept = None
         if len(sci_cat_matched) >= 5 and intercept is not None:
             from functions import set_size
-            from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
+            from plotting_utils import (
+                apply_autophot_mplstyle, get_ransac_color, get_marker_size,
+                get_alpha, get_line_width, ransac_grid, ransac_savefig,
+                ransac_legend_top_outside, set_mag_axes_inverted_xy,
+            )
 
+            apply_autophot_mplstyle()
             fig, ax = plt.subplots(figsize=set_size(340, 1))
-            plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
-            ax.errorbar(
-                ref_cat_matched["MAG_APER"],
-                sci_cat_matched["MAG_APER"],
-                xerr=ref_cat_matched["MAGERR_APER"],
-                yerr=sci_cat_matched["MAGERR_APER"],
-                fmt="o",
-                markersize=get_marker_size('medium'),
-                mfc="none",
-                mec=get_color('inliers'),
-                ecolor=get_color('inliers'),
-                alpha=get_alpha('dark'),
-                label=f"Inliers [{len(sci_cat_matched)}]",
-            )
-            x_fit = np.linspace(
-                np.min(ref_cat_matched["MAG_APER"]),
-                np.max(ref_cat_matched["MAG_APER"]),
-                100,
-            )
-            # Slope is forced to 1.0, intercept is the zeropoint
-            y_fit = x_fit + intercept
-            ax.plot(
-                x_fit,
-                y_fit,
-                color=get_color('fit'),
-                linestyle="--",
-                lw=get_line_width('medium'),
-                label=f"Fit: slope=1.000, intercept={intercept:.3f}",
-            )
-            # Add shaded error region (calculate from residuals)
             sci_mag = np.array(sci_cat_matched["MAG_APER"], dtype=float)
             ref_mag = np.array(ref_cat_matched["MAG_APER"], dtype=float)
+            ax.errorbar(
+                ref_mag,
+                sci_mag,
+                xerr=np.array(ref_cat_matched["MAGERR_APER"], dtype=float),
+                yerr=np.array(sci_cat_matched["MAGERR_APER"], dtype=float),
+                fmt="o",
+                markersize=get_marker_size('medium'),
+                color=get_ransac_color('alignment'),
+                ecolor="lightgrey",
+                elinewidth=0.4,
+                capsize=0,
+                alpha=get_alpha('dark'),
+                label=f"Matched [{len(sci_cat_matched)}]",
+            )
+            x_fit = np.linspace(np.nanmin(ref_mag), np.nanmax(ref_mag), 100)
+            y_fit = x_fit + intercept
             residuals = sci_mag - (ref_mag + intercept)
-            residual_std = np.std(residuals)
-            n_points = len(sci_mag)
-            intercept_error = residual_std / np.sqrt(n_points)
+            intercept_error = np.std(residuals) / np.sqrt(len(sci_mag))
             ax.fill_between(
-                x_fit,
-                y_fit - intercept_error,
-                y_fit + intercept_error,
-                color=get_color('error_region'),
-                alpha=get_alpha('light'),
+                x_fit, y_fit - intercept_error, y_fit + intercept_error,
+                color=get_ransac_color('error_band'), alpha=get_alpha('very_light'),
             )
-            ax.invert_xaxis()
-            ax.invert_yaxis()
-            ax.set_xlabel("Reference MAG_APER")
-            ax.set_ylabel("Science MAG_APER")
-            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2)
-            ax.grid(True)
-            fig.savefig(
-                sci_cat_path.replace(".cat", "_Mag_Fit.png"), dpi=150
+            ax.plot(
+                x_fit, y_fit,
+                color=get_ransac_color('fit'),
+                linestyle="--",
+                lw=get_line_width('medium'),
+                label=f"Fit: slope=1, intercept={intercept:.3f}",
             )
+            ax.set_xlabel(r"Reference $m$ [mag]")
+            ax.set_ylabel(r"Science $m$ [mag]")
+            ransac_legend_top_outside(ax, ncol=2)
+            ransac_grid(ax)
+            set_mag_axes_inverted_xy(ax)
+            ransac_savefig(fig, sci_cat_path.replace(".cat", "_Mag_Fit.png"))
             plt.close(fig)
 
         if len(sci_cat_matched) > nmax:

@@ -2229,17 +2229,14 @@ class Catalog:
 
             # Plotting
             from plotting_utils import (
-                apply_autophot_mplstyle,
-                ransac_legend_top_outside,
-                set_mag_axes_inverted_xy,
+                apply_autophot_mplstyle, get_ransac_color, get_marker_size,
+                get_alpha, get_line_width, ransac_grid, ransac_savefig,
+                ransac_legend_top_outside, set_mag_axes_inverted_xy,
             )
 
             apply_autophot_mplstyle()
             plt.ioff()
             fig, ax1 = plt.subplots(figsize=set_size(340, 1))
-            plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
-            # Import centralized plotting utilities for consistent formatting
-            from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
 
             if fit_line:
                 predicted = fit_line(inst_mag_linear)
@@ -2253,11 +2250,10 @@ class Catalog:
                     yerr=catalog_mag_err_linear[ransac_outliers],
                     xerr=inst_mag_err_linear[ransac_outliers],
                     fmt="x",
-                    color=get_color('outliers'),
+                    color=get_ransac_color('outliers'),
                     ecolor="lightgrey",
                     markersize=get_marker_size('medium'),
                     alpha=get_alpha('medium'),
-                    lw=get_line_width('thin'),
                     capsize=0,
                     elinewidth=0.4,
                     linestyle="None",
@@ -2270,8 +2266,7 @@ class Catalog:
                     xerr=inst_mag_err_linear[ransac_inliers],
                     fmt="o",
                     markersize=get_marker_size('medium'),
-                    mfc=get_color('inliers'),
-                    mec=get_color('inliers'),
+                    color=get_ransac_color('zeropoint_ap'),
                     ecolor="lightgrey",
                     alpha=get_alpha('dark'),
                     capsize=0,
@@ -2281,26 +2276,23 @@ class Catalog:
                 )
                 x_range = np.linspace(inst_mag_linear[ransac_inliers].min(), inst_mag_linear[ransac_inliers].max(), 100)
                 y_fit = fit_line(x_range)
-                ax1.plot(
-                    x_range,
-                    y_fit,
-                    color=get_color('fit'),
-                    linestyle="--",
-                    lw=get_line_width('thick'),
-                    zorder=10,
-                    label=(
-                        f"m_cal = m_inst + {intercept:.2f} ± {intercept_error:.2f} "
-                        f"(slope fixed to 1.0)"
-                    ),
-                )
-                # Add shaded error region
                 ax1.fill_between(
                     x_range,
                     y_fit - intercept_error,
                     y_fit + intercept_error,
-                    color=get_color('error_region'),
-                    alpha=get_alpha('light'),
-                    label=f"Fit error (+/- {intercept_error:.2f})",
+                    color=get_ransac_color('error_band'),
+                    alpha=get_alpha('very_light'),
+                )
+                ax1.plot(
+                    x_range,
+                    y_fit,
+                    color=get_ransac_color('fit'),
+                    linestyle="--",
+                    lw=get_line_width('medium'),
+                    zorder=10,
+                    label=(
+                        rf"$m_\mathrm{{cal}} = m_\mathrm{{inst}} + {intercept:.2f} \pm {intercept_error:.2f}$"
+                    ),
                 )
 
                 # Add vertical lines showing linearity range in instrumental magnitude
@@ -2311,15 +2303,17 @@ class Catalog:
                     max_inst_mag = -2.5 * np.log10(min_flux)
                     ax1.axvline(
                         x=min_inst_mag,
-                        color="#00AA00",
+                        color=get_ransac_color('error_band'),
                         linestyle=":",
+                        lw=get_line_width('thin'),
                         alpha=0.7,
-                        label=f"Linearity range: {min_flux:.1f}-{max_flux:.1f} flux",
+                        label=f"Linearity range: {min_flux:.1f}–{max_flux:.1f} flux",
                     )
                     ax1.axvline(
                         x=max_inst_mag,
-                        color="#00AA00",
+                        color=get_ransac_color('error_band'),
                         linestyle=":",
+                        lw=get_line_width('thin'),
                         alpha=0.7,
                     )
 
@@ -2327,11 +2321,9 @@ class Catalog:
             ax1.set_ylabel(rf"Catalog $m_\mathrm{{cal,{use_filter}}}$ [mag]")
             set_mag_axes_inverted_xy(ax1)
             ransac_legend_top_outside(ax1, ncol=2)
-            ax1.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
-            save_path = os.path.join(
-                write_dir, f"Saturation_{base_name}.png"
-            )
-            fig.savefig(save_path, bbox_inches="tight", dpi=150, facecolor="white")
+            ransac_grid(ax1)
+            save_path = os.path.join(write_dir, f"Saturation_{base_name}.png")
+            ransac_savefig(fig, save_path)
             plt.close(fig)
 
             # Robust selection: find continuous linear region with tight scatter requirement
