@@ -117,7 +117,7 @@ sudo apt install astrometry.net
 ```
 
 You will also need to get some index files for astrometry.net. You can download them from the [astrometry.net website](https://astrometry.net/data.html)
-```
+
 
 ### Astromatic Suite (SExtractor, SCAMP, SWarp)
 
