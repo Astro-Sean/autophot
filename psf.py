@@ -2134,7 +2134,7 @@ class PSF:
                 recentering_maxiters=100,
                 fitter=EPSFFitter(fit_boxsize=fit_boxsize),
                 maxiters=10,
-                norm_radius=norm_radius,
+                # norm_radius=norm_radius,
                 sigma_clip=sigma_clip_epsf,
                 smoothing_kernel=smooth_kernel,
                 progress_bar=False,
@@ -2168,7 +2168,7 @@ class PSF:
                 oversampling=oversample,
             )
 
-            epsf, fitted_stars = epsf_builder.build_epsf(epsfstars, init_epsf=init_epsf)
+            epsf, fitted_stars = epsf_builder.build_epsf(epsfstars, epsf=init_epsf)
 
             # EPSFBuilder already normalizes to unit sum within norm_radius.
             # Do not apply secondary normalization as it corrupts the flux scale

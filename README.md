@@ -103,7 +103,6 @@ For WCS solving when FITS headers lack astrometry:
 conda install conda-forge::astrometry
 ```
 
-
 or install via apt (with sudo rights):
 
 ```bash
