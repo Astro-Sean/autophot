@@ -100,7 +100,7 @@ print(f"Results saved to: {output_file}")
 For WCS solving when FITS headers lack astrometry:
 
 ```bash
-conda install -c conda-forge astrometry-net
+conda install conda-forge::astrometry
 ```
 
 ### Astromatic Suite (SExtractor, SCAMP, SWarp)
