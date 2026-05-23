@@ -1140,6 +1140,7 @@ def run_photometry():
         )
 
         input_yaml["read_noise"] = readnoise
+        input_yaml["airmass"] = airmass
         header["RDNOISE"] = readnoise
 
         #  Handle Exposure Time — science frames must have a valid header; ZTF reference
@@ -1560,8 +1561,8 @@ def run_photometry():
         logging.info("Date of observation: %s", date)
 
         header["gain"] = gain
-        # header["saturate"] = saturate
-        header["RDNOISE"] = readnoise
+        # saturate already written to header at line 1130 (if finite)
+        # RDNOISE already written to header at line 1143
 
         # =============================================================================
         # Image Preprocessing
@@ -3667,7 +3668,7 @@ def run_photometry():
         image_sources = None
 
         header["aper"] = int(np.ceil(optimum_radius * ImageFWHM))
-        header["RDNOISE"] = readnoise
+        # RDNOISE already written to header at line 1143
 
         # Writes the modified image and header back to the FITS file.
         safe_fits_write(fpath, image, header)
