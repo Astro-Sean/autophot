@@ -103,6 +103,13 @@ For WCS solving when FITS headers lack astrometry:
 conda install conda-forge::astrometry
 ```
 
+
+or install via apt (with sudo rights):
+
+```bash
+sudo apt install astrometry.net
+```
+
 ### Astromatic Suite (SExtractor, SCAMP, SWarp)
 
 ```bash
@@ -112,6 +119,14 @@ conda install -c conda-forge astromatic-source-extractor astromatic-scamp astrom
 > [!TIP]
 > For best template-to-science registration (especially near hosts / chip edges),
 > use SCAMP+SWarp alignment and a TPV/PV distortion model (see “Template subtraction” below).
+
+### SFFT
+
+For SFFT-based template subtraction:
+
+```bash
+pip install sfft
+```
 
 ### HOTPANTS
 
