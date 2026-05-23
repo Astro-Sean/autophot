@@ -1138,8 +1138,8 @@ def compute_target_crowding(
     # Catalog for centroids
     try:
         cat = SourceCatalog(cut, segm)
-        xcen = np.asarray(cat.xcentroid)
-        ycen = np.asarray(cat.ycentroid)
+        xcen = np.asarray(cat.x_centroid if hasattr(cat, 'x_centroid') else cat.xcentroid)
+        ycen = np.asarray(cat.y_centroid if hasattr(cat, 'y_centroid') else cat.ycentroid)
     except Exception:
         xcen = np.array([])
         ycen = np.array([])

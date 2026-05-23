@@ -209,7 +209,10 @@ class Find_FWHM:
             progress_bar=False,
         )
         catalog = SourceCatalog(image, deblended_map)
-        coms = np.column_stack((catalog.xcentroid, catalog.ycentroid))
+        coms = np.column_stack((
+            catalog.x_centroid if hasattr(catalog, 'x_centroid') else catalog.xcentroid,
+            catalog.y_centroid if hasattr(catalog, 'y_centroid') else catalog.ycentroid,
+        ))
         segment_ids = catalog.label
 
         source_coords = np.column_stack(
@@ -871,8 +874,10 @@ class Find_FWHM:
                     return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
                 df = tbl.to_pandas()
-                df["x_pix"] = df["xcentroid"]
-                df["y_pix"] = df["ycentroid"]
+                _xcol = "x_centroid" if "x_centroid" in df.columns else "xcentroid"
+                _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
+                df["x_pix"] = df[_xcol]
+                df["y_pix"] = df[_ycol]
                 df["s2n"] = df["peak"] / std
                 fwhm_list = []
                 half = int(max(default_scale, np.ceil(scale_multiplier * fwhm / 2)))
@@ -908,11 +913,12 @@ class Find_FWHM:
 
             # --- Automatic detection and FWHM estimation ---
             thr_img = detect_threshold(smooth, nsigma=5.0, mask=mask)
-            thr = float(np.nanmedian(thr_img))
+            # photutils >=3.0 supports spatially varying 2D threshold arrays.
+            # Use the full 2D threshold image for better detection near chip gaps/gradients.
             fwhm_fp = max(2.0, float(fwhm_initial))
             finder = IRAFStarFinder(
                 fwhm=fwhm_fp,
-                threshold=thr,
+                threshold=thr_img,
                 minsep_fwhm=1.0,
                 roundlo=0.0,
                 roundhi=1.0,
@@ -937,11 +943,13 @@ class Find_FWHM:
                 return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
             edge = int(np.ceil(3 * fwhm_fp))
+            _xcol = "x_centroid" if "x_centroid" in df.columns else "xcentroid"
+            _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
             df = df[
-                (df["xcentroid"] > edge)
-                & (df["xcentroid"] < nx - edge)
-                & (df["ycentroid"] > edge)
-                & (df["ycentroid"] < ny - edge)
+                (df[_xcol] > edge)
+                & (df[_xcol] < nx - edge)
+                & (df[_ycol] > edge)
+                & (df[_ycol] < ny - edge)
             ]
 
             if not no_clean:
@@ -955,7 +963,9 @@ class Find_FWHM:
                     dilated_mask = ndimage.binary_dilation(mask, iterations=buffer_px)
                     
                     # Check if sources are in dilated mask region
-                    source_coords = np.round(df[["xcentroid", "ycentroid"]].values).astype(int)
+                    _xcol = "x_centroid" if "x_centroid" in df.columns else "xcentroid"
+                    _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
+                    source_coords = np.round(df[[_xcol, _ycol]].values).astype(int)
                     # Clip to image bounds
                     source_coords[:, 0] = np.clip(source_coords[:, 0], 0, dilated_mask.shape[1] - 1)
                     source_coords[:, 1] = np.clip(source_coords[:, 1], 0, dilated_mask.shape[0] - 1)
@@ -987,8 +997,10 @@ class Find_FWHM:
             # --- Per-source FWHM ---
             half = int(max(default_scale, np.ceil(scale_multiplier * fwhm_fp / 2)))
             fwhm_meas, s2n_list = [], []
+            _xcol = "x_centroid" if "x_centroid" in df.columns else "xcentroid"
+            _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
             for _, r in df.iterrows():
-                x0, y0 = float(r["xcentroid"]), float(r["ycentroid"])
+                x0, y0 = float(r[_xcol]), float(r[_ycol])
                 cut = Cutout2D(
                     image, (x0, y0), 2 * half, mode="partial", fill_value=np.nan
                 ).data
@@ -1000,8 +1012,8 @@ class Find_FWHM:
                 s2n_list.append(float(r["peak"]) / max(std, 1e-12))
             df["fwhm"] = np.asarray(fwhm_meas, dtype=float)
             df["s2n"] = np.asarray(s2n_list, dtype=float)
-            df["x_pix"] = df["xcentroid"].astype(float)
-            df["y_pix"] = df["ycentroid"].astype(float)
+            df["x_pix"] = df[_xcol].astype(float)
+            df["y_pix"] = df[_ycol].astype(float)
 
             if not no_clean:
                 df = df[np.isfinite(df["fwhm"])]
@@ -1254,7 +1266,9 @@ class Find_FWHM:
         """
         if len(df) < 2:
             return df
-        xy = np.vstack([df["xcentroid"].values, df["ycentroid"].values]).T
+        _xcol = "x_centroid" if "x_centroid" in df.columns else "xcentroid"
+        _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
+        xy = np.vstack([df[_xcol].values, df[_ycol].values]).T
         tree = cKDTree(xy)
         dists, _ = tree.query(xy, k=2)
         nn = dists[:, 1]

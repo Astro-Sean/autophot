@@ -499,11 +499,15 @@ def compute_alignment_rms(
         if len(tbl_sci) < 5 or len(tbl_ref) < 5:
             return None
 
+        _xcol = "x_centroid" if "x_centroid" in tbl_sci.colnames else "xcentroid"
+        _ycol = "y_centroid" if "y_centroid" in tbl_sci.colnames else "ycentroid"
         sci_xy = np.column_stack(
-            (tbl_sci["xcentroid"].data, tbl_sci["ycentroid"].data)
+            (tbl_sci[_xcol].data, tbl_sci[_ycol].data)
         )
+        _xcol = "x_centroid" if "x_centroid" in tbl_ref.colnames else "xcentroid"
+        _ycol = "y_centroid" if "y_centroid" in tbl_ref.colnames else "ycentroid"
         ref_xy = np.column_stack(
-            (tbl_ref["xcentroid"].data, tbl_ref["ycentroid"].data)
+            (tbl_ref[_xcol].data, tbl_ref[_ycol].data)
         )
 
         max_sep = float(max(2.5, 2.5 * fwhm))

@@ -1223,9 +1223,11 @@ class Limits:
                     daofind = DAOStarFinder(fwhm=fwhm, threshold=5.0 * np.nanstd(cutout))
                     sources = daofind(cutout)
                     if sources is not None and len(sources) >= 5:
+                        _xcol = "x_centroid" if "x_centroid" in sources.colnames else "xcentroid"
+                        _ycol = "y_centroid" if "y_centroid" in sources.colnames else "ycentroid"
                         sources_df = pd.DataFrame({
-                            "x_pix": sources["xcentroid"],
-                            "y_pix": sources["ycentroid"]
+                            "x_pix": sources[_xcol],
+                            "y_pix": sources[_ycol]
                         })
                         ap = Aperture(input_yaml=local_input_yaml, image=cutout)
                         _, optimum_radius_fwhm, _ = ap.measure_optimum_radius(

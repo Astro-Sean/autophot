@@ -2194,9 +2194,23 @@ class PSF:
                 oversampling=oversample,
             )
 
-            epsf, fitted_stars = epsf_builder.build_epsf(epsfstars, epsf=init_epsf)
+            build_result = epsf_builder.build_epsf(epsfstars, epsf=init_epsf)
+            # photutils >=3.0 returns EPSFBuildResult; <3.0 returns (epsf, fitted_stars)
+            if hasattr(build_result, 'epsf'):
+                epsf = build_result.epsf
+                fitted_stars = build_result.fitted_stars
+                log.info(
+                    "ePSF build: converged=%s, iterations=%d, final_center_accuracy=%.4g px",
+                    build_result.converged,
+                    build_result.iterations,
+                    build_result.final_center_accuracy if build_result.final_center_accuracy is not None else float('nan'),
+                )
+                if not build_result.converged:
+                    log.warning("ePSF build did NOT converge; PSF model may be unreliable.")
+            else:
+                epsf, fitted_stars = build_result
 
-            # EPSFBuilder already normalizes to unit sum within norm_radius.
+            # EPSFBuilder already normalizes to unit sum.
             # Do not apply secondary normalization as it corrupts the flux scale
             # by dividing by total array sum (including wings outside norm_radius).
 
