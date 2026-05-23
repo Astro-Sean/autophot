@@ -143,6 +143,29 @@ git clone https://github.com/acbecker/hotpants
 cd hotpants && make
 ```
 
+---
+
+## Supported Catalogs
+
+AutoPHOT supports the following photometric reference catalogs (case-insensitive):
+
+- **gaia** - Gaia DR3 with XP spectra (default for most use cases)
+- **pan_starrs** / **panstarrs** / **ps1** - Pan-STARRS DR1/DR2
+- **sdss** - Sloan Digital Sky Survey
+- **apass** - AAVSO Photometric All-Sky Survey
+- **2mass** - 2-Micron All Sky Survey (infrared)
+- **legacy** - Legacy Survey (DR8+)
+- **skymapper** - SkyMapper Southern Sky Survey
+- **refcat** - PS1-based reference catalog (requires MAST CasJobs credentials)
+- **tic** - TESS Input Catalog
+- **custom** - User-provided CSV catalog (set `catalog.catalog_custom_fpath`)
+
+Set the catalog in your YAML configuration:
+```yaml
+catalog:
+  use_catalog: gaia  # or any of the above
+```
+
 
 
 

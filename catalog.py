@@ -268,10 +268,11 @@ class Catalog:
     @staticmethod
     def _normalize_catalog_name(catalog_name: str) -> str:
         """
-        Normalize catalog name aliases to canonical form.
+        Normalize catalog name aliases to canonical form (lowercase).
         
-        Accepts 'panstarrs' (no underscore) and converts to 'pan_starrs'.
-        This ensures backward compatibility with both naming conventions.
+        Accepts case-insensitive input (e.g., 'GAIA', 'Gaia', 'gaia') and
+        converts to lowercase. Also handles 'panstarrs' (no underscore) and
+        converts to 'pan_starrs' for backward compatibility.
         """
         if not catalog_name:
             return catalog_name
@@ -282,7 +283,7 @@ class Catalog:
             "pan-starrs": "pan_starrs",
             "ps1": "pan_starrs",
         }
-        return aliases.get(name, catalog_name)
+        return aliases.get(name, name)
 
     def _require_nonempty_catalog(
         self, selectedCatalog, catalogName: str, target_coords, radius_arcmin: float
