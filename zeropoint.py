@@ -45,7 +45,10 @@ from scipy.odr import ODR, Model, RealData
 # Local
 # ---------------------------------------------------------------------------
 from functions import log_step, snr_err, set_size, calculate_bins, normalize_photometric_filter_name
-from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
+from plotting_utils import (
+    get_color, get_ransac_color, get_marker_size, get_alpha, get_line_width,
+    apply_autophot_mplstyle, ransac_legend_top_outside, ransac_grid, ransac_savefig,
+)
 
 # ---------------------------------------------------------------------------
 # Module-level logger
@@ -983,14 +986,17 @@ class Zeropoint:
                 fit_params = self._fallback_zeropoint(catalog, use_filter)
                 return catalog, fit_params
 
-            from plotting_utils import apply_autophot_mplstyle, ransac_legend_top_outside, set_mag_axes_inverted_xy
+            from plotting_utils import (
+                apply_autophot_mplstyle, ransac_legend_top_outside,
+                set_mag_axes_inverted_xy, ransac_grid, ransac_savefig, get_ransac_color,
+            )
 
             apply_autophot_mplstyle()
             fig, ax = plt.subplots(1, 1, figsize=set_size(540, 1))
             inlier_masks_full = {
                 k: np.zeros(len(clean_catalog), dtype=bool) for k in ["AP", "PSF"]
             }
-            colors = {"AP": get_color('inliers'), "PSF": get_color('robust')}
+            colors = {"AP": get_ransac_color('zeropoint_ap'), "PSF": get_ransac_color('zeropoint_psf')}
             labels = {"AP": "Aperture", "PSF": "PSF"}
             global_xmins, global_xmaxs, global_ymins, global_ymaxs = [], [], [], []
 
@@ -1076,9 +1082,10 @@ class Zeropoint:
                     ms=get_marker_size("medium"),
                     color=colors[flux_type],
                     ecolor="lightgrey",
-                    alpha=0.75,
+                    alpha=get_alpha("dark"),
                     capsize=1.5,
-                    label=f"{labels[flux_type]} inliers",
+                    elinewidth=0.4,
+                    label=f"{labels[flux_type]} inliers [{inlier_short.sum()}]",
                 )
                 out_mask = ~inlier_short
                 if out_mask.any():
@@ -1089,11 +1096,12 @@ class Zeropoint:
                         yerr=m_cal_err[out_mask],
                         fmt="x",
                         ms=get_marker_size("medium"),
-                        color=colors[flux_type],
-                        ecolor=colors[flux_type],
-                        alpha=0.5,
+                        color=get_ransac_color('outliers'),
+                        ecolor="lightgrey",
+                        alpha=get_alpha("medium"),
                         capsize=0,
                         elinewidth=0.4,
+                        label=f"{labels[flux_type]} outliers [{out_mask.sum()}]",
                     )
 
                 xs = np.linspace(in_x.min() - 0.5, in_x.max() + 0.5, 200)
@@ -1155,16 +1163,11 @@ class Zeropoint:
                 )
             ax.set_xlabel(rf"Instrumental $m_{{\mathrm{{inst,{use_filter}}}}}$ [mag]")
             ax.set_ylabel(y_label)
-            ax.grid(True, ls="--", alpha=0.5)
+            ransac_grid(ax)
             ransac_legend_top_outside(ax, ncol=2)
             set_mag_axes_inverted_xy(ax)
 
-            fig.savefig(
-                os.path.join(write_dir, f"Zeropoint_{base_name}.png"),
-                bbox_inches="tight",
-                dpi=150,
-                facecolor="white",
-            )
+            ransac_savefig(fig, os.path.join(write_dir, f"Zeropoint_{base_name}.png"))
             plt.close(fig)
 
             # Build joint inlier mask only from flux types that actually
@@ -1284,13 +1287,9 @@ class Zeropoint:
                     zp_params = self._fallback_zeropoint(catalog, use_filter)
                     return catalog, zp_params
 
-                _style = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
-                )
-                if os.path.exists(_style):
-                    plt.style.use(_style)
+                apply_autophot_mplstyle()
                 fig_hist, ax_hist = plt.subplots(1, 1, figsize=set_size(540, 1))
-                colors = {"AP": get_color('inliers'), "PSF": get_color('robust')}
+                colors = {"AP": get_ransac_color('zeropoint_hist_ap'), "PSF": get_ransac_color('zeropoint_hist_psf')}
                 labels_base = {"AP": "Aperture", "PSF": "PSF"}
                 inlier_masks_full = {
                     k: np.zeros(len(clean_catalog), dtype=bool) for k in ["AP", "PSF"]
@@ -1666,7 +1665,7 @@ class Zeropoint:
 
                 ax_hist.set_xlabel("Zeropoint [mag]")
                 ax_hist.set_ylabel("Density")
-                ax_hist.grid(True, ls="-", alpha=0.25, zorder=0)
+                ransac_grid(ax_hist)
                 for patch in ax_hist.patches:
                     patch.set_zorder(3)
 
@@ -1703,14 +1702,7 @@ class Zeropoint:
                 )
                 fig_hist.tight_layout()
                 os.makedirs(write_dir, exist_ok=True)
-                fig_hist.savefig(
-                    os.path.join(
-                        write_dir, f"Zeropoint_Hist_Combined_{base_name}.png"
-                    ),
-                    bbox_inches="tight",
-                    dpi=150,
-                    facecolor="white",
-                )
+                ransac_savefig(fig_hist, os.path.join(write_dir, f"Zeropoint_Hist_Combined_{base_name}.png"))
                 plt.close(fig_hist)
 
                 # Combine inliers only over flux types that actually had
@@ -1747,24 +1739,36 @@ class Zeropoint:
         """Generate color term plot for piecewise linear fitting."""
         import matplotlib.pyplot as plt
         from matplotlib.gridspec import GridSpec
-        from plotting_utils import get_color, get_alpha
         import os
 
-        _style = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
-        )
-        if os.path.exists(_style):
-            plt.style.use(_style)
+        apply_autophot_mplstyle()
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(340, 2.0), sharex=True)
-        plt.subplots_adjust(hspace=0.35, top=0.95, bottom=0.1, left=0.15, right=0.95)
+        fig.subplots_adjust(hspace=0.45)
 
-        # Consistent colors from plotting_utils palette
-        inlier_color = get_color('inliers')
-        outlier_color = get_color('outliers')
+        inlier_color = get_ransac_color('color_term_piece')
+        outlier_color = get_ransac_color('outliers')
+        fit_color = get_ransac_color('fit')
+        err_color = get_ransac_color('error_band')
 
         # Top panel: uncorrected data
         if inlier_mask is not None:
             # Plot inliers
+            _out_mask_p = ~inlier_mask
+            if _out_mask_p.any():
+                ax1.errorbar(
+                    xi[_out_mask_p],
+                    yi[_out_mask_p],
+                    xerr=xe[_out_mask_p],
+                    yerr=ye[_out_mask_p],
+                    fmt="x",
+                    ms=get_marker_size('medium'),
+                    color=outlier_color,
+                    ecolor="lightgrey",
+                    alpha=get_alpha('medium'),
+                    capsize=0,
+                    elinewidth=0.4,
+                    label=f"Outliers [{_out_mask_p.sum()}]",
+                )
             ax1.errorbar(
                 xi[inlier_mask],
                 yi[inlier_mask],
@@ -1774,10 +1778,10 @@ class Zeropoint:
                 ms=get_marker_size('medium'),
                 color=inlier_color,
                 ecolor="lightgrey",
-                alpha=0.8,
-                capsize=2,
-                lw=0.5,
-                label="Inliers",
+                alpha=get_alpha('dark'),
+                capsize=1,
+                elinewidth=0.4,
+                label=f"Inliers [{inlier_mask.sum()}]",
             )
         else:
             ax1.errorbar(
@@ -1789,9 +1793,9 @@ class Zeropoint:
                 ms=get_marker_size('medium'),
                 color=inlier_color,
                 ecolor="lightgrey",
-                alpha=0.8,
-                capsize=2,
-                lw=0.5,
+                alpha=get_alpha('dark'),
+                capsize=1,
+                elinewidth=0.4,
                 label="Data",
             )
 
@@ -1836,29 +1840,28 @@ class Zeropoint:
             ax1.plot(
                 x_plot,
                 y_plot,
-                color=get_color('fit'),
+                color=fit_color,
                 linestyle="--",
-                lw=1.0,
+                lw=get_line_width('medium'),
                 label=label_text,
             )
-            # Add error shading
             ax1.fill_between(
                 x_plot,
                 y_plot_lower,
                 y_plot_upper,
-                color=get_color('error_region'),
-                alpha=get_alpha('light'),
+                color=err_color,
+                alpha=get_alpha('very_light'),
                 label="Error band",
             )
-            ax1.axvline(bp, color="gray", linestyle=":", alpha=0.5, label=f"Breakpoint: {bp:.3f}")
+            ax1.axvline(bp, color=err_color, linestyle=":", lw=get_line_width('thin'), alpha=0.6, label=f"Breakpoint: {bp:.3f}")
 
         ax1.set_xlim(xi.min() - 0.1 * np.ptp(xi), xi.max() + 0.1 * np.ptp(xi))
         ax1.set_ylim(yi.min() - 0.1 * np.ptp(yi), yi.max() + 0.1 * np.ptp(yi))
         ax1.set_ylabel(
             rf"$m_\mathrm{{cal,{color1}}} - m_\mathrm{{inst,{use_filter}}}$ [mag]"
         )
-        ax1.grid(True, alpha=0.3)
-        ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8, ncol=2)
+        ransac_grid(ax1)
+        ransac_legend_top_outside(ax1, ncol=2)
 
         # Bottom panel: color corrected data
         if n_segments == 2:
@@ -1885,6 +1888,22 @@ class Zeropoint:
 
         if inlier_mask is not None:
             # Plot corrected inliers
+            _out_mask_p2 = ~inlier_mask
+            if np.any(_out_mask_p2):
+                ax2.errorbar(
+                    xi[_out_mask_p2],
+                    yi_corrected[_out_mask_p2],
+                    xerr=xe[_out_mask_p2],
+                    yerr=ye_corrected[_out_mask_p2],
+                    fmt="x",
+                    ms=get_marker_size('medium'),
+                    color=outlier_color,
+                    ecolor="lightgrey",
+                    alpha=get_alpha('medium'),
+                    capsize=0,
+                    elinewidth=0.4,
+                    label=f"Outliers corrected [{_out_mask_p2.sum()}]",
+                )
             ax2.errorbar(
                 xi[inlier_mask],
                 yi_corrected[inlier_mask],
@@ -1892,29 +1911,13 @@ class Zeropoint:
                 yerr=ye_corrected[inlier_mask],
                 fmt="o",
                 ms=get_marker_size('medium'),
-                color=get_color('robust'),
+                color=inlier_color,
                 ecolor="lightgrey",
-                alpha=0.8,
-                capsize=2,
+                alpha=get_alpha('dark'),
+                capsize=1,
+                elinewidth=0.4,
                 label=f"Corrected inliers [{np.sum(inlier_mask)}]",
             )
-            # Plot outliers (corrected) if any
-            outlier_mask = ~inlier_mask
-            if np.any(outlier_mask):
-                ax2.errorbar(
-                    xi[outlier_mask],
-                    yi_corrected[outlier_mask],
-                    xerr=xe[outlier_mask],
-                    yerr=ye_corrected[outlier_mask],
-                    fmt="x",
-                    ms=get_marker_size('medium'),
-                    color=outlier_color,
-                    ecolor="lightgrey",
-                    alpha=0.6,
-                    capsize=2,
-                    lw=0.5,
-                    label="Outliers (corrected)",
-                )
         else:
             ax2.errorbar(
                 xi,
@@ -1923,19 +1926,19 @@ class Zeropoint:
                 yerr=ye_corrected,
                 fmt="o",
                 ms=get_marker_size('medium'),
-                color=get_color('robust'),
+                color=inlier_color,
                 ecolor="lightgrey",
-                alpha=0.8,
-                capsize=2,
-                lw=0.5,
+                alpha=get_alpha('dark'),
+                capsize=1,
+                elinewidth=0.4,
                 label="Corrected data",
             )
 
-        ax2.axhline(np.median(yi_corrected), color="gray", linestyle=":", alpha=0.5)
+        ax2.axhline(np.median(yi_corrected), color=err_color, linestyle=":", lw=get_line_width('thin'), alpha=0.5)
         ax2.set_xlabel(rf"$m_\mathrm{{cal,{color1}}} - m_\mathrm{{cal,{color2}}}$ [mag]")
         ax2.set_ylabel("Corrected [mag]")
-        ax2.grid(True, alpha=0.3)
-        ax2.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8, ncol=2)
+        ransac_grid(ax2)
+        ransac_legend_top_outside(ax2, ncol=2)
 
         # Set y-limits to center on median with +/- 5*std of inliers
         if inlier_mask is not None:
@@ -1951,7 +1954,6 @@ class Zeropoint:
             y_max = median_val + 5 * std_val
             ax2.set_ylim(y_min, y_max)
 
-        # Save plot to same directory as input file (per-image output folder)
         fpath = self.input_yaml.get("fpath", "")
         if output_dir is None:
             write_dir = os.path.dirname(fpath) or "."
@@ -1959,8 +1961,8 @@ class Zeropoint:
             write_dir = output_dir
         base_name = os.path.splitext(os.path.basename(fpath))[0] or "color_term"
         plot_file = os.path.join(write_dir, f"Color_Term_{base_name}_piecewise.png")
-        plt.savefig(plot_file, dpi=150, bbox_inches="tight")
-        plt.close()
+        ransac_savefig(fig, plot_file)
+        plt.close(fig)
         logger.info(f"fit_color_term: saved piecewise color term plot to {plot_file}")
 
     def _fit_piecewise_linear(self, x, y, x_err, y_err, n_segments):
@@ -2558,20 +2560,32 @@ class Zeropoint:
             plot_quad = coefficients[2] if poly_order == 2 else 0.0
 
             # ---- Plot ------------------------------------------------------
-            _style = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
-            )
-            if os.path.exists(_style):
-                plt.style.use(_style)
+            apply_autophot_mplstyle()
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(340, 2.0), sharex=True)
-            plt.subplots_adjust(hspace=0.35, top=0.95, bottom=0.1, left=0.15, right=0.95)
+            fig.subplots_adjust(hspace=0.45)
 
-            # Consistent colors from plotting_utils palette
-            inlier_color = get_color('inliers')
-            outlier_color = get_color('outliers')
-            all_sources_color = get_color('all_sources')
+            inlier_color = get_ransac_color('color_term')
+            outlier_color = get_ransac_color('outliers')
+            fit_color = get_ransac_color('fit')
+            err_color = get_ransac_color('error_band')
 
-            # Top panel: uncorrected data - show cleaned distribution (inliers)
+            # Top panel: uncorrected data — inliers and outliers
+            _out_mask = ~inlier_mask
+            if _out_mask.any():
+                ax1.errorbar(
+                    x[_out_mask],
+                    y[_out_mask],
+                    xerr=x_err[_out_mask],
+                    yerr=y_err[_out_mask],
+                    fmt="x",
+                    ms=get_marker_size('medium'),
+                    color=outlier_color,
+                    ecolor="lightgrey",
+                    alpha=get_alpha('medium'),
+                    capsize=0,
+                    elinewidth=0.4,
+                    label=f"Outliers [{_out_mask.sum()}]",
+                )
             ax1.errorbar(
                 xi,
                 yi,
@@ -2581,9 +2595,9 @@ class Zeropoint:
                 ms=get_marker_size('medium'),
                 color=inlier_color,
                 ecolor="lightgrey",
-                alpha=0.8,
+                alpha=get_alpha('dark'),
                 capsize=1,
-                lw=get_line_width('thin') * 0.5,
+                elinewidth=0.4,
                 label=f"Inliers [{np.sum(inlier_mask)}]",
             )
 
@@ -2598,9 +2612,9 @@ class Zeropoint:
             ax1.plot(
                 x_plot,
                 y_plot,
-                color=get_color('fit'),
+                color=fit_color,
                 linestyle="--",
-                lw=get_line_width('thin'),
+                lw=get_line_width('medium'),
                 label=label_text,
             )
 
@@ -2616,8 +2630,8 @@ class Zeropoint:
             ax1.set_ylabel(
                 rf"$m_\mathrm{{cal,{color1}}} - m_\mathrm{{inst,{use_filter}}}$ [mag]"
             )
-            ax1.grid(True, alpha=0.3)
-            ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2)
+            ransac_grid(ax1)
+            ransac_legend_top_outside(ax1, ncol=2)
 
             # Bottom panel: color corrected data (should be flat)
             if poly_order == 1:
@@ -2629,7 +2643,7 @@ class Zeropoint:
             std_uncorrected = float(median_abs_deviation(yi, nan_policy="omit"))
             std_corrected = float(median_abs_deviation(yi_corrected, nan_policy="omit"))
 
-            # Bottom panel: color corrected data - show cleaned distribution (inliers)
+            # Bottom panel: corrected data — inliers (corrected), with error band
             ax2.errorbar(
                 xi,
                 yi_corrected,
@@ -2639,20 +2653,28 @@ class Zeropoint:
                 ms=get_marker_size('medium'),
                 color=inlier_color,
                 ecolor="lightgrey",
-                alpha=0.8,
+                alpha=get_alpha('dark'),
                 capsize=1,
-                lw=get_line_width('thin') * 0.5,
-                label=f"Inliers (corrected) [{np.sum(inlier_mask)}]",
+                elinewidth=0.4,
+                label=f"Corrected inliers [{np.sum(inlier_mask)}]",
             )
 
             y_plot_corrected = np.full_like(x_plot, plot_intercept)
+            _intercept_err = coefficient_errors[0] if (coefficient_errors and np.isfinite(coefficient_errors[0])) else 0.0
+            ax2.fill_between(
+                x_plot,
+                y_plot_corrected - _intercept_err,
+                y_plot_corrected + _intercept_err,
+                color=err_color,
+                alpha=get_alpha('very_light'),
+            )
             ax2.plot(
                 x_plot,
                 y_plot_corrected,
-                color=get_color('fit'),
+                color=fit_color,
                 linestyle="-",
                 lw=get_line_width('medium'),
-                label=f"Flat (intercept={plot_intercept:.3f})",
+                label=f"Flat  (intercept = {plot_intercept:.3f})",
             )
 
             ax2.set_ylim(*_padded_lim(yi_corrected))
@@ -2662,18 +2684,13 @@ class Zeropoint:
             ax2.set_ylabel(
                 rf"Corrected $m_\mathrm{{cal,{color1}}} - m_\mathrm{{inst,{use_filter}}}$ [mag]"
             )
-            ax2.grid(True, alpha=0.3)
-            ax2.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2)
+            ransac_grid(ax2)
+            ransac_legend_top_outside(ax2, ncol=2)
 
             fpath = self.input_yaml.get("fpath", "")
             base_name = os.path.splitext(os.path.basename(fpath))[0] or "color_term"
             write_dir = os.path.dirname(fpath) or "."
-            fig.savefig(
-                os.path.join(write_dir, f"Color_Term_{base_name}.png"),
-                bbox_inches="tight",
-                dpi=150,
-                facecolor="white",
-            )
+            ransac_savefig(fig, os.path.join(write_dir, f"Color_Term_{base_name}.png"))
             plt.close(fig)
 
             return coefficients, coefficient_errors

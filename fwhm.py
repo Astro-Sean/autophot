@@ -542,17 +542,39 @@ class Find_FWHM:
 
             # --- Diagnostic plot (small markers, minimal overlap) ---
             try:
-                from plotting_utils import get_color, get_marker_size, get_alpha, get_line_width
+                from plotting_utils import (
+                    get_ransac_color, get_marker_size, get_alpha, get_line_width,
+                    apply_autophot_mplstyle, ransac_legend_top_outside, ransac_grid, ransac_savefig,
+                )
                 plt.ioff()
+                apply_autophot_mplstyle()
                 fig, ax = plt.subplots(figsize=set_size(340, 1))
-                plt.subplots_adjust(left=0.15, right=0.95, top=0.95, bottom=0.15)
-                # Check if errors are finite before passing to errorbar
+
+                inlier_color = get_ransac_color('linearity')
+                outlier_color = get_ransac_color('outliers')
+                fit_color = get_ransac_color('fit')
+                err_color = get_ransac_color('error_band')
+
                 xerr_vals = df_lin["m_inst_err"].values if "m_inst_err" in df_lin.columns else None
                 yerr_vals = df_lin["m_peak_err"].values if "m_peak_err" in df_lin.columns else None
                 xerr = xerr_vals if xerr_vals is not None and np.any(np.isfinite(xerr_vals)) else None
                 yerr = yerr_vals if yerr_vals is not None and np.any(np.isfinite(yerr_vals)) else None
-                
-                # Selected linear inliers - filled markers
+
+                if len(df_out) > 0:
+                    ax.errorbar(
+                        df_out["m_inst"],
+                        df_out["m_peak"],
+                        xerr=df_out["m_inst_err"].values if "m_inst_err" in df_out.columns else None,
+                        yerr=df_out["m_peak_err"].values if "m_peak_err" in df_out.columns else None,
+                        fmt="x",
+                        ms=get_marker_size('medium'),
+                        color=outlier_color,
+                        ecolor="lightgrey",
+                        alpha=get_alpha('medium'),
+                        capsize=0,
+                        elinewidth=0.4,
+                        label=f"Outliers [{len(df_out)}]",
+                    )
                 ax.errorbar(
                     df_lin["m_inst"],
                     df_lin["m_peak"],
@@ -560,63 +582,38 @@ class Find_FWHM:
                     yerr=yerr,
                     fmt="o",
                     ms=get_marker_size('medium'),
-                    mfc=get_color('inliers'),
-                    mec=get_color('inliers'),
+                    color=inlier_color,
                     ecolor="lightgrey",
                     alpha=get_alpha('dark'),
                     capsize=0,
                     elinewidth=0.4,
                     label=f"Inliers [{len(df_lin)}]",
                 )
-                # Rejected
-                ax.errorbar(
-                    df_out["m_inst"],
-                    df_out["m_peak"],
-                    xerr=df_out.get("m_inst_err", None),
-                    yerr=df_out.get("m_peak_err", None),
-                    fmt="x",
-                    ms=get_marker_size('medium'),
-                    color=get_color('outliers'),
-                    ecolor="lightgrey",
-                    alpha=get_alpha('medium'),
-                    lw=get_line_width('thin'),
-                    capsize=0,
-                    elinewidth=0.4,
-                    label=f"Outliers [{len(df_out)}]",
-                )
                 xx = np.linspace(np.nanmin(df["m_inst"]), np.nanmax(df["m_inst"]), 200)
                 yy = xx + b
-                ax.plot(xx, yy, color=get_color('fit'), linestyle="--", lw=get_line_width('medium'), label=f"Fit: m_peak = m_inst + {b:.3f}")
-                # Add shaded error region
                 intercept_error = fit_params.get("intercept_error", 0.0)
                 ax.fill_between(
-                    xx,
-                    yy - intercept_error,
-                    yy + intercept_error,
-                    color=get_color('error_region'),
-                    alpha=get_alpha('light'),
+                    xx, yy - intercept_error, yy + intercept_error,
+                    color=err_color, alpha=get_alpha('very_light'),
                 )
+                ax.plot(xx, yy, color=fit_color, linestyle="--", lw=get_line_width('medium'),
+                        label=f"Fit: $m_{{\\mathrm{{peak}}}} = m_{{\\mathrm{{inst}}}} + {b:.3f}$")
                 ax.set_xlabel(
-                    r"Instrumental magnitude [$-2.5 \log_{10}(\mathrm{Flux})$]"
+                    r"Instrumental magnitude [$-2.5\,\log_{{10}}(\mathrm{{Flux}})$]"
                 )
                 ax.set_ylabel(
-                    r"Peak magnitude [$-2.5 \log_{10}(\mathrm{Flux}_{\max})$]"
+                    r"Peak magnitude [$-2.5\,\log_{{10}}(\mathrm{{Flux}}_{{\max}})$]"
                 )
                 ax.invert_xaxis()
                 ax.invert_yaxis()
-                ax.grid(alpha=0.3, ls="--", lw=0.6)
-                ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8, ncol=2)
+                ransac_grid(ax)
+                ransac_legend_top_outside(ax, ncol=2)
                 if write_dir:
                     fpath = self.input_yaml["fpath"]
                     write_dir = self.input_yaml["write_dir"]
                     base = os.path.basename(fpath).split(".")[0]
                     png_out = os.path.join(write_dir, f"Linear_{base}.png")
-                    fig.savefig(
-                        png_out,
-                        bbox_inches="tight",
-                        dpi=150,
-                        facecolor="white",
-                    )
+                    ransac_savefig(fig, png_out)
                 plt.close(fig)
             except Exception as _pe:
                 logger.debug(f"Plotting skipped: {_pe}")

@@ -28,6 +28,21 @@ SCIENTIFIC_PALETTE = {
     'error_region': '#000000',  # Black with alpha for error regions
 }
 
+# Per-plot inlier primary colors — each RANSAC plot type gets a distinct color
+# drawn from the Okabe-Ito palette for colorblind safety.
+RANSAC_PLOT_COLORS = {
+    'zeropoint_ap':      '#0072B2',  # Okabe blue        — Zeropoint scatter, aperture
+    'zeropoint_psf':     '#009E73',  # Okabe green       — Zeropoint scatter, PSF
+    'zeropoint_hist_ap': '#0072B2',  # Okabe blue        — Zeropoint histogram, aperture
+    'zeropoint_hist_psf':'#009E73',  # Okabe green       — Zeropoint histogram, PSF
+    'color_term':        '#E69F00',  # Okabe orange      — Color-term polynomial plot
+    'color_term_piece':  '#CC79A7',  # Okabe reddish-purple — Piecewise color-term plot
+    'linearity':         '#D55E00',  # Okabe vermilion   — Linearity check plot
+    'outliers':          '#e02b25',  # Red               — Outliers (all plots)
+    'fit':               '#000000',  # Black             — Fit lines (all plots)
+    'error_band':        '#999999',  # Gray              — Error shading (all plots)
+}
+
 # Divergent color palette for source check plots
 # Using a blue-white-red divergent scheme where blue = negative deviation, white = neutral, red = positive deviation
 DIVERGENT_PALETTE = {
@@ -43,7 +58,7 @@ DIVERGENT_PALETTE = {
     'fwhm_high': '#B30000',  # Dark red for high FWHM
     'cross': '#CC79A7',  # Reddish purple for cross markers
 }
-# /home/sbrennan/Desktop/SN2024pba/photometry/SN_A/SN2024pba/images_REDUCED/DEEP_SN2024pba_2025-02-11_ZTF_g/LOG_DEEP_SN2024pba_2025-02-11_ZTF_g.log
+
 # Consistent marker sizes
 MARKER_SIZES = {
     'small': 4,
@@ -69,6 +84,10 @@ ALPHA_VALUES = {
 def get_color(palette_name):
     """Get color from scientific palette."""
     return SCIENTIFIC_PALETTE.get(palette_name, '#000000')
+
+def get_ransac_color(plot_type):
+    """Get the designated inlier color for a named RANSAC plot type."""
+    return RANSAC_PLOT_COLORS.get(plot_type, SCIENTIFIC_PALETTE['inliers'])
 
 def get_okabe_color(color_name):
     """Get color from Okabe-Ito palette."""
@@ -114,6 +133,16 @@ def ransac_legend_top_outside(ax, *, ncol: int = 2, fontsize: Optional[str] = "s
         ncol=ncol,
         fontsize=fontsize,
     )
+
+
+def ransac_grid(ax):
+    """Consistent grid style for all RANSAC / calibration plots."""
+    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.4, zorder=0)
+
+
+def ransac_savefig(fig, path):
+    """Consistent save settings for all RANSAC / calibration plots."""
+    fig.savefig(path, bbox_inches="tight", dpi=150, facecolor="white")
 
 
 def set_mag_axes_inverted_xy(ax):
