@@ -3453,6 +3453,29 @@ class PSF:
             if "flags" not in res.columns:
                 res["flags"] = 0
 
+            # Log human-readable flag descriptions using psfphot.decode_flags() (photutils 3.0).
+            # Also specifically warn on NON_FINITE_LOCALBKG (bit 2048) which photutils 3.0
+            # now handles gracefully rather than raising an error.
+            try:
+                flag_vals = np.asarray(res["flags"], int)
+                nonzero_flags = flag_vals[flag_vals != 0]
+                if len(nonzero_flags) > 0 and hasattr(psfphot, "decode_flags"):
+                    decoded = psfphot.decode_flags(res["flags"])
+                    unique_issues = set()
+                    for src_issues in decoded:
+                        for issue in src_issues:
+                            unique_issues.add(issue)
+                    if unique_issues:
+                        log.debug("PSF fit flags: %s", ", ".join(sorted(unique_issues)))
+                    if any(2048 & v for v in nonzero_flags):
+                        log.warning(
+                            "PSF fit: %d source(s) have non-finite local background "
+                            "(NON_FINITE_LOCALBKG flag); fitting proceeded without background subtraction.",
+                            int(np.sum([2048 & v for v in nonzero_flags])),
+                        )
+            except Exception:
+                pass
+
             # LSQ robustness retry:
             # Re-fit only pathological rows with a slightly larger fit box but
             # tighter centroid bounds to reduce divergence/outlier solutions.

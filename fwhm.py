@@ -38,6 +38,7 @@ from astropy.visualization import ZScaleInterval, ImageNormalize
 from photutils.detection import StarFinder, IRAFStarFinder, DAOStarFinder, find_peaks
 from photutils.background import Background2D, MedianBackground
 from photutils.utils import circular_footprint
+from photutils.profiles import RadialProfile
 from photutils.segmentation import (
     detect_threshold,
     detect_sources,
@@ -1222,8 +1223,11 @@ class Find_FWHM:
 
     def _fit_gaussian_2d(self, cutout: np.ndarray) -> Optional[Tuple[float, float]]:
         """
-        Fit a symmetric 2D Gaussian to a small cutout and return (fwhm_x, fwhm_y).
-        Returns None if fit fails. Uses robust initial guesses from image moments.
+        Estimate FWHM from a small cutout.
+
+        Primary method (photutils >=3.0): fit a Moffat profile to the radial
+        profile using RadialProfile.moffat_fwhm — more accurate for PSF wings.
+        Fallback: fit a 2D Gaussian via LevMarLSQFitter.
         """
         data = np.array(cutout, dtype=float)
         if not np.isfinite(data).any():
@@ -1231,12 +1235,26 @@ class Find_FWHM:
         mean, med, std = sigma_clipped_stats(data, sigma=3.0)
         data = data - med
         ny, nx = data.shape
-        y, x = np.mgrid[0:ny, 0:nx]
         total = np.abs(data).sum()
         if total <= 0:
             return None
-        x0 = (x * np.abs(data)).sum() / total
-        y0 = (y * np.abs(data)).sum() / total
+        y_arr, x_arr = np.mgrid[0:ny, 0:nx]
+        x0 = (x_arr * np.abs(data)).sum() / total
+        y0 = (y_arr * np.abs(data)).sum() / total
+
+        # --- Primary: Moffat radial profile fit (photutils 3.0) ---
+        try:
+            xycen = np.array([x0, y0])
+            max_r = 0.5 * min(nx, ny)
+            edge_radii = np.arange(0, max_r + 1, 0.5)
+            rp = RadialProfile(data, xycen, edge_radii, mask=~np.isfinite(data))
+            moffat_fwhm = rp.moffat_fwhm
+            if np.isfinite(moffat_fwhm) and moffat_fwhm > 0:
+                return float(moffat_fwhm), float(moffat_fwhm)
+        except Exception:
+            pass
+
+        # --- Fallback: 2D Gaussian fit ---
         amp0 = np.nanmax(data)
         sig0 = max(1.0, 0.5 * min(nx, ny) / 6.0)
         g0 = models.Gaussian2D(
@@ -1250,7 +1268,7 @@ class Find_FWHM:
         fitter = fitting.LevMarLSQFitter()
         try:
             with np.errstate(invalid="ignore", divide="ignore"):
-                g = fitter(g0, x, y, data)
+                g = fitter(g0, x_arr, y_arr, data)
             fwhm_x = 2.354820045 * float(abs(g.x_stddev.value))
             fwhm_y = 2.354820045 * float(abs(g.y_stddev.value))
             if not np.isfinite(fwhm_x) or not np.isfinite(fwhm_y):
