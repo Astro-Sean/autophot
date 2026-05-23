@@ -530,7 +530,6 @@ class BackgroundSubtractor:
                                 bkg_estimator=MedianBackground(),
                                 bkgrms_estimator=MADStdBackgroundRMS(),
                                 interpolator=BkgZoomInterpolator(order=1),
-                                edge_method="pad",
                                 exclude_percentile=90.0,
                             )
                             residual = image - np.asarray(bkg.background, dtype=float)
@@ -1093,7 +1092,6 @@ class BackgroundSubtractor:
                     bkg_estimator=BiweightLocationBackground(),
                     bkgrms_estimator=MADStdBackgroundRMS(),
                     interpolator=interp,
-                    edge_method="pad",
                     exclude_percentile=float(exclude_percentile),
                 )
 
@@ -1665,7 +1663,6 @@ class BackgroundSubtractor:
                 interpolator=interp,
                 mask=source_mask,
                 exclude_percentile=local_exclude_percentile,
-                edge_method="pad",
             )
             bkg_surface_local = bkg.background
         except Exception as exc:
