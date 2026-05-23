@@ -1015,24 +1015,11 @@ def run_photometry():
             telescope_data, telescope, instrument
         )
         if telescope_config is None:
-            # Use generic defaults for any telescope - no telescope.yml entry required
-            # This makes the pipeline completely blind to telescope identity
-            logging.info(
-                "No telescope.yml entry for %s+%s; using generic defaults.",
-                telescope,
-                instrument,
+            raise ValueError(
+                f"No telescope.yml entry found for telescope '{telescope}' and instrument '{instrument}'. "
+                f"Please add an entry to telescope.yml or use check.py to build the database. "
+                f"Supported telescopes/instruments can be found in telescope.yml."
             )
-            telescope_config = {
-                "Name": f"{telescope}+{instrument}",
-                "gain": "GAIN",
-                "saturate": "SATURATE",
-                "readnoise": "RDNOISE",
-                "airmass": "AIRMASS",
-                "mjd": "MJD-OBS",
-                "date": "DATE-OBS",
-                "exptime": "EXPTIME",
-                "filter_key_0": "FILTER",
-            }
 
         #  Handle Modified Julian Date (MJD)
         # Try telescope.yml mjd keyword, then common alternates, then date conversion.
@@ -1217,127 +1204,113 @@ def run_photometry():
                     f"Template image {fpath} is missing a usable FILTER keyword."
                 )
             # If we have a telescope.yml mapping for this telescope/instrument, apply it for templates too.
-            if telescope_config is not None:
-                try:
-                    mapping = telescope_data[telescope][instrument_key][instrument]
-                    if isinstance(mapping, dict):
-                        _meta = {
-                            "Name",
-                            "filter_key_0",
-                            "mjd",
-                            "date",
-                            "gain",
-                            "saturate",
-                            "readnoise",
-                            "airmass",
-                            "exptime",
-                            "pixel_scale",
-                        }
-                        m = mapping.get(imageFilter)
-                        if m is None:
-                            for k, v in mapping.items():
-                                if (
-                                    k not in _meta
-                                    and isinstance(v, str)
-                                    and k.strip().upper() == imageFilter.strip().upper()
-                                ):
-                                    m = v
-                                    break
-                        if m is not None:
-                            imageFilter = m
-                except Exception as e:
-                    logging.warning(f"Failed to apply telescope.yml filter mapping for template: {e}")
+            try:
+                mapping = telescope_data[telescope][instrument_key][instrument]
+                if isinstance(mapping, dict):
+                    _meta = {
+                        "Name",
+                        "filter_key_0",
+                        "mjd",
+                        "date",
+                        "gain",
+                        "saturate",
+                        "readnoise",
+                        "airmass",
+                        "exptime",
+                        "pixel_scale",
+                    }
+                    m = mapping.get(imageFilter)
+                    if m is None:
+                        for k, v in mapping.items():
+                            if (
+                                k not in _meta
+                                and isinstance(v, str)
+                                and k.strip().upper() == imageFilter.strip().upper()
+                            ):
+                                m = v
+                                break
+                    if m is not None:
+                        imageFilter = m
+            except Exception as e:
+                logging.warning(f"Failed to apply telescope.yml filter mapping for template: {e}")
         else:
             # Science image filter detection
-            if telescope_config is not None:
-                # Use telescope.yml filter key mappings
-                open_filter = False
-                found_correct_key = False
-                filter_keys = [
-                    i
-                    for i in list(telescope_data[telescope][instrument_key][instrument])
-                    if i.startswith("filter_key_")
-                ]
-                _inst = telescope_data[telescope][instrument_key][instrument]
-                _filter_meta = {
-                    "Name",
-                    "filter_key_0",
-                    "mjd",
-                    "date",
-                    "gain",
-                    "saturate",
-                    "readnoise",
-                    "airmass",
-                    "exptime",
-                    "pixel_scale",
-                }
-                for filter_header_key in filter_keys:
-                    header_key_candidate = _inst[filter_header_key]
-                    if header_key_candidate not in header:
-                        continue
-                    header_val = str(header[header_key_candidate]).strip()
-                    if header_val.lower() in avoid_keys:
-                        open_filter = True
-                        continue
-                    # If the header value is a known filter mapping (exact or case-insensitive), we found our key
-                    if header_val in _inst:
-                        found_correct_key = True
-                        break
-                    if any(
-                        k not in _filter_meta
-                        and isinstance(v, str)
-                        and k.strip().upper() == header_val.strip().upper()
-                        for k, v in _inst.items()
-                    ):
-                        found_correct_key = True
-                        break
+            # Use telescope.yml filter key mappings
+            open_filter = False
+            found_correct_key = False
+            filter_keys = [
+                i
+                for i in list(telescope_data[telescope][instrument_key][instrument])
+                if i.startswith("filter_key_")
+            ]
+            _inst = telescope_data[telescope][instrument_key][instrument]
+            _filter_meta = {
+                "Name",
+                "filter_key_0",
+                "mjd",
+                "date",
+                "gain",
+                "saturate",
+                "readnoise",
+                "airmass",
+                "exptime",
+                "pixel_scale",
+            }
+            for filter_header_key in filter_keys:
+                header_key_candidate = _inst[filter_header_key]
+                if header_key_candidate not in header:
+                    continue
+                header_val = str(header[header_key_candidate]).strip()
+                if header_val.lower() in avoid_keys:
+                    open_filter = True
+                    continue
+                # If the header value is a known filter mapping (exact or case-insensitive), we found our key
+                if header_val in _inst:
+                    found_correct_key = True
+                    break
+                if any(
+                    k not in _filter_meta
+                    and isinstance(v, str)
+                    and k.strip().upper() == header_val.strip().upper()
+                    for k, v in _inst.items()
+                ):
+                    found_correct_key = True
+                    break
 
-                if not found_correct_key and open_filter:
-                    raise Exception("Cannot find correct filter keyword")
+            if not found_correct_key and open_filter:
+                raise Exception("Cannot find correct filter keyword")
 
-                #  Get Image Filter
-                # Retrieves the image filter from the header.
-                if found_correct_key:
-                    input_yaml["filter_key"] = telescope_data[telescope][instrument_key][
-                        instrument
-                    ][filter_header_key]
-                    raw_filter = str(header[input_yaml["filter_key"]]).strip()
-                    # Use telescope.yml mapping if available; otherwise use heuristics
-                    imageFilter = None
-                    if telescope in telescope_data and instrument_key in telescope_data.get(telescope, {}):
-                        mapping = telescope_data[telescope][instrument_key].get(instrument, {})
-                        _meta = {
-                            "Name", "filter_key_0", "mjd", "date", "gain",
-                            "saturate", "readnoise", "airmass", "exptime", "pixel_scale",
-                        }
-                        imageFilter = mapping.get(raw_filter)
-                        if imageFilter is None:
-                            for k, v in mapping.items():
-                                if k not in _meta and isinstance(v, str) and k.strip().upper() == raw_filter.strip().upper():
-                                    imageFilter = v
-                                    break
-                    
-                    # Telescope-blind: if no mapping found, use heuristic to derive filter
+            #  Get Image Filter
+            # Retrieves the image filter from the header.
+            if found_correct_key:
+                input_yaml["filter_key"] = telescope_data[telescope][instrument_key][
+                    instrument
+                ][filter_header_key]
+                raw_filter = str(header[input_yaml["filter_key"]]).strip()
+                # Use telescope.yml mapping if available; otherwise use heuristics
+                imageFilter = None
+                if telescope in telescope_data and instrument_key in telescope_data.get(telescope, {}):
+                    mapping = telescope_data[telescope][instrument_key].get(instrument, {})
+                    _meta = {
+                        "Name", "filter_key_0", "mjd", "date", "gain",
+                        "saturate", "readnoise", "airmass", "exptime", "pixel_scale",
+                    }
+                    imageFilter = mapping.get(raw_filter)
                     if imageFilter is None:
-                        imageFilter = _heuristic_filter_mapping(raw_filter)
-                        if imageFilter != raw_filter:
-                            logging.info(
-                                f"Filter '{raw_filter}' mapped to '{imageFilter}' via heuristic (no telescope.yml entry)"
-                            )
-                else:
-                    # Fallback: no mapping found; use a common header key directly when present
-                    for fk in ("FILTER", "FILTER1", "FILTER2"):
-                        if (
-                            fk in header
-                            and str(header[fk]).strip().lower() not in avoid_keys
-                        ):
-                            input_yaml["filter_key"] = fk
-                            imageFilter = str(header[fk]).strip()
-                            break
-                    else:
-                        raise Exception("Cannot determine image filter from header.")
+                        for k, v in mapping.items():
+                            if k not in _meta and isinstance(v, str) and k.strip().upper() == raw_filter.strip().upper():
+                                imageFilter = v
+                                break
+                
+                # Telescope-blind: if no mapping found, use heuristic to derive filter
+                if imageFilter is None:
+                    imageFilter = _heuristic_filter_mapping(raw_filter)
+                    if imageFilter != raw_filter:
+                        logging.info(
+                            f"Filter '{raw_filter}' mapped to '{imageFilter}' via heuristic (no telescope.yml entry)"
+                        )
             else:
-                # No telescope.yml entry: use simple fallback to common header keys
+                # Fallback: no mapping found; use a common header key directly when present
                 for fk in ("FILTER", "FILTER1", "FILTER2"):
                     if (
                         fk in header
@@ -1347,7 +1320,7 @@ def run_photometry():
                         imageFilter = str(header[fk]).strip()
                         break
                 else:
-                    raise Exception("Cannot determine image filter from header (no telescope.yml entry).")
+                    raise Exception("Cannot determine image filter from header.")
 
         # =============================================================================
         # Pixel Scale
@@ -1382,7 +1355,7 @@ def run_photometry():
             pixel_scale = pixel_scale_candidate
             logging.info("Pixel scale from WCS: %.3f arcsec/pixel", pixel_scale)
         else:
-            if not is_template and telescope_config is not None:
+            if not is_template:
                 # Fallback: use telescope.yml pixel_scale if defined
                 ps = telescope_data[telescope][instrument_key][instrument].get(
                     "pixel_scale"
