@@ -1236,11 +1236,24 @@ class PSF:
         optionally plus a PSF-model-mismatch floor and optional smoothing.
         """
         image_e = np.asarray(image, float) * float(gain)
-        bkg_rms_e = (
-            np.zeros_like(image_e)
-            if background_rms is None
-            else np.asarray(background_rms, float) * float(gain)
-        )
+        if background_rms is None:
+            bkg_rms_e = np.zeros_like(image_e)
+        else:
+            bkg_rms_arr = np.asarray(background_rms, float)
+            # Ensure bkg_rms_e has the same shape as image_e
+            if bkg_rms_arr.shape == image_e.shape:
+                bkg_rms_e = bkg_rms_arr * float(gain)
+            elif bkg_rms_arr.ndim == 0 or np.prod(bkg_rms_arr.shape) == 1:
+                # Scalar or single-element array: broadcast to image shape
+                bkg_rms_e = np.full_like(image_e, bkg_rms_arr.item() * float(gain))
+            else:
+                # Array with different shape: try to broadcast or raise error
+                try:
+                    bkg_rms_e = np.broadcast_to(bkg_rms_arr * float(gain), image_e.shape)
+                except ValueError:
+                    raise ValueError(
+                        f"background_rms shape {background_rms.shape} incompatible with data shape {image_e.shape}"
+                    )
         bkg_error = np.sqrt(bkg_rms_e**2 + float(read_noise) ** 2)
         total_error = calc_total_error(
             data=image_e, bkg_error=bkg_error, effective_gain=1.0
