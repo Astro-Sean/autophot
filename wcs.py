@@ -977,7 +977,8 @@ def _resolve_sextractor_conv_fwhm_pixels(
             continue
         if np.isfinite(fwhm_pix) and fwhm_pix > 0:
             # Keep kernel practical and stable for SExtractor.
-            return float(np.clip(fwhm_pix, 1.0, 20.0))
+            # Minimum 2.5 px ensures realistic kernel for astronomical seeing
+            return float(np.clip(fwhm_pix, 2.5, 20.0))
     return 3.0
 
 

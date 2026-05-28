@@ -230,7 +230,8 @@ class ImageDistortionCorrector:
                 Takes priority over aperture_radius when provided.
         """
 
-        fwhm_pixels = float(max(1.0, min(fwhm_pixels, 15.0)))
+        # Enforce realistic FWHM bounds: 2.5-15 pixels for convolution kernel
+        fwhm_pixels = float(max(2.5, min(fwhm_pixels, 15.0)))
         # Kernel half-width priority: scale_half_width > aperture_radius > 1.7×FWHM.
         # 2*half_width+1 is always odd, so no even-size correction is needed.
         # SExtractor hard limit: 31×31 pixels.

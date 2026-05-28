@@ -251,7 +251,9 @@ class SExtractorWrapper:
         )
 
         if fwhm_pixels > 0:
-            fp = float(max(1.0, min(fwhm_pixels, 15.0)))
+            # Enforce realistic FWHM bounds: 2.5-15 pixels
+            # Minimum 2.5 px ensures kernel is never too small for astronomical seeing
+            fp = float(max(2.5, min(fwhm_pixels, 15.0)))
             kernel_size = max(3, int(np.ceil(fp * 3)))
             if kernel_size % 2 == 0:
                 kernel_size += 1  # Ensure odd size
