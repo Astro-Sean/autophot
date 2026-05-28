@@ -1393,32 +1393,57 @@ def run_photometry():
                     header["gain"] = header[IR_gain_key]
 
         #  Handle Gain — after instrument-specific header patches (e.g. GROND IR).
-        primary_gain_key = telescope_config.get("gain", "GAIN")
-        pref_gain = (
-            []
-            if primary_gain_key == "not_given_by_user"
-            else [primary_gain_key]
-        )
-        try:
-            gain, gain_header_key = gain_e_per_adu_from_header(header, pref_gain)
-        except ValueError as exc:
-            # Survey stacks (e.g. PS1 skycells) often omit GAIN; strict header gain
-            # still applies to science frames.
-            if is_template:
-                logging.warning(
-                    "Template image has no usable GAIN in FITS header (%s). "
-                    "Using gain=1.0 e-/ADU. For Pan-STARRS stacks, consider "
-                    "utils/fix_panstarrs_headers.py or add GAIN if pixels are not ADU.",
-                    exc,
-                )
-                gain, gain_header_key = 1.0, "assumed_1.0_template_no_header_gain"
-            else:
-                raise ValueError(
-                    f"No valid detector gain (e-/ADU) in FITS header for {fpath!r}: {exc}"
-                ) from exc
-        logging.info(
-            "Gain: %.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
-        )
+        # telescope.yml gain can be either a numeric value (e-/ADU) or a header keyword.
+        primary_gain = telescope_config.get("gain", "GAIN")
+        
+        # Check if telescope.yml gain is a numeric value (direct gain in e-/ADU)
+        if isinstance(primary_gain, (int, float)) and primary_gain > 0:
+            gain = float(primary_gain)
+            gain_header_key = f"telescope.yml_gain_{primary_gain}"
+            logging.info(
+                "Gain: %.5g e-/ADU (from telescope.yml)", gain
+            )
+        elif primary_gain == "not_given_by_user":
+            # No gain specified in telescope.yml, use header lookup
+            try:
+                gain, gain_header_key = gain_e_per_adu_from_header(header, [])
+            except ValueError as exc:
+                if is_template:
+                    logging.warning(
+                        "Template image has no usable GAIN in FITS header (%s). "
+                        "Using gain=1.0 e-/ADU. For Pan-STARRS stacks, consider "
+                        "utils/fix_panstarrs_headers.py or add GAIN if pixels are not ADU.",
+                        exc,
+                    )
+                    gain, gain_header_key = 1.0, "assumed_1.0_template_no_header_gain"
+                else:
+                    raise ValueError(
+                        f"No valid detector gain (e-/ADU) in FITS header for {fpath!r}: {exc}"
+                    ) from exc
+            logging.info(
+                "Gain: %.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
+            )
+        else:
+            # telescope.yml gain is a header keyword string
+            pref_gain = [primary_gain]
+            try:
+                gain, gain_header_key = gain_e_per_adu_from_header(header, pref_gain)
+            except ValueError as exc:
+                if is_template:
+                    logging.warning(
+                        "Template image has no usable GAIN in FITS header (%s). "
+                        "Using gain=1.0 e-/ADU. For Pan-STARRS stacks, consider "
+                        "utils/fix_panstarrs_headers.py or add GAIN if pixels are not ADU.",
+                        exc,
+                    )
+                    gain, gain_header_key = 1.0, "assumed_1.0_template_no_header_gain"
+                else:
+                    raise ValueError(
+                        f"No valid detector gain (e-/ADU) in FITS header for {fpath!r}: {exc}"
+                    ) from exc
+            logging.info(
+                "Gain: %.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
+            )
 
         #  Update WCS Pixel Scale
         # Updates the pixel scale in the input YAML.
