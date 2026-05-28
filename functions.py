@@ -808,7 +808,6 @@ def border_msg(msg: str, body: str = "-", corner: str = "+") -> str:
 # telescope.yml in the working dir lists all telescopes; each entry follows the structure below.
 # Top level: TELESCOP value (e.g. "1m0-01", "ESO-NTT", "Palomar 48-inch"). Under each:
 #   INSTRUME: instrument name -> instrument config dict.
-#   location (optional): {name, lon, lat, alt} for the site.
 #
 # Instrument config entry structure (build telescope.yml entries from this):
 INSTRUMENT_ENTRY_STRUCTURE = {
@@ -866,7 +865,6 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "pixel_scale": 0.4,
             },
         },
-        "location": {"name": None, "lon": None, "lat": None, "alt": None},
     },
     "SDSS": {
         "INSTRUME": {
@@ -885,7 +883,6 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "pixel_scale": 0.4,
             },
         },
-        "location": {"name": None, "lon": None, "lat": None, "alt": None},
     },
     "2MASS": {
         "INSTRUME": {
@@ -904,7 +901,6 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "pixel_scale": 1.0,
             },
         },
-        "location": {"name": None, "lon": None, "lat": None, "alt": None},
     },
     "ESO-VST": {
         "INSTRUME": {
@@ -927,7 +923,6 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "pixel_scale": 0.21,
             },
         },
-        "location": {"name": None, "lon": None, "lat": None, "alt": None},
     },
     "ESO-VISTA": {
         "INSTRUME": {
@@ -945,7 +940,6 @@ BUILTIN_TELESCOPE_DEFAULTS = {
                 "pixel_scale": 0.34,
             },
         },
-        "location": {"name": None, "lon": None, "lat": None, "alt": None},
     },
 }
 

@@ -612,14 +612,6 @@ class FitsInfo:
         )
         return correct_files
 
-    def _setup_telescope(self, tele_entry, tele_name):
-        """
-        Telescope setup hook.
-
-        Location information is no longer used, so this is a no-op that simply
-        preserves any existing values in the database without prompting.
-        """
-        return
 
     def _ask_filter_mapping(self, header_value):
         """
