@@ -164,10 +164,10 @@ class Plot:
                     vmaxs[key] = np.nanmax(img_data)
 
             # Set up figure with 1x3 layout for three images (Image, Reference, Difference)
-            fig = plt.figure(figsize=(18, 5), constrained_layout=False)
-            gs = GridSpec(1, 3, figure=fig, width_ratios=[1, 1, 1], wspace=0.3)
+            fig = plt.figure(figsize=(15, 5), constrained_layout=False)
+            gs = GridSpec(1, 3, figure=fig, width_ratios=[1, 1, 1], wspace=0.08)
             axes = [fig.add_subplot(gs[0, i]) for i in range(3)]
-            plt.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.1)
+            plt.subplots_adjust(left=0.05, right=0.97, top=0.93, bottom=0.08)
 
             img_height, img_width = image.shape
             margin = 0.05
@@ -1004,7 +1004,7 @@ class Plot:
                         lower_left,
                         square_size,
                         square_size,
-                        edgecolor=get_divergent_color('reference'),
+                        edgecolor="orange",
                         facecolor="none",
                         label="Reference Sources",
                         zorder=1,
@@ -1022,8 +1022,8 @@ class Plot:
                     norm_fwhm = Normalize(
                         vmin=np.nanmin(fwhm_values), vmax=np.nanmax(fwhm_values)
                     )
-                    # Perceptually-uniform sequential map for FWHM scaling.
-                    cmap = plt.get_cmap("gray")
+                    # Red colormap for FWHM scaling.
+                    cmap = plt.get_cmap("Reds")
 
                     # Create a ScalarMappable for the colorbar
                     sm = ScalarMappable(norm=norm_fwhm, cmap=cmap)
