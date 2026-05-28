@@ -937,41 +937,23 @@ NNW
                 ref_shape = ref_data.shape
                 sci_pix_scale = proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
                 ref_pix_scale = proj_plane_pixel_scales(ref_wcs)[0] * 3600.0
-                # Use the science image pixel center as the SWarp grid CENTER, and the
-                # science image shape as IMAGE_SIZE.  This is the only combination that
-                # guarantees SWarp produces an output of exactly sci_shape for the science
-                # image (it completely fills its own pixel-center grid) so no post-hoc
-                # cropping is required.  The reference is resampled onto the identical grid
-                # and will therefore have the same shape.
-                # Use the integer center pixel (0-based).  For odd-sized dimensions
-                # this lands exactly on the middle pixel; for even dimensions on the
-                # lower-middle pixel.  Passing a half-pixel (shape/2.0) as CENTER
-                # causes SWarp to compute CRPIX differently for science vs reference
-                # (each image's WCS rounds the sub-pixel position independently),
-                # producing the observed 1-px CRPIX offset between outputs.
-                _cx_pix = sci_shape[1] // 2  # integer, 0-based
-                _cy_pix = sci_shape[0] // 2  # integer, 0-based
-                ra_arr, dec_arr = sci_wcs.all_pix2world(
-                    [_cx_pix], [_cy_pix], 0
-                )
-                center_ra, center_dec = float(ra_arr[0]), float(dec_arr[0])
-                
-                # Compute optimal output size as intersection of valid (non-NaN) regions
-                # from both images. This reduces computation when coverage differs.
-                # Ensure the actual target location (from input_yaml) is always included in output.
-                target_ra = self.input_yaml.get("target_ra", center_ra)
-                target_dec = self.input_yaml.get("target_dec", center_dec)
-                output_width, output_height = self._compute_optimal_output_shape(
+                # Compute optimal output size and sky centre from the intersection of
+                # both images' valid footprints. The returned center_ra/center_dec is the
+                # midpoint of the overlap region — using this as SWarp CENTER guarantees
+                # the output grid lies within both images' coverage, avoiding the shape
+                # mismatch that occurs when the science pixel centre is used but the
+                # reference doesn't fully cover the northern portion of that grid.
+                target_ra = self.input_yaml.get("target_ra", None)
+                target_dec = self.input_yaml.get("target_dec", None)
+                output_width, output_height, center_ra, center_dec = self._compute_optimal_output_shape(
                     sci_data, sci_wcs, ref_data, ref_wcs, sci_pix_scale,
                     target_ra=target_ra, target_dec=target_dec
                 )
                 self.logger.info(
-                    "SWARP output: using target (RA=%.6f, Dec=%.6f) for size calculation",
-                    target_ra, target_dec
-                )
-                self.logger.info(
-                    "Optimal output shape: %dx%d (science was %dx%d, reference was %dx%d)",
-                    output_width, output_height, sci_shape[1], sci_shape[0], ref_shape[1], ref_shape[0]
+                    "Optimal output shape: %dx%d  CENTER=(%.6f,%.6f)  "
+                    "(science was %dx%d, reference was %dx%d)",
+                    output_width, output_height, center_ra, center_dec,
+                    sci_shape[1], sci_shape[0], ref_shape[1], ref_shape[0]
                 )
                 
                 # Force SWARP to always resample both images (removed skip check)
@@ -1914,8 +1896,10 @@ NNW
             
         Returns
         -------
-        (width, height) : tuple of int
-            Optimal output dimensions in pixels
+        (width, height, center_ra, center_dec) : tuple
+            Optimal output dimensions in pixels and sky centre of the overlap
+            region (degrees).  Callers should use center_ra/center_dec as the
+            SWarp CENTER so the output grid lies within both images' footprints.
         """
         try:
             # Find valid (finite) pixel regions in each image
@@ -1937,7 +1921,10 @@ NNW
             
             if sci_bbox is None or ref_bbox is None:
                 # Fall back to science shape if no valid data found
-                return sci_data.shape[1], sci_data.shape[0]
+                _scx = sci_data.shape[1] // 2
+                _scy = sci_data.shape[0] // 2
+                _fb_ra, _fb_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
+                return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
             
             # Convert bounding box corners to world coordinates
             def _bbox_corners(bbox):
@@ -1962,11 +1949,16 @@ NNW
                 self.logger.warning(
                     "No overlap in valid regions; using science image shape."
                 )
-                return sci_data.shape[1], sci_data.shape[0]
+                _scx = sci_data.shape[1] // 2
+                _scy = sci_data.shape[0] // 2
+                _fb_ra, _fb_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
+                return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
             
             # Convert overlap size to pixels at output pixel scale
             # cos(dec) factor for RA separation
-            cos_dec = np.cos(np.radians((dec_min + dec_max) / 2))
+            overlap_center_ra = (ra_min + ra_max) / 2
+            overlap_center_dec = (dec_min + dec_max) / 2
+            cos_dec = np.cos(np.radians(overlap_center_dec))
             ra_sep = (ra_max - ra_min) * cos_dec * 3600  # arcsec
             dec_sep = (dec_max - dec_min) * 3600  # arcsec
             
@@ -1985,8 +1977,8 @@ NNW
                 cos_dec = np.cos(np.radians(target_dec))
                 
                 # Target offset from center in arcsec
-                dra_arcsec = (target_ra - (ra_min + ra_max) / 2) * cos_dec * 3600
-                ddec_arcsec = (target_dec - (dec_min + dec_max) / 2) * 3600
+                dra_arcsec = (target_ra - overlap_center_ra) * cos_dec * 3600
+                ddec_arcsec = (target_dec - overlap_center_dec) * 3600
                 
                 # Convert to pixels
                 dx_pix = dra_arcsec / pix_scale
@@ -2038,13 +2030,19 @@ NNW
                     width = sci_data.shape[1]
                     height = sci_data.shape[0]
             
-            return width, height
+            return width, height, overlap_center_ra, overlap_center_dec
             
         except Exception as e:
             self.logger.warning(
                 "Could not compute optimal output shape: %s. Using science shape.", e
             )
-            return sci_data.shape[1], sci_data.shape[0]
+            _scx = sci_data.shape[1] // 2
+            _scy = sci_data.shape[0] // 2
+            try:
+                _fb_ra, _fb_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
+                return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
+            except Exception:
+                return sci_data.shape[1], sci_data.shape[0], float(sci_wcs.wcs.crval[0]), float(sci_wcs.wcs.crval[1])
 
     def _align_fallback_reproject_then_astroalign(
         self,
