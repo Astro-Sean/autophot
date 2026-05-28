@@ -6430,27 +6430,26 @@ def run_photometry():
         output_str = dict_to_string_with_hashtag(output)
 
         # Write calibration file with zeropoint and sequence star information
-        # Build zeropoint info dictionary
-        zp_info = {"# Zeropoint Information": {}}
+        # Build zeropoint info as clean comments
+        zp_lines = ["# Zeropoint and calibration information"]
         for method in image_zeropoint.keys():
             if method in image_zeropoint:
-                zp_info["# Zeropoint Information"][method] = {
-                    "zeropoint": image_zeropoint[method].get("zeropoint", np.nan),
-                    "zeropoint_error": image_zeropoint[method].get("zeropoint_error", np.nan),
-                }
+                zp = image_zeropoint[method].get("zeropoint", np.nan)
+                zp_err = image_zeropoint[method].get("zeropoint_error", np.nan)
+                zp_lines.append(f"# {method}_zeropoint: {zp:.6f}")
+                zp_lines.append(f"# {method}_zeropoint_error: {zp_err:.6f}")
                 # Add color term if available
                 if "color_term" in image_zeropoint[method]:
-                    zp_info["# Zeropoint Information"][method]["color_term"] = image_zeropoint[method].get("color_term")
-                    zp_info["# Zeropoint Information"][method]["color_term_error"] = image_zeropoint[method].get("color_term_error")
-
-        zp_str = dict_to_string_with_hashtag(zp_info)
+                    ct = image_zeropoint[method].get("color_term")
+                    ct_err = image_zeropoint[method].get("color_term_error")
+                    zp_lines.append(f"# {method}_color_term: {ct:.6f}")
+                    zp_lines.append(f"# {method}_color_term_error: {ct_err:.6f}")
 
         # Opens the file in write mode to add the output string and zeropoint info.
         with open(calibration_file, "w") as file:
             file.write("# Output dictionary")
             file.write(output_str + "")
-            file.write("\n# Zeropoint and calibration information")
-            file.write(zp_str + "")
+            file.write("\n" + "\n".join(zp_lines))
 
         # Append sequence star catalog (CatalogSources) if available
         if CatalogSources is not None and not CatalogSources.empty:

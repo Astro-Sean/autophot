@@ -5223,6 +5223,7 @@ class Templates:
                 )
             rss = ensure_odd(max(3 * r, 11))
 
+
             # Read noise: HOTPANTS can misbehave with 0; use a small floor (e.g. 0.1 e-).
             rn_floor = 0.1
             science_readnoise = max(float(science_readnoise), rn_floor)
