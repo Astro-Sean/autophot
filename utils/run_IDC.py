@@ -1109,14 +1109,13 @@ NNW
             scamp_config_ref = {
                 **scamp_config_base,
                 "FWHM_THRESHOLDS": f"{0.3*fwhm_ref_pix:.2f},{10*fwhm_ref_pix:.2f}",
-                # Inter-image alignment only needs a linear model (shift + scale + rotation).
-                # High DISTORT_DEGREES (default 4) from WCS config overfits with sparse sources
-                # and produces WCS distortion terms that confuse SWarp's grid computation.
-                "DISTORT_DEGREES": 1,
+                # Cap DISTORT_DEGREES at 3 for inter-image alignment.
+                # The global WCS config default (4) can overfit with sparse source lists.
+                "DISTORT_DEGREES": 3,
             }
             sparse_note = " (sparse field mode)" if is_sparse_field else ""
             self.logger.info(
-                'SCAMP: CROSSID_RADIUS=%.2f" POSITION_MAXERR=%.2f" SN_THRESHOLDS=%s DISTORT_DEGREES=1%s FWHM_THRESHOLDS ref=[%.2f,%.2f]',
+                'SCAMP: CROSSID_RADIUS=%.2f" POSITION_MAXERR=%.2f" SN_THRESHOLDS=%s DISTORT_DEGREES=3%s FWHM_THRESHOLDS ref=[%.2f,%.2f]',
                 crossid_arcsec,
                 position_maxerr_arcsec,
                 sn_thresholds,
