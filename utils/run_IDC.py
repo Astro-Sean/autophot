@@ -89,7 +89,7 @@ class ImageDistortionCorrector:
 
     DEFAULT_SCAMP_CONFIG = {
         "SOLVE_ASTROM": "Y",
-        "SOLVE_PHOTOM": "Y",
+        "SOLVE_PHOTOM": "N",  # Alignment-only; photometric solution unused and wastes time
         "REF_TIMEOUT": 60,
         "REF_SERVER": "vizier.cfa.harvard.edu",
         "DISTORT_DEGREES": None,  # Will be set from config
@@ -98,12 +98,19 @@ class ImageDistortionCorrector:
         "MATCH_FLIPPED": "Y",
         "WRITE_XML": "Y",
         "VERBOSE_TYPE": "LOG",
+        # Input LDAC centroid columns (windowed, most accurate)
+        "CENTROID_KEYS": "XWIN_IMAGE,YWIN_IMAGE",
+        "CENTROIDERR_KEYS": "ERRAWIN_IMAGE,ERRBWIN_IMAGE,ERRTHETAWIN_IMAGE",
+        "DISTORT_KEYS": "XWIN_IMAGE,YWIN_IMAGE",
+        # Reference catalog column names (science LDAC used as ASTREFCAT_NAME).
+        # The science LDAC contains XWIN_WORLD/YWIN_WORLD as its windowed world
+        # coordinates — these are what SCAMP expects for ASTREFCENT_KEYS when the
+        # reference catalog is an LDAC (not an online catalog like GAIA).
         "ASTREF_WEIGHT": 1,
         "ASTREFMAG_KEY": "MAG_AUTO",
         "ASTREFMAGERR_KEY": "MAGERR_AUTO",
-        "ASTREFCENT_KEYS": "ALPHA_J2000,DELTA_J2000",
+        "ASTREFCENT_KEYS": "XWIN_WORLD,YWIN_WORLD",
         "ASTREFERR_KEYS": "ERRA_WORLD,ERRB_WORLD,ERRTHETA_WORLD",
-        "DISTORT_KEYS": "XWIN_IMAGE,YWIN_IMAGE",
         "ELLIPTICITY_MAX": 0.5,
         "MOSAIC_TYPE": "UNCHANGED",
         "STABILITY_TYPE": "EXPOSURE",
