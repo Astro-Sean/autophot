@@ -201,22 +201,62 @@ class ImageDistortionCorrector:
         """Replace non-ASCII chars in a line with '?' safely (fixes ord() bug)."""
         return "".join((ch if ord(ch) < 128 else "?") for ch in line)
 
-    def _create_conv_file(self, path: str, fwhm_pixels: float = 3.0) -> None:
+    def _create_conv_file(
+        self,
+        path: str,
+        fwhm_pixels: float = 3.0,
+        aperture_radius: Optional[float] = None,
+        scale_half_width: Optional[int] = None,
+    ) -> None:
         """
-        Create a convolution kernel for SExtractor, optimized for the given FWHM.
+        Create a convolution kernel for SExtractor.
+
+        Kernel half-width priority (highest to lowest):
+          1. ``scale_half_width`` — the pipeline ``scale`` parameter (already half the
+             cutout box size). Ensures the kernel covers the same footprint used for
+             PSF/cutout extraction.
+          2. ``aperture_radius`` — photometry aperture radius, so the matched-filter
+             kernel exactly covers the detection aperture.
+          3. ``1.7 × fwhm_pixels`` — default aperture formula from run_sex.py.
+
+        ``fwhm_pixels`` always controls the Gaussian sigma regardless of which
+        half-width source is used.
 
         Args:
             path: Path to save the convolution file.
-            fwhm_pixels: FWHM in pixels, used to optimize the kernel size.
+            fwhm_pixels: FWHM in pixels (sets the Gaussian sigma).
+            aperture_radius: Photometry aperture radius in pixels.
+            scale_half_width: The pipeline ``scale`` parameter (half the cutout box) in pixels.
+                Takes priority over aperture_radius when provided.
         """
 
         fwhm_pixels = float(max(1.0, min(fwhm_pixels, 15.0)))
-        kernel_size = max(3, int(np.ceil(fwhm_pixels * 2)))
-        if kernel_size % 2 == 0:
-            kernel_size += 1  # Ensure odd size
-        kernel_size = min(kernel_size, 21)  # SExtractor hard limit
+        # Kernel half-width priority: scale_half_width > aperture_radius > 1.7×FWHM.
+        # 2*half_width+1 is always odd, so no even-size correction is needed.
+        # SExtractor hard limit: 31×31 pixels.
+        if scale_half_width is not None and int(scale_half_width) > 0:
+            half_width = int(scale_half_width)
+            self.logger.info(
+                "Convolution kernel half-width set from scale: %d px (FWHM=%.1f px)",
+                half_width,
+                fwhm_pixels,
+            )
+        elif aperture_radius is not None and float(aperture_radius) > 0:
+            half_width = int(np.ceil(float(aperture_radius)))
+            self.logger.info(
+                "Convolution kernel half-width set from aperture radius: %d px (FWHM=%.1f px)",
+                half_width,
+                fwhm_pixels,
+            )
+        else:
+            half_width = int(np.ceil(1.7 * fwhm_pixels))
+        kernel_size = max(3, 2 * half_width + 1)
+        kernel_size = min(kernel_size, 31)  # SExtractor hard limit
         self.logger.info(
-            f"Creating Convolution Kernel with FWHM: {fwhm_pixels:.1f} pixels"
+            "Creating convolution kernel: FWHM=%.1f px  size=%dx%d",
+            fwhm_pixels,
+            kernel_size,
+            kernel_size,
         )
         center = kernel_size // 2
         sigma = fwhm_pixels / 2.355  # FWHM = 2.355 * sigma
@@ -492,6 +532,7 @@ NNW
         aperture_radius=None,
         weight_path: Optional[str] = None,
         crowded: bool = False,
+        scale: Optional[int] = None,
     ) -> Dict:
         """
         Build a clean catalog using SExtractor, prioritizing extended sources.
@@ -522,7 +563,20 @@ NNW
                     pixel_scale_header = PIXEL_SCALE if PIXEL_SCALE > 0 else 1.0
                 seeing_fwhm_arcsec = float(fwhm_pixels) * pixel_scale_header
 
-            self._create_conv_file(conv_path, fwhm_pixels=fwhm_pixels)
+            # Kernel sizing priority: scale > aperture_radius > 1.7×FWHM.
+            # scale is already half the pipeline source-cutout box size, so it
+            # directly gives the kernel half-width — the kernel covers the same
+            # footprint as PSF/cutout work.
+            _eff_aperture: Optional[float] = None
+            if aperture_radius is not None and float(aperture_radius) > 0:
+                _eff_aperture = float(aperture_radius)
+            _scale_hw: Optional[int] = int(scale) if scale is not None and int(scale) > 0 else None
+            self._create_conv_file(
+                conv_path,
+                fwhm_pixels=fwhm_pixels,
+                aperture_radius=_eff_aperture,
+                scale_half_width=_scale_hw,
+            )
 
             final_config = self.DEFAULT_SEX_CONFIG.copy()
             if crowded:
@@ -993,6 +1047,7 @@ NNW
             if ref_w:
                 self.logger.info("Alignment SExtractor: using reference MAP_WEIGHT %s", ref_w)
 
+            # Pass 1: measure FWHM (kernel sized from aperture/FWHM header only)
             sci_sex = self.run_sextractor(
                 str(sci_image_copy),
                 output_dir=str(science_aligned_dir),
@@ -1008,6 +1063,43 @@ NNW
                 weight_path=ref_w,
                 PIXEL_SCALE=ref_pix_scale,
                 crowded=sextractor_crowded,
+            )
+
+            fwhm_sci_pix = float(sci_sex["fwhm"]) if "fwhm" in sci_sex else 2.5
+            fwhm_ref_pix = float(ref_sex["fwhm"]) if "fwhm" in ref_sex else 2.5
+
+            # Pass 2: re-run with kernel sized from scale (scale_multiplier × FWHM).
+            # Take the larger of the two scales so the kernel covers the broader PSF,
+            # matching the source-cutout footprint used throughout the rest of the pipeline.
+            from utils.run_sex import scale_multiplier_from_config, clamp_scale_from_config
+            iy_cfg = getattr(self, "input_yaml", None) or {}
+            _sm = scale_multiplier_from_config(iy_cfg)
+            sci_scale = int(clamp_scale_from_config(iy_cfg, _sm * fwhm_sci_pix))
+            ref_scale = int(clamp_scale_from_config(iy_cfg, _sm * fwhm_ref_pix))
+            combined_scale = max(sci_scale, ref_scale)
+            self.logger.info(
+                "Alignment SExtractor pass-2: science scale=%d ref scale=%d -> combined=%d px",
+                sci_scale,
+                ref_scale,
+                combined_scale,
+            )
+            sci_sex = self.run_sextractor(
+                str(sci_image_copy),
+                output_dir=str(science_aligned_dir),
+                aperture_radius=sci_aperture_radius,
+                weight_path=sci_w,
+                PIXEL_SCALE=sci_pix_scale,
+                crowded=sextractor_crowded,
+                scale=combined_scale,
+            )
+            ref_sex = self.run_sextractor(
+                str(ref_image_copy),
+                output_dir=str(reference_aligned_dir),
+                aperture_radius=ref_aperture_radius,
+                weight_path=ref_w,
+                PIXEL_SCALE=ref_pix_scale,
+                crowded=sextractor_crowded,
+                scale=combined_scale,
             )
 
             n_sci = len(sci_sex.get("catalog", []))

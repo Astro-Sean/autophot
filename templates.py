@@ -3822,6 +3822,7 @@ class Templates:
         flux_scale_ref_to_sci: Optional[float] = None,
         centroid_offset_x: Optional[float] = None,
         centroid_offset_y: Optional[float] = None,
+        scale: Optional[int] = None,
     ) -> Tuple[
         Optional[str], Optional[np.ndarray], Optional[List[Tuple[float, float]]]
     ]:
@@ -4506,7 +4507,7 @@ class Templates:
                     masked_centers,
                     matching_sources,
                     kernel_order,
-                    scale*2,
+                    scale,
                     method,
                     science_fwhm,
                     template_fwhm,
@@ -4537,6 +4538,7 @@ class Templates:
                     kernel_order,
                     stamp_loc,
                     scienceNoise,
+                    scale,
                 )
                 if not success:
                     return None, None, None
@@ -4873,16 +4875,37 @@ class Templates:
                 const_phot_ratio,
             )
 
-            # Calculate kernel half-width from FWHM (same as HOTPANTS)
+            # Calculate kernel half-width from scale (pipeline source-cutout half-size).
+            # scale is already half the cutout box size (scale_multiplier × FWHM / 2),
+            # so it directly gives the kernel half-width. This ensures the kernel covers
+            # the same footprint used for PSF/cutout extraction.
+            # Fall back to FWHM-based sizing if scale is not provided.
             KER_HW_MIN = 3
             KER_HW_MAX = 50
-            fwhm_ref = float(template_fwhm)
-            fwhm_sci = float(science_fwhm)
-            ker_hw = int(
-                max(KER_HW_MIN, min(KER_HW_MAX, round(1.5 * max(fwhm_ref, fwhm_sci))))
+            logger.info(
+                "SFFT kernel sizing: scale=%s, science_fwhm=%.2f, template_fwhm=%.2f",
+                scale,
+                float(science_fwhm),
+                float(template_fwhm),
             )
-            # Use the kernel half-width calculated from FWHM (ker_hw), not the scale parameter
-            kernel_half_width = ker_hw
+            if scale is not None and int(scale) > 0:
+                kernel_half_width = int(scale)
+                logger.info(
+                    "SFFT kernel half-width set from scale: %d px (scale=%d)",
+                    kernel_half_width,
+                    int(scale),
+                )
+            else:
+                fwhm_ref = float(template_fwhm)
+                fwhm_sci = float(science_fwhm)
+                kernel_half_width = int(
+                    max(KER_HW_MIN, min(KER_HW_MAX, round(1.5 * max(fwhm_ref, fwhm_sci))))
+                )
+                logger.info(
+                    "SFFT kernel half-width set from FWHM: %d px (fallback, scale not provided)",
+                    kernel_half_width,
+                )
+            kernel_half_width = max(KER_HW_MIN, min(KER_HW_MAX, kernel_half_width))
             
             def _serialize_xy_pairs(xy_list) -> str:
                 if not xy_list:
@@ -4999,7 +5022,7 @@ class Templates:
                 .replace("_ERROR", "")
             )
             post_anomaly_csv = scienceDir / f"SFFT_PostAnomaly_Sources_{out_base}.csv"
-            log_path = scienceDir / f"sfft_{Path(base_name).stem}.txt"
+            log_path = scienceDir / f"SFFT_{Path(base_name).stem}.txt"
             # Force single process/CPU: one thread for BLAS/OpenMP and common env limits.
             sfft_env = {**os.environ}
             for _k in (
@@ -5133,6 +5156,7 @@ class Templates:
         kernel_order,
         stamp_loc,
         scienceNoise,
+        scale,
     ) -> bool:
         """Attempt HOTPANTS subtraction. Returns True on success."""
         logger.info("Starting HOTPANTS subtraction...")
@@ -5170,10 +5194,33 @@ class Templates:
             scienceFpath = clean_fits_nans(scienceFpath, str(scienceDir))
             templateFpath = clean_fits_nans(templateFpath, str(scienceDir))
 
-            hotpants_fwhm = ensure_odd(
-                int(max(np.ceil(template_fwhm), np.ceil(science_fwhm)))
+            # Kernel sizing: prefer scale (pipeline source-cutout half-size),
+            # fall back to FWHM-based sizing if scale not provided.
+            # scale is already half the cutout box size, so it directly gives the kernel half-width.
+            # r = kernel half-width for HOTPANTS convolution kernel.
+            # rss = substamp half-width (typically 3× r).
+            logger.info(
+                "HOTPANTS kernel sizing: scale=%s, science_fwhm=%.2f, template_fwhm=%.2f",
+                scale,
+                float(science_fwhm),
+                float(template_fwhm),
             )
-            r = ensure_odd(max(int(1.5 * hotpants_fwhm), 5))
+            if scale is not None and int(scale) > 0:
+                r = ensure_odd(max(int(scale), 5))
+                logger.info(
+                    "HOTPANTS kernel half-width (-r) set from scale: %d px (scale=%d)",
+                    r,
+                    int(scale),
+                )
+            else:
+                hotpants_fwhm = ensure_odd(
+                    int(max(np.ceil(template_fwhm), np.ceil(science_fwhm)))
+                )
+                r = ensure_odd(max(int(1.5 * hotpants_fwhm), 5))
+                logger.info(
+                    "HOTPANTS kernel half-width (-r) set from FWHM: %d px (fallback, scale not provided)",
+                    r,
+                )
             rss = ensure_odd(max(3 * r, 11))
 
             # Read noise: HOTPANTS can misbehave with 0; use a small floor (e.g. 0.1 e-).

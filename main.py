@@ -4652,6 +4652,22 @@ def run_photometry():
                 if os.path.exists(sfft_matched_sources):
                     os.remove(sfft_matched_sources)
 
+                # Compute combined scale for subtraction: max(science_scale, template_scale)
+                # ensures the kernel covers the broader PSF of both images, matching the
+                # approach used in run_IDC.py for alignment.
+                from utils.run_sex import scale_multiplier_from_config, clamp_scale_from_config
+                sci_scale = input_yaml.get("scale")
+                template_fwhm = template_header.get("FWHM", 3.0)
+                scale_mult = scale_multiplier_from_config(input_yaml)
+                template_scale = int(clamp_scale_from_config(input_yaml, scale_mult * template_fwhm))
+                combined_scale = max(sci_scale, template_scale) if sci_scale is not None else template_scale
+                logging.info(
+                    "Subtraction kernel scale: science=%d template=%d -> combined=%d px",
+                    sci_scale if sci_scale is not None else -1,
+                    template_scale,
+                    combined_scale,
+                )
+
                 fpath, subtraction_mask, masked_centers = Templates(input_yaml=input_yaml).subtract(
                     scienceFpath=fpath,
                     templateFpath=templateFpath,
@@ -4665,6 +4681,7 @@ def run_photometry():
                     flux_scale_ref_to_sci=flux_scale_ref_to_sci,
                     centroid_offset_x=centroid_offset_x if centroid_offset_valid else None,
                     centroid_offset_y=centroid_offset_y if centroid_offset_valid else None,
+                    scale=combined_scale,
                 )
                 if fpath is None:
                     logging.warning(
