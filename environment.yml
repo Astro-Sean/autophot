@@ -22,6 +22,7 @@ dependencies:
   - requests==2.32.5
   - tqdm==4.67.3
   - corner==2.2.3
+  - ccdproc==2.5.1
   - astroalign==2.6.2
   - astromatic-source-extractor
   - astromatic-scamp
