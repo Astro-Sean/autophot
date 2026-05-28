@@ -1591,43 +1591,71 @@ NNW
                     _ref_shape = _ref_data.shape
 
                 if _sci_shape != _ref_shape:
+                    dy = abs(_sci_shape[0] - _ref_shape[0])
+                    dx = abs(_sci_shape[1] - _ref_shape[1])
                     self.logger.warning(
-                        "SWarp outputs have different shapes (sci=%s, ref=%s) — "
-                        "adjusting reference to match science shape.",
-                        _sci_shape, _ref_shape,
+                        "SWarp output shapes differ: science=%s, reference=%s (delta rows=%d, cols=%d).",
+                        _sci_shape, _ref_shape, dy, dx,
                     )
-                    # Science image determines the output shape (it's the photometric reference)
+
+                    # Large shape mismatch (>20 px) means SCAMP shifted the reference
+                    # WCS enough that it no longer covers the output grid — padding with
+                    # NaN would produce a spatially misaligned image.  Trigger fallback.
+                    if dy > 20 or dx > 20:
+                        self.logger.warning(
+                            "Shape mismatch too large (rows=%d, cols=%d) — SCAMP likely "
+                            "failed to align reference to science grid.  Falling back.",
+                            dy, dx,
+                        )
+                        return self._align_fallback_reproject_then_astroalign(
+                            science_image, reference_image, output_dir
+                        )
+
+                    # Small mismatch (<=20 px): SWarp rounding artefact — safe to trim/pad.
+                    # Center the cutout on the same sky position used as the SWarp CENTER
+                    # (center_ra, center_dec) projected into the reference pixel frame, so
+                    # science and reference share the same celestial anchor point.
                     ny_target, nx_target = _sci_shape
-                    
+
                     from astropy.nddata.utils import Cutout2D
-                    
-                    # Science image: keep as-is, just update header for consistency
-                    _sci_header['NAXIS1'] = nx_target
-                    _sci_header['NAXIS2'] = ny_target
-                    
-                    # Reference image: adjust to match science shape
-                    # Use 'partial' mode which both pads (with NaN) if smaller AND trims if larger
+
+                    # Find the pixel position of the SWarp CENTER in the reference image
+                    try:
+                        ref_cx_arr, ref_cy_arr = _ref_wcs.all_world2pix(
+                            [center_ra], [center_dec], 0
+                        )
+                        ref_cx = float(ref_cx_arr[0])
+                        ref_cy = float(ref_cy_arr[0])
+                        if not (np.isfinite(ref_cx) and np.isfinite(ref_cy)):
+                            raise ValueError(f"non-finite ref center: ({ref_cx}, {ref_cy})")
+                    except Exception as _ce:
+                        self.logger.debug(
+                            "Could not project SWarp CENTER into reference WCS (%s); "
+                            "using pixel center instead.", _ce
+                        )
+                        ref_cx = _ref_shape[1] / 2.0
+                        ref_cy = _ref_shape[0] / 2.0
+
                     ref_cutout = Cutout2D(
                         _ref_data,
-                        (_ref_shape[1]/2, _ref_shape[0]/2),  # Center of original reference
+                        (ref_cx, ref_cy),
                         (nx_target, ny_target),
                         wcs=_ref_wcs,
-                        mode='partial'
+                        mode='partial',
                     )
                     _ref_data_adjusted = ref_cutout.data
-                    # Preserve original distortion model; only update CRPIX and NAXIS
                     ref_wcs_header = ref_cutout.wcs.to_header()
                     _ref_header['CRPIX1'] = ref_wcs_header.get('CRPIX1', _ref_header.get('CRPIX1'))
                     _ref_header['CRPIX2'] = ref_wcs_header.get('CRPIX2', _ref_header.get('CRPIX2'))
                     _ref_header['NAXIS1'] = nx_target
                     _ref_header['NAXIS2'] = ny_target
-                    
-                    # Write images back (science unchanged, reference adjusted)
+
                     fits.writeto(aligned_sci, _sci_data, _sci_header, overwrite=True)
                     fits.writeto(aligned_ref, _ref_data_adjusted, _ref_header, overwrite=True)
-                    
+
                     self.logger.info(
-                        "Reference adjusted to science shape=%s (pad with NaN if smaller, trim if larger).", 
+                        "Reference adjusted to science shape=%s "
+                        "(centered on SWarp sky CENTER, pad/trim <=20 px).",
                         (ny_target, nx_target),
                     )
                 else:
