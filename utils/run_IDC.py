@@ -1235,7 +1235,6 @@ NNW
             # No need to manually write FITS-LDAC files
             
             # Save copies of the full catalogs for SCAMP before filter_matched_sources overwrites them
-            import shutil
             sci_catalog_scamp_backup = str(science_aligned_dir / "science_image_PYSEx_CAT_scamp.cat")
             ref_catalog_scamp_backup = str(reference_aligned_dir / "reference_image_PYSEx_CAT_scamp.cat")
             shutil.copy2(sci_catalog_path, sci_catalog_scamp_backup)
