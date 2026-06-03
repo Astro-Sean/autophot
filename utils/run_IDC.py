@@ -1582,7 +1582,7 @@ NNW
                     )
                     scamp_result = self.run_scamp(
                         str(ref_cat_tmp),
-                        reference_cat=sci_catalog_scamp_path,
+                        reference_cat=sci_catalog_path,
                         output_dir=str(reference_aligned_dir),
                         config=scamp_config_ref,
                     )
