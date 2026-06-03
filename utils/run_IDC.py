@@ -1230,7 +1230,34 @@ NNW
             
             # Write the raw Tables to FITS-LDAC format at the expected paths
             # The raw Tables already have the correct SExtractor column names
+            # But we need to add world coordinate columns for filter_matched_sources
+            from astropy.wcs import WCS
+            sci_wcs = WCS(fits.getheader(str(sci_image_copy)))
+            ref_wcs = WCS(fits.getheader(str(ref_image_copy)))
+            
             if sci_catalog_raw is not None and len(sci_catalog_raw) > 0:
+                # Add world coordinate columns
+                if "XWIN_IMAGE" in sci_catalog_raw.colnames and "YWIN_IMAGE" in sci_catalog_raw.colnames:
+                    x_coords = sci_catalog_raw["XWIN_IMAGE"]
+                    y_coords = sci_catalog_raw["YWIN_IMAGE"]
+                    world_coords = sci_wcs.pixel_to_world(x_coords, y_coords)
+                    sci_catalog_raw["XWIN_WORLD"] = world_coords.ra.deg
+                    sci_catalog_raw["YWIN_WORLD"] = world_coords.dec.deg
+                    sci_catalog_raw["X_WORLD"] = world_coords.ra.deg
+                    sci_catalog_raw["Y_WORLD"] = world_coords.dec.deg
+                    sci_catalog_raw["ALPHA_J2000"] = world_coords.ra.deg
+                    sci_catalog_raw["DELTA_J2000"] = world_coords.dec.deg
+                elif "X_IMAGE" in sci_catalog_raw.colnames and "Y_IMAGE" in sci_catalog_raw.colnames:
+                    x_coords = sci_catalog_raw["X_IMAGE"]
+                    y_coords = sci_catalog_raw["Y_IMAGE"]
+                    world_coords = sci_wcs.pixel_to_world(x_coords, y_coords)
+                    sci_catalog_raw["XWIN_WORLD"] = world_coords.ra.deg
+                    sci_catalog_raw["YWIN_WORLD"] = world_coords.dec.deg
+                    sci_catalog_raw["X_WORLD"] = world_coords.ra.deg
+                    sci_catalog_raw["Y_WORLD"] = world_coords.dec.deg
+                    sci_catalog_raw["ALPHA_J2000"] = world_coords.ra.deg
+                    sci_catalog_raw["DELTA_J2000"] = world_coords.dec.deg
+                
                 # Add LDAC headers to the raw Table
                 hdu0 = fits.PrimaryHDU()
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
@@ -1244,6 +1271,28 @@ NNW
                 hdul.writeto(sci_catalog_path, overwrite=True)
             
             if ref_catalog_raw is not None and len(ref_catalog_raw) > 0:
+                # Add world coordinate columns
+                if "XWIN_IMAGE" in ref_catalog_raw.colnames and "YWIN_IMAGE" in ref_catalog_raw.colnames:
+                    x_coords = ref_catalog_raw["XWIN_IMAGE"]
+                    y_coords = ref_catalog_raw["YWIN_IMAGE"]
+                    world_coords = ref_wcs.pixel_to_world(x_coords, y_coords)
+                    ref_catalog_raw["XWIN_WORLD"] = world_coords.ra.deg
+                    ref_catalog_raw["YWIN_WORLD"] = world_coords.dec.deg
+                    ref_catalog_raw["X_WORLD"] = world_coords.ra.deg
+                    ref_catalog_raw["Y_WORLD"] = world_coords.dec.deg
+                    ref_catalog_raw["ALPHA_J2000"] = world_coords.ra.deg
+                    ref_catalog_raw["DELTA_J2000"] = world_coords.dec.deg
+                elif "X_IMAGE" in ref_catalog_raw.colnames and "Y_IMAGE" in ref_catalog_raw.colnames:
+                    x_coords = ref_catalog_raw["X_IMAGE"]
+                    y_coords = ref_catalog_raw["Y_IMAGE"]
+                    world_coords = ref_wcs.pixel_to_world(x_coords, y_coords)
+                    ref_catalog_raw["XWIN_WORLD"] = world_coords.ra.deg
+                    ref_catalog_raw["YWIN_WORLD"] = world_coords.dec.deg
+                    ref_catalog_raw["X_WORLD"] = world_coords.ra.deg
+                    ref_catalog_raw["Y_WORLD"] = world_coords.dec.deg
+                    ref_catalog_raw["ALPHA_J2000"] = world_coords.ra.deg
+                    ref_catalog_raw["DELTA_J2000"] = world_coords.dec.deg
+                
                 hdu0 = fits.PrimaryHDU()
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
                 hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
@@ -1343,7 +1392,30 @@ NNW
             
             # Write the raw Tables to FITS-LDAC format at the expected paths
             # This overwrites the pass-1 catalogs with pass-2 catalogs
+            # Add world coordinate columns for filter_matched_sources
             if sci_catalog2_raw is not None and len(sci_catalog2_raw) > 0:
+                # Add world coordinate columns
+                if "XWIN_IMAGE" in sci_catalog2_raw.colnames and "YWIN_IMAGE" in sci_catalog2_raw.colnames:
+                    x_coords = sci_catalog2_raw["XWIN_IMAGE"]
+                    y_coords = sci_catalog2_raw["YWIN_IMAGE"]
+                    world_coords = sci_wcs.pixel_to_world(x_coords, y_coords)
+                    sci_catalog2_raw["XWIN_WORLD"] = world_coords.ra.deg
+                    sci_catalog2_raw["YWIN_WORLD"] = world_coords.dec.deg
+                    sci_catalog2_raw["X_WORLD"] = world_coords.ra.deg
+                    sci_catalog2_raw["Y_WORLD"] = world_coords.dec.deg
+                    sci_catalog2_raw["ALPHA_J2000"] = world_coords.ra.deg
+                    sci_catalog2_raw["DELTA_J2000"] = world_coords.dec.deg
+                elif "X_IMAGE" in sci_catalog2_raw.colnames and "Y_IMAGE" in sci_catalog2_raw.colnames:
+                    x_coords = sci_catalog2_raw["X_IMAGE"]
+                    y_coords = sci_catalog2_raw["Y_IMAGE"]
+                    world_coords = sci_wcs.pixel_to_world(x_coords, y_coords)
+                    sci_catalog2_raw["XWIN_WORLD"] = world_coords.ra.deg
+                    sci_catalog2_raw["YWIN_WORLD"] = world_coords.dec.deg
+                    sci_catalog2_raw["X_WORLD"] = world_coords.ra.deg
+                    sci_catalog2_raw["Y_WORLD"] = world_coords.dec.deg
+                    sci_catalog2_raw["ALPHA_J2000"] = world_coords.ra.deg
+                    sci_catalog2_raw["DELTA_J2000"] = world_coords.dec.deg
+                
                 hdu0 = fits.PrimaryHDU()
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
                 hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
@@ -1356,6 +1428,28 @@ NNW
                 hdul.writeto(sci_catalog_path, overwrite=True)
             
             if ref_catalog2_raw is not None and len(ref_catalog2_raw) > 0:
+                # Add world coordinate columns
+                if "XWIN_IMAGE" in ref_catalog2_raw.colnames and "YWIN_IMAGE" in ref_catalog2_raw.colnames:
+                    x_coords = ref_catalog2_raw["XWIN_IMAGE"]
+                    y_coords = ref_catalog2_raw["YWIN_IMAGE"]
+                    world_coords = ref_wcs.pixel_to_world(x_coords, y_coords)
+                    ref_catalog2_raw["XWIN_WORLD"] = world_coords.ra.deg
+                    ref_catalog2_raw["YWIN_WORLD"] = world_coords.dec.deg
+                    ref_catalog2_raw["X_WORLD"] = world_coords.ra.deg
+                    ref_catalog2_raw["Y_WORLD"] = world_coords.dec.deg
+                    ref_catalog2_raw["ALPHA_J2000"] = world_coords.ra.deg
+                    ref_catalog2_raw["DELTA_J2000"] = world_coords.dec.deg
+                elif "X_IMAGE" in ref_catalog2_raw.colnames and "Y_IMAGE" in ref_catalog2_raw.colnames:
+                    x_coords = ref_catalog2_raw["X_IMAGE"]
+                    y_coords = ref_catalog2_raw["Y_IMAGE"]
+                    world_coords = ref_wcs.pixel_to_world(x_coords, y_coords)
+                    ref_catalog2_raw["XWIN_WORLD"] = world_coords.ra.deg
+                    ref_catalog2_raw["YWIN_WORLD"] = world_coords.dec.deg
+                    ref_catalog2_raw["X_WORLD"] = world_coords.ra.deg
+                    ref_catalog2_raw["Y_WORLD"] = world_coords.dec.deg
+                    ref_catalog2_raw["ALPHA_J2000"] = world_coords.ra.deg
+                    ref_catalog2_raw["DELTA_J2000"] = world_coords.dec.deg
+                
                 hdu0 = fits.PrimaryHDU()
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
                 hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
