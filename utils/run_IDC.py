@@ -1119,6 +1119,16 @@ NNW
             except Exception:
                 pass
             
+            # For alignment, use a smaller FWHM (3.0 px) for better detection
+            # The measured FWHM (8.6 px) may be too large for the convolution kernel
+            # causing over-smoothing and poor source detection
+            if sci_hdr_fwhm and sci_hdr_fwhm > 5.0:
+                sci_hdr_fwhm = 3.0
+                self.logger.info("Using smaller FWHM (3.0 px) for alignment detection to avoid over-smoothing")
+            if ref_hdr_fwhm and ref_hdr_fwhm > 5.0:
+                ref_hdr_fwhm = 3.0
+                self.logger.info("Using smaller FWHM (3.0 px) for alignment detection to avoid over-smoothing")
+            
             sci_sex = self.run_sextractor(
                 str(sci_image_copy),
                 output_dir=str(science_aligned_dir),
