@@ -1263,6 +1263,9 @@ NNW
                 
                 # Add LDAC headers to the raw Table
                 hdu0 = fits.PrimaryHDU()
+                # Add SExtractor-specific headers to primary HDU
+                hdu0.header['SExtractor'] = 'SExtractor'
+                hdu0.header['VERSION'] = '2.28.2'
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
                 hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
                 hdu1.header['HIERARCH LDAC_OBJECTS'] = len(sci_catalog_raw)
@@ -1299,6 +1302,9 @@ NNW
                     ref_catalog_raw["DELTA_J2000"] = world_coords.dec.deg
                 
                 hdu0 = fits.PrimaryHDU()
+                # Add SExtractor-specific headers to primary HDU
+                hdu0.header['SExtractor'] = 'SExtractor'
+                hdu0.header['VERSION'] = '2.28.2'
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
                 hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
                 hdu1.header['HIERARCH LDAC_OBJECTS'] = len(ref_catalog_raw)
@@ -1424,6 +1430,9 @@ NNW
                     sci_catalog2_raw["DELTA_J2000"] = world_coords.dec.deg
                 
                 hdu0 = fits.PrimaryHDU()
+                # Add SExtractor-specific headers to primary HDU
+                hdu0.header['SExtractor'] = 'SExtractor'
+                hdu0.header['VERSION'] = '2.28.2'
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
                 hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
                 hdu1.header['HIERARCH LDAC_OBJECTS'] = len(sci_catalog2_raw)
@@ -1460,6 +1469,9 @@ NNW
                     ref_catalog2_raw["DELTA_J2000"] = world_coords.dec.deg
                 
                 hdu0 = fits.PrimaryHDU()
+                # Add SExtractor-specific headers to primary HDU
+                hdu0.header['SExtractor'] = 'SExtractor'
+                hdu0.header['VERSION'] = '2.28.2'
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
                 hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
                 hdu1.header['HIERARCH LDAC_OBJECTS'] = len(ref_catalog2_raw)
