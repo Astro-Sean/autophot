@@ -1182,15 +1182,15 @@ NNW
                 sci_catalog_ldac = sci_catalog.copy()
                 sci_catalog_ldac["x_pix"] += 1
                 sci_catalog_ldac["y_pix"] += 1
-                # Write as FITS_LDAC
+                # Write as FITS_LDAC (table in extension 2 as expected by filter_matched_sources)
                 sci_table = Table.from_pandas(sci_catalog_ldac)
-                # Create FITS_LDAC format (primary header + table in extension 2)
-                hdu1 = fits.PrimaryHDU()
+                hdu0 = fits.PrimaryHDU()
+                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
+                hdu1.header['LDAC_IMNAME'] = 'LDACTEST'
+                hdu1.header['LDAC_OBJECTS'] = len(sci_table)
+                hdu1.header['LDAC_CTYPE'] = 'OBJECTS'
                 hdu2 = fits.BinTableHDU(sci_table)
-                hdu2.header['LDAC_IMNAME'] = 'LDACTEST'
-                hdu2.header['LDAC_OBJECTS'] = len(sci_table)
-                hdu2.header['LDAC_CTYPE'] = 'OBJECTS'
-                hdul = fits.HDUList([hdu1, hdu2])
+                hdul = fits.HDUList([hdu0, hdu1, hdu2])
                 hdul.writeto(sci_catalog_path, overwrite=True)
             
             if ref_catalog is not None and len(ref_catalog) > 0:
@@ -1198,14 +1198,15 @@ NNW
                 ref_catalog_ldac = ref_catalog.copy()
                 ref_catalog_ldac["x_pix"] += 1
                 ref_catalog_ldac["y_pix"] += 1
-                # Write as FITS_LDAC
+                # Write as FITS_LDAC (table in extension 2 as expected by filter_matched_sources)
                 ref_table = Table.from_pandas(ref_catalog_ldac)
-                hdu1 = fits.PrimaryHDU()
+                hdu0 = fits.PrimaryHDU()
+                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
+                hdu1.header['LDAC_IMNAME'] = 'LDACTEST'
+                hdu1.header['LDAC_OBJECTS'] = len(ref_table)
+                hdu1.header['LDAC_CTYPE'] = 'OBJECTS'
                 hdu2 = fits.BinTableHDU(ref_table)
-                hdu2.header['LDAC_IMNAME'] = 'LDACTEST'
-                hdu2.header['LDAC_OBJECTS'] = len(ref_table)
-                hdu2.header['LDAC_CTYPE'] = 'OBJECTS'
-                hdul = fits.HDUList([hdu1, hdu2])
+                hdul = fits.HDUList([hdu0, hdu1, hdu2])
                 hdul.writeto(ref_catalog_path, overwrite=True)
             
             # Convert to expected format - use the FITS_LDAC catalog path
@@ -1293,12 +1294,13 @@ NNW
                 sci_catalog_ldac["x_pix"] += 1
                 sci_catalog_ldac["y_pix"] += 1
                 sci_table = Table.from_pandas(sci_catalog_ldac)
-                hdu1 = fits.PrimaryHDU()
+                hdu0 = fits.PrimaryHDU()
+                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
+                hdu1.header['LDAC_IMNAME'] = 'LDACTEST'
+                hdu1.header['LDAC_OBJECTS'] = len(sci_table)
+                hdu1.header['LDAC_CTYPE'] = 'OBJECTS'
                 hdu2 = fits.BinTableHDU(sci_table)
-                hdu2.header['LDAC_IMNAME'] = 'LDACTEST'
-                hdu2.header['LDAC_OBJECTS'] = len(sci_table)
-                hdu2.header['LDAC_CTYPE'] = 'OBJECTS'
-                hdul = fits.HDUList([hdu1, hdu2])
+                hdul = fits.HDUList([hdu0, hdu1, hdu2])
                 hdul.writeto(sci_catalog_path, overwrite=True)
             
             if ref_catalog2 is not None and len(ref_catalog2) > 0:
@@ -1306,12 +1308,13 @@ NNW
                 ref_catalog_ldac["x_pix"] += 1
                 ref_catalog_ldac["y_pix"] += 1
                 ref_table = Table.from_pandas(ref_catalog_ldac)
-                hdu1 = fits.PrimaryHDU()
+                hdu0 = fits.PrimaryHDU()
+                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
+                hdu1.header['LDAC_IMNAME'] = 'LDACTEST'
+                hdu1.header['LDAC_OBJECTS'] = len(ref_table)
+                hdu1.header['LDAC_CTYPE'] = 'OBJECTS'
                 hdu2 = fits.BinTableHDU(ref_table)
-                hdu2.header['LDAC_IMNAME'] = 'LDACTEST'
-                hdu2.header['LDAC_OBJECTS'] = len(ref_table)
-                hdu2.header['LDAC_CTYPE'] = 'OBJECTS'
-                hdul = fits.HDUList([hdu1, hdu2])
+                hdul = fits.HDUList([hdu0, hdu1, hdu2])
                 hdul.writeto(ref_catalog_path, overwrite=True)
             
             # Convert to expected format - use the FITS_LDAC catalog path
