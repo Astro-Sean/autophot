@@ -548,6 +548,7 @@ NNW
         crowded: bool = False,
         scale: Optional[int] = None,
         for_alignment: bool = False,
+        fwhm_pixels: Optional[float] = None,
     ) -> Dict:
         """
         Build a clean catalog using SExtractor, prioritizing extended sources.
@@ -559,6 +560,7 @@ NNW
         If crowded is True, uses parameters tuned for crowded fields (tighter deblending,
         smaller background mesh, more deblend levels).
         If for_alignment is True, uses alignment-specific config with more sensitive detection.
+        If fwhm_pixels is provided, use it directly instead of reading from header (avoids stale header values).
         """
         try:
             output_dir = self._validate_output_dir(output_dir, prefix="sex_")
@@ -568,10 +570,16 @@ NNW
             nnw_path = str(Path(output_dir) / f"{stem}_default.nnw")
             self._create_nnw_file(nnw_path)
 
-            # Get FWHM from header if available, otherwise use default
+            # Get FWHM: prefer explicit parameter, then header, then default
+            # Header FWHM can be stale from previous runs or instrument defaults
+            if fwhm_pixels is None or fwhm_pixels <= 0:
+                with fits.open(fits_image) as hdul:
+                    header = hdul[0].header
+                    fwhm_pixels = header.get("FWHM", 2.0)
+            
+            pixel_scale_header = None
             with fits.open(fits_image) as hdul:
                 header = hdul[0].header
-                fwhm_pixels = header.get("FWHM", 2.0)
                 pixel_scale_header = header.get("PIXSCALE", header.get("CDELT2", 0))
                 if pixel_scale_header:
                     pixel_scale_header = abs(float(pixel_scale_header)) * 3600.0
@@ -1091,6 +1099,19 @@ NNW
                 self.logger.info("Alignment SExtractor: using reference MAP_WEIGHT %s", ref_w)
 
             # Pass 1: measure FWHM (kernel sized from aperture/FWHM header only)
+            # Use header FWHM if available (set by main pipeline after initial source detection)
+            # This avoids using stale/instrument-default FWHM values
+            sci_hdr_fwhm = None
+            ref_hdr_fwhm = None
+            try:
+                sci_hdr_fwhm = float(fits.getheader(str(sci_image_copy)).get("FWHM", fits.getheader(str(sci_image_copy)).get("fwhm")))
+            except Exception:
+                pass
+            try:
+                ref_hdr_fwhm = float(fits.getheader(str(ref_image_copy)).get("FWHM", fits.getheader(str(ref_image_copy)).get("fwhm")))
+            except Exception:
+                pass
+            
             sci_sex = self.run_sextractor(
                 str(sci_image_copy),
                 output_dir=str(science_aligned_dir),
@@ -1099,6 +1120,7 @@ NNW
                 PIXEL_SCALE=sci_pix_scale,
                 crowded=sextractor_crowded,
                 for_alignment=True,
+                fwhm_pixels=sci_hdr_fwhm,
             )
             ref_sex = self.run_sextractor(
                 str(ref_image_copy),
@@ -1108,6 +1130,7 @@ NNW
                 PIXEL_SCALE=ref_pix_scale,
                 crowded=sextractor_crowded,
                 for_alignment=True,
+                fwhm_pixels=ref_hdr_fwhm,
             )
 
             fwhm_sci_pix = float(sci_sex["fwhm"]) if "fwhm" in sci_sex else 2.5
@@ -1168,6 +1191,7 @@ NNW
                 crowded=sextractor_crowded,
                 scale=combined_scale,
                 for_alignment=True,
+                fwhm_pixels=fwhm_sci_pix,
             )
             ref_sex = self.run_sextractor(
                 str(ref_image_copy),
@@ -1178,6 +1202,7 @@ NNW
                 crowded=sextractor_crowded,
                 scale=combined_scale,
                 for_alignment=True,
+                fwhm_pixels=fwhm_ref_pix,
             )
 
             n_sci = len(sci_sex.get("catalog", []))
