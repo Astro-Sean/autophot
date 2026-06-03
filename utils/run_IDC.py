@@ -1110,6 +1110,12 @@ NNW
                     sci_data.shape, np.nanmin(sci_data), np.nanmax(sci_data),
                     np.nanmean(sci_data), np.nanmedian(sci_data), np.nanstd(sci_data)
                 )
+                # Check if image has been modified (e.g., by SWarp copy)
+                self.logger.info(
+                    "Science image header FWHM: %.2f, APER: %.2f",
+                    hdul[0].header.get("FWHM", "N/A"),
+                    hdul[0].header.get("APER", "N/A")
+                )
 
             # Pass 1: measure FWHM (kernel sized from aperture/FWHM header only)
             # Use header FWHM if available (set by main pipeline after initial source detection)
