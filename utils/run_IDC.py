@@ -1121,6 +1121,11 @@ NNW
                     hdul[0].header.get("CRPIX1", "N/A"),
                     hdul[0].header.get("CRPIX2", "N/A")
                 )
+                # Check if this is a cropped image (from templates.py)
+                self.logger.info(
+                    "Science image path: %s (original: %s)",
+                    sci_image_copy, science_image
+                )
 
             # Pass 1: measure FWHM (kernel sized from aperture/FWHM header only)
             # Use header FWHM if available (set by main pipeline after initial source detection)
