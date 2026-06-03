@@ -4020,9 +4020,14 @@ class Templates:
             # This rescales the template to match the science robust sigma on
             # finite pixels and propagates the scaling into saturation and gain
             # (so e- = ADU * gain remains consistent).
+            #
+            # Note: this is only applied when photometric flux scaling from
+            # find_flux_consistent_sources is NOT available. When RANSAC flux
+            # scale is used, it already accounts for the flux mismatch, and
+            # applying sigma-based scaling on top would double-count the correction.
             # -------------------------------------------------------------
             ts_cfg_scale = self.input_yaml.get("template_subtraction", {}) or {}
-            if _as_bool(ts_cfg_scale.get("scale_template_to_science", False), False):
+            if _as_bool(ts_cfg_scale.get("scale_template_to_science", False), False) and flux_scale_ref_to_sci is None:
                 logger.info(
                     "Template scaling enabled: will rescale template to match science robust sigma when scale mismatch is large."
                 )
