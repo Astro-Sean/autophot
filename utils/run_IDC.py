@@ -82,6 +82,7 @@ class ImageDistortionCorrector:
         "BACK_SIZE": 64,  # Larger background mesh for better global background estimate
         "DEBLEND_NTHRESH": 32,  # Fewer deblending thresholds to avoid splitting
         "BACK_FILTERSIZE": 3,
+        "MEMORY_PIXSTACK": 300000,  # Increase pixel stack to avoid overflow warnings
     }
 
     # Maximum FWHM (pixels) for sources used in alignment; sources with FWHM > this are excluded
@@ -613,11 +614,22 @@ NNW
                 self.logger.info(
                     "Using SExtractor crowded-field config overrides (tighter deblending, smaller back mesh)"
                 )
+            
+            # For alignment, disable convolution filter to improve source detection
+            # The filter can over-smooth and reduce detection, especially in sparse fields
+            if for_alignment:
+                filter_name = ""
+                filter_flag = "N"
+            else:
+                filter_name = conv_path
+                filter_flag = "Y"
+            
             final_config.update(
                 {
                     # 'CHECKIMAGE_NAME': 'check_seg.fits,check_aper.fits',
                     "SATUR_LEVEL": self.determine_saturation_level(fits_image),
-                    "FILTER_NAME": conv_path,
+                    "FILTER_NAME": filter_name,
+                    "FILTER": filter_flag,
                     "STARNNW_NAME": nnw_path,
                     "NTHREADS": self.default_threads,
                     "PIXEL_SCALE": PIXEL_SCALE,
