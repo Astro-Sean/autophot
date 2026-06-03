@@ -76,14 +76,14 @@ class ImageDistortionCorrector:
     # Alignment-specific SExtractor config overrides: more sensitive detection for sparse fields
     # These are applied on top of DEFAULT_SEX_CONFIG
     ALIGNMENT_SEX_CONFIG = {
-        "DETECT_THRESH": 1.5,  # Use same as default (was 1.0)
-        "ANALYSIS_THRESH": 1.2,  # Use same as default (was 0.8)
-        "DETECT_MINAREA": 3,  # Use same as default (was 1)
-        "BACK_SIZE": 32,  # Use same as default (was 64)
-        "DEBLEND_NTHRESH": 64,  # Use same as default (was 16)
-        "BACK_FILTERSIZE": 5,  # Use same as default (was 3)
+        "DETECT_THRESH": 1.0,  # Lower threshold for fainter sources
+        "ANALYSIS_THRESH": 0.8,  # Lower analysis threshold
+        "DETECT_MINAREA": 1,  # Smaller minimum area for compact sources
+        "BACK_SIZE": 64,  # Larger background mesh for better global background estimate
+        "DEBLEND_NTHRESH": 32,  # Fewer deblending thresholds to avoid splitting
+        "BACK_FILTERSIZE": 3,
         "MEMORY_PIXSTACK": 300000,  # Increase pixel stack to avoid overflow warnings
-        "CLEAN": "Y",  # Use same as default (was N)
+        "CLEAN": "N",  # Disable cleaning to avoid removing faint sources
         "FILTER": "Y",  # Keep convolution filter enabled
     }
 
@@ -1112,9 +1112,11 @@ NNW
                 )
                 # Check if image has been modified (e.g., by SWarp copy)
                 self.logger.info(
-                    "Science image header FWHM: %.2f, APER: %.2f",
+                    "Science image header FWHM: %.2f, APER: %.2f, CRPIX1: %.2f, CRPIX2: %.2f",
                     hdul[0].header.get("FWHM", "N/A"),
-                    hdul[0].header.get("APER", "N/A")
+                    hdul[0].header.get("APER", "N/A"),
+                    hdul[0].header.get("CRPIX1", "N/A"),
+                    hdul[0].header.get("CRPIX2", "N/A")
                 )
 
             # Pass 1: measure FWHM (kernel sized from aperture/FWHM header only)
