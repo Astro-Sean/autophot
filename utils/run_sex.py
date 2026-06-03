@@ -1042,77 +1042,9 @@ class SExtractorWrapper:
             if return_raw and catalog_type == "FITS_LDAC" and mdir:
                 # Copy the catalog to the specified mdir with .cat extension
                 dest_path = Path(mdir) / f"{base_name}_PYSEx_CAT.cat"
-                # Add missing SCAMP-required columns if not present
-                with fits.open(catalog_path, mode='update') as hdul:
-                    table = Table(hdul[2].data)
-                    # Add world coordinate columns if not present
-                    if 'XWIN_WORLD' not in table.colnames and 'XWIN_IMAGE' in table.colnames:
-                        # Read WCS from the input FITS file to compute world coordinates
-                        from astropy.wcs import WCS
-                        try:
-                            wcs = WCS(fits.getheader(fits_path))
-                            x_coords = table['XWIN_IMAGE']
-                            y_coords = table['YWIN_IMAGE']
-                            world_coords = wcs.pixel_to_world(x_coords, y_coords)
-                            table['XWIN_WORLD'] = world_coords.ra.deg
-                            table['YWIN_WORLD'] = world_coords.dec.deg
-                            table['X_WORLD'] = world_coords.ra.deg
-                            table['Y_WORLD'] = world_coords.dec.deg
-                            table['ALPHA_J2000'] = world_coords.ra.deg
-                            table['DELTA_J2000'] = world_coords.dec.deg
-                        except Exception as e:
-                            logger.warning(f"Could not compute world coordinates: {e}")
-                    # Add MAG_AUTO and MAGERR_AUTO if not present (SCAMP needs these)
-                    if 'MAG_AUTO' not in table.colnames and 'MAG_APER' in table.colnames:
-                        table['MAG_AUTO'] = table['MAG_APER']
-                    if 'MAGERR_AUTO' not in table.colnames and 'MAGERR_APER' in table.colnames:
-                        table['MAGERR_AUTO'] = table['MAGERR_APER']
-                    # Add ERRAWIN_IMAGE if not present (error on windowed position)
-                    if 'ERRAWIN_IMAGE' not in table.colnames:
-                        # Set to a reasonable default based on FWHM if available, else 0.1 pixels
-                        if 'FWHM_IMAGE' in table.colnames:
-                            table['ERRAWIN_IMAGE'] = table['FWHM_IMAGE'] * 0.1
-                        else:
-                            table['ERRAWIN_IMAGE'] = 0.1
-                    # Add ERRBWIN_IMAGE if not present (error on windowed shape)
-                    if 'ERRBWIN_IMAGE' not in table.colnames:
-                        table['ERRBWIN_IMAGE'] = table['ERRAWIN_IMAGE']
-                    # Add ERRX2WIN_IMAGE and ERRY2WIN_IMAGE if not present
-                    if 'ERRX2WIN_IMAGE' not in table.colnames:
-                        table['ERRX2WIN_IMAGE'] = table['ERRAWIN_IMAGE'] ** 2
-                    if 'ERRY2WIN_IMAGE' not in table.colnames:
-                        table['ERRY2WIN_IMAGE'] = table['ERRAWIN_IMAGE'] ** 2
-                    # Add ERRTHETAWIN_IMAGE if not present (error on windowed angle)
-                    if 'ERRTHETAWIN_IMAGE' not in table.colnames:
-                        table['ERRTHETAWIN_IMAGE'] = 0.1
-                    # Add ERRX2WIN_WORLD and ERRY2WIN_WORLD if not present (world coordinate errors)
-                    if 'ERRX2WIN_WORLD' not in table.colnames:
-                        table['ERRX2WIN_WORLD'] = table['ERRX2WIN_IMAGE']
-                    if 'ERRY2WIN_WORLD' not in table.colnames:
-                        table['ERRY2WIN_WORLD'] = table['ERRY2WIN_IMAGE']
-                    # Add ERRA_WORLD and ERRDEC_WORLD if not present (world coordinate errors in degrees)
-                    if 'ERRA_WORLD' not in table.colnames:
-                        # Convert pixel error to degrees using pixel scale (approximate)
-                        # Assume 0.1585 arcsec/pixel as a default if not available
-                        pixel_scale = 0.1585 / 3600.0  # degrees per pixel
-                        table['ERRA_WORLD'] = table['ERRAWIN_IMAGE'] * pixel_scale
-                    if 'ERRDEC_WORLD' not in table.colnames:
-                        pixel_scale = 0.1585 / 3600.0
-                        table['ERRDEC_WORLD'] = table['ERRAWIN_IMAGE'] * pixel_scale
-                    # Add ERRB_WORLD if not present (world coordinate shape error)
-                    if 'ERRB_WORLD' not in table.colnames:
-                        pixel_scale = 0.1585 / 3600.0
-                        table['ERRB_WORLD'] = table['ERRBWIN_IMAGE'] * pixel_scale
-                    # Add ERRX2_WORLD and ERRY2_WORLD if not present
-                    if 'ERRX2_WORLD' not in table.colnames:
-                        table['ERRX2_WORLD'] = table['ERRX2WIN_WORLD']
-                    if 'ERRY2_WORLD' not in table.colnames:
-                        table['ERRY2_WORLD'] = table['ERRY2WIN_WORLD']
-                    # Update the table in the FITS file
-                    hdul[2].data = table.as_array()
-                # Copy the modified FITS file to the destination
-                shutil.copy2(catalog_path, dest_path)
-                logger.info(f"Copied FITS-LDAC catalog to {dest_path}")
+                # Copy will happen after filtering to ensure filtered data is used
+                # Just save the destination path for now
+                pass
 
             # If return_raw is True, return the raw astropy Table without conversion
             if return_raw:
@@ -1151,10 +1083,66 @@ class SExtractorWrapper:
                     initial_count,
                     len(sources),
                 )
-                # Write the filtered Table back to the FITS file so the backup has filtered data
-                if catalog_type == "FITS_LDAC":
+                # Add missing SCAMP-required columns and write to FITS file
+                if catalog_type == "FITS_LDAC" and mdir:
+                    dest_path = Path(mdir) / f"{base_name}_PYSEx_CAT.cat"
                     with fits.open(catalog_path, mode='update') as hdul:
-                        hdul[2].data = sources.as_array()
+                        table = sources
+                        # Add world coordinate columns if not present
+                        if 'XWIN_WORLD' not in table.colnames and 'XWIN_IMAGE' in table.colnames:
+                            from astropy.wcs import WCS
+                            try:
+                                wcs = WCS(fits.getheader(fits_path))
+                                x_coords = table['XWIN_IMAGE']
+                                y_coords = table['YWIN_IMAGE']
+                                world_coords = wcs.pixel_to_world(x_coords, y_coords)
+                                table['XWIN_WORLD'] = world_coords.ra.deg
+                                table['YWIN_WORLD'] = world_coords.dec.deg
+                                table['X_WORLD'] = world_coords.ra.deg
+                                table['Y_WORLD'] = world_coords.dec.deg
+                                table['ALPHA_J2000'] = world_coords.ra.deg
+                                table['DELTA_J2000'] = world_coords.dec.deg
+                            except Exception as e:
+                                logger.warning(f"Could not compute world coordinates: {e}")
+                        # Add MAG_AUTO and MAGERR_AUTO if not present
+                        if 'MAG_AUTO' not in table.colnames and 'MAG_APER' in table.colnames:
+                            table['MAG_AUTO'] = table['MAG_APER']
+                        if 'MAGERR_AUTO' not in table.colnames and 'MAGERR_APER' in table.colnames:
+                            table['MAGERR_AUTO'] = table['MAGERR_APER']
+                        # Add error columns if not present
+                        if 'ERRAWIN_IMAGE' not in table.colnames:
+                            if 'FWHM_IMAGE' in table.colnames:
+                                table['ERRAWIN_IMAGE'] = table['FWHM_IMAGE'] * 0.1
+                            else:
+                                table['ERRAWIN_IMAGE'] = 0.1
+                        if 'ERRBWIN_IMAGE' not in table.colnames:
+                            table['ERRBWIN_IMAGE'] = table['ERRAWIN_IMAGE']
+                        if 'ERRX2WIN_IMAGE' not in table.colnames:
+                            table['ERRX2WIN_IMAGE'] = table['ERRAWIN_IMAGE'] ** 2
+                        if 'ERRY2WIN_IMAGE' not in table.colnames:
+                            table['ERRY2WIN_IMAGE'] = table['ERRAWIN_IMAGE'] ** 2
+                        if 'ERRTHETAWIN_IMAGE' not in table.colnames:
+                            table['ERRTHETAWIN_IMAGE'] = 0.1
+                        if 'ERRX2WIN_WORLD' not in table.colnames:
+                            table['ERRX2WIN_WORLD'] = table['ERRX2WIN_IMAGE']
+                        if 'ERRY2WIN_WORLD' not in table.colnames:
+                            table['ERRY2WIN_WORLD'] = table['ERRY2WIN_IMAGE']
+                        pixel_scale = 0.1585 / 3600.0
+                        if 'ERRA_WORLD' not in table.colnames:
+                            table['ERRA_WORLD'] = table['ERRAWIN_IMAGE'] * pixel_scale
+                        if 'ERRDEC_WORLD' not in table.colnames:
+                            table['ERRDEC_WORLD'] = table['ERRAWIN_IMAGE'] * pixel_scale
+                        if 'ERRB_WORLD' not in table.colnames:
+                            table['ERRB_WORLD'] = table['ERRBWIN_IMAGE'] * pixel_scale
+                        if 'ERRX2_WORLD' not in table.colnames:
+                            table['ERRX2_WORLD'] = table['ERRX2WIN_WORLD']
+                        if 'ERRY2_WORLD' not in table.colnames:
+                            table['ERRY2_WORLD'] = table['ERRY2WIN_WORLD']
+                        # Update the table in the FITS file
+                        hdul[2].data = table.as_array()
+                    # Copy the modified FITS file to the destination
+                    shutil.copy2(catalog_path, dest_path)
+                    logger.info(f"Copied FITS-LDAC catalog to {dest_path}")
                 # Calculate FWHM from raw sources before returning
                 if "FWHM_IMAGE" in sources_df.columns:
                     fwhm_est = self.calculate_robust_fwhm(sources_df["FWHM_IMAGE"].values)
