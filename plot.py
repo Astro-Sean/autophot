@@ -77,6 +77,7 @@ class Plot:
         target_ra=None,
         target_dec=None,
         masked_source_centers=None,
+        kernel_half_width=None,
     ):
         """
         Perform and visualize a subtraction check of astronomical images using zscale with percentile cleaning.
@@ -217,7 +218,11 @@ class Plot:
                 ax.set_xlabel("X [Pixel]", fontsize=9)
                 ax.set_ylabel("Y [Pixel]", fontsize=9)
 
-            square_size = int(inset_size * 2)  # Width/height of the square in pixels
+            # Use kernel_half_width for square size if provided, otherwise fall back to inset_size
+            if kernel_half_width is not None and kernel_half_width > 0:
+                square_size = int(kernel_half_width * 2)  # Full kernel diameter
+            else:
+                square_size = int(inset_size * 2)  # Width/height of the square in pixels
             if matching_sources is not None and len(matching_sources) > 0:
                 x_col = y_col = None
                 for xc, yc in (

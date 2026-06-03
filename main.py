@@ -4670,7 +4670,7 @@ def run_photometry():
                     combined_scale,
                 )
 
-                fpath, subtraction_mask, masked_centers = Templates(input_yaml=input_yaml).subtract(
+                fpath, subtraction_mask, masked_centers, kernel_half_width = Templates(input_yaml=input_yaml).subtract(
                     scienceFpath=fpath,
                     templateFpath=templateFpath,
                     method=input_yaml["template_subtraction"]["method"],
@@ -5486,6 +5486,7 @@ def run_photometry():
                 target_ra=target_ra,
                 target_dec=target_dec,
                 masked_source_centers=masked_centers,
+                kernel_half_width=kernel_half_width,
             )
 
         # Target FWHM should reflect the *measured target* width on this frame,

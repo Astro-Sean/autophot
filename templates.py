@@ -3809,7 +3809,7 @@ class Templates:
         centroid_offset_y: Optional[float] = None,
         scale: Optional[int] = None,
     ) -> Tuple[
-        Optional[str], Optional[np.ndarray], Optional[List[Tuple[float, float]]]
+        Optional[str], Optional[np.ndarray], Optional[List[Tuple[float, float]]], Optional[int]
     ]:
         """
         Subtract the template from the science image.
@@ -4534,11 +4534,11 @@ class Templates:
             elapsed = time.time() - t0
             logger.info("Image subtraction completed in %.1f s", elapsed)
 
-            return differenceFpath, visualization_mask, masked_centers
+            return differenceFpath, visualization_mask, masked_centers, kernel_half_width
 
         except Exception:
             logger.exception("Unhandled error in subtract()")
-            return None, None, None
+            return None, None, None, None
         finally:
             if prepared_template_fpath:
                 try:
