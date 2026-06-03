@@ -1334,7 +1334,8 @@ NNW
             
             self.logger.info("SExtractorWrapper pass-2 detected %d science sources, %d reference sources", len(sci_catalog2) if sci_catalog2 is not None else 0, len(ref_catalog2) if ref_catalog2 is not None else 0)
             
-            # Save copies of the full catalogs for SCAMP before filter_matched_sources overwrites them
+            # Save copies of the full catalogs for SCAMP BEFORE filter_matched_sources overwrites them
+            # This must happen immediately after pass-2 SExtractor completes
             sci_catalog_scamp_backup = str(science_aligned_dir / "science_image_PYSEx_CAT_scamp.cat")
             ref_catalog_scamp_backup = str(reference_aligned_dir / "reference_image_PYSEx_CAT_scamp.cat")
             shutil.copy2(sci_catalog_path, sci_catalog_scamp_backup)
