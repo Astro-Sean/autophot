@@ -1589,7 +1589,7 @@ NNW
                     )
                     scamp_result = self.run_scamp(
                         str(ref_cat_tmp),
-                        reference_cat=sci_catalog_path,
+                        reference_cat=sci_catalog_scamp_backup,
                         output_dir=str(reference_aligned_dir),
                         config=scamp_config_ref,
                     )
@@ -1603,8 +1603,8 @@ NNW
                     self.logger.error("Failed to create temporary catalog for SCAMP: %s", e)
                     self.logger.info("Falling back to single-catalog SCAMP on reference...")
                     scamp_result = self.run_scamp(
-                        ref_catalog_path,
-                        reference_cat=sci_catalog_path,
+                        ref_catalog_scamp_backup,
+                        reference_cat=sci_catalog_scamp_backup,
                         output_dir=str(reference_aligned_dir),
                         config=scamp_config_ref,
                     )
