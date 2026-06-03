@@ -1155,9 +1155,8 @@ NNW
             # Catalog paths must match the image paths that filter_matched_sources expects
             sci_catalog_path = str(science_aligned_dir / "science_image_PYSEx_CAT.cat")
             ref_catalog_path = str(reference_aligned_dir / "reference_image_PYSEx_CAT.cat")
-            # SCAMP catalogs (unfiltered) - use different paths to avoid being overwritten by filter_matched_sources
-            sci_catalog_scamp_path = str(science_aligned_dir / "science_image_PYSEx_CAT_scamp.cat")
-            ref_catalog_scamp_path = str(reference_aligned_dir / "reference_image_PYSEx_CAT_scamp.cat")
+            # SExtractorWrapper will copy the FITS-LDAC catalog to these paths when return_raw=True
+            # These are the actual SExtractor outputs with full metadata
             
             sci_fwhm, sci_catalog, sci_scale = self.sextractor.run(
                 fits_path=str(sci_image_copy),
@@ -1231,91 +1230,9 @@ NNW
                 return_raw=True,
             )
             
-            # Write the raw Tables to FITS-LDAC format at the expected paths
-            # The raw Tables already have the correct SExtractor column names
-            # But we need to add world coordinate columns for filter_matched_sources
-            from astropy.wcs import WCS
-            sci_wcs = WCS(fits.getheader(str(sci_image_copy)))
-            ref_wcs = WCS(fits.getheader(str(ref_image_copy)))
-            
-            if sci_catalog_raw is not None and len(sci_catalog_raw) > 0:
-                # Add world coordinate columns
-                if "XWIN_IMAGE" in sci_catalog_raw.colnames and "YWIN_IMAGE" in sci_catalog_raw.colnames:
-                    x_coords = sci_catalog_raw["XWIN_IMAGE"]
-                    y_coords = sci_catalog_raw["YWIN_IMAGE"]
-                    world_coords = sci_wcs.pixel_to_world(x_coords, y_coords)
-                    sci_catalog_raw["XWIN_WORLD"] = world_coords.ra.deg
-                    sci_catalog_raw["YWIN_WORLD"] = world_coords.dec.deg
-                    sci_catalog_raw["X_WORLD"] = world_coords.ra.deg
-                    sci_catalog_raw["Y_WORLD"] = world_coords.dec.deg
-                    sci_catalog_raw["ALPHA_J2000"] = world_coords.ra.deg
-                    sci_catalog_raw["DELTA_J2000"] = world_coords.dec.deg
-                elif "X_IMAGE" in sci_catalog_raw.colnames and "Y_IMAGE" in sci_catalog_raw.colnames:
-                    x_coords = sci_catalog_raw["X_IMAGE"]
-                    y_coords = sci_catalog_raw["Y_IMAGE"]
-                    world_coords = sci_wcs.pixel_to_world(x_coords, y_coords)
-                    sci_catalog_raw["XWIN_WORLD"] = world_coords.ra.deg
-                    sci_catalog_raw["YWIN_WORLD"] = world_coords.dec.deg
-                    sci_catalog_raw["X_WORLD"] = world_coords.ra.deg
-                    sci_catalog_raw["Y_WORLD"] = world_coords.dec.deg
-                    sci_catalog_raw["ALPHA_J2000"] = world_coords.ra.deg
-                    sci_catalog_raw["DELTA_J2000"] = world_coords.dec.deg
-                
-                # Add LDAC headers to the raw Table
-                hdu0 = fits.PrimaryHDU()
-                # Add SExtractor-specific headers to primary HDU
-                hdu0.header['SExtractor'] = 'SExtractor'
-                hdu0.header['VERSION'] = '2.28.2'
-                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
-                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
-                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(sci_catalog_raw)
-                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
-                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
-                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
-                hdu2 = fits.BinTableHDU(sci_catalog_raw)
-                hdul = fits.HDUList([hdu0, hdu1, hdu2])
-                # Write to SCAMP path (unfiltered) and also to regular path for filter_matched_sources
-                hdul.writeto(sci_catalog_scamp_path, overwrite=True)
-                hdul.writeto(sci_catalog_path, overwrite=True)
-            
-            if ref_catalog_raw is not None and len(ref_catalog_raw) > 0:
-                # Add world coordinate columns
-                if "XWIN_IMAGE" in ref_catalog_raw.colnames and "YWIN_IMAGE" in ref_catalog_raw.colnames:
-                    x_coords = ref_catalog_raw["XWIN_IMAGE"]
-                    y_coords = ref_catalog_raw["YWIN_IMAGE"]
-                    world_coords = ref_wcs.pixel_to_world(x_coords, y_coords)
-                    ref_catalog_raw["XWIN_WORLD"] = world_coords.ra.deg
-                    ref_catalog_raw["YWIN_WORLD"] = world_coords.dec.deg
-                    ref_catalog_raw["X_WORLD"] = world_coords.ra.deg
-                    ref_catalog_raw["Y_WORLD"] = world_coords.dec.deg
-                    ref_catalog_raw["ALPHA_J2000"] = world_coords.ra.deg
-                    ref_catalog_raw["DELTA_J2000"] = world_coords.dec.deg
-                elif "X_IMAGE" in ref_catalog_raw.colnames and "Y_IMAGE" in ref_catalog_raw.colnames:
-                    x_coords = ref_catalog_raw["X_IMAGE"]
-                    y_coords = ref_catalog_raw["Y_IMAGE"]
-                    world_coords = ref_wcs.pixel_to_world(x_coords, y_coords)
-                    ref_catalog_raw["XWIN_WORLD"] = world_coords.ra.deg
-                    ref_catalog_raw["YWIN_WORLD"] = world_coords.dec.deg
-                    ref_catalog_raw["X_WORLD"] = world_coords.ra.deg
-                    ref_catalog_raw["Y_WORLD"] = world_coords.dec.deg
-                    ref_catalog_raw["ALPHA_J2000"] = world_coords.ra.deg
-                    ref_catalog_raw["DELTA_J2000"] = world_coords.dec.deg
-                
-                hdu0 = fits.PrimaryHDU()
-                # Add SExtractor-specific headers to primary HDU
-                hdu0.header['SExtractor'] = 'SExtractor'
-                hdu0.header['VERSION'] = '2.28.2'
-                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
-                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
-                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(ref_catalog_raw)
-                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
-                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
-                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
-                hdu2 = fits.BinTableHDU(ref_catalog_raw)
-                hdul = fits.HDUList([hdu0, hdu1, hdu2])
-                # Write to SCAMP path (unfiltered) and also to regular path for filter_matched_sources
-                hdul.writeto(ref_catalog_scamp_path, overwrite=True)
-                hdul.writeto(ref_catalog_path, overwrite=True)
+            # SExtractorWrapper with return_raw=True copies the FITS-LDAC catalog to the mdir
+            # The catalogs are now at the expected paths with full SExtractor metadata
+            # No need to manually write FITS-LDAC files
             
             # Use the raw Tables for downstream processing
             sci_catalog = sci_catalog_raw
@@ -1403,86 +1320,9 @@ NNW
                 return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
             )
             
-            # Write the raw Tables to FITS-LDAC format at the expected paths
-            # This overwrites the pass-1 catalogs with pass-2 catalogs
-            # Add world coordinate columns for filter_matched_sources
-            if sci_catalog2_raw is not None and len(sci_catalog2_raw) > 0:
-                # Add world coordinate columns
-                if "XWIN_IMAGE" in sci_catalog2_raw.colnames and "YWIN_IMAGE" in sci_catalog2_raw.colnames:
-                    x_coords = sci_catalog2_raw["XWIN_IMAGE"]
-                    y_coords = sci_catalog2_raw["YWIN_IMAGE"]
-                    world_coords = sci_wcs.pixel_to_world(x_coords, y_coords)
-                    sci_catalog2_raw["XWIN_WORLD"] = world_coords.ra.deg
-                    sci_catalog2_raw["YWIN_WORLD"] = world_coords.dec.deg
-                    sci_catalog2_raw["X_WORLD"] = world_coords.ra.deg
-                    sci_catalog2_raw["Y_WORLD"] = world_coords.dec.deg
-                    sci_catalog2_raw["ALPHA_J2000"] = world_coords.ra.deg
-                    sci_catalog2_raw["DELTA_J2000"] = world_coords.dec.deg
-                elif "X_IMAGE" in sci_catalog2_raw.colnames and "Y_IMAGE" in sci_catalog2_raw.colnames:
-                    x_coords = sci_catalog2_raw["X_IMAGE"]
-                    y_coords = sci_catalog2_raw["Y_IMAGE"]
-                    world_coords = sci_wcs.pixel_to_world(x_coords, y_coords)
-                    sci_catalog2_raw["XWIN_WORLD"] = world_coords.ra.deg
-                    sci_catalog2_raw["YWIN_WORLD"] = world_coords.dec.deg
-                    sci_catalog2_raw["X_WORLD"] = world_coords.ra.deg
-                    sci_catalog2_raw["Y_WORLD"] = world_coords.dec.deg
-                    sci_catalog2_raw["ALPHA_J2000"] = world_coords.ra.deg
-                    sci_catalog2_raw["DELTA_J2000"] = world_coords.dec.deg
-                
-                hdu0 = fits.PrimaryHDU()
-                # Add SExtractor-specific headers to primary HDU
-                hdu0.header['SExtractor'] = 'SExtractor'
-                hdu0.header['VERSION'] = '2.28.2'
-                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
-                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
-                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(sci_catalog2_raw)
-                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
-                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
-                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
-                hdu2 = fits.BinTableHDU(sci_catalog2_raw)
-                hdul = fits.HDUList([hdu0, hdu1, hdu2])
-                # Write to SCAMP path (unfiltered) and also to regular path for filter_matched_sources
-                hdul.writeto(sci_catalog_scamp_path, overwrite=True)
-                hdul.writeto(sci_catalog_path, overwrite=True)
-            
-            if ref_catalog2_raw is not None and len(ref_catalog2_raw) > 0:
-                # Add world coordinate columns
-                if "XWIN_IMAGE" in ref_catalog2_raw.colnames and "YWIN_IMAGE" in ref_catalog2_raw.colnames:
-                    x_coords = ref_catalog2_raw["XWIN_IMAGE"]
-                    y_coords = ref_catalog2_raw["YWIN_IMAGE"]
-                    world_coords = ref_wcs.pixel_to_world(x_coords, y_coords)
-                    ref_catalog2_raw["XWIN_WORLD"] = world_coords.ra.deg
-                    ref_catalog2_raw["YWIN_WORLD"] = world_coords.dec.deg
-                    ref_catalog2_raw["X_WORLD"] = world_coords.ra.deg
-                    ref_catalog2_raw["Y_WORLD"] = world_coords.dec.deg
-                    ref_catalog2_raw["ALPHA_J2000"] = world_coords.ra.deg
-                    ref_catalog2_raw["DELTA_J2000"] = world_coords.dec.deg
-                elif "X_IMAGE" in ref_catalog2_raw.colnames and "Y_IMAGE" in ref_catalog2_raw.colnames:
-                    x_coords = ref_catalog2_raw["X_IMAGE"]
-                    y_coords = ref_catalog2_raw["Y_IMAGE"]
-                    world_coords = ref_wcs.pixel_to_world(x_coords, y_coords)
-                    ref_catalog2_raw["XWIN_WORLD"] = world_coords.ra.deg
-                    ref_catalog2_raw["YWIN_WORLD"] = world_coords.dec.deg
-                    ref_catalog2_raw["X_WORLD"] = world_coords.ra.deg
-                    ref_catalog2_raw["Y_WORLD"] = world_coords.dec.deg
-                    ref_catalog2_raw["ALPHA_J2000"] = world_coords.ra.deg
-                    ref_catalog2_raw["DELTA_J2000"] = world_coords.dec.deg
-                
-                hdu0 = fits.PrimaryHDU()
-                # Add SExtractor-specific headers to primary HDU
-                hdu0.header['SExtractor'] = 'SExtractor'
-                hdu0.header['VERSION'] = '2.28.2'
-                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
-                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
-                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(ref_catalog2_raw)
-                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
-                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
-                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
-                hdu2 = fits.BinTableHDU(ref_catalog2_raw)
-                hdul = fits.HDUList([hdu0, hdu1, hdu2])
-                # Write to SCAMP path (unfiltered) and also to regular path for filter_matched_sources
-                hdul.writeto(ref_catalog_scamp_path, overwrite=True)
-                hdul.writeto(ref_catalog_path, overwrite=True)
+            # SExtractorWrapper with return_raw=True copies the FITS-LDAC catalog to the mdir
+            # The catalogs are now at the expected paths with full SExtractor metadata
+            # No need to manually write FITS-LDAC files
             
             # Use the raw Tables for downstream processing
             sci_catalog2 = sci_catalog2_raw
@@ -1719,8 +1559,8 @@ NNW
                 # Run SCAMP on reference catalog only, using science catalog as reference.
                 # The reference .head corrects the reference WCS to match the science WCS.
                 # Only the reference .head is placed next to the reference image before SWarp.
-                ref_cat_path = Path(ref_catalog_scamp_path)  # Use SCAMP catalog (unfiltered)
-                sci_cat_path = Path(sci_catalog_scamp_path)  # Use SCAMP catalog (unfiltered)
+                ref_cat_path = Path(ref_catalog_path)  # Use the actual SExtractor output
+                sci_cat_path = Path(sci_catalog_path)  # Use the actual SExtractor output
                 ref_cat_tmp = reference_aligned_dir / f"{ref_cat_path.stem}_ref.cat"
                 ref_cat_tmp_stem = ref_cat_tmp.stem
 
@@ -1756,8 +1596,8 @@ NNW
                     self.logger.error("Failed to create temporary catalog for SCAMP: %s", e)
                     self.logger.info("Falling back to single-catalog SCAMP on reference...")
                     scamp_result = self.run_scamp(
-                        ref_catalog_scamp_path,
-                        reference_cat=sci_catalog_scamp_path,
+                        ref_catalog_path,
+                        reference_cat=sci_catalog_path,
                         output_dir=str(reference_aligned_dir),
                         config=scamp_config_ref,
                     )

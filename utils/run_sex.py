@@ -1037,6 +1037,13 @@ class SExtractorWrapper:
             if len(sources) == 0:
                 logger.warning("No sources detected by SExtractor.")
                 return 0.0, None, default_scale
+            
+            # If return_raw is True, copy the FITS-LDAC file to the mdir before temp cleanup
+            if return_raw and catalog_type == "FITS_LDAC" and mdir:
+                # Copy the catalog to the specified mdir with .cat extension
+                dest_path = Path(mdir) / f"{base_name}_PYSEx_CAT.cat"
+                shutil.copy2(catalog_path, dest_path)
+                logger.info(f"Copied FITS-LDAC catalog to {dest_path}")
 
             # If return_raw is True, return the raw astropy Table without conversion
             if return_raw:
