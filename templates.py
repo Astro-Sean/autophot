@@ -3866,6 +3866,7 @@ class Templates:
         template_work_fpath: str = str(templateFpath)
         _sci_clean_path: Optional[str] = None
         _ref_clean_path: Optional[str] = None
+        kernel_half_width: Optional[int] = None
 
         try:
             # =============================================================
