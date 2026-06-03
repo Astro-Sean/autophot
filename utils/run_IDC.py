@@ -1183,8 +1183,6 @@ NNW
                 sci_catalog_ldac["x_pix"] += 1
                 sci_catalog_ldac["y_pix"] += 1
                 # Write as FITS_LDAC
-                from astropy.io import fits
-                from astropy.table import Table
                 sci_table = Table.from_pandas(sci_catalog_ldac)
                 # Create FITS_LDAC format (primary header + table in extension 2)
                 hdu1 = fits.PrimaryHDU()
