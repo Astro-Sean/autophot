@@ -1045,6 +1045,23 @@ class SExtractorWrapper:
                 # Add missing SCAMP-required columns if not present
                 with fits.open(catalog_path, mode='update') as hdul:
                     table = Table(hdul[2].data)
+                    # Add world coordinate columns if not present
+                    if 'XWIN_WORLD' not in table.colnames and 'XWIN_IMAGE' in table.colnames:
+                        # Read WCS from the input FITS file to compute world coordinates
+                        from astropy.wcs import WCS
+                        try:
+                            wcs = WCS(fits.getheader(fits_path))
+                            x_coords = table['XWIN_IMAGE']
+                            y_coords = table['YWIN_IMAGE']
+                            world_coords = wcs.pixel_to_world(x_coords, y_coords)
+                            table['XWIN_WORLD'] = world_coords.ra.deg
+                            table['YWIN_WORLD'] = world_coords.dec.deg
+                            table['X_WORLD'] = world_coords.ra.deg
+                            table['Y_WORLD'] = world_coords.dec.deg
+                            table['ALPHA_J2000'] = world_coords.ra.deg
+                            table['DELTA_J2000'] = world_coords.dec.deg
+                        except Exception as e:
+                            logger.warning(f"Could not compute world coordinates: {e}")
                     # Add ERRAWIN_IMAGE if not present (error on windowed position)
                     if 'ERRAWIN_IMAGE' not in table.colnames:
                         # Set to a reasonable default based on FWHM if available, else 0.1 pixels
