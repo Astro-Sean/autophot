@@ -76,13 +76,14 @@ class ImageDistortionCorrector:
     # Alignment-specific SExtractor config overrides: more sensitive detection for sparse fields
     # These are applied on top of DEFAULT_SEX_CONFIG
     ALIGNMENT_SEX_CONFIG = {
-        "DETECT_THRESH": 1.2,  # Lower threshold for fainter sources
-        "ANALYSIS_THRESH": 1.0,
-        "DETECT_MINAREA": 2,  # Smaller minimum area for compact sources
+        "DETECT_THRESH": 1.0,  # Lower threshold for fainter sources (was 1.2)
+        "ANALYSIS_THRESH": 0.8,  # Lower analysis threshold (was 1.0)
+        "DETECT_MINAREA": 1,  # Smaller minimum area for compact sources (was 2)
         "BACK_SIZE": 64,  # Larger background mesh for better global background estimate
-        "DEBLEND_NTHRESH": 32,  # Fewer deblending thresholds to avoid splitting
+        "DEBLEND_NTHRESH": 16,  # Fewer deblending thresholds to avoid splitting (was 32)
         "BACK_FILTERSIZE": 3,
         "MEMORY_PIXSTACK": 300000,  # Increase pixel stack to avoid overflow warnings
+        "CLEAN": "N",  # Disable cleaning to avoid removing faint sources
     }
 
     # Maximum FWHM (pixels) for sources used in alignment; sources with FWHM > this are excluded
@@ -596,12 +597,15 @@ NNW
             if aperture_radius is not None and float(aperture_radius) > 0:
                 _eff_aperture = float(aperture_radius)
             _scale_hw: Optional[int] = int(scale) if scale is not None and int(scale) > 0 else None
-            self._create_conv_file(
-                conv_path,
-                fwhm_pixels=fwhm_pixels,
-                aperture_radius=_eff_aperture,
-                scale_half_width=_scale_hw,
-            )
+            
+            # For alignment, skip convolution file creation since we disable filtering
+            if not for_alignment:
+                self._create_conv_file(
+                    conv_path,
+                    fwhm_pixels=fwhm_pixels,
+                    aperture_radius=_eff_aperture,
+                    scale_half_width=_scale_hw,
+                )
 
             final_config = self.DEFAULT_SEX_CONFIG.copy()
             if for_alignment:
