@@ -3895,23 +3895,24 @@ class Templates:
                     )
                 return template_work_fpath
 
-            # Ensure reference (template) is background-subtracted so both inputs
-            # to SFFT/HOTPANTS have comparable zero level (science is already
-            # background-subtracted in main.py).
-            template_invalid = ~np.isfinite(templateImage) | (
-                np.abs(templateImage) < 1.1e-20
-            )
-            template_bg_median = 0.0
-            if not template_invalid.all():
-                _, template_bg_median, _ = sigma_clipped_stats(
-                    templateImage, mask=template_invalid, sigma=3, maxiters=5
-                )
-                templateImage = templateImage - template_bg_median
-                write_fits(_ensure_prepared_template_path(), templateImage, templateHeader)
-                logger.info(
-                    "Reference image background subtracted (median %.4g).",
-                    float(template_bg_median),
-                )
+            # Background subtraction disabled to preserve original flux values.
+            # SFFT handles flux scaling internally and expects raw ADU values.
+            # Background subtraction alters the DC offset which can interfere with
+            # SFFT's internal photometric scaling.
+            # template_invalid = ~np.isfinite(templateImage) | (
+            #     np.abs(templateImage) < 1.1e-20
+            # )
+            # template_bg_median = 0.0
+            # if not template_invalid.all():
+            #     _, template_bg_median, _ = sigma_clipped_stats(
+            #         templateImage, mask=template_invalid, sigma=3, maxiters=5
+            #     )
+            #     templateImage = templateImage - template_bg_median
+            #     write_fits(_ensure_prepared_template_path(), templateImage, templateHeader)
+            #     logger.info(
+            #         "Reference image background subtracted (median %.4g).",
+            #         float(template_bg_median),
+            #     )
 
             # Keep interpolation to the WCS reproject stage only.
 

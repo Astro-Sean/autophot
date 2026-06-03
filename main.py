@@ -2318,19 +2318,25 @@ def run_photometry():
         background_rms_cached = background_rms
         defects_mask_cached = defects_mask
 
-        # Subtracts the background surface from the image.
-        # Background subtraction in-place; free the surface immediately after use.
-        image -= background_surface
+        # Background subtraction disabled to preserve original flux values for SFFT.
+        # SFFT handles flux scaling internally and expects raw ADU values.
+        # Background subtraction alters the DC offset which can interfere with
+        # SFFT's internal photometric scaling.
+        # image -= background_surface
 
         # Update saturation to match background-subtracted image units so
         # downstream masks and SExtractor use a consistent threshold.
-        saturate_sub = saturate - np.nanmedian(background_surface)
-        input_yaml["saturate"] = saturate_sub
+        # saturate_sub = saturate - np.nanmedian(background_surface)
+        # input_yaml["saturate"] = saturate_sub
         # FITS headers cannot store inf; only write when finite.
-        if np.isfinite(saturate_sub):
-            header["saturate"] = float(saturate_sub)
+        # if np.isfinite(saturate_sub):
+        #     header["saturate"] = float(saturate_sub)
 
         # Writes the modified image and header back to the file.
+        # safe_fits_write(fpath, image, header)
+
+        # Write the original (non-background-subtracted) image back to disk
+        # so that SFFT receives raw ADU values
         safe_fits_write(fpath, image, header)
         # Save the background_rms array with '.weight' inserted before the suffix
         base, ext = os.path.splitext(fpath)
@@ -4730,13 +4736,15 @@ def run_photometry():
                 PreformSubtraction = False
                 image = get_image(fpath)
 
-            elif PreformSubtraction:
-                logging.info("Measuring background from difference image")
-                bg_remover = BackgroundSubtractor(input_yaml)
-                result = bg_remover.remove(image, plot=False, fwhm=ImageFWHM)
-                background_surface = result["background"]
-                background_rms = result["background_rms"]
-                image = np.asarray(image, dtype=float) - np.asarray(background_surface, dtype=float)
+            # Background subtraction disabled on difference image to preserve
+            # original flux values. SFFT handles flux scaling internally.
+            # elif PreformSubtraction:
+            #     logging.info("Measuring background from difference image")
+            #     bg_remover = BackgroundSubtractor(input_yaml)
+            #     result = bg_remover.remove(image, plot=False, fwhm=ImageFWHM)
+            #     background_surface = result["background"]
+            #     background_rms = result["background_rms"]
+            #     image = np.asarray(image, dtype=float) - np.asarray(background_surface, dtype=float)
 
         # Gets the header of the image.
         header = get_header(fpath)
