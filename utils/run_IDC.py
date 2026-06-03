@@ -1096,14 +1096,11 @@ NNW
             sextractor_crowded = ts.get(
                 "sextractor_crowded", templates_cfg.get("crowded_field", phot_crowded)
             )
-            # sci_w is already set above based on has_distortion flag
-            if not has_distortion:
-                sci_w = self._guess_map_weight_path(str(science_image))
-                if sci_w:
-                    self.logger.info("Alignment SExtractor: using science MAP_WEIGHT %s", sci_w)
-            ref_w = self._guess_map_weight_path(str(reference_image))
-            if ref_w:
-                self.logger.info("Alignment SExtractor: using reference MAP_WEIGHT %s", ref_w)
+            # For alignment, disable weight maps to avoid masking sources
+            # Weight maps can mask faint sources that are needed for alignment
+            sci_w = None
+            ref_w = None
+            self.logger.info("Alignment SExtractor: weight maps disabled to avoid masking sources")
 
             # Pass 1: measure FWHM (kernel sized from aperture/FWHM header only)
             # Use header FWHM if available (set by main pipeline after initial source detection)
