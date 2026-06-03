@@ -1238,15 +1238,15 @@ NNW
                 if "ELONGATION" not in sci_catalog_ldac.columns:
                     sci_catalog_ldac["ELONGATION"] = 1.0 + sci_catalog_ldac["ELLIPTICITY"]
                 # Write as FITS_LDAC (table in extension 2 as expected by filter_matched_sources)
-                # Add proper LDAC headers for SCAMP compatibility
+                # Add proper LDAC headers for SCAMP compatibility with HIERARCH prefix
                 sci_table = Table.from_pandas(sci_catalog_ldac)
                 hdu0 = fits.PrimaryHDU()
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
-                hdu1.header['LDAC_IMNAME'] = 'LDACTEST'
-                hdu1.header['LDAC_OBJECTS'] = len(sci_table)
-                hdu1.header['LDAC_CTYPE'] = 'OBJECTS'
-                hdu1.header['LDAC_NAXIS1'] = 1
-                hdu1.header['LDAC_NAXIS2'] = 1
+                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
+                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(sci_table)
+                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
+                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
+                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
                 hdu2 = fits.BinTableHDU(sci_table)
                 hdul = fits.HDUList([hdu0, hdu1, hdu2])
                 hdul.writeto(sci_catalog_path, overwrite=True)
@@ -1278,15 +1278,15 @@ NNW
                 if "ELONGATION" not in ref_catalog_ldac.columns:
                     ref_catalog_ldac["ELONGATION"] = 1.0 + ref_catalog_ldac["ELLIPTICITY"]
                 # Write as FITS_LDAC (table in extension 2 as expected by filter_matched_sources)
-                # Add proper LDAC headers for SCAMP compatibility
+                # Add proper LDAC headers for SCAMP compatibility with HIERARCH prefix
                 ref_table = Table.from_pandas(ref_catalog_ldac)
                 hdu0 = fits.PrimaryHDU()
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
-                hdu1.header['LDAC_IMNAME'] = 'LDACTEST'
-                hdu1.header['LDAC_OBJECTS'] = len(ref_table)
-                hdu1.header['LDAC_CTYPE'] = 'OBJECTS'
-                hdu1.header['LDAC_NAXIS1'] = 1
-                hdu1.header['LDAC_NAXIS2'] = 1
+                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
+                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(ref_table)
+                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
+                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
+                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
                 hdu2 = fits.BinTableHDU(ref_table)
                 hdul = fits.HDUList([hdu0, hdu1, hdu2])
                 hdul.writeto(ref_catalog_path, overwrite=True)
@@ -1399,11 +1399,11 @@ NNW
                 sci_table = Table.from_pandas(sci_catalog_ldac)
                 hdu0 = fits.PrimaryHDU()
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
-                hdu1.header['LDAC_IMNAME'] = 'LDACTEST'
-                hdu1.header['LDAC_OBJECTS'] = len(sci_table)
-                hdu1.header['LDAC_CTYPE'] = 'OBJECTS'
-                hdu1.header['LDAC_NAXIS1'] = 1
-                hdu1.header['LDAC_NAXIS2'] = 1
+                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
+                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(sci_table)
+                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
+                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
+                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
                 hdu2 = fits.BinTableHDU(sci_table)
                 hdul = fits.HDUList([hdu0, hdu1, hdu2])
                 hdul.writeto(sci_catalog_path, overwrite=True)
@@ -1436,11 +1436,11 @@ NNW
                 ref_table = Table.from_pandas(ref_catalog_ldac)
                 hdu0 = fits.PrimaryHDU()
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
-                hdu1.header['LDAC_IMNAME'] = 'LDACTEST'
-                hdu1.header['LDAC_OBJECTS'] = len(ref_table)
-                hdu1.header['LDAC_CTYPE'] = 'OBJECTS'
-                hdu1.header['LDAC_NAXIS1'] = 1
-                hdu1.header['LDAC_NAXIS2'] = 1
+                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
+                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(ref_table)
+                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
+                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
+                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
                 hdu2 = fits.BinTableHDU(ref_table)
                 hdul = fits.HDUList([hdu0, hdu1, hdu2])
                 hdul.writeto(ref_catalog_path, overwrite=True)
