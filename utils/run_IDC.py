@@ -1197,6 +1197,11 @@ NNW
                 "flux_radius": "FLUX_RADIUS",
             }
             
+            # Get WCS from science and reference images to compute world coordinates
+            from astropy.wcs import WCS
+            sci_wcs = WCS(fits.getheader(str(sci_image_copy)))
+            ref_wcs = WCS(fits.getheader(str(ref_image_copy)))
+            
             if sci_catalog is not None and len(sci_catalog) > 0:
                 # Convert 0-based coordinates back to 1-based for FITS_LDAC compatibility
                 sci_catalog_ldac = sci_catalog.copy()
@@ -1211,18 +1216,16 @@ NNW
                     sci_catalog_ldac["XWIN_IMAGE"] = sci_catalog_ldac["X_IMAGE"]
                 if "YWIN_IMAGE" not in sci_catalog_ldac.columns:
                     sci_catalog_ldac["YWIN_IMAGE"] = sci_catalog_ldac["Y_IMAGE"]
-                if "XWIN_WORLD" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["XWIN_WORLD"] = sci_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0  # Approximate conversion
-                if "YWIN_WORLD" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["YWIN_WORLD"] = sci_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
-                if "X_WORLD" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["X_WORLD"] = sci_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
-                if "Y_WORLD" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["Y_WORLD"] = sci_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
-                if "ALPHA_J2000" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["ALPHA_J2000"] = sci_catalog_ldac["X_WORLD"]
-                if "DELTA_J2000" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["DELTA_J2000"] = sci_catalog_ldac["Y_WORLD"]
+                # Compute world coordinates using actual WCS
+                x_coords = sci_catalog_ldac["X_IMAGE"].values
+                y_coords = sci_catalog_ldac["Y_IMAGE"].values
+                world_coords = sci_wcs.pixel_to_world(x_coords, y_coords)
+                sci_catalog_ldac["XWIN_WORLD"] = world_coords.ra.deg
+                sci_catalog_ldac["YWIN_WORLD"] = world_coords.dec.deg
+                sci_catalog_ldac["X_WORLD"] = world_coords.ra.deg
+                sci_catalog_ldac["Y_WORLD"] = world_coords.dec.deg
+                sci_catalog_ldac["ALPHA_J2000"] = world_coords.ra.deg
+                sci_catalog_ldac["DELTA_J2000"] = world_coords.dec.deg
                 if "ELONGATION" not in sci_catalog_ldac.columns:
                     sci_catalog_ldac["ELONGATION"] = 1.0 + sci_catalog_ldac["ELLIPTICITY"]
                 # Write as FITS_LDAC (table in extension 2 as expected by filter_matched_sources)
@@ -1250,18 +1253,16 @@ NNW
                     ref_catalog_ldac["XWIN_IMAGE"] = ref_catalog_ldac["X_IMAGE"]
                 if "YWIN_IMAGE" not in ref_catalog_ldac.columns:
                     ref_catalog_ldac["YWIN_IMAGE"] = ref_catalog_ldac["Y_IMAGE"]
-                if "XWIN_WORLD" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["XWIN_WORLD"] = ref_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
-                if "YWIN_WORLD" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["YWIN_WORLD"] = ref_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
-                if "X_WORLD" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["X_WORLD"] = ref_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
-                if "Y_WORLD" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["Y_WORLD"] = ref_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
-                if "ALPHA_J2000" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["ALPHA_J2000"] = ref_catalog_ldac["X_WORLD"]
-                if "DELTA_J2000" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["DELTA_J2000"] = ref_catalog_ldac["Y_WORLD"]
+                # Compute world coordinates using actual WCS
+                x_coords = ref_catalog_ldac["X_IMAGE"].values
+                y_coords = ref_catalog_ldac["Y_IMAGE"].values
+                world_coords = ref_wcs.pixel_to_world(x_coords, y_coords)
+                ref_catalog_ldac["XWIN_WORLD"] = world_coords.ra.deg
+                ref_catalog_ldac["YWIN_WORLD"] = world_coords.dec.deg
+                ref_catalog_ldac["X_WORLD"] = world_coords.ra.deg
+                ref_catalog_ldac["Y_WORLD"] = world_coords.dec.deg
+                ref_catalog_ldac["ALPHA_J2000"] = world_coords.ra.deg
+                ref_catalog_ldac["DELTA_J2000"] = world_coords.dec.deg
                 if "ELONGATION" not in ref_catalog_ldac.columns:
                     ref_catalog_ldac["ELONGATION"] = 1.0 + ref_catalog_ldac["ELLIPTICITY"]
                 # Write as FITS_LDAC (table in extension 2 as expected by filter_matched_sources)
@@ -1368,18 +1369,16 @@ NNW
                     sci_catalog_ldac["XWIN_IMAGE"] = sci_catalog_ldac["X_IMAGE"]
                 if "YWIN_IMAGE" not in sci_catalog_ldac.columns:
                     sci_catalog_ldac["YWIN_IMAGE"] = sci_catalog_ldac["Y_IMAGE"]
-                if "XWIN_WORLD" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["XWIN_WORLD"] = sci_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
-                if "YWIN_WORLD" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["YWIN_WORLD"] = sci_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
-                if "X_WORLD" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["X_WORLD"] = sci_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
-                if "Y_WORLD" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["Y_WORLD"] = sci_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
-                if "ALPHA_J2000" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["ALPHA_J2000"] = sci_catalog_ldac["X_WORLD"]
-                if "DELTA_J2000" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["DELTA_J2000"] = sci_catalog_ldac["Y_WORLD"]
+                # Compute world coordinates using actual WCS
+                x_coords = sci_catalog_ldac["X_IMAGE"].values
+                y_coords = sci_catalog_ldac["Y_IMAGE"].values
+                world_coords = sci_wcs.pixel_to_world(x_coords, y_coords)
+                sci_catalog_ldac["XWIN_WORLD"] = world_coords.ra.deg
+                sci_catalog_ldac["YWIN_WORLD"] = world_coords.dec.deg
+                sci_catalog_ldac["X_WORLD"] = world_coords.ra.deg
+                sci_catalog_ldac["Y_WORLD"] = world_coords.dec.deg
+                sci_catalog_ldac["ALPHA_J2000"] = world_coords.ra.deg
+                sci_catalog_ldac["DELTA_J2000"] = world_coords.dec.deg
                 if "ELONGATION" not in sci_catalog_ldac.columns:
                     sci_catalog_ldac["ELONGATION"] = 1.0 + sci_catalog_ldac["ELLIPTICITY"]
                 sci_table = Table.from_pandas(sci_catalog_ldac)
@@ -1405,18 +1404,16 @@ NNW
                     ref_catalog_ldac["XWIN_IMAGE"] = ref_catalog_ldac["X_IMAGE"]
                 if "YWIN_IMAGE" not in ref_catalog_ldac.columns:
                     ref_catalog_ldac["YWIN_IMAGE"] = ref_catalog_ldac["Y_IMAGE"]
-                if "XWIN_WORLD" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["XWIN_WORLD"] = ref_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
-                if "YWIN_WORLD" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["YWIN_WORLD"] = ref_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
-                if "X_WORLD" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["X_WORLD"] = ref_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
-                if "Y_WORLD" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["Y_WORLD"] = ref_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
-                if "ALPHA_J2000" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["ALPHA_J2000"] = ref_catalog_ldac["X_WORLD"]
-                if "DELTA_J2000" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["DELTA_J2000"] = ref_catalog_ldac["Y_WORLD"]
+                # Compute world coordinates using actual WCS
+                x_coords = ref_catalog_ldac["X_IMAGE"].values
+                y_coords = ref_catalog_ldac["Y_IMAGE"].values
+                world_coords = ref_wcs.pixel_to_world(x_coords, y_coords)
+                ref_catalog_ldac["XWIN_WORLD"] = world_coords.ra.deg
+                ref_catalog_ldac["YWIN_WORLD"] = world_coords.dec.deg
+                ref_catalog_ldac["X_WORLD"] = world_coords.ra.deg
+                ref_catalog_ldac["Y_WORLD"] = world_coords.dec.deg
+                ref_catalog_ldac["ALPHA_J2000"] = world_coords.ra.deg
+                ref_catalog_ldac["DELTA_J2000"] = world_coords.dec.deg
                 if "ELONGATION" not in ref_catalog_ldac.columns:
                     ref_catalog_ldac["ELONGATION"] = 1.0 + ref_catalog_ldac["ELLIPTICITY"]
                 ref_table = Table.from_pandas(ref_catalog_ldac)
