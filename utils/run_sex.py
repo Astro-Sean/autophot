@@ -1094,6 +1094,10 @@ class SExtractorWrapper:
                     if 'ERRDEC_WORLD' not in table.colnames:
                         pixel_scale = 0.1585 / 3600.0
                         table['ERRDEC_WORLD'] = table['ERRAWIN_IMAGE'] * pixel_scale
+                    # Add ERRB_WORLD if not present (world coordinate shape error)
+                    if 'ERRB_WORLD' not in table.colnames:
+                        pixel_scale = 0.1585 / 3600.0
+                        table['ERRB_WORLD'] = table['ERRBWIN_IMAGE'] * pixel_scale
                     # Add ERRX2_WORLD and ERRY2_WORLD if not present
                     if 'ERRX2_WORLD' not in table.colnames:
                         table['ERRX2_WORLD'] = table['ERRX2WIN_WORLD']
