@@ -618,7 +618,7 @@ NNW
             # For alignment, disable convolution filter to improve source detection
             # The filter can over-smooth and reduce detection, especially in sparse fields
             if for_alignment:
-                filter_name = ""
+                filter_name = "NONE"  # SExtractor's way to disable filtering
                 filter_flag = "N"
             else:
                 filter_name = conv_path
