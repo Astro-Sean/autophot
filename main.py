@@ -4335,36 +4335,13 @@ def run_photometry():
                     f"Well-detected sources in both images: {len(image_sources)}"
                 )
 
-                # Finds flux-consistent sources between image and template.
-                flux_scale_ref_to_sci = None
+                # Cross-match science and template sources for subtraction
                 if len(image_sources) > 5:
                     template_obj = Templates(input_yaml=input_yaml)
-                    # Build flux matching parameters from config
-                    from templates import FluxMatchParams
-                    ts_cfg = input_yaml.get("template_subtraction", {}) or {}
-                    flux_params = FluxMatchParams(
-                        use_spatial_thinning=ts_cfg.get("flux_match_use_spatial_thinning", True),
-                        spatial_n_bins=ts_cfg.get("flux_match_spatial_n_bins", 8),
-                        spatial_max_per_bin=ts_cfg.get("flux_match_spatial_max_per_bin", 10),
+                    MatchingSources, _ = template_obj.find_flux_consistent_sources(
+                        image_sources,
+                        template_sources,
                     )
-                    MatchingSources, offset_params = (
-                        template_obj.find_flux_consistent_sources(
-                            image_sources,
-                            template_sources,
-                            params=flux_params,
-                        )
-                    )
-                    # offset_params = (mag_slope, flux_scale); use flux_scale to
-                    # rescale template to science photometric level before subtraction.
-                    if offset_params is not None and len(offset_params) == 2:
-                        _, _flux_scale = offset_params
-                        if _flux_scale is not None and np.isfinite(_flux_scale) and _flux_scale > 0:
-                            flux_scale_ref_to_sci = float(_flux_scale)
-                            logging.info(
-                                "Photometric flux scale from find_flux_consistent_sources: %.4g (%.3f mag offset)",
-                                flux_scale_ref_to_sci,
-                                -2.5 * np.log10(flux_scale_ref_to_sci),
-                            )
                 else:
                     MatchingSources = image_sources
 
@@ -4703,7 +4680,6 @@ def run_photometry():
                     scienceNoise=weight_fpath,
                     templateNoise=template_weight_path,
                     background_defects_mask=defects_mask,
-                    flux_scale_ref_to_sci=flux_scale_ref_to_sci,
                     centroid_offset_x=centroid_offset_x if centroid_offset_valid else None,
                     centroid_offset_y=centroid_offset_y if centroid_offset_valid else None,
                     scale=combined_scale,
