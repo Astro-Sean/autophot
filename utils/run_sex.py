@@ -1042,6 +1042,23 @@ class SExtractorWrapper:
             if return_raw and catalog_type == "FITS_LDAC" and mdir:
                 # Copy the catalog to the specified mdir with .cat extension
                 dest_path = Path(mdir) / f"{base_name}_PYSEx_CAT.cat"
+                # Add missing SCAMP-required columns if not present
+                with fits.open(catalog_path, mode='update') as hdul:
+                    table = Table(hdul[2].data)
+                    # Add ERRAWIN_IMAGE if not present (error on windowed position)
+                    if 'ERRAWIN_IMAGE' not in table.colnames:
+                        # Set to a reasonable default based on FWHM if available, else 0.1 pixels
+                        if 'FWHM_IMAGE' in table.colnames:
+                            table['ERRAWIN_IMAGE'] = table['FWHM_IMAGE'] * 0.1
+                        else:
+                            table['ERRAWIN_IMAGE'] = 0.1
+                    # Add ERRX2WIN_IMAGE and ERRY2WIN_IMAGE if not present
+                    if 'ERRX2WIN_IMAGE' not in table.colnames:
+                        table['ERRX2WIN_IMAGE'] = table['ERRAWIN_IMAGE'] ** 2
+                    if 'ERRY2WIN_IMAGE' not in table.colnames:
+                        table['ERRY2WIN_IMAGE'] = table['ERRAWIN_IMAGE'] ** 2
+                    # Update the table in the FITS file
+                    hdul[2].data = table.as_array()
                 shutil.copy2(catalog_path, dest_path)
                 logger.info(f"Copied FITS-LDAC catalog to {dest_path}")
 
