@@ -881,11 +881,13 @@ class SExtractorWrapper:
 
             fwhm_for_kernel = float(use_FWHM)
             if not np.isfinite(fwhm_for_kernel) or fwhm_for_kernel <= 0:
-                # Use known image FWHM when available to avoid a generic kernel.
+                # Use config fwhm (runtime measured value) if available, otherwise header
+                # Header FWHM can be stale from previous runs or instrument defaults
+                # Config fwhm is set by the pipeline after measurement
                 for v in (
+                    self.config.get("fwhm"),
                     header.get("FWHM"),
                     header.get("fwhm"),
-                    self.config.get("fwhm"),
                 ):
                     try:
                         vv = float(v)
