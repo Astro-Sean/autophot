@@ -1120,6 +1120,40 @@ NNW
             fwhm_sci_pix = float(sci_sex["fwhm"]) if "fwhm" in sci_sex else 2.5
             fwhm_ref_pix = float(ref_sex["fwhm"]) if "fwhm" in ref_sex else 2.5
 
+            # Sanity check: if alignment FWHM is unreasonable (> 50 px), fall back to header/main pipeline FWHM
+            # This can happen when alignment only detects artifacts
+            MAX_REASONABLE_FWHM = 50.0
+            if fwhm_sci_pix > MAX_REASONABLE_FWHM:
+                self.logger.warning(
+                    "Alignment FWHM %.1f px is unreasonable (> %.0f px); using header/default FWHM instead",
+                    fwhm_sci_pix,
+                    MAX_REASONABLE_FWHM,
+                )
+                # Try to get FWHM from header, otherwise use default
+                try:
+                    from astropy.io import fits
+                    hdr = fits.getheader(str(sci_image_copy))
+                    fwhm_sci_pix = float(hdr.get("FWHM", 8.5))
+                    self.logger.info("Using FWHM from header: %.1f px", fwhm_sci_pix)
+                except Exception:
+                    fwhm_sci_pix = 8.5
+                    self.logger.info("Using default FWHM: %.1f px", fwhm_sci_pix)
+
+            if fwhm_ref_pix > MAX_REASONABLE_FWHM:
+                self.logger.warning(
+                    "Alignment FWHM %.1f px is unreasonable (> %.0f px); using header/default FWHM instead",
+                    fwhm_ref_pix,
+                    MAX_REASONABLE_FWHM,
+                )
+                try:
+                    from astropy.io import fits
+                    hdr = fits.getheader(str(ref_image_copy))
+                    fwhm_ref_pix = float(hdr.get("FWHM", 8.5))
+                    self.logger.info("Using FWHM from header: %.1f px", fwhm_ref_pix)
+                except Exception:
+                    fwhm_ref_pix = 8.5
+                    self.logger.info("Using default FWHM: %.1f px", fwhm_ref_pix)
+
             # Pass 2: re-run with kernel sized from FWHM-based scale for alignment.
             # Use a smaller scale than the pipeline cutout scale to ensure proper
             # source detection. Alignment needs to detect point sources, not use
