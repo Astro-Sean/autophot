@@ -1234,12 +1234,6 @@ NNW
             # The catalogs are now at the expected paths with full SExtractor metadata
             # No need to manually write FITS-LDAC files
             
-            # Save copies of the full catalogs for SCAMP before filter_matched_sources overwrites them
-            sci_catalog_scamp_backup = str(science_aligned_dir / "science_image_PYSEx_CAT_scamp.cat")
-            ref_catalog_scamp_backup = str(reference_aligned_dir / "reference_image_PYSEx_CAT_scamp.cat")
-            shutil.copy2(sci_catalog_path, sci_catalog_scamp_backup)
-            shutil.copy2(ref_catalog_path, ref_catalog_scamp_backup)
-            
             # Use the raw Tables for downstream processing
             sci_catalog = sci_catalog_raw
             ref_catalog = ref_catalog_raw
@@ -1329,6 +1323,12 @@ NNW
             # SExtractorWrapper with return_raw=True copies the FITS-LDAC catalog to the mdir
             # The catalogs are now at the expected paths with full SExtractor metadata
             # No need to manually write FITS-LDAC files
+            
+            # Save copies of the full catalogs for SCAMP before filter_matched_sources overwrites them
+            sci_catalog_scamp_backup = str(science_aligned_dir / "science_image_PYSEx_CAT_scamp.cat")
+            ref_catalog_scamp_backup = str(reference_aligned_dir / "reference_image_PYSEx_CAT_scamp.cat")
+            shutil.copy2(sci_catalog_path, sci_catalog_scamp_backup)
+            shutil.copy2(ref_catalog_path, ref_catalog_scamp_backup)
             
             # Use the raw Tables for downstream processing
             sci_catalog2 = sci_catalog2_raw
