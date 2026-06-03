@@ -1062,6 +1062,11 @@ class SExtractorWrapper:
                             table['DELTA_J2000'] = world_coords.dec.deg
                         except Exception as e:
                             logger.warning(f"Could not compute world coordinates: {e}")
+                    # Add MAG_AUTO and MAGERR_AUTO if not present (SCAMP needs these)
+                    if 'MAG_AUTO' not in table.colnames and 'MAG_APER' in table.colnames:
+                        table['MAG_AUTO'] = table['MAG_APER']
+                    if 'MAGERR_AUTO' not in table.colnames and 'MAGERR_APER' in table.colnames:
+                        table['MAGERR_AUTO'] = table['MAGERR_APER']
                     # Add ERRAWIN_IMAGE if not present (error on windowed position)
                     if 'ERRAWIN_IMAGE' not in table.colnames:
                         # Set to a reasonable default based on FWHM if available, else 0.1 pixels
