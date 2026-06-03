@@ -74,7 +74,7 @@ class ImageDistortionCorrector:
     }
 
     # Maximum FWHM (pixels) for sources used in alignment; sources with FWHM > this are excluded
-    ALIGNMENT_MAX_FWHM_PIX = 50.0
+    ALIGNMENT_MAX_FWHM_PIX = 100.0
 
     # Crowded-field overrides: maximize source detection (tighter deblending, smaller back mesh, lower thresholds)
     CROWDED_SEX_CONFIG = {
