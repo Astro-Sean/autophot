@@ -84,6 +84,7 @@ class ImageDistortionCorrector:
         "BACK_FILTERSIZE": 3,
         "MEMORY_PIXSTACK": 300000,  # Increase pixel stack to avoid overflow warnings
         "CLEAN": "N",  # Disable cleaning to avoid removing faint sources
+        "FILTER": "Y",  # Keep convolution filter enabled (important for detection)
     }
 
     # Maximum FWHM (pixels) for sources used in alignment; sources with FWHM > this are excluded
@@ -598,14 +599,13 @@ NNW
                 _eff_aperture = float(aperture_radius)
             _scale_hw: Optional[int] = int(scale) if scale is not None and int(scale) > 0 else None
             
-            # For alignment, skip convolution file creation since we disable filtering
-            if not for_alignment:
-                self._create_conv_file(
-                    conv_path,
-                    fwhm_pixels=fwhm_pixels,
-                    aperture_radius=_eff_aperture,
-                    scale_half_width=_scale_hw,
-                )
+            # Always create convolution file for filtering
+            self._create_conv_file(
+                conv_path,
+                fwhm_pixels=fwhm_pixels,
+                aperture_radius=_eff_aperture,
+                scale_half_width=_scale_hw,
+            )
 
             final_config = self.DEFAULT_SEX_CONFIG.copy()
             if for_alignment:
@@ -619,21 +619,12 @@ NNW
                     "Using SExtractor crowded-field config overrides (tighter deblending, smaller back mesh)"
                 )
             
-            # For alignment, disable convolution filter to improve source detection
-            # The filter can over-smooth and reduce detection, especially in sparse fields
-            if for_alignment:
-                filter_name = "NONE"  # SExtractor's way to disable filtering
-                filter_flag = "N"
-            else:
-                filter_name = conv_path
-                filter_flag = "Y"
-            
             final_config.update(
                 {
                     # 'CHECKIMAGE_NAME': 'check_seg.fits,check_aper.fits',
                     "SATUR_LEVEL": self.determine_saturation_level(fits_image),
-                    "FILTER_NAME": filter_name,
-                    "FILTER": filter_flag,
+                    "FILTER_NAME": conv_path,
+                    "FILTER": "Y",
                     "STARNNW_NAME": nnw_path,
                     "NTHREADS": self.default_threads,
                     "PIXEL_SCALE": PIXEL_SCALE,
