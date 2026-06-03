@@ -1151,6 +1151,7 @@ NNW
             
             # SExtractorWrapper saves catalog as <stem>_PYSEx_CAT.fits in the mdir
             # SCAMP expects .cat extension for FITS-LDAC catalogs
+            # We'll use SExtractorWrapper's output directly and rename it to .cat
             sci_catalog_wrapper_path = str(science_aligned_dir / f"{Path(sci_image_copy).stem}_PYSEx_CAT.fits")
             ref_catalog_wrapper_path = str(reference_aligned_dir / f"{Path(ref_image_copy).stem}_PYSEx_CAT.fits")
             sci_catalog_path = str(science_aligned_dir / f"{Path(sci_image_copy).stem}_PYSEx_CAT.cat")
@@ -1178,118 +1179,12 @@ NNW
                 mdir=str(reference_aligned_dir),
             )
             
-            # Remove SExtractorWrapper's .fits files since we'll create our own .cat files
+            # Rename SExtractorWrapper's .fits to .cat for SCAMP compatibility
+            # SExtractorWrapper creates proper FITS-LDAC files with all SExtractor metadata
             if Path(sci_catalog_wrapper_path).exists():
-                Path(sci_catalog_wrapper_path).unlink()
+                shutil.move(sci_catalog_wrapper_path, sci_catalog_path)
             if Path(ref_catalog_wrapper_path).exists():
-                Path(ref_catalog_wrapper_path).unlink()
-            
-            # Convert pandas DataFrames to FITS_LDAC format for downstream compatibility
-            # SExtractorWrapper returns pandas DataFrames, but filter_matched_sources expects FITS_LDAC
-            # Column name mapping from SExtractorWrapper to SExtractor format
-            column_mapping = {
-                "x_pix": "X_IMAGE",
-                "y_pix": "Y_IMAGE",
-                "flux_AP": "FLUX_APER",
-                "flux_AP_err": "FLUXERR_APER",
-                "fwhm": "FWHM_IMAGE",
-                "roundness": "ELLIPTICITY",
-                "snr": "SNR_WIN",
-                "flags": "FLAGS",
-                "class_star": "CLASS_STAR",
-                "peak_flux": "BACKGROUND",  # Use peak_flux as proxy for BACKGROUND
-                "a": "ERRAWIN_IMAGE",  # Use a as proxy for ERRAWIN_IMAGE
-                "b": "ERRBWIN_IMAGE",  # Use b as proxy for ERRBWIN_IMAGE
-                "theta": "ERRTHETAWIN_IMAGE",  # Use theta as proxy for ERRTHETAWIN_IMAGE
-                "mu_max": "MAG_AUTO",  # Use mu_max as proxy for MAG_AUTO
-                "area": "ISOAREA_IMAGE",
-                "flux_radius": "FLUX_RADIUS",
-            }
-            
-            # Get WCS from science and reference images to compute world coordinates
-            from astropy.wcs import WCS
-            sci_wcs = WCS(fits.getheader(str(sci_image_copy)))
-            ref_wcs = WCS(fits.getheader(str(ref_image_copy)))
-            
-            if sci_catalog is not None and len(sci_catalog) > 0:
-                # Convert 0-based coordinates back to 1-based for FITS_LDAC compatibility
-                sci_catalog_ldac = sci_catalog.copy()
-                sci_catalog_ldac["x_pix"] += 1
-                sci_catalog_ldac["y_pix"] += 1
-                # Rename columns to SExtractor format
-                sci_catalog_ldac = sci_catalog_ldac.rename(columns=column_mapping)
-                # Add missing required columns with default values
-                if "MAGERR_AUTO" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["MAGERR_AUTO"] = 0.02
-                if "XWIN_IMAGE" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["XWIN_IMAGE"] = sci_catalog_ldac["X_IMAGE"]
-                if "YWIN_IMAGE" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["YWIN_IMAGE"] = sci_catalog_ldac["Y_IMAGE"]
-                # Compute world coordinates using actual WCS
-                x_coords = sci_catalog_ldac["X_IMAGE"].values
-                y_coords = sci_catalog_ldac["Y_IMAGE"].values
-                world_coords = sci_wcs.pixel_to_world(x_coords, y_coords)
-                sci_catalog_ldac["XWIN_WORLD"] = world_coords.ra.deg
-                sci_catalog_ldac["YWIN_WORLD"] = world_coords.dec.deg
-                sci_catalog_ldac["X_WORLD"] = world_coords.ra.deg
-                sci_catalog_ldac["Y_WORLD"] = world_coords.dec.deg
-                sci_catalog_ldac["ALPHA_J2000"] = world_coords.ra.deg
-                sci_catalog_ldac["DELTA_J2000"] = world_coords.dec.deg
-                if "ELONGATION" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["ELONGATION"] = 1.0 + sci_catalog_ldac["ELLIPTICITY"]
-                # Write as FITS_LDAC (table in extension 2 as expected by filter_matched_sources)
-                # Add proper LDAC headers for SCAMP compatibility with HIERARCH prefix
-                sci_table = Table.from_pandas(sci_catalog_ldac)
-                hdu0 = fits.PrimaryHDU()
-                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
-                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
-                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(sci_table)
-                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
-                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
-                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
-                hdu2 = fits.BinTableHDU(sci_table)
-                hdul = fits.HDUList([hdu0, hdu1, hdu2])
-                hdul.writeto(sci_catalog_path, overwrite=True)
-            
-            if ref_catalog is not None and len(ref_catalog) > 0:
-                # Convert 0-based coordinates back to 1-based for FITS_LDAC compatibility
-                ref_catalog_ldac = ref_catalog.copy()
-                ref_catalog_ldac["x_pix"] += 1
-                ref_catalog_ldac["y_pix"] += 1
-                # Rename columns to SExtractor format
-                ref_catalog_ldac = ref_catalog_ldac.rename(columns=column_mapping)
-                # Add missing required columns with default values
-                if "MAGERR_AUTO" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["MAGERR_AUTO"] = 0.02
-                if "XWIN_IMAGE" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["XWIN_IMAGE"] = ref_catalog_ldac["X_IMAGE"]
-                if "YWIN_IMAGE" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["YWIN_IMAGE"] = ref_catalog_ldac["Y_IMAGE"]
-                # Compute world coordinates using actual WCS
-                x_coords = ref_catalog_ldac["X_IMAGE"].values
-                y_coords = ref_catalog_ldac["Y_IMAGE"].values
-                world_coords = ref_wcs.pixel_to_world(x_coords, y_coords)
-                ref_catalog_ldac["XWIN_WORLD"] = world_coords.ra.deg
-                ref_catalog_ldac["YWIN_WORLD"] = world_coords.dec.deg
-                ref_catalog_ldac["X_WORLD"] = world_coords.ra.deg
-                ref_catalog_ldac["Y_WORLD"] = world_coords.dec.deg
-                ref_catalog_ldac["ALPHA_J2000"] = world_coords.ra.deg
-                ref_catalog_ldac["DELTA_J2000"] = world_coords.dec.deg
-                if "ELONGATION" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["ELONGATION"] = 1.0 + ref_catalog_ldac["ELLIPTICITY"]
-                # Write as FITS_LDAC (table in extension 2 as expected by filter_matched_sources)
-                # Add proper LDAC headers for SCAMP compatibility with HIERARCH prefix
-                ref_table = Table.from_pandas(ref_catalog_ldac)
-                hdu0 = fits.PrimaryHDU()
-                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
-                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
-                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(ref_table)
-                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
-                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
-                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
-                hdu2 = fits.BinTableHDU(ref_table)
-                hdul = fits.HDUList([hdu0, hdu1, hdu2])
-                hdul.writeto(ref_catalog_path, overwrite=True)
+                shutil.move(ref_catalog_wrapper_path, ref_catalog_path)
             
             # Convert to expected format - use the FITS_LDAC catalog path
             sci_sex = {"fwhm": sci_fwhm, "catalog": sci_catalog, "catalog_path": sci_catalog_path}
@@ -1348,6 +1243,7 @@ NNW
             )
             
             # Re-run with FWHM-based scale using SExtractorWrapper
+            # The pass-2 catalogs will overwrite the pass-1 catalogs (same paths)
             sci_fwhm2, sci_catalog2, sci_scale2 = self.sextractor.run(
                 fits_path=str(sci_image_copy),
                 pixel_scale=sci_pix_scale,
@@ -1370,80 +1266,12 @@ NNW
                 mdir=str(reference_aligned_dir),
             )
             
-            # Convert pandas DataFrames to FITS_LDAC format for downstream compatibility
-            if sci_catalog2 is not None and len(sci_catalog2) > 0:
-                sci_catalog_ldac = sci_catalog2.copy()
-                sci_catalog_ldac["x_pix"] += 1
-                sci_catalog_ldac["y_pix"] += 1
-                # Rename columns to SExtractor format
-                sci_catalog_ldac = sci_catalog_ldac.rename(columns=column_mapping)
-                # Add missing required columns with default values
-                if "MAGERR_AUTO" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["MAGERR_AUTO"] = 0.02
-                if "XWIN_IMAGE" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["XWIN_IMAGE"] = sci_catalog_ldac["X_IMAGE"]
-                if "YWIN_IMAGE" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["YWIN_IMAGE"] = sci_catalog_ldac["Y_IMAGE"]
-                # Compute world coordinates using actual WCS
-                x_coords = sci_catalog_ldac["X_IMAGE"].values
-                y_coords = sci_catalog_ldac["Y_IMAGE"].values
-                world_coords = sci_wcs.pixel_to_world(x_coords, y_coords)
-                sci_catalog_ldac["XWIN_WORLD"] = world_coords.ra.deg
-                sci_catalog_ldac["YWIN_WORLD"] = world_coords.dec.deg
-                sci_catalog_ldac["X_WORLD"] = world_coords.ra.deg
-                sci_catalog_ldac["Y_WORLD"] = world_coords.dec.deg
-                sci_catalog_ldac["ALPHA_J2000"] = world_coords.ra.deg
-                sci_catalog_ldac["DELTA_J2000"] = world_coords.dec.deg
-                if "ELONGATION" not in sci_catalog_ldac.columns:
-                    sci_catalog_ldac["ELONGATION"] = 1.0 + sci_catalog_ldac["ELLIPTICITY"]
-                sci_table = Table.from_pandas(sci_catalog_ldac)
-                hdu0 = fits.PrimaryHDU()
-                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
-                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
-                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(sci_table)
-                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
-                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
-                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
-                hdu2 = fits.BinTableHDU(sci_table)
-                hdul = fits.HDUList([hdu0, hdu1, hdu2])
-                hdul.writeto(sci_catalog_path, overwrite=True)
-            
-            if ref_catalog2 is not None and len(ref_catalog2) > 0:
-                ref_catalog_ldac = ref_catalog2.copy()
-                ref_catalog_ldac["x_pix"] += 1
-                ref_catalog_ldac["y_pix"] += 1
-                # Rename columns to SExtractor format
-                ref_catalog_ldac = ref_catalog_ldac.rename(columns=column_mapping)
-                # Add missing required columns with default values
-                if "MAGERR_AUTO" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["MAGERR_AUTO"] = 0.02
-                if "XWIN_IMAGE" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["XWIN_IMAGE"] = ref_catalog_ldac["X_IMAGE"]
-                if "YWIN_IMAGE" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["YWIN_IMAGE"] = ref_catalog_ldac["Y_IMAGE"]
-                # Compute world coordinates using actual WCS
-                x_coords = ref_catalog_ldac["X_IMAGE"].values
-                y_coords = ref_catalog_ldac["Y_IMAGE"].values
-                world_coords = ref_wcs.pixel_to_world(x_coords, y_coords)
-                ref_catalog_ldac["XWIN_WORLD"] = world_coords.ra.deg
-                ref_catalog_ldac["YWIN_WORLD"] = world_coords.dec.deg
-                ref_catalog_ldac["X_WORLD"] = world_coords.ra.deg
-                ref_catalog_ldac["Y_WORLD"] = world_coords.dec.deg
-                ref_catalog_ldac["ALPHA_J2000"] = world_coords.ra.deg
-                ref_catalog_ldac["DELTA_J2000"] = world_coords.dec.deg
-                if "ELONGATION" not in ref_catalog_ldac.columns:
-                    ref_catalog_ldac["ELONGATION"] = 1.0 + ref_catalog_ldac["ELLIPTICITY"]
-                ref_table = Table.from_pandas(ref_catalog_ldac)
-                hdu0 = fits.PrimaryHDU()
-                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
-                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
-                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(ref_table)
-                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
-                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
-                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
-                hdu2 = fits.BinTableHDU(ref_table)
-                hdul = fits.HDUList([hdu0, hdu1, hdu2])
-                hdul.writeto(ref_catalog_path, overwrite=True)
+            # Rename SExtractorWrapper's .fits to .cat for SCAMP compatibility
+            # This overwrites the pass-1 catalogs with pass-2 catalogs
+            if Path(sci_catalog_wrapper_path).exists():
+                shutil.move(sci_catalog_wrapper_path, sci_catalog_path)
+            if Path(ref_catalog_wrapper_path).exists():
+                shutil.move(ref_catalog_wrapper_path, ref_catalog_path)
             
             # Convert to expected format - use the FITS_LDAC catalog path
             sci_sex = {"fwhm": sci_fwhm2, "catalog": sci_catalog2, "catalog_path": sci_catalog_path}
