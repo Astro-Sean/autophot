@@ -623,8 +623,9 @@ def run_sfft() -> Optional[int]:
     # to fit both science and template PSFs. KerHWLimit (min, max): SFFT clamps
     # kernel half-width to this range. Keep max large enough that large sci/ref
     # FWHM differences are not clamped.
+    # Increased max to 50 to match templates.py and handle sparse fields with large scale values
     KER_HW_LIMIT_MIN = 2
-    KER_HW_LIMIT_MAX = 20
+    KER_HW_LIMIT_MAX = 50
     KerHWLimit = (KER_HW_LIMIT_MIN, KER_HW_LIMIT_MAX)
 
     # HOTPANTS default is 1.5*FWHM; using this avoids over-smoothing moderately

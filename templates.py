@@ -4729,6 +4729,9 @@ class Templates:
             # Fall back to FWHM-based sizing if scale is not provided.
             KER_HW_MIN = 3
             KER_HW_MAX = 50
+            # Clamp scale-derived kernel half-width to reasonable range to avoid
+            # impractically large kernels when scale is very large (sparse fields)
+            MAX_KERNEL_HALF_WIDTH_FROM_SCALE = 50  # Matches KER_HW_MAX
             logger.info(
                 "SFFT kernel sizing: scale=%s, science_fwhm=%.2f, template_fwhm=%.2f",
                 scale,
@@ -4736,11 +4739,12 @@ class Templates:
                 float(template_fwhm),
             )
             if scale is not None and int(scale) > 0:
-                kernel_half_width = int(scale)
+                kernel_half_width = min(int(scale), MAX_KERNEL_HALF_WIDTH_FROM_SCALE)
                 logger.info(
-                    "SFFT kernel half-width set from scale: %d px (scale=%d)",
+                    "SFFT kernel half-width set from scale: %d px (scale=%d, clamped to max %d)",
                     kernel_half_width,
                     int(scale),
+                    MAX_KERNEL_HALF_WIDTH_FROM_SCALE,
                 )
             else:
                 fwhm_ref = float(template_fwhm)
@@ -5046,6 +5050,9 @@ class Templates:
             # scale is already half the cutout box size, so it directly gives the kernel half-width.
             # r = kernel half-width for HOTPANTS convolution kernel.
             # rss = substamp half-width (typically 3× r).
+            # Clamp scale-derived kernel half-width to reasonable range to avoid
+            # impractically large kernels when scale is very large (sparse fields)
+            MAX_KERNEL_HALF_WIDTH_FROM_SCALE = 50
             logger.info(
                 "HOTPANTS kernel sizing: scale=%s, science_fwhm=%.2f, template_fwhm=%.2f",
                 scale,
@@ -5053,11 +5060,12 @@ class Templates:
                 float(template_fwhm),
             )
             if scale is not None and int(scale) > 0:
-                r = ensure_odd(max(int(scale), 5))
+                r = ensure_odd(max(min(int(scale), MAX_KERNEL_HALF_WIDTH_FROM_SCALE), 5))
                 logger.info(
-                    "HOTPANTS kernel half-width (-r) set from scale: %d px (scale=%d)",
+                    "HOTPANTS kernel half-width (-r) set from scale: %d px (scale=%d, clamped to max %d)",
                     r,
                     int(scale),
+                    MAX_KERNEL_HALF_WIDTH_FROM_SCALE,
                 )
             else:
                 hotpants_fwhm = ensure_odd(
