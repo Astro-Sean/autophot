@@ -1110,6 +1110,7 @@ class SExtractorWrapper:
                         table['ERRY2_WORLD'] = table['ERRY2WIN_WORLD']
                     # Update the table in the FITS file
                     hdul[2].data = table.as_array()
+                # Copy the modified FITS file to the destination
                 shutil.copy2(catalog_path, dest_path)
                 logger.info(f"Copied FITS-LDAC catalog to {dest_path}")
 
