@@ -73,22 +73,15 @@ class ImageDistortionCorrector:
         "VERBOSE_TYPE": "QUIET",
     }
 
-    # Alignment-specific SExtractor config: more sensitive detection for sparse fields
+    # Alignment-specific SExtractor config overrides: more sensitive detection for sparse fields
+    # These are applied on top of DEFAULT_SEX_CONFIG
     ALIGNMENT_SEX_CONFIG = {
-        "CATALOG_TYPE": "FITS_LDAC",
         "DETECT_THRESH": 1.2,  # Lower threshold for fainter sources
         "ANALYSIS_THRESH": 1.0,
         "DETECT_MINAREA": 2,  # Smaller minimum area for compact sources
         "BACK_SIZE": 64,  # Larger background mesh for better global background estimate
         "DEBLEND_NTHRESH": 32,  # Fewer deblending thresholds to avoid splitting
-        "BACK_TYPE": "MANUAL",
-        "DEBLEND_MINCONT": 0.001,
         "BACK_FILTERSIZE": 3,
-        "FILTER": "Y",
-        "CLEAN": "Y",
-        "CLEAN_PARAM": 1,
-        "PHOT_APERTURES": 10,
-        "VERBOSE_TYPE": "QUIET",
     }
 
     # Maximum FWHM (pixels) for sources used in alignment; sources with FWHM > this are excluded
@@ -603,14 +596,14 @@ NNW
 
             final_config = self.DEFAULT_SEX_CONFIG.copy()
             if for_alignment:
-                final_config = self.ALIGNMENT_SEX_CONFIG.copy()
+                final_config.update(self.ALIGNMENT_SEX_CONFIG)
                 self.logger.info(
-                    "Using SExtractor alignment config (more sensitive detection for sparse fields)"
+                    "Using SExtractor alignment config overrides (more sensitive detection for sparse fields)"
                 )
             elif crowded:
                 final_config.update(self.CROWDED_SEX_CONFIG)
                 self.logger.info(
-                    "Using SExtractor crowded-field config (tighter deblending, smaller back mesh)"
+                    "Using SExtractor crowded-field config overrides (tighter deblending, smaller back mesh)"
                 )
             final_config.update(
                 {
