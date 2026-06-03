@@ -1052,11 +1052,22 @@ class SExtractorWrapper:
                             table['ERRAWIN_IMAGE'] = table['FWHM_IMAGE'] * 0.1
                         else:
                             table['ERRAWIN_IMAGE'] = 0.1
+                    # Add ERRBWIN_IMAGE if not present (error on windowed shape)
+                    if 'ERRBWIN_IMAGE' not in table.colnames:
+                        table['ERRBWIN_IMAGE'] = table['ERRAWIN_IMAGE']
                     # Add ERRX2WIN_IMAGE and ERRY2WIN_IMAGE if not present
                     if 'ERRX2WIN_IMAGE' not in table.colnames:
                         table['ERRX2WIN_IMAGE'] = table['ERRAWIN_IMAGE'] ** 2
                     if 'ERRY2WIN_IMAGE' not in table.colnames:
                         table['ERRY2WIN_IMAGE'] = table['ERRAWIN_IMAGE'] ** 2
+                    # Add ERRTHETAWIN_IMAGE if not present (error on windowed angle)
+                    if 'ERRTHETAWIN_IMAGE' not in table.colnames:
+                        table['ERRTHETAWIN_IMAGE'] = 0.1
+                    # Add ERRX2WIN_WORLD and ERRY2WIN_WORLD if not present (world coordinate errors)
+                    if 'ERRX2WIN_WORLD' not in table.colnames:
+                        table['ERRX2WIN_WORLD'] = table['ERRX2WIN_IMAGE']
+                    if 'ERRY2WIN_WORLD' not in table.colnames:
+                        table['ERRY2WIN_WORLD'] = table['ERRY2WIN_IMAGE']
                     # Update the table in the FITS file
                     hdul[2].data = table.as_array()
                 shutil.copy2(catalog_path, dest_path)
