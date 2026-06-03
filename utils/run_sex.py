@@ -1085,6 +1085,20 @@ class SExtractorWrapper:
                         table['ERRX2WIN_WORLD'] = table['ERRX2WIN_IMAGE']
                     if 'ERRY2WIN_WORLD' not in table.colnames:
                         table['ERRY2WIN_WORLD'] = table['ERRY2WIN_IMAGE']
+                    # Add ERRA_WORLD and ERRDEC_WORLD if not present (world coordinate errors in degrees)
+                    if 'ERRA_WORLD' not in table.colnames:
+                        # Convert pixel error to degrees using pixel scale (approximate)
+                        # Assume 0.1585 arcsec/pixel as a default if not available
+                        pixel_scale = 0.1585 / 3600.0  # degrees per pixel
+                        table['ERRA_WORLD'] = table['ERRAWIN_IMAGE'] * pixel_scale
+                    if 'ERRDEC_WORLD' not in table.colnames:
+                        pixel_scale = 0.1585 / 3600.0
+                        table['ERRDEC_WORLD'] = table['ERRAWIN_IMAGE'] * pixel_scale
+                    # Add ERRX2_WORLD and ERRY2_WORLD if not present
+                    if 'ERRX2_WORLD' not in table.colnames:
+                        table['ERRX2_WORLD'] = table['ERRX2WIN_WORLD']
+                    if 'ERRY2_WORLD' not in table.colnames:
+                        table['ERRY2_WORLD'] = table['ERRY2WIN_WORLD']
                     # Update the table in the FITS file
                     hdul[2].data = table.as_array()
                 shutil.copy2(catalog_path, dest_path)
