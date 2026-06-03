@@ -1151,6 +1151,10 @@ class SExtractorWrapper:
                     initial_count,
                     len(sources),
                 )
+                # Write the filtered Table back to the FITS file so the backup has filtered data
+                if catalog_type == "FITS_LDAC":
+                    with fits.open(catalog_path, mode='update') as hdul:
+                        hdul[2].data = sources.as_array()
                 # Calculate FWHM from raw sources before returning
                 if "FWHM_IMAGE" in sources_df.columns:
                     fwhm_est = self.calculate_robust_fwhm(sources_df["FWHM_IMAGE"].values)
