@@ -73,6 +73,24 @@ class ImageDistortionCorrector:
         "VERBOSE_TYPE": "QUIET",
     }
 
+    # Alignment-specific SExtractor config: more sensitive detection for sparse fields
+    ALIGNMENT_SEX_CONFIG = {
+        "CATALOG_TYPE": "FITS_LDAC",
+        "DETECT_THRESH": 1.2,  # Lower threshold for fainter sources
+        "ANALYSIS_THRESH": 1.0,
+        "DETECT_MINAREA": 2,  # Smaller minimum area for compact sources
+        "BACK_SIZE": 64,  # Larger background mesh for better global background estimate
+        "DEBLEND_NTHRESH": 32,  # Fewer deblending thresholds to avoid splitting
+        "BACK_TYPE": "MANUAL",
+        "DEBLEND_MINCONT": 0.001,
+        "BACK_FILTERSIZE": 3,
+        "FILTER": "Y",
+        "CLEAN": "Y",
+        "CLEAN_PARAM": 1,
+        "PHOT_APERTURES": 10,
+        "VERBOSE_TYPE": "QUIET",
+    }
+
     # Maximum FWHM (pixels) for sources used in alignment; sources with FWHM > this are excluded
     ALIGNMENT_MAX_FWHM_PIX = 100.0
 
@@ -536,6 +554,7 @@ NNW
         weight_path: Optional[str] = None,
         crowded: bool = False,
         scale: Optional[int] = None,
+        for_alignment: bool = False,
     ) -> Dict:
         """
         Build a clean catalog using SExtractor, prioritizing extended sources.
@@ -546,6 +565,7 @@ NNW
         NaN-heavy stacks and SWarp no-coverage bands).
         If crowded is True, uses parameters tuned for crowded fields (tighter deblending,
         smaller background mesh, more deblend levels).
+        If for_alignment is True, uses alignment-specific config with more sensitive detection.
         """
         try:
             output_dir = self._validate_output_dir(output_dir, prefix="sex_")
@@ -582,7 +602,12 @@ NNW
             )
 
             final_config = self.DEFAULT_SEX_CONFIG.copy()
-            if crowded:
+            if for_alignment:
+                final_config = self.ALIGNMENT_SEX_CONFIG.copy()
+                self.logger.info(
+                    "Using SExtractor alignment config (more sensitive detection for sparse fields)"
+                )
+            elif crowded:
                 final_config.update(self.CROWDED_SEX_CONFIG)
                 self.logger.info(
                     "Using SExtractor crowded-field config (tighter deblending, smaller back mesh)"
@@ -1080,6 +1105,7 @@ NNW
                 weight_path=sci_w,
                 PIXEL_SCALE=sci_pix_scale,
                 crowded=sextractor_crowded,
+                for_alignment=True,
             )
             ref_sex = self.run_sextractor(
                 str(ref_image_copy),
@@ -1088,6 +1114,7 @@ NNW
                 weight_path=ref_w,
                 PIXEL_SCALE=ref_pix_scale,
                 crowded=sextractor_crowded,
+                for_alignment=True,
             )
 
             fwhm_sci_pix = float(sci_sex["fwhm"]) if "fwhm" in sci_sex else 2.5
@@ -1115,6 +1142,7 @@ NNW
                 PIXEL_SCALE=sci_pix_scale,
                 crowded=sextractor_crowded,
                 scale=combined_scale,
+                for_alignment=True,
             )
             ref_sex = self.run_sextractor(
                 str(ref_image_copy),
@@ -1124,6 +1152,7 @@ NNW
                 PIXEL_SCALE=ref_pix_scale,
                 crowded=sextractor_crowded,
                 scale=combined_scale,
+                for_alignment=True,
             )
 
             n_sci = len(sci_sex.get("catalog", []))
