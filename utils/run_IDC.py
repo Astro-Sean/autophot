@@ -1152,8 +1152,9 @@ NNW
             # SExtractorWrapper saves catalog as <stem>_PYSEx_CAT.fits in the mdir
             # SCAMP expects .cat extension for FITS-LDAC catalogs
             # Use return_raw=True to get the raw FITS-LDAC file path and avoid pandas conversion
-            sci_catalog_path = str(science_aligned_dir / f"{Path(sci_image_copy).stem}_PYSEx_CAT.cat")
-            ref_catalog_path = str(reference_aligned_dir / f"{Path(ref_image_copy).stem}_PYSEx_CAT.cat")
+            # Catalog paths must match the image paths that filter_matched_sources expects
+            sci_catalog_path = str(science_aligned_dir / "science_image_PYSEx_CAT.cat")
+            ref_catalog_path = str(reference_aligned_dir / "reference_image_PYSEx_CAT.cat")
             
             sci_fwhm, sci_catalog, sci_scale = self.sextractor.run(
                 fits_path=str(sci_image_copy),
@@ -1180,8 +1181,8 @@ NNW
             )
             
             # SExtractorWrapper with return_raw=True creates .fits files, rename to .cat for SCAMP
-            sci_catalog_wrapper_path = str(science_aligned_dir / f"{Path(sci_image_copy).stem}_PYSEx_CAT.fits")
-            ref_catalog_wrapper_path = str(reference_aligned_dir / f"{Path(ref_image_copy).stem}_PYSEx_CAT.fits")
+            sci_catalog_wrapper_path = str(science_aligned_dir / "science_image_PYSEx_CAT.fits")
+            ref_catalog_wrapper_path = str(reference_aligned_dir / "reference_image_PYSEx_CAT.fits")
             if Path(sci_catalog_wrapper_path).exists():
                 shutil.move(sci_catalog_wrapper_path, sci_catalog_path)
             if Path(ref_catalog_wrapper_path).exists():
