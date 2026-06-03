@@ -1124,7 +1124,6 @@ NNW
                 )
                 # Try to get FWHM from header, otherwise use default
                 try:
-                    from astropy.io import fits
                     hdr = fits.getheader(str(sci_image_copy))
                     fwhm_sci_pix = float(hdr.get("FWHM", 8.5))
                     self.logger.info("Using FWHM from header: %.1f px", fwhm_sci_pix)
@@ -1139,7 +1138,6 @@ NNW
                     MAX_REASONABLE_FWHM,
                 )
                 try:
-                    from astropy.io import fits
                     hdr = fits.getheader(str(ref_image_copy))
                     fwhm_ref_pix = float(hdr.get("FWHM", 8.5))
                     self.logger.info("Using FWHM from header: %.1f px", fwhm_ref_pix)
