@@ -1075,7 +1075,12 @@ class SExtractorWrapper:
                     initial_count,
                     len(sources),
                 )
-                return fwhm, sources, default_scale
+                # Calculate FWHM from raw sources before returning
+                if "FWHM_IMAGE" in sources_df.columns:
+                    fwhm_est = self.calculate_robust_fwhm(sources_df["FWHM_IMAGE"].values)
+                else:
+                    fwhm_est = float(use_FWHM) if use_FWHM > 0 else 8.5
+                return fwhm_est, sources, default_scale
 
             # Rename columns for compatibility
             newcols = [
