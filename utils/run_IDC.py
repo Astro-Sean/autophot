@@ -1234,6 +1234,13 @@ NNW
             # The catalogs are now at the expected paths with full SExtractor metadata
             # No need to manually write FITS-LDAC files
             
+            # Save copies of the full catalogs for SCAMP before filter_matched_sources overwrites them
+            import shutil
+            sci_catalog_scamp_backup = str(science_aligned_dir / "science_image_PYSEx_CAT_scamp.cat")
+            ref_catalog_scamp_backup = str(reference_aligned_dir / "reference_image_PYSEx_CAT_scamp.cat")
+            shutil.copy2(sci_catalog_path, sci_catalog_scamp_backup)
+            shutil.copy2(ref_catalog_path, ref_catalog_scamp_backup)
+            
             # Use the raw Tables for downstream processing
             sci_catalog = sci_catalog_raw
             ref_catalog = ref_catalog_raw
@@ -1559,8 +1566,9 @@ NNW
                 # Run SCAMP on reference catalog only, using science catalog as reference.
                 # The reference .head corrects the reference WCS to match the science WCS.
                 # Only the reference .head is placed next to the reference image before SWarp.
-                ref_cat_path = Path(ref_catalog_path)  # Use the actual SExtractor output
-                sci_cat_path = Path(sci_catalog_path)  # Use the actual SExtractor output
+                # Use the backup paths (full catalogs) instead of the paths that filter_matched_sources overwrites
+                ref_cat_path = Path(ref_catalog_scamp_backup)  # Use the full catalog
+                sci_cat_path = Path(sci_catalog_scamp_backup)  # Use the full catalog
                 ref_cat_tmp = reference_aligned_dir / f"{ref_cat_path.stem}_ref.cat"
                 ref_cat_tmp_stem = ref_cat_tmp.stem
 
