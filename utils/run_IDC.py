@@ -1180,12 +1180,27 @@ NNW
                 return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
             )
             
-            # SExtractorWrapper with return_raw=True creates .fits files, rename to .cat for SCAMP
-            sci_catalog_wrapper_path = str(science_aligned_dir / "science_image_PYSEx_CAT.fits")
-            ref_catalog_wrapper_path = str(reference_aligned_dir / "reference_image_PYSEx_CAT.fits")
-            if Path(sci_catalog_wrapper_path).exists():
+            # SExtractorWrapper with return_raw=True creates .fits files in a temp subdirectory
+            # Find and move them to the expected location for SCAMP
+            sci_catalog_wrapper_path = None
+            ref_catalog_wrapper_path = None
+            
+            # Search for the catalog files in the aligned directories (they're in temp subdirs)
+            for temp_dir in science_aligned_dir.glob("temp_*"):
+                potential = temp_dir / "science_image_PYSEx_CAT.fits"
+                if potential.exists():
+                    sci_catalog_wrapper_path = str(potential)
+                    break
+            
+            for temp_dir in reference_aligned_dir.glob("temp_*"):
+                potential = temp_dir / "reference_image_PYSEx_CAT.fits"
+                if potential.exists():
+                    ref_catalog_wrapper_path = str(potential)
+                    break
+            
+            if sci_catalog_wrapper_path:
                 shutil.move(sci_catalog_wrapper_path, sci_catalog_path)
-            if Path(ref_catalog_wrapper_path).exists():
+            if ref_catalog_wrapper_path:
                 shutil.move(ref_catalog_wrapper_path, ref_catalog_path)
             
             # Convert to expected format - use the FITS_LDAC catalog path
