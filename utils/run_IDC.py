@@ -1155,6 +1155,9 @@ NNW
             # Catalog paths must match the image paths that filter_matched_sources expects
             sci_catalog_path = str(science_aligned_dir / "science_image_PYSEx_CAT.cat")
             ref_catalog_path = str(reference_aligned_dir / "reference_image_PYSEx_CAT.cat")
+            # SCAMP catalogs (unfiltered) - use different paths to avoid being overwritten by filter_matched_sources
+            sci_catalog_scamp_path = str(science_aligned_dir / "science_image_PYSEx_CAT_scamp.cat")
+            ref_catalog_scamp_path = str(reference_aligned_dir / "reference_image_PYSEx_CAT_scamp.cat")
             
             sci_fwhm, sci_catalog, sci_scale = self.sextractor.run(
                 fits_path=str(sci_image_copy),
@@ -1268,6 +1271,8 @@ NNW
                 hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
                 hdu2 = fits.BinTableHDU(sci_catalog_raw)
                 hdul = fits.HDUList([hdu0, hdu1, hdu2])
+                # Write to SCAMP path (unfiltered) and also to regular path for filter_matched_sources
+                hdul.writeto(sci_catalog_scamp_path, overwrite=True)
                 hdul.writeto(sci_catalog_path, overwrite=True)
             
             if ref_catalog_raw is not None and len(ref_catalog_raw) > 0:
@@ -1302,6 +1307,8 @@ NNW
                 hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
                 hdu2 = fits.BinTableHDU(ref_catalog_raw)
                 hdul = fits.HDUList([hdu0, hdu1, hdu2])
+                # Write to SCAMP path (unfiltered) and also to regular path for filter_matched_sources
+                hdul.writeto(ref_catalog_scamp_path, overwrite=True)
                 hdul.writeto(ref_catalog_path, overwrite=True)
             
             # Use the raw Tables for downstream processing
@@ -1425,6 +1432,8 @@ NNW
                 hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
                 hdu2 = fits.BinTableHDU(sci_catalog2_raw)
                 hdul = fits.HDUList([hdu0, hdu1, hdu2])
+                # Write to SCAMP path (unfiltered) and also to regular path for filter_matched_sources
+                hdul.writeto(sci_catalog_scamp_path, overwrite=True)
                 hdul.writeto(sci_catalog_path, overwrite=True)
             
             if ref_catalog2_raw is not None and len(ref_catalog2_raw) > 0:
@@ -1459,6 +1468,8 @@ NNW
                 hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
                 hdu2 = fits.BinTableHDU(ref_catalog2_raw)
                 hdul = fits.HDUList([hdu0, hdu1, hdu2])
+                # Write to SCAMP path (unfiltered) and also to regular path for filter_matched_sources
+                hdul.writeto(ref_catalog_scamp_path, overwrite=True)
                 hdul.writeto(ref_catalog_path, overwrite=True)
             
             # Use the raw Tables for downstream processing
@@ -1719,7 +1730,7 @@ NNW
                     )
                     scamp_result = self.run_scamp(
                         str(ref_cat_tmp),
-                        reference_cat=sci_sex["catalog_path"],
+                        reference_cat=sci_catalog_scamp_path,
                         output_dir=str(reference_aligned_dir),
                         config=scamp_config_ref,
                     )
@@ -1733,8 +1744,8 @@ NNW
                     self.logger.error("Failed to create temporary catalog for SCAMP: %s", e)
                     self.logger.info("Falling back to single-catalog SCAMP on reference...")
                     scamp_result = self.run_scamp(
-                        ref_sex["catalog_path"],
-                        reference_cat=sci_sex["catalog_path"],
+                        ref_catalog_scamp_path,
+                        reference_cat=sci_catalog_scamp_path,
                         output_dir=str(reference_aligned_dir),
                         config=scamp_config_ref,
                     )
