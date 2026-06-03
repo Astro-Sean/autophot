@@ -1308,7 +1308,7 @@ NNW
             swarp_config = {
                 "CENTER_TYPE": "MANUAL",
                 "CENTER": f"{center_ra:.8f},{center_dec:.8f}",
-                "PIXEL_SCALE_TYPE": "MANUAL",
+                "PIXELSCALE_TYPE": "MANUAL",
                 "PIXEL_SCALE": pix_scale,
                 "IMAGE_SIZE": f"{output_width},{output_height}",
                 "RESAMPLING_TYPE": sci_resampling_method,
