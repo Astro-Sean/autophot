@@ -1707,8 +1707,8 @@ NNW
                 # Run SCAMP on reference catalog only, using science catalog as reference.
                 # The reference .head corrects the reference WCS to match the science WCS.
                 # Only the reference .head is placed next to the reference image before SWarp.
-                ref_cat_path = Path(ref_sex["catalog_path"])
-                sci_cat_path = Path(sci_sex["catalog_path"])
+                ref_cat_path = Path(ref_catalog_scamp_path)  # Use SCAMP catalog (unfiltered)
+                sci_cat_path = Path(sci_catalog_scamp_path)  # Use SCAMP catalog (unfiltered)
                 ref_cat_tmp = reference_aligned_dir / f"{ref_cat_path.stem}_ref.cat"
                 ref_cat_tmp_stem = ref_cat_tmp.stem
 
