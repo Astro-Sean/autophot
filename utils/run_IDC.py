@@ -76,15 +76,15 @@ class ImageDistortionCorrector:
     # Alignment-specific SExtractor config overrides: more sensitive detection for sparse fields
     # These are applied on top of DEFAULT_SEX_CONFIG
     ALIGNMENT_SEX_CONFIG = {
-        "DETECT_THRESH": 1.0,  # Lower threshold for fainter sources (was 1.2)
-        "ANALYSIS_THRESH": 0.8,  # Lower analysis threshold (was 1.0)
-        "DETECT_MINAREA": 1,  # Smaller minimum area for compact sources (was 2)
-        "BACK_SIZE": 64,  # Larger background mesh for better global background estimate
-        "DEBLEND_NTHRESH": 16,  # Fewer deblending thresholds to avoid splitting (was 32)
-        "BACK_FILTERSIZE": 3,
+        "DETECT_THRESH": 1.5,  # Use same as default (was 1.0)
+        "ANALYSIS_THRESH": 1.2,  # Use same as default (was 0.8)
+        "DETECT_MINAREA": 3,  # Use same as default (was 1)
+        "BACK_SIZE": 32,  # Use same as default (was 64)
+        "DEBLEND_NTHRESH": 64,  # Use same as default (was 16)
+        "BACK_FILTERSIZE": 5,  # Use same as default (was 3)
         "MEMORY_PIXSTACK": 300000,  # Increase pixel stack to avoid overflow warnings
-        "CLEAN": "N",  # Disable cleaning to avoid removing faint sources
-        "FILTER": "Y",  # Keep convolution filter enabled (important for detection)
+        "CLEAN": "Y",  # Use same as default (was N)
+        "FILTER": "Y",  # Keep convolution filter enabled
     }
 
     # Maximum FWHM (pixels) for sources used in alignment; sources with FWHM > this are excluded
@@ -1101,6 +1101,15 @@ NNW
             sci_w = None
             ref_w = None
             self.logger.info("Alignment SExtractor: weight maps disabled to avoid masking sources")
+            
+            # Log science image statistics to debug detection issues
+            with fits.open(sci_image_copy) as hdul:
+                sci_data = hdul[0].data
+                self.logger.info(
+                    "Science image stats: shape=%s, min=%.2f, max=%.2f, mean=%.2f, median=%.2f, std=%.2f",
+                    sci_data.shape, np.nanmin(sci_data), np.nanmax(sci_data),
+                    np.nanmean(sci_data), np.nanmedian(sci_data), np.nanstd(sci_data)
+                )
 
             # Pass 1: measure FWHM (kernel sized from aperture/FWHM header only)
             # Use header FWHM if available (set by main pipeline after initial source detection)
@@ -1115,16 +1124,6 @@ NNW
                 ref_hdr_fwhm = float(fits.getheader(str(ref_image_copy)).get("FWHM", fits.getheader(str(ref_image_copy)).get("fwhm")))
             except Exception:
                 pass
-            
-            # For alignment, use a smaller FWHM (3.0 px) for better detection
-            # The measured FWHM (8.6 px) may be too large for the convolution kernel
-            # causing over-smoothing and poor source detection
-            if sci_hdr_fwhm and sci_hdr_fwhm > 5.0:
-                sci_hdr_fwhm = 3.0
-                self.logger.info("Using smaller FWHM (3.0 px) for alignment detection to avoid over-smoothing")
-            if ref_hdr_fwhm and ref_hdr_fwhm > 5.0:
-                ref_hdr_fwhm = 3.0
-                self.logger.info("Using smaller FWHM (3.0 px) for alignment detection to avoid over-smoothing")
             
             sci_sex = self.run_sextractor(
                 str(sci_image_copy),
