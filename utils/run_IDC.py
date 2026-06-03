@@ -2846,11 +2846,11 @@ NNW
                     stderr=subprocess.STDOUT,
                     text=True,
                     check=False,
-                    timeout=90,
+                    timeout=180,
                 )
             self.clean_log(log_file)
         except subprocess.TimeoutExpired:
-            self.logger.error("SCAMP execution timed out after 90 seconds")
+            self.logger.error("SCAMP execution timed out after 180 seconds")
             _clean_scamp_outputs()
             raise
 
