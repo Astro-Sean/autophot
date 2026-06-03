@@ -1175,6 +1175,41 @@ NNW
                 mdir=str(reference_aligned_dir),
             )
             
+            # Convert pandas DataFrames to FITS_LDAC format for downstream compatibility
+            # SExtractorWrapper returns pandas DataFrames, but filter_matched_sources expects FITS_LDAC
+            if sci_catalog is not None and len(sci_catalog) > 0:
+                # Convert 0-based coordinates back to 1-based for FITS_LDAC compatibility
+                sci_catalog_ldac = sci_catalog.copy()
+                sci_catalog_ldac["x_pix"] += 1
+                sci_catalog_ldac["y_pix"] += 1
+                # Write as FITS_LDAC
+                from astropy.io import fits
+                from astropy.table import Table
+                sci_table = Table.from_pandas(sci_catalog_ldac)
+                # Create FITS_LDAC format (primary header + table in extension 2)
+                hdu1 = fits.PrimaryHDU()
+                hdu2 = fits.BinTableHDU(sci_table)
+                hdu2.header['LDAC_IMNAME'] = 'LDACTEST'
+                hdu2.header['LDAC_OBJECTS'] = len(sci_table)
+                hdu2.header['LDAC_CTYPE'] = 'OBJECTS'
+                hdul = fits.HDUList([hdu1, hdu2])
+                hdul.writeto(sci_catalog_path, overwrite=True)
+            
+            if ref_catalog is not None and len(ref_catalog) > 0:
+                # Convert 0-based coordinates back to 1-based for FITS_LDAC compatibility
+                ref_catalog_ldac = ref_catalog.copy()
+                ref_catalog_ldac["x_pix"] += 1
+                ref_catalog_ldac["y_pix"] += 1
+                # Write as FITS_LDAC
+                ref_table = Table.from_pandas(ref_catalog_ldac)
+                hdu1 = fits.PrimaryHDU()
+                hdu2 = fits.BinTableHDU(ref_table)
+                hdu2.header['LDAC_IMNAME'] = 'LDACTEST'
+                hdu2.header['LDAC_OBJECTS'] = len(ref_table)
+                hdu2.header['LDAC_CTYPE'] = 'OBJECTS'
+                hdul = fits.HDUList([hdu1, hdu2])
+                hdul.writeto(ref_catalog_path, overwrite=True)
+            
             # Convert to expected format - use the FITS_LDAC catalog path
             sci_sex = {"fwhm": sci_fwhm, "catalog": sci_catalog, "catalog_path": sci_catalog_path}
             ref_sex = {"fwhm": ref_fwhm, "catalog": ref_catalog, "catalog_path": ref_catalog_path}
@@ -1253,6 +1288,33 @@ NNW
                 use_for_matching=True,
                 mdir=str(reference_aligned_dir),
             )
+            
+            # Convert pandas DataFrames to FITS_LDAC format for downstream compatibility
+            if sci_catalog2 is not None and len(sci_catalog2) > 0:
+                sci_catalog_ldac = sci_catalog2.copy()
+                sci_catalog_ldac["x_pix"] += 1
+                sci_catalog_ldac["y_pix"] += 1
+                sci_table = Table.from_pandas(sci_catalog_ldac)
+                hdu1 = fits.PrimaryHDU()
+                hdu2 = fits.BinTableHDU(sci_table)
+                hdu2.header['LDAC_IMNAME'] = 'LDACTEST'
+                hdu2.header['LDAC_OBJECTS'] = len(sci_table)
+                hdu2.header['LDAC_CTYPE'] = 'OBJECTS'
+                hdul = fits.HDUList([hdu1, hdu2])
+                hdul.writeto(sci_catalog_path, overwrite=True)
+            
+            if ref_catalog2 is not None and len(ref_catalog2) > 0:
+                ref_catalog_ldac = ref_catalog2.copy()
+                ref_catalog_ldac["x_pix"] += 1
+                ref_catalog_ldac["y_pix"] += 1
+                ref_table = Table.from_pandas(ref_catalog_ldac)
+                hdu1 = fits.PrimaryHDU()
+                hdu2 = fits.BinTableHDU(ref_table)
+                hdu2.header['LDAC_IMNAME'] = 'LDACTEST'
+                hdu2.header['LDAC_OBJECTS'] = len(ref_table)
+                hdu2.header['LDAC_CTYPE'] = 'OBJECTS'
+                hdul = fits.HDUList([hdu1, hdu2])
+                hdul.writeto(ref_catalog_path, overwrite=True)
             
             # Convert to expected format - use the FITS_LDAC catalog path
             sci_sex = {"fwhm": sci_fwhm2, "catalog": sci_catalog2, "catalog_path": sci_catalog_path}
