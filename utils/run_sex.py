@@ -1105,10 +1105,20 @@ class SExtractorWrapper:
                             except Exception as e:
                                 logger.warning(f"Could not compute world coordinates: {e}")
                         # Add MAG_AUTO and MAGERR_AUTO if not present
-                        if 'MAG_AUTO' not in table.colnames and 'MAG_APER' in table.colnames:
-                            table['MAG_AUTO'] = table['MAG_APER']
-                        if 'MAGERR_AUTO' not in table.colnames and 'MAGERR_APER' in table.colnames:
-                            table['MAGERR_AUTO'] = table['MAGERR_APER']
+                        if 'MAG_AUTO' not in table.colnames:
+                            if 'MAG_APER' in table.colnames:
+                                table['MAG_AUTO'] = table['MAG_APER']
+                            else:
+                                # Compute from FLUX_AUTO if available
+                                if 'FLUX_AUTO' in table.colnames:
+                                    table['MAG_AUTO'] = -2.5 * np.log10(table['FLUX_AUTO'])
+                                else:
+                                    table['MAG_AUTO'] = 0.0
+                        if 'MAGERR_AUTO' not in table.colnames:
+                            if 'MAGERR_APER' in table.colnames:
+                                table['MAGERR_AUTO'] = table['MAGERR_APER']
+                            else:
+                                table['MAGERR_AUTO'] = 0.1
                         # Add error columns if not present
                         if 'ERRAWIN_IMAGE' not in table.colnames:
                             if 'FWHM_IMAGE' in table.colnames:
