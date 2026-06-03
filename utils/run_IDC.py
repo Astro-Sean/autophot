@@ -1177,11 +1177,54 @@ NNW
             
             # Convert pandas DataFrames to FITS_LDAC format for downstream compatibility
             # SExtractorWrapper returns pandas DataFrames, but filter_matched_sources expects FITS_LDAC
+            # Column name mapping from SExtractorWrapper to SExtractor format
+            column_mapping = {
+                "x_pix": "X_IMAGE",
+                "y_pix": "Y_IMAGE",
+                "flux_AP": "FLUX_APER",
+                "flux_AP_err": "FLUXERR_APER",
+                "fwhm": "FWHM_IMAGE",
+                "roundness": "ELLIPTICITY",
+                "snr": "SNR_WIN",
+                "flags": "FLAGS",
+                "class_star": "CLASS_STAR",
+                "peak_flux": "BACKGROUND",  # Use peak_flux as proxy for BACKGROUND
+                "a": "ERRAWIN_IMAGE",  # Use a as proxy for ERRAWIN_IMAGE
+                "b": "ERRBWIN_IMAGE",  # Use b as proxy for ERRBWIN_IMAGE
+                "theta": "ERRTHETAWIN_IMAGE",  # Use theta as proxy for ERRTHETAWIN_IMAGE
+                "mu_max": "MAG_AUTO",  # Use mu_max as proxy for MAG_AUTO
+                "area": "ISOAREA_IMAGE",
+                "flux_radius": "FLUX_RADIUS",
+            }
+            
             if sci_catalog is not None and len(sci_catalog) > 0:
                 # Convert 0-based coordinates back to 1-based for FITS_LDAC compatibility
                 sci_catalog_ldac = sci_catalog.copy()
                 sci_catalog_ldac["x_pix"] += 1
                 sci_catalog_ldac["y_pix"] += 1
+                # Rename columns to SExtractor format
+                sci_catalog_ldac = sci_catalog_ldac.rename(columns=column_mapping)
+                # Add missing required columns with default values
+                if "MAGERR_AUTO" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["MAGERR_AUTO"] = 0.02
+                if "XWIN_IMAGE" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["XWIN_IMAGE"] = sci_catalog_ldac["X_IMAGE"]
+                if "YWIN_IMAGE" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["YWIN_IMAGE"] = sci_catalog_ldac["Y_IMAGE"]
+                if "XWIN_WORLD" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["XWIN_WORLD"] = sci_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0  # Approximate conversion
+                if "YWIN_WORLD" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["YWIN_WORLD"] = sci_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
+                if "X_WORLD" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["X_WORLD"] = sci_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
+                if "Y_WORLD" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["Y_WORLD"] = sci_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
+                if "ALPHA_J2000" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["ALPHA_J2000"] = sci_catalog_ldac["X_WORLD"]
+                if "DELTA_J2000" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["DELTA_J2000"] = sci_catalog_ldac["Y_WORLD"]
+                if "ELONGATION" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["ELONGATION"] = 1.0 + sci_catalog_ldac["ELLIPTICITY"]
                 # Write as FITS_LDAC (table in extension 2 as expected by filter_matched_sources)
                 sci_table = Table.from_pandas(sci_catalog_ldac)
                 hdu0 = fits.PrimaryHDU()
@@ -1198,6 +1241,29 @@ NNW
                 ref_catalog_ldac = ref_catalog.copy()
                 ref_catalog_ldac["x_pix"] += 1
                 ref_catalog_ldac["y_pix"] += 1
+                # Rename columns to SExtractor format
+                ref_catalog_ldac = ref_catalog_ldac.rename(columns=column_mapping)
+                # Add missing required columns with default values
+                if "MAGERR_AUTO" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["MAGERR_AUTO"] = 0.02
+                if "XWIN_IMAGE" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["XWIN_IMAGE"] = ref_catalog_ldac["X_IMAGE"]
+                if "YWIN_IMAGE" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["YWIN_IMAGE"] = ref_catalog_ldac["Y_IMAGE"]
+                if "XWIN_WORLD" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["XWIN_WORLD"] = ref_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
+                if "YWIN_WORLD" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["YWIN_WORLD"] = ref_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
+                if "X_WORLD" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["X_WORLD"] = ref_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
+                if "Y_WORLD" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["Y_WORLD"] = ref_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
+                if "ALPHA_J2000" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["ALPHA_J2000"] = ref_catalog_ldac["X_WORLD"]
+                if "DELTA_J2000" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["DELTA_J2000"] = ref_catalog_ldac["Y_WORLD"]
+                if "ELONGATION" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["ELONGATION"] = 1.0 + ref_catalog_ldac["ELLIPTICITY"]
                 # Write as FITS_LDAC (table in extension 2 as expected by filter_matched_sources)
                 ref_table = Table.from_pandas(ref_catalog_ldac)
                 hdu0 = fits.PrimaryHDU()
@@ -1293,6 +1359,29 @@ NNW
                 sci_catalog_ldac = sci_catalog2.copy()
                 sci_catalog_ldac["x_pix"] += 1
                 sci_catalog_ldac["y_pix"] += 1
+                # Rename columns to SExtractor format
+                sci_catalog_ldac = sci_catalog_ldac.rename(columns=column_mapping)
+                # Add missing required columns with default values
+                if "MAGERR_AUTO" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["MAGERR_AUTO"] = 0.02
+                if "XWIN_IMAGE" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["XWIN_IMAGE"] = sci_catalog_ldac["X_IMAGE"]
+                if "YWIN_IMAGE" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["YWIN_IMAGE"] = sci_catalog_ldac["Y_IMAGE"]
+                if "XWIN_WORLD" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["XWIN_WORLD"] = sci_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
+                if "YWIN_WORLD" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["YWIN_WORLD"] = sci_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
+                if "X_WORLD" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["X_WORLD"] = sci_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
+                if "Y_WORLD" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["Y_WORLD"] = sci_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
+                if "ALPHA_J2000" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["ALPHA_J2000"] = sci_catalog_ldac["X_WORLD"]
+                if "DELTA_J2000" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["DELTA_J2000"] = sci_catalog_ldac["Y_WORLD"]
+                if "ELONGATION" not in sci_catalog_ldac.columns:
+                    sci_catalog_ldac["ELONGATION"] = 1.0 + sci_catalog_ldac["ELLIPTICITY"]
                 sci_table = Table.from_pandas(sci_catalog_ldac)
                 hdu0 = fits.PrimaryHDU()
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
@@ -1307,6 +1396,29 @@ NNW
                 ref_catalog_ldac = ref_catalog2.copy()
                 ref_catalog_ldac["x_pix"] += 1
                 ref_catalog_ldac["y_pix"] += 1
+                # Rename columns to SExtractor format
+                ref_catalog_ldac = ref_catalog_ldac.rename(columns=column_mapping)
+                # Add missing required columns with default values
+                if "MAGERR_AUTO" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["MAGERR_AUTO"] = 0.02
+                if "XWIN_IMAGE" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["XWIN_IMAGE"] = ref_catalog_ldac["X_IMAGE"]
+                if "YWIN_IMAGE" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["YWIN_IMAGE"] = ref_catalog_ldac["Y_IMAGE"]
+                if "XWIN_WORLD" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["XWIN_WORLD"] = ref_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
+                if "YWIN_WORLD" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["YWIN_WORLD"] = ref_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
+                if "X_WORLD" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["X_WORLD"] = ref_catalog_ldac["X_IMAGE"] * 0.1585 / 3600.0
+                if "Y_WORLD" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["Y_WORLD"] = ref_catalog_ldac["Y_IMAGE"] * 0.1585 / 3600.0
+                if "ALPHA_J2000" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["ALPHA_J2000"] = ref_catalog_ldac["X_WORLD"]
+                if "DELTA_J2000" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["DELTA_J2000"] = ref_catalog_ldac["Y_WORLD"]
+                if "ELONGATION" not in ref_catalog_ldac.columns:
+                    ref_catalog_ldac["ELONGATION"] = 1.0 + ref_catalog_ldac["ELLIPTICITY"]
                 ref_table = Table.from_pandas(ref_catalog_ldac)
                 hdu0 = fits.PrimaryHDU()
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
