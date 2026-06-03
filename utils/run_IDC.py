@@ -3804,9 +3804,9 @@ NNW
                             f"Median fallback kept {len(sci_cat_matched)} sources"
                         )
         else:
-            # For fewer than 50 initial matches, skip RANSAC to avoid over-filtering
+            # For fewer than 5 initial matches, skip RANSAC to avoid over-filtering
             self.logger.info(
-                f"Skipping RANSAC mag filter (only {len(sci_cat_matched)} initial matches < 50 threshold)"
+                f"Skipping RANSAC mag filter (only {len(sci_cat_matched)} initial matches < 5 threshold)"
             )
             # Calculate simple intercept for plotting
             sci_mag = np.array(sci_cat_matched["MAG_APER"], dtype=float)
@@ -3862,7 +3862,7 @@ NNW
             ransac_legend_top_outside(ax, ncol=2)
             ransac_grid(ax)
             set_mag_axes_inverted_xy(ax)
-            ransac_savefig(fig, sci_cat_path.replace(".cat", "_Mag_Fit.png"))
+            ransac_savefig(fig, str(Path(sci_cat_path).with_suffix(".png")).replace(".png", "_Mag_Fit.png"))
             plt.close(fig)
 
         if len(sci_cat_matched) > nmax:
