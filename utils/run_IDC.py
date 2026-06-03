@@ -235,15 +235,17 @@ class ImageDistortionCorrector:
         # Kernel half-width priority: scale_half_width > aperture_radius > 1.7×FWHM.
         # 2*half_width+1 is always odd, so no even-size correction is needed.
         # SExtractor hard limit: 31×31 pixels.
+        # Clamp half_width to reasonable range (3-15) to avoid oversized kernels.
+        MAX_KERNEL_HALF_WIDTH = 15  # Gives max kernel_size = 31
         if scale_half_width is not None and int(scale_half_width) > 0:
-            half_width = int(scale_half_width)
+            half_width = min(int(scale_half_width), MAX_KERNEL_HALF_WIDTH)
             self.logger.info(
                 "Convolution kernel half-width set from scale: %d px (FWHM=%.1f px)",
                 half_width,
                 fwhm_pixels,
             )
         elif aperture_radius is not None and float(aperture_radius) > 0:
-            half_width = int(np.ceil(float(aperture_radius)))
+            half_width = min(int(np.ceil(float(aperture_radius))), MAX_KERNEL_HALF_WIDTH)
             self.logger.info(
                 "Convolution kernel half-width set from aperture radius: %d px (FWHM=%.1f px)",
                 half_width,
