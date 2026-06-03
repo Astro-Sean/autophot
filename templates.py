@@ -2874,6 +2874,10 @@ class Templates:
         # --- Load science image (single I/O) ---
         scienceImage, scienceHeader = read_fits(scienceFpath)
         imageWCS = get_wcs(scienceHeader)
+        
+        # Preserve FWHM and APER from original header for alignment
+        original_fwhm = scienceHeader.get("FWHM", scienceHeader.get("fwhm"))
+        original_aper = scienceHeader.get("APER")
 
         cy, cx, top, bot, left, right = self.find_non_uniform_center(scienceImage)
         height = bot - top
@@ -2934,6 +2938,12 @@ class Templates:
                 scienceImage = scienceImage_tmp
                 scienceHeader.update(scienceHeader_newwcs.to_header(relax=True), relax=True)
 
+            # Restore FWHM and APER from original header for alignment
+            if original_fwhm is not None:
+                scienceHeader["FWHM"] = original_fwhm
+            if original_aper is not None:
+                scienceHeader["APER"] = original_aper
+            
             write_fits(cropped_scienceFpath, scienceImage, scienceHeader)
             return cropped_scienceFpath, None
 
@@ -2943,6 +2953,10 @@ class Templates:
         templateImage, templateHeader = read_fits(templateFpath)
         templateWCS = get_wcs(templateHeader)
         cropped_templateFpath = str(scienceDir / Path(templateFpath).name)
+        
+        # Preserve FWHM and APER from original headers for alignment
+        original_template_fwhm = templateHeader.get("FWHM", templateHeader.get("fwhm"))
+        original_template_aper = templateHeader.get("APER")
 
         cy_t, cx_t, top_t, bot_t, left_t, right_t = self.find_non_uniform_center(
             templateImage
@@ -3058,6 +3072,16 @@ class Templates:
             # Final NaN cleanup
             templateImage[~np.isfinite(templateImage)] = np.nan
             scienceImage[~np.isfinite(scienceImage)] = np.nan
+
+        # Restore FWHM and APER from original headers for alignment
+        if original_fwhm is not None:
+            scienceHeader["FWHM"] = original_fwhm
+        if original_aper is not None:
+            scienceHeader["APER"] = original_aper
+        if original_template_fwhm is not None:
+            templateHeader["FWHM"] = original_template_fwhm
+        if original_template_aper is not None:
+            templateHeader["APER"] = original_template_aper
 
         write_fits(cropped_templateFpath, templateImage, templateHeader)
         write_fits(cropped_scienceFpath, scienceImage, scienceHeader)
