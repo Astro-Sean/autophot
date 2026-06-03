@@ -1093,17 +1093,16 @@ NNW
             fwhm_sci_pix = float(sci_sex["fwhm"]) if "fwhm" in sci_sex else 2.5
             fwhm_ref_pix = float(ref_sex["fwhm"]) if "fwhm" in ref_sex else 2.5
 
-            # Pass 2: re-run with kernel sized from scale (scale_multiplier × FWHM).
-            # Take the larger of the two scales so the kernel covers the broader PSF,
-            # matching the source-cutout footprint used throughout the rest of the pipeline.
-            from utils.run_sex import scale_multiplier_from_config, clamp_scale_from_config
-            iy_cfg = getattr(self, "input_yaml", None) or {}
-            _sm = scale_multiplier_from_config(iy_cfg)
-            sci_scale = int(clamp_scale_from_config(iy_cfg, _sm * fwhm_sci_pix))
-            ref_scale = int(clamp_scale_from_config(iy_cfg, _sm * fwhm_ref_pix))
+            # Pass 2: re-run with kernel sized from FWHM-based scale for alignment.
+            # Use a smaller scale than the pipeline cutout scale to ensure proper
+            # source detection. Alignment needs to detect point sources, not use
+            # the large cutout scale used for PSF building/subtraction.
+            # Use 1.5×FWHM as a reasonable alignment scale (covers PSF without being excessive)
+            sci_scale = int(max(5, 1.5 * fwhm_sci_pix))
+            ref_scale = int(max(5, 1.5 * fwhm_ref_pix))
             combined_scale = max(sci_scale, ref_scale)
             self.logger.info(
-                "Alignment SExtractor pass-2: science scale=%d ref scale=%d -> combined=%d px",
+                "Alignment SExtractor pass-2: science scale=%d ref scale=%d -> combined=%d px (FWHM-based for alignment)",
                 sci_scale,
                 ref_scale,
                 combined_scale,
