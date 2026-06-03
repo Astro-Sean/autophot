@@ -1181,27 +1181,83 @@ NNW
             )
             
             # SExtractorWrapper with return_raw=True creates .fits files in a temp subdirectory
-            # Find and move them to the expected location for SCAMP
-            sci_catalog_wrapper_path = None
-            ref_catalog_wrapper_path = None
+            # The temp directory is cleaned up after the context manager exits, so we need to
+            # copy the catalog before cleanup. Since we can't access the temp dir after cleanup,
+            # we'll use a workaround: copy the input FITS to have the same stem as the expected catalog.
+            # Then SExtractorWrapper will create the catalog with the correct name.
             
-            # Search for the catalog files in the aligned directories (they're in temp subdirs)
-            for temp_dir in science_aligned_dir.glob("temp_*"):
-                potential = temp_dir / "science_image_PYSEx_CAT.fits"
-                if potential.exists():
-                    sci_catalog_wrapper_path = str(potential)
-                    break
+            # Copy science and reference images with the expected catalog stems
+            sci_image_for_catalog = science_aligned_dir / "science_image.fits"
+            ref_image_for_catalog = reference_aligned_dir / "reference_image.fits"
             
-            for temp_dir in reference_aligned_dir.glob("temp_*"):
-                potential = temp_dir / "reference_image_PYSEx_CAT.fits"
-                if potential.exists():
-                    ref_catalog_wrapper_path = str(potential)
-                    break
+            # These are already the correct names from earlier, so SExtractorWrapper will create
+            # science_image_PYSEx_CAT.fits and reference_image_PYSEx_CAT.fits in the temp dir
+            # We need to modify SExtractorWrapper to not clean up when return_raw=True, or
+            # copy the catalog before cleanup. For now, let's create the catalogs directly
+            # by running SExtractorWrapper with a custom output path.
             
-            if sci_catalog_wrapper_path:
-                shutil.move(sci_catalog_wrapper_path, sci_catalog_path)
-            if ref_catalog_wrapper_path:
-                shutil.move(ref_catalog_wrapper_path, ref_catalog_path)
+            # Actually, the simplest solution is to just use the pandas DataFrame and
+            # write the FITS-LDAC ourselves (the original approach), but ensure we use
+            # the correct SExtractor column names from the raw Table.
+            
+            # Let me revert to the manual FITS-LDAC writing approach, but this time
+            # use the column names from the raw Table instead of mapping from pandas.
+            
+            # Re-run SExtractorWrapper to get the raw Table with correct column names
+            sci_fwhm, sci_catalog_raw, sci_scale = self.sextractor.run(
+                fits_path=str(sci_image_copy),
+                pixel_scale=sci_pix_scale,
+                seeing_fwhm=sci_seeing_fwhm,
+                catalog_type="FITS_LDAC",
+                use_FWHM=sci_hdr_fwhm if sci_hdr_fwhm else 0.0,
+                crowded=sextractor_crowded,
+                use_for_matching=True,
+                mdir=str(science_aligned_dir),
+                return_raw=True,
+            )
+            
+            ref_fwhm, ref_catalog_raw, ref_scale = self.sextractor.run(
+                fits_path=str(ref_image_copy),
+                pixel_scale=ref_pix_scale,
+                seeing_fwhm=ref_seeing_fwhm,
+                catalog_type="FITS_LDAC",
+                use_FWHM=ref_hdr_fwhm if ref_hdr_fwhm else 0.0,
+                crowded=sextractor_crowded,
+                use_for_matching=True,
+                mdir=str(reference_aligned_dir),
+                return_raw=True,
+            )
+            
+            # Write the raw Tables to FITS-LDAC format at the expected paths
+            # The raw Tables already have the correct SExtractor column names
+            if sci_catalog_raw is not None and len(sci_catalog_raw) > 0:
+                # Add LDAC headers to the raw Table
+                hdu0 = fits.PrimaryHDU()
+                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
+                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
+                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(sci_catalog_raw)
+                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
+                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
+                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
+                hdu2 = fits.BinTableHDU(sci_catalog_raw)
+                hdul = fits.HDUList([hdu0, hdu1, hdu2])
+                hdul.writeto(sci_catalog_path, overwrite=True)
+            
+            if ref_catalog_raw is not None and len(ref_catalog_raw) > 0:
+                hdu0 = fits.PrimaryHDU()
+                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
+                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
+                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(ref_catalog_raw)
+                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
+                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
+                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
+                hdu2 = fits.BinTableHDU(ref_catalog_raw)
+                hdul = fits.HDUList([hdu0, hdu1, hdu2])
+                hdul.writeto(ref_catalog_path, overwrite=True)
+            
+            # Use the raw Tables for downstream processing
+            sci_catalog = sci_catalog_raw
+            ref_catalog = ref_catalog_raw
             
             # Convert to expected format - use the FITS_LDAC catalog path
             sci_sex = {"fwhm": sci_fwhm, "catalog": sci_catalog, "catalog_path": sci_catalog_path}
@@ -1261,7 +1317,7 @@ NNW
             
             # Re-run with FWHM-based scale using SExtractorWrapper
             # The pass-2 catalogs will overwrite the pass-1 catalogs (same paths)
-            sci_fwhm2, sci_catalog2, sci_scale2 = self.sextractor.run(
+            sci_fwhm2, sci_catalog2_raw, sci_scale2 = self.sextractor.run(
                 fits_path=str(sci_image_copy),
                 pixel_scale=sci_pix_scale,
                 seeing_fwhm=fwhm_sci_pix * sci_pix_scale,
@@ -1273,7 +1329,7 @@ NNW
                 return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
             )
             
-            ref_fwhm2, ref_catalog2, ref_scale2 = self.sextractor.run(
+            ref_fwhm2, ref_catalog2_raw, ref_scale2 = self.sextractor.run(
                 fits_path=str(ref_image_copy),
                 pixel_scale=ref_pix_scale,
                 seeing_fwhm=fwhm_ref_pix * ref_pix_scale,
@@ -1285,12 +1341,35 @@ NNW
                 return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
             )
             
-            # Rename SExtractorWrapper's .fits to .cat for SCAMP compatibility
+            # Write the raw Tables to FITS-LDAC format at the expected paths
             # This overwrites the pass-1 catalogs with pass-2 catalogs
-            if Path(sci_catalog_wrapper_path).exists():
-                shutil.move(sci_catalog_wrapper_path, sci_catalog_path)
-            if Path(ref_catalog_wrapper_path).exists():
-                shutil.move(ref_catalog_wrapper_path, ref_catalog_path)
+            if sci_catalog2_raw is not None and len(sci_catalog2_raw) > 0:
+                hdu0 = fits.PrimaryHDU()
+                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
+                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
+                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(sci_catalog2_raw)
+                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
+                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
+                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
+                hdu2 = fits.BinTableHDU(sci_catalog2_raw)
+                hdul = fits.HDUList([hdu0, hdu1, hdu2])
+                hdul.writeto(sci_catalog_path, overwrite=True)
+            
+            if ref_catalog2_raw is not None and len(ref_catalog2_raw) > 0:
+                hdu0 = fits.PrimaryHDU()
+                hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
+                hdu1.header['HIERARCH LDAC_IMNAME'] = 'LDACTEST'
+                hdu1.header['HIERARCH LDAC_OBJECTS'] = len(ref_catalog2_raw)
+                hdu1.header['HIERARCH LDAC_CTYPE'] = 'OBJECTS'
+                hdu1.header['HIERARCH LDAC_NAXIS1'] = 1
+                hdu1.header['HIERARCH LDAC_NAXIS2'] = 1
+                hdu2 = fits.BinTableHDU(ref_catalog2_raw)
+                hdul = fits.HDUList([hdu0, hdu1, hdu2])
+                hdul.writeto(ref_catalog_path, overwrite=True)
+            
+            # Use the raw Tables for downstream processing
+            sci_catalog2 = sci_catalog2_raw
+            ref_catalog2 = ref_catalog2_raw
             
             # Convert to expected format - use the FITS_LDAC catalog path
             sci_sex = {"fwhm": sci_fwhm2, "catalog": sci_catalog2, "catalog_path": sci_catalog_path}
