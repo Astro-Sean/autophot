@@ -770,7 +770,8 @@ class SExtractorWrapper:
         use_FWHM: float = 0.0,
         crowded: Optional[bool] = None,
         use_for_matching: bool = False,
-    ) -> Tuple[float, Optional[pd.DataFrame], int]:
+        return_raw: bool = False,
+    ) -> Tuple[float, Optional[Union[pd.DataFrame, Table]], int]:
         """
         Run SExtractor to detect point sources and estimate FWHM.
         If use_FWHM is provided as a positive float, use it to optimize the convolution kernel.
@@ -797,6 +798,7 @@ class SExtractorWrapper:
             detect_thresh (float, optional): Detection threshold. Defaults to 2.0.
             analysis_thresh (float, optional): Analysis threshold. Defaults to 2.0.
             detect_minarea (int, optional): Minimum detection area. Defaults to 5.
+            return_raw (bool, optional): If True, return raw astropy Table instead of pandas DataFrame. Defaults to False.
             detect_maxarea (int, optional): Maximum detection area. Defaults to 0.
             deblend_nthresh (int, optional): Deblending threshold. Defaults to 32.
             deblend_mincont (float, optional): Deblending minimum contrast. Defaults to 0.005.
@@ -1034,6 +1036,45 @@ class SExtractorWrapper:
             if len(sources) == 0:
                 logger.warning("No sources detected by SExtractor.")
                 return 0.0, None, default_scale
+
+            # If return_raw is True, return the raw astropy Table without conversion
+            if return_raw:
+                # Still apply basic filtering for source quality
+                # Convert to pandas temporarily for filtering, then convert back
+                sources_df = sources.to_pandas()
+                # Apply the same filtering logic as below
+                initial_count = len(sources_df)
+                if use_for_matching or crowded:
+                    nmax = None
+                    effective_snr_limit = self.config.get("photometry", {}).get(
+                        "sextractor_snr_min_matching", 2.0
+                    )
+                    relaxed_cuts = use_for_matching
+                else:
+                    nmax = self.config.get("photometry", {}).get("sextractor_nmax", 1000)
+                    effective_snr_limit = 3.0
+                    relaxed_cuts = False
+                
+                # Apply SNR filter
+                if "SNR_WIN" in sources_df.columns:
+                    sources_df = sources_df[sources_df["SNR_WIN"] >= effective_snr_limit]
+                
+                # Apply FLAGS filter
+                if "FLAGS" in sources_df.columns:
+                    sources_df = sources_df[sources_df["FLAGS"] <= flags]
+                
+                # Apply nmax limit
+                if nmax is not None and len(sources_df) > nmax:
+                    sources_df = sources_df.nlargest(nmax, "FLUX_AUTO")
+                
+                # Convert back to Table
+                sources = Table.from_pandas(sources_df)
+                logger.info(
+                    "Filtered from %d to %d sources (raw mode)",
+                    initial_count,
+                    len(sources),
+                )
+                return fwhm, sources, default_scale
 
             # Rename columns for compatibility
             newcols = [

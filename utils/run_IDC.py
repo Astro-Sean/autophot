@@ -1151,9 +1151,7 @@ NNW
             
             # SExtractorWrapper saves catalog as <stem>_PYSEx_CAT.fits in the mdir
             # SCAMP expects .cat extension for FITS-LDAC catalogs
-            # We'll use SExtractorWrapper's output directly and rename it to .cat
-            sci_catalog_wrapper_path = str(science_aligned_dir / f"{Path(sci_image_copy).stem}_PYSEx_CAT.fits")
-            ref_catalog_wrapper_path = str(reference_aligned_dir / f"{Path(ref_image_copy).stem}_PYSEx_CAT.fits")
+            # Use return_raw=True to get the raw FITS-LDAC file path and avoid pandas conversion
             sci_catalog_path = str(science_aligned_dir / f"{Path(sci_image_copy).stem}_PYSEx_CAT.cat")
             ref_catalog_path = str(reference_aligned_dir / f"{Path(ref_image_copy).stem}_PYSEx_CAT.cat")
             
@@ -1166,6 +1164,7 @@ NNW
                 crowded=sextractor_crowded,
                 use_for_matching=True,  # Retain more sources for alignment
                 mdir=str(science_aligned_dir),
+                return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
             )
             
             ref_fwhm, ref_catalog, ref_scale = self.sextractor.run(
@@ -1177,10 +1176,12 @@ NNW
                 crowded=sextractor_crowded,
                 use_for_matching=True,  # Retain more sources for alignment
                 mdir=str(reference_aligned_dir),
+                return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
             )
             
-            # Rename SExtractorWrapper's .fits to .cat for SCAMP compatibility
-            # SExtractorWrapper creates proper FITS-LDAC files with all SExtractor metadata
+            # SExtractorWrapper with return_raw=True creates .fits files, rename to .cat for SCAMP
+            sci_catalog_wrapper_path = str(science_aligned_dir / f"{Path(sci_image_copy).stem}_PYSEx_CAT.fits")
+            ref_catalog_wrapper_path = str(reference_aligned_dir / f"{Path(ref_image_copy).stem}_PYSEx_CAT.fits")
             if Path(sci_catalog_wrapper_path).exists():
                 shutil.move(sci_catalog_wrapper_path, sci_catalog_path)
             if Path(ref_catalog_wrapper_path).exists():
@@ -1253,6 +1254,7 @@ NNW
                 crowded=sextractor_crowded,
                 use_for_matching=True,
                 mdir=str(science_aligned_dir),
+                return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
             )
             
             ref_fwhm2, ref_catalog2, ref_scale2 = self.sextractor.run(
@@ -1264,6 +1266,7 @@ NNW
                 crowded=sextractor_crowded,
                 use_for_matching=True,
                 mdir=str(reference_aligned_dir),
+                return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
             )
             
             # Rename SExtractorWrapper's .fits to .cat for SCAMP compatibility
