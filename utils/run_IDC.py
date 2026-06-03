@@ -1150,8 +1150,11 @@ NNW
             ref_seeing_fwhm = (ref_hdr_fwhm if ref_hdr_fwhm else 2.0) * ref_pix_scale
             
             # SExtractorWrapper saves catalog as <stem>_PYSEx_CAT.fits in the mdir
-            sci_catalog_path = str(science_aligned_dir / f"{Path(sci_image_copy).stem}_PYSEx_CAT.fits")
-            ref_catalog_path = str(reference_aligned_dir / f"{Path(ref_image_copy).stem}_PYSEx_CAT.fits")
+            # SCAMP expects .cat extension for FITS-LDAC catalogs
+            sci_catalog_wrapper_path = str(science_aligned_dir / f"{Path(sci_image_copy).stem}_PYSEx_CAT.fits")
+            ref_catalog_wrapper_path = str(reference_aligned_dir / f"{Path(ref_image_copy).stem}_PYSEx_CAT.fits")
+            sci_catalog_path = str(science_aligned_dir / f"{Path(sci_image_copy).stem}_PYSEx_CAT.cat")
+            ref_catalog_path = str(reference_aligned_dir / f"{Path(ref_image_copy).stem}_PYSEx_CAT.cat")
             
             sci_fwhm, sci_catalog, sci_scale = self.sextractor.run(
                 fits_path=str(sci_image_copy),
@@ -1174,6 +1177,12 @@ NNW
                 use_for_matching=True,  # Retain more sources for alignment
                 mdir=str(reference_aligned_dir),
             )
+            
+            # Remove SExtractorWrapper's .fits files since we'll create our own .cat files
+            if Path(sci_catalog_wrapper_path).exists():
+                Path(sci_catalog_wrapper_path).unlink()
+            if Path(ref_catalog_wrapper_path).exists():
+                Path(ref_catalog_wrapper_path).unlink()
             
             # Convert pandas DataFrames to FITS_LDAC format for downstream compatibility
             # SExtractorWrapper returns pandas DataFrames, but filter_matched_sources expects FITS_LDAC
@@ -1229,12 +1238,15 @@ NNW
                 if "ELONGATION" not in sci_catalog_ldac.columns:
                     sci_catalog_ldac["ELONGATION"] = 1.0 + sci_catalog_ldac["ELLIPTICITY"]
                 # Write as FITS_LDAC (table in extension 2 as expected by filter_matched_sources)
+                # Add proper LDAC headers for SCAMP compatibility
                 sci_table = Table.from_pandas(sci_catalog_ldac)
                 hdu0 = fits.PrimaryHDU()
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
                 hdu1.header['LDAC_IMNAME'] = 'LDACTEST'
                 hdu1.header['LDAC_OBJECTS'] = len(sci_table)
                 hdu1.header['LDAC_CTYPE'] = 'OBJECTS'
+                hdu1.header['LDAC_NAXIS1'] = 1
+                hdu1.header['LDAC_NAXIS2'] = 1
                 hdu2 = fits.BinTableHDU(sci_table)
                 hdul = fits.HDUList([hdu0, hdu1, hdu2])
                 hdul.writeto(sci_catalog_path, overwrite=True)
@@ -1266,12 +1278,15 @@ NNW
                 if "ELONGATION" not in ref_catalog_ldac.columns:
                     ref_catalog_ldac["ELONGATION"] = 1.0 + ref_catalog_ldac["ELLIPTICITY"]
                 # Write as FITS_LDAC (table in extension 2 as expected by filter_matched_sources)
+                # Add proper LDAC headers for SCAMP compatibility
                 ref_table = Table.from_pandas(ref_catalog_ldac)
                 hdu0 = fits.PrimaryHDU()
                 hdu1 = fits.ImageHDU(data=np.zeros((1, 1)), header=fits.Header())
                 hdu1.header['LDAC_IMNAME'] = 'LDACTEST'
                 hdu1.header['LDAC_OBJECTS'] = len(ref_table)
                 hdu1.header['LDAC_CTYPE'] = 'OBJECTS'
+                hdu1.header['LDAC_NAXIS1'] = 1
+                hdu1.header['LDAC_NAXIS2'] = 1
                 hdu2 = fits.BinTableHDU(ref_table)
                 hdul = fits.HDUList([hdu0, hdu1, hdu2])
                 hdul.writeto(ref_catalog_path, overwrite=True)
@@ -1387,6 +1402,8 @@ NNW
                 hdu1.header['LDAC_IMNAME'] = 'LDACTEST'
                 hdu1.header['LDAC_OBJECTS'] = len(sci_table)
                 hdu1.header['LDAC_CTYPE'] = 'OBJECTS'
+                hdu1.header['LDAC_NAXIS1'] = 1
+                hdu1.header['LDAC_NAXIS2'] = 1
                 hdu2 = fits.BinTableHDU(sci_table)
                 hdul = fits.HDUList([hdu0, hdu1, hdu2])
                 hdul.writeto(sci_catalog_path, overwrite=True)
@@ -1422,6 +1439,8 @@ NNW
                 hdu1.header['LDAC_IMNAME'] = 'LDACTEST'
                 hdu1.header['LDAC_OBJECTS'] = len(ref_table)
                 hdu1.header['LDAC_CTYPE'] = 'OBJECTS'
+                hdu1.header['LDAC_NAXIS1'] = 1
+                hdu1.header['LDAC_NAXIS2'] = 1
                 hdu2 = fits.BinTableHDU(ref_table)
                 hdul = fits.HDUList([hdu0, hdu1, hdu2])
                 hdul.writeto(ref_catalog_path, overwrite=True)
