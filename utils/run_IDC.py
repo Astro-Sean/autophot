@@ -47,6 +47,7 @@ import astropy.units as u
 sys.path.append(str(Path(__file__).parent.parent))
 from functions import remove_wcs_from_header, log_warning_from_exception
 from wcs import get_wcs
+from utils.run_sex import SExtractorWrapper
 
 
 class ImageDistortionCorrector:
@@ -169,6 +170,8 @@ class ImageDistortionCorrector:
         self._temp_dirs: set[str] = set()
         self.cleanup_intermediate = True
         self.input_yaml = input_yaml
+        # Initialize SExtractorWrapper for alignment (same as main pipeline)
+        self.sextractor = SExtractorWrapper(input_yaml)
 
     # -------------------------------- Utilities --------------------------------
     @staticmethod
@@ -1133,26 +1136,45 @@ NNW
             except Exception:
                 pass
             
-            sci_sex = self.run_sextractor(
-                str(sci_image_copy),
-                output_dir=str(science_aligned_dir),
-                aperture_radius=sci_aperture_radius,
-                weight_path=sci_w,
-                PIXEL_SCALE=sci_pix_scale,
+            # Use main pipeline's SExtractorWrapper for alignment (same as main source detection)
+            # This ensures consistent source detection behavior
+            self.logger.info("Using SExtractorWrapper.run for alignment (same as main pipeline)")
+            
+            # Convert pixel scale to arcsec/pixel for SExtractorWrapper
+            sci_seeing_fwhm = (sci_hdr_fwhm if sci_hdr_fwhm else 2.0) * sci_pix_scale
+            ref_seeing_fwhm = (ref_hdr_fwhm if ref_hdr_fwhm else 2.0) * ref_pix_scale
+            
+            # SExtractorWrapper saves catalog as <stem>_PYSEx_CAT.fits in the mdir
+            sci_catalog_path = str(science_aligned_dir / f"{Path(sci_image_copy).stem}_PYSEx_CAT.fits")
+            ref_catalog_path = str(reference_aligned_dir / f"{Path(ref_image_copy).stem}_PYSEx_CAT.fits")
+            
+            sci_fwhm, sci_catalog, sci_scale = self.sextractor.run(
+                fits_path=str(sci_image_copy),
+                pixel_scale=sci_pix_scale,
+                seeing_fwhm=sci_seeing_fwhm,
+                catalog_type="FITS_LDAC",
+                use_FWHM=sci_hdr_fwhm if sci_hdr_fwhm else 0.0,
                 crowded=sextractor_crowded,
-                for_alignment=True,
-                fwhm_pixels=sci_hdr_fwhm,
+                use_for_matching=True,  # Retain more sources for alignment
+                mdir=str(science_aligned_dir),
             )
-            ref_sex = self.run_sextractor(
-                str(ref_image_copy),
-                output_dir=str(reference_aligned_dir),
-                aperture_radius=ref_aperture_radius,
-                weight_path=ref_w,
-                PIXEL_SCALE=ref_pix_scale,
+            
+            ref_fwhm, ref_catalog, ref_scale = self.sextractor.run(
+                fits_path=str(ref_image_copy),
+                pixel_scale=ref_pix_scale,
+                seeing_fwhm=ref_seeing_fwhm,
+                catalog_type="FITS_LDAC",
+                use_FWHM=ref_hdr_fwhm if ref_hdr_fwhm else 0.0,
                 crowded=sextractor_crowded,
-                for_alignment=True,
-                fwhm_pixels=ref_hdr_fwhm,
+                use_for_matching=True,  # Retain more sources for alignment
+                mdir=str(reference_aligned_dir),
             )
+            
+            # Convert to expected format - use the FITS_LDAC catalog path
+            sci_sex = {"fwhm": sci_fwhm, "catalog": sci_catalog, "catalog_path": sci_catalog_path}
+            ref_sex = {"fwhm": ref_fwhm, "catalog": ref_catalog, "catalog_path": ref_catalog_path}
+            
+            self.logger.info("SExtractorWrapper detected %d science sources, %d reference sources", len(sci_catalog) if sci_catalog is not None else 0, len(ref_catalog) if ref_catalog is not None else 0)
 
             fwhm_sci_pix = float(sci_sex["fwhm"]) if "fwhm" in sci_sex else 2.5
             fwhm_ref_pix = float(ref_sex["fwhm"]) if "fwhm" in ref_sex else 2.5
@@ -1203,28 +1225,35 @@ NNW
                 ref_scale,
                 combined_scale,
             )
-            sci_sex = self.run_sextractor(
-                str(sci_image_copy),
-                output_dir=str(science_aligned_dir),
-                aperture_radius=sci_aperture_radius,
-                weight_path=sci_w,
-                PIXEL_SCALE=sci_pix_scale,
+            
+            # Re-run with FWHM-based scale using SExtractorWrapper
+            sci_fwhm2, sci_catalog2, sci_scale2 = self.sextractor.run(
+                fits_path=str(sci_image_copy),
+                pixel_scale=sci_pix_scale,
+                seeing_fwhm=fwhm_sci_pix * sci_pix_scale,
+                catalog_type="FITS_LDAC",
+                use_FWHM=fwhm_sci_pix,
                 crowded=sextractor_crowded,
-                scale=combined_scale,
-                for_alignment=True,
-                fwhm_pixels=fwhm_sci_pix,
+                use_for_matching=True,
+                mdir=str(science_aligned_dir),
             )
-            ref_sex = self.run_sextractor(
-                str(ref_image_copy),
-                output_dir=str(reference_aligned_dir),
-                aperture_radius=ref_aperture_radius,
-                weight_path=ref_w,
-                PIXEL_SCALE=ref_pix_scale,
+            
+            ref_fwhm2, ref_catalog2, ref_scale2 = self.sextractor.run(
+                fits_path=str(ref_image_copy),
+                pixel_scale=ref_pix_scale,
+                seeing_fwhm=fwhm_ref_pix * ref_pix_scale,
+                catalog_type="FITS_LDAC",
+                use_FWHM=fwhm_ref_pix,
                 crowded=sextractor_crowded,
-                scale=combined_scale,
-                for_alignment=True,
-                fwhm_pixels=fwhm_ref_pix,
+                use_for_matching=True,
+                mdir=str(reference_aligned_dir),
             )
+            
+            # Convert to expected format - use the FITS_LDAC catalog path
+            sci_sex = {"fwhm": sci_fwhm2, "catalog": sci_catalog2, "catalog_path": sci_catalog_path}
+            ref_sex = {"fwhm": ref_fwhm2, "catalog": ref_catalog2, "catalog_path": ref_catalog_path}
+            
+            self.logger.info("SExtractorWrapper pass-2 detected %d science sources, %d reference sources", len(sci_catalog2) if sci_catalog2 is not None else 0, len(ref_catalog2) if ref_catalog2 is not None else 0)
 
             n_sci = len(sci_sex.get("catalog", []))
             n_ref = len(ref_sex.get("catalog", []))
