@@ -717,11 +717,11 @@ def run_sfft() -> Optional[int]:
     is_crowded = args.crowded
 
     # SExtractor detection threshold for SFFT source selection.
-    # 3.0 sigma matches SFFT's own documentation and example configs.
-    # The previous value of 1.5 caused large numbers of noise peaks to be detected
-    # on background-subtracted images, polluting the kernel fit and generating
-    # excessive post-anomaly candidates that triggered unnecessary re-runs.
-    DETECT_THRESH = 3.0
+    # 1.5 sigma for sparse fields (background-subtracted images may have low flux)
+    # 3.0 sigma for crowded fields (avoids noise peaks)
+    # The previous fixed value of 3.0 caused source detection failures on
+    # SWarp-resampled, background-subtracted images with low flux levels.
+    DETECT_THRESH = 1.5 if not is_crowded else 3.0
     DEBLEND_MINCON = 0.005
 
     constant_phot_ratio = _parse_bool_str(
