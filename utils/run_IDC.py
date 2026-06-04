@@ -1094,31 +1094,13 @@ NNW
                 center_ra, center_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
                 center_ra = float(center_ra[0])
                 center_dec = float(center_dec[0])
-                
-                # Create a temporary copy of science image with CRPIX at center for SWarp.
-                # This prevents SWarp from clipping when CRPIX is offset from image center.
-                # The original science image is kept for source matching.
-                sci_swarp_copy = sci_image_copy.with_suffix(".swarp.fits")
-                shutil.copy2(sci_image_copy, sci_swarp_copy)
-                with fits.open(sci_swarp_copy, mode='update') as hdul:
-                    old_crpix1 = hdul[0].header.get('CRPIX1')
-                    old_crpix2 = hdul[0].header.get('CRPIX2')
-                    old_crval1 = hdul[0].header.get('CRVAL1')
-                    old_crval2 = hdul[0].header.get('CRVAL2')
-                    
-                    hdul[0].header['CRPIX1'] = _scx
-                    hdul[0].header['CRPIX2'] = _scy
-                    hdul[0].header['CRVAL1'] = center_ra
-                    hdul[0].header['CRVAL2'] = center_dec
-                    
-                    self.logger.info(
-                        "Created SWarp copy with CRPIX (%.2f,%.2f)->(%.2f,%.2f) CRVAL (%.6f,%.6f)->(%.6f,%.6f)",
-                        old_crpix1, old_crpix2, _scx, _scy,
-                        old_crval1, old_crval2, center_ra, center_dec
-                    )
-                
-                # Use the SWarp copy for resampling instead of the original
-                sci_image_for_swarp = sci_swarp_copy
+
+                # Use the original science image for SWarp. Do NOT create a copy with
+                # modified CRPIX/CRVAL — distortion terms (SIP, PV) are evaluated
+                # relative to CRPIX, so moving CRPIX changes the WCS mapping and
+                # introduces a small systematic offset. COMBINE=Y already guarantees
+                # full-size output at the requested IMAGE_SIZE.
+                sci_image_for_swarp = sci_image_copy
                 
                 self.logger.info(
                     "Output grid: %dx%d  CENTER=(%.6f,%.6f)  PIXEL_SCALE=%.4f "
