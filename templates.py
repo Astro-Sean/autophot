@@ -3403,26 +3403,6 @@ class Templates:
                 logger.info("Too few sources after robust filtering")
                 return empty, nan_fit
 
-            # --- Magnitude difference filter (exclude variable/problematic sources) ---
-            # Require science and template magnitudes to be within 3 mag of each other
-            # This excludes variables, artifacts, and sources with large photometric issues
-            mag_diff = np.abs(mag_img_r - mag_tpl_r)
-            mag_diff_ok = mag_diff < 3.0
-            n_mag_diff = int(np.sum(~mag_diff_ok))
-            if n_mag_diff > 0:
-                logger.info(
-                    "Removed %d sources with |mag_sci - mag_tpl| >= 3.0 mag from flux comparison",
-                    n_mag_diff,
-                )
-            mag_img_r = mag_img_r[mag_diff_ok]
-            mag_tpl_r = mag_tpl_r[mag_diff_ok]
-            mag_err_r = mag_err_r[mag_diff_ok]
-            idx_r = idx_r[mag_diff_ok]
-
-            if len(mag_img_r) < params.min_absolute_samples:
-                logger.info("Too few sources after magnitude difference filtering")
-                return empty, nan_fit
-
             # --- RANSAC / fallback fit ---
             X = mag_img_r.reshape(-1, 1)
             y = mag_tpl_r
