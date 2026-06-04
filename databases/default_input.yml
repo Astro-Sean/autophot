@@ -381,6 +381,7 @@ default_input:
     sfft_back_size: 128 # int --- SExtractor BACK_SIZE used by SFFT source selection/background estimation.
     sfft_back_filtersize: 6 # int --- SExtractor BACK_FILTERSIZE used by SFFT background smoothing.
     sfft_backphototype: LOCAL # str --- SExtractor BACKPHOTO_TYPE for source photometry background: LOCAL or GLOBAL.
+    sfft_detect_thresh: null # float|null --- SExtractor DETECT_THRESH for SFFT source selection (sigma). If null, uses 1.5 for sparse fields, 3.0 for crowded fields. Lower values (e.g., 1.0) help detect fainter sources on background-subtracted images but may increase noise.
 
     crowded_field: False # bool --- Global crowded-field flag for subtraction/source selection heuristics.
     sextractor_crowded: False # bool --- Use crowded-field SExtractor settings for subtraction/source selection (if supported).

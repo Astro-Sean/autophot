@@ -4845,12 +4845,15 @@ class Templates:
                 back_size = ts_sub.get("sfft_back_size", None)
                 back_filt = ts_sub.get("sfft_back_filtersize", None)
                 back_phototype = ts_sub.get("sfft_backphototype", "LOCAL")
+                detect_thresh = ts_sub.get("sfft_detect_thresh", None)
                 if back_size is not None:
                     cmd_local += ["-back_size", str(int(back_size))]
                 if back_filt is not None:
                     cmd_local += ["-back_filtersize", str(int(back_filt))]
                 if back_phototype is not None:
                     cmd_local += ["-backphototype", str(back_phototype).upper()]
+                if detect_thresh is not None:
+                    cmd_local += ["-detect_thresh", str(float(detect_thresh))]
 
                 # Robust SFFT source rejection controls.
                 only_flags_cfg = ts_sub.get("sfft_only_flags", [0, 1, 2])

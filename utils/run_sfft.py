@@ -268,6 +268,12 @@ def run_sfft() -> Optional[int]:
         default="[]",
         help="List of [x, y] pairs to preselect, same format as above.",
     )
+    parser.add_argument(
+        "-detect_thresh",
+        type=float,
+        default=None,
+        help="SExtractor DETECT_THRESH (sigma). If None, uses 1.5 for sparse, 3.0 for crowded.",
+    )
     parser.add_argument("-plot", action="store_true", help="Generate diagnostic plots.")
     parser.add_argument(
         "-forceconv",
@@ -721,7 +727,12 @@ def run_sfft() -> Optional[int]:
     # 3.0 sigma for crowded fields (avoids noise peaks)
     # The previous fixed value of 3.0 caused source detection failures on
     # SWarp-resampled, background-subtracted images with low flux levels.
-    DETECT_THRESH = 1.5 if not is_crowded else 3.0
+    # User can override via -detect_thresh argument.
+    if args.detect_thresh is not None and args.detect_thresh > 0:
+        DETECT_THRESH = float(args.detect_thresh)
+        log_info(f"Using user-specified DETECT_THRESH: {DETECT_THRESH:.1f}")
+    else:
+        DETECT_THRESH = 1.5 if not is_crowded else 3.0
     DEBLEND_MINCON = 0.005
 
     constant_phot_ratio = _parse_bool_str(
