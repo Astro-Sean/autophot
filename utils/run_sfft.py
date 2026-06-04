@@ -257,6 +257,13 @@ def run_sfft() -> Optional[int]:
         "-kernel_half_width", type=float, default=0, help="Kernel half width."
     )
     parser.add_argument(
+        "-kernel_hw_fwhm_multiplier",
+        type=float,
+        default=2.0,
+        help="Multiplier for physics-based kernel sizing: kernel_hw = ceil(mult * sqrt(FWHM_broad^2 - FWHM_narrow^2)). "
+             "Higher values give larger kernels (more fitting freedom, slower). Default 2.0.",
+    )
+    parser.add_argument(
         "-masked_sources",
         type=str,
         default="[]",
@@ -634,14 +641,29 @@ def run_sfft() -> Optional[int]:
     KER_HW_LIMIT_MAX = 50
     KerHWLimit = (KER_HW_LIMIT_MIN, KER_HW_LIMIT_MAX)
 
-    # HOTPANTS default is 1.5*FWHM; using this avoids over-smoothing moderately
-    # large sources while still being large enough to fit PSF differences.
+    # Physics-based kernel sizing: kernel half-width must contain the convolution
+    # that transforms the narrower PSF into the broader one.
+    # FWHM_conv = sqrt(FWHM_broad^2 - FWHM_narrow^2); kernel_hw = ceil(mult * FWHM_conv).
+    # Floor at FWHM_broad so the kernel always covers one full PSF footprint.
     if float(args.kernel_half_width) == 0:
-        kernel_half_width = _odd(max(5, int(np.ceil(FWHM * 2.5))))
-        log_info(f"Auto kernel half-width: 1.5 * FWHM = {kernel_half_width} px")
+        fwhm_broad = max(template_fwhm, science_fwhm)
+        fwhm_narrow = min(template_fwhm, science_fwhm)
+        if fwhm_broad > fwhm_narrow and fwhm_broad > 0:
+            fwhm_conv = np.sqrt(max(fwhm_broad ** 2 - fwhm_narrow ** 2, 0.0))
+        else:
+            fwhm_conv = fwhm_broad
+        _mult = float(getattr(args, "kernel_hw_fwhm_multiplier", 2.0) or 2.0)
+        if not np.isfinite(_mult) or _mult <= 0:
+            _mult = 2.0
+        ker_hw_from_conv = int(np.ceil(_mult * fwhm_conv))
+        ker_hw_floor = int(np.ceil(fwhm_broad))
+        kernel_half_width = _odd(max(5, max(ker_hw_from_conv, ker_hw_floor)))
+        log_info(
+            f"Auto kernel half-width: mult={_mult:.1f} FWHM_conv={fwhm_conv:.2f} "
+            f"floor={ker_hw_floor} -> {kernel_half_width} px"
+        )
     else:
         kernel_half_width = float(args.kernel_half_width)
-        # log_info(f" kernel half-width: {kernel_half_width} px")
 
     # Clamp auto/manual width to SFFT limits before any downstream use.
     k_lo, k_hi = KerHWLimit

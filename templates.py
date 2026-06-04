@@ -4399,20 +4399,54 @@ class Templates:
                 ts_cfg["sfft_crowded_method"] = (
                     False  # default to ESP (sparse) for better performance on typical fields
                 )
-            # Kernel polynomial order: default to 0 (constant kernel)
-            # Validate and clamp to reasonable bounds (0-3 typically)
+            # Kernel polynomial order: auto-select based on PSF difference and
+            # matched-source count.  Higher orders need more sources to constrain
+            # the additional polynomial coefficients and avoid overfitting.
+            #
+            # Minimum sources per order (empirical; ~20 DOF per term):
+            #   order 0 (constant)  : 1  term  -> ~20 sources
+            #   order 1 (linear)    : 3  terms -> ~40 sources
+            #   order 2 (quadratic) : 6  terms -> ~80 sources
+            #   order 3 (cubic)     : 10 terms -> ~150 sources
             user_kernel = ts_cfg.get("kernel_order", None)
-            if user_kernel is None or user_kernel < 0:
-                kernel_order = 0
-            else:
-                kernel_order = int(user_kernel)
-                if kernel_order > 3:
+            n_matched = len(matching_sources) if matching_sources else 0
+
+            if user_kernel is not None and user_kernel >= 0:
+                # User override: respect it but warn if likely under-constrained
+                kernel_order = min(int(user_kernel), 3)
+                min_src_for_order = {0: 0, 1: 40, 2: 80, 3: 150}
+                needed = min_src_for_order.get(kernel_order, 0)
+                if n_matched < needed:
                     logger.warning(
-                        "Kernel polynomial order %d is unusually high (recommended 0-3). "
-                        "High orders may cause overfitting and edge artifacts.",
-                        kernel_order
+                        "User kernel_order=%d may be under-constrained (only %d matched sources, "
+                        "recommend %d). Consider lowering kernel_order.",
+                        kernel_order, n_matched, needed,
                     )
-                    kernel_order = min(kernel_order, 3)  # Clamp to 3
+            else:
+                # Auto-select: start from PSF difference, then downgrade by source count
+                rel_diff = abs(science_fwhm - template_fwhm) / max((science_fwhm + template_fwhm) / 2, 0.1)
+                if rel_diff < 0.10:
+                    order_from_psf = 0
+                elif rel_diff < 0.30:
+                    order_from_psf = 1
+                elif rel_diff < 0.50:
+                    order_from_psf = 2
+                else:
+                    order_from_psf = 3
+
+                # Downgrade if not enough sources to constrain
+                if n_matched < 150 and order_from_psf >= 3:
+                    order_from_psf = 2
+                if n_matched < 80 and order_from_psf >= 2:
+                    order_from_psf = 1
+                if n_matched < 40 and order_from_psf >= 1:
+                    order_from_psf = 0
+
+                kernel_order = order_from_psf
+                logger.info(
+                    "Auto-selected kernel_order=%d (PSF rel_diff=%.2f, %d matched sources)",
+                    kernel_order, rel_diff, n_matched,
+                )
 
             # Validate background polynomial order (bg_order)
             bg_order = ts_cfg.get("sfft_bg_order", 0)
@@ -4795,8 +4829,24 @@ class Templates:
             ts_sub = self.input_yaml["template_subtraction"]
             phot_cfg = self.input_yaml.get("photometry", {})
 
-            # Enforce REF convolution for SFFT so DIFF = SCI - conv(REF).
-            forceconv = "REF"
+            # Auto-select ForceConv based on which image has the broader PSF.
+            # REF => DIFF = SCI - conv(REF)  (use when science PSF is broader)
+            # SCI => DIFF = conv(SCI) - REF  (use when template PSF is broader)
+            # This preserves the transient in the image with the better seeing.
+            if float(template_fwhm) > float(science_fwhm):
+                forceconv = "SCI"
+                logger.info(
+                    "SFFT ForceConv=SCI (template FWHM %.2f > science FWHM %.2f); "
+                    "convolving science to match template PSF.",
+                    float(template_fwhm), float(science_fwhm),
+                )
+            else:
+                forceconv = "REF"
+                logger.info(
+                    "SFFT ForceConv=REF (science FWHM %.2f >= template FWHM %.2f); "
+                    "convolving reference to match science PSF.",
+                    float(science_fwhm), float(template_fwhm),
+                )
 
             # Background polynomial order: default to 0 unless the user explicitly overrides
             bg_order = ts_sub.get("sfft_bg_order", 0)
