@@ -271,7 +271,7 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
     y_min, y_max = np.where(rows_with_valid)[0][[0, -1]]
     x_min, x_max = np.where(cols_with_valid)[0][[0, -1]]
 
-    logging.info(f"NaN boundary trimming: valid region bounds x=[{x_min},{x_max}], y=[{y_min},{y_max}]")
+    logging.info(f"NaN boundary trimming: valid region bounds x=[{x_min},{x_max}] px, y=[{y_min},{y_max}] px")
     
     # Add buffer
     y_min = max(0, y_min - buffer_pixels)
@@ -279,7 +279,7 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
     x_min = max(0, x_min - buffer_pixels)
     x_max = min(image_data.shape[1] - 1, x_max + buffer_pixels)
 
-    logging.info(f"NaN boundary trimming: after buffer x=[{x_min},{x_max}], y=[{y_min},{y_max}]")
+    logging.info(f"NaN boundary trimming: after buffer x=[{x_min},{x_max}] px, y=[{y_min},{y_max}] px")
 
     # Check if target is included (if provided)
     if target_x is not None and target_y is not None:
@@ -325,8 +325,8 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
         elif expanded:
             logging.info(f"NaN boundary trimming: successfully expanded bounds to include target")
 
-    logging.info(f"NaN boundary trimming: final bounds x=[{x_min},{x_max}], y=[{y_min},{y_max}]")
-    logging.info(f"NaN boundary trimming: original shape {image_data.shape}, will trim to ({y_max - y_min + 1}, {x_max - x_min + 1})")
+    logging.info(f"NaN boundary trimming: final bounds x=[{x_min},{x_max}] px, y=[{y_min},{y_max}] px")
+    logging.info(f"NaN boundary trimming: original shape {image_data.shape}, will trim to ({y_max - y_min + 1}, {x_max - x_min + 1}) px")
 
     # Perform trim using Cutout2D for proper WCS handling
 
@@ -1602,7 +1602,7 @@ def run_photometry():
                             )
                             target_x, target_y = float(target_x), float(target_y)
                             logging.info(
-                                "Target position for NaN trimming: (%.1f, %.1f)",
+                                "Target position for NaN trimming: (%.1f, %.1f) px",
                                 target_x,
                                 target_y,
                             )
@@ -1644,7 +1644,7 @@ def run_photometry():
                             input_yaml["target_x_pix"] = float(new_target_x)
                             input_yaml["target_y_pix"] = float(new_target_y)
                             logging.info(
-                                "Target pixel coordinates refreshed after trimming: (%.1f, %.1f)",
+                                "Target pixel coordinates refreshed after trimming: (%.1f, %.1f) px",
                                 float(new_target_x),
                                 float(new_target_y),
                             )
@@ -1836,7 +1836,7 @@ def run_photometry():
                     input_yaml["target_y_pix"] = float(target_y_pix)
                     logging.info(
                         f"Target pixel coordinates refreshed after trimming: "
-                        f"({target_x_pix:.1f}, {target_y_pix:.1f})"
+                        f"({target_x_pix:.1f}, {target_y_pix:.1f}) px"
                     )
         except Exception as wcs_refresh_exc:
             logging.warning(f"Could not refresh target coordinates after trimming: {wcs_refresh_exc}")
@@ -3884,7 +3884,7 @@ def run_photometry():
                     logging.info(f"Science cutout shape: {science_cutout.data.shape}")
                     logging.info(f"Template cutout shape: {template_cutout.data.shape}")
                     logging.info(
-                        f"Target pixel coordinates (science): x={target_x_pix:.2f}, y={target_y_pix:.2f}"
+                        f"Target pixel coordinates (science): x={target_x_pix:.2f} px, y={target_y_pix:.2f} px"
                     )
 
             # Reloads the image and header.
@@ -5649,7 +5649,7 @@ def run_photometry():
             f"Target threshold: {TargetPosition['threshold'].iloc[0]:.1f} x background standard deviation"
         )
         logging.info(f"Target detectability: {target_beta * 100:.1f} %")
-        logging.info(f"Target location measured with FWHM: {target_fwhm:.1f} pixels")
+        logging.info(f"Target location measured with FWHM: {target_fwhm:.1f} px")
 
         # Calculates pixel offsets.
         dx_pix = TargetPosition["x_fit"].iloc[0] - input_yaml["target_x_pix"]
@@ -5658,13 +5658,13 @@ def run_photometry():
 
         logging.info("POSITION OFFSET ANALYSIS:")
         logging.info(
-            f"\tExpected pixel position: ({input_yaml['target_x_pix']:.3f}, {input_yaml['target_y_pix']:.3f})"
+            f"  Expected pixel position: ({input_yaml['target_x_pix']:.3f}, {input_yaml['target_y_pix']:.3f}) px"
         )
         logging.info(
-            f"\tFitted pixel position:   ({TargetPosition['x_fit'].iloc[0]:.3f}, {TargetPosition['y_fit'].iloc[0]:.3f})"
+            f"  Fitted pixel position:   ({TargetPosition['x_fit'].iloc[0]:.3f}, {TargetPosition['y_fit'].iloc[0]:.3f}) px"
         )
-        logging.info(f"\tPixel offset: dx = {dx_pix:+.3f}, dy = {dy_pix:+.3f}")
-        logging.info(f"\tTotal pixel offset: {offset_pix:.3f} pixels")
+        logging.info(f"  Pixel offset: dx = {dx_pix:+.3f} px, dy = {dy_pix:+.3f} px")
+        logging.info(f"  Total pixel offset: {offset_pix:.3f} px")
 
         # Calculates RA/Dec error in arcseconds from pixel errors.
         if not np.isnan(TargetPosition["x_fit_err"].iloc[0]) and not np.isnan(
@@ -5693,13 +5693,13 @@ def run_photometry():
             dec_err = sky_center.separation(sky_dy).arcsecond
             fitting_error_arcsec = np.sqrt(ra_err**2 + dec_err**2)
             logging.info(
-                f"\tFitting uncertainty: {TargetPosition['x_fit_err'].iloc[0]:.3f}, {TargetPosition['y_fit_err'].iloc[0]:.3f} pixels"
+                f"  Fitting uncertainty: {TargetPosition['x_fit_err'].iloc[0]:.3f}, {TargetPosition['y_fit_err'].iloc[0]:.3f} px"
             )
         else:
             ra_err = np.nan
             dec_err = np.nan
             fitting_error_arcsec = 0
-            logging.info("\tFitting uncertainty: N/A (fit did not converge)")
+            logging.info("  Fitting uncertainty: N/A (fit did not converge)")
 
         # Calculates the offset in arcseconds (including direction).
         # pixel_to_world uses 0-based indexing by default (matching numpy arrays)
@@ -5718,10 +5718,10 @@ def run_photometry():
         )
         ddec_arcsec = (fitted_sky.dec.degree - expected_sky.dec.degree) * 3600
         logging.info(
-            f'\tSky offset: dRA = {dra_arcsec:+.3f}", dDec = {ddec_arcsec:+.3f}"'
+            f"  Sky offset: dRA = {dra_arcsec:+.3f}\", dDec = {ddec_arcsec:+.3f}\""
         )
         logging.info(
-            f"\tTotal separation: {separation:.3f} +/- {fitting_error_arcsec:.3f} arcseconds"
+            f"  Total separation: {separation:.3f} +/- {fitting_error_arcsec:.3f} arcsec"
         )
 
         # Store fitted RA/Dec for output
@@ -5908,9 +5908,9 @@ def run_photometry():
                         beta_sigma_str = "unknown"
                     logging.info(
                         "Limiting magnitude config:\n"
-                        "\tbeta_limit=%g (~%s sigma; n=3 beta formalism)\n"
-                        "\tdetection_limit=%r\n"
-                        "\tcompleteness_target=%.2f\n"
+                        "  beta_limit: %g (~%s sigma; n=3 beta formalism)\n"
+                        "  detection_limit: %r\n"
+                        "  completeness_target: %.2f\n"
                         "\trecovery_method=%s",
                         float(beta_limit),
                         beta_sigma_str,

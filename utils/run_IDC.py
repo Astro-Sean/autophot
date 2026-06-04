@@ -1604,7 +1604,10 @@ NNW
             )
 
             self.logger.info(
-                "SWarp output grid: CENTER=(%.6f,%.6f) IMAGE_SIZE=(%d,%d) PIXEL_SCALE=%.4f arcsec/px",
+                "SWarp output grid:\n"
+                "  Center: (%.6f, %.6f) deg\n"
+                "  Image size: %d x %d px\n"
+                "  Pixel scale: %.4f arcsec/px",
                 center_ra, center_dec, output_width, output_height, pix_scale,
             )
 
@@ -1846,8 +1849,11 @@ NNW
                     else:
                         ref_wcs_info = wcs_info
                     self.logger.info(
-                        "SWarp output WCS [%s]: shape=(%d,%d) CRPIX=(%.2f,%.2f) "
-                        "CRVAL=(%.6f,%.6f) CTYPE=(%s,%s)",
+                        "SWarp output WCS [%s]:\n"
+                        "  Shape: %d x %d px\n"
+                        "  CRPIX: (%.2f, %.2f)\n"
+                        "  CRVAL: (%.6f, %.6f) deg\n"
+                        "  CTYPE: (%s, %s)",
                         _label, _ny, _nx,
                         wcs_info["crpix1"], wcs_info["crpix2"],
                         wcs_info["crval1"], wcs_info["crval2"],

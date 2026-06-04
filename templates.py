@@ -534,8 +534,12 @@ def compute_alignment_rms(
         rms = float(np.sqrt(np.mean(d_mut**2)))
 
         logger.info(
-            "Alignment diagnostics: median=%.3f px  rms=%.3f px  p90=%.3f px"
-            "  (%d mutual pairs, max_sep=%.2f px)",
+            "Alignment diagnostics:\n"
+            "  Median: %.3f px\n"
+            "  RMS: %.3f px\n"
+            "  P90: %.3f px\n"
+            "  Mutual pairs: %d\n"
+            "  Max separation: %.2f px",
             median_offset, rms, p90, len(d_mut), max_sep,
         )
         return median_offset
@@ -2738,8 +2742,8 @@ class Templates:
             # Log the coordinate change and WCS parameters
             logger.info(
                 "Target coordinates updated after %s alignment: "
-                "(%.1f, %.1f) -> (%.1f, %.1f). "
-                "WCS CRPIX=(%.1f, %.1f), CRVAL=(%.6f, %.6f)",
+                "(%.1f, %.1f) px -> (%.1f, %.1f) px. "
+                "WCS CRPIX=(%.1f, %.1f) px, CRVAL=(%.6f, %.6f) deg",
                 method_name, old_target_x, old_target_y, new_target_x, new_target_y,
                 aligned_header.get("CRPIX1", np.nan), aligned_header.get("CRPIX2", np.nan),
                 aligned_header.get("CRVAL1", np.nan), aligned_header.get("CRVAL2", np.nan)
@@ -4150,9 +4154,15 @@ class Templates:
                 ker_hw_floor = int(np.ceil(fwhm_broad))
                 ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_from_conv, ker_hw_floor)))
                 logger.info(
-                    "Kernel sizing: FWHM_sci=%.2f FWHM_ref=%.2f FWHM_broad=%.2f "
-                    "FWHM_conv=%.2f -> hw_conv=%d hw_floor=%d -> kernel_hw=%d px "
-                    "(multiplier=%.1f)",
+                    "Kernel sizing:\n"
+                    "  FWHM_sci: %.2f px\n"
+                    "  FWHM_ref: %.2f px\n"
+                    "  FWHM_broad: %.2f px\n"
+                    "  FWHM_conv: %.2f px\n"
+                    "  hw_conv: %d px\n"
+                    "  hw_floor: %d px\n"
+                    "  kernel_hw: %d px\n"
+                    "  Multiplier: %.1f",
                     fwhm_sci, fwhm_ref, fwhm_broad, fwhm_conv,
                     ker_hw_from_conv, ker_hw_floor, ker_hw, _mult,
                 )
@@ -4514,7 +4524,11 @@ class Templates:
                     diff_rms = np.sqrt(np.mean(valid_pixels ** 2))
 
                     logger.info(
-                        "Subtraction quality: median=%.3f, std=%.3f, rms=%.3f (based on %d valid pixels)",
+                        "Subtraction quality:\n"
+                        "  Median: %.3f\n"
+                        "  Std: %.3f\n"
+                        "  RMS: %.3f\n"
+                        "  Valid pixels: %d",
                         diff_median, diff_std, diff_rms, len(valid_pixels)
                     )
 

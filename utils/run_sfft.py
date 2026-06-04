@@ -761,7 +761,9 @@ def run_sfft() -> Optional[int]:
     BACK_SIZE = int(max(16, args.back_size))
     BACK_FILTERSIZE = int(max(1, args.back_filtersize))
     log_info(
-        f"SExtractor background mesh: BACK_SIZE={BACK_SIZE} px, BACK_FILTERSIZE={BACK_FILTERSIZE}"
+        f"SExtractor background mesh:\n"
+        f"  BACK_SIZE: {BACK_SIZE} px\n"
+        f"  BACK_FILTERSIZE: {BACK_FILTERSIZE}"
     )
 
     def parse_only_flags(s: str):

@@ -2784,9 +2784,9 @@ class PSF:
         ):
             log.info(
                 "PSF fit bounds config:\n"
-                "\tfitting_xy_bounds=%.3g arcsec\n"
-                "\tpixel_scale=%.3g arcsec/px\n"
-                "\tbase_xy_bounds=%.3g px\n"
+                "  fitting_xy_bounds: %.3g arcsec\n"
+                "  pixel_scale: %.3g arcsec/px\n"
+                "  base_xy_bounds: %.3g px\n"
                 "\teffective per tier (bright/faint/very-faint)=%.3g/%.3g/%.3g px",
                 float(cfg_xy_arcsec_log),
                 float(pix_scale_log),
@@ -2798,9 +2798,9 @@ class PSF:
         else:
             log.info(
                 "PSF fit bounds config:\n"
-                "\tfitting_xy_bounds=%s arcsec\n"
-                "\tpixel_scale=%s arcsec/px\n"
-                "\tbase_xy_bounds=%.3g px\n"
+                "  fitting_xy_bounds: %s arcsec\n"
+                "  pixel_scale: %s arcsec/px\n"
+                "  base_xy_bounds: %.3g px\n"
                 "\teffective per tier (bright/faint/very-faint)=%.3g/%.3g/%.3g px",
                 str(cfg_xy_arcsec_log),
                 str(pix_scale_log),
@@ -2812,11 +2812,11 @@ class PSF:
 
         log.info(
             "Fit shapes:\n"
-            "\tbright=%s\n"
-            "\tfaint=%s\n"
-            "\tvery-faint=%s\n"
-            "\txy_bounds=%.3g px\n"
-            "\tundersampled=%s",
+            "  bright: %s\n"
+            "  faint: %s\n"
+            "  very-faint: %s\n"
+            "  xy_bounds: %.3g px\n"
+            "  undersampled: %s",
             str(fit_shape_bright),
             str(fit_shape_faint),
             str(fit_shape_vfaint),
@@ -2826,10 +2826,10 @@ class PSF:
         if is_target_fit:
             log.info(
                 "Target-fit shape scaling:\n"
-                "\tbright/faint/very-faint=%.3g/%.3g/%.3g * FWHM\n"
-                "\tfit_sampling_boost=%.3g\n"
-                "\ttarget_boost=%.3g\n"
-                "\tpixel_scale=%s arcsec/px",
+                "  bright/faint/very-faint: %.3g/%.3g/%.3g * FWHM\n"
+                "  fit_sampling_boost: %.3g\n"
+                "  target_boost: %.3g\n"
+                "  pixel_scale: %s arcsec/px",
                 fs_bright_scale,
                 fs_faint_scale,
                 fs_vfaint_scale,

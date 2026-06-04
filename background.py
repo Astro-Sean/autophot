@@ -361,7 +361,11 @@ class BackgroundSubtractor:
         filter_size = mesh_filter
 
         self.logger.info(
-            "Background mesh: fwhm=%.2f px  mesh_scale=%.2f  box_size=%s  filter_size=%d",
+            "Background mesh:\n"
+            "  FWHM: %.2f px\n"
+            "  Mesh scale: %.2f\n"
+            "  Box size: %s\n"
+            "  Filter size: %d",
             fwhm_pixels,
             mesh_scale,
             box_size,
@@ -1111,8 +1115,11 @@ class BackgroundSubtractor:
                 bkg_data = np.asarray(bkg.background, dtype=float)
 
                 self.logger.info(
-                    "Background2D final: attempt=%d box_size=%s filter_size=%d "
-                    "exclude_percentile=%.1f",
+                    "Background2D final:\n"
+                    "  Attempt: %d\n"
+                    "  Box size: %s\n"
+                    "  Filter size: %d\n"
+                    "  Exclude percentile: %.1f",
                     i + 1,
                     bs,
                     fs,
@@ -1381,7 +1388,10 @@ class BackgroundSubtractor:
             maxiters=stats_maxiters,
         )
         self.logger.info(
-            f"Global stats - mean {gmean:.3e}  median {gmed:.3e}  std {gstd:.3e}"
+            f"Global stats:\n"
+            f"  Mean: {gmean:.3e}\n"
+            f"  Median: {gmed:.3e}\n"
+            f"  Std: {gstd:.3e}"
         )
 
         
@@ -1440,7 +1450,8 @@ class BackgroundSubtractor:
             pass
 
         self.logger.info(
-            f"Background median {bkg_median:.3e}  RMS mean {np.nanmean(bkg_rms):.3e}"
+            f"Background median: {bkg_median:.3e}\n"
+            f"RMS mean: {np.nanmean(bkg_rms):.3e}"
         )
 
         # ---- Subtract background ----

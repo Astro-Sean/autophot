@@ -1852,7 +1852,9 @@ class Plot:
 
             logger.info(f"Saved WCS vs PSF offset plot: {save_path}")
             logger.info(
-                f"WCS vs PSF offset statistics: Median=({med_dx:.3f}, {med_dy:.3f}) px, RMS=({rms_dx:.3f}, {rms_dy:.3f}) px"
+                f"WCS vs PSF offset statistics:\n"
+                f"  Median: ({med_dx:.3f}, {med_dy:.3f}) px\n"
+                f"  RMS: ({rms_dx:.3f}, {rms_dy:.3f}) px"
             )
 
         except Exception as e:
