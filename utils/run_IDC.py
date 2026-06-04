@@ -3455,9 +3455,13 @@ NNW
                     np.random.shuffle(valid_sources)
                     return valid_sources[:max_sources]
                 elif selection_mode == "uniform":
-                    # Uniform spatial grid sampling
+                    # True uniform spatial grid sampling - ensure coverage across entire image
                     img_h, img_w = image_shape
-                    n_grid = int(np.ceil(np.sqrt(max_sources * 2)))  # Grid size for uniform sampling
+                    
+                    # Create a grid that covers the entire image
+                    n_grid = int(np.ceil(np.sqrt(max_sources)))
+                    grid_spacing_x = img_w / n_grid
+                    grid_spacing_y = img_h / n_grid
                     
                     selected_sources = []
                     grid_cells = {}  # Dictionary to store sources per grid cell
@@ -3465,38 +3469,58 @@ NNW
                     # Assign sources to grid cells
                     for source in valid_sources:
                         x, y = source["XWIN_IMAGE"], source["YWIN_IMAGE"]
-                        grid_x = min(int(x / img_w * n_grid), n_grid - 1)
-                        grid_y = min(int(y / img_h * n_grid), n_grid - 1)
+                        grid_x = min(int(x / grid_spacing_x), n_grid - 1)
+                        grid_y = min(int(y / grid_spacing_y), n_grid - 1)
                         cell_key = (grid_x, grid_y)
                         
                         if cell_key not in grid_cells:
                             grid_cells[cell_key] = []
                         grid_cells[cell_key].append(source)
                     
-                    # Select sources from each grid cell
-                    sources_per_cell = max(1, max_sources // len(grid_cells))
-                    remaining_slots = max_sources - (sources_per_cell * len(grid_cells))
+                    # Create all possible grid cells (even empty ones)
+                    all_grid_cells = [(gx, gy) for gx in range(n_grid) for gy in range(n_grid)]
                     
-                    for cell_key in sorted(grid_cells.keys()):
-                        cell_sources = grid_cells[cell_key]
-                        # Randomly select sources from this cell
-                        n_select = min(sources_per_cell + (1 if remaining_slots > 0 else 0), len(cell_sources))
-                        if remaining_slots > 0:
-                            remaining_slots -= 1
+                    # First, try to select one source from each grid cell that has sources
+                    selected_count = 0
+                    for cell_key in all_grid_cells:
+                        if selected_count >= max_sources:
+                            break
                         
-                        if len(cell_sources) > 0:
-                            np.random.shuffle(cell_sources)
-                            selected_sources.extend(cell_sources[:n_select])
+                        if cell_key in grid_cells and len(grid_cells[cell_key]) > 0:
+                            # Randomly select one source from this cell
+                            np.random.shuffle(grid_cells[cell_key])
+                            selected_sources.append(grid_cells[cell_key][0])
+                            selected_count += 1
                     
-                    # If we still need more sources, add randomly from remaining
-                    if len(selected_sources) < max_sources:
-                        remaining_needed = max_sources - len(selected_sources)
+                    # If we still need more sources, fill remaining slots from populated cells
+                    if selected_count < max_sources:
+                        remaining_needed = max_sources - selected_count
+                        
+                        # Create a list of all remaining sources
+                        remaining_sources = []
+                        for cell_key in all_grid_cells:
+                            if cell_key in grid_cells:
+                                cell_sources = grid_cells[cell_key]
+                                if len(cell_sources) > 1:  # Skip the one we already took
+                                    remaining_sources.extend(cell_sources[1:])
+                        
+                        # Randomly select from remaining sources
+                        if remaining_sources:
+                            np.random.shuffle(remaining_sources)
+                            additional_needed = min(remaining_needed, len(remaining_sources))
+                            selected_sources.extend(remaining_sources[:additional_needed])
+                            selected_count += additional_needed
+                    
+                    # If still not enough (sparse catalog), add from any available sources
+                    if selected_count < max_sources:
+                        remaining_needed = max_sources - selected_count
                         used_sources = set(selected_sources)
                         available_sources = [s for s in valid_sources if s not in used_sources]
                         
                         if available_sources:
                             np.random.shuffle(available_sources)
-                            selected_sources.extend(available_sources[:remaining_needed])
+                            additional_needed = min(remaining_needed, len(available_sources))
+                            selected_sources.extend(available_sources[:additional_needed])
                     
                     return selected_sources[:max_sources]
                 else:
