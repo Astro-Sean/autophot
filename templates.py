@@ -332,13 +332,13 @@ class FluxMatchParams:
     flux_key_err: str = "flux_AP_err"
     """Column name for aperture flux uncertainty."""
 
-    mag_residual_threshold: float = 0.8
-    """Maximum allowed magnitude residual for an inlier (more relaxed by default)."""
+    mag_residual_threshold: float = 0.3
+    """Maximum allowed magnitude residual for an inlier (stricter for robust fitting)."""
 
-    min_samples_fraction: float = 0.5
-    """Minimum fraction of sources required by RANSAC (increased to avoid clustering)."""
+    min_samples_fraction: float = 0.7
+    """Minimum fraction of sources required by RANSAC (increased for robust fitting)."""
 
-    max_trials: int = 1000
+    max_trials: int = 2000
     """RANSAC maximum iteration count (increased for better sampling)."""
 
     min_absolute_samples: int = 5
@@ -3506,6 +3506,22 @@ class Templates:
                             inliers = np.abs(diffs - median_diff) < params.mag_residual_threshold
                             slope, intercept = 1.0, median_diff
                             method_used = "Median offset (RANSAC clustered)"
+                        else:
+                            # Post-RANSAC sigma-clipping for additional robustness
+                            # Remove any remaining outliers beyond 3 sigma from the fit
+                            residuals = y[inliers] - (slope * X[inliers].ravel() + intercept)
+                            residual_std = np.std(residuals)
+                            if residual_std > 0:
+                                inlier_residuals = np.abs(residuals) < 3 * residual_std
+                                n_clipped = int(np.sum(~inlier_residuals))
+                                if n_clipped > 0:
+                                    logger.info(
+                                        "Post-RANSAC sigma-clipping removed %d additional outliers (3 sigma)",
+                                        n_clipped,
+                                    )
+                                    # Update inliers mask
+                                    inlier_indices = np.where(inliers)[0]
+                                    inliers[inlier_indices[~inlier_residuals]] = False
                 except Exception as exc:
                     logger.debug("RANSAC failed: %s", exc)
 
