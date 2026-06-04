@@ -807,6 +807,7 @@ class SExtractorWrapper:
             phot_apertures (float, optional): Photometric apertures. Defaults to 5.0.
             negative_corr (bool, optional): Apply negative correlation. Defaults to True.
             checkimage_type (str, optional): Check image type. Defaults to "NONE".
+            return_full_table (bool, optional): If True, return full SExtractor table with all columns without renaming. Defaults to False.
             vignet (tuple, optional): Vignet size. Defaults to None.
             stamp_imgsize (int, optional): Stamp image size. Defaults to None.
             flags (int, optional): Maximum allowed SExtractor flag value. Defaults to 2.
@@ -1160,7 +1161,7 @@ class SExtractorWrapper:
                     fwhm_est = float(use_FWHM) if use_FWHM > 0 else 8.5
                 return fwhm_est, sources, default_scale
 
-            # Rename columns for compatibility
+            # Rename columns for compatibility (unless return_full_table is True)
             newcols = [
                 "x_pix",
                 "y_pix",
@@ -1180,6 +1181,47 @@ class SExtractorWrapper:
                 "flux_radius",
             ]
             sources = sources.to_pandas()
+            
+            # If return_full_table is True, skip column renaming and coordinate conversion
+            if return_full_table:
+                logger.info("Returning full SExtractor table with all columns (no renaming)")
+                # Still apply filtering
+                initial_count = len(sources)
+                if use_for_matching or crowded:
+                    nmax = None
+                    effective_snr_limit = self.config.get("photometry", {}).get(
+                        "sextractor_snr_min_matching", 2.0
+                    )
+                    relaxed_cuts = use_for_matching
+                else:
+                    nmax = self.config.get("photometry", {}).get("sextractor_nmax", 1000)
+                    effective_snr_limit = 3.0
+                    relaxed_cuts = False
+                
+                # Apply SNR filter
+                if "SNR_WIN" in sources.columns:
+                    sources = sources[sources["SNR_WIN"] >= effective_snr_limit]
+                
+                # Apply FLAGS filter
+                if "FLAGS" in sources.columns:
+                    sources = sources[sources["FLAGS"] <= flags]
+                
+                # Apply nmax limit
+                if nmax is not None and len(sources) > nmax:
+                    sources = sources.nlargest(nmax, "FLUX_AUTO")
+                
+                logger.info(
+                    "Filtered from %d to %d sources (full table mode)",
+                    initial_count,
+                    len(sources),
+                )
+                # Calculate FWHM
+                if "FWHM_IMAGE" in sources.columns:
+                    fwhm_est = self.calculate_robust_fwhm(sources["FWHM_IMAGE"].values)
+                else:
+                    fwhm_est = float(use_FWHM) if use_FWHM > 0 else 8.5
+                return fwhm_est, sources, default_scale
+            
             # Handle optional VIGNET column before renaming fixed columns
             if vignet is not None and len(sources.columns) == len(newcols) + 1:
                 # VIGNET is always appended last by SExtractor
