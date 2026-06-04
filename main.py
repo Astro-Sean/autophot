@@ -2318,25 +2318,19 @@ def run_photometry():
         background_rms_cached = background_rms
         defects_mask_cached = defects_mask
 
-        # Background subtraction disabled to preserve original flux values for SFFT.
-        # SFFT handles flux scaling internally and expects raw ADU values.
-        # Background subtraction alters the DC offset which can interfere with
-        # SFFT's internal photometric scaling.
-        # image -= background_surface
+        # Background subtraction enabled (user request).
+        # SFFT handles flux scaling internally; background-subtracted images are acceptable.
+        image -= background_surface
 
         # Update saturation to match background-subtracted image units so
         # downstream masks and SExtractor use a consistent threshold.
-        # saturate_sub = saturate - np.nanmedian(background_surface)
-        # input_yaml["saturate"] = saturate_sub
+        saturate_sub = saturate - np.nanmedian(background_surface)
+        input_yaml["saturate"] = saturate_sub
         # FITS headers cannot store inf; only write when finite.
-        # if np.isfinite(saturate_sub):
-        #     header["saturate"] = float(saturate_sub)
+        if np.isfinite(saturate_sub):
+            header["saturate"] = float(saturate_sub)
 
         # Writes the modified image and header back to the file.
-        # safe_fits_write(fpath, image, header)
-
-        # Write the original (non-background-subtracted) image back to disk
-        # so that SFFT receives raw ADU values
         safe_fits_write(fpath, image, header)
         # Save the background_rms array with '.weight' inserted before the suffix
         base, ext = os.path.splitext(fpath)
