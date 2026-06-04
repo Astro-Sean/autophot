@@ -1364,6 +1364,23 @@ class PSF:
             epsfstars = extract_stars(ndimage, stars_tbl, size=cutout_shape)
             log.info(f"[robust_extract_stars] Extracted {len(epsfstars)} cutouts")
 
+            # Subtract local background from each cutout to prevent PSF from having
+            # a high DC offset. Use the outer annulus (outer 20% of cutout) to estimate
+            # the background level for each star.
+            ny_cut, nx_cut = cutout_shape
+            cy_outer = slice(ny_cut // 5, 4 * ny_cut // 5)
+            cx_outer = slice(nx_cut // 5, 4 * nx_cut // 5)
+            for star in epsfstars:
+                cutout_data = star.data
+                # Estimate background from outer annulus (central 20-80% region)
+                outer_data = cutout_data[cy_outer, cx_outer]
+                finite_outer = outer_data[np.isfinite(outer_data)]
+                if len(finite_outer) > 0:
+                    bkg_level = float(np.median(finite_outer))
+                    # Subtract background from the entire cutout
+                    star.data = cutout_data - bkg_level
+            log.info("[robust_extract_stars] Subtracted local background from PSF cutouts")
+
             # Filter out stars with NaN or masked pixels in the *central* region.
             # Edge NaNs (common near image boundaries) are acceptable; only reject
             # if the core PSF region is contaminated.
