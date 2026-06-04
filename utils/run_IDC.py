@@ -3615,7 +3615,72 @@ NNW
                         va="top",
                     )
             
+            # Handle remaining sources that exceed the limit
+            def plot_remaining_sources(ax, catalog, image_shape, rebin_scale, max_sources, 
+                                     selected_count, catalog_type="sources"):
+                """Plot remaining sources as small crosses and add message."""
+                
+                # Get all valid sources
+                all_valid_sources = []
+                for row in catalog:
+                    if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames:
+                        x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
+                        if np.isfinite(x) and np.isfinite(y):
+                            all_valid_sources.append(row)
+                
+                remaining_sources = len(all_valid_sources) - selected_count
+                
+                if remaining_sources > 0:
+                    # Add message in top right
+                    ax.text(0.98, 0.98, f"+{remaining_sources} more {catalog_type}", 
+                           transform=ax.transAxes, fontsize=8, 
+                           ha='right', va='top', 
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
+                           zorder=20)
+                    
+                    # Plot remaining sources as small crosses
+                    img_h, img_w = image_shape
+                    cross_size = 3 * rebin_scale  # Small cross size
+                    
+                    for row in all_valid_sources[max_sources:]:
+                        x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
+                        # Scale coordinates if image was rebinned, then convert to 0-based
+                        x_scaled = x * rebin_scale
+                        y_scaled = y * rebin_scale
+                        x_0based, y_0based = x_scaled - 1, y_scaled - 1
+                        
+                        # Validate coordinates are within image bounds
+                        if not (0 <= x_0based < img_w and 0 <= y_0based < img_h):
+                            continue
+                        
+                        # Draw small cross
+                        ax.plot([x_0based - cross_size, x_0based + cross_size], 
+                               [y_0based, y_0based], 'k-', linewidth=0.5, alpha=0.6, zorder=3)
+                        ax.plot([x_0based, x_0based], 
+                               [y_0based - cross_size, y_0based + cross_size], 
+                               'k-', linewidth=0.5, alpha=0.6, zorder=3)
+                
+                return remaining_sources
+            
+            # Plot remaining sources for science image
+            sci_remaining = plot_remaining_sources(ax1, sci_cat, (sci_h, sci_w), rebin_scale, 
+                                                  max_sources, len(sci_selected), "science sources")
+            
+            # Plot remaining sources for reference image  
+            ref_remaining = plot_remaining_sources(ax2, ref_cat, (ref_h, ref_w), rebin_scale,
+                                                  max_sources, len(ref_selected), "reference sources")
+            
+            total_sources_sci = len([row for row in sci_cat 
+                                    if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames
+                                    and np.isfinite(row["XWIN_IMAGE"]) and np.isfinite(row["YWIN_IMAGE"])])
+            total_sources_ref = len([row for row in ref_cat
+                                    if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames  
+                                    and np.isfinite(row["XWIN_IMAGE"]) and np.isfinite(row["YWIN_IMAGE"])])
+            
+            logging.info(f"Science: {len(sci_selected)} plotted + {sci_remaining} crosses = {total_sources_sci} total")
+            logging.info(f"Reference: {len(ref_selected)} plotted + {ref_remaining} crosses = {total_sources_ref} total")
             logging.info(f"Plotted {len(sci_positions)} science and {len(ref_positions)} reference sources within image bounds")
+            
             # `constrained_layout=True` keeps colorbars and labels from
             # overlapping, so no additional tight_layout is needed.
             plt.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
