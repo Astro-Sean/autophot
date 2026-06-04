@@ -343,7 +343,8 @@ def _resolve_band_triplet(cols, band: str, method: str):
 
 
 def _lmag_to_apparent(df: pd.DataFrame, zp_col: str) -> pd.Series:
-    """Convert pipeline limiting mag (instrumental) to apparent using band zeropoint."""
+    """Convert pipeline limiting mag (instrumental) to apparent using band zeropoint.
+    Returns NaN when limiting magnitudes are invalid."""
     col = (
         "limiting_inst_mag"
         if "limiting_inst_mag" in df.columns
@@ -351,9 +352,18 @@ def _lmag_to_apparent(df: pd.DataFrame, zp_col: str) -> pd.Series:
     )
     if col is None:
         return pd.Series(np.nan, index=df.index, dtype=float)
+    
     li = pd.to_numeric(df[col], errors="coerce")
     zp = pd.to_numeric(df[zp_col], errors="coerce")
-    return li + zp
+    
+    # Calculate apparent limiting magnitude
+    limiting_mag = li + zp
+    
+    # Return NaN for invalid limiting magnitudes (NaN, negative, or too small/too large)
+    invalid_mask = (~np.isfinite(limiting_mag)) | (limiting_mag < 15) | (limiting_mag > 30)
+    limiting_mag.loc[invalid_mask] = np.nan
+    
+    return limiting_mag
 
 
 def _compute_detection_mask(
@@ -458,7 +468,21 @@ def _compute_detection_mask(
         if len(snr) > 0:
             logging.info(f"_compute_detection_mask: method={method}, snr_source={snr_source}, snr={snr[0]:.3f}, limit={snr_limit}, detected={detected[0]}")
     else:
-        detected = np.isfinite(mag) & np.isfinite(err) & (mag < lmag)
+        # Use magnitude comparison with limiting magnitude if available and reasonable
+        # Otherwise fall back to SNR-based detection using magnitude errors
+        valid_lmag = np.isfinite(lmag) & (lmag > 10)  # Limiting mag should be positive and reasonable (> 10)
+        if np.any(valid_lmag):
+            # Use limiting magnitude where valid and reasonable
+            detected = np.isfinite(mag) & np.isfinite(err) & (mag < lmag)
+        else:
+            # Fallback: use SNR computed from magnitude errors
+            snr_from_err = _snr_from_magerr(err)
+            detected = (
+                np.isfinite(mag)
+                & np.isfinite(err)
+                & np.isfinite(snr_from_err)
+                & (snr_from_err >= 3.0)  # Default SNR threshold
+            )
 
     return np.asarray(detected, dtype=bool)
 
@@ -1489,9 +1513,12 @@ def generate_photometry_table(
                 # Already apparent magnitude
                 mag_values = detects[col]
             
+            # Calculate limiting magnitude for detections
+            limiting_mag = _lmag_to_apparent(detects, zp_col)
+            
             detects = detects.assign(
                 Filter=band_label,
-                Limit="-",
+                Limit=limiting_mag.round(3),
                 MJD=detects["mjd"].round(3),
                 Date=Time(detects["mjd"], format="mjd").iso,
                 Mag=mag_values.round(3),
