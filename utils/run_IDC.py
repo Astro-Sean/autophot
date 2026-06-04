@@ -995,9 +995,10 @@ NNW
                     if (_ref_shape[0] > _sci_shape[0] * 1.5 or _ref_shape[1] > _sci_shape[1] * 1.5):
                         from astropy.nddata.utils import Cutout2D
                         
-                        # Get science center in world coords
-                        _scx = _sci_shape[1] / 2.0
-                        _scy = _sci_shape[0] / 2.0
+                        # Get science center in world coords.
+                        # Use correct numpy 0-based center: (nx-1)/2, (ny-1)/2.
+                        _scx = (_sci_shape[1] - 1) / 2.0
+                        _scy = (_sci_shape[0] - 1) / 2.0
                         _sci_cra, _sci_cdec = _sci_w.all_pix2world([_scx], [_scy], 0)
                         
                         # Project science center into reference pixel coords
@@ -1088,10 +1089,12 @@ NNW
                 # Both images are resampled to match science dimensions and pixel scale.
                 output_width, output_height = sci_shape[1], sci_shape[0]
                 
-                # Compute world coordinates of image center for SWarp CENTER
-                _scx = output_width / 2.0
-                _scy = output_height / 2.0
-                center_ra, center_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
+                # Compute world coordinates of image center for SWarp CENTER.
+                # SWarp uses FITS 1-based convention; the center of an nx x ny image
+                # is at ((nx+1)/2, (ny+1)/2) in FITS coordinates.
+                _scx = (output_width + 1) / 2.0
+                _scy = (output_height + 1) / 2.0
+                center_ra, center_dec = sci_wcs.all_pix2world([_scx], [_scy], 1)
                 center_ra = float(center_ra[0])
                 center_dec = float(center_dec[0])
 
@@ -2064,8 +2067,9 @@ NNW
                             "Could not project SWarp CENTER into reference WCS (%s); "
                             "using pixel center instead.", _ce
                         )
-                        ref_cx = _ref_shape[1] / 2.0
-                        ref_cy = _ref_shape[0] / 2.0
+                        # Use correct numpy 0-based center for Cutout2D
+                        ref_cx = (_ref_shape[1] - 1) / 2.0
+                        ref_cy = (_ref_shape[0] - 1) / 2.0
 
                     ref_cutout = Cutout2D(
                         _ref_data,
@@ -2078,11 +2082,11 @@ NNW
                     ref_wcs_header = ref_cutout.wcs.to_header()
                     _ref_header['NAXIS1'] = nx_target
                     _ref_header['NAXIS2'] = ny_target
-                    
-                    # Set both science and reference CRPIX and CRVAL to match exactly
-                    # This ensures both images have identical WCS after cutout adjustment
-                    crpix1_center = nx_target / 2.0
-                    crpix2_center = ny_target / 2.0
+
+                    # Set both science and reference CRPIX and CRVAL to match exactly.
+                    # CRPIX is FITS 1-based, so the center is at (nx+1)/2, (ny+1)/2.
+                    crpix1_center = (nx_target + 1) / 2.0
+                    crpix2_center = (ny_target + 1) / 2.0
                     crval1 = _sci_header.get('CRVAL1')
                     crval2 = _sci_header.get('CRVAL2')
                     
