@@ -3321,9 +3321,12 @@ class Templates:
                 return empty, nan_fit
 
             # --- Saturation filter (exclude non-linear sources) ---
+            # Use more aggressive threshold to ensure only fully linear sources
+            # Similar to zeropoint nonlinear_peak_frac (0.85) to exclude sources
+            # entering the non-linear regime, not just fully saturated ones
             saturate = self.input_yaml.get("saturate", np.inf)
-            saturate_frac = self.input_yaml.get("template_subtraction", {}).get(
-                "subtraction_saturate_fraction", 0.90
+            nonlinear_frac = self.input_yaml.get("zeropoint", {}).get(
+                "nonlinear_peak_frac", 0.85
             )
             if (
                 np.isfinite(saturate)
@@ -3333,15 +3336,15 @@ class Templates:
             ):
                 peak_img = catalog_img["peak_flux"].values
                 peak_tpl = catalog_tpl["peak_flux"].values
-                sat_thresh = saturate_frac * saturate
+                sat_thresh = nonlinear_frac * saturate
                 sat_ok = (peak_img < sat_thresh) & (peak_tpl < sat_thresh)
                 n_sat = int(np.sum(ok & ~sat_ok))
                 if n_sat > 0:
                     logger.info(
-                        "Removed %d saturated sources from flux comparison "
+                        "Removed %d non-linear sources from flux comparison "
                         "(peak_flux >= %.2f x saturate).",
                         n_sat,
-                        saturate_frac,
+                        nonlinear_frac,
                     )
                 ok = ok & sat_ok
 
