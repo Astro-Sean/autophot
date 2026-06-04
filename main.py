@@ -2319,16 +2319,8 @@ def run_photometry():
         defects_mask_cached = defects_mask
 
         # Background subtraction enabled (user request).
-        # SFFT handles flux scaling internally; background-subtracted images are acceptable.
+        # Only background surface is removed; no other flux scaling applied.
         image -= background_surface
-
-        # Update saturation to match background-subtracted image units so
-        # downstream masks and SExtractor use a consistent threshold.
-        saturate_sub = saturate - np.nanmedian(background_surface)
-        input_yaml["saturate"] = saturate_sub
-        # FITS headers cannot store inf; only write when finite.
-        if np.isfinite(saturate_sub):
-            header["saturate"] = float(saturate_sub)
 
         # Writes the modified image and header back to the file.
         safe_fits_write(fpath, image, header)
