@@ -1151,7 +1151,7 @@ class Aperture:
                     Circle((cx_local, cy_local), radius, ec=color, fc="none", lw=0.5, ls=ls)
                 )
             label = base if saveTarget else index
-            save_name = os.path.join(write_dir, f"Aperture_{label}.png")
+            save_name = os.path.join(write_dir, f"Aperture_{label}.pdf")
             fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
             return
@@ -1279,7 +1279,7 @@ class Aperture:
         ax_right.yaxis.tick_right()
 
         label = base if saveTarget else index
-        save_name = os.path.join(write_dir, f"Aperture_{label}.png")
+        save_name = os.path.join(write_dir, f"Aperture_{label}.pdf")
         fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
         plt.close(fig)
 
@@ -1869,7 +1869,7 @@ class Aperture:
 
             save_loc = os.path.join(
                 self.input_yaml["write_dir"],
-                f'optimum_aperture_{self.input_yaml["base"]}.png',
+                f'optimum_aperture_{self.input_yaml["base"]}.pdf',
             )
             fig = plt.figure(figsize=set_size(340, 1.5))
             gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
@@ -2067,7 +2067,7 @@ class Aperture:
             ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
             fig.tight_layout()
             png_path = os.path.join(
-                write_dir, f"Aperture_Correction_{base_name}.png"
+                write_dir, f"Aperture_Correction_{base_name}.pdf"
             )
             fig.savefig(
                 png_path,

@@ -119,7 +119,7 @@ class Plot:
             base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
             save_path = os.path.join(
-                write_dir, f"Subtraction_Check_{base}.png"
+                write_dir, f"Subtraction_Check_{base}.pdf"
             )
 
             # Create zscale interval object
@@ -650,7 +650,7 @@ class Plot:
 
         base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
         write_dir = os.path.dirname(self.input_yaml["fpath"])
-        save_path = os.path.join(write_dir, f"Crowding_Target_{base}.png")
+        save_path = os.path.join(write_dir, f"Crowding_Target_{base}.pdf")
 
         zscale = ZScaleInterval()
         finite = cut[np.isfinite(cut)]
@@ -1242,11 +1242,11 @@ class Plot:
             # Save figure
             if not subtracted:
                 save_loc = os.path.join(
-                    write_dir, "SourceCheck_" + base + ".png"
+                    write_dir, "SourceCheck_" + base + ".pdf"
                 )
             else:
                 save_loc = os.path.join(
-                    write_dir, "Subtracted_SourceCheck_" + base + ".png"
+                    write_dir, "Subtracted_SourceCheck_" + base + ".pdf"
                 )
 
             fig.savefig(
@@ -1654,7 +1654,7 @@ class Plot:
 
             base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
-            save_path = os.path.join(write_dir, f"WCS_vs_PSF_Offset_{base}.png")
+            save_path = os.path.join(write_dir, f"WCS_vs_PSF_Offset_{base}.pdf")
 
             # Filter to sources with valid PSF fits
             valid = (

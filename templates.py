@@ -3750,7 +3750,7 @@ class Templates:
         set_mag_axes_inverted_xy(ax)
 
         base = Path(self.input_yaml["fpath"]).stem
-        out = Path(self.input_yaml["fpath"]).parent / f"Flux_Comparison_{base}.png"
+        out = Path(self.input_yaml["fpath"]).parent / f"Flux_Comparison_{base}.pdf"
         ransac_savefig(fig, str(out))
         plt.close(fig)
 

@@ -2276,7 +2276,7 @@ class Limits:
         fpath = self.input_yaml.get("fpath", "frame")
         base = os.path.splitext(os.path.basename(str(fpath)))[0]
         outdir = os.path.dirname(str(fpath)) if os.path.dirname(str(fpath)) else "."
-        save_png = os.path.join(outdir, f"EMCEE_InjectionDiag_{base}.png")
+        save_png = os.path.join(outdir, f"EMCEE_InjectionDiag_{base}.pdf")
         fig.suptitle(f"EMCEE recovery diagnostic (m_inj={float(m_inj):.3f})", fontsize=10)
         fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
@@ -2387,7 +2387,7 @@ class Limits:
             if not outdir:
                 outdir = "."
             os.makedirs(outdir, exist_ok=True)
-            save_png = os.path.join(outdir, f"Completeness_LogisticEMCEE_{base}.png")
+            save_png = os.path.join(outdir, f"Completeness_LogisticEMCEE_{base}.pdf")
 
             # empirical completeness per mag point
             emp = []
@@ -2586,7 +2586,7 @@ class Limits:
         ax.grid(True, alpha=0.3, linestyle="--")
         
         fig.tight_layout()
-        save_loc = os.path.join(write_dir, f"SNR_vs_Magnitude_{base}.png")
+        save_loc = os.path.join(write_dir, f"SNR_vs_Magnitude_{base}.pdf")
         fig.savefig(save_loc, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
         
@@ -3413,7 +3413,7 @@ class Limits:
                 )
 
         fig.tight_layout()
-        save_loc_png = os.path.join(write_dir, f"Completeness_{base}.png")
+        save_loc_png = os.path.join(write_dir, f"Completeness_{base}.pdf")
         fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
 
@@ -3728,7 +3728,7 @@ class Limits:
         ax.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
 
         fig.tight_layout()
-        save_path = os.path.join(write_dir, f"InjectionRecovery_{base}.png")
+        save_path = os.path.join(write_dir, f"InjectionRecovery_{base}.pdf")
         fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
 

@@ -1246,7 +1246,7 @@ def run_sfft() -> Optional[int]:
                     ax.set_ylabel("MAG_REF (SCI) - MAG_REF (REF)")
                     ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
                     ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=9)
-                    png_path = os.path.join(out_dir, f"VarCheck_{out_base}.png")
+                    png_path = os.path.join(out_dir, f"VarCheck_{out_base}.pdf")
                     try:
                         plt.savefig(
                             png_path, bbox_inches="tight", dpi=150

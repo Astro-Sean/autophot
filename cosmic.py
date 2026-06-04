@@ -219,7 +219,7 @@ class RemoveCosmicRays:
         # Leave room for the suptitle so it doesn't collide with axes/colorbars.
         plt.tight_layout(rect=[0, 0, 1, 0.95])
 
-        png_path = os.path.join(write_dir, f"Cosmic_Rays_{base}.png")
+        png_path = os.path.join(write_dir, f"Cosmic_Rays_{base}.pdf")
         fig.savefig(
             png_path, bbox_inches="tight", dpi=150, facecolor="white"
         )

@@ -149,9 +149,9 @@ def visualize_source_selection(all_positions, selected_positions, image_shape, s
                 ax2.axhline(y_line, color='gray', alpha=0.2, linestyle='--')
     
     plt.tight_layout()
-    plt.savefig(f'debug_source_selection_{selection_mode}.png', dpi=150, bbox_inches='tight')
+    plt.savefig(f'debug_source_selection_{selection_mode}.pdf', dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"Saved debug plot: debug_source_selection_{selection_mode}.png")
+    print(f"Saved debug plot: debug_source_selection_{selection_mode}.pdf")
 
 # Test with simulated data
 if __name__ == "__main__":

@@ -1939,8 +1939,8 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
                 search = os.path.join(loc, f"{pfx}*")
                 candidates.extend(glob.glob(search))
 
-            pngs = [f for f in candidates if f.lower().endswith(".png")]
-            files = sorted(pngs)
+            pdfs = [f for f in candidates if f.lower().endswith(".pdf")]
+            files = sorted(pdfs)
             if not files:
                 continue
 

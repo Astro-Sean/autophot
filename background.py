@@ -1174,7 +1174,7 @@ class BackgroundSubtractor:
 
         base = os.path.splitext(os.path.basename(fpath))[0]
         prefix_title = "_".join([p[:1].upper() + p[1:] for p in prefix.split("_")])
-        save_path_png = os.path.join(outdir, f"{prefix_title}_{base}.png")
+        save_path_png = os.path.join(outdir, f"{prefix_title}_{base}.pdf")
 
         fig.savefig(
             save_path_png, dpi=150, bbox_inches="tight", facecolor="white"
