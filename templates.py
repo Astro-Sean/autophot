@@ -4829,24 +4829,10 @@ class Templates:
             ts_sub = self.input_yaml["template_subtraction"]
             phot_cfg = self.input_yaml.get("photometry", {})
 
-            # Auto-select ForceConv based on which image has the broader PSF.
-            # REF => DIFF = SCI - conv(REF)  (use when science PSF is broader)
-            # SCI => DIFF = conv(SCI) - REF  (use when template PSF is broader)
-            # This preserves the transient in the image with the better seeing.
-            if float(template_fwhm) > float(science_fwhm):
-                forceconv = "SCI"
-                logger.info(
-                    "SFFT ForceConv=SCI (template FWHM %.2f > science FWHM %.2f); "
-                    "convolving science to match template PSF.",
-                    float(template_fwhm), float(science_fwhm),
-                )
-            else:
-                forceconv = "REF"
-                logger.info(
-                    "SFFT ForceConv=REF (science FWHM %.2f >= template FWHM %.2f); "
-                    "convolving reference to match science PSF.",
-                    float(science_fwhm), float(template_fwhm),
-                )
+            # Always convolve the reference image (ForceConv=REF).
+            # DIFF = SCI - conv(REF): the transient keeps the science PSF.
+            forceconv = "REF"
+            logger.info("SFFT ForceConv=REF (reference always convolved).")
 
             # Background polynomial order: default to 0 unless the user explicitly overrides
             bg_order = ts_sub.get("sfft_bg_order", 0)

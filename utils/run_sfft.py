@@ -286,7 +286,7 @@ def run_sfft() -> Optional[int]:
         "-forceconv",
         type=str,
         default="REF",
-        help="Which image to convolve to match the other PSF for SFFT (REF or SCI).",
+        help="Deprecated: always REF. Reference image is always convolved (DIFF = SCI - conv(REF)).",
     )
 
     # Pass gain/saturate values so SFFT does not depend on headers (avoids KeyError when SATURATE missing).
@@ -707,13 +707,10 @@ def run_sfft() -> Optional[int]:
     #         recommended when science has broader PSF than the template).
     # SCI  => DIFF = conv(SCI) - REF: use when the template has broader PSF.
     # AUTO => SFFT chooses based on measured FWHMs.
-    ForceConv = str(getattr(args, "forceconv", "REF")).upper().strip()
-    if ForceConv not in ("REF", "SCI", "AUTO"):
-        log_info(
-            f"ForceConv='{ForceConv}' is not a recognised value; falling back to 'REF'."
-        )
-        ForceConv = "REF"
-    log_info(f"ForceConv={ForceConv}: DIFF = SCI - conv(REF) convention applies.")
+    # Always convolve the reference image (ForceConv=REF).
+    # DIFF = SCI - conv(REF): the transient keeps the science PSF.
+    ForceConv = "REF"
+    log_info("ForceConv=REF (reference always convolved). DIFF = SCI - conv(REF).")
     GAIN_KEY = "GAIN"
     SATUR_KEY = "SATURATE"
 
