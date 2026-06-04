@@ -3119,7 +3119,7 @@ class Limits:
                         vmin, vmax = zscale.get_limits(np.clip(injected_disp, lower, upper))
                     else:
                         vmin, vmax = np.nanmin(injected_disp), np.nanmax(injected_disp)
-                    cmap = plt.get_cmap("viridis").copy()
+                    cmap = plt.get_cmap("gray").copy()
                     cmap.set_bad(color="white")
                     im = ax_inject.imshow(
                         np.ma.array(injected_disp, mask=~np.isfinite(injected_disp)),

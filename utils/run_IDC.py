@@ -340,7 +340,7 @@ NNW
         image_path: str,
         catalog_path: str,
         output_plot_path: str = "sextractor_sources.png",
-        cmap: str = "viridis",
+        cmap: str = "gray",
         figsize: Optional[tuple] = None,
         max_sources: int = 1000,
         **imshow_kwargs,
@@ -923,26 +923,29 @@ NNW
         output_dir: Optional[str] = None,
         science_already_resampled: bool = False,
         reference_already_resampled: bool = False,
-        skip_resampling: bool = False,
+        resample_mode: str = "common_grid",
     ) -> Optional[dict]:
         """
-        Align and resample both science and reference images to the science image's grid.
+        Align and resample both science and reference images.
         SCAMP is run on the reference image only (against the science catalog) to compute
-        the WCS correction. Both images are then resampled together in a single SWarp call
-        onto a common grid defined by the science image pixel centre and shape.
-        If an image is already resampled (flag or header RESAMPLED/SWARPED), SWarp is skipped
-        for that image to avoid degrading the data.
-        
-        If skip_resampling=True, only SCAMP WCS correction is applied and SWarp resampling
-        is skipped entirely (suitable for template subtraction with different pixel scales).
+        the WCS correction. SWarp resampling behaviour is controlled by resample_mode:
+
+        - "common_grid" (default): Both images resampled onto the science image's pixel
+          grid (same center, pixel scale, and shape). Best for pixel-based operations.
+        - "native_scale": Each image resampled independently keeping its native pixel
+          scale, but aligned to the same sky center. Output shapes differ if pixel
+          scales differ. Best for template subtraction algorithms that handle
+          different pixel scales internally.
+        - "wcs_only": No SWarp resampling; only SCAMP WCS correction is applied.
+          Best when you want to avoid any resampling.
 
         Args:
             science_image: Path to science image.
             reference_image: Path to reference image.
             output_dir: Output directory for aligned images.
-            science_already_resampled: If True, skip SWarp for science; use image as-is (avoids double resampling).
+            science_already_resampled: If True, skip SWarp for science; use image as-is.
             reference_already_resampled: If True, skip SWarp for reference; use image as-is.
-            skip_resampling: If True, skip SWarp resampling entirely (SCAMP WCS correction only).
+            resample_mode: "common_grid", "native_scale", or "wcs_only".
         Returns:
             Dictionary with paths to aligned images and alignment metadata.
         """
@@ -1781,7 +1784,7 @@ NNW
                 "COMBINE_TYPE": "MEDIAN",
             }
 
-            if skip_resampling:
+            if resample_mode == "wcs_only":
                 # Skip SWarp resampling - use SCAMP WCS correction only
                 self.logger.info("Skipping SWarp resampling (WCS-only alignment for template subtraction)")
                 
@@ -1801,8 +1804,84 @@ NNW
                 
                 self.logger.info(f"WCS-only alignment complete: sci={aligned_sci}, ref={aligned_ref}")
                 
+            elif resample_mode == "native_scale":
+                # Each image resampled independently keeping its native pixel scale,
+                # but aligned to the same sky center. Output shapes differ if pixel
+                # scales differ, but sky coverage is approximately matched.
+                self.logger.info(
+                    "Using native-scale resampling: science=%.4f\"/px ref=%.4f\"/px",
+                    sci_pix_scale, ref_pix_scale,
+                )
+                
+                # Compute reference IMAGE_SIZE to match science sky coverage
+                ref_output_width = int(round(sci_shape[1] * sci_pix_scale / ref_pix_scale))
+                ref_output_height = int(round(sci_shape[0] * sci_pix_scale / ref_pix_scale))
+                
+                self.logger.info(
+                    "Native-scale shapes: science=%dx%d reference=%dx%d",
+                    sci_shape[1], sci_shape[0], ref_output_width, ref_output_height,
+                )
+                
+                resample_dir_sci = resample_dir / "sci"
+                resample_dir_ref = resample_dir / "ref"
+                resample_dir_sci.mkdir(parents=True, exist_ok=True)
+                resample_dir_ref.mkdir(parents=True, exist_ok=True)
+                
+                # Science image: native pixel scale and original shape
+                swarp_config_sci = {
+                    **swarp_config_combined,
+                    "COMBINE": "Y",
+                    "COMBINE_TYPE": "MEDIAN",
+                    "PIXEL_SCALE": sci_pix_scale,
+                    "IMAGE_SIZE": f"{sci_shape[1]},{sci_shape[0]}",
+                }
+                
+                # Reference image: native pixel scale, shape scaled to match sky coverage
+                swarp_config_ref = {
+                    **swarp_config_combined,
+                    "COMBINE": "Y",
+                    "COMBINE_TYPE": "MEDIAN",
+                    "PIXEL_SCALE": ref_pix_scale,
+                    "IMAGE_SIZE": f"{ref_output_width},{ref_output_height}",
+                }
+                
+                self.logger.debug("Running SWarp on science image (native scale)...")
+                swarp_res_sci = self.run_swarp(
+                    [str(sci_image_for_swarp)],
+                    scamp_results=None,
+                    output_dir=str(resample_dir_sci),
+                    config=swarp_config_sci,
+                    no_weight_maps=True,
+                )
+                
+                self.logger.debug("Running SWarp on reference image (native scale)...")
+                swarp_res_ref = self.run_swarp(
+                    [str(ref_image_copy)],
+                    scamp_results=None,
+                    output_dir=str(resample_dir_ref),
+                    config=swarp_config_ref,
+                    no_weight_maps=True,
+                )
+                
+                if swarp_res_sci is None or swarp_res_ref is None:
+                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
+                
+                aligned_sci = Path(swarp_res_sci["corrected_image"])
+                aligned_ref = Path(swarp_res_ref["corrected_image"])
+                
+                if not aligned_sci.exists() or not aligned_ref.exists():
+                    self.logger.info(
+                        "Could not find SWarp output images. Falling back to AstroAlign."
+                    )
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
+                    
             else:
-                # Original SWarp resampling logic
+                # "common_grid" (default): Both images resampled to science grid
                 resample_dir_sci = resample_dir / "sci"
                 resample_dir_ref = resample_dir / "ref"
                 resample_dir_sci.mkdir(parents=True, exist_ok=True)
@@ -3385,7 +3464,7 @@ NNW
         label_color: str = "#FF0000",
         label_fontsize: int = 8,
         figsize: Optional[tuple] = None,
-        cmap: str = "viridis",
+        cmap: str = "gray",
         draw_lines: bool = True,
         line_color: str = "#FF0000",
         line_alpha: float = 0.5,

@@ -323,12 +323,12 @@ class AlignmentVerifier:
         
         plt.figure(figsize=(12, 8))
         plt.subplot(2, 2, 1)
-        plt.imshow(sci_data, cmap='viridis', origin='lower')
+        plt.imshow(sci_data, cmap='gray', origin='lower')
         plt.title('Science Image')
         plt.colorbar()
         
         plt.subplot(2, 2, 2)
-        plt.imshow(ref_data, cmap='viridis', origin='lower')
+        plt.imshow(ref_data, cmap='gray', origin='lower')
         plt.title('Reference Image')
         plt.colorbar()
         

@@ -92,7 +92,7 @@ def test_alignment(science_path, reference_path, output_dir, verbose=1):
         science_image=str(sci_path_copy),
         reference_image=str(ref_path_copy),
         output_dir=str(output_dir),
-        skip_resampling=False  # Default to resampling for testing
+        resample_mode="common_grid"  # Default to common grid resampling for testing
     )
     
     if result is None:

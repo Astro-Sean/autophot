@@ -200,7 +200,8 @@ class Plot:
                 logger.info(f"subtraction_check: {title} shape={images[title].shape}")
             for i, (ax, title) in enumerate(zip(axes, image_titles)):
                 img_data = images[title]
-                cmap = plt.get_cmap("viridis").copy()
+                # Use grayscale for full images to improve contrast with colored markers
+                cmap = plt.get_cmap("gray").copy()
                 cmap.set_bad(color="white")
                 ax.imshow(
                     img_data,
@@ -443,7 +444,7 @@ class Plot:
 
                     # Inset
                     ax_inset = inset_axes(ax, width="30%", height="30%", loc=inset_loc)
-                    cmap = plt.get_cmap("viridis").copy()
+                    cmap = plt.get_cmap("gray").copy()
                     cmap.set_bad(color="white")
                     ax_inset.imshow(
                         img_data,
@@ -881,7 +882,7 @@ class Plot:
                 image, interval=ZScaleInterval(), stretch=LinearStretch()
             )
             # Set NaN values to display as white
-            cmap = plt.get_cmap("viridis")
+            cmap = plt.get_cmap("gray")
             cmap.set_bad(color='white')
             im = ax1.imshow(
                 image,

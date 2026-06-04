@@ -2545,12 +2545,31 @@ class Templates:
                 logger.info("Attempting SWarp + SCAMP alignment.")
                 idc = run_IDC.ImageDistortionCorrector(input_yaml=self.input_yaml)
                 
-                # Check if resampling should be skipped for template subtraction
-                skip_resampling = bool(self.input_yaml.get("template_subtraction", {}).get("skip_resampling", False))
-                if skip_resampling:
-                    logger.info("Using WCS-only alignment (skip_resampling=True) for template subtraction")
+                # Determine resampling mode from config
+                ts_cfg = self.input_yaml.get("template_subtraction", {})
+                skip_resampling = bool(ts_cfg.get("skip_resampling", False))
+                resample_mode = str(ts_cfg.get("resample_mode", "")).strip().lower()
                 
-                res = idc.align_and_resample_both_images(scienceFpath, templateFpath, skip_resampling=skip_resampling)
+                # Backward compatibility: skip_resampling=True maps to "wcs_only"
+                if not resample_mode:
+                    resample_mode = "wcs_only" if skip_resampling else "common_grid"
+                
+                valid_modes = ("common_grid", "native_scale", "wcs_only")
+                if resample_mode not in valid_modes:
+                    logger.warning(
+                        f"Invalid resample_mode '{resample_mode}'; falling back to 'common_grid'. "
+                        f"Valid modes: {valid_modes}"
+                    )
+                    resample_mode = "common_grid"
+                
+                if resample_mode != "common_grid":
+                    logger.info(
+                        f"Using alignment resample_mode='{resample_mode}' for template subtraction"
+                    )
+                
+                res = idc.align_and_resample_both_images(
+                    scienceFpath, templateFpath, resample_mode=resample_mode
+                )
                 if not res or not res.get("science_aligned"):
                     logger.info("SWarp alignment did not produce aligned outputs.")
                     return None, None
