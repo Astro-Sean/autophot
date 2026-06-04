@@ -4003,8 +4003,39 @@ class Templates:
                             continue
                 return float(default)
 
-            science_fwhm = float(self.input_yaml.get("fwhm", _hdr_float(scienceHeader, ["FWHM", "fwhm"], 3.0)))
-            template_fwhm = float(_hdr_float(templateHeader, ["FWHM", "fwhm"], 3.0))
+            # Get FWHM values - these should be in pixels for the resampled images
+            # Since images are resampled to a common pixel scale by SWarp, we need to
+            # account for any pixel scale differences between original and resampled images
+            science_fwhm_orig = float(self.input_yaml.get("fwhm", _hdr_float(scienceHeader, ["FWHM", "fwhm"], 3.0)))
+            template_fwhm_orig = float(_hdr_float(templateHeader, ["FWHM", "fwhm"], 3.0))
+
+            # Get pixel scales from WCS to check if resampling changed the scale
+            try:
+                from astropy.wcs.utils import proj_plane_pixel_scales
+                sci_wcs = get_wcs(scienceHeader)
+                tpl_wcs = get_wcs(templateHeader)
+                sci_pix_scale = float(proj_plane_pixel_scales(sci_wcs)[0] * 3600.0)  # arcsec/pixel
+                tpl_pix_scale = float(proj_plane_pixel_scales(tpl_wcs)[0] * 3600.0)  # arcsec/pixel
+                logger.info(
+                    "Pixel scales for kernel sizing: science=%.4f, template=%.4f arcsec/px",
+                    sci_pix_scale, tpl_pix_scale
+                )
+                # If pixel scales differ significantly, adjust FWHM to common scale
+                # Assume science pixel scale is the reference (images resampled to science scale)
+                if tpl_pix_scale > 0 and sci_pix_scale > 0 and abs(tpl_pix_scale - sci_pix_scale) / sci_pix_scale > 0.01:
+                    scale_factor = sci_pix_scale / tpl_pix_scale
+                    template_fwhm = template_fwhm_orig * scale_factor
+                    logger.info(
+                        "Template FWHM adjusted for pixel scale: %.2f -> %.2f px (scale factor=%.3f)",
+                        template_fwhm_orig, template_fwhm, scale_factor
+                    )
+                else:
+                    template_fwhm = template_fwhm_orig
+                science_fwhm = science_fwhm_orig
+            except Exception as e:
+                logger.debug("Could not get pixel scales for FWHM adjustment: %s", e)
+                science_fwhm = science_fwhm_orig
+                template_fwhm = template_fwhm_orig
 
             # Gain: prefer pipeline-resolved value for science; template often needs header.
             science_gain = float(self.input_yaml.get("gain", _hdr_float(scienceHeader, ["GAIN", "gain"], 1.0)))
