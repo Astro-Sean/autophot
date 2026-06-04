@@ -170,7 +170,8 @@ def test_alignment(science_path, reference_path, output_dir, verbose=1):
     # Check WCS invertibility
     wcs_invertible = True
     for label, wcs, shape in [("Science", sci_wcs, sci_shape), ("Reference", ref_wcs, ref_shape)]:
-        cx, cy = shape[1] / 2, shape[0] / 2
+        # Correct numpy 0-based center is (nx-1)/2, (ny-1)/2.
+        cx, cy = (shape[1] - 1) / 2, (shape[0] - 1) / 2
         try:
             ra, dec = wcs.all_pix2world([cx], [cy], 0)
             if not (np.isfinite(ra[0]) and np.isfinite(dec[0])):

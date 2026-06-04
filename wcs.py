@@ -1806,7 +1806,9 @@ class WCSSolver:
                 test_wcs = get_wcs(best_trial_header)
                 if test_wcs is not None:
                     # Test transform at image center - if this fails, the distortion is too extreme
-                    cx, cy = best_trial_header.get("NAXIS1", 1000) / 2, best_trial_header.get("NAXIS2", 1000) / 2
+                    # Correct numpy 0-based center is (nx-1)/2, (ny-1)/2.
+                    cx = (best_trial_header.get("NAXIS1", 1000) - 1) / 2
+                    cy = (best_trial_header.get("NAXIS2", 1000) - 1) / 2
                     ra_test, dec_test = test_wcs.all_pix2world(cx, cy, 0)
                     # Round-trip test: world->pix->world should converge
                     x_back, y_back = test_wcs.all_world2pix(ra_test, dec_test, 0, maxiter=50)

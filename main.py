@@ -1748,8 +1748,9 @@ def run_photometry():
                 # Trim NaN boundaries created by Cutout2D (fill_value=np.nan)
                 # This must happen before background subtraction
                 # Calculate center of trimmed image for target preservation
-                center_x = image.shape[1] / 2.0
-                center_y = image.shape[0] / 2.0
+                # Correct numpy 0-based center is (nx-1)/2, (ny-1)/2.
+                center_x = (image.shape[1] - 1) / 2.0
+                center_y = (image.shape[0] - 1) / 2.0
                 logging.info(f"Attempting NaN boundary trimming after 5 arcmin cutout: center=({center_x:.1f}, {center_y:.1f})")
                 buffer = input_yaml["preprocessing"].get("nan_trim_buffer", 10)
                 image, header, trim_info = _trim_nan_boundaries(
@@ -2356,7 +2357,8 @@ def run_photometry():
         ):
             if input_yaml["target_ra"] is None and input_yaml["target_dec"] is None:
                 # Use image center when no target information is provided.
-                center_pix = (image.shape[1] / 2, image.shape[0] / 2)
+                # Correct numpy 0-based center is (nx-1)/2, (ny-1)/2.
+                center_pix = ((image.shape[1] - 1) / 2, (image.shape[0] - 1) / 2)
                 center = imageWCS.all_pix2world([center_pix[0]], [center_pix[1]], 0)
                 target_coords = SkyCoord(
                     center[0][0],
@@ -3769,7 +3771,8 @@ def run_photometry():
                     # SWarp is configured with CENTER = science pixel center and
                     # IMAGE_SIZE = science shape, so both resampled images are already
                     # registered to this grid and the pixel center is the natural anchor.
-                    science_center_pix = (nx / 2.0, ny / 2.0)
+                    # Correct numpy 0-based center is (nx-1)/2, (ny-1)/2.
+                    science_center_pix = ((nx - 1) / 2.0, (ny - 1) / 2.0)
                     science_center_world = science_wcs.all_pix2world(
                         science_center_pix[0], science_center_pix[1], 0
                     )

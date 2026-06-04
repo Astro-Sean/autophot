@@ -80,7 +80,9 @@ class AlignmentMethodAnalyzer:
         # Check if WCS are analytically invertible
         try:
             # Test coordinate transformations
-            center_x, center_y = sci_header.get('NAXIS1', 1000) / 2, sci_header.get('NAXIS2', 1000) / 2
+            # Correct numpy 0-based center is (nx-1)/2, (ny-1)/2.
+            center_x = (sci_header.get('NAXIS1', 1000) - 1) / 2
+            center_y = (sci_header.get('NAXIS2', 1000) - 1) / 2
             sci_world = sci_wcs.all_pix2world([[center_x]], [[center_y]], 0)
             sci_back = sci_wcs.all_world2pix([sci_world[0, 0]], [sci_world[1, 0]], 0)
             
@@ -95,7 +97,9 @@ class AlignmentMethodAnalyzer:
             analysis['resampling_required'] = True
         
         try:
-            center_x, center_y = ref_header.get('NAXIS1', 1000) / 2, ref_header.get('NAXIS2', 1000) / 2
+            # Correct numpy 0-based center is (nx-1)/2, (ny-1)/2.
+            center_x = (ref_header.get('NAXIS1', 1000) - 1) / 2
+            center_y = (ref_header.get('NAXIS2', 1000) - 1) / 2
             ref_world = ref_wcs.all_pix2world([[center_x]], [[center_y]], 0)
             ref_back = ref_wcs.all_world2pix([ref_world[0, 0]], [ref_world[1, 0]], 0)
             
