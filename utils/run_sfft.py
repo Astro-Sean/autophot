@@ -21,7 +21,7 @@ import warnings
 
 # Add parent directory to path to import functions.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from functions import ColoredLevelFormatter, LogMessageNormalizeFilter, set_size
+from functions import ColoredLevelFormatter, LogMessageNormalizeFilter, set_size, safe_fits_write
 
 # Limit BLAS/OpenMP threads before any scientific imports (avoids libgomp
 # "Resource temporarily unavailable" when this script is run as a subprocess
@@ -483,20 +483,41 @@ def run_sfft() -> Optional[int]:
     hdr_sci, data_sci = get_fits_info(FITS_SCI)
     hdr_ref, data_ref = get_fits_info(FITS_REF)
 
-    # Build a combined NaN mask from both inputs so that no-data regions in either
-    # image are correctly propagated to the output difference image.
-    # NOTE: we do NOT write this mask back into the input FITS files.  Mutating the
-    # science / template files here would permanently corrupt them on any retry path
-    # (e.g. SFFT post-anomaly feedback) and would cause NaN regions to grow with
-    # each re-run.  SFFT handles no-data regions via the PriorBanMask argument.
-    nan_mask_sci = ~np.isfinite(data_sci)
-    nan_mask_ref = ~np.isfinite(data_ref)
-    combined_nan_mask = nan_mask_sci | nan_mask_ref
-    if np.any(combined_nan_mask):
+    # Build a combined invalid-pixel mask from both inputs so that no-data regions
+    # (NaN or exactly zero, e.g. from SWarp padding) in either image are masked in
+    # BOTH images before passing to SFFT.  This prevents SFFT from fitting the
+    # convolution kernel across image-boundary padding or chip gaps where only one
+    # image has valid data.
+    invalid_sci = ~np.isfinite(data_sci) | (data_sci == 0)
+    invalid_ref = ~np.isfinite(data_ref) | (data_ref == 0)
+    combined_invalid_mask = invalid_sci | invalid_ref
+    if np.any(combined_invalid_mask):
         log_info(
-            f"Combined NaN/invalid mask: {int(np.count_nonzero(combined_nan_mask))} pixels "
-            "will be forced to NaN in the output difference image."
+            f"Combined invalid mask: {int(np.count_nonzero(combined_invalid_mask))} pixels "
+            "will be forced to NaN in both images before SFFT."
         )
+
+    # Create temporary FITS files with synchronized NaN masks for SFFT input.
+    # We do NOT mutate the original science / template files (they may be reused on
+    # retry paths such as post-anomaly feedback).
+    _temp_sci_path = os.path.join(out_dir, f"._sfft_sci_sync_{os.getpid()}.fits")
+    _temp_ref_path = os.path.join(out_dir, f"._sfft_ref_sync_{os.getpid()}.fits")
+    _temp_paths_created = []
+    try:
+        if np.any(combined_invalid_mask):
+            data_sci_sync = data_sci.copy()
+            data_ref_sync = data_ref.copy()
+            data_sci_sync[combined_invalid_mask] = np.nan
+            data_ref_sync[combined_invalid_mask] = np.nan
+            safe_fits_write(_temp_sci_path, data_sci_sync, hdr_sci, overwrite=True)
+            safe_fits_write(_temp_ref_path, data_ref_sync, hdr_ref, overwrite=True)
+            _temp_paths_created = [_temp_sci_path, _temp_ref_path]
+            FITS_SCI = _temp_sci_path
+            FITS_REF = _temp_ref_path
+            log_info(f"Synchronized NaN masks written to temporary FITS for SFFT input.")
+    except Exception as e:
+        log_info(f"Warning: Failed to write synchronized-mask temp FITS: {e}. Using original files.")
+        # If temp write fails, fall back to original paths (FITS_SCI/FITS_REF unchanged)
 
     def _sanitize_xy_sources(
         xy: Optional[np.ndarray], label: str, width: int, height: int
@@ -916,7 +937,6 @@ def run_sfft() -> Optional[int]:
             # ECP may write FITS_DIFF itself; if we have diff_image and file missing, write it
             if diff_image is not None and FITS_DIFF and not os.path.isfile(FITS_DIFF):
                 try:
-                    from functions import safe_fits_write
                     with fits.open(FITS_SCI, mode="readonly") as hdl:
                         hdu = hdl[0].copy()
                         # SFFT internally uses (ny, nx); FITS data is also (ny, nx) row-major.
@@ -1193,7 +1213,6 @@ def run_sfft() -> Optional[int]:
                         out_dir,
                         f"{os.path.basename(fits_path).replace('.fits', '')}.fittedPix.fits",
                     )
-                    from functions import safe_fits_write
                     with fits.open(fits_path, mode="readonly") as hdl:
                         header_copy = hdl[0].header.copy()
                     safe_fits_write(out_path, pix_a_vis.T, header_copy)
@@ -1288,6 +1307,16 @@ def run_sfft() -> Optional[int]:
         line = exc_tb.tb_lineno if exc_tb else -1
         log_info(f"Fatal Error: {exc_type} in {fname} at line {line}: {e}")
         return None
+    finally:
+        # Clean up temporary synchronized-mask FITS files if they were created.
+        _tmp_paths_to_clean = locals().get("_temp_paths_created", [])
+        for _tmp_path in _tmp_paths_to_clean:
+            try:
+                if os.path.isfile(_tmp_path):
+                    os.remove(_tmp_path)
+                    log_info(f"Cleaned up temp file: {_tmp_path}")
+            except Exception:
+                pass
 
     log_info(f"Total elapsed: {time.time() - t0_total:.3f} s")
     return 1
