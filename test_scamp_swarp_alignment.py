@@ -16,10 +16,16 @@ Usage:
 import argparse
 import sys
 import shutil
+import os
 from pathlib import Path
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
+
+# Add astro environment to PATH to find SExtractor
+astro_bin = "/home/sbrennan/miniconda3/envs/astro/bin"
+if os.path.exists(astro_bin):
+    os.environ["PATH"] = astro_bin + ":" + os.environ.get("PATH", "")
 
 # Add parent directory to path to import autophot modules
 sys.path.insert(0, str(Path(__file__).parent))
