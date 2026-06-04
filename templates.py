@@ -54,7 +54,7 @@ try:
     from tqdm import tqdm
 except ImportError:
     tqdm = None
-from scipy.ndimage import shift as ndimage_shift, binary_dilation
+from scipy.ndimage import binary_dilation
 from scipy.optimize import minimize
 from scipy.spatial import cKDTree
 from scipy.stats import median_abs_deviation
@@ -3860,8 +3860,6 @@ class Templates:
         scienceNoise: Optional[str] = None,
         templateNoise: Optional[str] = None,
         background_defects_mask: Optional[np.ndarray] = None,
-        centroid_offset_x: Optional[float] = None,
-        centroid_offset_y: Optional[float] = None,
         scale: Optional[int] = None,
     ) -> Tuple[
         Optional[str], Optional[np.ndarray], Optional[List[Tuple[float, float]]], Optional[int]
@@ -4018,53 +4016,6 @@ class Templates:
 
             # Note: template background subtraction is disabled (template_bg_median commented out)
             # so no saturation adjustment is needed
-
-            # Apply subpixel shift to correct centroid misalignment from WCS alignment
-            # The centroid_offset values represent the mean offset between science source positions
-            # and their centroids in the template image. We shift the template to align with science.
-            if centroid_offset_x is not None and centroid_offset_y is not None:
-                if np.isfinite(centroid_offset_x) and np.isfinite(centroid_offset_y):
-                    shift_mag = np.sqrt(centroid_offset_x**2 + centroid_offset_y**2)
-                    if 0.05 <= shift_mag < 2.0:  # Valid range for subpixel correction
-                        logger.info(
-                            "Applying subpixel shift to template: dx=%.3f, dy=%.3f (total=%.3f px)",
-                            float(centroid_offset_x), float(centroid_offset_y), float(shift_mag)
-                        )
-                        # Apply shift: positive offset means template is shifted right/down,
-                        # so we shift by negative to align with science
-                        # Use 'nearest' mode to replicate edge pixels instead of filling with zeros
-                        # Fill NaN values temporarily to prevent propagation during interpolation
-                        nan_mask = ~np.isfinite(templateImage)
-                        if np.any(nan_mask):
-                            # Fill NaNs with median for shift, then restore as NaN
-                            valid_data = templateImage[np.isfinite(templateImage)]
-                            fill_value = float(np.median(valid_data)) if len(valid_data) > 0 else 0.0
-                            templateImage_filled = np.where(nan_mask, fill_value, templateImage)
-                        else:
-                            templateImage_filled = templateImage
-
-                        templateImage_shifted = ndimage_shift(
-                            templateImage_filled,
-                            shift=(-float(centroid_offset_y), -float(centroid_offset_x)),  # (y, x) order for scipy
-                            order=3,  # Cubic interpolation for smooth subpixel shift
-                            mode='nearest'  # Replicate edge pixels to avoid artificial zeros
-                        )
-
-                        # Restore NaN regions (approximately - they will be slightly expanded)
-                        if np.any(nan_mask):
-                            # Expand NaN mask slightly to account for shift
-                            nan_mask_dilated = binary_dilation(nan_mask, iterations=2)
-                            templateImage = np.where(nan_mask_dilated, np.nan, templateImage_shifted)
-                        else:
-                            templateImage = templateImage_shifted
-
-                        write_fits(_ensure_prepared_template_path(), templateImage, templateHeader)
-                        logger.info("Subpixel shift applied successfully")
-                    else:
-                        logger.info(
-                            "Subpixel shift magnitude (%.3f px) outside valid range [0.05, 2.0], skipping",
-                            float(shift_mag)
-                        )
 
             # Optional: inpaint broken/saturated template cores (cosmetic/robustness).
             # This can reduce subtraction artefacts around very bright stars, but does not

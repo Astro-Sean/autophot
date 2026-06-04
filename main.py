@@ -4255,11 +4255,6 @@ def run_photometry():
                 # Filter sources where the centroid is well-aligned with the original pixel position
                 well_aligned_mask = distance < POSITION_TOLERANCE
 
-                # Compute centroid offsets for subpixel correction
-                centroid_offset_x = np.nan
-                centroid_offset_y = np.nan
-                centroid_offset_valid = False
-
                 # Log diagnostic statistics before filtering
                 if np.any(np.isfinite(distance)):
                     mean_offset = float(np.nanmean(distance))
@@ -4269,26 +4264,6 @@ def run_photometry():
                         "Centroid alignment: mean=%.3f, median=%.3f, std=%.3f px (tolerance=%.1f px)",
                         mean_offset, median_offset, std_offset, POSITION_TOLERANCE
                     )
-
-                    # Compute mean offset in x and y for subpixel correction
-                    # Only compute if we have enough well-aligned sources
-                    if np.any(well_aligned_mask):
-                        dx = template_sources.loc[well_aligned_mask, "x_pix"].values - template_sources.loc[well_aligned_mask, "x_centroid"].values
-                        dy = template_sources.loc[well_aligned_mask, "y_pix"].values - template_sources.loc[well_aligned_mask, "y_centroid"].values
-                        if np.sum(np.isfinite(dx)) >= 5 and np.sum(np.isfinite(dy)) >= 5:
-                            centroid_offset_x = float(np.nanmedian(dx))
-                            centroid_offset_y = float(np.nanmedian(dy))
-                            offset_mag = np.sqrt(centroid_offset_x**2 + centroid_offset_y**2)
-                            logging.info(
-                                "Subpixel shift: dx=%.3f, dy=%.3f, total=%.3f px (from %d sources)",
-                                centroid_offset_x, centroid_offset_y, offset_mag, np.sum(np.isfinite(dx))
-                            )
-                            # Only apply if offset is significant (> 0.1 px) but not too large (< 2 px)
-                            if 0.1 <= offset_mag < 2.0:
-                                centroid_offset_valid = True
-                                logging.info("Subpixel shift will be applied to template before subtraction")
-                            else:
-                                logging.info("Subpixel shift magnitude (%.3f px) outside valid range [0.1, 2.0], skipping", offset_mag)
 
                 # If alignment is poor and we reject everything, adaptively relax
                 # the tolerance to keep enough sources for flux-consistent matching.
@@ -4672,8 +4647,6 @@ def run_photometry():
                     scienceNoise=weight_fpath,
                     templateNoise=template_weight_path,
                     background_defects_mask=defects_mask,
-                    centroid_offset_x=centroid_offset_x if centroid_offset_valid else None,
-                    centroid_offset_y=centroid_offset_y if centroid_offset_valid else None,
                     scale=combined_scale,
                 )
                 if fpath is None:
