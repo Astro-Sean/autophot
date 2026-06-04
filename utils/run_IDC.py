@@ -2090,7 +2090,6 @@ NNW
                     aligned_science_fpath,
                     e,
                 )
-
             # Keep SIP/TPV distortion coefficients in header to preserve distortion correction
             # SWarp outputs TAN projection but the distortion model is still needed for accurate WCS
             # Removing SIP coefficients causes systematic WCS errors across the field
@@ -3339,6 +3338,8 @@ NNW
         circle_color: str = "none",
         circle_edge_width: float = 0.5,
         max_sources: int = 100,
+        selection_mode: str = "uniform",  # "uniform", "random", or "first"
+        random_seed: Optional[int] = 42,  # Seed for reproducible random selection
         **imshow_kwargs,
     ):
         try:
@@ -3426,9 +3427,89 @@ NNW
                 else:
                     return f"{chr(65 + (i // 26) - 1)}{chr(65 + (i % 26))}"
 
+            def select_sources_spatially(catalog, max_sources, image_shape, selection_mode="uniform", random_seed=42):
+                """Select sources across the image using specified selection mode."""
+                if len(catalog) <= max_sources:
+                    return catalog
+                
+                # Set random seed for reproducibility
+                if random_seed is not None:
+                    np.random.seed(random_seed)
+                
+                # Get valid sources with positions
+                valid_sources = []
+                for row in catalog:
+                    if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames:
+                        x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
+                        if np.isfinite(x) and np.isfinite(y):
+                            valid_sources.append(row)
+                
+                if len(valid_sources) <= max_sources:
+                    return valid_sources
+                
+                if selection_mode == "first":
+                    # Original behavior: take first N sources
+                    return valid_sources[:max_sources]
+                elif selection_mode == "random":
+                    # Random selection across entire image
+                    np.random.shuffle(valid_sources)
+                    return valid_sources[:max_sources]
+                elif selection_mode == "uniform":
+                    # Uniform spatial grid sampling
+                    img_h, img_w = image_shape
+                    n_grid = int(np.ceil(np.sqrt(max_sources * 2)))  # Grid size for uniform sampling
+                    
+                    selected_sources = []
+                    grid_cells = {}  # Dictionary to store sources per grid cell
+                    
+                    # Assign sources to grid cells
+                    for source in valid_sources:
+                        x, y = source["XWIN_IMAGE"], source["YWIN_IMAGE"]
+                        grid_x = min(int(x / img_w * n_grid), n_grid - 1)
+                        grid_y = min(int(y / img_h * n_grid), n_grid - 1)
+                        cell_key = (grid_x, grid_y)
+                        
+                        if cell_key not in grid_cells:
+                            grid_cells[cell_key] = []
+                        grid_cells[cell_key].append(source)
+                    
+                    # Select sources from each grid cell
+                    sources_per_cell = max(1, max_sources // len(grid_cells))
+                    remaining_slots = max_sources - (sources_per_cell * len(grid_cells))
+                    
+                    for cell_key in sorted(grid_cells.keys()):
+                        cell_sources = grid_cells[cell_key]
+                        # Randomly select sources from this cell
+                        n_select = min(sources_per_cell + (1 if remaining_slots > 0 else 0), len(cell_sources))
+                        if remaining_slots > 0:
+                            remaining_slots -= 1
+                        
+                        if len(cell_sources) > 0:
+                            np.random.shuffle(cell_sources)
+                            selected_sources.extend(cell_sources[:n_select])
+                    
+                    # If we still need more sources, add randomly from remaining
+                    if len(selected_sources) < max_sources:
+                        remaining_needed = max_sources - len(selected_sources)
+                        used_sources = set(selected_sources)
+                        available_sources = [s for s in valid_sources if s not in used_sources]
+                        
+                        if available_sources:
+                            np.random.shuffle(available_sources)
+                            selected_sources.extend(available_sources[:remaining_needed])
+                    
+                    return selected_sources[:max_sources]
+                else:
+                    # Default to uniform if invalid mode
+                    return select_sources_spatially(catalog, max_sources, image_shape, "uniform", random_seed)
+
             sci_positions = []
             sci_h, sci_w = sci_data.shape
-            for i, row in enumerate(sci_cat[:max_sources]):
+            
+            # Select science sources using specified selection mode
+            logging.info(f"Selecting {max_sources} science sources using '{selection_mode}' mode")
+            sci_selected = select_sources_spatially(sci_cat, max_sources, (sci_h, sci_w), selection_mode, random_seed)
+            for i, row in enumerate(sci_selected):
                 if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames:
                     x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
                     # Scale coordinates if image was rebinned, then convert to 0-based
@@ -3468,7 +3549,11 @@ NNW
             
             ref_positions = []
             ref_h, ref_w = ref_data.shape
-            for i, row in enumerate(ref_cat[:max_sources]):
+            
+            # Select reference sources using specified selection mode
+            logging.info(f"Selecting {max_sources} reference sources using '{selection_mode}' mode")
+            ref_selected = select_sources_spatially(ref_cat, max_sources, (ref_h, ref_w), selection_mode, random_seed)
+            for i, row in enumerate(ref_selected):
                 if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames:
                     x, y = row["XWIN_IMAGE"], row["YWIN_IMAGE"]
                     # Scale coordinates if image was rebinned, then convert to 0-based
