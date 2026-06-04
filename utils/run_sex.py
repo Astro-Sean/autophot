@@ -772,6 +772,7 @@ class SExtractorWrapper:
         crowded: Optional[bool] = None,
         use_for_matching: bool = False,
         return_raw: bool = False,
+        return_full_table: bool = False,
     ) -> Tuple[float, Optional[Union[pd.DataFrame, Table]], int]:
         """
         Run SExtractor to detect point sources and estimate FWHM.
