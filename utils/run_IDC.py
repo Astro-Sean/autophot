@@ -774,8 +774,10 @@ NNW
                     try:
                         wcs = WCS(fits.getheader(fits_image))
                         if 'XWIN_WORLD' not in cleaned.colnames and 'XWIN_IMAGE' in cleaned.colnames:
-                            x_coords = cleaned['XWIN_IMAGE']
-                            y_coords = cleaned['YWIN_IMAGE']
+                            # SExtractor uses 1-based pixel coordinates (FITS convention)
+                            # astropy WCS pixel_to_world expects 0-based numpy convention
+                            x_coords = np.asarray(cleaned['XWIN_IMAGE'], float) - 1.0
+                            y_coords = np.asarray(cleaned['YWIN_IMAGE'], float) - 1.0
                             world_coords = wcs.pixel_to_world(x_coords, y_coords)
                             cleaned['XWIN_WORLD'] = world_coords.ra.deg
                             cleaned['YWIN_WORLD'] = world_coords.dec.deg
@@ -921,6 +923,7 @@ NNW
         output_dir: Optional[str] = None,
         science_already_resampled: bool = False,
         reference_already_resampled: bool = False,
+        skip_resampling: bool = False,
     ) -> Optional[dict]:
         """
         Align and resample both science and reference images to the science image's grid.
@@ -929,6 +932,9 @@ NNW
         onto a common grid defined by the science image pixel centre and shape.
         If an image is already resampled (flag or header RESAMPLED/SWARPED), SWarp is skipped
         for that image to avoid degrading the data.
+        
+        If skip_resampling=True, only SCAMP WCS correction is applied and SWarp resampling
+        is skipped entirely (suitable for template subtraction with different pixel scales).
 
         Args:
             science_image: Path to science image.
@@ -936,6 +942,7 @@ NNW
             output_dir: Output directory for aligned images.
             science_already_resampled: If True, skip SWarp for science; use image as-is (avoids double resampling).
             reference_already_resampled: If True, skip SWarp for reference; use image as-is.
+            skip_resampling: If True, skip SWarp resampling entirely (SCAMP WCS correction only).
         Returns:
             Dictionary with paths to aligned images and alignment metadata.
         """
@@ -1774,44 +1781,66 @@ NNW
                 "COMBINE_TYPE": "MEDIAN",
             }
 
-            resample_dir_sci = resample_dir / "sci"
-            resample_dir_ref = resample_dir / "ref"
-            resample_dir_sci.mkdir(parents=True, exist_ok=True)
-            resample_dir_ref.mkdir(parents=True, exist_ok=True)
+            if skip_resampling:
+                # Skip SWarp resampling - use SCAMP WCS correction only
+                self.logger.info("Skipping SWarp resampling (WCS-only alignment for template subtraction)")
+                
+                # Copy SCAMP-corrected reference image to aligned location
+                aligned_ref = output_dir / f"aligned_ref_{Path(reference_image).stem}.fits"
+                aligned_sci = Path(science_image)  # Use original science image
+                
+                # Copy reference image with SCAMP corrections applied
+                shutil.copy2(ref_image_copy, aligned_ref)
+                
+                # Apply SCAMP head file to reference image if it exists
+                head_file = Path(ref_image_copy).with_suffix(".head")
+                if head_file.exists():
+                    self.logger.debug("Applying SCAMP .head file to reference image")
+                    # The head file was already applied during SCAMP processing
+                    # Just copy the corrected reference image
+                
+                self.logger.info(f"WCS-only alignment complete: sci={aligned_sci}, ref={aligned_ref}")
+                
+            else:
+                # Original SWarp resampling logic
+                resample_dir_sci = resample_dir / "sci"
+                resample_dir_ref = resample_dir / "ref"
+                resample_dir_sci.mkdir(parents=True, exist_ok=True)
+                resample_dir_ref.mkdir(parents=True, exist_ok=True)
 
-            self.logger.debug("Running SWarp on science image (COMBINE=Y)...")
-            swarp_res_sci = self.run_swarp(
-                [str(sci_image_for_swarp)],
-                scamp_results=None,
-                output_dir=str(resample_dir_sci),
-                config=swarp_config_each,
-                no_weight_maps=True,
-            )
-
-            self.logger.debug("Running SWarp on reference image (COMBINE=Y)...")
-            swarp_res_ref = self.run_swarp(
-                [str(ref_image_copy)],
-                scamp_results=None,
-                output_dir=str(resample_dir_ref),
-                config=swarp_config_each,
-                no_weight_maps=True,
-            )
-
-            if swarp_res_sci is None or swarp_res_ref is None:
-                self.logger.info("SWarp failed. Falling back to AstroAlign.")
-                return self._align_fallback_reproject_then_astroalign(
-                    science_image, reference_image, output_dir
+                self.logger.debug("Running SWarp on science image (COMBINE=Y)...")
+                swarp_res_sci = self.run_swarp(
+                    [str(sci_image_for_swarp)],
+                    scamp_results=None,
+                    output_dir=str(resample_dir_sci),
+                    config=swarp_config_each,
+                    no_weight_maps=True,
                 )
 
-            # With COMBINE=Y the output is the co-added file (output.fits), not .resamp.fits
-            aligned_sci = Path(swarp_res_sci["corrected_image"])
-            aligned_ref = Path(swarp_res_ref["corrected_image"])
-
-            if not aligned_sci.exists() or not aligned_ref.exists():
-                self.logger.info(
-                    "Could not find SWarp output images. Falling back to AstroAlign."
+                self.logger.debug("Running SWarp on reference image (COMBINE=Y)...")
+                swarp_res_ref = self.run_swarp(
+                    [str(ref_image_copy)],
+                    scamp_results=None,
+                    output_dir=str(resample_dir_ref),
+                    config=swarp_config_each,
+                    no_weight_maps=True,
                 )
-                return self._align_fallback_reproject_then_astroalign(
+
+                if swarp_res_sci is None or swarp_res_ref is None:
+                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
+
+                # With COMBINE=Y the output is the co-added file (output.fits), not .resamp.fits
+                aligned_sci = Path(swarp_res_sci["corrected_image"])
+                aligned_ref = Path(swarp_res_ref["corrected_image"])
+
+                if not aligned_sci.exists() or not aligned_ref.exists():
+                    self.logger.info(
+                        "Could not find SWarp output images. Falling back to AstroAlign."
+                    )
+                    return self._align_fallback_reproject_then_astroalign(
                     science_image, reference_image, output_dir
                 )
 
@@ -3687,10 +3716,10 @@ NNW
                         
                         # Draw small cross
                         ax.plot([x_0based - cross_size, x_0based + cross_size], 
-                               [y_0based, y_0based], 'k-', linewidth=0.5, alpha=0.6, zorder=3)
+                               [y_0based, y_0based], 'r-', linewidth=0.5, alpha=0.6, zorder=3)
                         ax.plot([x_0based, x_0based], 
                                [y_0based - cross_size, y_0based + cross_size], 
-                               'k-', linewidth=0.5, alpha=0.6, zorder=3)
+                               'r-', linewidth=0.5, alpha=0.6, zorder=3)
                 
                 return remaining_sources
             

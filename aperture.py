@@ -1817,19 +1817,34 @@ class Aperture:
                 if good_profiles.ndim == 2 and good_profiles.shape[0] > 0:
                     mean_profile = np.nanmedian(good_profiles, axis=0)
 
-                    def ee_model(r, alpha, beta):
-                        return 1.0 - np.exp(-((r / radii[-1] / alpha) ** beta))
-
-                    popt, _ = curve_fit(
-                        ee_model,
-                        radii,
-                        mean_profile,
-                        p0=[0.3, 2.0],
-                        bounds=(0, np.inf),
-                        maxfev=10000,
-                    )
+                    # Use non-parametric smoothed median profile instead of
+                    # parametric model for better representation of the true
+                    # curve of growth (handles complex PSF shapes: core + wings).
+                    from scipy.interpolate import make_interp_spline
+                    
+                    # Fine grid for smooth plotting
                     fine_r = np.linspace(0, radii[-1], 500)
-                    fine_profile = ee_model(fine_r, *popt)
+                    
+                    # Smooth the median profile using a smoothing spline.
+                    # Use a small smoothing factor to avoid overfitting but
+                    # reduce noise from the discrete radii sampling.
+                    try:
+                        # Use 3rd order spline with moderate smoothing
+                        tck = make_interp_spline(
+                            radii, mean_profile, k=3,
+                        )
+                        fine_profile = tck(fine_r)
+                        # Clip to valid range [0, 1]
+                        fine_profile = np.clip(fine_profile, 0.0, 1.0)
+                        # Ensure monotonic (non-decreasing)
+                        fine_profile = np.maximum.accumulate(fine_profile)
+                    except Exception:
+                        # Fallback to linear interpolation
+                        fine_profile = np.interp(fine_r, radii, mean_profile)
+                        fine_profile = np.clip(fine_profile, 0.0, 1.0)
+                        fine_profile = np.maximum.accumulate(fine_profile)
+                    
+                    # Refine optimum radius from smoothed profile
                     r_target_pix = np.interp(aperture_norm_factor, fine_profile, fine_r)
                     if np.isfinite(r_target_pix) and r_target_pix > 0:
                         optimum_radius = float(r_target_pix / fwhm)

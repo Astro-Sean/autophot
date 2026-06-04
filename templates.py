@@ -2544,7 +2544,13 @@ class Templates:
                     return None, None
                 logger.info("Attempting SWarp + SCAMP alignment.")
                 idc = run_IDC.ImageDistortionCorrector(input_yaml=self.input_yaml)
-                res = idc.align_and_resample_both_images(scienceFpath, templateFpath)
+                
+                # Check if resampling should be skipped for template subtraction
+                skip_resampling = bool(self.input_yaml.get("template_subtraction", {}).get("skip_resampling", False))
+                if skip_resampling:
+                    logger.info("Using WCS-only alignment (skip_resampling=True) for template subtraction")
+                
+                res = idc.align_and_resample_both_images(scienceFpath, templateFpath, skip_resampling=skip_resampling)
                 if not res or not res.get("science_aligned"):
                     logger.info("SWarp alignment did not produce aligned outputs.")
                     return None, None

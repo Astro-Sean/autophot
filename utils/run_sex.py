@@ -1095,8 +1095,10 @@ class SExtractorWrapper:
                             from astropy.wcs import WCS
                             try:
                                 wcs = WCS(fits.getheader(fits_path))
-                                x_coords = table['XWIN_IMAGE']
-                                y_coords = table['YWIN_IMAGE']
+                                # SExtractor uses 1-based pixel coordinates (FITS convention)
+                                # astropy WCS pixel_to_world expects 0-based numpy convention
+                                x_coords = np.asarray(table['XWIN_IMAGE'], float) - 1.0
+                                y_coords = np.asarray(table['YWIN_IMAGE'], float) - 1.0
                                 world_coords = wcs.pixel_to_world(x_coords, y_coords)
                                 table['XWIN_WORLD'] = world_coords.ra.deg
                                 table['YWIN_WORLD'] = world_coords.dec.deg
