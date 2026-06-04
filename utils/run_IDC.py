@@ -769,6 +769,64 @@ NNW
                     # cleaned = self.filter_well_defined_positions(cleaned)
                     if "SNR_WIN" in cleaned.colnames:
                         cleaned.sort("SNR_WIN", reverse=True)
+                    # Add SCAMP-required columns if not present
+                    from astropy.wcs import WCS
+                    try:
+                        wcs = WCS(fits.getheader(fits_image))
+                        if 'XWIN_WORLD' not in cleaned.colnames and 'XWIN_IMAGE' in cleaned.colnames:
+                            x_coords = cleaned['XWIN_IMAGE']
+                            y_coords = cleaned['YWIN_IMAGE']
+                            world_coords = wcs.pixel_to_world(x_coords, y_coords)
+                            cleaned['XWIN_WORLD'] = world_coords.ra.deg
+                            cleaned['YWIN_WORLD'] = world_coords.dec.deg
+                            cleaned['X_WORLD'] = world_coords.ra.deg
+                            cleaned['Y_WORLD'] = world_coords.dec.deg
+                            cleaned['ALPHA_J2000'] = world_coords.ra.deg
+                            cleaned['DELTA_J2000'] = world_coords.dec.deg
+                    except Exception as e:
+                        self.logger.warning(f"Could not compute world coordinates: {e}")
+                    # Add MAG_AUTO and MAGERR_AUTO if not present
+                    if 'MAG_AUTO' not in cleaned.colnames:
+                        if 'MAG_APER' in cleaned.colnames:
+                            cleaned['MAG_AUTO'] = cleaned['MAG_APER']
+                        elif 'FLUX_AUTO' in cleaned.colnames:
+                            cleaned['MAG_AUTO'] = -2.5 * np.log10(cleaned['FLUX_AUTO'])
+                        else:
+                            cleaned['MAG_AUTO'] = 0.0
+                    if 'MAGERR_AUTO' not in cleaned.colnames:
+                        if 'MAGERR_APER' in cleaned.colnames:
+                            cleaned['MAGERR_AUTO'] = cleaned['MAGERR_APER']
+                        else:
+                            cleaned['MAGERR_AUTO'] = 0.1
+                    # Add error columns if not present
+                    if 'ERRAWIN_IMAGE' not in cleaned.colnames:
+                        if 'FWHM_IMAGE' in cleaned.colnames:
+                            cleaned['ERRAWIN_IMAGE'] = cleaned['FWHM_IMAGE'] * 0.1
+                        else:
+                            cleaned['ERRAWIN_IMAGE'] = 0.1
+                    if 'ERRBWIN_IMAGE' not in cleaned.colnames:
+                        cleaned['ERRBWIN_IMAGE'] = cleaned['ERRAWIN_IMAGE']
+                    if 'ERRX2WIN_IMAGE' not in cleaned.colnames:
+                        cleaned['ERRX2WIN_IMAGE'] = cleaned['ERRAWIN_IMAGE'] ** 2
+                    if 'ERRY2WIN_IMAGE' not in cleaned.colnames:
+                        cleaned['ERRY2WIN_IMAGE'] = cleaned['ERRAWIN_IMAGE'] ** 2
+                    if 'ERRTHETAWIN_IMAGE' not in cleaned.colnames:
+                        cleaned['ERRTHETAWIN_IMAGE'] = 0.1
+                    if 'ERRX2WIN_WORLD' not in cleaned.colnames:
+                        cleaned['ERRX2WIN_WORLD'] = cleaned['ERRX2WIN_IMAGE']
+                    if 'ERRY2WIN_WORLD' not in cleaned.colnames:
+                        cleaned['ERRY2WIN_WORLD'] = cleaned['ERRY2WIN_IMAGE']
+                    pixel_scale = 0.1585 / 3600.0
+                    if 'ERRA_WORLD' not in cleaned.colnames:
+                        cleaned['ERRA_WORLD'] = cleaned['ERRAWIN_IMAGE'] * pixel_scale
+                    if 'ERRDEC_WORLD' not in cleaned.colnames:
+                        cleaned['ERRDEC_WORLD'] = cleaned['ERRAWIN_IMAGE'] * pixel_scale
+                    if 'ERRB_WORLD' not in cleaned.colnames:
+                        cleaned['ERRB_WORLD'] = cleaned['ERRBWIN_IMAGE'] * pixel_scale
+                    if 'ERRX2_WORLD' not in cleaned.colnames:
+                        cleaned['ERRX2_WORLD'] = cleaned['ERRX2WIN_WORLD']
+                    if 'ERRY2_WORLD' not in cleaned.colnames:
+                        cleaned['ERRY2_WORLD'] = cleaned['ERRY2WIN_WORLD']
                     hdul[tbhdu].data = cleaned.as_array()
                     hdul.flush()
                 else:
