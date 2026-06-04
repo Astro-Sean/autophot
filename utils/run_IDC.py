@@ -1824,6 +1824,37 @@ NNW
             aligned_sci = sci_target
             aligned_ref = ref_target
 
+            # Verify precise alignment between science and reference images
+            try:
+                from alignment_verification import AlignmentVerifier
+                verifier = AlignmentVerifier(verbose_level=self.verbose_level)
+                
+                verification_results = verifier.verify_precise_alignment(
+                    str(aligned_sci), str(aligned_ref), 
+                    tolerance_pixels=0.5,
+                    output_dir=str(resample_dir / "alignment_verification")
+                )
+                
+                if verification_results.get('precise_alignment', False):
+                    self.logger.info(f"✓ Precise alignment verified (quality: {verification_results.get('alignment_quality', 'unknown')})")
+                else:
+                    self.logger.warning(f"⚠ Alignment quality issues detected (quality: {verification_results.get('alignment_quality', 'unknown')})")
+                    if 'wcs_consistency' in verification_results and verification_results['wcs_consistency'].get('issues'):
+                        for issue in verification_results['wcs_consistency']['issues']:
+                            self.logger.warning(f"  WCS issue: {issue}")
+                    if 'coordinate_accuracy' in verification_results:
+                        max_offset = verification_results['coordinate_accuracy'].get('max_offset_pixels', 0)
+                        self.logger.warning(f"  Max coordinate offset: {max_offset:.3f} pixels")
+                
+                alignment_metadata = verification_results
+                
+            except ImportError:
+                self.logger.info("Alignment verification module not available - skipping verification")
+                alignment_metadata = {}
+            except Exception as e:
+                self.logger.warning(f"Alignment verification failed: {e}")
+                alignment_metadata = {}
+
             # Log SWarp output WCS for both images so alignment can be verified.
             # Since CENTER = overlap sky midpoint and IMAGE_SIZE = overlap region size,
             # both outputs should have identical shapes.
@@ -2121,6 +2152,7 @@ NNW
                 "science_fwhm_pixels": fwhm_sci_pix,
                 "reference_fwhm_pixels": fwhm_ref_pix,
                 "alignment_method": "scamp_swarp",
+                "alignment_verification": alignment_metadata,
             }
 
         except Exception as e:
