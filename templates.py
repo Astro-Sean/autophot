@@ -4098,21 +4098,63 @@ class Templates:
                 _hdr_float(templateHeader, ["RDNOISE", "READNOISE", "rdnoise", "readnoise"], 1.0)
             )
 
-            # NOTE: `scale` in default_input.yml is a plotting/cutout helper and
-            # is not the same as SFFT's kernel half-width.
-            # Oversubtraction artefacts can occur if we pass an uninitialized
-            # (often 0) kernel size into SFFT.
+            # Compute the subtraction kernel half-width from the PSF FWHMs of both images.
             #
-            # Instead, derive SFFT kernel half-width from the measured FWHMs.
-            # Use 1.5x max FWHM to match HOTPANTS behavior and reduce oversubtraction risk.
+            # The convolution kernel that transforms the sharper PSF into the broader one has a
+            # FWHM of sqrt(FWHM_broad^2 - FWHM_narrow^2).  The kernel stamp must be large enough
+            # to contain this kernel, so kernel_hw >= ceil(multiplier * FWHM_conv).
+            # We also enforce a floor of ceil(FWHM_broad) so the kernel always covers at least
+            # one full PSF footprint, which is required for flux-conserving photometry.
+            #
+            # The multiplier is configurable (default 2.0) and can be overridden entirely via
+            # kernel_hw_override for debugging.
             KER_HW_MIN = 3
             KER_HW_MAX = 50
             fwhm_ref = float(template_fwhm)
             fwhm_sci = float(science_fwhm)
-            # Use 1.5x max FWHM to match HOTPANTS (avoids over-smoothing that can cause oversubtraction)
-            ker_hw = int(
-                max(KER_HW_MIN, min(KER_HW_MAX, round(1.5 * max(fwhm_ref, fwhm_sci))))
-            )
+            fwhm_broad = max(fwhm_ref, fwhm_sci)
+            fwhm_narrow = min(fwhm_ref, fwhm_sci)
+            ts_cfg_ker = self.input_yaml.get("template_subtraction", {})
+
+            # Override: user directly specifies kernel half-width in pixels
+            _ker_hw_override = ts_cfg_ker.get("kernel_hw_override", None)
+            if _ker_hw_override is not None:
+                try:
+                    ker_hw = int(_ker_hw_override)
+                    logger.info(
+                        "Kernel half-width overridden by config: %d px (kernel_hw_override)",
+                        ker_hw,
+                    )
+                except (TypeError, ValueError):
+                    _ker_hw_override = None
+
+            if _ker_hw_override is None:
+                # Read user multiplier, default 2.0
+                try:
+                    _mult = float(ts_cfg_ker.get("kernel_hw_fwhm_multiplier") or 2.0)
+                    if not np.isfinite(_mult) or _mult <= 0:
+                        _mult = 2.0
+                except (TypeError, ValueError):
+                    _mult = 2.0
+
+                # FWHM of the convolution kernel (quadrature difference)
+                if fwhm_broad > fwhm_narrow and fwhm_broad > 0:
+                    fwhm_conv = np.sqrt(max(fwhm_broad ** 2 - fwhm_narrow ** 2, 0.0))
+                else:
+                    fwhm_conv = fwhm_broad  # identical PSFs: kernel ≈ delta function; use broad as floor
+
+                # Half-width must comfortably contain the kernel and floor at the broad PSF
+                ker_hw_from_conv = int(np.ceil(_mult * fwhm_conv))
+                ker_hw_floor = int(np.ceil(fwhm_broad))
+                ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_from_conv, ker_hw_floor)))
+                logger.info(
+                    "Kernel sizing: FWHM_sci=%.2f FWHM_ref=%.2f FWHM_broad=%.2f "
+                    "FWHM_conv=%.2f -> hw_conv=%d hw_floor=%d -> kernel_hw=%d px "
+                    "(multiplier=%.1f)",
+                    fwhm_sci, fwhm_ref, fwhm_broad, fwhm_conv,
+                    ker_hw_from_conv, ker_hw_floor, ker_hw, _mult,
+                )
+
             scale = max(ker_hw, 5)
             target_location = [
                 (self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"])
@@ -4741,39 +4783,43 @@ class Templates:
                 const_phot_ratio,
             )
 
-            # Calculate kernel half-width from scale (pipeline source-cutout half-size).
-            # scale is already half the cutout box size (scale_multiplier × FWHM / 2),
-            # so it directly gives the kernel half-width. This ensures the kernel covers
-            # the same footprint used for PSF/cutout extraction.
-            # Fall back to FWHM-based sizing if scale is not provided.
+            # `scale` was computed above in subtract() using the physics-based quadrature
+            # formula: kernel_hw = ceil(mult * sqrt(FWHM_broad^2 - FWHM_narrow^2)), floored at
+            # FWHM_broad.  Use it directly; the fallback path below covers the rare case where
+            # scale was not passed into _subtract_sfft.
             KER_HW_MIN = 3
             KER_HW_MAX = 50
-            # Clamp scale-derived kernel half-width to reasonable range to avoid
-            # impractically large kernels when scale is very large (sparse fields)
-            MAX_KERNEL_HALF_WIDTH_FROM_SCALE = 50  # Matches KER_HW_MAX
             logger.info(
                 "SFFT kernel sizing: scale=%s, science_fwhm=%.2f, template_fwhm=%.2f",
                 scale,
                 float(science_fwhm),
                 float(template_fwhm),
             )
+            # `scale` here is the kernel_hw already computed in subtract() via the
+            # physics-based quadrature formula.  Use it directly.
             if scale is not None and int(scale) > 0:
-                kernel_half_width = min(int(scale), MAX_KERNEL_HALF_WIDTH_FROM_SCALE)
+                kernel_half_width = min(int(scale), KER_HW_MAX)
                 logger.info(
-                    "SFFT kernel half-width set from scale: %d px (scale=%d, clamped to max %d)",
+                    "SFFT kernel half-width: %d px (from physics-based sizing)",
                     kernel_half_width,
-                    int(scale),
-                    MAX_KERNEL_HALF_WIDTH_FROM_SCALE,
                 )
             else:
-                fwhm_ref = float(template_fwhm)
-                fwhm_sci = float(science_fwhm)
-                kernel_half_width = int(
-                    max(KER_HW_MIN, min(KER_HW_MAX, round(1.5 * max(fwhm_ref, fwhm_sci))))
-                )
+                # Pure fallback: no scale passed; use quadrature formula directly
+                fwhm_ref_fb = float(template_fwhm)
+                fwhm_sci_fb = float(science_fwhm)
+                fwhm_broad_fb = max(fwhm_ref_fb, fwhm_sci_fb)
+                fwhm_narrow_fb = min(fwhm_ref_fb, fwhm_sci_fb)
+                if fwhm_broad_fb > fwhm_narrow_fb and fwhm_broad_fb > 0:
+                    fwhm_conv_fb = np.sqrt(max(fwhm_broad_fb ** 2 - fwhm_narrow_fb ** 2, 0.0))
+                else:
+                    fwhm_conv_fb = fwhm_broad_fb
+                ker_hw_conv = int(np.ceil(2.0 * fwhm_conv_fb))
+                ker_hw_floor = int(np.ceil(fwhm_broad_fb))
+                kernel_half_width = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_conv, ker_hw_floor)))
                 logger.info(
-                    "SFFT kernel half-width set from FWHM: %d px (fallback, scale not provided)",
-                    kernel_half_width,
+                    "SFFT kernel half-width: %d px (fallback quadrature formula, "
+                    "FWHM_sci=%.1f FWHM_ref=%.1f FWHM_conv=%.1f)",
+                    kernel_half_width, fwhm_sci_fb, fwhm_ref_fb, fwhm_conv_fb,
                 )
             kernel_half_width = max(KER_HW_MIN, min(KER_HW_MAX, kernel_half_width))
             
