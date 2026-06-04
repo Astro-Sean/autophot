@@ -1163,35 +1163,35 @@ def run_sfft() -> Optional[int]:
             pass
 
         # ------------------------------------------------------------------
-        # Re-impose NaN mask on output difference image
+        # Re-impose invalid-pixel mask on output difference image
         #
         # Some subtraction / resampling steps can emit exact zeros in regions
-        # where either input image had NaNs (chip gaps / no-data). Those zeros
-        # should remain "invalid" and propagate as NaNs, otherwise downstream
-        # background/SNR/limits can be biased.
+        # where either input image had NaNs or zeros (chip gaps / no-data / SWarp
+        # padding). Those pixels should remain "invalid" and propagate as NaNs,
+        # otherwise downstream background/SNR/limits can be biased.
         # ------------------------------------------------------------------
         try:
-            if np.any(combined_nan_mask) and FITS_DIFF and os.path.isfile(FITS_DIFF):
+            if np.any(combined_invalid_mask) and FITS_DIFF and os.path.isfile(FITS_DIFF):
                 with fits.open(FITS_DIFF, mode="update", memmap=False) as hdul:
                     diff = np.asarray(hdul[0].data, dtype=float)
-                    if diff.shape == combined_nan_mask.shape:
+                    if diff.shape == combined_invalid_mask.shape:
                         n_before = int(np.count_nonzero(~np.isfinite(diff)))
-                        diff[combined_nan_mask] = np.nan
+                        diff[combined_invalid_mask] = np.nan
                         hdul[0].data = diff
                         hdul.flush()
                         n_after = int(np.count_nonzero(~np.isfinite(diff)))
-                        n_mask = int(np.count_nonzero(combined_nan_mask))
+                        n_mask = int(np.count_nonzero(combined_invalid_mask))
                         log_info(
-                            f"Applied combined NaN mask to diff: NaN/inf {n_before} -> {n_after} "
+                            f"Applied combined invalid mask to diff: NaN/inf {n_before} -> {n_after} "
                             f"(mask={n_mask} px)"
                         )
                     else:
                         log_info(
-                            f"Warning: combined_nan_mask shape {combined_nan_mask.shape} "
-                            f"!= diff shape {diff.shape}; cannot reapply NaN mask."
+                            f"Warning: combined_invalid_mask shape {combined_invalid_mask.shape} "
+                            f"!= diff shape {diff.shape}; cannot reapply invalid mask."
                         )
         except Exception as e:
-            log_info(f"Warning: failed to reapply NaN mask to diff: {e}")
+            log_info(f"Warning: failed to reapply invalid mask to diff: {e}")
 
         t1_sfft = time.time()
         log_info(f"SFFT core elapsed: {t1_sfft - t0_sfft:.3f} s")
