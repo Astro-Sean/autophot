@@ -3985,13 +3985,8 @@ class Templates:
             science_saturate = _safe_saturate(scienceHeader)
             template_saturate = _safe_saturate(templateHeader)
 
-            # Adjust template saturation into the background-subtracted frame:
-            # after subtracting template_bg_median, saturated pixels move from
-            # SATURATE to SATURATE - template_bg_median in data units.
-            if np.isfinite(template_saturate) and template_bg_median != 0.0:
-                template_saturate = template_saturate - float(template_bg_median)
-                if template_saturate <= 0:
-                    template_saturate = np.inf
+            # Note: template background subtraction is disabled (template_bg_median commented out)
+            # so no saturation adjustment is needed
 
             # Apply subpixel shift to correct centroid misalignment from WCS alignment
             # The centroid_offset values represent the mean offset between science source positions
