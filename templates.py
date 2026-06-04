@@ -226,9 +226,11 @@ logger = logging.getLogger(__name__)
 RNG = np.random.default_rng(seed=None)
 
 # Sentinel value used to represent "no data" in FITS images after alignment.
-# Chosen to be extremely small but non-zero so it passes finite checks
-# but is trivially distinguishable from real flux.
-NO_DATA_SENTINEL = 1e-30
+# 0.0 is used so that SExtractor (inside SFFT/HOTPANTS) does not treat the
+# no-coverage border as a giant connected source, which causes "Pixel stack
+# overflow" and prevents real sources from being detected.  SFFT's own
+# internal mask already excludes pixels with |value| < 1.1e-20 (i.e. 0.0).
+NO_DATA_SENTINEL = 0.0
 
 
 class AlignmentResult(NamedTuple):
