@@ -3404,14 +3404,14 @@ class Templates:
                 return empty, nan_fit
 
             # --- Magnitude difference filter (exclude variable/problematic sources) ---
-            # Require science and template magnitudes to be within 1 mag of each other
+            # Require science and template magnitudes to be within 3 mag of each other
             # This excludes variables, artifacts, and sources with large photometric issues
             mag_diff = np.abs(mag_img_r - mag_tpl_r)
-            mag_diff_ok = mag_diff < 1.0
+            mag_diff_ok = mag_diff < 3.0
             n_mag_diff = int(np.sum(~mag_diff_ok))
             if n_mag_diff > 0:
                 logger.info(
-                    "Removed %d sources with |mag_sci - mag_tpl| >= 1.0 mag from flux comparison",
+                    "Removed %d sources with |mag_sci - mag_tpl| >= 3.0 mag from flux comparison",
                     n_mag_diff,
                 )
             mag_img_r = mag_img_r[mag_diff_ok]
