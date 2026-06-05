@@ -360,14 +360,8 @@ class BackgroundSubtractor:
         filter_size = mesh_filter
 
         self.logger.info(
-            "Background mesh:\n  FWHM: %.2f px\n"
-            "  Mesh scale: %.2f\n"
-            "  Box size: %s\n"
-            "  Filter size: %d",
-            fwhm_pixels,
-            mesh_scale,
-            box_size,
-            filter_size,
+            "Background mesh: FWHM=%.2f px scale=%.1f box=%s filter=%d",
+            fwhm_pixels, mesh_scale, box_size, filter_size,
         )
 
         self._box_size_cache[shape] = (box_size, filter_size, fwhm_pixels)
@@ -1803,34 +1797,13 @@ class BackgroundSubtractor:
                     corrected_cutout = corrected_cutout + lift
                     bkg_surface_local = bkg_surface_local - lift
                     cutout_nonneg_lift = float(lift)
-                    self.logger.info(
-                        "Local background: adding a bias of +%.6g to the local cutout residual (and -%.6g to the local background surface) to enforce %s >= %.6g. "
-                        "Annulus_std=%.6g, annulus_k=%.3g.",
-                        lift,
-                        lift,
-                        floor_stat,
-                        cut_floor,
-                        float(annulus_std) if np.isfinite(annulus_std) else np.nan,
-                        float(ann_k) if np.isfinite(ann_k) else np.nan,
-                    )
-                    self.logger.info(
-                        "Local background: subtracted cutout %s=%.6g; raised cutout by %.6g so %s >= %.6g on %d pixels.",
-                        floor_stat,
-                        stat_val,
-                        lift,
-                        floor_stat,
-                        cut_floor,
-                        int(np.sum(good)),
+                    self.logger.debug(
+                        "Local background: lifted cutout by %.6g (%s >= %.6g on %d px)",
+                        lift, floor_stat, cut_floor, int(np.sum(good)),
                     )
         else:
             # Make it unambiguous in logs when the DC bias/lift is disabled.
-            try:
-                self.logger.info(
-                    "Local background: DC bias/lift disabled (background.local_nonnegative_target_offset=%r).",
-                    nn_enabled_cfg,
-                )
-            except Exception:
-                pass
+            self.logger.debug("Local background: DC bias/lift disabled")
         image_sub = image.copy()
         image_sub[y_min:y_max, x_min:x_max] = corrected_cutout
 
