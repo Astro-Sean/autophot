@@ -186,7 +186,14 @@ class ImageDistortionCorrector:
         if cache_dir:
             path = Path(cache_dir).expanduser()
         else:
-            path = Path.home() / ".autophot" / "scamp_gaia_cache"
+            # Default: store cache alongside reduced data so it travels with the dataset.
+            fits_dir = iy.get("fits_dir") if isinstance(iy, dict) else None
+            if fits_dir:
+                fits_path = Path(fits_dir)
+                reduced_dir = fits_path.parent / (fits_path.name + "_REDUCED")
+                path = reduced_dir / "scamp_gaia_cache"
+            else:
+                path = Path.home() / ".autophot" / "scamp_gaia_cache"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
