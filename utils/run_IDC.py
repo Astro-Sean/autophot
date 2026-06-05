@@ -1394,6 +1394,25 @@ NNW
             shutil.copy2(sci_catalog_path, sci_catalog_scamp_backup)
             shutil.copy2(ref_catalog_path, ref_catalog_scamp_backup)
 
+            # Pre-compute SWarp resampling methods so Phase 1b can use them.
+            # (Moved here from below so science-first GAIA SWarp has access.)
+            def _swarp_resampling_type(is_undersampled: bool, fwhm_pix: float) -> str:
+                if is_undersampled is None:
+                    is_undersampled = False
+                if fwhm_pix is None or not np.isfinite(fwhm_pix):
+                    self.logger.warning("Invalid FWHM (%s), defaulting to LANCZOS3", fwhm_pix)
+                    return "LANCZOS3"
+                if is_undersampled or fwhm_pix < 2.0:
+                    return "LANCZOS2"
+                return "LANCZOS3"
+
+            sci_resampling_method = _swarp_resampling_type(
+                sci_is_undersampled, fwhm_sci_pix
+            )
+            ref_resampling_method = _swarp_resampling_type(
+                ref_is_undersampled, fwhm_ref_pix
+            )
+
             # ------------------------------------------------------------------
             # Phase 1+2: Science-first GAIA astrometry (Option B)
             # ------------------------------------------------------------------
@@ -1723,30 +1742,6 @@ NNW
                 sparse_note,
                 0.3 * fwhm_ref_pix,
                 10 * fwhm_ref_pix,
-            )
-
-            # SWarp: resampling type from FWHM/undersampling
-            # Use LANCZOS3 for all resampling except undersampled data (< 2 px FWHM)
-            # where NEAREST preserves pixel values without interpolation blur
-            def _swarp_resampling_type(is_undersampled: bool, fwhm_pix: float) -> str:
-                # Defensive checks for None/NaN values
-                if is_undersampled is None:
-                    is_undersampled = False
-                if fwhm_pix is None or not np.isfinite(fwhm_pix):
-                    # Default to LANCZOS3 if FWHM is invalid
-                    self.logger.warning("Invalid FWHM (%s), defaulting to LANCZOS3", fwhm_pix)
-                    return "LANCZOS3"
-                if is_undersampled or fwhm_pix < 2.0:
-                    # NEAREST for undersampled data to avoid blurring
-                    return "LANCZOS2"
-                # LANCZOS3 for all well-sampled data
-                return "LANCZOS3"
-
-            sci_resampling_method = _swarp_resampling_type(
-                sci_is_undersampled, fwhm_sci_pix
-            )
-            ref_resampling_method = _swarp_resampling_type(
-                ref_is_undersampled, fwhm_ref_pix
             )
 
             # Allow YAML to override the automatic SWarp resampling choice for expert tuning.
