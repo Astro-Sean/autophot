@@ -1167,7 +1167,7 @@ class Zeropoint:
             ransac_legend_top_outside(ax, ncol=2)
             set_mag_axes_inverted_xy(ax)
 
-            ransac_savefig(fig, os.path.join(write_dir, f"Zeropoint_{base_name}.pdf"))
+            ransac_savefig(fig, os.path.join(write_dir, f"Zeropoint_{base_name}.png"))
             plt.close(fig)
 
             # Build joint inlier mask only from flux types that actually
@@ -1702,7 +1702,7 @@ class Zeropoint:
                 )
                 fig_hist.tight_layout()
                 os.makedirs(write_dir, exist_ok=True)
-                ransac_savefig(fig_hist, os.path.join(write_dir, f"Zeropoint_Hist_Combined_{base_name}.pdf"))
+                ransac_savefig(fig_hist, os.path.join(write_dir, f"Zeropoint_Hist_Combined_{base_name}.png"))
                 plt.close(fig_hist)
 
                 # Combine inliers only over flux types that actually had
@@ -1960,7 +1960,7 @@ class Zeropoint:
         else:
             write_dir = output_dir
         base_name = os.path.splitext(os.path.basename(fpath))[0] or "color_term"
-        plot_file = os.path.join(write_dir, f"Color_Term_{base_name}_piecewise.pdf")
+        plot_file = os.path.join(write_dir, f"Color_Term_{base_name}_piecewise.png")
         ransac_savefig(fig, plot_file)
         plt.close(fig)
         logger.info(f"fit_color_term: saved piecewise color term plot to {plot_file}")
@@ -2690,7 +2690,7 @@ class Zeropoint:
             fpath = self.input_yaml.get("fpath", "")
             base_name = os.path.splitext(os.path.basename(fpath))[0] or "color_term"
             write_dir = os.path.dirname(fpath) or "."
-            ransac_savefig(fig, os.path.join(write_dir, f"Color_Term_{base_name}.pdf"))
+            ransac_savefig(fig, os.path.join(write_dir, f"Color_Term_{base_name}.png"))
             plt.close(fig)
 
             return coefficients, coefficient_errors

@@ -270,7 +270,7 @@ class Find_FWHM:
             fpath = self.input_yaml["fpath"]
             write_dir = self.input_yaml["write_dir"]
             base = os.path.basename(fpath).split(".")[0]
-            png_out = os.path.join(write_dir, f"Segmentation_{base}.pdf")
+            png_out = os.path.join(write_dir, f"Segmentation_{base}.png")
             fig.savefig(png_out, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
 
@@ -612,7 +612,7 @@ class Find_FWHM:
                     fpath = self.input_yaml["fpath"]
                     write_dir = self.input_yaml["write_dir"]
                     base = os.path.basename(fpath).split(".")[0]
-                    png_out = os.path.join(write_dir, f"Linear_{base}.pdf")
+                    png_out = os.path.join(write_dir, f"Linear_{base}.png")
                     ransac_savefig(fig, png_out)
                 plt.close(fig)
             except Exception as _pe:

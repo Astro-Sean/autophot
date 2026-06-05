@@ -339,7 +339,7 @@ NNW
         self,
         image_path: str,
         catalog_path: str,
-        output_plot_path: str = "sextractor_sources.pdf",
+        output_plot_path: str = "sextractor_sources.png",
         cmap: str = "gray",
         figsize: Optional[tuple] = None,
         max_sources: int = 1000,
@@ -1676,7 +1676,7 @@ NNW
                     ref_image_path=str(ref_image_copy),
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
-                    output_plot_path=output_dir / f"matched_sources_{Path(sci_image_copy).stem}.pdf",
+                    output_plot_path=output_dir / f"matched_sources_{Path(sci_image_copy).stem}.png",
                     label_color="#FF0000",
                     label_fontsize=7,
                     circle_radius_sci=fwhm_sci_pix,
@@ -2875,7 +2875,7 @@ NNW
                     ref_image_path=str(ref_image_copy),
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
-                    output_plot_path=science_dir / f"matched_sources_{Path(sci_image_copy).stem}.pdf",
+                    output_plot_path=science_dir / f"matched_sources_{Path(sci_image_copy).stem}.png",
                     label_color="#FF0000",
                     label_fontsize=10,
                     circle_radius_sci=fwhm_sci_pix,
@@ -3668,7 +3668,7 @@ NNW
         ref_image_path: str,
         sci_cat_path: str,
         ref_cat_path: str,
-        output_plot_path: str = "matched_sources_side_by_side.pdf",
+        output_plot_path: str = "matched_sources_side_by_side.png",
         label_color: str = "#FF0000",
         label_fontsize: int = 8,
         figsize: Optional[tuple] = None,
@@ -4358,7 +4358,7 @@ NNW
             ransac_legend_top_outside(ax, ncol=2)
             ransac_grid(ax)
             set_mag_axes_inverted_xy(ax)
-            ransac_savefig(fig, str(Path(sci_cat_path).with_suffix(".pdf")).replace(".pdf", "_Mag_Fit.pdf"))
+            ransac_savefig(fig, str(Path(sci_cat_path).with_suffix(".png")).replace(".png", "_Mag_Fit.png"))
             plt.close(fig)
 
         if len(sci_cat_matched) > nmax:

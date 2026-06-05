@@ -2219,7 +2219,7 @@ class PSF:
                     epsf,
                     oversample=oversample,
                     save_path=os.path.join(
-                        write_dir, f"PSF_Image_{base}.pdf"
+                        write_dir, f"PSF_Image_{base}.png"
                     ),
                 )
 
@@ -2554,7 +2554,7 @@ class PSF:
         ax_right_3d.view_init(elev=35, azim=135)
 
         # Standardized PNG output.
-        psf_sources_png = os.path.join(write_dir, f"PSF_Sources_{base}.pdf")
+        psf_sources_png = os.path.join(write_dir, f"PSF_Sources_{base}.png")
         fig.savefig(
             psf_sources_png,
             bbox_inches="tight",
@@ -3911,8 +3911,8 @@ class PSF:
                 fpath = self.input_yaml["fpath"]
                 base = os.path.splitext(os.path.basename(fpath))[0]
                 write_dir = os.path.dirname(fpath)
-                old_path = os.path.join(write_dir, f"PSF_Target_{base}.pdf")
-                new_path = os.path.join(write_dir, f"PSF_Target_{base}_inverted.pdf")
+                old_path = os.path.join(write_dir, f"PSF_Target_{base}.png")
+                new_path = os.path.join(write_dir, f"PSF_Target_{base}_inverted.png")
                 if os.path.exists(old_path):
                     os.rename(old_path, new_path)
                     # log.info(f"Saved inverted PSF fit plot: {new_path}")
@@ -4626,7 +4626,7 @@ class PSF:
                 _ax_R.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
             ax1.legend(loc="upper left")
             save_name_png = (
-                f"PSF_Target_{base}.pdf" if plotTarget else f"PSF_Subtractions_{base}.pdf"
+                f"PSF_Target_{base}.png" if plotTarget else f"PSF_Subtractions_{base}.png"
             )
             plt.savefig(
                 os.path.join(write_dir, save_name_png),
@@ -4757,7 +4757,7 @@ class PSF:
         writedir = writedir or cfg.get("write_dir", ".")
         os.makedirs(writedir, exist_ok=True)
         stem = os.path.splitext(os.path.basename(fpath))[0]
-        outpath_png = os.path.join(writedir, f"PSF_MCMC_Corner_{stem}.pdf")
+        outpath_png = os.path.join(writedir, f"PSF_MCMC_Corner_{stem}.png")
 
         if corner is None:
             log.warning(

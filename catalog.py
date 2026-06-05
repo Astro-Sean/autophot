@@ -2322,7 +2322,7 @@ class Catalog:
             set_mag_axes_inverted_xy(ax1)
             ransac_legend_top_outside(ax1, ncol=2)
             ransac_grid(ax1)
-            save_path = os.path.join(write_dir, f"Saturation_{base_name}.pdf")
+            save_path = os.path.join(write_dir, f"Saturation_{base_name}.png")
             ransac_savefig(fig, save_path)
             plt.close(fig)
 
@@ -2958,7 +2958,7 @@ class Catalog:
             pos = ax_right.get_position()
             ax_right.set_position([pos.x0 + 0.05, pos.y0, pos.width, pos.height])
             output_path = os.path.join(
-                write_dir, f"Zeropoint_Sources_{base}.pdf"
+                write_dir, f"Zeropoint_Sources_{base}.png"
             )
             fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close()

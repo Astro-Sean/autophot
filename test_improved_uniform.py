@@ -162,9 +162,9 @@ def visualize_selection(all_positions, selected_positions, image_shape, mode):
                 ax2.axhline(y_line, color='gray', alpha=0.2, linestyle='--')
     
     plt.tight_layout()
-    plt.savefig(f'test_improved_uniform_{mode}.pdf', dpi=150, bbox_inches='tight')
+    plt.savefig(f'test_improved_uniform_{mode}.png', dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"Saved plot: test_improved_uniform_{mode}.pdf")
+    print(f"Saved plot: test_improved_uniform_{mode}.png")
 
 # Test with simulated one-sided data
 if __name__ == "__main__":

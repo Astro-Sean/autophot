@@ -4862,7 +4862,7 @@ def run_photometry():
                     if bool(phot_cfg.get("lpi_save_diagnostic_plot", True)):
                         base0 = os.path.splitext(os.path.basename(fpath))[0]
                         write_dir0 = os.path.dirname(fpath)
-                        save_png = os.path.join(write_dir0, f"LPI_Target_{base0}.pdf")
+                        save_png = os.path.join(write_dir0, f"LPI_Target_{base0}.png")
                         save_lpi_diagnostic_plot(
                             image=diff_image_for_plot if PreformSubtraction else image,
                             x0=float(bg_target_x_pix),

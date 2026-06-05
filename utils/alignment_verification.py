@@ -354,7 +354,7 @@ class AlignmentVerifier:
                 plt.ylabel('Y (pixels)')
         
         plt.tight_layout()
-        plt.savefig(output_dir / 'alignment_verification.pdf', dpi=150, bbox_inches='tight')
+        plt.savefig(output_dir / 'alignment_verification.png', dpi=150, bbox_inches='tight')
         plt.close()
         
         self.logger.info(f"Alignment verification plots saved to {output_dir}")

@@ -1651,7 +1651,7 @@ def snr(maxPixel, noiseBkg):
 
 def snr_err(snr_value):
     """
-     Error associated with signal to noise ratio (S/N). Equation  taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.pdf>`_. Whe can associate the error on the instrumental magnitude of a source as:
+     Error associated with signal to noise ratio (S/N). Equation  taken from `here <https://www.ucolick.org/~bolte/AY257/s_n.png>`_. Whe can associate the error on the instrumental magnitude of a source as:
 
 
     .. math ::
