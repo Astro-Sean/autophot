@@ -173,6 +173,10 @@ class ImageDistortionCorrector:
         self._temp_dirs: set[str] = set()
         self.cleanup_intermediate = True
         self.input_yaml = input_yaml
+        # Allow user to keep SCAMP logs for debugging
+        iy = getattr(self, "input_yaml", None) or {}
+        ts = iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
+        self.preserve_scamp_logs = bool(ts.get("preserve_scamp_logs", False))
         # Initialize SExtractorWrapper for alignment (same as main pipeline)
         self.sextractor = SExtractorWrapper(input_yaml)
 
@@ -304,10 +308,11 @@ class ImageDistortionCorrector:
         meta_path = cache_dir / f"{cache_key}_gaia_dr3.json"
         try:
             with fits.open(str(temp_path)) as hdul:
-                new_hdul = fits.HDUList([hdu.copy() for hdu in hdul])
-                for hdu in new_hdul:
+                new_hdul = fits.HDUList()
+                for hdu in hdul:
                     if hasattr(hdu, "columns"):
-                        cols = [c.name for c in hdu.columns]
+                        # Rebuild table so we can safely add columns
+                        tbl = Table(hdu.data)
                         rename_map = {
                             "X_WORLD": "XWIN_WORLD",
                             "Y_WORLD": "YWIN_WORLD",
@@ -316,22 +321,24 @@ class ImageDistortionCorrector:
                         }
                         changed = False
                         for old_name, new_name in rename_map.items():
-                            if old_name in cols and new_name not in cols:
-                                idx = cols.index(old_name)
-                                hdu.columns[idx].name = new_name
-                                hdu.header[f"TTYPE{idx + 1}"] = new_name
+                            if old_name in tbl.colnames and new_name not in tbl.colnames:
+                                tbl.rename_column(old_name, new_name)
                                 changed = True
                         # Add dummy ERRTHETA_WORLD if missing (ASTREFERR_KEYS expects it)
-                        if "ERRA_WORLD" in cols and "ERRB_WORLD" in cols and "ERRTHETA_WORLD" not in cols:
-                            theta_col = fits.Column(
-                                name="ERRTHETA_WORLD",
-                                format="1E",
-                                array=np.zeros(len(hdu.data), dtype=np.float32),
-                            )
-                            hdu.columns.add_col(theta_col)
-                            hdu.header["COMMENT"] = "Added dummy ERRTHETA_WORLD for SCAMP FILE mode"
+                        if (
+                            "ERRA_WORLD" in tbl.colnames
+                            and "ERRB_WORLD" in tbl.colnames
+                            and "ERRTHETA_WORLD" not in tbl.colnames
+                        ):
+                            tbl["ERRTHETA_WORLD"] = np.zeros(len(tbl), dtype=np.float32)
+                            changed = True
                         if changed:
-                            hdu.header["COMMENT"] = "Renamed GAIA columns for SCAMP FILE mode"
+                            tbl.meta["COMMENT"] = "Renamed GAIA columns for SCAMP FILE mode"
+                        new_hdu = fits.table_to_hdu(tbl)
+                        new_hdu.header["EXTNAME"] = hdu.name
+                        new_hdul.append(new_hdu)
+                    else:
+                        new_hdul.append(hdu.copy())
                 new_hdul.writeto(str(cat_path), overwrite=True)
 
             meta = {
@@ -3659,9 +3666,11 @@ NNW
 
         def _clean_scamp_outputs():
             if output_path:
-                for p in [config_file, xml_file, log_file] + list(
-                    Path(output_path).glob("*.head")
-                ):
+                # When preserve_scamp_logs is True, keep the log file for debugging
+                to_remove = [config_file, xml_file]
+                if not getattr(self, "preserve_scamp_logs", False):
+                    to_remove.append(log_file)
+                for p in to_remove + list(Path(output_path).glob("*.head")):
                     try:
                         Path(p).unlink(missing_ok=True)
                     except OSError as e:
