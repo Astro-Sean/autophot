@@ -1396,6 +1396,9 @@ NNW
 
             # Pre-compute SWarp resampling methods so Phase 1b can use them.
             # (Moved here from below so science-first GAIA SWarp has access.)
+            sci_is_undersampled = fwhm_sci_pix < 2.0
+            ref_is_undersampled = fwhm_ref_pix < 2.0
+
             def _swarp_resampling_type(is_undersampled: bool, fwhm_pix: float) -> str:
                 if is_undersampled is None:
                     is_undersampled = False
@@ -1630,8 +1633,6 @@ NNW
             )
 
 
-            sci_is_undersampled = fwhm_sci_pix < 2.0
-            ref_is_undersampled = fwhm_ref_pix < 2.0
             self.logger.info(
                 "Undersampling flags: science = %s, reference = %s",
                 sci_is_undersampled,
