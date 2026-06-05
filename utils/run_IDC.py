@@ -222,19 +222,30 @@ class ImageDistortionCorrector:
         days = ts.get("gaia_cache_ttl_days", 30)
         return float(days) * 86400.0
 
-    @staticmethod
-    def _compute_gaia_cache_key(catalog_path: str) -> str:
-        """Compute a cache key from an LDAC catalog's sky footprint.
+    def _compute_gaia_cache_key(self, catalog_path: str) -> str:
+        """Compute a cache key from the target coordinates in input_yaml.
 
-        Reads world coordinates from the catalog, computes the median
-        center and approximate search radius, and returns an MD5 hash.
+        All images of the same field share the same target RA/Dec, so they
+        all get the same cache key.  Falls back to the catalog's median world
+        coordinates only when target_ra/target_dec are not available.
         """
         cat_path = Path(catalog_path)
-        if not cat_path.exists():
-            return hashlib.md5(cat_path.name.encode()).hexdigest()
         try:
+            # Prefer target coordinates from input_yaml — constant per field
+            iy = getattr(self, "input_yaml", None) or {}
+            target_ra = iy.get("target_ra")
+            target_dec = iy.get("target_dec")
+
+            if target_ra is not None and target_dec is not None:
+                ra_r = round(float(target_ra), 2)
+                dec_r = round(float(target_dec), 2)
+                key_str = f"{ra_r:.2f}_{dec_r:.2f}_30.0"
+                return hashlib.md5(key_str.encode()).hexdigest()
+
+            # Fallback: median world coordinates from the catalog itself
+            if not cat_path.exists():
+                return hashlib.md5(cat_path.name.encode()).hexdigest()
             with fits.open(str(cat_path)) as hdul:
-                # Find the HDU containing source data (LDAC_OBJECTS or any BinTable with world coords)
                 data_hdu = None
                 for hdu in hdul:
                     if hasattr(hdu, "columns"):
@@ -249,33 +260,19 @@ class ImageDistortionCorrector:
                     return hashlib.md5(cat_path.name.encode()).hexdigest()
 
                 cols = [c.name for c in data_hdu.columns]
-                if "XWIN_WORLD" in cols:
-                    ra = data_hdu.data["XWIN_WORLD"]
-                    dec = data_hdu.data["YWIN_WORLD"]
-                else:
-                    ra = data_hdu.data["ALPHA_J2000"]
-                    dec = data_hdu.data["DELTA_J2000"]
-
+                ra = data_hdu.data["XWIN_WORLD" if "XWIN_WORLD" in cols else "ALPHA_J2000"]
+                dec = data_hdu.data["YWIN_WORLD" if "YWIN_WORLD" in cols else "DELTA_J2000"]
                 ra = np.asarray(ra, dtype=float)
                 dec = np.asarray(dec, dtype=float)
                 valid = np.isfinite(ra) & np.isfinite(dec)
                 if not valid.any():
                     return hashlib.md5(cat_path.name.encode()).hexdigest()
 
-                ra = ra[valid]
-                dec = dec[valid]
-                center_ra = float(np.median(ra))
-                center_dec = float(np.median(dec))
-
-                # Round coarsely so all images of the same field share one cache entry.
-                # 0.01 deg ≈ 36 arcsec — fine enough to avoid field collisions but coarse
-                # enough that small catalog-to-catalog shifts don't create unique keys.
-                # Fixed 30 arcmin radius: GAIA-DR3 reference catalogs for the same field
-                # all cover roughly the same sky area regardless of detection footprint.
+                center_ra = float(np.median(ra[valid]))
+                center_dec = float(np.median(dec[valid]))
                 ra_r = round(center_ra, 2)
                 dec_r = round(center_dec, 2)
-                radius_r = 30.0  # arcmin
-                key_str = f"{ra_r:.2f}_{dec_r:.2f}_{radius_r:.1f}"
+                key_str = f"{ra_r:.2f}_{dec_r:.2f}_30.0"
                 return hashlib.md5(key_str.encode()).hexdigest()
         except Exception:
             return hashlib.md5(cat_path.name.encode()).hexdigest()
