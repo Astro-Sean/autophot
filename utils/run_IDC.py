@@ -197,7 +197,21 @@ class ImageDistortionCorrector:
                 reduced_dir = fits_path.parent / (fits_path.name + "_REDUCED")
                 path = reduced_dir / "scamp_gaia_cache"
             else:
-                path = Path.home() / ".autophot" / "scamp_gaia_cache"
+                # Try to infer from current working directory if it ends with _REDUCED
+                cwd = Path.cwd()
+                if cwd.name.endswith("_REDUCED"):
+                    path = cwd / "scamp_gaia_cache"
+                else:
+                    # Try fpath (output directory) if available
+                    fpath = iy.get("fpath") if isinstance(iy, dict) else None
+                    if fpath:
+                        fpath_dir = Path(fpath).parent
+                        if fpath_dir.name.endswith("_REDUCED"):
+                            path = fpath_dir / "scamp_gaia_cache"
+                        else:
+                            path = Path.home() / ".autophot" / "scamp_gaia_cache"
+                    else:
+                        path = Path.home() / ".autophot" / "scamp_gaia_cache"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
