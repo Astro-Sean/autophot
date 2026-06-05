@@ -117,8 +117,7 @@ def _log_scamp_vizier_failure_hint(
     ):
         return
     logger.warning(
-        "SCAMP astrometric catalog fetch failed (Vizier/network). "
-        "Raise `wcs.scamp_ref_timeout` (AutoPHoT default 60 s; SCAMP built-in is 10 s) "
+        "SCAMP astrometric catalog fetch failed (Vizier/network). Raise `wcs.scamp_ref_timeout` (AutoPHoT default 60 s; SCAMP built-in is 10 s) "
         "or set `wcs.scamp_ref_server` to another mirror (default is vizier.cfa.harvard.edu; "
         "alternatives include vizier.unistra.fr, vizier.ast.cam.ac.uk). SCAMP log: %s",
         scamp_log_fpath,
@@ -1817,8 +1816,7 @@ class WCSSolver:
                     logger.debug("SCAMP WCS passed invertibility test at image center")
             except Exception as inv_exc:
                 logger.warning(
-                    "SCAMP trial '%s' distortion model failed invertibility test: %s. "
-                    "Rejecting extreme distortion solution.",
+                    "SCAMP trial '%s' distortion model failed invertibility test: %s. Rejecting extreme distortion solution.",
                     best_trial_label, inv_exc
                 )
                 return np.nan  # Reject this SCAMP solution, will fall back to solve-field SIP
@@ -1898,8 +1896,7 @@ class WCSSolver:
         )
         if not solvefield_exe:
             logger.warning(
-                "Astrometry.net 'solve-field' executable not found; skipping solve-field WCS step. "
-                "To install with conda:\n"
+                "Astrometry.net 'solve-field' executable not found; skipping solve-field WCS step. To install with conda:\n"
                 "  conda install -c conda-forge astrometry\n"
                 "Then ensure 'solve-field' is on PATH or set wcs.solve_field_exe_loc in your YAML."
             )
@@ -2187,8 +2184,7 @@ class WCSSolver:
                 )
             else:
                 logger.info(
-                    "solve-field: omitting --crpix-center (solver reference pixel; "
-                    "often closer to instrument WCS - set wcs.solve_field_crpix_center: true for legacy)"
+                    "solve-field: omitting --crpix-center (solver reference pixel; often closer to instrument WCS - set wcs.solve_field_crpix_center: true for legacy)"
                 )
             # Tweak order(s) for solve-field. Can be a single int or a list.
             # Example YAML:
@@ -2522,14 +2518,12 @@ class WCSSolver:
                         if model_switch and not clear_gain:
                             if redo_requested:
                                 logger.info(
-                                    "redo_wcs=True: model-switch safeguard disabled "
-                                    "(TPV->TAN-SIP check); continuing with solved/refined WCS."
+                                    "redo_wcs=True: model-switch safeguard disabled (TPV->TAN-SIP check); continuing with solved/refined WCS."
                                 )
                             else:
                                 force_preserve_input_distortion = True
                                 logger.warning(
-                                    "WCS model switch TPV->TAN-SIP without clear gain "
-                                    "(input med/p95=%.3f/%.3f, solved med/p95=%.3f/%.3f arcsec): "
+                                    "WCS model switch TPV->TAN-SIP without clear gain (input med/p95=%.3f/%.3f, solved med/p95=%.3f/%.3f arcsec): "
                                     "preserving input distortion model and updating linear terms only.",
                                     float(med_in),
                                     float(p95_in),
@@ -2553,8 +2547,7 @@ class WCSSolver:
                         if keep_if_not_better and solved_not_better:
                             keep_input_wcs_full = True
                             logger.warning(
-                                "Solved WCS is not better than input on matched points "
-                                "(input med/p95=%.3f/%.3f, solved med/p95=%.3f/%.3f arcsec): "
+                                "Solved WCS is not better than input on matched points (input med/p95=%.3f/%.3f, solved med/p95=%.3f/%.3f arcsec): "
                                 "keeping original full input WCS for this frame.",
                                 float(med_in),
                                 float(p95_in),
@@ -2576,8 +2569,7 @@ class WCSSolver:
                     dra_arcsec = (crval1_sv - crval1_in) * 3600.0
                     ddec_arcsec = (crval2_sv - crval2_in) * 3600.0
                     logger.info(
-                        "WCS header delta:\n"
-                        "\tCTYPE: (%s, %s) -> (%s, %s)\n"
+                        "WCS header delta:\n\tCTYPE: (%s, %s) -> (%s, %s)\n"
                         "\tdCRPIX=(%g, %g) px\n"
                         "\tdCRVAL=(%g, %g) arcsec",
                         ctype1_in,

@@ -199,8 +199,7 @@ class Catalog:
                         membership_matches.append(str(key))
                 if len(membership_matches) > 1:
                     logger.warning(
-                        "catalog.use_catalog mapping is ambiguous for filter '%s': matched keys=%s. "
-                        "Using precedence: exact key > first membership key > default.",
+                        "catalog.use_catalog mapping is ambiguous for filter '%s': matched keys=%s. Using precedence: exact key > first membership key > default.",
                         use_filter,
                         membership_matches,
                     )
@@ -365,8 +364,7 @@ class Catalog:
 
         try:
             logger.info(
-                "Querying Gaia DR3 (synthetic photometry, SQL TOP %d -> target %d "
-                "sources; paced archive: pause %.2fs before/after ADQL)...",
+                "Querying Gaia DR3 (synthetic photometry, SQL TOP %d -> target %d sources; paced archive: pause %.2fs before/after ADQL)...",
                 sql_top,
                 max_sources,
                 max(query_pause_b, query_pause_a),
@@ -384,8 +382,7 @@ class Catalog:
 
             if sort_by_distance and not results.empty:
                 logger.info(
-                    "Sorting %d rows by on-sky distance to target (Gaia ADQL "
-                    "does not support ORDER BY distance); keeping nearest %d.",
+                    "Sorting %d rows by on-sky distance to target (Gaia ADQL does not support ORDER BY distance); keeping nearest %d.",
                     len(results),
                     max_sources,
                 )
@@ -430,8 +427,7 @@ class Catalog:
                         phot_systems.append(sys_name)
 
             logger.info(
-                "Downloading Gaia XP spectra and synthetic photometry with GaiaXPy "
-                "(batched: size=%d, inter-batch pause=%.2fs)...",
+                "Downloading Gaia XP spectra and synthetic photometry with GaiaXPy (batched: size=%d, inter-batch pause=%.2fs)...",
                 xp_batch_size if xp_batch_size > 0 else len(source_ids),
                 xp_batch_pause,
             )
@@ -901,8 +897,7 @@ class Catalog:
                         f"Downloading reference sources from {catalogName.upper()}"
                     )
                     logger.warning(
-                        "REFCAT requires MAST CasJobs credentials. Set `default_input.catalog.MASTcasjobs_wsid` "
-                        "and `default_input.catalog.MASTcasjobs_pwd` (or provide them via environment/local overrides)."
+                        "REFCAT requires MAST CasJobs credentials. Set `default_input.catalog.MASTcasjobs_wsid` and `default_input.catalog.MASTcasjobs_pwd` (or provide them via environment/local overrides)."
                     )
                     # Normalise types: many auth backends are strict about
                     # receiving strings, so cast to str (and strip) here.
@@ -1329,8 +1324,7 @@ class Catalog:
                     valid_indices = distance < max_distance_threshold
                     if not np.any(valid_indices):
                         logger.warning(
-                            "Catalog WCS pre-filter removed all sources (sky vs ref); "
-                            "relaxing filter and keeping full list for pixel conversion."
+                            "Catalog WCS pre-filter removed all sources (sky vs ref); relaxing filter and keeping full list for pixel conversion."
                         )
                         valid_indices = np.ones(len(ra_values), dtype=bool)
 

@@ -387,8 +387,7 @@ class SExtractorWrapper:
         if not np.isfinite(fwhm_value) or fwhm_value <= 0.0:
             fallback = float(self.config.get("fwhm_fallback_pixels", 3.0))
             logger.warning(
-                "Robust FWHM estimate is non-positive or invalid (%.3f); "
-                "falling back to %.2f pixels.",
+                "Robust FWHM estimate is non-positive or invalid (%.3f); falling back to %.2f pixels.",
                 fwhm_value,
                 fallback,
             )
@@ -715,8 +714,7 @@ class SExtractorWrapper:
         # something to work with.
         if len(sources) == 0 and n0 > 0:
             logger.warning(
-                "All sources removed by filtering pipeline; returning unfiltered "
-                "catalogue prior to FWHM cut."
+                "All sources removed by filtering pipeline; returning unfiltered catalogue prior to FWHM cut."
             )
             sources = sources_before_fwhm
 
@@ -846,8 +844,7 @@ class SExtractorWrapper:
             )
         if crowded:
             logger.info(
-                "Using SExtractor crowded-field parameters (forcing BACKPHOTO_TYPE=GLOBAL, "
-                "tighter deblending, smaller back mesh)."
+                "Using SExtractor crowded-field parameters (forcing BACKPHOTO_TYPE=GLOBAL, tighter deblending, smaller back mesh)."
             )
         fits_path = Path(fits_path)
         if not fits_path.exists():
@@ -1236,8 +1233,7 @@ class SExtractorWrapper:
                 sources.columns = newcols
             else:
                 logger.warning(
-                    "SExtractor output has %d columns but expected %d; "
-                    "skipping column rename to avoid data corruption.",
+                    "SExtractor output has %d columns but expected %d; skipping column rename to avoid data corruption.",
                     len(sources.columns),
                     len(newcols),
                 )
@@ -1268,8 +1264,7 @@ class SExtractorWrapper:
                 bad_region_mask = None
             else:
                 logger.info(
-                    "photometry.sextractor_reject_constant_regions=False: skipping "
-                    "constant-region source rejection"
+                    "photometry.sextractor_reject_constant_regions=False: skipping constant-region source rejection"
                 )
 
             sources = self.filter_sextractor_sources(
@@ -1299,8 +1294,7 @@ class SExtractorWrapper:
             # Clamp to configured bounds (and ensure >= 1).
             scale = clamp_scale_from_config(self.config, raw_scale)  # returns int per annotation
             logger.info(
-                "Found %d point sources, robust FWHM %.2f px; scale = %.1f "
-                "(FWHM x %.2f from source_detection / config)",
+                "Found %d point sources, robust FWHM %.2f px; scale = %.1f (FWHM x %.2f from source_detection / config)",
                 final_count,
                 fwhm,
                 scale,

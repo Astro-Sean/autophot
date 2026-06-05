@@ -473,8 +473,7 @@ class GaiaCurveCatalogBuilder:
         )
         if sort_by_distance and not gaia.empty:
             self.logger.info(
-                "Gaia TAP does not support ORDER BY sky distance; "
-                "fetched TOP %d rows, sorting in Python to nearest %d ...",
+                "Gaia TAP does not support ORDER BY sky distance; fetched TOP %d rows, sorting in Python to nearest %d ...",
                 sql_top,
                 max_sources,
             )
@@ -494,8 +493,7 @@ class GaiaCurveCatalogBuilder:
         source_ids = [s for s in gaia["_sid_key"].tolist() if s]
         if len(source_ids) != len(gaia):
             self.logger.warning(
-                "After formatting, %d / %d Gaia rows have empty source_id (skipped "
-                "for GaiaXPy).",
+                "After formatting, %d / %d Gaia rows have empty source_id (skipped for GaiaXPy).",
                 len(gaia) - len(source_ids),
                 len(gaia),
             )
@@ -506,8 +504,7 @@ class GaiaCurveCatalogBuilder:
         )
         n_batches = max(1, (len(source_ids) + eff_bs - 1) // eff_bs) if source_ids else 0
         self.logger.info(
-            "Calibrating Gaia XP spectra for %d sources (%d batch(es), "
-            "batch_size=%s, inter_batch_pause=%.2fs) ...",
+            "Calibrating Gaia XP spectra for %d sources (%d batch(es), batch_size=%s, inter_batch_pause=%.2fs) ...",
             len(source_ids),
             n_batches,
             gaia_xp_batch_size if gaia_xp_batch_size > 0 else "all",
@@ -528,8 +525,7 @@ class GaiaCurveCatalogBuilder:
             )
         elif not spectra_df.empty:
             self.logger.warning(
-                "GaiaXPy did not return a separate wavelength sampling array; "
-                "expecting wavelength columns inside each row. If the catalog is "
+                "GaiaXPy did not return a separate wavelength sampling array; expecting wavelength columns inside each row. If the catalog is "
                 "empty, update autophot_gaia_curves or inspect calibrate() output."
             )
 
@@ -608,8 +604,7 @@ class GaiaCurveCatalogBuilder:
             out_df = pd.DataFrame(columns=cols)
             if not spectra_df.empty:
                 self.logger.warning(
-                    "Gaia curve-map catalog has 0 usable rows after band "
-                    "integration (%d calibrated sources skipped). "
+                    "Gaia curve-map catalog has 0 usable rows after band integration (%d calibrated sources skipped). "
                     "spectra_df columns=%s; xp_sampling_nm=%s. "
                     "Check XP flux column names, wavelength grid, and filter overlap.",
                     len(spectra_df),
@@ -640,8 +635,7 @@ class GaiaCurveCatalogBuilder:
                     bad_bands.append(f"{b} (0/{n} finite)")
             if len(bad_bands) == len(list(loaded_curves.keys())):
                 self.logger.warning(
-                    "Gaia curve-map catalog build produced %d row(s) but no finite "
-                    "synthetic magnitudes for any requested band(s): %s. "
+                    "Gaia curve-map catalog build produced %d row(s) but no finite synthetic magnitudes for any requested band(s): %s. "
                     "Likely causes: (1) curve wavelength units misinterpreted (A vs nm), "
                     "(2) no overlap with Gaia XP spectra (~330-1050 nm), "
                     "(3) GaiaXPy output format changed (flux column names).",

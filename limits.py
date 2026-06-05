@@ -722,8 +722,7 @@ class Limits:
             if current_half < min_half_needed:
                 scale_used = max(base_scale, min_half_needed - location_fwhm_mult_pre * fwhm_pre)
                 logger.info(
-                    "Auto-increasing scale from %.1f to %.1f px to fit sky annulus "
-                    "(need half=%.1f, had half=%.1f)",
+                    "Auto-increasing scale from %.1f to %.1f px to fit sky annulus (need half=%.1f, had half=%.1f)",
                     base_scale, scale_used, min_half_needed, current_half,
                 )
 
@@ -773,8 +772,7 @@ class Limits:
             # Target is at the true centre returned by get_cutout (accounts for partial cutouts)
             H, W = cutout.shape
             logger.info(
-                "Cutout extracted: shape=(%d, %d), true_target_centre=(%.2f, %.2f), "
-                "geometric_centre=(%.2f, %.2f), offset=(%.2f, %.2f px)",
+                "Cutout extracted: shape=(%d, %d), true_target_centre=(%.2f, %.2f), geometric_centre=(%.2f, %.2f), offset=(%.2f, %.2f px)",
                 H, W,
                 float(cutout_cx), float(cutout_cy),
                 float((W - 1) / 2.0), float((H - 1) / 2.0),
@@ -797,8 +795,7 @@ class Limits:
             local_input_yaml["exposure_time"] = _exp_canon
             local_input_yaml["gain"] = _gain_canon
             logger.info(
-                "Limiting magnitude: using exposure_time=%.5g s, gain=%.5g e/ADU for "
-                "aperture photometry and injection flux calibration",
+                "Limiting magnitude: using exposure_time=%.5g s, gain=%.5g e/ADU for aperture photometry and injection flux calibration",
                 _exp_canon,
                 _gain_canon,
             )
@@ -1143,8 +1140,7 @@ class Limits:
                         if ratio > _var_ratio_thr:
                             n_drop_var += 1
                             logger.debug(
-                                "Site (%.1f,%.1f) rejected: var_ap/var_ref=%.2f > %.2f "
-                                "(elevated pixel scatter — likely star-subtraction residual).",
+                                "Site (%.1f,%.1f) rejected: var_ap/var_ref=%.2f > %.2f (elevated pixel scatter — likely star-subtraction residual).",
                                 x, y, ratio, _var_ratio_thr,
                             )
                             continue
@@ -1155,8 +1151,7 @@ class Limits:
                         if bias > _mean_sigma_thr:
                             n_drop_mean += 1
                             logger.debug(
-                                "Site (%.1f,%.1f) rejected: |mean_ap - mean_annulus|/sigma=%.2f > %.2f "
-                                "(significant local mean bias — likely star-subtraction pedestal).",
+                                "Site (%.1f,%.1f) rejected: |mean_ap - mean_annulus|/sigma=%.2f > %.2f (significant local mean bias — likely star-subtraction pedestal).",
                                 x, y, bias, _mean_sigma_thr,
                             )
                             continue
@@ -1166,8 +1161,7 @@ class Limits:
                 n_drop = n_drop_var + n_drop_mean
                 if n_drop > 0:
                     logger.info(
-                        "Pixel-statistics filter: dropped %d/%d sites "
-                        "(var_test=%d, mean_test=%d; thresholds: var_ratio=%.2g, mean_sigma=%.2g).",
+                        "Pixel-statistics filter: dropped %d/%d sites (var_test=%d, mean_test=%d; thresholds: var_ratio=%.2g, mean_sigma=%.2g).",
                         n_drop, len(df), n_drop_var, n_drop_mean,
                         _var_ratio_thr, _mean_sigma_thr,
                     )
@@ -1271,14 +1265,8 @@ class Limits:
             # plus a PSF-wing buffer so transient flux cannot bias the injected recovery.
             target_exclusion_r = 2.0 * aperture_radius_local + fwhm
             logger.info(
-                "Target exclusion zone: r=%.1f px (2*ap_r=%.1f + fwhm=%.1f)",
-                target_exclusion_r, 2.0 * aperture_radius_local, fwhm
-            )
-            logger.info(
-                "Injection photometry config: aperture_r=%.2f px, annulus=[%.2f, %.2f] px "
-                "(gap=%.2f FWHM, width=%.2f FWHM) - consistent with target measurement",
-                aperture_radius_local, annulus_in_local, annulus_out_local,
-                gap_fwhm, width_fwhm
+                "Injection config: exclusion_r=%.1f px, aperture_r=%.2f px, annulus=[%.1f, %.1f] px",
+                target_exclusion_r, aperture_radius_local, annulus_in_local, annulus_out_local
             )
 
             # Define injection radii early (needed for initial guess)
@@ -1318,10 +1306,9 @@ class Limits:
                 new_scale = max(base_scale, needed_scale, 10.0)  # minimum 10px scale
                 
                 logger.info(
-                    "Cutout size update: current=%dx%d (half=%.1f), needed=%dx%d (half=%.1f), "
-                    "scale: %.1f -> %.1f",
-                    current_cutout_size, current_cutout_size, current_half_size,
-                    min_cutout_size, min_cutout_size, min_half_size,
+                    "Cutout enlarged: %dx%d -> %dx%d px (scale %.1f -> %.1f)",
+                    current_cutout_size, current_cutout_size,
+                    min_cutout_size, min_cutout_size,
                     base_scale, new_scale
                 )
                 
@@ -1329,9 +1316,7 @@ class Limits:
                 scale_used = new_scale
             else:
                 logger.info(
-                    "Cutout size sufficient: %dx%d (half=%.1f) >= needed %dx%d (half=%.1f)",
-                    current_cutout_size, current_cutout_size, current_half_size,
-                    min_cutout_size, min_cutout_size, min_half_size
+                    "Cutout size OK: %dx%d px", current_cutout_size, current_cutout_size
                 )
 
             # Data-driven initial guess from instrumental magnitudes measured
@@ -1385,8 +1370,7 @@ class Limits:
                         if np.isfinite(flux_guess) and flux_guess > 0:
                             initialGuess = float(mag(flux_guess))
                             logger.info(
-                                "Injected limiting magnitude: initial guess from %.1f*sigma*sqrt(Npix) = %.2f "
-                                "(sigma=%.3g, Npix=%.1f, N=%d)",
+                                "Injected limiting magnitude: initial guess from %.1f*sigma*sqrt(Npix) = %.2f (sigma=%.3g, Npix=%.1f, N=%d)",
                                 float(guess_k),
                                 float(initialGuess),
                                 float(sigma_med),
@@ -1462,8 +1446,7 @@ class Limits:
                 rel_diff = abs(counts_ref - counts_ref_from_flux) / counts_ref_from_flux
                 if np.isfinite(rel_diff) and rel_diff > 0.02:
                     logger.warning(
-                        "PSF injection calibration mismatch: counts_ref=%.6g, flux_ref*exp=%.6g "
-                        "(rel_diff=%.2f%%). Using flux_ref*exp for consistency.",
+                        "PSF injection calibration mismatch: counts_ref=%.6g, flux_ref*exp=%.6g (rel_diff=%.2f%%). Using flux_ref*exp for consistency.",
                         float(counts_ref),
                         float(counts_ref_from_flux),
                         100.0 * float(rel_diff),
@@ -1479,8 +1462,7 @@ class Limits:
             mag_at_unit_flux = float(mag(float(F_ref)))
             f_roundtrip = float(flux_for_mag(mag_at_unit_flux))
             logger.info(
-                "PSF injection calibration: counts_ref=%.6g (e- in aperture @ model flux=1), "
-                "mag(F=1)=%.5f, flux_for_mag(mag(F=1))=%.6f (expect 1.0), "
+                "PSF injection calibration: counts_ref=%.6g (e- in aperture @ model flux=1), mag(F=1)=%.5f, flux_for_mag(mag(F=1))=%.6f (expect 1.0), "
                 "flux_for_mag(initialGuess)=%.6g",
                 float(counts_ref),
                 mag_at_unit_flux,
@@ -1489,8 +1471,7 @@ class Limits:
             )
             if np.isfinite(f_roundtrip) and abs(f_roundtrip - 1.0) > 0.02:
                 logger.warning(
-                    "PSF flux calibration round-trip differs from 1.0 (got %.6f). "
-                    "Check exposure_time, oversampling, and that the science cutout "
+                    "PSF flux calibration round-trip differs from 1.0 (got %.6f). Check exposure_time, oversampling, and that the science cutout "
                     "uses the same ADU/gain convention as Aperture.measure.",
                     f_roundtrip,
                 )
@@ -1504,8 +1485,7 @@ class Limits:
             # "AUTO" is resolved in main.py to AP vs PSF from do_aperture_ONLY; if unset, prefer PSF.
             if recovery_method in {"AUTO", "DEFAULT", "MATCH_TRANSIENT", "MATCH_TARGET"}:
                 logger.warning(
-                    "limiting_magnitude.recovery_method=%s was not pre-resolved; using PSF. "
-                    "Set recovery_method explicitly or run from main (auto).",
+                    "limiting_magnitude.recovery_method=%s was not pre-resolved; using PSF. Set recovery_method explicitly or run from main (auto).",
                     recovery_method,
                 )
                 recovery_method = "PSF"
@@ -1611,15 +1591,13 @@ class Limits:
             n5 = int(len(cand_df))
 
             logger.info(
-                "Candidate sites: sampled=%d, after_exclusion=%d, after_edge=%d, "
-                "after_aperture=%d, after_annulus=%d, after_pixel_stats=%d",
+                "Candidate sites: sampled=%d, after_exclusion=%d, after_edge=%d, after_aperture=%d, after_annulus=%d, after_pixel_stats=%d",
                 n0, n1, n2, n3, n4, n5,
             )
 
             if len(cand_df) == 0:
                 logger.warning(
-                    "No valid candidate sites after NaN/edge/exclusion filtering; "
-                    "cannot run injected limiting magnitude."
+                    "No valid candidate sites after NaN/edge/exclusion filtering; cannot run injected limiting magnitude."
                 )
                 return np.nan
 
@@ -1704,8 +1682,7 @@ class Limits:
                     chosen_indices.append(np.argmin(distances))
                 jittered_chosen = pool.iloc[chosen_indices].copy()
                 logger.info(
-                    "Stage 2 jittered quiet selection: %d candidates x %d jitters = %d jittered positions -> "
-                    "selected %d spatially uniform sites via K-means from pool of %d quietest.",
+                    "Stage 2 jittered quiet selection: %d candidates x %d jitters = %d jittered positions -> selected %d spatially uniform sites via K-means from pool of %d quietest.",
                     int(len(stage1_chosen)),
                     int(redo_default),
                     int(len(jittered_df)),
@@ -1720,8 +1697,7 @@ class Limits:
                 )
                 jittered_chosen = pool.head(n_quiet)
                 logger.info(
-                    "Stage 2 jittered quiet selection: %d candidates x %d jitters = %d jittered positions -> "
-                    "using the lowest %d (K-means fallback).",
+                    "Stage 2 jittered quiet selection: %d candidates x %d jitters = %d jittered positions -> using the lowest %d (K-means fallback).",
                     int(len(stage1_chosen)),
                     int(redo_default),
                     int(len(jittered_df)),
@@ -3005,8 +2981,7 @@ class Limits:
                     demo_y = float(np.clip(target_y, annulus_margin,
                                            ny_c - 1 - annulus_margin))
                     logger.warning(
-                        "All circumference fallback points too close to edge; "
-                        "using offset demo site (%.1f, %.1f)", demo_x, demo_y,
+                        "All circumference fallback points too close to edge; using offset demo site (%.1f, %.1f)", demo_x, demo_y,
                     )
 
             for i, mag_target in enumerate(mag_targets):
@@ -3106,8 +3081,7 @@ class Limits:
                     bkgrms_zoom = background_rms_zoom
 
                     logger.debug(
-                        "Subpanel zoom: cutout=(%dx%d), target=(%.1f,%.1f), "
-                        "injection=(%.1f,%.1f), inject_distance=%.1f px, zoom_radius=%.1f px, "
+                        "Subpanel zoom: cutout=(%dx%d), target=(%.1f,%.1f), injection=(%.1f,%.1f), inject_distance=%.1f px, zoom_radius=%.1f px, "
                         "zoom=[%d:%d, %d:%d]",
                         nx, ny, x_center, y_center,
                         inject_x, inject_y, inject_distance, zoom_radius,

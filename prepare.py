@@ -288,8 +288,7 @@ class Prepare:
                         membership_matches.append(str(k))
                 if len(membership_matches) > 1:
                     self.logger.warning(
-                        "catalog.use_catalog mapping is ambiguous for filter '%s': matched keys=%s. "
-                        "Using precedence: exact key > first membership key > default.",
+                        "catalog.use_catalog mapping is ambiguous for filter '%s': matched keys=%s. Using precedence: exact key > first membership key > default.",
                         image_filter,
                         membership_matches,
                     )
@@ -352,8 +351,7 @@ class Prepare:
                 custom_table = pd.read_csv(fname)
             except pd.errors.EmptyDataError:
                 self.logger.error(
-                    "Custom catalog CSV is empty or has no parseable header. "
-                    "Remove the file to force a rebuild, or fix the path: %s",
+                    "Custom catalog CSV is empty or has no parseable header. Remove the file to force a rebuild, or fix the path: %s",
                     fname,
                 )
                 sys.exit(1)
@@ -907,8 +905,7 @@ class Prepare:
                 )
                 if mapping is None and not is_template:
                     self.logger.warning(
-                        "Instrument '%s' for telescope '%s' not found in telescope.yml; "
-                        "falling back to raw FILTER header for %s.",
+                        "Instrument '%s' for telescope '%s' not found in telescope.yml; falling back to raw FILTER header for %s.",
                         inst,
                         tele,
                         name,
@@ -954,8 +951,7 @@ class Prepare:
                 if header_key is None:
                     # Could not find a suitable filter header; fall back
                     self.logger.warning(
-                        "No valid filter header found for '%s' with telescope '%s' / instrument '%s'; "
-                        "falling back to raw FILTER header.",
+                        "No valid filter header found for '%s' with telescope '%s' / instrument '%s'; falling back to raw FILTER header.",
                         name,
                         tele,
                         inst,
@@ -1190,8 +1186,7 @@ class Prepare:
 
         if not os.path.isdir(template_dir):
             self.logger.warning(
-                "No template folder found at expected location; skipping templates. "
-                "Expected position: %s",
+                "No template folder found at expected location; skipping templates. Expected position: %s",
                 template_dir,
             )
             return []

@@ -1373,8 +1373,7 @@ class Aperture:
             optimum_radius = fixed_radius
             optimum_scale = max(7, int(np.ceil(fixed_radius * fwhm))) + 0.5
             logger.info(
-                "Crowded field: skipping data-driven optimum-radius search; "
-                "using fixed aperture radius of %.2f FWHM (%.2f pixels).",
+                "Crowded field: skipping data-driven optimum-radius search; using fixed aperture radius of %.2f FWHM (%.2f pixels).",
                 optimum_radius,
                 optimum_radius * fwhm,
             )

@@ -1210,8 +1210,7 @@ NNW
                                 overwrite=True
                             )
                             self.logger.info(
-                                "Pre-cut reference to %dx%d centered on science region "
-                                "(was %dx%d)",
+                                "Pre-cut reference to %dx%d centered on science region (was %dx%d)",
                                 _cut_w, _cut_h, _ref_shape[1], _ref_shape[0]
                             )
             except Exception as _e:
@@ -1242,12 +1241,8 @@ NNW
             if has_distortion:
                 distortion_type = "SIP" if has_sip else "TPV/PV" if has_pv else "CTYPE-based"
                 self.logger.info(
-                    f"Science image has {distortion_type} distortion parameters. "
-                    "Distortion will be corrected during final SWarp resampling."
-                )
-            else:
-                self.logger.info(
-                    "Science image has no distortion parameters; skipping distortion correction"
+                    f"Science image has {distortion_type} distortion. "
+                    "Correction will happen during SWarp resampling."
                 )
             # Use weight map if available
             sci_w = self._guess_map_weight_path(str(sci_image_copy))
@@ -1287,8 +1282,7 @@ NNW
                 sci_image_for_swarp = sci_image_copy
                 
                 self.logger.info(
-                    "Output grid: %dx%d  CENTER=(%.6f,%.6f)  PIXEL_SCALE=%.4f "
-                    "(science was %dx%d, reference was %dx%d)",
+                    "Output grid: %dx%d  CENTER=(%.6f,%.6f)  PIXEL_SCALE=%.4f (science was %dx%d, reference was %dx%d)",
                     output_width, output_height, center_ra, center_dec, sci_pix_scale,
                     sci_shape[1], sci_shape[0], ref_shape[1], ref_shape[0]
                 )
@@ -1305,8 +1299,7 @@ NNW
                                 (ref_y >= 0) & (ref_y < ref_shape[0]))
                 if not all(ref_in_bounds):
                     self.logger.warning(
-                        "Reference image may not fully cover science image region. "
-                        "Science corners in ref pixels: X=%s, Y=%s",
+                        "Reference image may not fully cover science image region. Science corners in ref pixels: X=%s, Y=%s",
                         ref_x.tolist(), ref_y.tolist()
                     )
                 else:
@@ -1476,7 +1469,7 @@ NNW
             sci_sex = {"fwhm": sci_fwhm, "catalog": sci_catalog, "catalog_path": sci_catalog_path}
             ref_sex = {"fwhm": ref_fwhm, "catalog": ref_catalog, "catalog_path": ref_catalog_path}
             
-            self.logger.info("SExtractorWrapper detected %d science sources, %d reference sources", len(sci_catalog) if sci_catalog is not None else 0, len(ref_catalog) if ref_catalog is not None else 0)
+            self.logger.info("SExtractor pass-1: %d sci / %d ref sources", len(sci_catalog) if sci_catalog is not None else 0, len(ref_catalog) if ref_catalog is not None else 0)
 
             fwhm_sci_pix = float(sci_sex["fwhm"]) if "fwhm" in sci_sex else 2.5
             fwhm_ref_pix = float(ref_sex["fwhm"]) if "fwhm" in ref_sex else 2.5
@@ -1521,12 +1514,7 @@ NNW
             sci_scale = int(max(5, 1.5 * fwhm_sci_pix))
             ref_scale = int(max(5, 1.5 * fwhm_ref_pix))
             combined_scale = max(sci_scale, ref_scale)
-            self.logger.info(
-                "Alignment SExtractor pass-2: science scale=%d ref scale=%d -> combined=%d px (FWHM-based for alignment)",
-                sci_scale,
-                ref_scale,
-                combined_scale,
-            )
+            self.logger.info("SExtractor pass-2: scale=%d px (FWHM-based)", combined_scale)
             
             # Re-run with FWHM-based scale using SExtractorWrapper
             # The pass-2 catalogs will overwrite the pass-1 catalogs (same paths)
@@ -1566,7 +1554,7 @@ NNW
             sci_sex = {"fwhm": sci_fwhm2, "catalog": sci_catalog2, "catalog_path": sci_catalog_path}
             ref_sex = {"fwhm": ref_fwhm2, "catalog": ref_catalog2, "catalog_path": ref_catalog_path}
             
-            self.logger.info("SExtractorWrapper pass-2 detected %d science sources, %d reference sources", len(sci_catalog2) if sci_catalog2 is not None else 0, len(ref_catalog2) if ref_catalog2 is not None else 0)
+            self.logger.info("SExtractor pass-2: %d sci / %d ref sources", len(sci_catalog2) if sci_catalog2 is not None else 0, len(ref_catalog2) if ref_catalog2 is not None else 0)
             
             # Save copies of the full catalogs for SCAMP BEFORE filter_matched_sources overwrites them
             # This must happen immediately after pass-2 SExtractor completes
@@ -1731,8 +1719,7 @@ NNW
                                 center_dec = float(center_dec[0])
 
                             self.logger.info(
-                                "Science corrected: shape=%s scale=%.4f "
-                                "center=(%.6f,%.6f)",
+                                "Science corrected: shape=%s scale=%.4f center=(%.6f,%.6f)",
                                 sci_shape,
                                 sci_pix_scale,
                                 center_ra,
@@ -1971,8 +1958,7 @@ NNW
             )
 
             self.logger.info(
-                "SWarp output grid:\n"
-                "  Center: (%.6f, %.6f) deg\n"
+                "SWarp output grid:\n  Center: (%.6f, %.6f) deg\n"
                 "  Image size: %d x %d px\n"
                 "  Pixel scale: %.4f arcsec/px",
                 center_ra, center_dec, output_width, output_height, pix_scale,
@@ -2376,8 +2362,7 @@ NNW
                     else:
                         ref_wcs_info = wcs_info
                     self.logger.info(
-                        "SWarp output WCS [%s]:\n"
-                        "  Shape: %d x %d px\n"
+                        "SWarp output WCS [%s]:\n  Shape: %d x %d px\n"
                         "  CRPIX: (%.2f, %.2f)\n"
                         "  CRVAL: (%.6f, %.6f) deg\n"
                         "  CTYPE: (%s, %s)",
@@ -2400,8 +2385,7 @@ NNW
                 crpix_diff_y = abs(sci_wcs_info["crpix2"] - ref_wcs_info["crpix2"])
                 if crpix_diff_x > 0.01 or crpix_diff_y > 0.01:
                     self.logger.warning(
-                        "SWarp output CRPIX differs: science=(%.2f,%.2f), reference=(%.2f,%.2f). "
-                        "This may indicate sub-pixel alignment issues.",
+                        "SWarp output CRPIX differs: science=(%.2f,%.2f), reference=(%.2f,%.2f). This may indicate sub-pixel alignment issues.",
                         sci_wcs_info["crpix1"], sci_wcs_info["crpix2"],
                         ref_wcs_info["crpix1"], ref_wcs_info["crpix2"]
                     )
@@ -2440,8 +2424,7 @@ NNW
                     # Increased threshold to handle SWarp clipping when CRPIX is offset.
                     if dy > 500 or dx > 500:
                         self.logger.warning(
-                            "Shape mismatch too large (rows=%d, cols=%d) — SCAMP likely "
-                            "failed to align reference to science grid.  Falling back.",
+                            "Shape mismatch too large (rows=%d, cols=%d) — SCAMP likely failed to align reference to science grid.  Falling back.",
                             dy, dx,
                         )
                         return self._align_fallback_reproject_then_astroalign(
@@ -2467,8 +2450,7 @@ NNW
                             raise ValueError(f"non-finite ref center: ({ref_cx}, {ref_cy})")
                     except Exception as _ce:
                         self.logger.debug(
-                            "Could not project SWarp CENTER into reference WCS (%s); "
-                            "using pixel center instead.", _ce
+                            "Could not project SWarp CENTER into reference WCS (%s); using pixel center instead.", _ce
                         )
                         # Use correct numpy 0-based center for Cutout2D
                         ref_cx = (_ref_shape[1] - 1) / 2.0
@@ -2504,8 +2486,7 @@ NNW
                     fits.writeto(aligned_ref, _ref_data_adjusted, _ref_header, overwrite=True)
 
                     self.logger.info(
-                        "Reference adjusted to science shape=%s "
-                        "(centered on SWarp sky CENTER, pad/trim <=20 px).",
+                        "Reference adjusted to science shape=%s (centered on SWarp sky CENTER, pad/trim <=20 px).",
                         (ny_target, nx_target),
                     )
                 else:
@@ -2891,8 +2872,7 @@ NNW
                 margin = 50  # pixels
                 if not (margin <= sci_target_x < width - margin and margin <= sci_target_y < height - margin):
                     self.logger.warning(
-                        "Target (%.1f, %.1f) is outside output bounds (%dx%d). "
-                        "Using full science image size (%dx%d) to ensure target is included.",
+                        "Target (%.1f, %.1f) is outside output bounds (%dx%d). Using full science image size (%dx%d) to ensure target is included.",
                         sci_target_x, sci_target_y, width, height,
                         sci_data.shape[1], sci_data.shape[0]
                     )

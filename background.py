@@ -155,8 +155,7 @@ class BackgroundSubtractor:
             return fp
         if fp > cap:
             self.logger.info(
-                "Background mesh: capping FWHM %.2f -> %.2f px "
-                "(background.max_fwhm_pixels=%.1f) to limit Background2D memory use.",
+                "Background mesh: capping FWHM %.2f -> %.2f px (background.max_fwhm_pixels=%.1f) to limit Background2D memory use.",
                 fp,
                 cap,
                 cap,
@@ -361,8 +360,7 @@ class BackgroundSubtractor:
         filter_size = mesh_filter
 
         self.logger.info(
-            "Background mesh:\n"
-            "  FWHM: %.2f px\n"
+            "Background mesh:\n  FWHM: %.2f px\n"
             "  Mesh scale: %.2f\n"
             "  Box size: %s\n"
             "  Filter size: %d",
@@ -1115,8 +1113,7 @@ class BackgroundSubtractor:
                 bkg_data = np.asarray(bkg.background, dtype=float)
 
                 self.logger.info(
-                    "Background2D final:\n"
-                    "  Attempt: %d\n"
+                    "Background2D final:\n  Attempt: %d\n"
                     "  Box size: %s\n"
                     "  Filter size: %d\n"
                     "  Exclude percentile: %.1f",
@@ -1313,8 +1310,7 @@ class BackgroundSubtractor:
             )
         elif skip_trail:
             self.logger.info(
-                "Background: fast_mode - skipping satellite trail mask (full-image "
-                "labeling). Set background.fast_mode_skip_trail_mask: false to enable."
+                "Background: fast_mode - skipping satellite trail mask (full-image labeling). Set background.fast_mode_skip_trail_mask: false to enable."
             )
 
         # ---- Iterative source mask ----
@@ -1358,8 +1354,7 @@ class BackgroundSubtractor:
         sat_frac = float(np.mean(sat_mask)) if sat_mask is not None else 0.0
         if sat_frac > 0.95:
             self.logger.error(
-                "Image appears fully saturated (saturation mask covers %.2f%% of pixels); "
-                "background estimation and photometry are not reliable. "
+                "Image appears fully saturated (saturation mask covers %.2f%% of pixels); background estimation and photometry are not reliable. "
                 "Aborting background subtraction for this frame.",
                 100.0 * sat_frac,
             )
@@ -1388,10 +1383,7 @@ class BackgroundSubtractor:
             maxiters=stats_maxiters,
         )
         self.logger.info(
-            f"Global stats:\n"
-            f"  Mean: {gmean:.3e}\n"
-            f"  Median: {gmed:.3e}\n"
-            f"  Std: {gstd:.3e}"
+            f"Global stats: mean={gmean:.3e} med={gmed:.3e} std={gstd:.3e}"
         )
 
         
@@ -1450,8 +1442,7 @@ class BackgroundSubtractor:
             pass
 
         self.logger.info(
-            f"Background median: {bkg_median:.3e}\n"
-            f"RMS mean: {np.nanmean(bkg_rms):.3e}"
+            f"Background median={bkg_median:.3e} RMS={np.nanmean(bkg_rms):.3e}"
         )
 
         # ---- Subtract background ----
@@ -1813,8 +1804,7 @@ class BackgroundSubtractor:
                     bkg_surface_local = bkg_surface_local - lift
                     cutout_nonneg_lift = float(lift)
                     self.logger.info(
-                        "Local background: adding a bias of +%.6g to the local cutout residual "
-                        "(and -%.6g to the local background surface) to enforce %s >= %.6g. "
+                        "Local background: adding a bias of +%.6g to the local cutout residual (and -%.6g to the local background surface) to enforce %s >= %.6g. "
                         "Annulus_std=%.6g, annulus_k=%.3g.",
                         lift,
                         lift,
@@ -1824,8 +1814,7 @@ class BackgroundSubtractor:
                         float(ann_k) if np.isfinite(ann_k) else np.nan,
                     )
                     self.logger.info(
-                        "Local background: subtracted cutout %s=%.6g; "
-                        "raised cutout by %.6g so %s >= %.6g on %d pixels.",
+                        "Local background: subtracted cutout %s=%.6g; raised cutout by %.6g so %s >= %.6g on %d pixels.",
                         floor_stat,
                         stat_val,
                         lift,

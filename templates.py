@@ -534,8 +534,7 @@ def compute_alignment_rms(
         rms = float(np.sqrt(np.mean(d_mut**2)))
 
         logger.info(
-            "Alignment diagnostics:\n"
-            "  Median: %.3f px\n"
+            "Alignment diagnostics:\n  Median: %.3f px\n"
             "  RMS: %.3f px\n"
             "  P90: %.3f px\n"
             "  Mutual pairs: %d\n"
@@ -606,8 +605,7 @@ def _reproject_template(
         sci_corners = science_proj.calc_footprint().flatten()
         ref_corners = template_proj.calc_footprint().flatten()
         logger.info(
-            "Reproject WCS check: science footprint RA=[%.3f,%.3f] Dec=[%.3f,%.3f], "
-            "template footprint RA=[%.3f,%.3f] Dec=[%.3f,%.3f]",
+            "Reproject WCS check: science footprint RA=[%.3f,%.3f] Dec=[%.3f,%.3f], template footprint RA=[%.3f,%.3f] Dec=[%.3f,%.3f]",
             sci_corners[0::2].min(), sci_corners[0::2].max(),
             sci_corners[1::2].min(), sci_corners[1::2].max(),
             ref_corners[0::2].min(), ref_corners[0::2].max(),
@@ -2720,8 +2718,7 @@ class Templates:
             test_ra, test_dec = aligned_wcs.all_pix2world([0], [0], 0)
             if not (np.isfinite(test_ra[0]) and np.isfinite(test_dec[0])):
                 logger.error(
-                    "WCS validation failed after %s alignment: WCS produces NaN at pixel (0,0). "
-                    "This indicates a corrupted WCS header.",
+                    "WCS validation failed after %s alignment: WCS produces NaN at pixel (0,0). This indicates a corrupted WCS header.",
                     method_name
                 )
                 return False
@@ -2738,8 +2735,7 @@ class Templates:
             # Validate that conversion succeeded
             if not (np.isfinite(new_target_x) and np.isfinite(new_target_y)):
                 logger.error(
-                    "WCS validation failed after %s alignment: "
-                    "Target RA/Dec conversion produced NaN pixel coordinates "
+                    "WCS validation failed after %s alignment: Target RA/Dec conversion produced NaN pixel coordinates "
                     "(RA=%.6f, Dec=%.6f). This indicates a corrupted WCS header.",
                     method_name, target_ra, target_dec
                 )
@@ -2758,16 +2754,14 @@ class Templates:
             margin = 50  # pixels
             if not (margin <= new_target_x < w - margin and margin <= new_target_y < h - margin):
                 logger.warning(
-                    "Target after %s alignment is close to image edge: "
-                    "(%.1f, %.1f) in %dx%d image (margin=%d px). "
+                    "Target after %s alignment is close to image edge: (%.1f, %.1f) in %dx%d image (margin=%d px). "
                     "This may cause issues with subtraction/photometry.",
                     method_name, new_target_x, new_target_y, w, h, margin
                 )
 
             # Log the coordinate change and WCS parameters
             logger.info(
-                "Target coordinates updated after %s alignment: "
-                "(%.1f, %.1f) px -> (%.1f, %.1f) px. "
+                "Target coordinates updated after %s alignment: (%.1f, %.1f) px -> (%.1f, %.1f) px. "
                 "WCS CRPIX=(%.1f, %.1f) px, CRVAL=(%.6f, %.6f) deg",
                 method_name, old_target_x, old_target_y, new_target_x, new_target_y,
                 aligned_header.get("CRPIX1", np.nan), aligned_header.get("CRPIX2", np.nan),
@@ -3366,8 +3360,7 @@ class Templates:
                 n_sat = int(np.sum(ok & ~sat_ok))
                 if n_sat > 0:
                     logger.info(
-                        "Removed %d non-linear sources from flux comparison "
-                        "(peak_flux >= %.2f x saturate).",
+                        "Removed %d non-linear sources from flux comparison (peak_flux >= %.2f x saturate).",
                         n_sat,
                         nonlinear_frac,
                     )
@@ -3629,7 +3622,7 @@ class Templates:
             flux_scale = 10 ** (-0.4 * intercept) if np.isfinite(intercept) else np.nan
 
             logger.info(
-                "Fit [%s]: slope=%.3f, intercept=%.3f, " "inliers=%d/%d, robust=%d/%d",
+                "Fit [%s]: slope=%.3f, intercept=%.3f, inliers=%d/%d, robust=%d/%d",
                 method_used,
                 slope,
                 intercept,
@@ -3641,8 +3634,7 @@ class Templates:
             # Warn if intercept indicates a systematic offset (>0.5 mag or ~1 pixel equivalent)
             if np.isfinite(intercept) and abs(intercept) > 0.5:
                 logger.warning(
-                    "RANSAC intercept=%.3f mag indicates systematic offset between images; "
-                    "check WCS alignment and centroid matching.",
+                    "RANSAC intercept=%.3f mag indicates systematic offset between images; check WCS alignment and centroid matching.",
                     intercept,
                 )
 
@@ -4205,8 +4197,7 @@ class Templates:
                 ker_hw_floor = int(np.ceil(fwhm_broad))
                 ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_from_conv, ker_hw_floor)))
                 logger.info(
-                    "Kernel sizing:\n"
-                    "  FWHM_sci: %.2f px\n"
+                    "Kernel sizing:\n  FWHM_sci: %.2f px\n"
                     "  FWHM_ref: %.2f px\n"
                     "  FWHM_broad: %.2f px\n"
                     "  FWHM_conv: %.2f px\n"
@@ -4307,8 +4298,7 @@ class Templates:
             # Source masks are still computed for visualization (red x markers) but not applied to subtraction
             universal_mask = np.where(mask_essential, 1, 0).astype(np.int32)
             logger.info(
-                "Using only NaN/invalid mask for subtraction (%.1f%% masked) to preserve flux calibration sources. "
-                "Source masks are still computed for visualization (red x markers).",
+                "Using only NaN/invalid mask for subtraction (%.1f%% masked) to preserve flux calibration sources. Source masks are still computed for visualization (red x markers).",
                 np.sum(universal_mask) / universal_mask.size * 100.0
             )
 
@@ -4418,8 +4408,7 @@ class Templates:
                 needed = min_src_for_order.get(kernel_order, 0)
                 if n_matched < needed:
                     logger.warning(
-                        "User kernel_order=%d may be under-constrained (only %d matched sources, "
-                        "recommend %d). Consider lowering kernel_order.",
+                        "User kernel_order=%d may be under-constrained (only %d matched sources, recommend %d). Consider lowering kernel_order.",
                         kernel_order, n_matched, needed,
                     )
             else:
@@ -4456,8 +4445,7 @@ class Templates:
                 bg_order = int(bg_order)
                 if bg_order > 2:
                     logger.warning(
-                        "Background polynomial order %d is unusually high (recommended 0-2). "
-                        "High orders may cause overfitting and instability.",
+                        "Background polynomial order %d is unusually high (recommended 0-2). High orders may cause overfitting and instability.",
                         bg_order
                     )
                     bg_order = min(bg_order, 2)  # Clamp to 2
@@ -4468,8 +4456,7 @@ class Templates:
                 star_ext_iter = int(star_ext_iter)
                 if star_ext_iter > 6:
                     logger.warning(
-                        "StarExt_iter %d is unusually high (recommended 1-6). "
-                        "High values may cause over-deblending and slow performance.",
+                        "StarExt_iter %d is unusually high (recommended 1-6). High values may cause over-deblending and slow performance.",
                         star_ext_iter
                     )
                     star_ext_iter = min(star_ext_iter, 6)  # Clamp to 6
@@ -4577,8 +4564,7 @@ class Templates:
 
             if np.all(np.isnan(diff_data)) or np.nanstd(diff_data) < 1e-5:
                 logger.error(
-                    "Difference image is invalid (all NaN or near-zero variance). "
-                    "Subtraction backend may have written a bad file; treat as failure and use "
+                    "Difference image is invalid (all NaN or near-zero variance). Subtraction backend may have written a bad file; treat as failure and use "
                     "original science image."
                 )
                 return None, None, None
@@ -4609,8 +4595,7 @@ class Templates:
                     diff_rms = np.sqrt(np.mean(valid_pixels ** 2))
 
                     logger.info(
-                        "Subtraction quality:\n"
-                        "  Median: %.3f\n"
+                        "Subtraction quality:\n  Median: %.3f\n"
                         "  Std: %.3f\n"
                         "  RMS: %.3f\n"
                         "  Valid pixels: %d",
@@ -4620,16 +4605,14 @@ class Templates:
                     # Check for systematic offset
                     if abs(diff_median) > 0.1 * diff_std:
                         logger.warning(
-                            "Subtraction has systematic offset (median=%.3f, std=%.3f). "
-                            "This may indicate background subtraction issues.",
+                            "Subtraction has systematic offset (median=%.3f, std=%.3f). This may indicate background subtraction issues.",
                             diff_median, diff_std
                         )
 
                     # Check for excessive RMS
                     if diff_rms > 5.0 * diff_std:
                         logger.warning(
-                            "Subtraction RMS is high (rms=%.3f, std=%.3f). "
-                            "This may indicate poor subtraction quality.",
+                            "Subtraction RMS is high (rms=%.3f, std=%.3f). This may indicate poor subtraction quality.",
                             diff_rms, diff_std
                         )
 
@@ -4647,8 +4630,7 @@ class Templates:
                             edge_std = np.nanstd(edge_pixels)
                             if edge_std > 2.0 * diff_std:
                                 logger.warning(
-                                    "Subtraction has edge artifacts (edge std=%.3f, global std=%.3f). "
-                                    "This may indicate kernel or alignment issues at image boundaries.",
+                                    "Subtraction has edge artifacts (edge std=%.3f, global std=%.3f). This may indicate kernel or alignment issues at image boundaries.",
                                     edge_std, diff_std
                                 )
             except Exception as e:
@@ -4864,14 +4846,12 @@ class Templates:
             if phot_cfg.get("crowded_field", False) and not force_sparse:
                 if not sfft_crowded:
                     logger.info(
-                        "photometry.crowded_field=True; forcing SFFT crowded (ECP) mode "
-                        "for subtraction."
+                        "photometry.crowded_field=True; forcing SFFT crowded (ECP) mode for subtraction."
                     )
                 sfft_crowded = True
             elif force_sparse:
                 logger.info(
-                    "force_sparse_sfft=True in template_subtraction; using SFFT sparse "
-                    "(ESP) even though crowded_field=%s.",
+                    "force_sparse_sfft=True in template_subtraction; using SFFT sparse (ESP) even though crowded_field=%s.",
                     phot_cfg.get("crowded_field", False),
                 )
 
@@ -4920,8 +4900,7 @@ class Templates:
                 ker_hw_floor = int(np.ceil(fwhm_broad_fb))
                 kernel_half_width = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_conv, ker_hw_floor)))
                 logger.info(
-                    "SFFT kernel half-width: %d px (fallback quadrature formula, "
-                    "FWHM_sci=%.1f FWHM_ref=%.1f FWHM_conv=%.1f)",
+                    "SFFT kernel half-width: %d px (fallback quadrature formula, FWHM_sci=%.1f FWHM_ref=%.1f FWHM_conv=%.1f)",
                     kernel_half_width, fwhm_sci_fb, fwhm_ref_fb, fwhm_conv_fb,
                 )
             kernel_half_width = max(KER_HW_MIN, min(KER_HW_MAX, kernel_half_width))
@@ -5194,8 +5173,7 @@ class Templates:
             if os.path.sep in exe or exe.startswith("."):
                 if not os.path.isfile(exe):
                     logger.warning(
-                        "HOTPANTS executable '%s' was not found. "
-                        "Set template_subtraction.hotpants_exe_loc to a valid path or ensure 'hotpants' is on PATH.",
+                        "HOTPANTS executable '%s' was not found. Set template_subtraction.hotpants_exe_loc to a valid path or ensure 'hotpants' is on PATH.",
                         exe,
                     )
                     return False
@@ -5203,8 +5181,7 @@ class Templates:
                 which = shutil.which(exe)
                 if which is None:
                     logger.warning(
-                        "HOTPANTS executable '%s' not found on PATH. "
-                        "Install HOTPANTS and/or set template_subtraction.hotpants_exe_loc to its full path.",
+                        "HOTPANTS executable '%s' not found on PATH. Install HOTPANTS and/or set template_subtraction.hotpants_exe_loc to its full path.",
                         exe,
                     )
                     return False

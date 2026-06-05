@@ -427,8 +427,7 @@ def run_photometry():
 
     if missing_tools:
         logger.warning(
-            "Optional Astromatic tools not found on PATH: %s. "
-            "These are only required for advanced features (SCAMP for TPV distortion, "
+            "Optional Astromatic tools not found on PATH: %s. These are only required for advanced features (SCAMP for TPV distortion, "
             "SWarp for image resampling). The pipeline will fall back to alternative methods "
             "(astrometry.net for WCS, AstroAlign/Reproject for template alignment). "
             "To install: conda install -c conda-forge astromatic-source-extractor "

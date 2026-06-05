@@ -317,8 +317,7 @@ def calibrate_source_ids_batched(
             ):
                 if logger is not None:
                     logger.warning(
-                        "GaiaXPy calibrate wavelength sampling differed between "
-                        "batches; using the grid from the first batch."
+                        "GaiaXPy calibrate wavelength sampling differed between batches; using the grid from the first batch."
                     )
 
     if not frames:

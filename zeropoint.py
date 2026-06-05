@@ -1179,8 +1179,7 @@ class Zeropoint:
                 clean_catalog = clean_catalog[joint_mask]
             else:
                 logger.warning(
-                    "fit_zeropoint: no inliers from any flux type; "
-                    "returning unfiltered clean_catalog."
+                    "fit_zeropoint: no inliers from any flux type; returning unfiltered clean_catalog."
                 )
 
             logger.info(f"[fit_zeropoint] Done in {time.time() - t0:.3f}s")
