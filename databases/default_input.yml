@@ -381,6 +381,8 @@ default_input:
     image_shape: null # list[int]|null --- Optional expected image shape (ny, nx) for validation; null disables check.
     use_catalog_for_matching: True # bool --- If True, use catalog sources (when available) for matching/registration heuristics.
 
+
+
     sfft_crowded_auto: False # bool --- Auto-enable SFFT crowded-field tuning based on source density heuristics.
     sfft_crowded_min_sources: 500 # int --- Crowded-field trigger: minimum number of detected sources for SFFT tuning.
     sfft_crowded_min_density: 100 # float --- Crowded-field trigger: minimum sources per area (pipeline-specific units).

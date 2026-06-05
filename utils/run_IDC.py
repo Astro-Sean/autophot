@@ -1592,14 +1592,9 @@ NNW
                 isinstance(ts, dict) and ts.get("science_first_astrometry", False)
             )
             if science_first_astrometry:
-                self.logger.info(
-                    "Option B: Science-first GAIA astrometry enabled."
-                )
+                self.logger.info("Science-first GAIA astrometry: Phase 1a (SCAMP)")
 
                 # Phase 1a: SCAMP on science catalog vs GAIA-DR3
-                self.logger.info(
-                    "Phase 1a: Running SCAMP on science vs GAIA-DR3..."
-                )
                 # SCAMP writes .head next to the catalog, so output_dir must be
                 # the same directory as the catalog for the glob to find it.
                 sci_gaia_dir = science_aligned_dir
@@ -1642,9 +1637,7 @@ NNW
                     )
 
                     # Phase 1b: SWarp science to GAIA-corrected grid
-                    self.logger.info(
-                        "Phase 1b: SWarping science to GAIA-corrected grid..."
-                    )
+                    self.logger.info("Phase 1b: SWarp science to GAIA grid")
                     sci_gaia_swarp_dir = science_aligned_dir / "swarp_gaia"
                     sci_gaia_swarp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1781,11 +1774,6 @@ NNW
 
             n_sci = len(sci_sex.get("catalog", []))
             n_ref = len(ref_sex.get("catalog", []))
-            self.logger.info(
-                "Alignment source counts: science image = %d, reference/template = %d",
-                n_sci,
-                n_ref,
-            )
 
             fwhm_sci_pix = float(sci_sex["fwhm"]) if "fwhm" in sci_sex else 2.5
             fwhm_ref_pix = float(ref_sex["fwhm"]) if "fwhm" in ref_sex else 2.5
@@ -1793,22 +1781,17 @@ NNW
             fwhm_sci_arcsec = fwhm_sci_pix * sci_pix_scale
             fwhm_ref_arcsec = fwhm_ref_pix * ref_pix_scale
             self.logger.info(
-                "Measured FWHM: science = %.2f pixels (%.2f arcsec), reference = %.2f pixels (%.2f arcsec)",
-                fwhm_sci_pix,
-                fwhm_sci_arcsec,
-                fwhm_ref_pix,
-                fwhm_ref_arcsec,
+                "FWHM: sci=%.2f px (%.2f\") ref=%.2f px (%.2f\")",
+                fwhm_sci_pix, fwhm_sci_arcsec,
+                fwhm_ref_pix, fwhm_ref_arcsec,
             )
-
-
-            self.logger.info(
-                "Undersampling flags: science = %s, reference = %s",
-                sci_is_undersampled,
-                ref_is_undersampled,
+            self.logger.debug(
+                "Undersampling: sci=%s ref=%s",
+                sci_is_undersampled, ref_is_undersampled,
             )
 
             crossid_radius = max(3.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 3.0)
-            self.logger.info("Using cross-match radius: %.2f arcsec", crossid_radius)
+            self.logger.info("Cross-match radius: %.2f arcsec", crossid_radius)
 
             def _do_match(radius_arcsec: float):
                 return self.filter_matched_sources(
@@ -1831,13 +1814,6 @@ NNW
                 )
 
 
-            self.logger.info(
-                "Matched sources for SCAMP/SWarp: %d (science %d, reference %d)",
-                _num_matched,
-                n_sci,
-                n_ref,
-            )
-
             try:
                 self.plot_matched_sources_side_by_side(
                     sci_image_path=str(sci_image_copy),
@@ -1856,8 +1832,8 @@ NNW
                 self.logger.debug("Matched-sources plot failed (non-fatal): %s", e)
 
             self.logger.info(
-                "Proceeding with SCAMP + SWarp alignment (%d matched sources).",
-                _num_matched,
+                "SCAMP+SWarp alignment: %d matched sources (sci=%d ref=%d)",
+                _num_matched, n_sci, n_ref,
             )
             pix_scale = sci_pix_scale
 
@@ -1901,16 +1877,10 @@ NNW
                 # We only need shift/scale/rotation between reference and science.
                 "DISTORT_DEGREES": distort_degrees,
             }
-            sparse_note = " (sparse field mode)" if is_sparse_field else ""
+            sparse_note = " (sparse)" if is_sparse_field else ""
             self.logger.info(
-                'SCAMP: CROSSID_RADIUS=%.2f" POSITION_MAXERR=%.2f" SN_THRESHOLDS=%s DISTORT_DEGREES=%d%s FWHM_THRESHOLDS ref=[%.2f,%.2f]',
-                crossid_arcsec,
-                position_maxerr_arcsec,
-                sn_thresholds,
-                distort_degrees,
-                sparse_note,
-                0.3 * fwhm_ref_pix,
-                10 * fwhm_ref_pix,
+                'SCAMP: crossid=%.1f" maxerr=%.1f" distort=%d%s',
+                crossid_arcsec, position_maxerr_arcsec, distort_degrees, sparse_note,
             )
 
             # Allow YAML to override the automatic SWarp resampling choice for expert tuning.
@@ -1948,19 +1918,12 @@ NNW
             }
 
             self.logger.info(
-                "SWarp resampling: science=%s (FWHM=%.2f px%s) reference=%s (FWHM=%.2f px%s)",
-                sci_resampling_method,
-                fwhm_sci_pix,
-                ", undersampled" if sci_is_undersampled else "",
-                ref_resampling_method,
-                fwhm_ref_pix,
-                ", undersampled" if ref_is_undersampled else "",
+                "SWarp: sci=%s ref=%s",
+                sci_resampling_method, ref_resampling_method,
             )
 
             self.logger.info(
-                "SWarp output grid:\n  Center: (%.6f, %.6f) deg\n"
-                "  Image size: %d x %d px\n"
-                "  Pixel scale: %.4f arcsec/px",
+                "SWarp grid: center=(%.4f, %.4f) size=%dx%d scale=%.3f\"/px",
                 center_ra, center_dec, output_width, output_height, pix_scale,
             )
 
@@ -2066,9 +2029,7 @@ NNW
                 if Path(head_src).resolve() != head_dst.resolve():
                     try:
                         shutil.copy2(head_src, head_dst)
-                        self.logger.info(
-                            "Copied SCAMP .head (%s) to %s for SWarp.", label, head_dst
-                        )
+                        self.logger.info("Copied .head for %s SWarp", label)
                     except Exception as e:
                         log_warning_from_exception(
                             self.logger, f"Could not copy .head for {label}", e
@@ -2107,14 +2068,7 @@ NNW
                 "RESAMPLING_TYPE": combined_resampling_method,
             }
 
-            self.logger.info(
-                "SWarp resampling (single call): method=%s (sci FWHM=%.2f px%s, ref FWHM=%.2f px%s)",
-                combined_resampling_method,
-                fwhm_sci_pix,
-                ", undersampled" if sci_is_undersampled else "",
-                fwhm_ref_pix,
-                ", undersampled" if ref_is_undersampled else "",
-            )
+            self.logger.info("SWarp resampling: %s", combined_resampling_method)
 
             # Run SWarp separately on each image with COMBINE=Y.
             # With COMBINE=N, SWarp clips each .resamp.fits to the input image sky footprint,
@@ -2196,9 +2150,7 @@ NNW
                 # Phase 1 already corrected science; skip re-SWarping it here.
                 if science_first_astrometry:
                     aligned_sci = Path(sci_image_for_swarp)
-                    self.logger.info(
-                        "Native-scale: using Phase 1 corrected science (skip SWarp)."
-                    )
+                    self.logger.info("Native-scale: using Phase 1 science (skip SWarp)")
                     swarp_res_sci = {"corrected_image": str(aligned_sci)}
                 else:
                     self.logger.debug("Running SWarp on science image (native scale)...")
@@ -2251,9 +2203,7 @@ NNW
                 # Phase 1 already corrected science; skip re-SWarping it here.
                 if science_first_astrometry:
                     aligned_sci = Path(sci_image_for_swarp)
-                    self.logger.info(
-                        "Common-grid: using Phase 1 corrected science (skip SWarp)."
-                    )
+                    self.logger.info("Common-grid: using Phase 1 science (skip SWarp)")
                     swarp_res_sci = {"corrected_image": str(aligned_sci)}
                 else:
                     self.logger.debug("Running SWarp on science image (COMBINE=Y)...")
@@ -2362,13 +2312,9 @@ NNW
                     else:
                         ref_wcs_info = wcs_info
                     self.logger.info(
-                        "SWarp output WCS [%s]:\n  Shape: %d x %d px\n"
-                        "  CRPIX: (%.2f, %.2f)\n"
-                        "  CRVAL: (%.6f, %.6f) deg\n"
-                        "  CTYPE: (%s, %s)",
+                        "SWarp output [%s]: shape=%dx%d CRPIX=(%.1f,%.1f) CTYPE=%s/%s",
                         _label, _ny, _nx,
                         wcs_info["crpix1"], wcs_info["crpix2"],
-                        wcs_info["crval1"], wcs_info["crval2"],
                         wcs_info["ctype1"], wcs_info["ctype2"],
                     )
                 except Exception as _e:
@@ -2378,20 +2324,20 @@ NNW
             if sci_wcs_info and ref_wcs_info:
                 if sci_wcs_info["shape"] != ref_wcs_info["shape"]:
                     self.logger.warning(
-                        "SWarp output shapes differ: science=%s, reference=%s. This may indicate alignment issues.",
+                        "SWarp shapes differ: sci=%s ref=%s",
                         sci_wcs_info["shape"], ref_wcs_info["shape"]
                     )
                 crpix_diff_x = abs(sci_wcs_info["crpix1"] - ref_wcs_info["crpix1"])
                 crpix_diff_y = abs(sci_wcs_info["crpix2"] - ref_wcs_info["crpix2"])
                 if crpix_diff_x > 0.01 or crpix_diff_y > 0.01:
                     self.logger.warning(
-                        "SWarp output CRPIX differs: science=(%.2f,%.2f), reference=(%.2f,%.2f). This may indicate sub-pixel alignment issues.",
+                        "CRPIX mismatch: sci=(%.1f,%.1f) ref=(%.1f,%.1f)",
                         sci_wcs_info["crpix1"], sci_wcs_info["crpix2"],
                         ref_wcs_info["crpix1"], ref_wcs_info["crpix2"]
                     )
                 else:
-                    self.logger.info(
-                        "SWarp output CRPIX consistent: both images have CRPIX=(%.2f,%.2f)",
+                    self.logger.debug(
+                        "CRPIX consistent: (%.1f,%.1f)",
                         sci_wcs_info["crpix1"], sci_wcs_info["crpix2"]
                     )
 
@@ -2414,7 +2360,7 @@ NNW
                     dy = abs(_sci_shape[0] - _ref_shape[0])
                     dx = abs(_sci_shape[1] - _ref_shape[1])
                     self.logger.warning(
-                        "SWarp output shapes differ: science=%s, reference=%s (delta rows=%d, cols=%d).",
+                        "SWarp shape mismatch: sci=%s ref=%s (delta %d,%d)",
                         _sci_shape, _ref_shape, dy, dx,
                     )
 
@@ -2424,7 +2370,7 @@ NNW
                     # Increased threshold to handle SWarp clipping when CRPIX is offset.
                     if dy > 500 or dx > 500:
                         self.logger.warning(
-                            "Shape mismatch too large (rows=%d, cols=%d) — SCAMP likely failed to align reference to science grid.  Falling back.",
+                            "Shape mismatch too large (%d,%d); falling back to reproject/AstroAlign.",
                             dy, dx,
                         )
                         return self._align_fallback_reproject_then_astroalign(

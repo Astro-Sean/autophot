@@ -534,11 +534,7 @@ def compute_alignment_rms(
         rms = float(np.sqrt(np.mean(d_mut**2)))
 
         logger.info(
-            "Alignment diagnostics:\n  Median: %.3f px\n"
-            "  RMS: %.3f px\n"
-            "  P90: %.3f px\n"
-            "  Mutual pairs: %d\n"
-            "  Max separation: %.2f px",
+            "Alignment RMS: med=%.3f px rms=%.3f px p90=%.3f px n=%d max=%.2f px",
             median_offset, rms, p90, len(d_mut), max_sep,
         )
         return median_offset

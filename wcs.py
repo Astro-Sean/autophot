@@ -1477,9 +1477,7 @@ class WCSSolver:
                 cat_path,
             ]
             try:
-                logger.info(
-                    "Running SExtractor for SCAMP: %s", " ".join(map(str, sex_cmd))
-                )
+                logger.info("Running SExtractor for SCAMP catalog")
                 result = subprocess.run(
                     sex_cmd,
                     check=False,
@@ -1529,16 +1527,8 @@ class WCSSolver:
             # Keep the pipeline "serial across images" (nCPU=1) but allow SCAMP to
             # use a small amount of internal threading by default.
             if scamp_threads < 4:
-                logger.info(
-                    "SCAMP threads requested=%r -> using 4 (minimum default).",
-                    _snth,
-                )
                 scamp_threads = 4
-            logger.info(
-                "SCAMP threads: %d (wcs.scamp_nthreads=%r)",
-                scamp_threads,
-                _snth,
-            )
+            logger.info("SCAMP: using %d threads", scamp_threads)
             # SCAMP defaults REF_TIMEOUT=10s against vizier.unistra.fr; that often fails on slow links.
             scamp_cfg = {
                 "SOLVE_ASTROM": "Y",
