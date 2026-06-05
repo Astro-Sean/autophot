@@ -1394,6 +1394,200 @@ NNW
             shutil.copy2(sci_catalog_path, sci_catalog_scamp_backup)
             shutil.copy2(ref_catalog_path, ref_catalog_scamp_backup)
 
+            # ------------------------------------------------------------------
+            # Phase 1+2: Science-first GAIA astrometry (Option B)
+            # ------------------------------------------------------------------
+            science_first_astrometry = bool(
+                isinstance(ts, dict) and ts.get("science_first_astrometry", False)
+            )
+            if science_first_astrometry:
+                self.logger.info(
+                    "Option B: Science-first GAIA astrometry enabled."
+                )
+
+                # Phase 1a: SCAMP on science catalog vs GAIA-DR3
+                self.logger.info(
+                    "Phase 1a: Running SCAMP on science vs GAIA-DR3..."
+                )
+                sci_gaia_dir = science_aligned_dir / "scamp_gaia"
+                sci_gaia_dir.mkdir(parents=True, exist_ok=True)
+                sci_gaia_scamp = self.run_scamp(
+                    catalog_paths=sci_catalog_scamp_backup,
+                    reference_cat=None,  # triggers GAIA-DR3
+                    output_dir=str(sci_gaia_dir),
+                    config={
+                        "DISTORT_DEGREES": 3,
+                        "CROSSID_RADIUS": "5.0",
+                        "POSITION_MAXERR": "1.0",
+                        "SN_THRESHOLDS": "3.0,1000.0",
+                        "MATCH_RESOL": "0.0",
+                        "ASTREF_WEIGHT": "1",
+                        "VERBOSE_TYPE": "FULL"
+                        if self.verbose_level >= 2
+                        else "NORMAL",
+                    },
+                )
+                if sci_gaia_scamp is None:
+                    self.logger.warning(
+                        "Science GAIA SCAMP failed. Disabling science-first astrometry."
+                    )
+                    science_first_astrometry = False
+                else:
+                    sci_head_src = sci_gaia_scamp.get("head_file")
+                    if not (sci_head_src and Path(sci_head_src).exists()):
+                        self.logger.warning(
+                            "No GAIA SCAMP .head produced; disabling science-first astrometry."
+                        )
+                        science_first_astrometry = False
+
+                if science_first_astrometry:
+                    # Copy .head next to sci_image_copy for SWarp
+                    sci_head_dst = Path(sci_image_copy).with_suffix(".head")
+                    if Path(sci_head_src).resolve() != sci_head_dst.resolve():
+                        shutil.copy2(sci_head_src, sci_head_dst)
+                    self.logger.info(
+                        "Copied GAIA SCAMP .head to %s", sci_head_dst
+                    )
+
+                    # Phase 1b: SWarp science to GAIA-corrected grid
+                    self.logger.info(
+                        "Phase 1b: SWarping science to GAIA-corrected grid..."
+                    )
+                    sci_gaia_swarp_dir = science_aligned_dir / "swarp_gaia"
+                    sci_gaia_swarp_dir.mkdir(parents=True, exist_ok=True)
+
+                    sci_gaia_swarp_cfg = {
+                        "CENTER_TYPE": "MANUAL",
+                        "CENTER": f"{center_ra:.8f},{center_dec:.8f}",
+                        "PIXELSCALE_TYPE": "MANUAL",
+                        "PIXEL_SCALE": sci_pix_scale,
+                        "IMAGE_SIZE": f"{output_width},{output_height}",
+                        "RESAMPLING_TYPE": sci_resampling_method,
+                        "COMBINE": "Y",
+                        "COMBINE_TYPE": "MEDIAN",
+                        "OVERSAMPLING": 0,
+                    }
+
+                    sci_gaia_swarp_res = self.run_swarp(
+                        [str(sci_image_copy)],
+                        scamp_results=sci_gaia_scamp,
+                        output_dir=str(sci_gaia_swarp_dir),
+                        config=sci_gaia_swarp_cfg,
+                        no_weight_maps=True,
+                    )
+                    if sci_gaia_swarp_res is None:
+                        self.logger.warning(
+                            "Science GAIA SWarp failed. Disabling science-first astrometry."
+                        )
+                        science_first_astrometry = False
+                    else:
+                        science_corrected_raw = Path(
+                            sci_gaia_swarp_res["corrected_image"]
+                        )
+                        if not science_corrected_raw.exists():
+                            self.logger.warning(
+                                "Science GAIA SWarp output missing. Disabling science-first astrometry."
+                            )
+                            science_first_astrometry = False
+                        else:
+                            # Rename to a known stem for predictable catalog paths
+                            science_corrected_fits = (
+                                science_aligned_dir / "science_corrected.fits"
+                            )
+                            shutil.copy2(
+                                str(science_corrected_raw),
+                                str(science_corrected_fits),
+                            )
+
+                            # Update science image paths for downstream
+                            sci_image_copy = science_corrected_fits
+                            sci_image_for_swarp = science_corrected_fits
+
+                            # Re-read WCS and grid from corrected science
+                            with fits.open(sci_image_copy) as hdul:
+                                sci_head = hdul[0].header
+                                sci_data = hdul[0].data
+                                sci_wcs = get_wcs(sci_head)
+                                sci_shape = sci_data.shape
+                                from astropy.wcs.utils import (
+                                    proj_plane_pixel_scales,
+                                )
+
+                                sci_pix_scale = (
+                                    proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
+                                )
+                                output_width = sci_shape[1]
+                                output_height = sci_shape[0]
+                                _scx = (output_width + 1) / 2.0
+                                _scy = (output_height + 1) / 2.0
+                                center_ra, center_dec = sci_wcs.all_pix2world(
+                                    [_scx], [_scy], 1
+                                )
+                                center_ra = float(center_ra[0])
+                                center_dec = float(center_dec[0])
+
+                            self.logger.info(
+                                "Science corrected: shape=%s scale=%.4f "
+                                "center=(%.6f,%.6f)",
+                                sci_shape,
+                                sci_pix_scale,
+                                center_ra,
+                                center_dec,
+                            )
+
+                            # Phase 2: Re-detect sources on corrected science
+                            self.logger.info(
+                                "Phase 2: Re-detecting sources on corrected science..."
+                            )
+                            (
+                                sci_fwhm_gaia,
+                                sci_catalog_gaia_raw,
+                                sci_scale_gaia,
+                            ) = self.sextractor.run(
+                                fits_path=str(sci_image_copy),
+                                pixel_scale=sci_pix_scale,
+                                seeing_fwhm=fwhm_sci_pix * sci_pix_scale,
+                                catalog_type="FITS_LDAC",
+                                use_FWHM=fwhm_sci_pix,
+                                crowded=sextractor_crowded,
+                                use_for_matching=True,
+                                mdir=str(science_aligned_dir),
+                                return_raw=True,
+                            )
+
+                            # Predictable catalog path based on known stem
+                            sci_catalog_path = str(
+                                science_aligned_dir
+                                / "science_corrected_PYSEx_CAT.cat"
+                            )
+
+                            # Update the sci_sex dict for downstream
+                            sci_sex = {
+                                "fwhm": sci_fwhm_gaia,
+                                "catalog": sci_catalog_gaia_raw,
+                                "catalog_path": sci_catalog_path,
+                            }
+                            fwhm_sci_pix = (
+                                float(sci_fwhm_gaia)
+                                if sci_fwhm_gaia and float(sci_fwhm_gaia) > 0
+                                else fwhm_sci_pix
+                            )
+
+                            # Backup corrected science catalog for reference SCAMP
+                            sci_catalog_scamp_backup = str(
+                                science_aligned_dir
+                                / "science_corrected_PYSEx_CAT_scamp.cat"
+                            )
+                            shutil.copy2(sci_catalog_path, sci_catalog_scamp_backup)
+
+                            self.logger.info(
+                                "Corrected science catalog: %s sources, FWHM=%.2f px",
+                                len(sci_catalog_gaia_raw)
+                                if sci_catalog_gaia_raw is not None
+                                else 0,
+                                fwhm_sci_pix,
+                            )
+
             n_sci = len(sci_sex.get("catalog", []))
             n_ref = len(ref_sex.get("catalog", []))
             self.logger.info(
@@ -1775,7 +1969,12 @@ NNW
                 
                 # Copy SCAMP-corrected reference image to aligned location
                 aligned_ref = output_dir / f"aligned_ref_{Path(reference_image).stem}.fits"
-                aligned_sci = Path(science_image)  # Use original science image
+                # Use corrected science if Phase 1 ran, otherwise original
+                aligned_sci = (
+                    Path(sci_image_for_swarp)
+                    if science_first_astrometry
+                    else Path(science_image)
+                )
                 
                 # Copy reference image with SCAMP corrections applied
                 shutil.copy2(ref_image_copy, aligned_ref)
@@ -1830,15 +2029,29 @@ NNW
                     "IMAGE_SIZE": f"{ref_output_width},{ref_output_height}",
                 }
                 
-                self.logger.debug("Running SWarp on science image (native scale)...")
-                swarp_res_sci = self.run_swarp(
-                    [str(sci_image_for_swarp)],
-                    scamp_results=None,
-                    output_dir=str(resample_dir_sci),
-                    config=swarp_config_sci,
-                    no_weight_maps=True,
-                )
-                
+                # Phase 1 already corrected science; skip re-SWarping it here.
+                if science_first_astrometry:
+                    aligned_sci = Path(sci_image_for_swarp)
+                    self.logger.info(
+                        "Native-scale: using Phase 1 corrected science (skip SWarp)."
+                    )
+                    swarp_res_sci = {"corrected_image": str(aligned_sci)}
+                else:
+                    self.logger.debug("Running SWarp on science image (native scale)...")
+                    swarp_res_sci = self.run_swarp(
+                        [str(sci_image_for_swarp)],
+                        scamp_results=None,
+                        output_dir=str(resample_dir_sci),
+                        config=swarp_config_sci,
+                        no_weight_maps=True,
+                    )
+                    if swarp_res_sci is None:
+                        self.logger.info("SWarp failed. Falling back to AstroAlign.")
+                        return self._align_fallback_reproject_then_astroalign(
+                            science_image, reference_image, output_dir
+                        )
+                    aligned_sci = Path(swarp_res_sci["corrected_image"])
+
                 self.logger.debug("Running SWarp on reference image (native scale)...")
                 swarp_res_ref = self.run_swarp(
                     [str(ref_image_copy)],
@@ -1847,14 +2060,13 @@ NNW
                     config=swarp_config_ref,
                     no_weight_maps=True,
                 )
-                
-                if swarp_res_sci is None or swarp_res_ref is None:
+
+                if swarp_res_ref is None:
                     self.logger.info("SWarp failed. Falling back to AstroAlign.")
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
-                
-                aligned_sci = Path(swarp_res_sci["corrected_image"])
+
                 aligned_ref = Path(swarp_res_ref["corrected_image"])
                 
                 if not aligned_sci.exists() or not aligned_ref.exists():
@@ -1872,14 +2084,28 @@ NNW
                 resample_dir_sci.mkdir(parents=True, exist_ok=True)
                 resample_dir_ref.mkdir(parents=True, exist_ok=True)
 
-                self.logger.debug("Running SWarp on science image (COMBINE=Y)...")
-                swarp_res_sci = self.run_swarp(
-                    [str(sci_image_for_swarp)],
-                    scamp_results=None,
-                    output_dir=str(resample_dir_sci),
-                    config=swarp_config_each,
-                    no_weight_maps=True,
-                )
+                # Phase 1 already corrected science; skip re-SWarping it here.
+                if science_first_astrometry:
+                    aligned_sci = Path(sci_image_for_swarp)
+                    self.logger.info(
+                        "Common-grid: using Phase 1 corrected science (skip SWarp)."
+                    )
+                    swarp_res_sci = {"corrected_image": str(aligned_sci)}
+                else:
+                    self.logger.debug("Running SWarp on science image (COMBINE=Y)...")
+                    swarp_res_sci = self.run_swarp(
+                        [str(sci_image_for_swarp)],
+                        scamp_results=None,
+                        output_dir=str(resample_dir_sci),
+                        config=swarp_config_each,
+                        no_weight_maps=True,
+                    )
+                    if swarp_res_sci is None:
+                        self.logger.info("SWarp failed. Falling back to AstroAlign.")
+                        return self._align_fallback_reproject_then_astroalign(
+                            science_image, reference_image, output_dir
+                        )
+                    aligned_sci = Path(swarp_res_sci["corrected_image"])
 
                 self.logger.debug("Running SWarp on reference image (COMBINE=Y)...")
                 swarp_res_ref = self.run_swarp(
@@ -1890,14 +2116,13 @@ NNW
                     no_weight_maps=True,
                 )
 
-                if swarp_res_sci is None or swarp_res_ref is None:
+                if swarp_res_ref is None:
                     self.logger.info("SWarp failed. Falling back to AstroAlign.")
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
 
                 # With COMBINE=Y the output is the co-added file (output.fits), not .resamp.fits
-                aligned_sci = Path(swarp_res_sci["corrected_image"])
                 aligned_ref = Path(swarp_res_ref["corrected_image"])
 
                 if not aligned_sci.exists() or not aligned_ref.exists():

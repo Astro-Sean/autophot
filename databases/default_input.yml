@@ -357,6 +357,7 @@ default_input:
     alignment_max_fwhm_pix: 50.0 # float --- Max FWHM (pixels) kept when alignment_use_extended_sources=False.
     skip_resampling: True # bool --- DEPRECATED: use resample_mode instead. If True, maps to resample_mode="wcs_only".
     resample_mode: common_grid # str --- SWarp resampling mode: "common_grid" (both to science grid), "native_scale" (each keeps own pixel scale), "wcs_only" (no resampling).
+    science_first_astrometry: False # bool --- If True, distortion-correct the science image against GAIA-DR3 first via SCAMP+SWarp, then re-detect sources and use this corrected catalog as the astrometric reference for aligning the reference image. This gives the reference image more sources to match against but resamples the science image twice.
     method: sfft # str --- Subtraction backend (sfft default; hotpants or zogy optional where available).
     kernel_order: 0 # int --- Polynomial order for the SFFT kernel flux scaling model.
     kernel_hw_fwhm_multiplier: 3.0 # float|null --- Multiplier applied to the FWHM of the convolution kernel when sizing the subtraction kernel half-width. If null, uses 2.0 (recommended). The kernel FWHM is computed as sqrt(FWHM_broad^2 - FWHM_narrow^2); kernel_hw = ceil(multiplier * FWHM_conv). Lower values (e.g. 1.5) give a tighter kernel; higher (e.g. 2.5) allow more fitting freedom at the cost of computation.
