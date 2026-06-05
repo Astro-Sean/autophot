@@ -289,7 +289,13 @@ class ImageDistortionCorrector:
     def _save_gaia_catalog_to_cache(
         self, temp_cat_path: str, cache_key: str
     ) -> Optional[Path]:
-        """Move a SCAMP-downloaded GAIA catalog into the persistent cache."""
+        """Move a SCAMP-downloaded GAIA catalog into the persistent cache.
+
+        SCAMP's SAVE_REFCATALOG writes columns like X_WORLD/Y_WORLD/MAG,
+        but our DEFAULT_SCAMP_CONFIG expects XWIN_WORLD/YWIN_WORLD/MAG_AUTO
+        when ASTREF_CATALOG=FILE.  We rename the columns on the way into the
+        cache so that subsequent cache hits work transparently.
+        """
         temp_path = Path(temp_cat_path)
         if not temp_path.exists():
             return None
@@ -297,7 +303,37 @@ class ImageDistortionCorrector:
         cat_path = cache_dir / f"{cache_key}_gaia_dr3.cat"
         meta_path = cache_dir / f"{cache_key}_gaia_dr3.json"
         try:
-            shutil.copy2(str(temp_path), str(cat_path))
+            with fits.open(str(temp_path)) as hdul:
+                new_hdul = fits.HDUList([hdu.copy() for hdu in hdul])
+                for hdu in new_hdul:
+                    if hasattr(hdu, "columns"):
+                        cols = [c.name for c in hdu.columns]
+                        rename_map = {
+                            "X_WORLD": "XWIN_WORLD",
+                            "Y_WORLD": "YWIN_WORLD",
+                            "MAG": "MAG_AUTO",
+                            "MAGERR": "MAGERR_AUTO",
+                        }
+                        changed = False
+                        for old_name, new_name in rename_map.items():
+                            if old_name in cols and new_name not in cols:
+                                idx = cols.index(old_name)
+                                hdu.columns[idx].name = new_name
+                                hdu.header[f"TTYPE{idx + 1}"] = new_name
+                                changed = True
+                        # Add dummy ERRTHETA_WORLD if missing (ASTREFERR_KEYS expects it)
+                        if "ERRA_WORLD" in cols and "ERRB_WORLD" in cols and "ERRTHETA_WORLD" not in cols:
+                            theta_col = fits.Column(
+                                name="ERRTHETA_WORLD",
+                                format="1E",
+                                array=np.zeros(len(hdu.data), dtype=np.float32),
+                            )
+                            hdu.columns.add_col(theta_col)
+                            hdu.header["COMMENT"] = "Added dummy ERRTHETA_WORLD for SCAMP FILE mode"
+                        if changed:
+                            hdu.header["COMMENT"] = "Renamed GAIA columns for SCAMP FILE mode"
+                new_hdul.writeto(str(cat_path), overwrite=True)
+
             meta = {
                 "created": time.time(),
                 "catalog": "GAIA-DR3",
