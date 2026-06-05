@@ -1409,8 +1409,9 @@ NNW
                 self.logger.info(
                     "Phase 1a: Running SCAMP on science vs GAIA-DR3..."
                 )
-                sci_gaia_dir = science_aligned_dir / "scamp_gaia"
-                sci_gaia_dir.mkdir(parents=True, exist_ok=True)
+                # SCAMP writes .head next to the catalog, so output_dir must be
+                # the same directory as the catalog for the glob to find it.
+                sci_gaia_dir = science_aligned_dir
                 sci_gaia_scamp = self.run_scamp(
                     catalog_paths=sci_catalog_scamp_backup,
                     reference_cat=None,  # triggers GAIA-DR3
