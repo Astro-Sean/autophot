@@ -1289,6 +1289,10 @@ class Limits:
             
             # Enforce r_min >= target_exclusion_r so sites are never generated inside exclusion zone
             r_min = max(r_min, target_exclusion_r)
+            # Ensure valid sampling range; if exclusion zone consumes the whole
+            # injection annulus, expand r_max to leave at least one FWHM of room.
+            if r_min >= r_max:
+                r_max = r_min + max(fwhm_px, 2.0)
             logger.info(
                 "Injection radii: r_min=%.1f px (excl_zone=%.1f), r_base=%.1f, r_max=%.1f",
                 r_min, target_exclusion_r, r_base, r_max,

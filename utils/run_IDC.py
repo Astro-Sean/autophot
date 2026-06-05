@@ -12,11 +12,14 @@ External tools required on PATH:
   - sex, psfex (optional), scamp, swarp
 """
 
+import hashlib
+import json
 import logging
 import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from tempfile import mkdtemp
 from typing import Dict, List, Optional, Tuple, Union
@@ -172,6 +175,134 @@ class ImageDistortionCorrector:
         self.input_yaml = input_yaml
         # Initialize SExtractorWrapper for alignment (same as main pipeline)
         self.sextractor = SExtractorWrapper(input_yaml)
+
+    # ---------------------------- GAIA cache helpers ----------------------------
+
+    def _get_gaia_cache_dir(self) -> Path:
+        """Return the persistent GAIA cache directory path."""
+        iy = getattr(self, "input_yaml", None) or {}
+        ts = iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
+        cache_dir = ts.get("gaia_cache_dir")
+        if cache_dir:
+            path = Path(cache_dir).expanduser()
+        else:
+            path = Path.home() / ".autophot" / "scamp_gaia_cache"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _gaia_cache_ttl_seconds(self) -> float:
+        """Return cache TTL in seconds (default 30 days)."""
+        iy = getattr(self, "input_yaml", None) or {}
+        ts = iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
+        days = ts.get("gaia_cache_ttl_days", 30)
+        return float(days) * 86400.0
+
+    @staticmethod
+    def _compute_gaia_cache_key(catalog_path: str) -> str:
+        """Compute a cache key from an LDAC catalog's sky footprint.
+
+        Reads world coordinates from the catalog, computes the median
+        center and approximate search radius, and returns an MD5 hash.
+        """
+        cat_path = Path(catalog_path)
+        if not cat_path.exists():
+            return hashlib.md5(cat_path.name.encode()).hexdigest()
+        try:
+            with fits.open(str(cat_path)) as hdul:
+                # Find the HDU containing source data (LDAC_OBJECTS or any BinTable with world coords)
+                data_hdu = None
+                for hdu in hdul:
+                    if hasattr(hdu, "columns"):
+                        cols = [c.name for c in hdu.columns]
+                        if "XWIN_WORLD" in cols and "YWIN_WORLD" in cols:
+                            data_hdu = hdu
+                            break
+                        if "ALPHA_J2000" in cols and "DELTA_J2000" in cols:
+                            data_hdu = hdu
+                            break
+                if data_hdu is None or len(data_hdu.data) == 0:
+                    return hashlib.md5(cat_path.name.encode()).hexdigest()
+
+                cols = [c.name for c in data_hdu.columns]
+                if "XWIN_WORLD" in cols:
+                    ra = data_hdu.data["XWIN_WORLD"]
+                    dec = data_hdu.data["YWIN_WORLD"]
+                else:
+                    ra = data_hdu.data["ALPHA_J2000"]
+                    dec = data_hdu.data["DELTA_J2000"]
+
+                ra = np.asarray(ra, dtype=float)
+                dec = np.asarray(dec, dtype=float)
+                valid = np.isfinite(ra) & np.isfinite(dec)
+                if not valid.any():
+                    return hashlib.md5(cat_path.name.encode()).hexdigest()
+
+                ra = ra[valid]
+                dec = dec[valid]
+                center_ra = float(np.median(ra))
+                center_dec = float(np.median(dec))
+
+                # Approximate radius: max separation from center (arcmin)
+                coords = SkyCoord(ra=ra * u.deg, dec=dec * u.deg)
+                center = SkyCoord(ra=center_ra * u.deg, dec=center_dec * u.deg)
+                sep = center.separation(coords).arcmin
+                radius = float(np.max(sep)) if len(sep) else 15.0
+                # Round for stable keys
+                ra_r = round(center_ra, 4)
+                dec_r = round(center_dec, 4)
+                radius_r = round(max(radius, 15.0), 1)
+                key_str = f"{ra_r:.4f}_{dec_r:.4f}_{radius_r:.1f}"
+                return hashlib.md5(key_str.encode()).hexdigest()
+        except Exception:
+            return hashlib.md5(cat_path.name.encode()).hexdigest()
+
+    def _find_cached_gaia_catalog(self, cache_key: str) -> Optional[Path]:
+        """Return path to cached GAIA catalog if it exists and is fresh."""
+        cache_dir = self._get_gaia_cache_dir()
+        cat_path = cache_dir / f"{cache_key}_gaia_dr3.cat"
+        meta_path = cache_dir / f"{cache_key}_gaia_dr3.json"
+        if not cat_path.exists():
+            return None
+        if not meta_path.exists():
+            # No metadata: treat as stale to be safe
+            return None
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            created = meta.get("created", 0)
+            ttl = self._gaia_cache_ttl_seconds()
+            if time.time() - created > ttl:
+                self.logger.debug("GAIA cache entry expired for key %s", cache_key)
+                return None
+            self.logger.debug("GAIA cache hit: %s", cat_path)
+            return cat_path
+        except Exception:
+            return None
+
+    def _save_gaia_catalog_to_cache(
+        self, temp_cat_path: str, cache_key: str
+    ) -> Optional[Path]:
+        """Move a SCAMP-downloaded GAIA catalog into the persistent cache."""
+        temp_path = Path(temp_cat_path)
+        if not temp_path.exists():
+            return None
+        cache_dir = self._get_gaia_cache_dir()
+        cat_path = cache_dir / f"{cache_key}_gaia_dr3.cat"
+        meta_path = cache_dir / f"{cache_key}_gaia_dr3.json"
+        try:
+            shutil.copy2(str(temp_path), str(cat_path))
+            meta = {
+                "created": time.time(),
+                "catalog": "GAIA-DR3",
+                "cache_key": cache_key,
+            }
+            with open(meta_path, "w") as f:
+                json.dump(meta, f)
+            self.logger.info("Cached GAIA catalog to %s", cat_path)
+            return cat_path
+        except Exception as e:
+            self.logger.warning("Failed to save GAIA catalog to cache: %s", e)
+            return None
 
     # -------------------------------- Utilities --------------------------------
     @staticmethod
@@ -3408,6 +3539,24 @@ NNW
         wcs_cfg = iy.get("wcs", {}) if isinstance(iy, dict) else {}
         distort_degrees = int(wcs_cfg.get("scamp_distort_degrees", 4))
 
+        # ------------------------------------------------------------------
+        # GAIA-DR3 catalog caching
+        # ------------------------------------------------------------------
+        gaia_cache_key: Optional[str] = None
+        gaia_cache_hit = False
+        gaia_temp_dir: Optional[Path] = None
+        cached_gaia_path: Optional[Path] = None
+
+        if reference_cat is None:
+            gaia_cache_key = self._compute_gaia_cache_key(catalog_paths[0])
+            cached_gaia_path = self._find_cached_gaia_catalog(gaia_cache_key)
+            if cached_gaia_path is not None:
+                gaia_cache_hit = True
+                reference_cat = str(cached_gaia_path)
+                self.logger.info(
+                    "GAIA cache hit: using cached catalog %s", cached_gaia_path
+                )
+
         final_config = {
             **self.DEFAULT_SCAMP_CONFIG,
             "DISTORT_DEGREES": distort_degrees,
@@ -3419,6 +3568,15 @@ NNW
         # COMBINE is a SWarp keyword, not a SCAMP keyword. Do not pass it to SCAMP.
         final_config.pop("COMBINE", None)
         final_config = {k: v for k, v in final_config.items() if v is not None}
+
+        # If downloading GAIA (cache miss), ask SCAMP to save it for next time.
+        if reference_cat is None and gaia_cache_key is not None:
+            gaia_temp_dir = Path(mkdtemp(prefix="scamp_gaia_"))
+            final_config["SAVE_REFCATALOG"] = "Y"
+            final_config["REFOUT_CATPATH"] = str(gaia_temp_dir)
+            self.logger.info(
+                "GAIA cache miss: downloading and caching with key %s", gaia_cache_key
+            )
 
         config_file = (
             str(output_path / f"{stem}_default.scamp")
@@ -3465,6 +3623,11 @@ NNW
                         Path(p).unlink(missing_ok=True)
                     except OSError as e:
                         self.logger.debug("Could not remove SCAMP output %s: %s", p, e)
+            if gaia_temp_dir and gaia_temp_dir.exists():
+                try:
+                    shutil.rmtree(gaia_temp_dir)
+                except OSError as e:
+                    self.logger.debug("Could not remove GAIA temp dir %s: %s", gaia_temp_dir, e)
 
         try:
             with open(log_file, "w") as log_f:
@@ -3507,6 +3670,20 @@ NNW
                 f"SCAMP failed (code {result.returncode}). See {log_file}"
             )
             return None
+
+        # After successful SCAMP run, save downloaded GAIA catalog to cache.
+        if gaia_temp_dir is not None and gaia_cache_key is not None:
+            saved_cats = list(gaia_temp_dir.glob("*.cat"))
+            if saved_cats:
+                self._save_gaia_catalog_to_cache(str(saved_cats[0]), gaia_cache_key)
+            else:
+                self.logger.debug("SCAMP did not save a reference catalog to %s", gaia_temp_dir)
+            # Clean up temp dir
+            try:
+                shutil.rmtree(gaia_temp_dir)
+            except OSError as e:
+                self.logger.debug("Could not remove GAIA temp dir %s: %s", gaia_temp_dir, e)
+            gaia_temp_dir = None
 
         distortion = self._parse_scamp_xml(xml_file)
 
@@ -3983,7 +4160,7 @@ NNW
                     ax.text(0.98, 0.98, f"+{remaining_sources} more {catalog_type}", 
                            transform=ax.transAxes, fontsize=8, 
                            ha='right', va='top', 
-                           bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='lightgrey', alpha=0.7),
                            zorder=20)
                     
                     # Plot remaining sources as small crosses
