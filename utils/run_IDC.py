@@ -267,16 +267,15 @@ class ImageDistortionCorrector:
                 center_ra = float(np.median(ra))
                 center_dec = float(np.median(dec))
 
-                # Approximate radius: max separation from center (arcmin)
-                coords = SkyCoord(ra=ra * u.deg, dec=dec * u.deg)
-                center = SkyCoord(ra=center_ra * u.deg, dec=center_dec * u.deg)
-                sep = center.separation(coords).arcmin
-                radius = float(np.max(sep)) if len(sep) else 15.0
-                # Round for stable keys
-                ra_r = round(center_ra, 4)
-                dec_r = round(center_dec, 4)
-                radius_r = round(max(radius, 15.0), 1)
-                key_str = f"{ra_r:.4f}_{dec_r:.4f}_{radius_r:.1f}"
+                # Round coarsely so all images of the same field share one cache entry.
+                # 0.01 deg ≈ 36 arcsec — fine enough to avoid field collisions but coarse
+                # enough that small catalog-to-catalog shifts don't create unique keys.
+                # Fixed 30 arcmin radius: GAIA-DR3 reference catalogs for the same field
+                # all cover roughly the same sky area regardless of detection footprint.
+                ra_r = round(center_ra, 2)
+                dec_r = round(center_dec, 2)
+                radius_r = 30.0  # arcmin
+                key_str = f"{ra_r:.2f}_{dec_r:.2f}_{radius_r:.1f}"
                 return hashlib.md5(key_str.encode()).hexdigest()
         except Exception:
             return hashlib.md5(cat_path.name.encode()).hexdigest()
