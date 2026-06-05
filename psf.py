@@ -627,6 +627,7 @@ class MCMCFitter:
         background_rms=None,
         psf_error_floor_frac=0.0,
         smooth_variance_sigma=0.0,
+        is_background_subtracted=False,
     ):
         """
         Compute per-pixel sigma in electrons matching create_nddata_with_fitting_weights.
@@ -651,8 +652,13 @@ class MCMCFitter:
                         f"background_rms shape {background_rms.shape} incompatible with data shape {image_e.shape}"
                     )
         bkg_error = np.sqrt(bkg_rms_e**2 + float(readnoise) ** 2)
+        # When data is background-subtracted, the Poisson variance from the sky
+        # is missing.  Approximate it as bkg_rms^2 (Poisson: variance ≈ mean).
+        poisson_e = image_e
+        if is_background_subtracted:
+            poisson_e = poisson_e + bkg_rms_e**2
         total_error = calc_total_error(
-            data=image_e, bkg_error=bkg_error, effective_gain=1.0
+            data=poisson_e, bkg_error=bkg_error, effective_gain=1.0
         )
 
         if psf_error_floor_frac > 0:
@@ -789,17 +795,27 @@ class MCMCFitter:
                 getattr(fitted_model, pname).bounds = (p0 - self.delta, p0 + self.delta)
 
         if use_nddata_uncertainty:
-            # _recompute_noise_variance returns per-pixel sigma; likelihood expects variance (sigma^2)
-            sigma = self._recompute_noise_variance(
-                data,
-                gain=gain,
-                readnoise=readnoise,
-                background_rms=background_rms,
-                psf_error_floor_frac=psf_error_floor_frac,
-                smooth_variance_sigma=smooth_variance_sigma,
-            )
-            noise_variance = np.asarray(sigma, float) ** 2
-            weights = None  # use our variance only; avoid double-counting if caller passed weights
+            if weights is not None:
+                # Trust photutils' weights from the original NDData uncertainty (computed on
+                # the full non-background-subtracted image). Convert inverse-weights to variance.
+                w = np.asarray(weights, float)
+                noise_variance = 1.0 / np.clip(w, 1e-30, None) ** 2
+                log.debug("[MCMC] Using photutils NDData weights for variance.")
+            else:
+                # Fallback: recompute from the cutout.  Add bkg_rms^2 to the Poisson term
+                # because data is background-subtracted and the Poisson noise from the sky
+                # is missing.  For Poisson background, variance ≈ mean ≈ rms^2.
+                sigma = self._recompute_noise_variance(
+                    data,
+                    gain=gain,
+                    readnoise=readnoise,
+                    background_rms=background_rms,
+                    psf_error_floor_frac=psf_error_floor_frac,
+                    smooth_variance_sigma=smooth_variance_sigma,
+                    is_background_subtracted=True,
+                )
+                noise_variance = np.asarray(sigma, float) ** 2
+            weights = None  # variance now fully encodes uncertainty
         else:
             # If the caller provides an explicit per-pixel variance map, treat it
             # as authoritative and ignore extra weights to avoid ambiguity.
@@ -3324,77 +3340,6 @@ class PSF:
 
             if not iterative:
                 nd_for_fit = nd_override if nd_override is not None else ndimage
-                if False:
-                    # Work on a copy so other tiers/fits see the original image.
-                    work = np.array(ndimage.data, dtype=float, copy=True)
-                    sub_init_tmp = init_params[mask].to_pandas()
-                    n_ok = 0
-                    slopes = []
-                    # For the target fit (single source), subtract the fitted plane
-                    # over a larger local stamp around the target (comparable to the
-                    # local background region), instead of just the tiny PSF fit box.
-                    if is_target_fit and int(np.count_nonzero(mask)) == 1:
-                        _x = float(sub_init_tmp["x"].to_numpy()[0])
-                        _y = float(sub_init_tmp["y"].to_numpy()[0])
-                        coef = _fit_plane_from_annulus(work, _x, _y, inner_r, outer_r)
-                        if coef is not None:
-                            # Use a box ~2*outer_r on a side around the target to
-                            # capture the same local environment as the annulus-based
-                            # background estimate, but without touching the full frame.
-                            side = max(3, int(2.0 * float(outer_r)))
-                            side = _odd(side)
-                            if _subtract_plane_in_fit_box(
-                                work, coef, _x, _y, (side, side)
-                            ):
-                                n_ok = 1
-                                slopes.append((coef[1], coef[2]))
-                                log.info(
-                                    "Planar background subtraction applied in a local stamp for target fit "
-                                    "(inner=%.1f px, outer=%.1f px, box=%dx%d). "
-                                    "Slopes: bx=%.3g, by=%.3g ADU/pix.",
-                                    float(inner_r),
-                                    float(outer_r),
-                                    side,
-                                    side,
-                                    float(coef[1]),
-                                    float(coef[2]),
-                                )
-                    else:
-                        for _x, _y in zip(
-                            sub_init_tmp["x"].to_numpy(), sub_init_tmp["y"].to_numpy()
-                        ):
-                            coef = _fit_plane_from_annulus(
-                                work, float(_x), float(_y), inner_r, outer_r
-                            )
-                            if coef is None:
-                                continue
-                            if _subtract_plane_in_fit_box(
-                                work, coef, float(_x), float(_y), fit_shape
-                            ):
-                                n_ok += 1
-                                slopes.append((coef[1], coef[2]))
-                    nd_for_fit = _nddata_clone(ndimage, data=work)
-                    if n_ok > 0:
-                        bx_med = (
-                            float(np.nanmedian([s[0] for s in slopes]))
-                            if slopes
-                            else 0.0
-                        )
-                        by_med = (
-                            float(np.nanmedian([s[1] for s in slopes]))
-                            if slopes
-                            else 0.0
-                        )
-                        log.info(
-                            "Planar background subtraction applied to %d/%d sources (inner=%.1f px, outer=%.1f px). "
-                            "Median slopes: bx=%.3g, by=%.3g ADU/pix.",
-                            n_ok,
-                            int(np.count_nonzero(mask)),
-                            float(inner_r),
-                            float(outer_r),
-                            bx_med,
-                            by_med,
-                        )
                 psfphot = PSFPhotometry(
                     psf_model=epsf_model_copy,
                     fitter=fitter,
