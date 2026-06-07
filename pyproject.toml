@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autophot"
-version = "1.0.2"
+version = "1.0.3"
 description = "AutoPHOT object photometry pipeline (CCD/NIR; calibrated aperture/PSF photometry; template subtraction)."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
@@ -45,6 +45,7 @@ all = ["mastcasjobs==0.0.7", "sfft==1.7.1", "aafitrans==0.2.1"]
 autophot-main = "main:run_photometry"
 autophot-driver = "autophot:main"
 autophot-gaia-curves = "autophot_gaia_curves.cli:main"
+autophot-inspect-telescope = "inspect_telescope:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -58,6 +59,7 @@ py-modules = [
   "check",
   "cosmic",
   "functions",
+  "inspect_telescope",
   "fwhm",
   "lightcurve",
   "limits",

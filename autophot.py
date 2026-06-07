@@ -941,6 +941,309 @@ def prepare_template_directory(
     }
 
 
+def inspect_telescope(
+    fits_dir: str,
+    wdir: Optional[str] = None,
+    recursive: bool = False,
+    dry_run: bool = False,
+    verbose: bool = False,
+    filter_key: Optional[str] = None,
+    gain_key: str = "GAIN",
+    rn_key: str = "RDNOISE",
+    sat_key: str = "SATURATE",
+    exptime_key: str = "EXPTIME",
+    mjd_key: str = "MJD-OBS",
+    date_key: str = "DATE-OBS",
+    airmass_key: str = "AIRMASS",
+) -> Optional[dict]:
+    """
+    Scan a folder of FITS images and build / update ``telescope.yml``.
+
+    For every unique (TELESCOP, INSTRUME) combination discovered, the function:
+
+    - auto-detects the filter header key (FILTER, FILTER1, …)
+    - records every raw filter value seen (as identity mappings — edit the
+      right-hand side to the appropriate catalog band name afterwards)
+    - derives the pixel scale (arcsec/pixel) from the image WCS
+    - records which FITS header keywords are present for gain, readnoise,
+      saturate, exptime, MJD, date, and airmass
+
+    The result is written to ``<wdir>/telescope.yml`` (default: ``fits_dir``).
+    If the file already exists it is **deep-merged**: existing user values are
+    kept and only missing keys are added.
+
+    Parameters
+    ----------
+    fits_dir : str
+        Folder containing FITS images (``.fits``, ``.fts``, ``.fit``,
+        optionally gzip-compressed).
+    wdir : str, optional
+        Directory where ``telescope.yml`` is written.
+        Defaults to ``fits_dir``.
+    recursive : bool
+        Scan sub-folders as well (default False).
+    dry_run : bool
+        If True, print the generated YAML to stdout without writing anything.
+    verbose : bool
+        If True, print a per-file diagnostic line.
+    filter_key : str, optional
+        Force a specific FITS header keyword for the filter name.
+        When None (default), the first non-empty key from
+        FILTER / FILTER1 / FILTER2 / FILTERID / INSFILTE / FILTNAM1 is used.
+    gain_key : str
+        FITS header keyword for the gain (default ``GAIN``).
+    rn_key : str
+        FITS header keyword for read noise (default ``RDNOISE``).
+    sat_key : str
+        FITS header keyword for the saturation level (default ``SATURATE``).
+    exptime_key : str
+        FITS header keyword for exposure time (default ``EXPTIME``).
+    mjd_key : str
+        FITS header keyword for the Modified Julian Date (default ``MJD-OBS``).
+    date_key : str
+        FITS header keyword for the observation date (default ``DATE-OBS``).
+    airmass_key : str
+        FITS header keyword for airmass (default ``AIRMASS``).
+
+    Returns
+    -------
+    dict or None
+        The merged telescope configuration that was (or would be) written,
+        or ``None`` if no valid images were found.
+
+    Examples
+    --------
+    >>> from autophot import inspect_telescope
+    >>> inspect_telescope("/data/2024-06-01/")          # writes telescope.yml next to the images
+    >>> inspect_telescope("/data/2024-06-01/", dry_run=True)   # preview only
+    >>> inspect_telescope("/data/", recursive=True, wdir="/data/_REDUCED/")
+    """
+    import copy as _copy
+    import numpy as _np
+    import yaml as _yaml
+    from astropy.io import fits as _fits
+
+    _FITS_EXTENSIONS = (".fits", ".fit", ".fts", ".fits.gz", ".fit.gz", ".fts.gz")
+    _FILTER_CANDIDATES = ["FILTER", "FILTER1", "FILTER2", "FILTERID", "INSFILTE", "FILTNAM1"]
+    _AVOID_FILTERS = {"clear", "open", "none", "", "n/a"}
+
+    log_it = logging.getLogger(__name__)
+
+    # ---- helpers ----
+    def _find_files(d, rec):
+        out = []
+        if rec:
+            for root, _, names in os.walk(d):
+                for n in names:
+                    if any(n.lower().endswith(e) for e in _FITS_EXTENSIONS):
+                        out.append(os.path.join(root, n))
+        else:
+            for n in os.listdir(d):
+                if any(n.lower().endswith(e) for e in _FITS_EXTENSIONS):
+                    out.append(os.path.join(d, n))
+        return sorted(out)
+
+    def _read_header(fpath):
+        with _fits.open(fpath, ignore_missing_end=True, memmap=False) as hdul:
+            hdul.verify("silentfix+ignore")
+            for hdu in hdul:
+                if any(k.upper() == "TELESCOP" for k in hdu.header.keys()):
+                    return hdu.header.copy()
+            return hdul[0].header.copy()
+
+    def _pixel_scale(header):
+        try:
+            from astropy.wcs import WCS, utils as wcsutils
+            with _np.errstate(all="ignore"):
+                wcs_obj = WCS(header, naxis=2)
+                scales = wcsutils.proj_plane_pixel_scales(wcs_obj)
+                if scales is not None and len(scales) > 0:
+                    ps = float(scales[0]) * 3600.0
+                    if _np.isfinite(ps) and 0 < ps <= 20:
+                        return round(ps, 4)
+        except Exception:
+            pass
+        return None
+
+    def _hval(header, key, default=None):
+        try:
+            if key and key in header:
+                return header[key]
+        except Exception:
+            pass
+        return default
+
+    def _read_filter(header, forced_key):
+        candidates = ([forced_key] + _FILTER_CANDIDATES) if forced_key else _FILTER_CANDIDATES
+        for key in candidates:
+            val = _hval(header, key)
+            if val is not None and str(val).strip().lower() not in _AVOID_FILTERS:
+                return str(val).strip(), key
+        return None, None
+
+    def _deep_merge(base, override):
+        for k, v in override.items():
+            if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+                _deep_merge(base[k], v)
+            else:
+                base[k] = v
+        return base
+
+    def _load_yml(path):
+        if os.path.isfile(path):
+            with open(path) as f:
+                return _yaml.safe_load(f) or {}
+        return {}
+
+    def _write_yml(path, data):
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w") as f:
+            _yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    # ---- main logic ----
+    fits_dir = os.path.abspath(str(fits_dir))
+    if not os.path.isdir(fits_dir):
+        raise ValueError(f"fits_dir does not exist: {fits_dir!r}")
+
+    wdir_path = os.path.abspath(str(wdir)) if wdir else fits_dir
+    yml_path = os.path.join(wdir_path, "telescope.yml")
+
+    files = _find_files(fits_dir, recursive)
+    if not files:
+        log_it.warning("inspect_telescope: no FITS files found in %s", fits_dir)
+        return None
+
+    log_it.info("inspect_telescope: scanning %d file(s) in %s", len(files), fits_dir)
+
+    seen: dict = {}
+    skipped = 0
+
+    for fpath in files:
+        try:
+            header = _read_header(fpath)
+        except Exception as exc:
+            log_it.debug("Cannot read %s: %s", fpath, exc)
+            skipped += 1
+            continue
+
+        tele = _hval(header, "TELESCOP")
+        inst = _hval(header, "INSTRUME")
+        if not tele or not inst:
+            if verbose:
+                log_it.info("  SKIP (no TELESCOP/INSTRUME): %s", os.path.basename(fpath))
+            skipped += 1
+            continue
+
+        tele, inst = str(tele).strip(), str(inst).strip()
+        fval, fhdr_key = _read_filter(header, filter_key)
+        ps = _pixel_scale(header)
+
+        if (tele, inst) not in seen:
+            seen[(tele, inst)] = {
+                "filters": {}, "filter_header_key": None, "pixel_scales": [],
+                "gain_keys": set(), "rn_keys": set(), "sat_keys": set(),
+                "exptime_keys": set(), "mjd_keys": set(), "date_keys": set(),
+                "airmass_keys": set(), "gain_val": None, "rn_val": None,
+            }
+        rec = seen[(tele, inst)]
+
+        if fval:
+            rec["filters"][fval] = rec["filters"].get(fval, 0) + 1
+        if fhdr_key and rec["filter_header_key"] is None:
+            rec["filter_header_key"] = fhdr_key
+        if ps is not None:
+            rec["pixel_scales"].append(ps)
+
+        for attr, kw in [
+            ("gain_keys", gain_key), ("rn_keys", rn_key), ("sat_keys", sat_key),
+            ("exptime_keys", exptime_key), ("mjd_keys", mjd_key),
+            ("date_keys", date_key), ("airmass_keys", airmass_key),
+        ]:
+            if kw and kw in header:
+                rec[attr].add(kw)
+
+        if rec["gain_val"] is None:
+            try:
+                rec["gain_val"] = float(_hval(header, gain_key, _np.nan))
+            except (TypeError, ValueError):
+                pass
+        if rec["rn_val"] is None:
+            try:
+                rec["rn_val"] = float(_hval(header, rn_key, _np.nan))
+            except (TypeError, ValueError):
+                pass
+
+        if verbose:
+            log_it.info(
+                "  %-40s  TELESCOP=%-20s INSTRUME=%-15s FILTER=%-8s ps=%s",
+                os.path.basename(fpath), tele, inst,
+                fval or "?", f'{ps:.3f}"' if ps else "N/A",
+            )
+
+    if skipped:
+        log_it.info("inspect_telescope: skipped %d file(s).", skipped)
+
+    if not seen:
+        log_it.warning("inspect_telescope: no valid telescope/instrument entries found.")
+        return None
+
+    existing = _load_yml(yml_path)
+    new_data: dict = _copy.deepcopy(existing)
+
+    for (tele, inst), rec in seen.items():
+        filter_hdr = rec["filter_header_key"] or "FILTER"
+        ps_list = rec["pixel_scales"]
+        ps_med = float(_np.median(ps_list)) if ps_list else None
+
+        def _best_key(found_set, default):
+            return next(iter(found_set), default)
+
+        inst_block: dict = {
+            "filter_key_0": filter_hdr,
+            "mjd": _best_key(rec["mjd_keys"], mjd_key),
+            "date": _best_key(rec["date_keys"], date_key),
+            "gain": _best_key(rec["gain_keys"], gain_key),
+            "saturate": _best_key(rec["sat_keys"], sat_key),
+            "readnoise": _best_key(rec["rn_keys"], rn_key),
+            "airmass": _best_key(rec["airmass_keys"], airmass_key),
+            "exptime": _best_key(rec["exptime_keys"], exptime_key),
+        }
+        if ps_med is not None:
+            inst_block["pixel_scale"] = round(ps_med, 4)
+        for fv in sorted(rec["filters"]):
+            if fv not in inst_block:
+                inst_block[fv] = fv  # placeholder; edit RHS to catalog band name
+
+        tele_block = new_data.setdefault(tele, {})
+        ib = tele_block.setdefault("INSTRUME", {})
+        existing_inst = ib.get(inst, {})
+        if not isinstance(existing_inst, dict):
+            existing_inst = {}
+        for k, v in inst_block.items():
+            if k not in existing_inst:
+                existing_inst[k] = v
+        ib[inst] = existing_inst
+
+        log_it.info(
+            "inspect_telescope: %-20s / %-15s  filters=[%s]  pixel_scale=%s",
+            tele, inst,
+            ", ".join(sorted(rec["filters"])) or "(none)",
+            f'{ps_med:.4f}"' if ps_med else "N/A",
+        )
+
+    if dry_run:
+        print("\n# ---- telescope.yml (dry-run, not written) ----")
+        print(_yaml.dump(new_data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+        print("# -----------------------------------------------")
+        return new_data
+
+    _write_yml(yml_path, new_data)
+    log_it.info("inspect_telescope: telescope.yml written to %s", yml_path)
+    if existing:
+        log_it.info("inspect_telescope: existing entries preserved; new keys merged in.")
+    return new_data
+
+
 def __getattr__(name: str):
     """
     Resolve common misspellings for public module symbols.
