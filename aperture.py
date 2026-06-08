@@ -454,7 +454,9 @@ def _measure_worker(args):
             mag_err_val = np.nan
 
         rn_term = empirical_std**2 + read_noise_sq
-        max_flux_err = np.sqrt(np.abs(raw_max) + rn_term) * inv_exposure_time
+        # raw_max is a single pixel (e⁻); scale sky+RN variance by area to match
+        # the same approximation used in the total_var fallback above.
+        max_flux_err = np.sqrt(np.abs(raw_max) + effective_area * rn_term) * inv_exposure_time
 
         return {
             "idx": i,
@@ -1420,13 +1422,18 @@ class Aperture:
         sources["tail_outer_slope"] = np.nan
 
         gain = resolve_gain_e_per_adu(None, self.input_yaml)
-        error = (
-            None
-            if background_rms is None
-            else calc_total_error(
-                self.image, background_rms, effective_gain=float(gain)
+        if background_rms is not None:
+            # Convert both data and bkg_error to electrons so total_error is in e⁻.
+            # Matches the convention used in Aperture.measure() (image_e = image*gain,
+            # bkg_error = background_rms_ADU * gain, effective_gain=1).
+            _image_e_opt = np.where(
+                np.isfinite(self.image), np.maximum(self.image * gain, 0.0), np.nan
             )
-        )
+            error = calc_total_error(
+                _image_e_opt, np.abs(background_rms) * gain, effective_gain=1
+            )
+        else:
+            error = None
         n_jobs = _resolve_n_jobs(n_jobs, half_cpus=False)
         use_moffat_cog = bool(phot_cfg.get("optimum_radius_use_moffat_cog", False))
         moffat_beta = float(
@@ -2009,11 +2016,16 @@ class Aperture:
 
         gain = resolve_gain_e_per_adu(None, self.input_yaml)
         radii = np.arange(0.05, max_radius, 0.1) * fwhm
-        error = (
-            calc_total_error(image, background_rms, effective_gain=gain)
-            if background_rms is not None
-            else None
-        )
+        if background_rms is not None:
+            # Convert both data and bkg_error to electrons (matches Aperture.measure convention).
+            _image_e_ac = np.where(
+                np.isfinite(image), np.maximum(image * gain, 0.0), np.nan
+            )
+            error = calc_total_error(
+                _image_e_ac, np.abs(background_rms) * gain, effective_gain=1
+            )
+        else:
+            error = None
 
         selected = sources.sort_values("flux_AP", ascending=False).head(n_samples)
 

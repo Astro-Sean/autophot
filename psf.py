@@ -3154,9 +3154,12 @@ class PSF:
         fwhm_clamped = max(1.0, min(fwhm, 50.0))  # Prevent extreme FWHM values
         psf_norm = 1.0 / (np.pi * fwhm_clamped**2)
         psf_norm = max(1e-6, min(psf_norm, 1.0))  # Clamp to reasonable range
-        # Background noise term: (b/g + Nccd/g^2) / C
-        # Convert bkgrmsval (ADU) to electrons, add read noise squared, divide by PSF norm
-        background_noise = (bkgrmsval * gain + read_noise**2) / gain / psf_norm
+        # Background noise term: (sigma_sky_e^2 + RN_e^2) / (g^2 * C)
+        # where sigma_sky_e = bkgrmsval * gain (ADU -> e-), RN_e = read_noise (e-).
+        # Variance in e-^2, divided by g^2 to produce ADU^2-equivalent variance,
+        # consistent with source_noise = flux_e_frame / gain (also ADU equivalent).
+        bkg_var_e2 = (bkgrmsval * gain) ** 2 + read_noise ** 2  # e-^2
+        background_noise = bkg_var_e2 / (gain ** 2 * psf_norm)
         # Source photon noise term: fs / g (for normalized PSF)
         # flux_e_frame is integrated e⁻ in the frame (same units as Aperture.counts_AP)
         source_noise = flux_e_frame / gain
