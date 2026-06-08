@@ -1817,11 +1817,16 @@ class Limits:
                 betas = np.array([r[1] for r in results], dtype=float)
                 recovered_fluxes = np.array([r[2] for r in results], dtype=float)
 
-                # DIAGNOSTIC: log detection rate at this magnitude
-                F = flux_for_mag(m)
+                # Per-trial progress line with visual completeness bar.
+                _rate = float(det_flags.mean()) if len(det_flags) else 0.0
+                _n_det = int(det_flags.sum())
+                _n_tot = len(det_flags)
+                _bar_width = 20
+                _filled = int(round(_rate * _bar_width))
+                _bar = "\u2588" * _filled + "-" * (_bar_width - _filled)
                 logger.info(
-                    "run_trials_at_mag(m=%.3f): F=%.4e, det_rate=%.3f (%d/%d)",
-                    m, F, float(det_flags.mean()), int(det_flags.sum()), len(det_flags)
+                    "  inject m=%+7.3f | [%s] %5.1f%%  (%d/%d detected)",
+                    m, _bar, 100.0 * _rate, _n_det, _n_tot,
                 )
 
                 det_rate = float(det_flags.mean()) if len(det_flags) else 0.0
@@ -1849,6 +1854,10 @@ class Limits:
                 # ---- Bracket phase ------------------------------------------
                 step = 0.5
                 max_steps = 30
+                logger.info(
+                    "--- Bracket phase: target completeness=%.0f%%, initial guess m=%.3f, step=%.2f mag ---",
+                    100.0 * completeness_target, float(initialGuess), step,
+                )
                 # Check if injection recovery plot is enabled
                 plot_injection_recovery = (self.input_yaml.get("limiting_magnitude") or {}).get("plot_injection_recovery", False)
 
@@ -1945,14 +1954,28 @@ class Limits:
                 if not bracketed:
                     # Return NaN when bracketing fails - no default fallback limit
                     inject_lmag = np.nan
+                    all_bracket_mags = [t[0] for t in bracket_steps if np.isfinite(t[0])]
+                    m_lo_tried = float(min(all_bracket_mags)) if all_bracket_mags else np.nan
+                    m_hi_tried = float(max(all_bracket_mags)) if all_bracket_mags else np.nan
                     logger.warning(
-                        f"Could not bracket cutoff; returning NaN"
+                        "Could not bracket %.0f%% completeness threshold "
+                        "(searched m=[%.2f, %.2f], brightest det_rate=%.1f%%, "
+                        "faintest det_rate=%.1f%%); returning NaN.",
+                        100.0 * completeness_target,
+                        m_lo_tried, m_hi_tried,
+                        100.0 * float(c_bright),
+                        100.0 * float(c_faint),
                     )
 
                 else:
                     # ---- Bisect phase ----------------------------------------
                     lo_m, lo_c = m_bright, c_bright
                     hi_m, hi_c = m_faint, c_faint
+                    logger.info(
+                        "--- Bisect phase: bracket [m=%.3f (%.0f%%) .. m=%.3f (%.0f%%)] ---",
+                        float(lo_m), 100.0 * float(lo_c),
+                        float(hi_m), 100.0 * float(hi_c),
+                    )
                     # Bracket endpoints already recorded in bracket_steps, but include
                     # them here so the plotted trajectory clearly straddles 50%.
                     # (f_bright/f_faint are medians from run_trials_at_mag).
@@ -2006,6 +2029,10 @@ class Limits:
                                 inject_lmag = float(lo_m + w * (hi_m - lo_m))
                     except Exception:
                         pass
+                    logger.info(
+                        "    Bisection converged: m50=%.4f (bracket width=%.4f mag)",
+                        float(inject_lmag), abs(hi_m - lo_m),
+                    )
 
                     # Optional: fit a smooth completeness curve with emcee and solve for m50.
                     if completeness_solver == "logistic_emcee":
@@ -2090,35 +2117,41 @@ class Limits:
             # =================================================================
             elapsed = time.time() - start_time
             if np.isfinite(inject_lmag):
-                # Select appropriate zeropoint for logging (same logic as plotting)
+                # Select appropriate zeropoint for logging.
                 log_zeropoint = zeropoint
                 if image_zeropoint is not None:
                     recovery_method_upper = str(recovery_method).strip().upper() if recovery_method else "AP"
                     if recovery_method_upper in ("PSF", "EMCEE"):
                         log_zeropoint = image_zeropoint.get("PSF", {}).get("zeropoint", zeropoint)
-                    else:  # AP method
+                    else:
                         log_zeropoint = image_zeropoint.get("AP", {}).get("zeropoint", zeropoint)
-                
-                app_str = ""
-                if log_zeropoint is not None and np.isfinite(log_zeropoint):
-                    app_mag = float(inject_lmag) + float(log_zeropoint)
-                    app_str = f" ({app_mag:.3f} apparent)"
+
                 zp_log = (
                     f"{float(log_zeropoint):.3f}"
-                    if log_zeropoint is not None and np.isfinite(log_zeropoint)
+                    if log_zeropoint is not None and np.isfinite(float(log_zeropoint) if log_zeropoint is not None else np.nan)
                     else "n/a"
                 )
-                logger.info(
-                    f"Limiting magnitude: instrumental={inject_lmag:.3f}{app_str}, "
-                    f"zeropoint={zp_log}"
-                )
-                f_inst_per_s = 10.0 ** (-0.4 * float(inject_lmag))
+                app_str = ""
+                if log_zeropoint is not None:
+                    try:
+                        if np.isfinite(float(log_zeropoint)):
+                            app_mag = float(inject_lmag) + float(log_zeropoint)
+                            app_str = f"  apparent={app_mag:.3f}"
+                    except (TypeError, ValueError):
+                        pass
 
+                n_trials_total = len(_trial_cache)
                 logger.info(
-                    f"Limiting mag ~ {inject_lmag:.3f}{app_str}  [{elapsed:.1f}s]"
+                    "\u2605 Limiting magnitude: inst=%.3f%s  ZP=%s  "
+                    "method=%s  completeness=%.0f%%  trials=%d  [%.1fs]",
+                    float(inject_lmag), app_str, zp_log,
+                    str(recovery_method), 100.0 * completeness_target,
+                    n_trials_total, elapsed,
                 )
             else:
-                logger.info(f"Limiting magnitude search failed [{elapsed:.1f}s]")
+                logger.info(
+                    "\u26a0 Limiting magnitude search failed  [%.1fs]", elapsed
+                )
 
             # The limiting magnitude is already exposure-time-normalized via flux_for_mag
             return float(inject_lmag)
