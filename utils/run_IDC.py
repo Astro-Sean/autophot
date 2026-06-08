@@ -53,6 +53,29 @@ from wcs import get_wcs
 from utils.run_sex import SExtractorWrapper
 
 
+def _safe_world2pix(wcs_obj, ra, dec, origin=0):
+    """
+    ``wcs.all_world2pix`` with ``quiet=True`` so non-converging points
+    return NaN instead of raising ``astropy.wcs.NoConvergence``.
+
+    The ``quiet`` kwarg was added in astropy 4.0.  On older versions we fall
+    back to the plain call wrapped in a try/except so callers never see the
+    exception and can test ``np.isfinite`` instead.
+    """
+    try:
+        return wcs_obj.all_world2pix(ra, dec, origin, quiet=True)
+    except TypeError:
+        # astropy < 4.0: quiet kwarg not supported
+        try:
+            return wcs_obj.all_world2pix(ra, dec, origin)
+        except Exception:
+            _nan = np.full_like(np.atleast_1d(ra), np.nan, dtype=float)
+            return _nan, _nan.copy()
+    except Exception:
+        _nan = np.full_like(np.atleast_1d(ra), np.nan, dtype=float)
+        return _nan, _nan.copy()
+
+
 class ImageDistortionCorrector:
     """
     Process astronomical images with SExtractor, SCAMP, SWarp, and AstroAlign,
@@ -1193,7 +1216,8 @@ NNW
                         _sci_cra, _sci_cdec = _sci_w.all_pix2world([_scx], [_scy], 0)
                         
                         # Project science center into reference pixel coords
-                        _rcx, _rcy = _ref_w.all_world2pix(_sci_cra[0], _sci_cdec[0], 0)
+                        _rcx_arr, _rcy_arr = _safe_world2pix(_ref_w, _sci_cra[0], _sci_cdec[0], 0)
+                        _rcx, _rcy = float(np.atleast_1d(_rcx_arr)[0]), float(np.atleast_1d(_rcy_arr)[0])
                         
                         # Cutout size: science size + 20% margin for alignment shifts
                         _cut_h = int(_sci_shape[0] * 1.2)
@@ -1202,7 +1226,7 @@ NNW
                         if np.isfinite(_rcx) and np.isfinite(_rcy):
                             _ref_cutout = Cutout2D(
                                 _rh[0].data,
-                                (_rcx[0], _rcy[0]),
+                                (_rcx, _rcy),
                                 (_cut_h, _cut_w),
                                 wcs=_ref_w,
                                 mode='partial',
@@ -1297,23 +1321,30 @@ NNW
                     sci_shape[1], sci_shape[0], ref_shape[1], ref_shape[0]
                 )
                 
-                # Verify reference covers the science region
-                # Compute science corners in world coords
-                sci_corners = np.array([[0, 0], [sci_shape[1], 0], 
-                                        [sci_shape[1], sci_shape[0]], [0, sci_shape[0]]])
-                sci_world_corners = sci_wcs.all_pix2world(sci_corners, 0)
-                # Check if these corners fall within reference image bounds
-                ref_x, ref_y = ref_wcs.all_world2pix(sci_world_corners[:, 0], 
-                                                      sci_world_corners[:, 1], 0)
-                ref_in_bounds = ((ref_x >= 0) & (ref_x < ref_shape[1]) & 
-                                (ref_y >= 0) & (ref_y < ref_shape[0]))
-                if not all(ref_in_bounds):
-                    self.logger.warning(
-                        "Reference image may not fully cover science image region. Science corners in ref pixels: X=%s, Y=%s",
-                        ref_x.tolist(), ref_y.tolist()
+                # Verify reference covers the science region (diagnostic only —
+                # never abort alignment if this check fails or WCS doesn't converge).
+                try:
+                    sci_corners = np.array([[0, 0], [sci_shape[1], 0],
+                                            [sci_shape[1], sci_shape[0]], [0, sci_shape[0]]])
+                    sci_world_corners = sci_wcs.all_pix2world(sci_corners, 0)
+                    # _safe_world2pix returns NaN for non-converging points instead
+                    # of raising NoConvergence (common with high-order SIP distortion).
+                    ref_x, ref_y = _safe_world2pix(
+                        ref_wcs, sci_world_corners[:, 0], sci_world_corners[:, 1], 0
                     )
-                else:
-                    self.logger.debug("Reference image fully covers science region")
+                    ref_in_bounds = (np.isfinite(ref_x) & np.isfinite(ref_y) &
+                                     (ref_x >= 0) & (ref_x < ref_shape[1]) &
+                                     (ref_y >= 0) & (ref_y < ref_shape[0]))
+                    if not all(ref_in_bounds):
+                        self.logger.warning(
+                            "Reference image may not fully cover science image region. "
+                            "Science corners in ref pixels: X=%s, Y=%s",
+                            np.round(ref_x, 1).tolist(), np.round(ref_y, 1).tolist(),
+                        )
+                    else:
+                        self.logger.debug("Reference image fully covers science region")
+                except Exception as _cov_exc:
+                    self.logger.debug("Coverage check skipped: %s", _cov_exc)
                 
                 reference_already_scamp = self._header_indicates_scamp(ref_head)
 
@@ -2486,7 +2517,8 @@ NNW
                             science_image, reference_image, output_dir
                         )
                     # Test world2pix (critical for Cutout2D)
-                    test_px, test_py = ref_wcs.all_world2pix(ref_ra[0], ref_dec[0], 0)
+                    test_px, test_py = _safe_world2pix(ref_wcs, ref_ra[0], ref_dec[0], 0)
+                    test_px, test_py = float(np.atleast_1d(test_px)[0]), float(np.atleast_1d(test_py)[0])
                     if not (np.isfinite(test_px) and np.isfinite(test_py)):
                         self.logger.error(
                             f"SWarp-aligned reference has non-invertible WCS: world2pix returned NaN/Inf. "
@@ -2515,7 +2547,8 @@ NNW
                             science_image, reference_image, output_dir
                         )
                     # Test world2pix (critical for Cutout2D)
-                    test_px, test_py = sci_wcs.all_world2pix(sci_ra[0], sci_dec[0], 0)
+                    test_px, test_py = _safe_world2pix(sci_wcs, sci_ra[0], sci_dec[0], 0)
+                    test_px, test_py = float(np.atleast_1d(test_px)[0]), float(np.atleast_1d(test_py)[0])
                     if not (np.isfinite(test_px) and np.isfinite(test_py)):
                         self.logger.error(
                             f"SWarp-aligned science has non-invertible WCS: world2pix returned NaN/Inf. "
