@@ -384,7 +384,9 @@ def _injection_worker(args):
                         flux_hat = float(theta[0])
                         flux_err = float(np.sqrt(max(cov[0, 0], 0.0)))
                         if np.isfinite(flux_err) and flux_err > 0:
-                            snr_val = np.abs(flux_hat) / flux_err
+                            # Use signed S/N: a negative flux_hat (source on sky hole)
+                            # must NOT pass the detection threshold >= snr_limit > 0.
+                            snr_val = float(flux_hat) / flux_err
             except Exception:
                 snr_val = np.nan
         elif method == "EMCEE":
@@ -473,6 +475,12 @@ def _injection_worker(args):
         if method in ("PSF", "EMCEE"):
             recovered_flux = flux_hat if np.isfinite(flux_hat) else np.nan
             if not np.isfinite(snr_val):
+                # snr_val is NaN when the WLS/MCMC fit failed (e.g. too few valid
+                # pixels in the stamp).  Return non-detection rather than crashing.
+                # Note: this can happen for sites near chip edges/gaps where the PSF
+                # stamp footprint is larger than the aperture disk used by site filtering.
+                # Such sites should ideally be rejected by an upstream stamp-validity
+                # check; treat this as a conservative non-detection.
                 return False, beta_p, recovered_flux
         else:
             # AP recovery: aperture S/N is the method-consistent detection statistic.
@@ -1418,14 +1426,19 @@ class Limits:
                 epsf_model, H, W, float(cx), float(cy), 1.0, oversampling
             )
 
-            psf_ap = Aperture(input_yaml=local_input_yaml, image=psf_unit)
-            psf_meas = psf_ap.measure(
-                pd.DataFrame({"x_pix": [cutout_cx], "y_pix": [cutout_cy]}),  # Use same centre as PSF evaluation
-                plot=False,
-                verbose=0,
+            # Calibration: integrate the unit-flux PSF inside the aperture disk WITHOUT
+            # local background subtraction.  Running Aperture.measure() on a pure PSF
+            # image causes its local annulus estimator to subtract PSF-wing flux,
+            # making counts_ref smaller than the true enclosed flux and biasing
+            # flux_for_mag() to inject too much signal -> limit is spuriously shallow.
+            # Using exact pixel-fraction photometry on a zero-background image avoids this.
+            _psf_ap_obj = CircularAperture(
+                (float(cx), float(cy)), r=float(aperture_radius_local)
             )
-            F_ref = float(psf_meas["flux_AP"].iloc[0])  # e-/s (same as mag/PSF pipeline)
-            counts_ref = float(psf_meas["counts_AP"].iloc[0])  # integrated e- in frame (see Aperture.measure)
+            _psf_phot = _psf_ap_obj.do_photometry(psf_unit, method="exact")
+            counts_ref = float(_psf_phot[0][0])  # integrated PSF flux in aperture (no sky sub)
+            # F_ref = counts_ref / exposure_time (same units as Aperture.measure flux_AP)
+            F_ref = counts_ref / float(local_input_yaml["exposure_time"])
             exposure_time = float(local_input_yaml["exposure_time"])
 
             # Guard: check if calibration failed
@@ -1438,41 +1451,29 @@ class Limits:
                 )
                 return np.nan
 
-            # Internal consistency check:
-            # Aperture.measure defines flux_AP = counts_AP / exposure_time.
-            # If they diverge noticeably, force a consistent calibration basis.
-            counts_ref_from_flux = float(F_ref) * float(exposure_time)
-            if np.isfinite(counts_ref_from_flux) and counts_ref_from_flux > 0:
-                rel_diff = abs(counts_ref - counts_ref_from_flux) / counts_ref_from_flux
-                if np.isfinite(rel_diff) and rel_diff > 0.02:
-                    logger.warning(
-                        "PSF injection calibration mismatch: counts_ref=%.6g, flux_ref*exp=%.6g (rel_diff=%.2f%%). Using flux_ref*exp for consistency.",
-                        float(counts_ref),
-                        float(counts_ref_from_flux),
-                        100.0 * float(rel_diff),
-                    )
-                    counts_ref = float(counts_ref_from_flux)
-
             # Memoised so repeated calls at the same magnitude are free.
             def flux_for_mag(m: float) -> float:
                 """Return ePSF flux parameter to inject for instrumental magnitude m."""
                 return _flux_for_mag_cached(m, counts_ref, exposure_time)
 
-            # Sanity: mag(counts_ref/exposure) == mag(F_ref); flux_for_mag at that m should return 1.0.
+            # Sanity round-trip: flux_for_mag(mag(F_ref)) should equal 1.0.
             mag_at_unit_flux = float(mag(float(F_ref)))
             f_roundtrip = float(flux_for_mag(mag_at_unit_flux))
             logger.info(
-                "PSF injection calibration: counts_ref=%.6g (e- in aperture @ model flux=1), mag(F=1)=%.5f, flux_for_mag(mag(F=1))=%.6f (expect 1.0), "
-                "flux_for_mag(initialGuess)=%.6g",
+                "PSF injection calibration (exact aperture integral, no sky-sub): "
+                "counts_ref=%.6g (e- in r=%.2f px aperture), F_ref=%.6g e-/s, mag(F_ref)=%.5f, "
+                "flux_for_mag(mag(F_ref))=%.6f (expect 1.0), flux_for_mag(initialGuess)=%.6g",
                 float(counts_ref),
+                float(aperture_radius_local),
+                float(F_ref),
                 mag_at_unit_flux,
                 f_roundtrip,
                 float(flux_for_mag(float(initialGuess))),
             )
-            if np.isfinite(f_roundtrip) and abs(f_roundtrip - 1.0) > 0.02:
+            if np.isfinite(f_roundtrip) and abs(f_roundtrip - 1.0) > 1e-6:
                 logger.warning(
-                    "PSF flux calibration round-trip differs from 1.0 (got %.6f). Check exposure_time, oversampling, and that the science cutout "
-                    "uses the same ADU/gain convention as Aperture.measure.",
+                    "PSF flux calibration round-trip differs from 1.0 (got %.8f). "
+                    "Check oversampling and that flux_for_mag uses the same aperture radius as recovery.",
                     f_roundtrip,
                 )
 
