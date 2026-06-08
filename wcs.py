@@ -91,16 +91,28 @@ def _wcs_cfg_int(cfg: dict, key: str, default: int) -> int:
 @contextmanager
 def silence_astropy_wcs_info():
     """
-    Context manager to silence Astropy WCS info-level logs.
-    Useful for reducing log clutter during WCS operations.
+    Suppress the FITSFixedWarning / INFO log that astropy emits when SIP
+    distortion keywords are present but CTYPE lacks the '-SIP' suffix.
+
+    Astropy emits this message via two independent channels:
+      1. ``warnings.warn(FITSFixedWarning)``  — caught by warnings.catch_warnings.
+      2. ``logging.getLogger('astropy.wcs.wcs').info(...)`` — caught here.
+
+    Both the child logger (astropy.wcs.wcs) and the parent (astropy.wcs) are
+    silenced to WARNING to cover all astropy version paths.
     """
-    wcs_logger = logging.getLogger("astropy.wcs.wcs")
-    prev_level = wcs_logger.level
-    wcs_logger.setLevel(logging.WARNING)
+    _loggers = [
+        logging.getLogger("astropy.wcs.wcs"),
+        logging.getLogger("astropy.wcs"),
+    ]
+    prev_levels = [lg.level for lg in _loggers]
+    for lg in _loggers:
+        lg.setLevel(logging.WARNING)
     try:
         yield
     finally:
-        wcs_logger.setLevel(prev_level)
+        for lg, lv in zip(_loggers, prev_levels):
+            lg.setLevel(lv)
 
 
 def _log_scamp_vizier_failure_hint(
@@ -215,6 +227,12 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
         return None
 
     try:
+        # Normalise CTYPE first so the WCS() constructor always receives a
+        # self-consistent header (SIP coefficients paired with TAN-SIP CTYPE,
+        # PV coefficients with TPV CTYPE). This prevents the FITSFixedWarning
+        # "SIP coefficients present but CTYPE missing -SIP suffix" that astropy
+        # emits both via warnings.warn() and via logger.info() on the
+        # astropy.wcs.wcs logger.
         header = _normalize_projection_codes(header, inplace=False)
 
         # Check for basic WCS keywords
@@ -224,33 +242,39 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
             logger.warning(f"get_wcs: missing keywords {missing}")
             return None
 
+        # Suppress FITSFixedWarning for the entire WCS build + test:
+        # - warnings.catch_warnings / simplefilter("ignore") catches the
+        #   warnings.warn() path.
+        # - silence_astropy_wcs_info() silences the astropy.wcs.wcs INFO
+        #   logger path (astropy also emits the same message as a log record).
+        # Both suppressors must stay active through pixel_to_world() because
+        # lazy WCS evaluation can trigger the warning on first coordinate call.
         with warnings.catch_warnings():
-            if silent:
-                warnings.simplefilter("ignore")
+            warnings.simplefilter("ignore")
             with silence_astropy_wcs_info():
                 wcs = WCS(header, fix=True, relax=True)
 
-        # Validate WCS has celestial component
-        if not wcs.has_celestial:
-            logger.warning("get_wcs: WCS has no celestial component")
-            return None
+                # Validate WCS has celestial component
+                if not wcs.has_celestial:
+                    logger.warning("get_wcs: WCS has no celestial component")
+                    return None
 
-        # Ensure 2D celestial WCS so reproject and callers get consistent pixel grid
-        naxis = getattr(wcs.wcs, "naxis", 2)
-        if naxis > 2:
-            wcs = wcs.celestial
+                # Ensure 2D celestial WCS so reproject and callers get consistent pixel grid
+                naxis = getattr(wcs.wcs, "naxis", 2)
+                if naxis > 2:
+                    wcs = wcs.celestial
 
-        # Test transformation
-        # CRPIX is FITS 1-based; pixel_to_world uses 0-based numpy convention -> subtract 1.
-        try:
-            test_x, test_y = float(header['CRPIX1']) - 1.0, float(header['CRPIX2']) - 1.0
-            test_world = wcs.pixel_to_world(test_x, test_y)
-            if test_world is None:
-                logger.warning("get_wcs: WCS transformation test failed - returned None")
-                return None
-        except Exception as e:
-            logger.warning(f"get_wcs: WCS transformation test failed with exception: {e}")
-            return None
+                # Test transformation (CRPIX is FITS 1-based; pixel_to_world uses 0-based)
+                try:
+                    test_x = float(header['CRPIX1']) - 1.0
+                    test_y = float(header['CRPIX2']) - 1.0
+                    test_world = wcs.pixel_to_world(test_x, test_y)
+                    if test_world is None:
+                        logger.warning("get_wcs: WCS transformation test failed - returned None")
+                        return None
+                except Exception as e:
+                    logger.warning(f"get_wcs: WCS transformation test failed with exception: {e}")
+                    return None
 
         return wcs
 
