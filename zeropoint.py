@@ -1465,13 +1465,8 @@ class Zeropoint:
                     )
 
                     # ---- Histogram (colour-corrected) ----------------------
-                    # Cap bins at 100 for large catalogs to prevent slow rendering.
-                    # Freedman-Diaconis (bins="fd") can create hundreds of bins for large datasets.
-                    n_inl = len(inlier_deltas)
-                    if n_inl < 100:
-                        bin_edges = np.histogram_bin_edges(inlier_deltas, bins="fd")
-                    else:
-                        bin_edges = np.histogram_bin_edges(inlier_deltas, bins=min(100, n_inl // 2))
+                    # Use auto binning (Freedman-Diaconis) for all catalogs.
+                    bin_edges = np.histogram_bin_edges(inlier_deltas, bins="fd")
                     bin_centers = (bin_edges[:-1] + bin_edges[1]) / 2
                     width = bin_edges[1] - bin_edges[0]
                     counts, _ = np.histogram(
@@ -1631,12 +1626,8 @@ class Zeropoint:
                         n_sources_nc = len(vmask_nc_sigma_idx)
 
                         if len(inl_nc) > 0:
-                            # Cap bins at 100 for large catalogs (same logic as main histogram).
-                            n_nc = len(inl_nc)
-                            if n_nc < 100:
-                                be_nc = np.histogram_bin_edges(inl_nc, bins="fd")
-                            else:
-                                be_nc = np.histogram_bin_edges(inl_nc, bins=min(100, n_nc // 2))
+                            # Use auto binning (Freedman-Diaconis) for all catalogs.
+                            be_nc = np.histogram_bin_edges(inl_nc, bins="fd")
                             bc_nc = (be_nc[:-1] + be_nc[1:]) / 2
                             w_nc = be_nc[1] - be_nc[0]
                             ct_nc, _ = np.histogram(inl_nc, bins=be_nc, density=True)
