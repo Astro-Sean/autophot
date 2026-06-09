@@ -5952,7 +5952,17 @@ def run_photometry():
                         # NaN-fill defects (saturated pixels, streaks, trails, detected sources)
                         # so that injection site filtering and recovery photometry treat them
                         # as invalid.  Use a copy to avoid mutating the shared image array.
-                        image_for_limits = np.where(defects_mask, np.nan, image).astype(np.float32)
+                        # For difference images: do NOT mask detected sources (use hardware_defects_mask
+                        # which excludes the source mask). Properly subtracted diff images should have
+                        # no sources, so we want to inject in those regions too.
+                        is_diff_image = "diff_" in os.path.basename(str(fpath))
+                        if is_diff_image:
+                            image_for_limits = np.where(hardware_defects_mask, np.nan, image).astype(np.float32)
+                            logging.info(
+                                "Limiting magnitude: using hardware_defects_mask (no source masking) for difference image."
+                            )
+                        else:
+                            image_for_limits = np.where(defects_mask, np.nan, image).astype(np.float32)
                         try:
                             lim_cfg_local = input_yaml.get("limiting_magnitude") or {}
                             revert_lift = bool(lim_cfg_local.get("revert_target_dc_bias_for_injection", False))
