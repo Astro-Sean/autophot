@@ -3669,12 +3669,14 @@ def run_photometry():
                     logging.warning("All variable sources failed WCS conversion, using empty list")
                     variable_sources = pd.DataFrame(columns=variable_sources.columns)
         # Plots the source check.
+        # Use hardware_defects_mask (NaN/zeros/saturation/bleed only) instead of
+        # defects_mask (which includes source_mask and would mask out all detected sources).
         Plot(input_yaml=input_yaml).source_check(
             image=image,
             psfSources=PSFSources,
             catalogSources=CatalogSources,
             FWHMSources=FWHMSources,
-            mask=defects_mask,
+            mask=hardware_defects_mask,
             variable_sources=variable_sources,
         )
         image_sources = None
