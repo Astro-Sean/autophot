@@ -1822,7 +1822,12 @@ class Catalog:
             target_name = self.input_yaml.get("target_name", "Transient")
 
         # Generate file name for the catalog
-        fname = f"{target_name}_r_{radius}arcmins_CUSTOM.csv".replace("", "")
+        # Include target RA/DEC to make the cache field-specific (prevents reusing
+        # catalogs from different targets with the same name, which causes N in the
+        # ZP legend to be much larger than the actual number of sources).
+        target_ra = target_coords.ra.degree
+        target_dec = target_coords.dec.degree
+        fname = f"{target_name}_r_{radius}arcmins_target_ra_{target_ra:.6f}_dec_{target_dec:.6f}_CUSTOM.csv".replace("", "")
         wdir = self.input_yaml.get("wdir")
         if not wdir:
             raise ValueError("Working directory (wdir) is not set in input YAML.")
