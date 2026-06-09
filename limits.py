@@ -1222,6 +1222,46 @@ class Limits:
                     )
                 return df
 
+            def _calculate_annulus_statistics(
+                x: float,
+                y: float,
+                image: np.ndarray,
+                annulus_in_pix: float,
+                annulus_out_pix: float,
+            ) -> tuple[float, float]:
+                """
+                Calculate annulus statistics (mean, std) for a given position.
+                
+                Parameters
+                ----------
+                x, y : float
+                    Center position in pixels
+                image : np.ndarray
+                    Image array
+                annulus_in_pix, annulus_out_pix : float
+                    Inner and outer radius of annulus in pixels
+                    
+                Returns
+                -------
+                mean, std : tuple[float, float]
+                    Mean and standard deviation of annulus pixels (NaN if invalid)
+                """
+                try:
+                    ann = CircularAnnulus((x, y), r_in=annulus_in_pix, r_out=annulus_out_pix)
+                    ann_vals = ann.to_mask(method="center").get_values(image)
+                    if ann_vals is not None:
+                        ann_vals = np.asarray(ann_vals, dtype=float)
+                        ann_vals = ann_vals[np.isfinite(ann_vals)]
+                        if ann_vals.size >= 4:
+                            mean = float(np.median(ann_vals))
+                            # Use robust std estimator (MAD scaled to normal distribution)
+                            mad = np.median(np.abs(ann_vals - mean))
+                            std = float(1.4826 * mad)
+                            return mean, std
+                except Exception:
+                    pass
+                return np.nan, np.nan
+
             # If aperture_radius equals fwhm (default fallback), try to calculate optimum
             if configured_radius == fwhm:
                 try:
@@ -1618,6 +1658,16 @@ class Limits:
                 return np.nan
 
             if use_quiet_sites:
+                # Calculate target annulus statistics to use as reference for site selection
+                target_mean, target_std = _calculate_annulus_statistics(
+                    cutout_cx, cutout_cy, cutout,
+                    float(annulus_in_local), float(annulus_out_local)
+                )
+                logger.info(
+                    "Target annulus statistics: mean=%.3f, std=%.3f",
+                    target_mean, target_std
+                )
+                
                 # Stage 1: Measure S/N at each candidate site (no jitter).
                 ini_ap = Aperture(input_yaml=local_input_yaml, image=cutout)
                 cand_df = ini_ap.measure(
@@ -1627,28 +1677,79 @@ class Limits:
                     verbose=0,
                 )
                 cand_df = _robust_site_snr(cand_df)
-
-                # Score candidates by |SNR| so we choose the quietest background-like sites.
+                
+                # Calculate annulus statistics for each candidate site
+                ann_means = []
+                ann_stds = []
+                for _, row in cand_df.iterrows():
+                    mean, std = _calculate_annulus_statistics(
+                        row["x_pix"], row["y_pix"], cutout,
+                        float(annulus_in_local), float(annulus_out_local)
+                    )
+                    ann_means.append(mean)
+                    ann_stds.append(std)
+                cand_df = cand_df.assign(
+                    _annulus_mean=ann_means,
+                    _annulus_std=ann_stds
+                )
+                
+                # Score candidates by combined metric:
+                # 1. Primary: |SNR| (quietness) - lower is better
+                # 2. Secondary: Similarity to target annulus statistics
                 snr_col = np.asarray(cand_df.get("SNR", np.nan), dtype=float)
-                cand_df = cand_df.assign(_snr_score=snr_col)
-                cand_df = cand_df[np.isfinite(cand_df["_snr_score"])].copy()
+                mean_col = np.asarray(cand_df.get("_annulus_mean", np.nan), dtype=float)
+                std_col = np.asarray(cand_df.get("_annulus_std", np.nan), dtype=float)
+                
+                # Calculate similarity scores (lower is more similar)
+                mean_diff = np.abs(mean_col - target_mean) if np.isfinite(target_mean) else np.zeros_like(mean_col)
+                std_diff = np.abs(std_col - target_std) if np.isfinite(target_std) else np.zeros_like(std_col)
+                
+                # Normalize differences by target values (relative difference)
+                mean_sim = mean_diff / (np.abs(target_mean) + 1e-6) if np.isfinite(target_mean) and target_mean != 0 else mean_diff
+                std_sim = std_diff / (np.abs(target_std) + 1e-6) if np.isfinite(target_std) and target_std != 0 else std_diff
+                
+                # Combined score: weighted sum of SNR and similarity
+                # Weight SNR more heavily (0.7) but still consider similarity (0.3)
+                similarity_weight = 0.3
+                snr_weight = 0.7
+                combined_score = snr_weight * np.abs(snr_col) + similarity_weight * (mean_sim + std_sim)
+                
+                cand_df = cand_df.assign(_combined_score=combined_score)
+                cand_df = cand_df[np.isfinite(cand_df["_combined_score"])].copy()
+                
                 if len(cand_df) == 0:
                     logger.warning(
-                        "All candidate sites have non-finite S/N; cannot find injection sites."
+                        "All candidate sites have non-finite scores; cannot find injection sites."
                     )
                     return np.nan
 
-                # Select the n_quiet quietest candidates
-                cand_df = cand_df.sort_values("_snr_score", ascending=True)
-                quiet_mask = cand_df["_snr_score"] <= float(effective_snr_limit)
+                # Select the n_quiet candidates with best combined score (quiet + similar to target)
+                cand_df = cand_df.sort_values("_combined_score", ascending=True)
+                # Apply SNR filter as a hard constraint (must be quiet enough)
+                quiet_mask = np.abs(snr_col) <= float(effective_snr_limit)
                 cand_quiet = cand_df[quiet_mask].copy()
                 stage1_chosen = cand_quiet.head(n_quiet) if len(cand_quiet) >= n_quiet else cand_df.head(n_quiet)
-                logger.info(
-                    "Stage 1 quiet-site selection: sampled %d candidates -> selected %d quietest candidates (|S/N|<=%.3g).",
-                    int(n_candidates),
-                    int(len(stage1_chosen)),
-                    float(effective_snr_limit),
-                )
+                
+                # Log statistics about the selected sites
+                if len(stage1_chosen) > 0:
+                    selected_mean = np.mean(np.abs(stage1_chosen["SNR"]))
+                    selected_mean_sim = np.mean(np.abs(stage1_chosen["_annulus_mean"] - target_mean)) if np.isfinite(target_mean) else 0
+                    selected_std_sim = np.mean(np.abs(stage1_chosen["_annulus_std"] - target_std)) if np.isfinite(target_std) else 0
+                    logger.info(
+                        "Stage 1 site selection: sampled %d candidates -> selected %d sites with best combined score (|S/N|<=%.3g).",
+                        int(n_candidates),
+                        int(len(stage1_chosen)),
+                        float(effective_snr_limit),
+                    )
+                    logger.info(
+                        "Selected sites: mean |S/N|=%.3f, mean similarity (mean=%.3f, std=%.3f)",
+                        selected_mean, selected_mean_sim, selected_std_sim
+                    )
+                else:
+                    logger.warning(
+                        "No candidate sites passed the S/N filter (|S/N|<=%.3g); cannot find injection sites.",
+                        float(effective_snr_limit),
+                    )
 
                 # Stage 2: Jitter the selected candidates, measure S/N, apply K-means spatial
                 # uniformity selection on the quietest jittered positions.

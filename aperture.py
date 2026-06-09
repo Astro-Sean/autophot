@@ -411,15 +411,20 @@ def _measure_worker(args):
         sqrt_var = np.nan
         if ap_err_pix is not None:
             # error array is in electrons; propagate by summing variances.
-            var_from_error = np.nansum(ap_err_pix.astype(float) ** 2)
-            if var_from_error > 0 and np.isfinite(var_from_error):
-                sqrt_var = np.sqrt(var_from_error)
+            # Use only finite values to avoid contamination from bad pixels
+            ap_err_finite = ap_err_pix[np.isfinite(ap_err_pix)]
+            if len(ap_err_finite) > 0:
+                var_from_error = np.nansum(ap_err_finite.astype(float) ** 2)
+                if var_from_error > 0 and np.isfinite(var_from_error):
+                    sqrt_var = np.sqrt(var_from_error)
 
         if not np.isfinite(sqrt_var):
             # Fallback variance: |source| + area * (sigma_sky^2 + RN^2)
-            total_var = np.abs(aperture_sum) + effective_area * (
-                empirical_std**2 + read_noise_sq
-            )
+            # Ensure source flux is positive for Poisson term
+            source_flux = max(aperture_sum, 0.0)
+            # Use robust empirical_std but ensure it's not too small
+            sky_var = max(empirical_std**2, 0.25)  # Minimum sky variance of 0.25 e^2
+            total_var = source_flux + effective_area * (sky_var + read_noise_sq)
             if total_var > 0 and np.isfinite(total_var):
                 sqrt_var = np.sqrt(total_var)
 

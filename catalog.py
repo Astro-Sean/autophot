@@ -1875,19 +1875,20 @@ class Catalog:
             logger.info(f"Loading existing custom catalog from {fpath}")
             existing_catalog = pd.read_csv(fpath)
             if not existing_catalog.empty:
-                # Deduplicate existing catalog
+                # Deduplicate existing catalog (only remove exact duplicates)
                 coords_existing = SkyCoord(
                     ra=existing_catalog["RA"].values * u.degree,
                     dec=existing_catalog["DEC"].values * u.degree
                 )
-                idx_match, sep, _ = coords_existing.match_to_catalog_sky(coords_existing, nthneighbor=2)
-                keep_mask = sep > 1.0 * u.arcsec
-                existing_catalog = existing_catalog[keep_mask].reset_index(drop=True)
-                n_dups = len(coords_existing) - len(existing_catalog)
-                if n_dups > 0:
-                    logger.warning(f"Removed {n_dups} duplicates from existing cached catalog - RESAVING clean version")
-                    # Save the deduplicated catalog back to file
-                    existing_catalog.to_csv(fpath, index=False, float_format="%.6f")
+                if len(coords_existing) >= 2:
+                    idx_match, sep, _ = coords_existing.match_to_catalog_sky(coords_existing, nthneighbor=2)
+                    keep_mask = sep > 0.1 * u.arcsec  # Only remove exact duplicates within 0.1 arcsec
+                    existing_catalog = existing_catalog[keep_mask].reset_index(drop=True)
+                    n_dups = len(coords_existing) - len(existing_catalog)
+                    if n_dups > 0:
+                        logger.warning(f"Removed {n_dups} duplicates from existing cached catalog - RESAVING clean version")
+                        # Save the deduplicated catalog back to file
+                        existing_catalog.to_csv(fpath, index=False, float_format="%.6f")
                 return existing_catalog
         
         output_catalog = pd.DataFrame(columns=cols)
@@ -1948,14 +1949,18 @@ class Catalog:
                 ra=output_catalog["RA"].values * u.degree,
                 dec=output_catalog["DEC"].values * u.degree
             )
-            idx_match, sep, _ = coords_final.match_to_catalog_sky(coords_final, nthneighbor=2)
-            keep_mask = sep > 1.0 * u.arcsec  # Keep sources with no close neighbour within 1 arcsec
-            n_before_dedup = len(output_catalog)
-            output_catalog = output_catalog[keep_mask].reset_index(drop=True)
-            n_removed = n_before_dedup - len(output_catalog)
-            logger.info(f"Final catalog: {len(output_catalog)} sources (removed {n_removed} duplicates)")
-            if n_removed > 0:
-                logger.warning(f"Removed {n_removed} duplicate sources from final combined catalog")
+            # Only remove exact duplicates (within 0.1 arcsec), not legitimate nearby sources
+            if len(coords_final) >= 2:
+                idx_match, sep, _ = coords_final.match_to_catalog_sky(coords_final, nthneighbor=2)
+                keep_mask = sep > 0.1 * u.arcsec  # Keep sources with no very close neighbour within 0.1 arcsec
+                n_before_dedup = len(output_catalog)
+                output_catalog = output_catalog[keep_mask].reset_index(drop=True)
+                n_removed = n_before_dedup - len(output_catalog)
+                logger.info(f"Final catalog: {len(output_catalog)} sources (removed {n_removed} duplicates)")
+                if n_removed > 0:
+                    logger.warning(f"Removed {n_removed} duplicate sources from final combined catalog")
+            else:
+                logger.info(f"Final catalog: {len(output_catalog)} sources (only 1 source, no duplicate removal needed)")
         
         # Final output catalog is ready
         output_catalog.to_csv(fpath, index=False, float_format="%.6f")
@@ -2089,46 +2094,9 @@ class Catalog:
             catalog_mag_linear = clean_catalog[use_filter].values
             catalog_mag_err_linear = clean_catalog[f"{use_filter}_err"].values
 
-            class ConstrainedSlopeRegressor(BaseEstimator, RegressorMixin):
-                def __init__(
-                    self, slope_constraint=1.0, slope_tolerance=1e-3, sample_weight=None
-                ):
-                    self.slope_constraint = slope_constraint
-                    self.slope_tolerance = slope_tolerance
-                    self.sample_weight = sample_weight  # weights = 1/sigma^2
-
-                def fit(self, X, y):
-                    X, y = check_X_y(X, y)
-                    weights = None
-                    if self.sample_weight is not None:
-                        weights = np.array(self.sample_weight)
-                        if weights.shape[0] != len(y):
-                            raise ValueError(
-                                "sample_weight must match number of samples"
-                            )
-
-                    def loss(params):
-                        slope, intercept = params
-                        pred = slope * X.flatten() + intercept
-                        resid = y - pred
-                        if weights is not None:
-                            mse = np.average(resid**2, weights=weights)
-                        else:
-                            mse = np.mean(resid**2)
-                        slope_penalty = 100 * max(
-                            0, abs(slope - self.slope_constraint) - self.slope_tolerance
-                        )
-                        return mse + slope_penalty
-
-                    init_params = [1.0, np.mean(y) - np.mean(X)]
-                    result = minimize(loss, init_params, method="L-BFGS-B")
-                    self.slope_, self.intercept_ = result.x
-                    return self
-
-                def predict(self, X):
-                    check_is_fitted(self, "slope_")
-                    X = check_array(X)
-                    return self.slope_ * X.flatten() + self.intercept_
+            # Import PenalisedSlopeRegressor from zeropoint module to avoid duplication
+            from zeropoint import PenalisedSlopeRegressor
+            ConstrainedSlopeRegressor = PenalisedSlopeRegressor
 
             # Fit with RANSAC
             if len(inst_mag_linear) > 1:

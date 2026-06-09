@@ -651,12 +651,19 @@ class MCMCFitter:
                     raise ValueError(
                         f"background_rms shape {background_rms.shape} incompatible with data shape {image_e.shape}"
                     )
-        bkg_error = np.sqrt(bkg_rms_e**2 + float(readnoise) ** 2)
+        # Ensure background RMS is not too small (minimum floor)
+        bkg_rms_e_floored = np.maximum(bkg_rms_e, 1.0)  # Minimum 1 e- RMS
+        bkg_error = np.sqrt(bkg_rms_e_floored**2 + float(readnoise) ** 2)
+        
         # When data is background-subtracted, the Poisson variance from the sky
         # is missing.  Approximate it as bkg_rms^2 (Poisson: variance ≈ mean).
         poisson_e = image_e
         if is_background_subtracted:
-            poisson_e = poisson_e + bkg_rms_e**2
+            # Add back the sky Poisson variance that was subtracted
+            poisson_e = poisson_e + bkg_rms_e_floored**2
+            # Ensure no negative values after adding back variance
+            poisson_e = np.maximum(poisson_e, 0.0)
+        
         total_error = calc_total_error(
             data=poisson_e, bkg_error=bkg_error, effective_gain=1.0
         )

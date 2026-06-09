@@ -1093,12 +1093,25 @@ class BackgroundSubtractor:
 
                 bkg_rms = np.asarray(bkg.background_rms, dtype=float)
                 rms_median = np.nanmedian(bkg_rms)
-                rms_floor = max(rms_median * 0.5, 1e-30)
+                # More adaptive floor: use 10% of median instead of 50%
+                # This preserves more realistic noise variations while preventing zeros
+                rms_floor = max(rms_median * 0.1, 1e-30)
+                # Also add an absolute minimum floor based on read noise
+                # Typical CCD read noise is ~5-10 e-, so floor at 1 e- is reasonable
+                rms_floor = max(rms_floor, 1.0)
                 # Preserve NaNs for chip gaps, only clip finite values
                 bkg_rms = np.where(
                     np.isfinite(bkg_rms),
                     np.clip(bkg_rms, rms_floor, None),
                     np.nan
+                )
+                
+                # Log statistics for debugging
+                rms_mean = np.nanmean(bkg_rms)
+                rms_std = np.nanstd(bkg_rms)
+                self.logger.info(
+                    "Background RMS statistics: median=%.3f, mean=%.3f, std=%.3f, floor=%.3f",
+                    rms_median, rms_mean, rms_std, rms_floor
                 )
 
                 # Use the raw Background2D background map without any

@@ -632,6 +632,70 @@ def run_photometry():
         )
         return target_x_pix, target_y_pix
 
+    def _remove_catalog_duplicates(catalog_df, method='pandas', sep_threshold=0.1):
+        """
+        Remove duplicate catalog entries using specified method.
+        
+        Parameters
+        ----------
+        catalog_df : pd.DataFrame
+            Catalog with potential duplicates
+        method : str
+            'pandas' for RA/DEC based removal, 'astropy' for angular separation
+        sep_threshold : float
+            Separation threshold in arcsec for 'astropy' method
+            
+        Returns
+        -------
+        pd.DataFrame
+            Deduplicated catalog
+        """
+        if catalog_df is None or len(catalog_df) == 0:
+            return catalog_df
+            
+        n_pre = len(catalog_df)
+        
+        if method == 'pandas' and {"RA", "DEC"}.issubset(catalog_df.columns):
+            # Fast pandas method for exact duplicates
+            catalog_df = (
+                catalog_df.sort_values(["RA", "DEC"])
+                .drop_duplicates(subset=["RA", "DEC"], keep="first")
+                .reset_index(drop=True)
+            )
+        elif method == 'pandas':
+            # Pixel-space fallback
+            _rx = np.round(catalog_df["x_pix"].to_numpy(dtype=float), 2)
+            _ry = np.round(catalog_df["y_pix"].to_numpy(dtype=float), 2)
+            catalog_df = (
+                catalog_df.assign(_rx=_rx, _ry=_ry)
+                .sort_values(["_rx", "_ry"])
+                .drop_duplicates(subset=["_rx", "_ry"], keep="first")
+                .drop(columns=["_rx", "_ry"])
+                .reset_index(drop=True)
+            )
+        elif method == 'astropy' and {"RA", "DEC"}.issubset(catalog_df.columns):
+            # Astropy method with angular separation
+            from astropy.coordinates import SkyCoord
+            import astropy.units as u
+            
+            coords = SkyCoord(
+                ra=catalog_df["RA"].values * u.degree,
+                dec=catalog_df["DEC"].values * u.degree
+            )
+            
+            if len(coords) >= 2:
+                idx_match, sep, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
+                keep_mask = sep > sep_threshold * u.arcsec
+                catalog_df = catalog_df[keep_mask].reset_index(drop=True)
+        
+        n_post = len(catalog_df)
+        if n_post < n_pre:
+            logging.info(
+                f"Removed {n_pre - n_post} duplicate sources using {method} method"
+            )
+        
+        return catalog_df
+
     try:
         #  Set Up Working Directory and Output
         # Retrieves the working directory and output directory name from the YAML configuration.
@@ -2775,31 +2839,9 @@ def run_photometry():
                     CatalogSources = CatalogSources  # Keep original unfiltered catalog
                 else:
                     CatalogSources = CatalogSources_filtered
-                    # De-duplicate catalog entries. Some catalogs can contain repeated
-                    # sources (overlapping tiles / duplicate IDs) which can look like
-                    # rows were "appended" downstream even when they were not.
+                    # De-duplicate catalog entries using helper function
                     n_pre_dedup = len(CatalogSources)
-                    try:
-                        if {"RA", "DEC"}.issubset(CatalogSources.columns):
-                            CatalogSources = (
-                                CatalogSources.sort_values(["RA", "DEC"])
-                                .drop_duplicates(subset=["RA", "DEC"], keep="first")
-                                .reset_index(drop=True)
-                            )
-                        else:
-                            # Pixel-space fallback: bucket by ~0.05 px to remove near-identical
-                            # duplicates without merging distinct close pairs.
-                            _rx = np.round(CatalogSources["x_pix"].to_numpy(dtype=float), 2)
-                            _ry = np.round(CatalogSources["y_pix"].to_numpy(dtype=float), 2)
-                            CatalogSources = (
-                                CatalogSources.assign(_rx=_rx, _ry=_ry)
-                                .sort_values(["_rx", "_ry"])
-                                .drop_duplicates(subset=["_rx", "_ry"], keep="first")
-                                .drop(columns=["_rx", "_ry"])
-                                .reset_index(drop=True)
-                            )
-                    except Exception:
-                        pass
+                    CatalogSources = _remove_catalog_duplicates(CatalogSources)
                     n_post_dedup = len(CatalogSources)
                     if n_post_dedup < n_pre_dedup:
                         logging.info(
@@ -6429,6 +6471,19 @@ def run_photometry():
         output_str = dict_to_string_with_hashtag(output)
 
         # Write calibration file with zeropoint and sequence star information
+        # Build target information as comments
+        target_lines = ["# Target information"]
+        if "target_name" in input_yaml and input_yaml["target_name"]:
+            target_lines.append(f"# target_name: {input_yaml['target_name']}")
+        if "target_ra" in input_yaml and input_yaml["target_ra"] is not None:
+            target_lines.append(f"# target_ra: {input_yaml['target_ra']:.6f} deg")
+        if "target_dec" in input_yaml and input_yaml["target_dec"] is not None:
+            target_lines.append(f"# target_dec: {input_yaml['target_dec']:.6f} deg")
+        if "target_x_pix" in input_yaml and input_yaml["target_x_pix"] is not None:
+            target_lines.append(f"# target_x_pix: {input_yaml['target_x_pix']:.2f} px")
+        if "target_y_pix" in input_yaml and input_yaml["target_y_pix"] is not None:
+            target_lines.append(f"# target_y_pix: {input_yaml['target_y_pix']:.2f} px")
+        
         # Build zeropoint info as clean comments
         zp_lines = ["# Zeropoint and calibration information"]
         for method in image_zeropoint.keys():
@@ -6444,37 +6499,38 @@ def run_photometry():
                     zp_lines.append(f"# {method}_color_term: {ct:.6f}")
                     zp_lines.append(f"# {method}_color_term_error: {ct_err:.6f}")
 
-        # Opens the file in write mode to add the output string and zeropoint info.
+        # Opens the file in write mode to add the output string and target/zeropoint info.
         with open(calibration_file, "w") as file:
             file.write("# Output dictionary")
             file.write(output_str + "")
+            file.write("\n" + "\n".join(target_lines))
             file.write("\n" + "\n".join(zp_lines))
 
         # Append sequence star catalog (CatalogSources) if available
+        logging.info(f"CALIB file: CatalogSources is {CatalogSources}")
+        if CatalogSources is not None:
+            logging.info(f"CALIB file: CatalogSources type: {type(CatalogSources)}")
+            logging.info(f"CALIB file: CatalogSources.empty: {CatalogSources.empty}")
+            logging.info(f"CALIB file: CatalogSources length: {len(CatalogSources)}")
+        else:
+            logging.warning("CALIB file: CatalogSources is None - no catalog sources will be written")
+        
         if CatalogSources is not None and not CatalogSources.empty:
-            # Remove duplicate entries based on RA and DEC before writing
-            # Create SkyCoord objects for all sources
-            coords = SkyCoord(
-                ra=CatalogSources["RA"].values * u.degree,
-                dec=CatalogSources["DEC"].values * u.degree
+            # Use consolidated duplicate removal function
+            CatalogSources_dedup = _remove_catalog_duplicates(
+                CatalogSources, 
+                method='astropy', 
+                sep_threshold=0.1  # Only remove exact duplicates
             )
             
-            # Self-match: find each source's nearest neighbour (excluding itself)
-            # This is O(N log N) instead of O(N²) nested loop
-            # Only run if there are at least 2 sources (nthneighbor=2 requires at least 2)
-            if len(coords) >= 2:
-                idx_match, sep, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
-                keep_mask = sep > 1.0 * u.arcsec  # Keep sources with no close neighbour
-                CatalogSources_dedup = CatalogSources[keep_mask].reset_index(drop=True)
-                n_removed = len(CatalogSources) - len(CatalogSources_dedup)
-                logging.info(f"Removed {n_removed} duplicate sources from CALIB catalog")
-            else:
-                CatalogSources_dedup = CatalogSources.reset_index(drop=True)
-                logging.info(f"Skipping duplicate removal: only {len(coords)} source(s) in CALIB catalog")
-            
-            with open(calibration_file, "a") as file:
+            logging.info(f"Writing {len(CatalogSources_dedup)} catalog sources to CALIB file")
+            with open(calibration_file, "a", newline='') as file:
                 file.write("\n# Sequence star catalog used for calibration\n")
                 CatalogSources_dedup.to_csv(file, index=False, float_format="%.6f")
+                file.flush()  # Ensure data is written immediately
+            logging.info(f"Successfully wrote {len(CatalogSources_dedup)} catalog sources to {calibration_file}")
+        else:
+            logging.warning("No catalog sources available to write to CALIB file")
 
         # Redoes the sources if enabled.
         if input_yaml["photometry"].get("redo_sources", False):
