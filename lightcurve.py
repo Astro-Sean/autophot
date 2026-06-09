@@ -366,6 +366,56 @@ def _lmag_to_apparent(df: pd.DataFrame, zp_col: str) -> pd.Series:
     return limiting_mag
 
 
+def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: list = None) -> dict:
+    """Convert limiting magnitudes for multiple S/N thresholds to apparent magnitudes.
+    
+    Returns a dictionary with keys like 'Limit_3sigma', 'Limit_5sigma' containing apparent magnitudes.
+    """
+    if snr_thresholds is None:
+        snr_thresholds = [3.0, 5.0]
+    
+    result = {}
+    
+    # Default single S/N limiting magnitude (backward compatibility)
+    result['Limit'] = _lmag_to_apparent(df, zp_col)
+    
+    # Multi-S/N limiting magnitudes
+    for snr in snr_thresholds:
+        # Look for S/N-specific limiting magnitude columns
+        snr_col = f"limiting_inst_mag_snr_{snr}"
+        fallback_col = f"lmag_snr_{snr}"
+        
+        # Find the appropriate column for this S/N threshold
+        col = None
+        if snr_col in df.columns:
+            col = snr_col
+        elif fallback_col in df.columns:
+            col = fallback_col
+        elif "limiting_inst_mag" in df.columns:
+            # Fallback to single limiting magnitude if S/N-specific not available
+            col = "limiting_inst_mag"
+        elif "lmag" in df.columns:
+            col = "lmag"
+        
+        if col is None:
+            result[f'Limit_{snr}sigma'] = pd.Series(np.nan, index=df.index, dtype=float)
+            continue
+        
+        li = pd.to_numeric(df[col], errors="coerce")
+        zp = pd.to_numeric(df[zp_col], errors="coerce")
+        
+        # Calculate apparent limiting magnitude for this S/N threshold
+        limiting_mag = li + zp
+        
+        # Return NaN for invalid limiting magnitudes
+        invalid_mask = (~np.isfinite(limiting_mag)) | (limiting_mag < 15) | (limiting_mag > 30)
+        limiting_mag.loc[invalid_mask] = np.nan
+        
+        result[f'Limit_{snr}S2N'] = limiting_mag.round(3)
+    
+    return result
+
+
 def _compute_detection_mask(
     df: pd.DataFrame,
     mag_col: str,
@@ -1360,13 +1410,13 @@ def plot_lightcurve(
         valid_detections = [df for df in detections_list if not df.empty]
         if valid_detections:
             det_file = os.path.join(save_path, f"detections_{base}_{method}.csv")
-            pd.concat(valid_detections, ignore_index=True).to_csv(det_file, index=False)
+            pd.concat(valid_detections, ignore_index=True).to_csv(det_file, index=False, float_format="%.6f")
     if return_detections and nondetections_list:
         valid_nondetections = [df for df in nondetections_list if not df.empty]
         if valid_nondetections:
             nondet_file = os.path.join(save_path, f"nondetections_{base}_{method}.csv")
             pd.concat(valid_nondetections, ignore_index=True).to_csv(
-                nondet_file, index=False
+                nondet_file, index=False, float_format="%.6f"
             )
 
     return det_file
@@ -1513,17 +1563,30 @@ def generate_photometry_table(
                 # Already apparent magnitude
                 mag_values = detects[col]
             
-            # Calculate limiting magnitude for detections
-            limiting_mag = _lmag_to_apparent(detects, zp_col)
+            # Calculate limiting magnitudes for multiple S/N thresholds
+            limiting_mags = _lmag_to_apparent_multi_snr(detects, zp_col)
             
-            detects = detects.assign(
-                Filter=band_label,
-                Limit=limiting_mag.round(3),
-                MJD=detects["mjd"].round(3),
-                Date=Time(detects["mjd"], format="mjd").iso,
-                Mag=mag_values.round(3),
-                Error=detects[err_col].round(3),
-            )[["MJD", "Date", "Mag", "Error", "Filter", "Limit"]]
+            # Build the row data with all limiting magnitude columns
+            row_data = {
+                'Filter': band_label,
+                'MJD': detects["mjd"].round(3),
+                'Date': Time(detects["mjd"], format="mjd").iso,
+                'Mag': mag_values.round(3),
+                'Error': detects[err_col].round(3),
+            }
+            
+            # Add all limiting magnitude columns
+            for limit_key, limit_values in limiting_mags.items():
+                row_data[limit_key] = limit_values
+            
+            detects = detects.assign(**row_data)
+            
+            # Determine column order - include all Limit columns
+            base_cols = ["MJD", "Date", "Mag", "Error", "Filter"]
+            limit_cols = sorted([k for k in limiting_mags.keys() if k.startswith('Limit')])
+            all_cols = base_cols + limit_cols
+            
+            detects = detects[all_cols]
             phot_table.append(detects)
 
         if not inv_detects.empty:
@@ -1555,33 +1618,63 @@ def generate_photometry_table(
                     if inv_err_col and inv_err_col in inv_detects.columns
                     else pd.Series(np.nan, index=inv_detects.index, dtype=float)
                 )
-                inv_detects = inv_detects.assign(
-                    Filter=band_label,
-                    Limit=pd.to_numeric(inv_detects["lmag"], errors="coerce").round(
-                        3
-                    ),
-                    MJD=inv_detects["mjd"].round(3),
-                    Date=Time(inv_detects["mjd"], format="mjd").iso,
-                    Mag=mag_value.round(3),
-                    Error=_err_s,
-                )[["MJD", "Date", "Mag", "Error", "Filter", "Limit"]]
+                # Calculate limiting magnitudes for multiple S/N thresholds
+                limiting_mags_inv = _lmag_to_apparent_multi_snr(inv_detects, zp_col)
+                
+                # Build the row data with all limiting magnitude columns
+                inv_row_data = {
+                    'Filter': band_label,
+                    'MJD': inv_detects["mjd"].round(3),
+                    'Date': Time(inv_detects["mjd"], format="mjd").iso,
+                    'Mag': mag_value.round(3),
+                    'Error': _err_s,
+                }
+                
+                # Add all limiting magnitude columns
+                for limit_key, limit_values in limiting_mags_inv.items():
+                    inv_row_data[limit_key] = limit_values
+                
+                inv_detects = inv_detects.assign(**inv_row_data)
+                
+                # Determine column order - include all Limit columns
+                base_cols = ["MJD", "Date", "Mag", "Error", "Filter"]
+                limit_cols = sorted([k for k in limiting_mags_inv.keys() if k.startswith('Limit')])
+                all_cols = base_cols + limit_cols
+                
+                inv_detects = inv_detects[all_cols]
                 phot_table.append(inv_detects)
 
         if not nondetects.empty:
-            nondetects = nondetects.assign(
-                Filter=band_label,
-                MJD=nondetects["mjd"].round(3),
-                Date=Time(nondetects["mjd"], format="mjd").iso,
-                Mag=pd.Series(np.nan, index=nondetects.index, dtype=float),
-                Error=pd.Series(np.nan, index=nondetects.index, dtype=float),
-                Limit=pd.to_numeric(nondetects["lmag"], errors="coerce").round(3),
-            )[["MJD", "Date", "Mag", "Error", "Filter", "Limit"]]
+            # Calculate limiting magnitudes for multiple S/N thresholds
+            limiting_mags_nd = _lmag_to_apparent_multi_snr(nondetects, zp_col)
+            
+            # Build the row data with all limiting magnitude columns
+            nd_row_data = {
+                'Filter': band_label,
+                'MJD': nondetects["mjd"].round(3),
+                'Date': Time(nondetects["mjd"], format="mjd").iso,
+                'Mag': pd.Series(np.nan, index=nondetects.index, dtype=float),
+                'Error': pd.Series(np.nan, index=nondetects.index, dtype=float),
+            }
+            
+            # Add all limiting magnitude columns
+            for limit_key, limit_values in limiting_mags_nd.items():
+                nd_row_data[limit_key] = limit_values
+            
+            nondetects = nondetects.assign(**nd_row_data)
+            
+            # Determine column order - include all Limit columns
+            base_cols = ["MJD", "Date", "Mag", "Error", "Filter"]
+            limit_cols = sorted([k for k in limiting_mags_nd.keys() if k.startswith('Limit')])
+            all_cols = base_cols + limit_cols
+            
+            nondetects = nondetects[all_cols]
             phot_table.append(nondetects)
 
     if not phot_table:
-        out_phot = pd.DataFrame(
-            columns=["MJD", "Date", "Mag", "Error", "Filter", "Limit"]
-        )
+        # Default columns including multi-SNR limiting magnitudes
+        default_cols = ["MJD", "Date", "Mag", "Error", "Filter", "Limit", "Limit_3S2N", "Limit_5S2N"]
+        out_phot = pd.DataFrame(columns=default_cols)
     else:
         out_phot = pd.concat(phot_table, ignore_index=True)
         if reference_epoch:

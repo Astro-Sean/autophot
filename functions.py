@@ -2290,7 +2290,7 @@ def get_normalized_histogram(data, bins="auto"):
     return normalized_hist, bin_edges
 
 
-def dict_to_string_with_hashtag(dictionary, float_format="%.3f"):
+def dict_to_string_with_hashtag(dictionary, float_format="%.6f"):
     result = ""
     for key, value in dictionary.items():
 

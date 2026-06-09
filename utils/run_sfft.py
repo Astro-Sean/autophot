@@ -216,7 +216,7 @@ def run_sfft() -> Optional[int]:
         if df_anom.empty:
             return 0
         df_anom = df_anom.drop_duplicates().reset_index(drop=True)
-        df_anom.to_csv(out_csv, index=False)
+        df_anom.to_csv(out_csv, index=False, float_format="%.6f")
         log_info(
             f"Exported {len(df_anom)} post-anomaly sources for feedback: {out_csv}"
         )
@@ -995,9 +995,9 @@ def run_sfft() -> Optional[int]:
                             ycol: "Y_IMAGE_REF_SCI_MEAN",
                         }
                     )
-                    df_out.to_csv(out_csv, index=False)
+                    df_out.to_csv(out_csv, index=False, float_format="%.6f")
                 else:
-                    matched_sources.to_csv(out_csv, index=False)
+                    matched_sources.to_csv(out_csv, index=False, float_format="%.6f")
         else:
             log_info("Running sparse-field subtraction (ESP).")
             try:
@@ -1142,9 +1142,9 @@ def run_sfft() -> Optional[int]:
                 df_out = matched_sources[[xcol, ycol]].rename(
                     columns={xcol: "X_IMAGE_REF_SCI_MEAN", ycol: "Y_IMAGE_REF_SCI_MEAN"}
                 )
-                df_out.to_csv(out_csv, index=False)
+                df_out.to_csv(out_csv, index=False, float_format="%.6f")
             else:
-                matched_sources.to_csv(out_csv, index=False)
+                matched_sources.to_csv(out_csv, index=False, float_format="%.6f")
 
         try:
             _write_post_anomaly_sources_csv(

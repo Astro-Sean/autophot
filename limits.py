@@ -647,6 +647,7 @@ class Limits:
         zeropoint: float = None,
         n_jobs: int = None,
         image_zeropoint: dict = None,
+        _return_details: bool = False,
     ) -> float:
         """
         Bracket-and-bisect search for the limiting magnitude by injecting
@@ -678,22 +679,13 @@ class Limits:
         start_time = time.time()
 
         try:
-            # Always write diagnostic completeness plots for limiting-magnitude runs.
-            # This keeps behavior consistent and avoids "missing plot" surprises.
-            plot = True
-
             lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
             # Beta-limit support is retained for backwards compatibility, but limiting
             # magnitude detection is now S/N-only (see _injection_worker).
             if detection_cutoff is None:
                 detection_cutoff = float(lim_cfg.get("beta_limit", 0.5))
             effective_snr_limit = float(detection_limit) if detection_limit is not None else 3.0
-            logger.info(
-                "Injected limiting magnitude: S/N-only detection (snr_limit=%.3g); beta_limit=%.3f (unused)",
-                float(effective_snr_limit),
-                float(detection_cutoff),
-            )
-            # =================================================================
+                        # =================================================================
             # Validation
             # =================================================================
             if epsf_model is None:
@@ -732,10 +724,6 @@ class Limits:
             current_half = float(np.ceil(location_fwhm_mult_pre * fwhm_pre + base_scale))
             if current_half < min_half_needed:
                 scale_used = max(base_scale, min_half_needed - location_fwhm_mult_pre * fwhm_pre)
-                logger.info(
-                    "Auto-increasing scale from %.1f to %.1f px to fit sky annulus (need half=%.1f, had half=%.1f)",
-                    base_scale, scale_used, min_half_needed, current_half,
-                )
 
             # Capture original values in immutable local variables before defining closure
             _orig_frame = np.asarray(full_image, dtype=float)  # full science frame
@@ -782,15 +770,7 @@ class Limits:
 
             # Target is at the true centre returned by get_cutout (accounts for partial cutouts)
             H, W = cutout.shape
-            logger.info(
-                "Cutout extracted: shape=(%d, %d), true_target_centre=(%.2f, %.2f), geometric_centre=(%.2f, %.2f), offset=(%.2f, %.2f px)",
-                H, W,
-                float(cutout_cx), float(cutout_cy),
-                float((W - 1) / 2.0), float((H - 1) / 2.0),
-                float(cutout_cx - (W - 1) / 2.0),
-                float(cutout_cy - (H - 1) / 2.0),
-            )
-
+            
             # Calculate optimum aperture radius if not already set
             fwhm = float(self.input_yaml.get("fwhm", 3.0))
             phot_cfg = self.input_yaml.get("photometry", {})
@@ -805,12 +785,7 @@ class Limits:
             _gain_canon = resolve_gain_e_per_adu(None, local_input_yaml)
             local_input_yaml["exposure_time"] = _exp_canon
             local_input_yaml["gain"] = _gain_canon
-            logger.info(
-                "Limiting magnitude: using exposure_time=%.5g s, gain=%.5g e/ADU for aperture photometry and injection flux calibration",
-                _exp_canon,
-                _gain_canon,
-            )
-
+            
             # For difference images and locally background-subtracted stamps, the local
             # annulus median can legitimately be negative. Flooring the local background
             # to 0 (the default in some configs) biases flux positive and can make every
@@ -825,11 +800,7 @@ class Limits:
             )
             phot_cfg_local["enforce_nonnegative_local_background"] = bool(floor_local_bkg)
             local_input_yaml["photometry"] = phot_cfg_local
-            if not floor_local_bkg:
-                logger.info(
-                    "Injection site scoring: allowing negative local background (no flooring)."
-                )
-
+            
             def _exclude_target_overlap(df: pd.DataFrame,
                                          target_cx: float,
                                          target_cy: float,
@@ -1172,12 +1143,6 @@ class Limits:
                     keep[i] = True
 
                 n_drop = n_drop_var + n_drop_mean
-                if n_drop > 0:
-                    logger.info(
-                        "Pixel-statistics filter: dropped %d/%d sites (var_test=%d, mean_test=%d; thresholds: var_ratio=%.2g, mean_sigma=%.2g).",
-                        n_drop, len(df), n_drop_var, n_drop_mean,
-                        _var_ratio_thr, _mean_sigma_thr,
-                    )
                 return df[keep].copy()
 
             def _robust_site_snr(df: pd.DataFrame) -> pd.DataFrame:
@@ -1214,12 +1179,6 @@ class Limits:
                 n_before = int(len(df))
                 df = df[valid].copy()
                 n_drop = int(n_before - len(df))
-                if n_drop > 0:
-                    logger.info(
-                        "Dropped %d/%d candidate injection sites with non-finite noise/area (cannot evaluate S/N).",
-                        n_drop,
-                        n_before,
-                    )
                 return df
 
             def _calculate_annulus_statistics(
@@ -1286,9 +1245,8 @@ class Limits:
                         optimum_radius_pixels = optimum_radius_fwhm * fwhm
                         # Update local config with calculated optimum radius
                         local_input_yaml["photometry"]["aperture_radius"] = optimum_radius_pixels
-                        logger.info(f"Calculated optimum aperture radius: {optimum_radius_pixels:.2f} pixels ({optimum_radius_fwhm:.2f} FWHM)")
                     else:
-                        logger.info(f"Insufficient sources for optimum radius, using configured: {configured_radius:.2f}")
+                        pass  # Insufficient sources for optimum radius, using configured
                 except Exception as e:
                     logger.warning(f"Failed to calculate optimum aperture radius: {e}, using configured")
             
@@ -1317,11 +1275,7 @@ class Limits:
             # Ensures zero overlap between transient aperture and injection aperture,
             # plus a PSF-wing buffer so transient flux cannot bias the injected recovery.
             target_exclusion_r = 2.0 * aperture_radius_local + fwhm
-            logger.info(
-                "Injection config: exclusion_r=%.1f px, aperture_r=%.2f px, annulus=[%.1f, %.1f] px",
-                target_exclusion_r, aperture_radius_local, annulus_in_local, annulus_out_local
-            )
-
+            
             # Define injection radii early (needed for initial guess)
             fwhm_px = float(self.input_yaml.get("fwhm", 3.0))
             r_min = float(lim_cfg.get("inject_min_radius_fwhm", 2.0)) * fwhm_px
@@ -1334,11 +1288,7 @@ class Limits:
             # injection annulus, expand r_max to leave at least one FWHM of room.
             if r_min >= r_max:
                 r_max = r_min + max(fwhm_px, 2.0)
-            logger.info(
-                "Injection radii: r_min=%.1f px (excl_zone=%.1f), r_base=%.1f, r_max=%.1f",
-                r_min, target_exclusion_r, r_base, r_max,
-            )
-            
+                        
             # Calculate minimum cutout size needed for all photometry operations
             # Need space for: target exclusion zone + edge clearance + injection radius
             edge_margin = max(3.0 * fwhm_px, 2.0 * aperture_radius_local)
@@ -1358,20 +1308,10 @@ class Limits:
                 # Ensure scale is at least the base scale and is reasonable
                 new_scale = max(base_scale, needed_scale, 10.0)  # minimum 10px scale
                 
-                logger.info(
-                    "Cutout enlarged: %dx%d -> %dx%d px (scale %.1f -> %.1f)",
-                    current_cutout_size, current_cutout_size,
-                    min_cutout_size, min_cutout_size,
-                    base_scale, new_scale
-                )
-                
+                                
                 # Update the scale used for cutout extraction
                 scale_used = new_scale
-            else:
-                logger.info(
-                    "Cutout size OK: %dx%d px", current_cutout_size, current_cutout_size
-                )
-
+            
             # Data-driven initial guess from instrumental magnitudes measured
             # on an annulus around the target location.
             try:
@@ -1511,20 +1451,6 @@ class Limits:
             # Sanity round-trip: flux_for_mag(mag(F_ref)) should equal 1.0.
             mag_at_unit_flux = float(mag(float(F_ref)))
             f_roundtrip = float(flux_for_mag(mag_at_unit_flux))
-            logger.info(
-                "PSF injection calibration (exact aperture integral, no sky-sub): "
-                "counts_ref_adu=%.6g, counts_ref(e-)=%.6g (r=%.2f px, gain=%.4g e/ADU), "
-                "F_ref=%.6g e-/s, mag(F_ref)=%.5f, "
-                "flux_for_mag(mag(F_ref))=%.6f (expect 1.0), flux_for_mag(initialGuess)=%.6g",
-                float(counts_ref_adu),
-                float(counts_ref),
-                float(aperture_radius_local),
-                float(_gain_canon),
-                float(F_ref),
-                mag_at_unit_flux,
-                f_roundtrip,
-                float(flux_for_mag(float(initialGuess))),
-            )
             if np.isfinite(f_roundtrip) and abs(f_roundtrip - 1.0) > 1e-6:
                 logger.warning(
                     "PSF flux calibration round-trip differs from 1.0 (got %.8f). "
@@ -1563,12 +1489,6 @@ class Limits:
             # Option to disable quiet site selection for more representative limiting magnitude
             use_quiet_sites = bool(lim_cfg.get("inject_use_quiet_sites", True))
 
-            logger.info(
-                "Injected limiting magnitude: recovery_method=%s, completeness_target=%.2f, use_quiet_sites=%s",
-                str(recovery_method),
-                float(completeness_target),
-                str(use_quiet_sites),
-            )
             completeness_solver = str(lim_cfg.get("completeness_solver", "bisect")).strip().lower()
             if completeness_solver not in {"bisect", "logistic_emcee"}:
                 completeness_solver = "bisect"
@@ -1646,10 +1566,7 @@ class Limits:
             )
             n5 = int(len(cand_df))
 
-            logger.info(
-                "Candidate sites: sampled=%d, after_exclusion=%d, after_edge=%d, after_aperture=%d, after_annulus=%d, after_pixel_stats=%d",
-                n0, n1, n2, n3, n4, n5,
-            )
+            logger.info(f"Found {n5} valid candidate sites for injection")
 
             if len(cand_df) == 0:
                 logger.warning(
@@ -1813,12 +1730,7 @@ class Limits:
                 injection_df = cand_df[["x_pix", "y_pix"]].sample(
                     n=n_draw, random_state=42, replace=False
                 ).reset_index(drop=True)
-                logger.info(
-                    "Representative-site injection (inject_use_quiet_sites=False): "
-                    "drew %d spatially uniform sites from %d candidates.",
-                    int(len(injection_df)), int(len(cand_df)),
-                )
-
+                
             # Use only these jittered positions for injection trials.
             sourceNum = int(len(injection_df))
 
@@ -1862,11 +1774,7 @@ class Limits:
             # so x_pix_arr/y_pix_arr are the final trial positions (no further jittering needed).
             _x_inj_all = x_pix_arr
             _y_inj_all = y_pix_arr
-            logger.info(
-                "Injection trial grid: %d total trials per magnitude (jittered during quiet-site selection).",
-                int(n_sites),
-            )
-
+            
             # Default serial; cap workers to avoid HPC fork/resource limits.
             n_jobs = n_jobs if n_jobs is not None else 1
             n_jobs = max(1, min(n_jobs, 8))
@@ -1934,11 +1842,9 @@ class Limits:
                 _n_det = int(det_flags.sum())
                 _n_tot = len(det_flags)
                 _bar_width = 20
-                _filled = int(round(_rate * _bar_width))
-                _bar = "\u2588" * _filled + "-" * (_bar_width - _filled)
                 logger.info(
-                    "  inject m=%+7.3f | [%s] %5.1f%%  (%d/%d detected)",
-                    m, _bar, 100.0 * _rate, _n_det, _n_tot,
+                    "  inject m=%+7.3f | %5.1f%%  (%d/%d detected)",
+                    m, 100.0 * _rate, _n_det, _n_tot,
                 )
 
                 det_rate = float(det_flags.mean()) if len(det_flags) else 0.0
@@ -1966,11 +1872,7 @@ class Limits:
                 # ---- Bracket phase ------------------------------------------
                 step = 0.5
                 max_steps = 30
-                logger.info(
-                    "--- Bracket phase: target completeness=%.0f%%, initial guess m=%.3f, step=%.2f mag ---",
-                    100.0 * completeness_target, float(initialGuess), step,
-                )
-                # Check if injection recovery plot is enabled
+                                # Check if injection recovery plot is enabled
                 plot_injection_recovery = (self.input_yaml.get("limiting_magnitude") or {}).get("plot_injection_recovery", False)
 
                 if plot_injection_recovery:
@@ -2083,12 +1985,7 @@ class Limits:
                     # ---- Bisect phase ----------------------------------------
                     lo_m, lo_c = m_bright, c_bright
                     hi_m, hi_c = m_faint, c_faint
-                    logger.info(
-                        "--- Bisect phase: bracket [m=%.3f (%.0f%%) .. m=%.3f (%.0f%%)] ---",
-                        float(lo_m), 100.0 * float(lo_c),
-                        float(hi_m), 100.0 * float(hi_c),
-                    )
-                    # Bracket endpoints already recorded in bracket_steps, but include
+                                        # Bracket endpoints already recorded in bracket_steps, but include
                     # them here so the plotted trajectory clearly straddles 50%.
                     # (f_bright/f_faint are medians from run_trials_at_mag).
                     try:
@@ -2201,6 +2098,7 @@ class Limits:
                         target_name=self.input_yaml.get("target_name", None),
                         cutout_cx=cutout_cx,
                         cutout_cy=cutout_cy,
+                        snr_limit=effective_snr_limit,
                     )
 
                     # Detection-limit demo plot removed by request.
@@ -2254,7 +2152,7 @@ class Limits:
 
                 n_trials_total = len(_trial_cache)
                 logger.info(
-                    "\u2605 Limiting magnitude: inst=%.3f%s  ZP=%s  "
+                    "Limiting magnitude: inst=%.3f%s  ZP=%s  "
                     "method=%s  completeness=%.0f%%  trials=%d  [%.1fs]",
                     float(inject_lmag), app_str, zp_log,
                     str(recovery_method), 100.0 * completeness_target,
@@ -2266,7 +2164,32 @@ class Limits:
                 )
 
             # The limiting magnitude is already exposure-time-normalized via flux_for_mag
-            return float(inject_lmag)
+            result_mag = float(inject_lmag)
+            if _return_details:
+                return {
+                    "inject_lmag": result_mag,
+                    "bracket_steps": bracket_steps,
+                    "bisect_steps": bisect_steps,
+                    "completeness_target": completeness_target,
+                    "detection_cutoff": detection_cutoff,
+                    "zeropoint": zeropoint,
+                    "recovery_method": recovery_method,
+                    "snr_limit": effective_snr_limit,
+                    "image_zeropoint": image_zeropoint,
+                    # Objects needed for injection cutout inset panels
+                    "epsf_model": epsf_model,
+                    "cutout": cutout,
+                    "position": position,
+                    "background_rms": background_rms,
+                    "flux_for_mag": flux_for_mag,
+                    "injection_df": injection_df,
+                    "F_ref": F_ref,
+                    "counts_ref": counts_ref,
+                    "exposure_time": exposure_time,
+                    "cutout_cx": cutout_cx,
+                    "cutout_cy": cutout_cy,
+                }
+            return result_mag
 
         except Exception as exc:
             exc_type, _, exc_tb = sys.exc_info()
@@ -2275,6 +2198,18 @@ class Limits:
                 f"getInjectedLimit failed: {exc} "
                 f"[{exc_type.__name__}, {fname}:{exc_tb.tb_lineno}]"
             )
+            if _return_details:
+                return {
+                    "inject_lmag": np.nan,
+                    "bracket_steps": [],
+                    "bisect_steps": [],
+                    "completeness_target": locals().get('completeness_target', 0.5),
+                    "detection_cutoff": detection_cutoff,
+                    "zeropoint": zeropoint,
+                    "recovery_method": None,
+                    "snr_limit": None,
+                    "image_zeropoint": image_zeropoint,
+                }
             return np.nan
 
     def _save_emcee_recovery_diagnostic(
@@ -2749,10 +2684,14 @@ class Limits:
         exposure_time=None,
         cutout_cx=None,
         cutout_cy=None,
+        snr_limit=None,
+        multi_snr_details=None,
     ) -> None:
         """
         Plot completeness curve with injection examples.
         If sample_mags is None, only shows bracket/bisect trajectories (no bar chart).
+        If multi_snr_details is provided, draws all S/N thresholds' trajectories
+        with distinct colors on the same plot.
         """
         logger = logging.getLogger(__name__)
         
@@ -2761,13 +2700,10 @@ class Limits:
             recovery_method_upper = str(recovery_method).strip().upper()
             if recovery_method_upper in ("PSF", "EMCEE"):
                 selected_zeropoint = image_zeropoint.get("PSF", {}).get("zeropoint", zeropoint)
-                logger.info(f"Using PSF zeropoint: {selected_zeropoint}")
             else:  # AP method
                 selected_zeropoint = image_zeropoint.get("AP", {}).get("zeropoint", zeropoint)
-                logger.info(f"Using AP zeropoint: {selected_zeropoint}")
         else:
             selected_zeropoint = zeropoint
-            logger.info("Using provided zeropoint (image_zeropoint not available)")
         # Skip bar chart processing if sample_mags is None
         if sample_mags is not None:
             order = np.argsort(sample_mags)
@@ -2839,104 +2775,121 @@ class Limits:
                 zorder=3,
             )
 
-        # Bracket and bisect search trajectories (ordered points + arrows).
-        if bracket_steps:
-            bm, bc, _ = zip(*bracket_steps)  # (mag, detection_rate, recovered_flux)
-            bc_percent = np.asarray(bc, float) * 100.0
-            bm = np.asarray(bm, float)
-            ax.scatter(
-                bm,
-                bc_percent,
-                s=14,
-                color="#0000FF",
-                alpha=0.8,
-                edgecolors="none",
-                label="Bracket search",
-                zorder=4,
-            )
-            for i in range(len(bm) - 1):
-                ax.annotate(
-                    "",
-                    xy=(bm[i + 1], bc_percent[i + 1]),
-                    xytext=(bm[i], bc_percent[i]),
-                    arrowprops=dict(arrowstyle="->", color="#0000FF", lw=0.5, alpha=0.7),
-                )
+        # Adopted limit: use the interpolated m50 (inject_lmag) rather than the
+        # last evaluated step (which can be above/below 50%).
+        adopted_mag = float(inject_lmag) if np.isfinite(inject_lmag) else np.nan
 
-        if bisect_steps:
-            bm, bc, _ = zip(*bisect_steps)  # (mag, detection_rate, recovered_flux)
-            bc_percent = np.asarray(bc, float) * 100.0
-            bm = np.asarray(bm, float)
-            ax.scatter(
-                bm,
-                bc_percent,
-                s=14,
-                color="#00AA00",
-                alpha=0.8,
-                edgecolors="none",
-                label="Bisection",
-                zorder=5,
-            )
-            for i in range(len(bm) - 1):
-                ax.annotate(
-                    "",
-                    xy=(bm[i + 1], bc_percent[i + 1]),
-                    xytext=(bm[i], bc_percent[i]),
-                    arrowprops=dict(arrowstyle="->", color="#00AA00", lw=0.5, alpha=0.7),
-                )
+        # ---- Bracket/bisection search trajectories & adopted-limit lines ----
+        # Color palette for multi-S/N thresholds (up to 6 distinct)
+        _palette = [
+            ("#2196F3", "#1565C0"),  # blue / dark-blue
+            ("#F44336", "#B71C1C"),  # red / dark-red
+            ("#4CAF50", "#1B5E20"),  # green / dark-green
+            ("#FF9800", "#E65100"),  # orange / dark-orange
+            ("#9C27B0", "#4A148C"),  # purple / dark-purple
+            ("#00BCD4", "#006064"),  # cyan / dark-cyan
+        ]
+        _markers = ["o", "s", "^", "D", "v", "P"]
+
+        if multi_snr_details is not None and len(multi_snr_details) > 1:
+            # --- Multi-SNR: draw all thresholds with distinct colours ---
+            for idx, detail in enumerate(multi_snr_details):
+                d_snr = detail.get("snr_limit")
+                d_bracket = detail.get("bracket_steps", [])
+                d_bisect = detail.get("bisect_steps", [])
+                d_lmag = detail.get("inject_lmag", np.nan)
+                d_ctarget = detail.get("completeness_target", 0.5)
+
+                c_brk, c_bis = _palette[idx % len(_palette)]
+                mk = _markers[idx % len(_markers)]
+                tag = f"S/N$\\geq${d_snr:.0f}" if d_snr is not None else f"#{idx+1}"
+
+                if d_bracket:
+                    bm, bc, _ = zip(*d_bracket)
+                    bc_pct = np.asarray(bc, float) * 100.0
+                    bm = np.asarray(bm, float)
+                    ax.scatter(bm, bc_pct, s=16, color=c_brk, alpha=0.85,
+                               edgecolors="none", marker=mk,
+                               label=f"Bracket ({tag})", zorder=4)
+                    for i in range(len(bm) - 1):
+                        ax.annotate("", xy=(bm[i+1], bc_pct[i+1]),
+                                    xytext=(bm[i], bc_pct[i]),
+                                    arrowprops=dict(arrowstyle="->", color=c_brk,
+                                                    lw=0.5, alpha=0.6))
+
+                if d_bisect:
+                    bm, bc, _ = zip(*d_bisect)
+                    bc_pct = np.asarray(bc, float) * 100.0
+                    bm = np.asarray(bm, float)
+                    ax.scatter(bm, bc_pct, s=16, color=c_bis, alpha=0.85,
+                               edgecolors="none", marker=mk,
+                               label=f"Bisection ({tag})", zorder=5)
+                    for i in range(len(bm) - 1):
+                        ax.annotate("", xy=(bm[i+1], bc_pct[i+1]),
+                                    xytext=(bm[i], bc_pct[i]),
+                                    arrowprops=dict(arrowstyle="->", color=c_bis,
+                                                    lw=0.5, alpha=0.6))
+
+                d_adopted = float(d_lmag) if np.isfinite(d_lmag) else np.nan
+                if np.isfinite(d_adopted):
+                    ax.axvline(d_adopted, color=c_brk, lw=0.8, ls="--",
+                               label=f"m50 ({tag})", zorder=6, alpha=0.9)
+                    ax.scatter([d_adopted], [float(d_ctarget) * 100.0],
+                               s=32, marker="D", c=c_brk,
+                               edgecolors="white", linewidth=0.4, zorder=7)
+        else:
+            # --- Single-SNR: original behaviour ---
+            snr_label = ""
+            if snr_limit is not None:
+                snr_label = f" (S/N>={snr_limit:.0f})"
+
+            if bracket_steps:
+                bm, bc, _ = zip(*bracket_steps)
+                bc_percent = np.asarray(bc, float) * 100.0
+                bm = np.asarray(bm, float)
+                ax.scatter(bm, bc_percent, s=14, color="#0000FF", alpha=0.8,
+                           edgecolors="none", label=f"Bracket search{snr_label}", zorder=4)
+                for i in range(len(bm) - 1):
+                    ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
+                                xytext=(bm[i], bc_percent[i]),
+                                arrowprops=dict(arrowstyle="->", color="#0000FF",
+                                                lw=0.5, alpha=0.7))
+
+            if bisect_steps:
+                bm, bc, _ = zip(*bisect_steps)
+                bc_percent = np.asarray(bc, float) * 100.0
+                bm = np.asarray(bm, float)
+                ax.scatter(bm, bc_percent, s=14, color="#00AA00", alpha=0.8,
+                           edgecolors="none", label=f"Bisection{snr_label}", zorder=5)
+                for i in range(len(bm) - 1):
+                    ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
+                                xytext=(bm[i], bc_percent[i]),
+                                arrowprops=dict(arrowstyle="->", color="#00AA00",
+                                                lw=0.5, alpha=0.7))
+
+            if np.isfinite(adopted_mag):
+                ax.axvline(adopted_mag, color="k", lw=0.6, ls="--",
+                           label=f"Adopted limit (m50){snr_label}", zorder=6)
+                try:
+                    ax.scatter([adopted_mag], [float(completeness_target) * 100.0],
+                               s=28, marker="D", c="k", edgecolors="white",
+                               linewidth=0.4, zorder=7)
+                except Exception:
+                    pass
 
         # Reference lines.
         ax.axhline(50, color="0.7", lw=0.5, ls="--", zorder=0)
-        ax.text(
-            0.02,
-            50,
-            "50%",
-            transform=ax.get_yaxis_transform(),
-            va="bottom",
-            ha="left",
-            color="0.5",
-        )
+        ax.text(0.02, 50, "50%", transform=ax.get_yaxis_transform(),
+                va="bottom", ha="left", color="0.5")
 
         if completeness_target != 0.5:
             target_percent = completeness_target * 100
             ax.axhline(target_percent, color="0.7", lw=0.5, ls="-.", zorder=0)
-            ax.text(
-                0.98,
-                target_percent,
-                f"{int(target_percent)}%",
-                transform=ax.get_yaxis_transform(),
-                va="bottom",
-                ha="right",
-                color="0.5",
-            )
+            ax.text(0.98, target_percent, f"{int(target_percent)}%",
+                    transform=ax.get_yaxis_transform(), va="bottom",
+                    ha="right", color="0.5")
 
-        # Adopted limit: use the interpolated m50 (inject_lmag) rather than the
-        # last evaluated step (which can be above/below 50%).
-        adopted_mag = float(inject_lmag) if np.isfinite(inject_lmag) else np.nan
-        if np.isfinite(adopted_mag):
-            ax.axvline(
-                adopted_mag,
-                color="k",
-                lw=0.6,
-                ls="--",
-                label="Adopted limit (m50)",
-                zorder=6,
-            )
-            # Marker at exactly the target completeness (typically 50%).
-            try:
-                ax.scatter(
-                    [adopted_mag],
-                    [float(completeness_target) * 100.0],
-                    s=28,
-                    marker="D",
-                    c="k",
-                    edgecolors="white",
-                    linewidth=0.4,
-                    zorder=7,
-                )
-            except Exception:
-                pass
-
-        # Add axis labels to main completeness plot
+        # Add axis labels and title to main completeness plot
         ax.set_xlabel("Injected brightness [mag]", fontsize=9)
         ax.set_ylabel("Recovery fraction [%]", fontsize=9)
         
@@ -2955,6 +2908,9 @@ class Limits:
             secax.set_xlabel("Apparent brightness [mag]")
             # The secondary axis direction follows from the monotonic transform;
             # do not call secax.invert_xaxis() as it would double-invert.
+
+        ncol = 2 if (multi_snr_details is not None and len(multi_snr_details) > 1) else 1
+        ax.legend(loc="best", fontsize=7, frameon=False, ncol=ncol)
 
         fig.tight_layout()
         
@@ -3243,7 +3199,7 @@ class Limits:
                         vmin, vmax = zscale.get_limits(np.clip(injected_disp, lower, upper))
                     else:
                         vmin, vmax = np.nanmin(injected_disp), np.nanmax(injected_disp)
-                    cmap = plt.get_cmap("gray").copy()
+                    cmap = plt.get_cmap("grey").copy()
                     cmap.set_bad(color="white")
                     im = ax_inject.imshow(
                         np.ma.array(injected_disp, mask=~np.isfinite(injected_disp)),
@@ -3419,7 +3375,7 @@ class Limits:
                     else:
                         ax_inject.set_ylabel('')
                     ax_inject.tick_params(labelsize=8)
-                except Exception as e:
+                except Exgception as e:
                     # If injection fails, just show the original cutout
                     import traceback
                     logger.warning(f"Subpanel injection failed for mag={mag_target:.2f}: {e}")
@@ -3427,7 +3383,7 @@ class Limits:
                     ny, nx = cutout.shape
                     from astropy.visualization import simple_norm
                     norm = simple_norm(cutout, 'sqrt', percent=99.5)
-                    cmap = plt.get_cmap("viridis").copy()
+                    cmap = plt.get_cmap("grey").copy()
                     cmap.set_bad(color="white")
                     plot_zero_as_nan = bool((self.input_yaml.get("limiting_magnitude") or {}).get("plot_zero_as_nan", True))
                     cut_disp = np.asarray(cutout, dtype=float).copy()
@@ -3457,7 +3413,7 @@ class Limits:
                 # Display original cutout (no injections)
                 from astropy.visualization import simple_norm
                 norm = simple_norm(cutout, 'sqrt', percent=99.5)
-                cmap = plt.get_cmap("viridis").copy()
+                cmap = plt.get_cmap("grey").copy()
                 cmap.set_bad(color="white")
                 plot_zero_as_nan = bool((self.input_yaml.get("limiting_magnitude") or {}).get("plot_zero_as_nan", True))
                 cut_disp = np.asarray(cutout, dtype=float).copy()
@@ -3597,22 +3553,16 @@ class Limits:
         det_rates = np.array([step[1] for step in all_steps])
         recovered_fluxes = np.array([step[2] for step in all_steps])
 
-        logger.info(f"Debug: inst_mags range: {inst_mags.min():.2f} to {inst_mags.max():.2f}")
-        logger.info(f"Debug: selected_zeropoint: {selected_zeropoint}")
-        logger.info(f"Debug: det_rates range: {det_rates.min():.2f} to {det_rates.max():.2f}")
-
+        
         # Convert to apparent magnitudes
         injected_apparent = inst_mags + selected_zeropoint
-        logger.info(f"Debug: injected_apparent range: {injected_apparent.min():.2f} to {injected_apparent.max():.2f}")
 
         # Convert recovered flux to instrumental magnitude, then to apparent
         # The recovered flux units depend on recovery_method:
         # - AP method: flux_AP is already e-/s (divided by exposure_time in Aperture.measure()).
         # - PSF/EMCEE methods: flux_hat is the PSF flux parameter (dimensionless scaling factor)
         #   To convert to physical flux rate: flux_e_per_s = flux_hat * counts_ref / exposure_time
-        logger.info(f"Debug: recovery_method={recovery_method}, counts_ref={counts_ref}, exposure_time={exposure_time}")
-        logger.info(f"Debug: recovered_fluxes sample: {recovered_fluxes[:3]}")
-
+        
         recovery_method_upper = str(recovery_method).strip().upper() if recovery_method is not None else "AP"
         if recovery_method_upper == "AP":
             # AP method: flux_AP is already e-/s, apply mag() directly
@@ -3857,3 +3807,198 @@ class Limits:
         plt.close(fig)
 
         logger.info(f"Saved injection recovery plot to {save_path}")
+
+    # -----------------------------------------------------------------------
+    # Combined completeness plot for multi-S/N thresholds
+    # -----------------------------------------------------------------------
+
+    def _plot_completeness_combined(self, all_details: list) -> None:
+        """
+        Draw a single completeness plot with bracket/bisect trajectories
+        from multiple S/N threshold runs overlaid in distinct colors,
+        plus injection cutout inset panels from the primary (first) threshold.
+
+        Parameters
+        ----------
+        all_details : list of dicts returned by get_injected_limit(_return_details=True)
+        """
+        logger = logging.getLogger(__name__)
+
+        if not all_details:
+            return
+
+        # Use the first (primary) threshold's detail to drive the inset panels
+        # via the existing _plot_completeness, then pass all thresholds' data
+        # for the multi-SNR overlay.
+        primary = all_details[0]
+
+        self._plot_completeness(
+            None,  # No sample_mags
+            None,  # No completeness_groups
+            None,  # No medians
+            primary.get("bracket_steps", []),
+            primary.get("bisect_steps", []),
+            primary.get("inject_lmag", np.nan),
+            primary.get("completeness_target", 0.5),
+            primary.get("detection_cutoff"),
+            primary.get("zeropoint"),
+            primary.get("recovery_method"),
+            epsf_model=primary.get("epsf_model"),
+            cutout=primary.get("cutout"),
+            position=primary.get("position"),
+            background_rms=primary.get("background_rms"),
+            flux_for_mag=primary.get("flux_for_mag"),
+            image_zeropoint=primary.get("image_zeropoint"),
+            injection_df=primary.get("injection_df"),
+            F_ref=primary.get("F_ref"),
+            counts_ref=primary.get("counts_ref"),
+            exposure_time=primary.get("exposure_time"),
+            extended_steps=[],
+            orig_position=None,
+            target_name=self.input_yaml.get("target_name", None),
+            cutout_cx=primary.get("cutout_cx"),
+            cutout_cy=primary.get("cutout_cy"),
+            snr_limit=primary.get("snr_limit"),
+            # Pass all threshold details for combined overlay
+            multi_snr_details=all_details,
+        )
+
+    # -----------------------------------------------------------------------
+    # Multi-S/N injection limiting magnitude
+    # -----------------------------------------------------------------------
+
+    def get_injected_limits_multi_snr(
+        self,
+        full_image: np.ndarray,
+        position,
+        epsf_model=None,
+        initialGuess: float = -5.0,
+        snr_thresholds: list = None,
+        detection_cutoff: float | None = None,
+        plot: bool = True,
+        background_rms: np.ndarray = None,
+        subtraction_ready: bool = False,
+        zeropoint: float = None,
+        n_jobs: int = None,
+        image_zeropoint: dict = None,
+    ) -> dict:
+        """
+        Calculate limiting magnitudes for multiple S/N thresholds using injection/recovery.
+
+        This function runs the injection limiting magnitude analysis for each specified
+        S/N threshold and returns structured results with all limits and comparisons.
+
+        Parameters
+        ----------
+        full_image      : full 2-D science image (pre-subtraction)
+        position        : (x, y) target pixel coords used to centre the cutout
+        epsf_model      : photutils ePSF model
+        initialGuess    : starting instrumental magnitude for the bracket
+        snr_thresholds  : list of S/N thresholds (e.g., [3.0, 5.0]). If None, uses config
+        detection_cutoff: legacy beta threshold (unused; retained for backwards compatibility)
+        plot            : save diagnostic completeness PDF for each S/N threshold
+        background_rms  : full-frame RMS map (optional)
+        subtraction_ready: unused placeholder
+        zeropoint       : adds an apparent-magnitude axis to the plot
+        n_jobs          : worker processes; None defaults to 1 (serial)
+
+        Returns
+        -------
+        dict - results for each S/N threshold with limiting magnitudes and comparisons
+        """
+        logger = logging.getLogger(__name__)
+        
+        # Get S/N thresholds from config if not specified
+        if snr_thresholds is None:
+            lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
+            snr_thresholds = lim_cfg.get("snr_thresholds", [3.0])
+        
+        # Ensure we have valid thresholds
+        if not snr_thresholds or not isinstance(snr_thresholds, list):
+            logger.warning("Invalid snr_thresholds, using default [3.0]")
+            snr_thresholds = [3.0]
+        
+        logger.info(f"Calculating injection limits for S/N thresholds: {snr_thresholds}")
+        
+        results = {}
+        # Collect per-threshold details for the combined completeness plot
+        all_details = []
+        
+        # Calculate limiting magnitude for each S/N threshold
+        # Suppress individual plots; we'll draw one combined plot at the end.
+        for snr in snr_thresholds:
+            try:
+                logger.info(f"Calculating limiting magnitude for S/N >= {snr}")
+                detail = self.get_injected_limit(
+                    full_image=full_image,
+                    position=position,
+                    epsf_model=epsf_model,
+                    initialGuess=initialGuess,
+                    detection_limit=snr,
+                    detection_cutoff=detection_cutoff,
+                    plot=False,  # suppress individual plots
+                    background_rms=background_rms,
+                    subtraction_ready=subtraction_ready,
+                    zeropoint=zeropoint,
+                    n_jobs=n_jobs,
+                    image_zeropoint=image_zeropoint,
+                    _return_details=True,
+                )
+                limit = detail["inject_lmag"]
+                all_details.append(detail)
+                results[f'snr_{snr}'] = {
+                    'limiting_mag': limit,
+                    'snr_threshold': snr,
+                    'valid': np.isfinite(limit)
+                }
+                logger.info(f"S/N {snr} limiting magnitude: {limit:.3f}")
+            except Exception as e:
+                logger.error(f"Failed to calculate S/N {snr} limiting magnitude: {e}")
+                results[f'snr_{snr}'] = {
+                    'limiting_mag': np.nan,
+                    'snr_threshold': snr,
+                    'valid': False,
+                    'error': str(e)
+                }
+        
+        # Add comparison metrics if we have multiple valid results
+        valid_results = {k: v for k, v in results.items() if v.get('valid', False)}
+        if len(valid_results) >= 2:
+            sorted_thresholds = sorted([float(k.split('_')[1]) for k in valid_results.keys()])
+            
+            comparisons = {}
+            for i in range(len(sorted_thresholds) - 1):
+                snr_low = sorted_thresholds[i]
+                snr_high = sorted_thresholds[i + 1]
+                
+                mag_low = valid_results[f'snr_{snr_low}']['limiting_mag']
+                mag_high = valid_results[f'snr_{snr_high}']['limiting_mag']
+                
+                if np.isfinite(mag_low) and np.isfinite(mag_high):
+                    delta_mag = mag_high - mag_low
+                    comparisons[f'snr_{snr_high}_vs_{snr_low}'] = {
+                        'delta_mag': delta_mag,
+                        'snr_low': snr_low,
+                        'snr_high': snr_high,
+                        'mag_low': mag_low,
+                        'mag_high': mag_high
+                    }
+            
+            results['comparisons'] = comparisons
+            logger.info(f"Generated {len(comparisons)} S/N threshold comparisons")
+        
+        # Adaptive threshold recommendation
+        lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
+        if lim_cfg.get("adaptive_snr_selection", False):
+            adaptive_threshold = 5.0 if 5.0 in snr_thresholds else max(snr_thresholds)
+            results['adaptive_threshold'] = adaptive_threshold
+            logger.info(f"Adaptive S/N threshold recommendation: {adaptive_threshold}")
+        
+        # Generate a single combined completeness plot with all S/N thresholds
+        if plot and all_details:
+            try:
+                self._plot_completeness_combined(all_details)
+            except Exception as exc:
+                logger.warning("Combined completeness plot failed: %s", exc)
+        
+        return results

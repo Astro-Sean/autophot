@@ -247,17 +247,16 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
     trim_info : dict
         Information about trimming performed
     """
-    logging.info(f"NaN boundary trimming: image shape {image_data.shape}")
     nan_count = np.sum(np.isnan(image_data))
     total_pixels = image_data.size
-    logging.info(f"NaN boundary trimming: {nan_count}/{total_pixels} pixels are NaN ({100*nan_count/total_pixels:.1f}%)")
+    nan_pct = 100 * nan_count / total_pixels
+    logging.info(f"NaN boundary trimming: {nan_count}/{total_pixels} pixels are NaN ({nan_pct:.1f}%)")
 
     # Find valid (non-NaN) pixels
     valid_mask = ~np.isnan(image_data)
 
     # If no NaNs or all NaNs, return as-is
     if not np.any(valid_mask) or np.all(valid_mask):
-        logging.info(f"NaN boundary trimming: skipped (all NaNs: {not np.any(valid_mask)}, no NaNs: {np.all(valid_mask)})")
         return image_data, header, {"trimmed": False}
 
     # Find valid region bounds
@@ -265,13 +264,10 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
     cols_with_valid = np.any(valid_mask, axis=0)
 
     if not np.any(rows_with_valid) or not np.any(cols_with_valid):
-        logging.info(f"NaN boundary trimming: skipped (no valid rows: {not np.any(rows_with_valid)}, no valid cols: {not np.any(cols_with_valid)})")
         return image_data, header, {"trimmed": False}
 
     y_min, y_max = np.where(rows_with_valid)[0][[0, -1]]
     x_min, x_max = np.where(cols_with_valid)[0][[0, -1]]
-
-    logging.info(f"NaN boundary trimming: valid region bounds x=[{x_min},{x_max}] px, y=[{y_min},{y_max}] px")
     
     # Add buffer
     y_min = max(0, y_min - buffer_pixels)
@@ -279,32 +275,20 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
     x_min = max(0, x_min - buffer_pixels)
     x_max = min(image_data.shape[1] - 1, x_max + buffer_pixels)
 
-    logging.info(f"NaN boundary trimming: after buffer x=[{x_min},{x_max}] px, y=[{y_min},{y_max}] px")
-
     # Check if target is included (if provided)
     if target_x is not None and target_y is not None:
         # Convert to 0-indexed for array checking
         tx_0idx, ty_0idx = target_x - 1, target_y - 1
-        logging.info(f"NaN boundary trimming: target position (0-indexed) x={tx_0idx:.1f}, y={ty_0idx:.1f}")
 
         # Expand bounds to include target if needed
-        expanded = False
         if tx_0idx < x_min:
-            logging.info(f"NaN boundary trimming: expanding x_min to include target")
             x_min = max(0, int(tx_0idx) - buffer_pixels)
-            expanded = True
         if tx_0idx > x_max:
-            logging.info(f"NaN boundary trimming: expanding x_max to include target")
             x_max = min(image_data.shape[1] - 1, int(tx_0idx) + buffer_pixels)
-            expanded = True
         if ty_0idx < y_min:
-            logging.info(f"NaN boundary trimming: expanding y_min to include target")
             y_min = max(0, int(ty_0idx) - buffer_pixels)
-            expanded = True
         if ty_0idx > y_max:
-            logging.info(f"NaN boundary trimming: expanding y_max to include target")
             y_max = min(image_data.shape[0] - 1, int(ty_0idx) + buffer_pixels)
-            expanded = True
 
         # Final verification: ensure target is within bounds
         if not (x_min <= tx_0idx <= x_max and y_min <= ty_0idx <= y_max):
@@ -901,16 +885,8 @@ def run_photometry():
         write_dir = (cur_dir + "/").replace(" ", "_")
         input_yaml["write_dir"] = write_dir
         logging.info(log_step(f"File: {base_filename}"))
-        logging.info("Full path: %s", fpath)
-        logging.info("Start time: %s", datetime.datetime.now())
-        if was_shortened:
-            logging.info(
-                "Original filename was too long; copied to a temporary location."
-            )
-        if replaced:
-            logging.info(
-                "Pre-reduced file found; replacing template file with original."
-            )
+        if was_shortened or replaced:
+            logging.info("Using pre-processed file")
 
         # When processing a template, ensure TELESCOP/INSTRUME/FILTER exist (e.g. after restore from .original)
         # Create a copy in the science directory to avoid crosstalk when multiple images use the same template
@@ -1621,21 +1597,14 @@ def run_photometry():
         #  Log Telescope and Instrument Metadata
         # Logs the telescope and instrument metadata.
 
-        logging.info("Telescope: %s", telescope)
-        logging.info("Instrument: %s", instrument)
-        logging.info("Filter: %s", imageFilter)
-        logging.info("MJD: %.3f", date_mjd)
-        logging.info("Read noise: %.3f e/pixel", readnoise)
-        logging.info("Saturation level: %.3f ADU", saturate)
+        logging.info(f"Telescope: {telescope}, Instrument: {instrument}, Filter: {imageFilter}")
 
         if pixel_scale:
             logging.info("Pixel scale: %.3f arcsec/pixel", pixel_scale)
-
             input_yaml["pixel_scale"] = pixel_scale
 
         date = Time([date_mjd], format="mjd", scale="utc")
         date = date.iso[0].split(" ")[0]
-        logging.info("Date of observation: %s", date)
 
         header["gain"] = gain
         # saturate already written to header at line 1130 (if finite)
@@ -5255,28 +5224,11 @@ def run_photometry():
                 inverted_image=inverted_image,
             )
 
-        # Debug: log the background levels each method used (helps diagnose
-        # large AP-vs-PSF flux offsets on difference images with biasing).
-        try:
-            ap_bkg_cols = ["local_bkg_raw", "local_bkg_used", "sky_bkg_total", "noiseSky"]
-            psf_bkg_cols = ["local_background", "local_bkg", "background", "bkg"]
-            parts = []
-            for c in ap_bkg_cols:
-                if c in TargetPosition.columns and np.isfinite(TargetPosition[c].iloc[0]):
-                    parts.append(f"{c}={float(TargetPosition[c].iloc[0]):.6g}")
-            for c in psf_bkg_cols:
-                if c in TargetPosition.columns and np.isfinite(TargetPosition[c].iloc[0]):
-                    parts.append(f"{c}={float(TargetPosition[c].iloc[0]):.6g}")
-            if parts:
-                logging.info("Target background debug: %s", "  ".join(parts))
-        except Exception:
-            pass
-
+        
         # If we used a cutout for the target fit, shift results back to full-image pixels
         # so downstream logging/output stays consistent.
         if target_cutout is not None:
             try:
-                logging.info(f"Converting cutout-local to full-image: cutout_x0={cutout_x0:.2f}, cutout_y0={cutout_y0:.2f}")
                 for col in ("x_pix", "y_pix", "x_fit", "y_fit", "x_fit_normal", "y_fit_normal"):
                     if col in TargetPosition.columns and np.isfinite(TargetPosition[col].iloc[0]):
                         old_val = float(TargetPosition[col].iloc[0])
@@ -5286,7 +5238,6 @@ def run_photometry():
                         else:
                             new_val = old_val + float(cutout_y0)
                             TargetPosition.loc[TargetPosition.index[0], col] = new_val
-                        logging.info(f"  {col}: {old_val:.3f} -> {new_val:.3f}")
             except Exception as e:
                 logging.warning(f"Failed to convert cutout coordinates: {e}")
 
@@ -5442,7 +5393,6 @@ def run_photometry():
                         sci_weight_path = p
                         with fits.open(p) as hdul:
                             weight_map_sci = np.asarray(hdul[0].data, dtype=float)
-                        logging.info(f"Loaded science weight map from {p}")
                         break
                 if sci_weight_path is None:
                     pass  # Weight maps are optional, no warning needed
@@ -5459,7 +5409,6 @@ def run_photometry():
                         ref_weight_path = p
                         with fits.open(p) as hdul:
                             weight_map_ref = np.asarray(hdul[0].data, dtype=float)
-                        logging.info(f"Loaded reference weight map from {p}")
                         break
                 if ref_weight_path is None:
                     pass  # Weight maps are optional, no warning needed
@@ -5853,6 +5802,7 @@ def run_photometry():
         # =============================================================================
         # Calculates the injected detection limit if the target has low SNR.
         InjectedLimit = np.nan
+        _multi_snr_results = None
         if (
             TargetPosition.at[idx, "threshold"] < 5
             or TargetPosition.at[idx, "SNR"] < 5
@@ -6054,19 +6004,54 @@ def run_photometry():
                             if "photometry" not in input_yaml or input_yaml["photometry"] is None:
                                 input_yaml["photometry"] = {}
                             input_yaml["photometry"]["enforce_nonnegative_local_background"] = False
-                            InjectedLimit = getDetectionLimits.get_injected_limit(
-                                image_for_limits,
-                                initialGuess=initial_guess,
-                                detection_limit=detection_snr_limit,
-                                detection_cutoff=beta_limit,
-                                position=lim_pos,
-                                epsf_model=epsf_model,
-                                background_rms=lim_rms,
-                                zeropoint=zeropoint,
-                                plot=True,
-                                n_jobs=lim_n_jobs,
-                                image_zeropoint=image_zeropoint,
-                            )
+                            # Check if multi-SNR thresholds are configured
+                            lim_cfg_local = input_yaml.get("limiting_magnitude") or {}
+                            snr_thresholds = lim_cfg_local.get("snr_thresholds", [3.0])
+                            
+                            if len(snr_thresholds) > 1 and lim_cfg_local.get("report_all_limits", False):
+                                # Use multi-SNR function when multiple thresholds are configured
+                                multi_snr_results = getDetectionLimits.get_injected_limits_multi_snr(
+                                    image_for_limits,
+                                    initialGuess=initial_guess,
+                                    snr_thresholds=snr_thresholds,
+                                    detection_cutoff=beta_limit,
+                                    position=lim_pos,
+                                    epsf_model=epsf_model,
+                                    background_rms=lim_rms,
+                                    zeropoint=zeropoint,
+                                    plot=True,
+                                    n_jobs=lim_n_jobs,
+                                    image_zeropoint=image_zeropoint,
+                                )
+                                
+                                # Extract the primary limit for backward compatibility (use 3σ if available, otherwise first)
+                                if 'snr_3.0' in multi_snr_results and multi_snr_results['snr_3.0'].get('valid', False):
+                                    InjectedLimit = multi_snr_results['snr_3.0']['limiting_mag']
+                                elif len(multi_snr_results) > 0:
+                                    first_valid = next((v for k, v in multi_snr_results.items() 
+                                                    if k.startswith('snr_') and v.get('valid', False)), None)
+                                    InjectedLimit = first_valid['limiting_mag'] if first_valid else np.nan
+                                else:
+                                    InjectedLimit = np.nan
+                                
+                                # Store multi-SNR results for CALIB file output (deferred until output dict exists)
+                                _multi_snr_results = multi_snr_results
+                                
+                            else:
+                                # Use single-SNR function for backward compatibility
+                                InjectedLimit = getDetectionLimits.get_injected_limit(
+                                    image_for_limits,
+                                    initialGuess=initial_guess,
+                                    detection_limit=detection_snr_limit,
+                                    detection_cutoff=beta_limit,
+                                    position=lim_pos,
+                                    epsf_model=epsf_model,
+                                    background_rms=lim_rms,
+                                    zeropoint=zeropoint,
+                                    plot=True,
+                                    n_jobs=lim_n_jobs,
+                                    image_zeropoint=image_zeropoint,
+                                )
                         finally:
                             if _old_enforce_nn_lim is not None:
                                 try:
@@ -6187,6 +6172,10 @@ def run_photometry():
                 "zp_psf_err": np.nan,
             }
         )
+
+        # Store multi-SNR limiting magnitude results (deferred from earlier computation)
+        if _multi_snr_results is not None:
+            output['multi_snr_limits'] = _multi_snr_results
 
         # Provide lowercase aliases for downstream tools (e.g. lightcurve.py) that
         # expect snake_case columns.
@@ -6480,9 +6469,9 @@ def run_photometry():
         if "target_dec" in input_yaml and input_yaml["target_dec"] is not None:
             target_lines.append(f"# target_dec: {input_yaml['target_dec']:.6f} deg")
         if "target_x_pix" in input_yaml and input_yaml["target_x_pix"] is not None:
-            target_lines.append(f"# target_x_pix: {input_yaml['target_x_pix']:.2f} px")
+            target_lines.append(f"# target_x_pix: {input_yaml['target_x_pix']:.6f} px")
         if "target_y_pix" in input_yaml and input_yaml["target_y_pix"] is not None:
-            target_lines.append(f"# target_y_pix: {input_yaml['target_y_pix']:.2f} px")
+            target_lines.append(f"# target_y_pix: {input_yaml['target_y_pix']:.6f} px")
         
         # Build zeropoint info as clean comments
         zp_lines = ["# Zeropoint and calibration information"]
@@ -6498,6 +6487,55 @@ def run_photometry():
                     ct_err = image_zeropoint[method].get("color_term_error")
                     zp_lines.append(f"# {method}_color_term: {ct:.6f}")
                     zp_lines.append(f"# {method}_color_term_error: {ct_err:.6f}")
+        
+        # Add multi-SNR limiting magnitude information if available
+        if "multi_snr_limits" in output and output["multi_snr_limits"]:
+            lim_lines = ["# Multi-S/N detection limits"]
+            multi_snr_results = output["multi_snr_limits"]
+            
+            # Add individual S/N limits
+            for key, result in multi_snr_results.items():
+                if key.startswith('snr_') and result.get('valid', False):
+                    snr = result.get('snr_threshold', np.nan)
+                    lim_mag = result.get('limiting_mag', np.nan)
+                    if np.isfinite(snr) and np.isfinite(lim_mag):
+                        # Convert to apparent magnitude if zeropoint is available
+                        apparent_mag = lim_mag
+                        if method in image_zeropoint and "zeropoint" in image_zeropoint[method]:
+                            zp = image_zeropoint[method]["zeropoint"]
+                            if np.isfinite(zp):
+                                apparent_mag = lim_mag + zp
+                        lim_lines.append(f"# limiting_mag_{snr:.0f}S2N: {apparent_mag:.3f}")
+            
+            # Add comparison information
+            if 'comparisons' in multi_snr_results:
+                lim_lines.append("# S/N threshold comparisons:")
+                for comp_key, comp_data in multi_snr_results['comparisons'].items():
+                    snr_high = comp_data.get('snr_high', np.nan)
+                    snr_low = comp_data.get('snr_low', np.nan)
+                    delta_mag = comp_data.get('delta_mag', np.nan)
+                    if np.isfinite(snr_high) and np.isfinite(snr_low) and np.isfinite(delta_mag):
+                        lim_lines.append(f"# delta_mag_{snr_high:.0f}S2N_vs_{snr_low:.0f}S2N: {delta_mag:+.3f}")
+            
+            # Add adaptive threshold recommendation
+            if 'adaptive_threshold' in multi_snr_results:
+                adaptive_snr = multi_snr_results['adaptive_threshold']
+                lim_lines.append(f"# adaptive_snr_threshold: {adaptive_snr:.0f}S2N")
+            
+            zp_lines.extend(lim_lines)
+        elif np.isfinite(InjectedLimit):
+            # Fallback for single S/N limiting magnitude (backward compatibility)
+            lim_lines = ["# Detection limits"]
+            apparent_mag = InjectedLimit
+            # Try to convert to apparent magnitude using available zeropoint
+            if image_zeropoint and len(image_zeropoint) > 0:
+                first_method = list(image_zeropoint.keys())[0]
+                if "zeropoint" in image_zeropoint[first_method]:
+                    zp = image_zeropoint[first_method]["zeropoint"]
+                    if np.isfinite(zp):
+                        apparent_mag = InjectedLimit + zp
+            lim_lines.append(f"# limiting_mag_3S2N: {apparent_mag:.3f}")
+            zp_lines.extend(lim_lines)
 
         # Opens the file in write mode to add the output string and target/zeropoint info.
         with open(calibration_file, "w") as file:
@@ -6507,14 +6545,6 @@ def run_photometry():
             file.write("\n" + "\n".join(zp_lines))
 
         # Append sequence star catalog (CatalogSources) if available
-        logging.info(f"CALIB file: CatalogSources is {CatalogSources}")
-        if CatalogSources is not None:
-            logging.info(f"CALIB file: CatalogSources type: {type(CatalogSources)}")
-            logging.info(f"CALIB file: CatalogSources.empty: {CatalogSources.empty}")
-            logging.info(f"CALIB file: CatalogSources length: {len(CatalogSources)}")
-        else:
-            logging.warning("CALIB file: CatalogSources is None - no catalog sources will be written")
-        
         if CatalogSources is not None and not CatalogSources.empty:
             # Use consolidated duplicate removal function
             CatalogSources_dedup = _remove_catalog_duplicates(
@@ -6528,9 +6558,10 @@ def run_photometry():
                 file.write("\n# Sequence star catalog used for calibration\n")
                 CatalogSources_dedup.to_csv(file, index=False, float_format="%.6f")
                 file.flush()  # Ensure data is written immediately
-            logging.info(f"Successfully wrote {len(CatalogSources_dedup)} catalog sources to {calibration_file}")
+        elif CatalogSources is not None:
+            logging.warning("CatalogSources is empty - no catalog sources will be written")
         else:
-            logging.warning("No catalog sources available to write to CALIB file")
+            pass  # No catalog sources available, silently skip
 
         # Redoes the sources if enabled.
         if input_yaml["photometry"].get("redo_sources", False):
