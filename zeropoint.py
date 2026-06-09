@@ -1465,8 +1465,14 @@ class Zeropoint:
                     )
 
                     # ---- Histogram (colour-corrected) ----------------------
-                    bin_edges = np.histogram_bin_edges(inlier_deltas, bins="fd")
-                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    # Cap bins at 100 for large catalogs to prevent slow rendering.
+                    # Freedman-Diaconis (bins="fd") can create hundreds of bins for large datasets.
+                    n_inl = len(inlier_deltas)
+                    if n_inl < 100:
+                        bin_edges = np.histogram_bin_edges(inlier_deltas, bins="fd")
+                    else:
+                        bin_edges = np.histogram_bin_edges(inlier_deltas, bins=min(100, n_inl // 2))
+                    bin_centers = (bin_edges[:-1] + bin_edges[1]) / 2
                     width = bin_edges[1] - bin_edges[0]
                     counts, _ = np.histogram(
                         inlier_deltas, bins=bin_edges, density=True
@@ -1541,6 +1547,7 @@ class Zeropoint:
                         try:
                             inlier_apcorr = inlier_deltas - float(ap_corr_mag)
                             # Use the same bin width as the inlier histogram, shifted in x.
+                            # Reuse the capped bin_edges from above to maintain consistency.
                             be_apcorr = bin_edges - float(ap_corr_mag)
                             ct_apcorr, _ = np.histogram(
                                 inlier_apcorr, bins=be_apcorr, density=True
@@ -1624,7 +1631,12 @@ class Zeropoint:
                         n_sources_nc = len(vmask_nc_sigma_idx)
 
                         if len(inl_nc) > 0:
-                            be_nc = np.histogram_bin_edges(inl_nc, bins="fd")
+                            # Cap bins at 100 for large catalogs (same logic as main histogram).
+                            n_nc = len(inl_nc)
+                            if n_nc < 100:
+                                be_nc = np.histogram_bin_edges(inl_nc, bins="fd")
+                            else:
+                                be_nc = np.histogram_bin_edges(inl_nc, bins=min(100, n_nc // 2))
                             bc_nc = (be_nc[:-1] + be_nc[1:]) / 2
                             w_nc = be_nc[1] - be_nc[0]
                             ct_nc, _ = np.histogram(inl_nc, bins=be_nc, density=True)
