@@ -85,7 +85,9 @@ default_input:
 
     # PSF star selection: FFT-based outlier rejection (blends, cosmic rays).
     psf_min_candidates: 8 # int --- Minimum PSF candidates to preserve during quality cuts (adaptive guard against over-pruning).
-    psf_saturate_fraction: 0.90 # float --- Nominal saturation cutoff for PSF stars (peak < fraction * saturate); auto-relaxed when candidate pool is small.
+    psf_saturate_fraction: 0.90 # float --- Nominal saturation cutoff for PSF stars (peak < fraction * saturate); auto-relaxed when candidate pool is small. Keep in sync with template_subtraction.subtraction_saturate_fraction.
+    psf_elongation_max: 1.5 # float --- Maximum allowed ELONGATION (a/b axis ratio) for PSF stars; rejects trailed or blended stars. Uses ELONGATION or ELLIPTICITY column if present; skip if neither available.
+    psf_isolation_radius_fwhm: 3.0 # float --- Minimum neighbour-free radius (in FWHM units) for PSF star selection; rejects stars with a close companion that would contaminate the ePSF cutout.
     psf_fft_rejection: True # bool --- Enable FFT-based rejection during PSF star selection.
     psf_fft_n_sigma: 4.0 # float --- Rejection threshold (sigma units) for FFT outlier metric.
     psf_fft_min_frac_keep: 0.25 # float --- Minimum fraction of PSF stars to retain after rejection.
@@ -155,7 +157,7 @@ default_input:
     allow_fallback_to_existing_on_solve_fail: False # bool --- If False, require a fresh solve when redo_wcs=True (no silent fallback to original header WCS).
     apply_solved_to_fits: True # bool --- If True, write solved WCS back into the FITS header on disk.
     solve_field_exe_loc: solve-field # str --- `solve-field` executable name/path (defaults to `solve-field` on PATH).
-    solve_field_tweak_order: 4 # int --- solve-field SIP tweak order to use (single-value mode).
+    solve_field_tweak_order: 2 # int --- solve-field SIP tweak order to use (single-value mode).
     prefer_scamp_tpv_after_solve: True # bool --- After solve-field succeeds, prefer SCAMP WCS (TPV/PV distortion) when available.
     # If True, preserve input non-linear distortion keywords (PV/SIP) when
     # merging solve-field WCS. Set False to fully replace distortion terms.
@@ -280,6 +282,14 @@ default_input:
     MASTcasjobs_wsid: null # str|null --- Optional MAST CasJobs workspace ID for refcat/casjobs-backed catalog queries.
     MASTcasjobs_pwd: null # str|null --- Optional MAST CasJobs password/token for refcat/casjobs-backed catalog queries.
 
+  zeropoint:
+    faint_mag_limit: 22.0 # float --- Discard catalog calibrators fainter than this in Zeropoint.clean(). The old hard-coded limit of 100 allowed very noisy faint stars that inflated ZP scatter. Increase for deep calibration catalogs.
+    bright_mag_limit: 11.0 # float --- Discard catalog calibrators brighter than this in Zeropoint.clean() (saturated/non-linear regime).
+    reject_nonlinear_sources: True # bool --- Reject sources near the non-linear/saturation regime during ZP clean.
+    nonlinear_peak_frac: 0.85 # float --- Sources with peak_flux >= this fraction of the saturation level are rejected as non-linear.
+    saturation_peak_frac: 0.99 # float --- Sources with peak_flux >= this fraction of saturation level are flagged as saturated (subset of non-linear reject; kept for diagnostics).
+    max_flags: 2 # int --- Maximum SExtractor FLAGS value allowed for ZP calibrators (0=clean, 1=nearby source, 2=blended, etc.).
+
   cosmic_rays:
     remove_cmrays: False # bool --- Enable cosmic-ray removal in preprocessing.
     use_lacosmic: False # bool --- Use L.A.Cosmic-style algorithm (if available/configured).
@@ -312,7 +322,7 @@ default_input:
     injection_strategy: ring_quiet # str --- Local-only injection placement near transient: "ring_quiet" (default; fixed-radius ring), or "annulus_random" (random points inside [inject_min_radius_fwhm, inject_max_radius_fwhm]).
     inject_min_radius_fwhm: 2.0 # float --- Minimum injection radius from the transient (in FWHM units). Prevents injecting on top of the transient.
     inject_max_radius_fwhm: 6.0 # float --- Maximum injection radius from the transient (in FWHM units) when searching for quiet injection sites.
-    inject_use_quiet_sites: true # bool --- If true, select only "quiet" sites (below detection threshold) for injection. If false, use all injection sites regardless of detection probability, which provides more representative limiting magnitude for the target location.
+    inject_use_quiet_sites: false # bool --- If false (default), use a spatially uniform random draw from valid sites for representative limiting magnitude. If true, select only "quiet" (low-|S/N|) sites, which biases the limit spuriously faint by injecting only into the cleanest sky patches.
     inject_max_variance_ratio: 3.0 # float --- Pixel-statistics site filter: reject sites whose aperture-pixel variance exceeds this multiple of the expected background variance (from RMS map or local annulus MAD). Catches bright-star template subtraction residuals whose noise is elevated even when their mean is near zero. Set to 0 to disable.
     inject_max_abs_mean_sigma: 2.5 # float --- Pixel-statistics site filter: reject sites whose aperture mean deviates from the local annulus mean by more than this many sigma. Catches positive/negative subtraction pedestals. Set to 0 to disable.
     initial_guess_n_samples: 24 # int --- Number of annulus probe positions used to estimate the injected-limit initial instrumental magnitude.

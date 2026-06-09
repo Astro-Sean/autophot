@@ -1707,6 +1707,111 @@ class PSF:
                     f"PSF candidates after saturation cuts: {len(df)}/{n_before}"
                 )
 
+            # ---- Elongation cut ----
+            # Reject trailed or elongated stars (e.g. from tracking errors or
+            # stellar blends) whose shapes would widen the ePSF core.
+            # SExtractor provides ELONGATION = a/b (semimajor / semiminor axis
+            # ratio); astropy SourceCatalog provides the equivalent as
+            # "elongation" or can be derived from "semimajor_sigma"/
+            # "semiminor_sigma".  Supported column names:
+            #   ELONGATION, elongation, ELLIPTICITY, ellipticity
+            # ellipticity = 1 - b/a, so the cut elongation_max <-> (1 - 1/elong)
+            elong_max = float(phot_cfg.get("psf_elongation_max", 1.5))
+            elong_col = next(
+                (c for c in ["ELONGATION", "elongation"] if c in df.columns), None
+            )
+            ellip_col = next(
+                (c for c in ["ELLIPTICITY", "ellipticity"] if c in df.columns), None
+            ) if elong_col is None else None
+            if elong_col is not None and np.isfinite(elong_max) and elong_max > 0:
+                ok_elong = df[elong_col].astype(float) <= elong_max
+                n_keep_elong = int(ok_elong.sum())
+                min_keep_elong = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                )
+                if n_keep_elong >= min_keep_elong:
+                    n_drop_elong = int((~ok_elong).sum())
+                    if n_drop_elong > 0:
+                        df = df[ok_elong].copy()
+                        log.info(
+                            "PSF elongation cut (<= %.2f): removed %d elongated candidates (%d kept)",
+                            elong_max, n_drop_elong, n_keep_elong,
+                        )
+                else:
+                    log.info(
+                        "Skipping elongation cut (<= %.2f): would leave only %d candidates (< %d).",
+                        elong_max, n_keep_elong, min_keep_elong,
+                    )
+            elif ellip_col is not None and np.isfinite(elong_max) and elong_max > 0:
+                # Convert elongation_max to ellipticity: e = 1 - 1/elong
+                ellip_max = 1.0 - 1.0 / elong_max
+                ok_ellip = df[ellip_col].astype(float) <= ellip_max
+                n_keep_ellip = int(ok_ellip.sum())
+                min_keep_ellip = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                )
+                if n_keep_ellip >= min_keep_ellip:
+                    n_drop_ellip = int((~ok_ellip).sum())
+                    if n_drop_ellip > 0:
+                        df = df[ok_ellip].copy()
+                        log.info(
+                            "PSF ellipticity cut (<= %.3f, equiv. elong=%.2f): removed %d elongated candidates (%d kept)",
+                            ellip_max, elong_max, n_drop_ellip, n_keep_ellip,
+                        )
+                else:
+                    log.info(
+                        "Skipping ellipticity cut (<= %.3f): would leave only %d candidates (< %d).",
+                        ellip_max, n_keep_ellip, min_keep_ellip,
+                    )
+
+            # ---- Neighbour-isolation cut ----
+            # Reject stars that have a close companion within isolation_radius
+            # pixels. Blended cutouts corrupt the ePSF core and wings.
+            # fwhm is resolved later in build(); read a preliminary value here
+            # from the header / input_yaml for the isolation radius only.
+            _hdr = self.header if self.header is not None else {}
+            _fwhm_for_iso = float(
+                _hdr.get("FWHM", _hdr.get("fwhm",
+                    self.input_yaml.get("fwhm", 3.0)
+                ))
+            )
+            if not (np.isfinite(_fwhm_for_iso) and _fwhm_for_iso > 0):
+                _fwhm_for_iso = 3.0
+            iso_r = float(phot_cfg.get("psf_isolation_radius_fwhm", 3.0)) * _fwhm_for_iso
+            xcol_now, ycol_now = _locate_columns(df)[:2]
+            if xcol_now is not None and ycol_now is not None and iso_r > 0 and len(df) >= 2:
+                xs = df[xcol_now].to_numpy(dtype=float)
+                ys = df[ycol_now].to_numpy(dtype=float)
+                # Pairwise distance check: keep stars that have no neighbour
+                # within iso_r (excluding self-distance).
+                from scipy.spatial import cKDTree
+                tree = cKDTree(np.column_stack([xs, ys]))
+                pairs = tree.query_ball_point(np.column_stack([xs, ys]), r=iso_r)
+                isolated = np.array([len(p) == 1 for p in pairs])  # only self within iso_r
+                n_keep_iso = int(isolated.sum())
+                min_keep_iso = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                )
+                if n_keep_iso >= min_keep_iso:
+                    n_drop_iso = int((~isolated).sum())
+                    if n_drop_iso > 0:
+                        df = df[isolated].copy()
+                        log.info(
+                            "PSF isolation cut (r=%.1f px = %.1f FWHM): removed %d blended candidates (%d kept)",
+                            iso_r,
+                            float(phot_cfg.get("psf_isolation_radius_fwhm", 3.0)),
+                            n_drop_iso,
+                            n_keep_iso,
+                        )
+                else:
+                    log.info(
+                        "Skipping isolation cut (r=%.1f px): would leave only %d candidates (< %d).",
+                        iso_r, n_keep_iso, min_keep_iso,
+                    )
+
             fpath = self.input_yaml["fpath"]
             write_dir = self.input_yaml["write_dir"]
             base = os.path.basename(fpath).split(".")[0]

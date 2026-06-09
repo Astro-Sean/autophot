@@ -708,7 +708,7 @@ class Catalog:
         catalogName : str
             Name of the catalog to fetch ('refcat', 'gaia', 'apass', '2mass', 'sdss', 'skymapper', 'panstarrs'/'pan_starrs', 'custom').
         radius : float, optional
-            Search radius around the target in degrees (default is 15).
+            Search radius around the target in **arcminutes** (default is 10).
         target_name : str, optional
             Optional name for the target.
         catalog_custom_fpath : str, optional
@@ -1028,7 +1028,7 @@ class Catalog:
                         
                         ra = float(target_coords.ra.degree)
                         dec = float(target_coords.dec.degree)
-                        radius_deg = 0.1
+                        # radius_deg is already computed from the caller's radius (arcmin)
                         
                         # Direct MAST API call for Pan-STARRS
                         url = "https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/ps1/search"

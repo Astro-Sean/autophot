@@ -41,12 +41,15 @@ def _flux_for_mag_cached(m: float, counts_ref: float, exposure_time: float) -> f
     """
     ePSF ``flux`` parameter for instrumental magnitude *m* (cached).
 
-    ``counts_ref`` is the aperture sum integrated over the exposure, same units
-    as ``Aperture.counts_AP`` (e⁻ in the frame when the pipeline uses
-    ``image * gain``).  ``m`` uses the same e⁻/s convention as ``mag(flux_AP)``.
+    ``counts_ref`` **must be in e⁻** (aperture sum of the unit-flux PSF render
+    after multiplying ADU by gain), matching ``Aperture.counts_AP``.  The ePSF
+    model is built from ADU images, so its raw aperture integral is in ADU;
+    the caller is responsible for multiplying by gain before passing here.
 
-    Returns the scale factor for ``epsf_model.evaluate(..., flux=...)`` such
-    that the *in-aperture* integrated signal matches a source of magnitude *m*.
+    ``m`` uses the same e⁻/s convention as ``mag(flux_AP)``.  The returned
+    value is the dimensionless PSF flux scale factor such that the injected PSF
+    carries exactly ``10^(-0.4*m) * exposure_time`` e⁻ inside the photometry
+    aperture.
     """
     flux_e_per_s = 10.0 ** (-0.4 * m)
     aperture_e_in_frame = flux_e_per_s * float(exposure_time)
@@ -1026,6 +1029,10 @@ class Limits:
                 if not (_use_var_test or _use_mean_test):
                     return df
 
+                # Minimum fraction of annulus pixels that must be finite to
+                # produce a reliable background/noise estimate.
+                _annulus_valid_fraction = 0.5
+
                 Hn, Wn = int(image.shape[0]), int(image.shape[1])
                 imgf = np.asarray(image, dtype=float)
                 r = float(max(1.0, aperture_radius_pix))
@@ -1098,11 +1105,10 @@ class Limits:
                             if ann_vals is not None:
                                 ann_vals = np.asarray(ann_vals, dtype=float)
                                 ann_vals = ann_vals[np.isfinite(ann_vals)]
-                            # TOLERANT CHECK: Require at least 50% of annulus pixels to be valid
-                            annulus_valid_fraction = 0.5
+                            # Require at least _annulus_valid_fraction of annulus pixels to be finite.
                             if ann_vals is not None and ann_vals.size >= 4:
                                 total_annulus = ann_vals.size
-                                if ann_vals.size >= (total_annulus * annulus_valid_fraction):
+                                if ann_vals.size >= (total_annulus * _annulus_valid_fraction):
                                     mean_annulus = float(np.median(ann_vals))
                                 else:
                                     mean_annulus = 0.0
@@ -1120,11 +1126,10 @@ class Limits:
                             if ann_vals is not None:
                                 ann_vals = np.asarray(ann_vals, dtype=float)
                                 ann_vals = ann_vals[np.isfinite(ann_vals)]
-                            # TOLERANT CHECK: Require at least 50% of annulus pixels to be valid
-                            annulus_valid_fraction = 0.5
+                            # Require at least _annulus_valid_fraction of annulus pixels to be finite.
                             if ann_vals is not None:
                                 total_annulus = ann_vals.size
-                                if ann_vals.size >= (total_annulus * annulus_valid_fraction):
+                                if ann_vals.size >= (total_annulus * _annulus_valid_fraction):
                                     mean_annulus = float(np.median(ann_vals))
                                     mad = float(np.median(np.abs(ann_vals - mean_annulus)))
                                     sigma_ref = max(mad * 1.4826, 1e-30)
@@ -1436,8 +1441,13 @@ class Limits:
                 (float(cx), float(cy)), r=float(aperture_radius_local)
             )
             _psf_phot = _psf_ap_obj.do_photometry(psf_unit, method="exact")
-            counts_ref = float(_psf_phot[0][0])  # integrated PSF flux in aperture (no sky sub)
-            # F_ref = counts_ref / exposure_time (same units as Aperture.measure flux_AP)
+            counts_ref_adu = float(_psf_phot[0][0])  # integrated PSF flux in aperture (ADU)
+            # Convert to e⁻ to match Aperture.measure which operates on image*gain.
+            # Without this, _flux_for_mag_cached divides e⁻ by ADU giving F_amp that
+            # is gain× too large, making every injected source gain× too bright and the
+            # recovered limiting magnitude ~2.5*log10(gain) mag spuriously deep.
+            counts_ref = counts_ref_adu * float(_gain_canon)  # now in e⁻
+            # F_ref = counts_ref (e⁻) / exposure_time → e⁻/s, same units as flux_AP
             F_ref = counts_ref / float(local_input_yaml["exposure_time"])
             exposure_time = float(local_input_yaml["exposure_time"])
 
@@ -1445,9 +1455,11 @@ class Limits:
             if not (np.isfinite(counts_ref) and counts_ref > 0
                     and np.isfinite(F_ref) and F_ref > 0):
                 logger.error(
-                    f"PSF calibration failed: counts_ref={counts_ref:.4e}, F_ref={F_ref:.4e} "
+                    f"PSF calibration failed: counts_ref_adu={counts_ref_adu:.4e}, "
+                    f"counts_ref(e-)={counts_ref:.4e}, F_ref={F_ref:.4e} "
                     f"(both must be finite and positive). "
-                    f"PSF sum={np.sum(psf_unit):.4e}, shape={psf_unit.shape}, oversampling={oversampling}"
+                    f"PSF sum={np.sum(psf_unit):.4e}, shape={psf_unit.shape}, oversampling={oversampling}, "
+                    f"gain={_gain_canon:.4g} e/ADU"
                 )
                 return np.nan
 
@@ -1461,10 +1473,13 @@ class Limits:
             f_roundtrip = float(flux_for_mag(mag_at_unit_flux))
             logger.info(
                 "PSF injection calibration (exact aperture integral, no sky-sub): "
-                "counts_ref=%.6g (e- in r=%.2f px aperture), F_ref=%.6g e-/s, mag(F_ref)=%.5f, "
+                "counts_ref_adu=%.6g, counts_ref(e-)=%.6g (r=%.2f px, gain=%.4g e/ADU), "
+                "F_ref=%.6g e-/s, mag(F_ref)=%.5f, "
                 "flux_for_mag(mag(F_ref))=%.6f (expect 1.0), flux_for_mag(initialGuess)=%.6g",
+                float(counts_ref_adu),
                 float(counts_ref),
                 float(aperture_radius_local),
+                float(_gain_canon),
                 float(F_ref),
                 mag_at_unit_flux,
                 f_roundtrip,
@@ -1602,110 +1617,106 @@ class Limits:
                 )
                 return np.nan
 
-            # Stage 1: Measure S/N at each candidate site (no jitter).
-            ini_ap = Aperture(input_yaml=local_input_yaml, image=cutout)
-            cand_df = ini_ap.measure(
-                sources=cand_df,
-                plot=False,
-                background_rms=cutout_rms,
-                verbose=0,
-            )
-            cand_df = _robust_site_snr(cand_df)
-
-            # Use the SNR column from Aperture.measure (with NaNs filled by _robust_site_snr).
-            # Score candidates by |SNR| so we choose the quietest background-like sites.
-            snr_col = np.asarray(cand_df.get("SNR", np.nan), dtype=float)
-            cand_df = cand_df.assign(_snr_score=snr_col)
-            cand_df = cand_df[np.isfinite(cand_df["_snr_score"])].copy()
-            if len(cand_df) == 0:
-                logger.warning(
-                    "All candidate sites have non-finite S/N; cannot find injection sites."
+            if use_quiet_sites:
+                # Stage 1: Measure S/N at each candidate site (no jitter).
+                ini_ap = Aperture(input_yaml=local_input_yaml, image=cutout)
+                cand_df = ini_ap.measure(
+                    sources=cand_df,
+                    plot=False,
+                    background_rms=cutout_rms,
+                    verbose=0,
                 )
-                return np.nan
+                cand_df = _robust_site_snr(cand_df)
 
-            # Select the 100 quietest candidates (spatial selection optional but not critical here)
-            cand_df = cand_df.sort_values("_snr_score", ascending=True)
-            quiet_mask = cand_df["_snr_score"] <= float(effective_snr_limit)
-            cand_quiet = cand_df[quiet_mask].copy()
-            
-            # Take the quietest n_quiet candidates (or fewer if not enough quiet sites)
-            stage1_chosen = cand_quiet.head(n_quiet) if len(cand_quiet) >= n_quiet else cand_df.head(n_quiet)
-            logger.info(
-                "Stage 1 quiet-site selection: sampled %d candidates -> selected %d quietest candidates (|S/N|<=%.3g).",
-                int(n_candidates),
-                int(len(stage1_chosen)),
-                float(effective_snr_limit),
-            )
+                # Score candidates by |SNR| so we choose the quietest background-like sites.
+                snr_col = np.asarray(cand_df.get("SNR", np.nan), dtype=float)
+                cand_df = cand_df.assign(_snr_score=snr_col)
+                cand_df = cand_df[np.isfinite(cand_df["_snr_score"])].copy()
+                if len(cand_df) == 0:
+                    logger.warning(
+                        "All candidate sites have non-finite S/N; cannot find injection sites."
+                    )
+                    return np.nan
 
-            # Stage 2: Jitter the selected candidates x3, measure S/N at all jittered positions,
-            # then select the 100 quietest jittered positions.
-            _jitter_rng = np.random.default_rng(42)
-            _jitter_dx = _jitter_rng.uniform(-0.5, 0.5, (len(stage1_chosen), redo_default))
-            _jitter_dy = _jitter_rng.uniform(-0.5, 0.5, (len(stage1_chosen), redo_default))
-            
-            jittered_rows = []
-            for i, (x0, y0) in enumerate(zip(stage1_chosen["x_pix"], stage1_chosen["y_pix"])):
-                for j in range(redo_default):
-                    jittered_rows.append({
-                        "x_pix": x0 + _jitter_dx[i, j],
-                        "y_pix": y0 + _jitter_dy[i, j],
-                    })
-            jittered_df = pd.DataFrame(jittered_rows)
-            
-            # Measure S/N at all jittered positions
-            jittered_df = ini_ap.measure(
-                sources=jittered_df,
-                plot=False,
-                background_rms=cutout_rms,
-                verbose=0,
-            )
-            jittered_df = _robust_site_snr(jittered_df)
-            
-            # Select the quietest jittered positions by |S/N|, then apply spatial uniformity
-            jittered_df["_abs_snr"] = np.abs(jittered_df["SNR"])
-            jittered_df = jittered_df[np.isfinite(jittered_df["_abs_snr"])].copy()
-            jittered_df = jittered_df.sort_values("_abs_snr", ascending=True)
-            
-            # Take a larger pool (3x n_quiet) to allow spatial selection, then use K-means
-            pool_size = min(3 * n_quiet, len(jittered_df))
-            pool = jittered_df.head(pool_size).copy()
-            
-            # Use K-means to select spatially uniform sites around the target
-            try:
-                from sklearn.cluster import KMeans
-                coords = np.column_stack([pool["x_pix"].values, pool["y_pix"].values])
-                kmeans = KMeans(n_clusters=n_quiet, random_state=42, n_init=10)
-                kmeans.fit(coords)
-                # Find the closest point to each cluster center
-                chosen_indices = []
-                for center in kmeans.cluster_centers_:
-                    distances = np.sum((coords - center) ** 2, axis=1)
-                    chosen_indices.append(np.argmin(distances))
-                jittered_chosen = pool.iloc[chosen_indices].copy()
+                # Select the n_quiet quietest candidates
+                cand_df = cand_df.sort_values("_snr_score", ascending=True)
+                quiet_mask = cand_df["_snr_score"] <= float(effective_snr_limit)
+                cand_quiet = cand_df[quiet_mask].copy()
+                stage1_chosen = cand_quiet.head(n_quiet) if len(cand_quiet) >= n_quiet else cand_df.head(n_quiet)
                 logger.info(
-                    "Stage 2 jittered quiet selection: %d candidates x %d jitters = %d jittered positions -> selected %d spatially uniform sites via K-means from pool of %d quietest.",
+                    "Stage 1 quiet-site selection: sampled %d candidates -> selected %d quietest candidates (|S/N|<=%.3g).",
+                    int(n_candidates),
                     int(len(stage1_chosen)),
-                    int(redo_default),
-                    int(len(jittered_df)),
-                    int(len(jittered_chosen)),
-                    int(pool_size),
+                    float(effective_snr_limit),
                 )
-            except Exception as exc:
-                # Fallback to simple selection if clustering fails
-                logger.warning(
-                    "K-means spatial selection failed (%s); falling back to simple selection.",
-                    str(exc),
+
+                # Stage 2: Jitter the selected candidates, measure S/N, apply K-means spatial
+                # uniformity selection on the quietest jittered positions.
+                _jitter_rng = np.random.default_rng(42)
+                _jitter_dx = _jitter_rng.uniform(-0.5, 0.5, (len(stage1_chosen), redo_default))
+                _jitter_dy = _jitter_rng.uniform(-0.5, 0.5, (len(stage1_chosen), redo_default))
+                jittered_rows = []
+                for i, (x0, y0) in enumerate(zip(stage1_chosen["x_pix"], stage1_chosen["y_pix"])):
+                    for j in range(redo_default):
+                        jittered_rows.append({
+                            "x_pix": x0 + _jitter_dx[i, j],
+                            "y_pix": y0 + _jitter_dy[i, j],
+                        })
+                jittered_df = pd.DataFrame(jittered_rows)
+                jittered_df = ini_ap.measure(
+                    sources=jittered_df,
+                    plot=False,
+                    background_rms=cutout_rms,
+                    verbose=0,
                 )
-                jittered_chosen = pool.head(n_quiet)
+                jittered_df = _robust_site_snr(jittered_df)
+                jittered_df["_abs_snr"] = np.abs(jittered_df["SNR"])
+                jittered_df = jittered_df[np.isfinite(jittered_df["_abs_snr"])].copy()
+                jittered_df = jittered_df.sort_values("_abs_snr", ascending=True)
+                pool_size = min(3 * n_quiet, len(jittered_df))
+                pool = jittered_df.head(pool_size).copy()
+
+                try:
+                    from sklearn.cluster import KMeans
+                    coords = np.column_stack([pool["x_pix"].values, pool["y_pix"].values])
+                    kmeans = KMeans(n_clusters=n_quiet, random_state=42, n_init=10)
+                    kmeans.fit(coords)
+                    chosen_indices = []
+                    for center in kmeans.cluster_centers_:
+                        distances = np.sum((coords - center) ** 2, axis=1)
+                        chosen_indices.append(np.argmin(distances))
+                    jittered_chosen = pool.iloc[chosen_indices].copy()
+                    logger.info(
+                        "Stage 2 jittered quiet selection: %d candidates x %d jitters -> %d jittered -> %d spatially uniform quiet sites via K-means from pool of %d.",
+                        int(len(stage1_chosen)), int(redo_default),
+                        int(len(jittered_df)), int(len(jittered_chosen)), int(pool_size),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "K-means spatial selection failed (%s); falling back to simple selection.",
+                        str(exc),
+                    )
+                    jittered_chosen = pool.head(n_quiet)
+                    logger.info(
+                        "Stage 2 jittered quiet selection: %d candidates x %d jitters -> using lowest %d (K-means fallback).",
+                        int(len(stage1_chosen)), int(redo_default), int(len(jittered_chosen)),
+                    )
+                injection_df = jittered_chosen[["x_pix", "y_pix"]].reset_index(drop=True)
+
+            else:
+                # Representative-site mode (inject_use_quiet_sites=False):
+                # Use a spatially uniform random draw from the full candidate pool.
+                # This gives a limit representative of the actual local background,
+                # rather than cherry-picked quiet patches which bias the depth faint.
+                n_draw = min(n_quiet, len(cand_df))
+                injection_df = cand_df[["x_pix", "y_pix"]].sample(
+                    n=n_draw, random_state=42, replace=False
+                ).reset_index(drop=True)
                 logger.info(
-                    "Stage 2 jittered quiet selection: %d candidates x %d jitters = %d jittered positions -> using the lowest %d (K-means fallback).",
-                    int(len(stage1_chosen)),
-                    int(redo_default),
-                    int(len(jittered_df)),
-                    int(len(jittered_chosen)),
+                    "Representative-site injection (inject_use_quiet_sites=False): "
+                    "drew %d spatially uniform sites from %d candidates.",
+                    int(len(injection_df)), int(len(cand_df)),
                 )
-            
-            injection_df = jittered_chosen[["x_pix", "y_pix"]].reset_index(drop=True)
 
             # Use only these jittered positions for injection trials.
             sourceNum = int(len(injection_df))

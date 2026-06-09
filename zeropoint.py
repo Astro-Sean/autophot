@@ -493,7 +493,7 @@ class Zeropoint:
         self,
         sources: pd.DataFrame,
         upperMaglimit: float = 11.0,
-        lowerMaglimit: float = 100.0,
+        lowerMaglimit: float = None,
         threshold_limit: float = 3.0,
     ) -> pd.DataFrame:
         """
@@ -502,8 +502,11 @@ class Zeropoint:
         Parameters
         ----------
         sources       : input catalog
-        upperMaglimit : discard sources brighter than this
-        lowerMaglimit : discard sources fainter than this
+        upperMaglimit : discard sources brighter than this (default 11)
+        lowerMaglimit : discard sources fainter than this; if None, read from
+                        ``input_yaml['zeropoint']['faint_mag_limit']`` with a
+                        fallback of 22.0 to avoid including very noisy catalog
+                        stars that inflate ZP scatter.
         threshold_limit: minimum detection threshold (S/N proxy)
 
         Returns
@@ -513,6 +516,14 @@ class Zeropoint:
         logger.info(log_step("Zeropoint: clean sequence stars"))
 
         try:
+            # Resolve magnitude limits from config when not supplied explicitly.
+            zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
+            if lowerMaglimit is None:
+                lowerMaglimit = float(zp_cfg.get("faint_mag_limit", 22.0))
+            # Also honour config bright limit if the caller left it at the default.
+            if upperMaglimit == 11.0:
+                upperMaglimit = float(zp_cfg.get("bright_mag_limit", 11.0))
+
             filter_col = self.input_yaml.get("imageFilter")
             filter_col = self._normalize_filter(filter_col)
             

@@ -2292,9 +2292,20 @@ class Templates:
                 logger.warning("create_image_mask: source catalog is empty; returning empty mask.")
                 return mask, masked_centres
 
-            # Flag categories (these are the bad sources we want to mask)
+            # Flag categories
             is_saturated = tbl["max_value"] > saturate_frac * sat_lvl
             is_negative = tbl["max_value"] < 0
+
+            # Mask saturated and negative sources directly from their
+            # segmentation footprints BEFORE removing them from tbl.
+            # Previously these were silently dropped, so bloomed/saturated
+            # stars were never present in the output mask.
+            for _, bad_src in tbl[is_saturated | is_negative].iterrows():
+                seg_pixels = seg.data == bad_src["label"]
+                mask[seg_pixels] = 1
+                cx = (bad_src["bbox_xmin"] + bad_src["bbox_xmax"]) / 2
+                cy = (bad_src["bbox_ymin"] + bad_src["bbox_ymax"]) / 2
+                masked_centres.append((float(cx), float(cy)))
 
             if remove_large_sources:
                 # Handle case where all areas are the same (sigma_clip will fail)
@@ -4278,29 +4289,46 @@ class Templates:
             # Include background defects mask if provided (saturation streaks, satellite trails, etc.)
             if background_defects_mask is not None:
                 background_defects_mask = background_defects_mask.astype(bool)
-                # Resize background defects mask to match current image shape if needed
                 if background_defects_mask.shape != scienceImage.shape:
-                    # If shapes don't match, skip the background defects mask
-                    logger.warning(
-                        f"Background defects mask shape {background_defects_mask.shape} doesn't match science image shape {scienceImage.shape}; skipping background defects mask."
+                    # Shapes differ after alignment/crop; crop the defects mask to the
+                    # science image extent (top-left origin, clipped to valid overlap)
+                    # rather than silently discarding it.
+                    dm = background_defects_mask
+                    sh, sw = scienceImage.shape
+                    dh, dw = dm.shape
+                    crop_h = min(sh, dh)
+                    crop_w = min(sw, dw)
+                    dm_crop = np.zeros(scienceImage.shape, dtype=bool)
+                    dm_crop[:crop_h, :crop_w] = dm[:crop_h, :crop_w]
+                    background_defects_mask = dm_crop
+                    logger.info(
+                        "Background defects mask shape %s != science shape %s; "
+                        "cropped to overlap region (%d×%d).",
+                        dm.shape, scienceImage.shape, crop_h, crop_w,
                     )
-                else:
-                    mask_essential = mask_essential | background_defects_mask
-                    logger.info("Included background defects mask (saturation streaks, satellite trails) in universal mask.")
+                mask_essential = mask_essential | background_defects_mask
+                logger.info(
+                    "Included background defects mask (saturation streaks, satellite trails) in universal mask."
+                )
 
+            # universal_mask_full keeps all layers for reference/logging
             universal_mask_full = (mask_essential | mask_sources).astype(np.int32)
 
-            # Use only NaN/invalid mask for subtraction to avoid masking flux calibration sources
-            # Source masks are still computed for visualization (red x markers) but not applied to subtraction
-            universal_mask = np.where(mask_essential, 1, 0).astype(np.int32)
+            # universal_mask passed to SFFT: NaN/invalid + background defects +
+            # saturated/negative source footprints (from mask_sources).
+            # Unsaturated point-source masks are excluded to preserve flux
+            # calibration stars for kernel fitting.
+            universal_mask = (mask_essential | mask_sources).astype(np.int32)
             logger.info(
-                "Using only NaN/invalid mask for subtraction (%.1f%% masked) to preserve flux calibration sources. Source masks are still computed for visualization (red x markers).",
-                np.sum(universal_mask) / universal_mask.size * 100.0
+                "Universal mask for subtraction: %.1f%% masked "
+                "(NaN/defects=%.1f%% + sources=%.1f%%).",
+                np.mean(universal_mask) * 100.0,
+                np.mean(mask_essential) * 100.0,
+                np.mean(mask_sources) * 100.0,
             )
 
-            # For visualization (subtraction check plot), use only NaN/invalid mask
-            # to avoid masking point sources with red regions
-            visualization_mask = np.where(mask_essential, 1, 0).astype(np.int32)
+            # For visualization use the same mask
+            visualization_mask = universal_mask.copy()
 
             # Save mask to scienceDir (not templateDir) to prevent crosstalk
             # when multiple science images use the same template

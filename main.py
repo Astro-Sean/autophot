@@ -1926,6 +1926,7 @@ def run_photometry():
         background_surface = np.asarray(result["background"], dtype=np.float32)
         background_rms = np.asarray(result["background_rms"], dtype=np.float32)
         defects_mask = np.asarray(result["defects_mask"], dtype=bool)
+        hardware_defects_mask = np.asarray(result["hardware_defects_mask"], dtype=bool)
 
         logging.info(f"Preliminary FWHM: {ImageFWHM:.1f} pixels")
 
@@ -2309,6 +2310,7 @@ def run_photometry():
         background_surface = np.asarray(result["background"], dtype=np.float32)
         background_rms = np.asarray(result["background_rms"], dtype=np.float32)
         defects_mask = np.asarray(result["defects_mask"], dtype=bool)
+        hardware_defects_mask = np.asarray(result["hardware_defects_mask"], dtype=bool)
 
         # Cache background results for potential reuse after template subtraction
         fpath_before_subtraction = fpath
@@ -2317,6 +2319,7 @@ def run_photometry():
         background_surface_cached = background_surface
         background_rms_cached = background_rms
         defects_mask_cached = defects_mask
+        hardware_defects_mask_cached = hardware_defects_mask
 
         # Background subtraction enabled (user request).
         # Only background surface is removed; no other flux scaling applied.
@@ -2647,6 +2650,7 @@ def run_photometry():
             background_surface = background_surface_cached
             background_rms = background_rms_cached
             defects_mask = defects_mask_cached
+            hardware_defects_mask = hardware_defects_mask_cached
             logging.info("Reusing cached background results (fpath unchanged)")
         else:
             result = bg_remover.remove(
@@ -2661,6 +2665,7 @@ def run_photometry():
             background_surface = np.asarray(result["background"], dtype=np.float32)
             background_rms = np.asarray(result["background_rms"], dtype=np.float32)
             defects_mask = np.asarray(result["defects_mask"], dtype=bool)
+            hardware_defects_mask = np.asarray(result["hardware_defects_mask"], dtype=bool)
 
         # Save the background_rms array with '.weight' inserted before the suffix
         base, ext = os.path.splitext(fpath)
@@ -4648,7 +4653,7 @@ def run_photometry():
                     stamp_loc=stamp_loc,
                     scienceNoise=weight_fpath,
                     templateNoise=template_weight_path,
-                    background_defects_mask=defects_mask,
+                    background_defects_mask=hardware_defects_mask,
                     scale=combined_scale,
                 )
                 if fpath is None:
@@ -5921,12 +5926,20 @@ def run_photometry():
                             float(beta_limit),
                             "off" if detection_snr_limit is None else str(detection_snr_limit),
                         )
-                        # For consistency, run injection directly on the full image
-                        # Use fitted position from TargetPosition instead of expected position
-                        lim_pos = (
-                            float(TargetPosition.at[idx, "x_fit"]),
-                            float(TargetPosition.at[idx, "y_fit"]),
-                        )
+                        # For consistency, run injection directly on the full image.
+                        # Prefer the fitted position; fall back to the expected pixel
+                        # position when the PSF fit did not converge (x_fit/y_fit NaN).
+                        _lp_x = float(TargetPosition.at[idx, "x_fit"])
+                        _lp_y = float(TargetPosition.at[idx, "y_fit"])
+                        if not (np.isfinite(_lp_x) and np.isfinite(_lp_y)):
+                            _lp_x = float(TargetPosition.at[idx, "x_pix"])
+                            _lp_y = float(TargetPosition.at[idx, "y_pix"])
+                            logging.info(
+                                "Limiting magnitude: PSF fit position is NaN; "
+                                "using expected pixel position (%.2f, %.2f) for injection.",
+                                _lp_x, _lp_y,
+                            )
+                        lim_pos = (_lp_x, _lp_y)
                         lim_rms = background_rms
                         # Limiting-magnitude injection uses the same image used for target
                         # measurement by default (including any local DC bias/lift applied by
@@ -5934,7 +5947,10 @@ def run_photometry():
                         #
                         # Optional expert toggle: revert that lift for injection/recovery to
                         # measure depth on the raw (unshifted) image scale.
-                        image_for_limits = image
+                        # NaN-fill defects (saturated pixels, streaks, trails, detected sources)
+                        # so that injection site filtering and recovery photometry treat them
+                        # as invalid.  Use a copy to avoid mutating the shared image array.
+                        image_for_limits = np.where(defects_mask, np.nan, image).astype(np.float32)
                         try:
                             lim_cfg_local = input_yaml.get("limiting_magnitude") or {}
                             revert_lift = bool(lim_cfg_local.get("revert_target_dc_bias_for_injection", False))
@@ -5955,9 +5971,9 @@ def run_photometry():
                                         0 <= y0b < y1b <= image.shape[0]
                                         and 0 <= x0b < x1b <= image.shape[1]
                                     ):
-                                        # Avoid promoting the full frame to float64; float32
-                                        # is sufficient and halves memory.
-                                        image_for_limits = np.asarray(image, dtype=np.float32).copy()
+                                        # Start from the already defect-NaN-filled array so
+                                        # the DC-bias revert doesn't lose the defects mask.
+                                        image_for_limits = np.asarray(image_for_limits, dtype=np.float32).copy()
                                         image_for_limits[y0b:y1b, x0b:x1b] = (
                                             image_for_limits[y0b:y1b, x0b:x1b]
                                             - float(local_cutout_nonneg_lift)

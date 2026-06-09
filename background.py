@@ -1456,15 +1456,36 @@ class BackgroundSubtractor:
         # - NaN/inf (chip gaps / invalid data)
         # - exact zeros (common "no data" pads after resampling/subtraction)
         # - saturation cores and extended bleed/streaks/trails
+        # - detected sources (iterative source mask) — included so that PSF
+        #   building, aperture photometry, and injection-site selection all
+        #   receive a full "bad-pixel" mask rather than only the hardware defects.
         #
         # Treating zeros as defects is important: they are not reliable sky pixels
         # and can contaminate PSF source selection and background statistics.
-        defects_mask = nan_mask | zero_mask | sat_mask | streak_mask | trail_mask
+        # hardware_defects_mask: pixel defects that are coordinate-frame-independent
+        # (NaN/zeros from chip gaps/resampling, saturation cores, bleed streaks,
+        # satellite trails).  Safe to pass to downstream steps that operate on a
+        # geometrically different (e.g. SWarp-resampled) version of the same image.
+        hardware_defects_mask = nan_mask | zero_mask | sat_mask | streak_mask | trail_mask
+
+        # defects_mask: adds the iterative source mask so that PSF building,
+        # aperture photometry, and injection-site selection on THIS SAME image all
+        # receive a full bad-pixel mask.  Do NOT pass this to steps that operate
+        # on a resampled copy of the image — source positions will have shifted.
+        defects_mask = hardware_defects_mask | source_mask
+
+        # After background subtraction, pixels that were exact zeros in the
+        # original image become (0 - bkg), which are no longer zero and therefore
+        # no longer caught by a downstream == 0 check.  Force them back to NaN so
+        # any code that relies on NaN to detect no-data padding still works.
+        sub = np.where(zero_mask, np.nan, sub)
+
         return {
             "image": sub,
             "background": bkg_surface,
             "background_rms": bkg_rms,
             "defects_mask": defects_mask,
+            "hardware_defects_mask": hardware_defects_mask,
             "source_mask": source_mask,
         }
 
