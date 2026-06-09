@@ -1285,6 +1285,8 @@ class Plot:
         default_size=(540, 1),
         ls="",
         show: bool = False,
+        adaptive_snr_selection=False,
+        input_yaml=None,
     ):
         """
         Plot lightcurve with detections and optional upper limits.
@@ -1345,6 +1347,31 @@ class Plot:
         data = pd.read_csv(output_file)
         if _normalize_photometry_columns is not None:
             data = _normalize_photometry_columns(data)
+        
+        # Adaptive S/N selection logic
+        adaptive_limit_col = None
+        if adaptive_snr_selection and input_yaml:
+            lim_cfg = input_yaml.get("limiting_magnitude") or {}
+            if lim_cfg.get("adaptive_snr_selection", False):
+                # Calculate median S/N of all detected sources
+                all_snr_values = []
+                for col in data.columns:
+                    if 'snr' in col.lower():
+                        try:
+                            snr_vals = pd.to_numeric(data[col], errors='coerce')
+                            all_snr_values.extend(snr_vals.dropna().tolist())
+                        except Exception:
+                            continue
+                
+                if all_snr_values:
+                    median_snr = np.median(all_snr_values)
+                    # Use 5σ limit if median S/N < 3, otherwise use 3σ
+                    if median_snr < 3.0 and "Limit_5S2N" in data.columns:
+                        adaptive_limit_col = "Limit_5S2N"
+                        logger.info(f"Adaptive S/N selection: median S/N={median_snr:.2f} < 3, using 5σ limiting magnitude")
+                    else:
+                        adaptive_limit_col = "Limit_3S2N" if "Limit_3S2N" in data.columns else "Limit"
+                        logger.info(f"Adaptive S/N selection: median S/N={median_snr:.2f} >= 3, using 3σ limiting magnitude")
         if data.columns.duplicated().any():
             data = data.loc[:, ~data.columns.duplicated()].copy()
 
@@ -1553,7 +1580,20 @@ class Plot:
                     )
             if show_limits and not nondetects.empty:
                 # Upper limits: plot at limiting magnitude (fainter than this = non-detection)
-                if "limiting_inst_mag" in nondetects.columns and np.any(
+                # Use adaptive S/N selection column if available
+                if adaptive_limit_col and adaptive_limit_col in nondetects.columns:
+                    y_lim = nondetects[adaptive_limit_col]
+                # Try new individual limiting magnitude columns first (e.g., limiting_mag_3s2n)
+                elif f"limiting_mag_{snr_limit:.0f}s2n" in nondetects.columns and np.any(
+                    np.isfinite(nondetects[f"limiting_mag_{snr_limit:.0f}s2n"])
+                ):
+                    y_lim = nondetects[f"limiting_mag_{snr_limit:.0f}s2n"]
+                # Fall back to standard limiting magnitude columns
+                elif "limiting_mag" in nondetects.columns and np.any(
+                    np.isfinite(nondetects["limiting_mag"])
+                ):
+                    y_lim = nondetects["limiting_mag"]
+                elif "limiting_inst_mag" in nondetects.columns and np.any(
                     np.isfinite(nondetects["limiting_inst_mag"])
                 ):
                     y_lim = nondetects["limiting_inst_mag"]

@@ -6176,6 +6176,24 @@ def run_photometry():
         # Store multi-SNR limiting magnitude results (deferred from earlier computation)
         if _multi_snr_results is not None:
             output['multi_snr_limits'] = _multi_snr_results
+            
+            # Add individual limiting magnitude columns to OUTPUT CSV
+            for key, result in _multi_snr_results.items():
+                if key.startswith('snr_') and result.get('valid', False):
+                    snr = result.get('snr_threshold', np.nan)
+                    lim_mag = result.get('limiting_mag', np.nan)
+                    if np.isfinite(snr) and np.isfinite(lim_mag):
+                        # Convert to apparent magnitude if zeropoint is available
+                        apparent_mag = lim_mag
+                        if image_zeropoint and len(image_zeropoint) > 0:
+                            first_method = list(image_zeropoint.keys())[0]
+                            if "zeropoint" in image_zeropoint[first_method]:
+                                zp = image_zeropoint[first_method]["zeropoint"]
+                                if np.isfinite(zp):
+                                    apparent_mag = lim_mag + zp
+                        # Add individual limiting magnitude column
+                        column_name = f"limiting_mag_{snr:.0f}s2n"
+                        output[column_name] = apparent_mag
 
         # Provide lowercase aliases for downstream tools (e.g. lightcurve.py) that
         # expect snake_case columns.
