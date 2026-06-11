@@ -3680,14 +3680,12 @@ def run_photometry():
                     logging.warning("All variable sources failed WCS conversion, using empty list")
                     variable_sources = pd.DataFrame(columns=variable_sources.columns)
         # Plots the source check.
-        # Use hardware_defects_mask (NaN/zeros/saturation/bleed only) instead of
-        # defects_mask (which includes source_mask and would mask out all detected sources).
+        # Remove mask parameter to avoid masking sources in plots
         Plot(input_yaml=input_yaml).source_check(
             image=image,
             psfSources=PSFSources,
             catalogSources=CatalogSources,
             FWHMSources=FWHMSources,
-            mask=hardware_defects_mask,
             variable_sources=variable_sources,
         )
         image_sources = None
@@ -6420,7 +6418,6 @@ def run_photometry():
             "mag_ap",
             "mag_ap_err",
             "limiting_inst_mag",
-            "limiting_mag",
             # quality
             "snr",
             "snr_psf",
@@ -6564,13 +6561,38 @@ def run_photometry():
 
         # Append sequence star catalog (CatalogSources) if available
         if CatalogSources is not None and not CatalogSources.empty:
+            # Ensure PSF position error columns exist (NaN if PSF fitting was skipped)
+            for col in ["x_fit", "y_fit", "x_fit_err", "y_fit_err",
+                        "flux_PSF", "flux_PSF_err", "fwhm_psf"]:
+                if col not in CatalogSources.columns:
+                    CatalogSources[col] = np.nan
+
+            # Disambiguate duplicate SNR columns:
+            #   SNR  = aperture photometry SNR (aperture_sum / sqrt_var)
+            #   snr  = maxPixel / noiseSky (from functions.snr)
+            #   SNR_err is never populated — drop it
+            if "SNR" in CatalogSources.columns:
+                CatalogSources.rename(columns={"SNR": "snr_ap"}, inplace=True)
+            if "snr" in CatalogSources.columns:
+                CatalogSources.rename(columns={"snr": "snr_peak"}, inplace=True)
+            if "SNR_err" in CatalogSources.columns:
+                CatalogSources.drop(columns=["SNR_err"], inplace=True)
+
+            # Drop columns that are entirely NaN / empty to keep CALIB tidy
+            _all_nan = CatalogSources.columns[
+                CatalogSources.isna().all() | (CatalogSources.astype(str) == "").all()
+            ].tolist()
+            if _all_nan:
+                logging.debug(f"Dropping {len(_all_nan)} all-NaN columns from CALIB: {_all_nan}")
+                CatalogSources = CatalogSources.drop(columns=_all_nan)
+
             # Use consolidated duplicate removal function
             CatalogSources_dedup = _remove_catalog_duplicates(
-                CatalogSources, 
-                method='astropy', 
+                CatalogSources,
+                method='astropy',
                 sep_threshold=0.1  # Only remove exact duplicates
             )
-            
+
             logging.info(f"Writing {len(CatalogSources_dedup)} catalog sources to CALIB file")
             with open(calibration_file, "a", newline='') as file:
                 file.write("\n# Sequence star catalog used for calibration\n")

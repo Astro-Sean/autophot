@@ -559,7 +559,7 @@ def plot_lightcurve(
     dpi=150,
     plot_color=False,
     color_match_days=0.5,
-    ls="",
+    ls="-",
 ):
     """Plot a publication-ready lightcurve with detections and limits.
 

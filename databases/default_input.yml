@@ -336,6 +336,11 @@ default_input:
     completeness_plot_nmags: 9 # int --- Number of magnitudes sampled across completeness_plot_span_mag for the completeness bar chart.
     plot_injection_recovery: false # bool --- If true, generate the InjectionRecovery plot showing injected vs recovered magnitudes. If false, skip this plot.
     n_jobs: 1 # int --- Worker processes for injection/recovery and background-limit trials (per-image). 1 = serial; >1 can speed up Monte Carlo trials.
+    
+    # Dual S/N detection threshold configuration
+    snr_thresholds: [3.0, 5.0] # list[float] --- S/N thresholds to calculate for detection limits (e.g., [3.0, 5.0]). Default [3.0] for backward compatibility.
+    adaptive_snr_selection: true # bool --- Use adaptive S/N threshold selection in plots (use 5σ limit when source S/N<3).
+    report_all_limits: true # bool --- Include all S/N limits in output tables and CALIB files.
 
   alignment:
     # reproject_method: "adaptive" uses local area resampling (better for varying distortion at edges) - most accurate

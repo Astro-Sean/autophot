@@ -470,17 +470,17 @@ class MCMCFitter:
 
     def __init__(
         self,
-        nwalkers: int = 50,
+        nwalkers: int = 64,
         nsteps: Optional[int] = 5000,
-        delta: float = 10.0,
+        delta: float = 5.0,
         burnin_frac: float = 0.3,
         thin: int = 10,
         random_state=None,
         inplace=None,
-        adaptive_tau_target: int = 50,
-        min_autocorr_N: int = 100,
-        batch_steps: int = 100,
-        jitter_scale: float = 0.01,
+        adaptive_tau_target: int = 30,
+        min_autocorr_N: int = 50,
+        batch_steps: int = 50,
+        jitter_scale: float = 0.02,
         use_nddata_uncertainty: bool = False,
         gain: float = 1.0,
         readnoise: float = 0.0,
@@ -696,12 +696,11 @@ class MCMCFitter:
         pos0 = self._jitter_within_bounds(initial_params, model)
         ndim = len(initial_params)
 
-        # Use a mixture of StretchMove and DEMove for better mixing.
+        # Use a mixture of moves optimized for PSF fitting convergence.
         # StretchMove is the default affine-invariant proposal; DEMove
-        # (differential evolution) improves mixing in correlated posteriors
-        # and is complementary for the low-ndim PSF parameter space.
+        # (differential evolution) improves mixing in correlated posteriors.
         _moves = [
-            (emcee.moves.StretchMove(), 0.7),
+            (emcee.moves.StretchMove(a=2.0), 0.7),
             (emcee.moves.DEMove(), 0.3),
         ]
         self.sampler = emcee.EnsembleSampler(
@@ -2447,12 +2446,9 @@ class PSF:
             except Exception:
                 _cmap = cmap
 
-            plot_zero_as_nan = bool(
-                (self.input_yaml.get("plotting") or {}).get("plot_zero_as_nan", True)
-            )
+            # Use only hardware mask (NaN/inf pixels) for plotting - don't mask out zero-valued pixels
+            # which could be valid sources
             _mask = ~np.isfinite(data_for_plot)
-            if plot_zero_as_nan:
-                _mask |= (np.asarray(data_for_plot, dtype=float) == 0.0)
             im = ax.imshow(
                 np.ma.array(data_for_plot, mask=_mask),
                 extent=extent,
@@ -3461,7 +3457,7 @@ class PSF:
                     fitter_maxiters=1000,
                     fit_shape=fit_shape,
                     aperture_radius=aperture_radius,
-                    localbkg_estimator=localbkg,
+                    local_bkg_estimator=localbkg,
                     xy_bounds=xy_bounds_this,
                     progress_bar=False,
                 )
@@ -3479,7 +3475,7 @@ class PSF:
                     fitter_maxiters=100,
                     fit_shape=fit_shape,
                     aperture_radius=aperture_radius,
-                    localbkg_estimator=localbkg,
+                    local_bkg_estimator=localbkg,
                     grouper=group_maker,
                     xy_bounds=xy_bounds_this,
                     progress_bar=False,
@@ -3520,7 +3516,7 @@ class PSF:
                 flag_vals = np.asarray(res["flags"], int)
                 nonzero_flags = flag_vals[flag_vals != 0]
                 if len(nonzero_flags) > 0 and hasattr(psfphot, "decode_flags"):
-                    decoded = psfphot.decode_flags(res["flags"])
+                    decoded = psfphot.decode_flags(res["flags"], return_bit_values=True)
                     unique_issues = set()
                     for src_issues in decoded:
                         for issue in src_issues:
@@ -3575,7 +3571,7 @@ class PSF:
                                 fitter_maxiters=1500,
                                 fit_shape=fit_shape_retry,
                                 aperture_radius=aperture_radius,
-                                localbkg_estimator=localbkg,
+                                local_bkg_estimator=localbkg,
                                 xy_bounds=xy_bounds_retry,
                                 progress_bar=False,
                             )
@@ -4080,6 +4076,14 @@ class PSF:
             df_out["flux_err_e"].to_numpy() / exposure_time
         )
 
+        # Compute per-source PSF SNR: |flux| / flux_err (same convention as main.py)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            _fpsf = updated["flux_PSF"].to_numpy(dtype=float)
+            _fpsf_err = updated["flux_PSF_err"].to_numpy(dtype=float)
+            _snr_psf = np.abs(_fpsf) / _fpsf_err
+            _snr_psf[(_fpsf_err <= 0) | ~np.isfinite(_fpsf) | ~np.isfinite(_fpsf_err)] = np.nan
+        updated["snr_psf"] = _snr_psf
+
         # Copy difference-image PSF snapshot for rows where inverted fit replaced the primary
         if snap_flux_e is not None:
             inv_mask_final = np.asarray(combined.get("_inverted_fit", False), bool)
@@ -4286,7 +4290,7 @@ class PSF:
                 subtracted = psfphot.make_residual_image(
                     nd_for_plot.data * nd_for_plot.unit,
                     psf_shape=first_image.shape,
-                    include_localbkg=True,
+                    include_local_bkg=True,
                 )
                 second_image = np.asarray(subtracted.data)
                 fitted_model = first_image - second_image

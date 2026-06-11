@@ -109,7 +109,7 @@ def test_skip_resampling(science_path, reference_path, output_dir, verbose=1):
             )
             
             if result is None:
-                print(f"❌ Alignment FAILED for skip_resampling={skip_resampling_value}")
+                print(f"FAIL Alignment FAILED for skip_resampling={skip_resampling_value}")
                 results[f"skip_resampling_{skip_resampling_value}"] = {
                     "success": False,
                     "reason": "Alignment returned None"
@@ -120,7 +120,7 @@ def test_skip_resampling(science_path, reference_path, output_dir, verbose=1):
             sci_aligned = Path(result.get("science_aligned", ""))
             ref_aligned = Path(result.get("reference_aligned", ""))
             
-            print(f"✓ Alignment succeeded for skip_resampling={skip_resampling_value}")
+            print(f"PASS Alignment succeeded for skip_resampling={skip_resampling_value}")
             print(f"  Science aligned: {sci_aligned}")
             print(f"  Reference aligned: {ref_aligned}")
             print(f"  Alignment method: {result.get('alignment_method', 'unknown')}")
@@ -142,7 +142,7 @@ def test_skip_resampling(science_path, reference_path, output_dir, verbose=1):
             print(f"  Files exist: sci={sci_exists}, ref={ref_exists}")
             
         except Exception as e:
-            print(f"❌ Exception for skip_resampling={skip_resampling_value}: {e}")
+            print(f"FAIL Exception for skip_resampling={skip_resampling_value}: {e}")
             results[f"skip_resampling_{skip_resampling_value}"] = {
                 "success": False,
                 "reason": f"Exception: {e}"
@@ -162,7 +162,7 @@ def test_skip_resampling(science_path, reference_path, output_dir, verbose=1):
     
     for key, result in results.items():
         skip_val = key.split("_")[-1]
-        status = "✓ PASS" if result["success"] else "❌ FAIL"
+        status = "PASS" if result["success"] else "FAIL"
         print(f"{status} skip_resampling={skip_val}")
         
         if result["success"]:
@@ -187,11 +187,11 @@ def main():
     
     # Validate input files
     if not Path(args.science).exists():
-        print(f"❌ Science file not found: {args.science}")
+        print(f"FAIL Science file not found: {args.science}")
         sys.exit(1)
     
     if not Path(args.reference).exists():
-        print(f"❌ Reference file not found: {args.reference}")
+        print(f"FAIL Reference file not found: {args.reference}")
         sys.exit(1)
     
     # Create output directory
@@ -203,10 +203,10 @@ def main():
     # Exit with appropriate code
     failed_tests = sum(1 for r in results.values() if not r["success"])
     if failed_tests > 0:
-        print(f"\n❌ {failed_tests} test(s) failed")
+        print(f"\nFAIL {failed_tests} test(s) failed")
         sys.exit(1)
     else:
-        print(f"\n✓ All tests passed")
+        print(f"\nPASS All tests passed")
         sys.exit(0)
 
 

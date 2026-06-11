@@ -1387,19 +1387,10 @@ class Catalog:
                 if col in catalog_keywords and catalog_keywords[col] in selectedCatalog:
                     outputCatalog[col] = selectedCatalog[catalog_keywords[col]].values
                     logger.debug(f"Mapped {col} from catalog_keywords")
-                # Fallback: copy directly if column exists (for custom catalogs)
+                # Fallback: copy directly if column exists with exact name match
                 elif col in selectedCatalog.columns:
                     outputCatalog[col] = selectedCatalog[col].values
                     logger.debug(f"Copied {col} directly from catalog")
-                # Case-insensitive fallback for custom catalogs only (not standard UBVRI/ugriz/JHK)
-                # to avoid conflating different photometric systems (e.g., r vs R)
-                elif col not in catalog_keywords:
-                    col_lower = col.lower()
-                    for cat_col in selectedCatalog.columns:
-                        if str(cat_col).lower() == col_lower:
-                            outputCatalog[col] = selectedCatalog[cat_col].values
-                            logger.debug(f"Mapped {col} case-insensitively from {cat_col}")
-                            break
                 else:
                     logger.warning(f"Could not find column {col} in catalog; available columns: {list(selectedCatalog.columns)}")
 
@@ -1422,16 +1413,11 @@ class Catalog:
                         outputCatalog[col] = selectedCatalog[
                             catalog_keywords[col]
                         ].values
-                    # Fallback: copy directly if column exists (for custom catalogs)
+                    # Fallback: copy directly if column exists with exact name match
                     elif col in selectedCatalog.columns:
                         outputCatalog[col] = selectedCatalog[col].values
-                    # Case-insensitive fallback for custom catalogs only (not standard UBVRI/ugriz/JHK)
-                    elif filter_x not in catalog_keywords:
-                        col_lower = col.lower()
-                        for cat_col in selectedCatalog.columns:
-                            if str(cat_col).lower() == col_lower:
-                                outputCatalog[col] = selectedCatalog[cat_col].values
-                                break
+                    # Note: case-insensitive fallback removed to prevent conflating
+                    # different photometric systems (e.g. SDSS r vs Cousins R).
 
             # --- Early return if only updating names ---
             if update_names_only:

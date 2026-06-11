@@ -92,8 +92,6 @@ panstarrs:
   w_err: !!str rMeanPSFMagErr
 
 
-
-
 refcat:
   RA: !!str RA
   DEC: !!str Dec
@@ -111,8 +109,6 @@ refcat:
   H_err: !!str dH
   K: !!str K
   K_err: !!str dK
-  w: !!str r
-  w_err: !!str dr
 
 
 tic:

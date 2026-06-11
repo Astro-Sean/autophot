@@ -27,16 +27,16 @@ try:
     prep = Prepare(test_input)
     tns_result = prep.check_tns()
     
-    print("✅ TNS lookup successful!")
+    print("SUCCESS TNS lookup successful!")
     print(f"Result: {tns_result}")
     
     if 'radeg' in tns_result and 'decdeg' in tns_result:
         print(f"Coordinates: RA={tns_result['radeg']}, Dec={tns_result['decdeg']}")
     else:
-        print("❌ No coordinates in TNS result")
+        print("FAIL No coordinates in TNS result")
         
 except Exception as e:
-    print(f"❌ TNS lookup failed: {e}")
+    print(f"FAIL TNS lookup failed: {e}")
     print(f"Error type: {type(e).__name__}")
     
     import traceback

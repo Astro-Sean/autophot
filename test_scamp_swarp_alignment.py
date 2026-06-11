@@ -96,7 +96,7 @@ def test_alignment(science_path, reference_path, output_dir, verbose=1):
     )
     
     if result is None:
-        print("\n❌ Alignment FAILED (returned None)")
+        print("\nFAIL Alignment FAILED (returned None)")
         return {
             "success": False,
             "reason": "Alignment returned None",
@@ -112,7 +112,7 @@ def test_alignment(science_path, reference_path, output_dir, verbose=1):
     ref_output = ref_path_copy
     
     if not sci_output.exists() or not ref_output.exists():
-        print(f"\n❌ Aligned output files not found")
+        print(f"\nFAIL Aligned output files not found")
         print(f"  Science: {sci_output}")
         print(f"  Reference: {ref_output}")
         return {
@@ -154,7 +154,7 @@ def test_alignment(science_path, reference_path, output_dir, verbose=1):
     
     # Check shape match
     shape_match = sci_shape == ref_shape
-    print(f"\n✓ Shape match: {shape_match}")
+    print(f"\nPASS Shape match: {shape_match}")
     if not shape_match:
         print(f"  Science: {sci_shape}")
         print(f"  Reference: {ref_shape}")
@@ -165,7 +165,7 @@ def test_alignment(science_path, reference_path, output_dir, verbose=1):
     crpix_ref = (ref_header.get('CRPIX1', 0), ref_header.get('CRPIX2', 0))
     crpix_diff = (abs(crpix_sci[0] - crpix_ref[0]), abs(crpix_sci[1] - crpix_ref[1]))
     crpix_match = crpix_diff[0] < 0.01 and crpix_diff[1] < 0.01
-    print(f"✓ CRPIX match: {crpix_match} (diff: {crpix_diff[0]:.3f}, {crpix_diff[1]:.3f})")
+    print(f"PASS CRPIX match: {crpix_match} (diff: {crpix_diff[0]:.3f}, {crpix_diff[1]:.3f})")
     
     # Check WCS invertibility
     wcs_invertible = True
@@ -175,28 +175,28 @@ def test_alignment(science_path, reference_path, output_dir, verbose=1):
         try:
             ra, dec = wcs.all_pix2world([cx], [cy], 0)
             if not (np.isfinite(ra[0]) and np.isfinite(dec[0])):
-                print(f"✗ {label} WCS pix2world failed: RA={ra[0]}, Dec={dec[0]}")
+                print(f"FAIL {label} WCS pix2world failed: RA={ra[0]}, Dec={dec[0]}")
                 wcs_invertible = False
                 continue
             
             px, py = wcs.all_world2pix(ra[0], dec[0], 0)
             if not (np.isfinite(px) and np.isfinite(py)):
-                print(f"✗ {label} WCS world2pix failed: px={px}, py={py}")
+                print(f"FAIL {label} WCS world2pix failed: px={px}, py={py}")
                 wcs_invertible = False
         except Exception as e:
-            print(f"✗ {label} WCS error: {e}")
+            print(f"FAIL {label} WCS error: {e}")
             wcs_invertible = False
     
-    print(f"✓ WCS invertible: {wcs_invertible}")
+    print(f"PASS WCS invertible: {wcs_invertible}")
     
     # Overall success
     success = shape_match and crpix_match and wcs_invertible
     
     print(f"\n{'='*70}")
     if success:
-        print(f"✅ Alignment PASSED")
+        print(f"SUCCESS Alignment PASSED")
     else:
-        print(f"❌ Alignment FAILED")
+        print(f"FAIL Alignment FAILED")
     print(f"{'='*70}\n")
     
     return {

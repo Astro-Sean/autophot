@@ -1127,12 +1127,8 @@ class Aperture:
             norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
             cmap = plt.get_cmap("viridis").copy()
             cmap.set_bad(color="white")
-            plot_zero_as_nan = bool(
-                (self.input_yaml.get("plotting") or {}).get("plot_zero_as_nan", True)
-            )
+            # Use only hardware mask (NaN/inf pixels) for plotting - don't mask out zero-valued pixels
             zmask = ~np.isfinite(zoom_image)
-            if plot_zero_as_nan:
-                zmask |= (np.asarray(zoom_image, dtype=float) == 0.0)
             zoom_disp = np.ma.array(zoom_image, mask=zmask)
             # FIX 1: use cutout-local coordinates for simpler alignment
             ax_main.imshow(

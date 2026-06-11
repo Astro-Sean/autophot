@@ -1589,10 +1589,6 @@ class Plot:
                 ):
                     y_lim = nondetects[f"limiting_mag_{snr_limit:.0f}s2n"]
                 # Fall back to standard limiting magnitude columns
-                elif "limiting_mag" in nondetects.columns and np.any(
-                    np.isfinite(nondetects["limiting_mag"])
-                ):
-                    y_lim = nondetects["limiting_mag"]
                 elif "limiting_inst_mag" in nondetects.columns and np.any(
                     np.isfinite(nondetects["limiting_inst_mag"])
                 ):

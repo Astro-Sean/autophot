@@ -72,9 +72,9 @@ class AlignmentMethodAnalyzer:
         
         # Check if both images have valid WCS
         if sci_wcs.is_celestial and ref_wcs.is_celestial:
-            analysis['reasons'].append("✓ Both images have valid celestial WCS")
+            analysis['reasons'].append("PASS Both images have valid celestial WCS")
         else:
-            analysis['reasons'].append("✗ One or both images lack valid celestial WCS")
+            analysis['reasons'].append("FAIL One or both images lack valid celestial WCS")
             analysis['resampling_required'] = True
         
         # Check if WCS are analytically invertible
@@ -87,13 +87,13 @@ class AlignmentMethodAnalyzer:
             sci_back = sci_wcs.all_world2pix([sci_world[0, 0]], [sci_world[1, 0]], 0)
             
             if np.isfinite(sci_back[0]) and np.isfinite(sci_back[1]):
-                analysis['reasons'].append("✓ Science WCS is analytically invertible")
+                analysis['reasons'].append("PASS Science WCS is analytically invertible")
             else:
-                analysis['reasons'].append("✗ Science WCS is not fully invertible")
+                analysis['reasons'].append("FAIL Science WCS is not fully invertible")
                 analysis['resampling_required'] = True
                 
         except Exception as e:
-            analysis['reasons'].append(f"✗ Science WCS transformation failed: {e}")
+            analysis['reasons'].append(f"FAIL Science WCS transformation failed: {e}")
             analysis['resampling_required'] = True
         
         try:
@@ -104,13 +104,13 @@ class AlignmentMethodAnalyzer:
             ref_back = ref_wcs.all_world2pix([ref_world[0, 0]], [ref_world[1, 0]], 0)
             
             if np.isfinite(ref_back[0]) and np.isfinite(ref_back[1]):
-                analysis['reasons'].append("✓ Reference WCS is analytically invertible")
+                analysis['reasons'].append("PASS Reference WCS is analytically invertible")
             else:
-                analysis['reasons'].append("✗ Reference WCS is not fully invertible")
+                analysis['reasons'].append("FAIL Reference WCS is not fully invertible")
                 analysis['resampling_required'] = True
                 
         except Exception as e:
-            analysis['reasons'].append(f"✗ Reference WCS transformation failed: {e}")
+            analysis['reasons'].append(f"FAIL Reference WCS transformation failed: {e}")
             analysis['resampling_required'] = True
     
     def _analyze_use_cases(self, sci_wcs, ref_wcs, sci_shape, ref_shape, analysis):
@@ -197,7 +197,7 @@ class AlignmentMethodAnalyzer:
         ref_distorted = ref_has_sip or ref_has_tpv or "TAN-SIP" in ref_ctype or "TPV" in ref_ctype
         
         if sci_distorted or ref_distorted:
-            analysis['reasons'].append("⚠ Images contain distortion parameters")
+            analysis['reasons'].append("WARNING Images contain distortion parameters")
             
             if sci_distorted and ref_distorted:
                 analysis['reasons'].append("  Both images have distortion - may need resampling for precise alignment")
@@ -209,7 +209,7 @@ class AlignmentMethodAnalyzer:
             # For many operations, distortion can be handled by WCS transformations
             analysis['reasons'].append("  However, WCS transformations can handle distortion for coordinate-based operations")
         else:
-            analysis['reasons'].append("✓ No significant distortion detected")
+            analysis['reasons'].append("PASS No significant distortion detected")
     
     def _analyze_pixel_grid_alignment(self, sci_wcs, ref_wcs, sci_shape, ref_shape, analysis):
         """Analyze pixel grid alignment requirements."""
@@ -220,18 +220,18 @@ class AlignmentMethodAnalyzer:
         if sci_pixscale and ref_pixscale:
             scale_diff = abs(sci_pixscale - ref_pixscale)
             if scale_diff < 0.001:  # Less than 0.001 arcsec difference
-                analysis['reasons'].append(f"✓ Pixel scales match: sci={sci_pixscale:.4f}\", ref={ref_pixscale:.4f}\"")
+                analysis['reasons'].append(f"PASS Pixel scales match: sci={sci_pixscale:.4f}\", ref={ref_pixscale:.4f}\"")
             else:
                 # Different pixel scales are OK for template subtraction
-                analysis['reasons'].append(f"⚠ Pixel scales differ: sci={sci_pixscale:.4f}\", ref={ref_pixscale:.4f}\" (diff={scale_diff:.4f}\")")
+                analysis['reasons'].append(f"WARNING Pixel scales differ: sci={sci_pixscale:.4f}\", ref={ref_pixscale:.4f}\" (diff={scale_diff:.4f}\")")
                 analysis['reasons'].append("  → Different scales acceptable for template subtraction")
                 # Don't mark resampling_required for template subtraction case
         
         if sci_shape == ref_shape:
-            analysis['reasons'].append(f"✓ Image shapes match: {sci_shape}")
+            analysis['reasons'].append(f"PASS Image shapes match: {sci_shape}")
         else:
             # Different shapes are also OK for template subtraction
-            analysis['reasons'].append(f"⚠ Image shapes differ: sci={sci_shape}, ref={ref_shape}")
+            analysis['reasons'].append(f"WARNING Image shapes differ: sci={sci_shape}, ref={ref_shape}")
             analysis['reasons'].append("  → Different shapes acceptable for template subtraction")
             # Don't mark resampling_required for template subtraction case
         
@@ -252,13 +252,13 @@ class AlignmentMethodAnalyzer:
                         max_offset = max(max_offset, offset)
             
             if max_offset < 0.1:  # Less than 0.1 arcsec offset
-                analysis['reasons'].append(f"✓ Coordinate grids align (max offset: {max_offset:.3f}\")")
+                analysis['reasons'].append(f"PASS Coordinate grids align (max offset: {max_offset:.3f}\")")
             else:
-                analysis['reasons'].append(f"⚠ Coordinate grids misaligned (max offset: {max_offset:.3f}\")")
+                analysis['reasons'].append(f"WARNING Coordinate grids misaligned (max offset: {max_offset:.3f}\")")
                 # WCS alignment still needed, but resampling not required for template subtraction
                 
         except Exception as e:
-            analysis['reasons'].append(f"⚠ Could not test coordinate alignment: {e}")
+            analysis['reasons'].append(f"WARNING Could not test coordinate alignment: {e}")
     
     def _get_pixel_scale(self, wcs):
         """Get pixel scale from WCS in arcsec/pixel."""

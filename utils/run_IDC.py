@@ -2309,9 +2309,9 @@ NNW
                 )
                 
                 if verification_results.get('precise_alignment', False):
-                    self.logger.info(f"✓ Precise alignment verified (quality: {verification_results.get('alignment_quality', 'unknown')})")
+                    self.logger.info(f"PASS Precise alignment verified (quality: {verification_results.get('alignment_quality', 'unknown')})")
                 else:
-                    self.logger.warning(f"⚠ Alignment quality issues detected (quality: {verification_results.get('alignment_quality', 'unknown')})")
+                    self.logger.warning(f"WARNING Alignment quality issues detected (quality: {verification_results.get('alignment_quality', 'unknown')})")
                     if 'wcs_consistency' in verification_results and verification_results['wcs_consistency'].get('issues'):
                         for issue in verification_results['wcs_consistency']['issues']:
                             self.logger.warning(f"  WCS issue: {issue}")

@@ -3039,7 +3039,7 @@ class Limits:
                         continue
                     v0 = float(cutout[yi, xi])
                     if not np.isfinite(v0) or (
-                        bool(lim_cfg.get("plot_zero_as_nan", True)) and v0 == 0.0
+                        False and v0 == 0.0
                     ):
                         continue
                     # Consistent with main injection-site selection: score by |SNR|.
@@ -3070,7 +3070,7 @@ class Limits:
                         if 0 <= xi < nx_c and 0 <= yi < ny_c:
                             v0 = float(cutout[yi, xi])
                             if not np.isfinite(v0) or (
-                                bool(lim_cfg.get("plot_zero_as_nan", True)) and v0 == 0.0
+                                False and v0 == 0.0
                             ):
                                 continue
                         demo_x = cx_try
@@ -3106,12 +3106,9 @@ class Limits:
                     
                     # Inject PSF at this magnitude
                     injected = cutout.copy()
-                    # For plotting only: treat no-data bands encoded as exact zeros as invalid.
-                    # SWarp/SFFT can output uncovered regions as 0.0 instead of NaN.
-                    plot_zero_as_nan = bool(lim_cfg.get("plot_zero_as_nan", True))
+                    # Use only hardware mask (NaN/inf pixels) for injection - don't mask out zero-valued pixels
+                    # which could be valid bright sources
                     invalid_mask = ~np.isfinite(injected)
-                    if plot_zero_as_nan:
-                        invalid_mask |= (np.asarray(injected, dtype=float) == 0.0)
                     # Ensure no-data stays NaN even after injection.
                     injected = np.asarray(injected, dtype=float)
                     injected[invalid_mask] = np.nan
@@ -3385,10 +3382,8 @@ class Limits:
                     norm = simple_norm(cutout, 'sqrt', percent=99.5)
                     cmap = plt.get_cmap("grey").copy()
                     cmap.set_bad(color="white")
-                    plot_zero_as_nan = bool((self.input_yaml.get("limiting_magnitude") or {}).get("plot_zero_as_nan", True))
+                    # Use only hardware mask (NaN/inf pixels) for plotting - don't mask out zero-valued pixels
                     cut_disp = np.asarray(cutout, dtype=float).copy()
-                    if plot_zero_as_nan:
-                        cut_disp[np.asarray(cut_disp, dtype=float) == 0.0] = np.nan
                     ax_inject.imshow(
                         np.ma.array(cut_disp, mask=~np.isfinite(cut_disp)),
                         origin="lower",
@@ -3415,10 +3410,8 @@ class Limits:
                 norm = simple_norm(cutout, 'sqrt', percent=99.5)
                 cmap = plt.get_cmap("grey").copy()
                 cmap.set_bad(color="white")
-                plot_zero_as_nan = bool((self.input_yaml.get("limiting_magnitude") or {}).get("plot_zero_as_nan", True))
+                # Use only hardware mask (NaN/inf pixels) for plotting - don't mask out zero-valued pixels
                 cut_disp = np.asarray(cutout, dtype=float).copy()
-                if plot_zero_as_nan:
-                    cut_disp[np.asarray(cut_disp, dtype=float) == 0.0] = np.nan
                 ax_sites.imshow(
                     np.ma.array(cut_disp, mask=~np.isfinite(cut_disp)),
                     origin="lower",
