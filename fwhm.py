@@ -53,7 +53,7 @@ from photutils.centroids import (
 )
 from skimage import feature, transform, exposure, morphology, draw
 from lmfit import Model
-from lmfit.models import Gaussian2dModel
+from lmfit.models import Gaussian2dModel, ConstantModel
 from sklearn.linear_model import RANSACRegressor
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
@@ -680,7 +680,10 @@ class Find_FWHM:
                 ygrid, xgrid = np.mgrid[:height, :width]
                 data_max = np.nanmax(data)
                 data_min = np.nanmin(data)
-                model = Gaussian2dModel()
+                data_median = float(np.nanmedian(data))
+                # Composite model: 2D Gaussian + constant background so the fit
+                # does not try to absorb background into the Gaussian amplitude.
+                model = Gaussian2dModel() + ConstantModel()
                 params = model.make_params()
                 params["centerx"].set(
                     value=x, min=max(1, x - dx), max=(min(width - 1, x + dx))
@@ -690,6 +693,9 @@ class Find_FWHM:
                 )
                 params["amplitude"].set(
                     value=data_max * 0.25, min=data_min * 1e-6, max=data_max * 1e6
+                )
+                params["c"].set(
+                    value=data_median, min=data_min - abs(data_max), max=data_max + abs(data_max)
                 )
                 if sigma is not None:
                     min_sigma = 0.5 / SQRT2LOG2

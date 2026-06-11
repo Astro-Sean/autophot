@@ -3300,6 +3300,36 @@ def run_photometry():
             CatalogSources = Calibrate_Catalog.downsample_sources_by_position(
                 CatalogSources
             )
+
+            # Transfer per-source FWHM from SExtractor (FWHMSources) to catalog sources
+            if (
+                FWHMSources is not None
+                and len(FWHMSources) > 0
+                and "fwhm" in FWHMSources.columns
+                and len(CatalogSources) > 0
+                and {"x_pix", "y_pix"}.issubset(CatalogSources.columns)
+            ):
+                try:
+                    from scipy.spatial import cKDTree
+
+                    fwhm_coords = FWHMSources[["x_pix", "y_pix"]].to_numpy(dtype=float)
+                    cat_coords = CatalogSources[["x_pix", "y_pix"]].to_numpy(dtype=float)
+                    tree = cKDTree(fwhm_coords)
+                    distances, idxs = tree.query(cat_coords, k=1)
+                    # Only assign if match is within 3 px (generous for catalog vs detection mismatch)
+                    match_ok = distances <= 3.0
+                    CatalogSources["fwhm"] = np.nan
+                    CatalogSources.loc[match_ok, "fwhm"] = FWHMSources.iloc[idxs[match_ok]]["fwhm"].values
+                    n_matched = int(match_ok.sum())
+                    if n_matched > 0:
+                        logging.info(
+                            f"Matched {n_matched}/{len(CatalogSources)} catalog sources to SExtractor FWHM"
+                        )
+                except Exception as e:
+                    logging.warning(f"Could not match catalog sources to SExtractor FWHM: {e}")
+                    CatalogSources["fwhm"] = np.nan
+            else:
+                CatalogSources["fwhm"] = np.nan
         else:
             logging.warning(
                 "No catalog sources available for photometric calibration; proceeding without catalog-based calibration."
@@ -5466,10 +5496,19 @@ def run_photometry():
             # Maximum allowed offset (pixels) for the target Gaussian centroid.
             # `Find_FWHM.fit_gaussian` caps dx/dy to 3 px internally for stability.
             max_radius_pix = 3.0
+            # Use the difference image if available (PreformSubtraction=True),
+            # otherwise fall back to the science image. The ConstantModel
+            # background term in fit_gaussian handles the near-zero background.
+            _sci = image
+            _tx = float(TargetPosition["x_fit"].iloc[0])
+            _ty = float(TargetPosition["y_fit"].iloc[0])
+            _half = max(10, int(np.ceil(3 * ImageFWHM)))
+            cutout = Cutout2D(_sci, (_tx, _ty), (2 * _half + 1, 2 * _half + 1), mode="partial", fill_value=np.nan)
+            _cutout = np.asarray(cutout.data, dtype=float)
             gaussian_fits = Find_FWHM(input_yaml=input_yaml).fit_gaussian(
-                image,
-                x=TargetPosition["x_fit"].iloc[0],
-                y=TargetPosition["y_fit"].iloc[0],
+                _cutout,
+                x=cutout.input_position_cutout[0],
+                y=cutout.input_position_cutout[1],
                 dx=max_radius_pix,
                 dy=max_radius_pix,
                 sigma=ImageFWHM / 2.335,
@@ -6471,6 +6510,9 @@ def run_photometry():
             float_format="%.6f",
         )
 
+        # Remove verbose multi_snr_limits dict from CALIB output (individual columns remain)
+        output.pop("multi_snr_limits", None)
+
         # Converts the output dictionary to a string.
         output_str = dict_to_string_with_hashtag(output)
 
@@ -6504,9 +6546,9 @@ def run_photometry():
                     zp_lines.append(f"# {method}_color_term_error: {ct_err:.6f}")
         
         # Add multi-SNR limiting magnitude information if available
-        if "multi_snr_limits" in output and output["multi_snr_limits"]:
+        if _multi_snr_results is not None:
             lim_lines = ["# Multi-S/N detection limits"]
-            multi_snr_results = output["multi_snr_limits"]
+            multi_snr_results = _multi_snr_results
             
             # Add individual S/N limits
             for key, result in multi_snr_results.items():
@@ -6561,11 +6603,17 @@ def run_photometry():
 
         # Append sequence star catalog (CatalogSources) if available
         if CatalogSources is not None and not CatalogSources.empty:
-            # Ensure PSF position error columns exist (NaN if PSF fitting was skipped)
+            # Ensure PSF columns exist (NaN if PSF fitting was skipped)
             for col in ["x_fit", "y_fit", "x_fit_err", "y_fit_err",
-                        "flux_PSF", "flux_PSF_err", "fwhm_psf"]:
+                        "flux_PSF", "flux_PSF_err", "fwhm", "fwhm_psf"]:
                 if col not in CatalogSources.columns:
                     CatalogSources[col] = np.nan
+
+            # Prefer per-source SExtractor fwhm over constant fwhm_psf for CALIB output
+            if "fwhm" in CatalogSources.columns and "fwhm_psf" in CatalogSources.columns:
+                # Fill any missing fwhm from fwhm_psf as fallback, then drop fwhm_psf
+                CatalogSources["fwhm"] = CatalogSources["fwhm"].fillna(CatalogSources["fwhm_psf"])
+                CatalogSources.drop(columns=["fwhm_psf"], inplace=True)
 
             # Disambiguate duplicate SNR columns:
             #   SNR  = aperture photometry SNR (aperture_sum / sqrt_var)

@@ -4061,6 +4061,9 @@ class PSF:
             if col not in updated.columns:
                 updated[col] = np.nan
         updated["fwhm_psf"] = fwhm
+        # Preserve per-source fwhm from SExtractor if already present; don't overwrite with constant image FWHM
+        if "fwhm" not in updated.columns:
+            updated["fwhm"] = np.nan
 
         row_pos = df_out.index.to_numpy()
         updated.iloc[
