@@ -2686,12 +2686,19 @@ class Limits:
         cutout_cy=None,
         snr_limit=None,
         multi_snr_details=None,
+        fig=None,
+        gs=None,
+        inset_row=1,
+        draw_main_plot=True,
     ) -> None:
         """
         Plot completeness curve with injection examples.
         If sample_mags is None, only shows bracket/bisect trajectories (no bar chart).
         If multi_snr_details is provided, draws all S/N thresholds' trajectories
         with distinct colors on the same plot.
+        If fig/gs are provided, uses them instead of creating a new figure.
+        inset_row controls which GridSpec row to use for insets (default=1).
+        draw_main_plot=False skips the main completeness plot (for adding inset rows only).
         """
         logger = logging.getLogger(__name__)
         
@@ -2736,183 +2743,193 @@ class Limits:
 
         plt.ioff()
 
-        # Create figure with main completeness plot on top, injection examples below
-        fig = plt.figure(figsize=set_size(540, 1.5))
-        gs = GridSpec(3, 4, figure=fig, height_ratios=[1.5, 1, 1])
-        
-        # Top row: Main completeness plot (spans all columns)
-        ax = fig.add_subplot(gs[0, :])
+        # Create figure or use provided one
+        owns_figure = fig is None
+        if owns_figure:
+            # Create figure with main completeness plot on top, injection examples below
+            fig = plt.figure(figsize=set_size(540, 1.5))
+            gs = GridSpec(3, 4, figure=fig, height_ratios=[1.5, 1, 1])
+        else:
+            # Use provided figure and gridspec
+            if gs is None:
+                raise ValueError("gs must be provided when fig is provided")
+
+        # Main completeness plot (spans all columns in row 0)
+        if draw_main_plot:
+            ax = fig.add_subplot(gs[0, :])
 
         # Plot bracket and bisect search trajectories below (scatter + arrows).
         # Avoid drawing a single polyline through all steps here, as it can make
         # the bisection look like it "jumps" across large intervals.
 
-        if mags_sorted is not None:
-            widths = 0.15
-            n_trials = np.array([max(1, len(g)) for g in groups_sorted], dtype=float)
-            p = np.clip(medians_sorted, 0.0, 1.0)
-            p_percent = p * 100  # Convert to percentage
-            # Binomial standard error (normal approx) for visual guidance.
-            p_err = np.sqrt(np.maximum(p * (1.0 - p) / n_trials, 0.0)) * 100  # Convert to percentage
+        if draw_main_plot:
+            if mags_sorted is not None:
+                widths = 0.15
+                n_trials = np.array([max(1, len(g)) for g in groups_sorted], dtype=float)
+                p = np.clip(medians_sorted, 0.0, 1.0)
+                p_percent = p * 100  # Convert to percentage
+                # Binomial standard error (normal approx) for visual guidance.
+                p_err = np.sqrt(np.maximum(p * (1.0 - p) / n_trials, 0.0)) * 100  # Convert to percentage
 
-            ax.bar(
-                mags_sorted,
-                p_percent,
-                width=widths,
-                color="#B0C4DE",
-                edgecolor="#4D4D4D",
-                linewidth=0.5,
-                zorder=2,
-            )
-            ax.errorbar(
-                mags_sorted,
-                p_percent,
-                yerr=p_err,
-                fmt="none",
-                ecolor="#4D4D4D",
-                elinewidth=0.5,
-                capsize=2,
-                zorder=3,
-            )
+                ax.bar(
+                    mags_sorted,
+                    p_percent,
+                    width=widths,
+                    color="#B0C4DE",
+                    edgecolor="#4D4D4D",
+                    linewidth=0.5,
+                    zorder=2,
+                )
+                ax.errorbar(
+                    mags_sorted,
+                    p_percent,
+                    yerr=p_err,
+                    fmt="none",
+                    ecolor="#4D4D4D",
+                    elinewidth=0.5,
+                    capsize=2,
+                    zorder=3,
+                )
 
-        # Adopted limit: use the interpolated m50 (inject_lmag) rather than the
-        # last evaluated step (which can be above/below 50%).
-        adopted_mag = float(inject_lmag) if np.isfinite(inject_lmag) else np.nan
+            # Adopted limit: use the interpolated m50 (inject_lmag) rather than the
+            # last evaluated step (which can be above/below 50%).
+            adopted_mag = float(inject_lmag) if np.isfinite(inject_lmag) else np.nan
 
-        # ---- Bracket/bisection search trajectories & adopted-limit lines ----
-        # Color palette for multi-S/N thresholds (up to 6 distinct)
-        _palette = [
-            ("#2196F3", "#1565C0"),  # blue / dark-blue
-            ("#F44336", "#B71C1C"),  # red / dark-red
-            ("#4CAF50", "#1B5E20"),  # green / dark-green
-            ("#FF9800", "#E65100"),  # orange / dark-orange
-            ("#9C27B0", "#4A148C"),  # purple / dark-purple
-            ("#00BCD4", "#006064"),  # cyan / dark-cyan
-        ]
-        _markers = ["o", "s", "^", "D", "v", "P"]
+            # ---- Bracket/bisection search trajectories & adopted-limit lines ----
+            # Color palette for multi-S/N thresholds (up to 6 distinct)
+            _palette = [
+                ("#2196F3", "#1565C0"),  # blue / dark-blue
+                ("#F44336", "#B71C1C"),  # red / dark-red
+                ("#4CAF50", "#1B5E20"),  # green / dark-green
+                ("#FF9800", "#E65100"),  # orange / dark-orange
+                ("#9C27B0", "#4A148C"),  # purple / dark-purple
+                ("#00BCD4", "#006064"),  # cyan / dark-cyan
+            ]
+            _markers = ["o", "s", "^", "D", "v", "P"]
 
-        if multi_snr_details is not None and len(multi_snr_details) > 1:
-            # --- Multi-SNR: draw all thresholds with distinct colours ---
-            for idx, detail in enumerate(multi_snr_details):
-                d_snr = detail.get("snr_limit")
-                d_bracket = detail.get("bracket_steps", [])
-                d_bisect = detail.get("bisect_steps", [])
-                d_lmag = detail.get("inject_lmag", np.nan)
-                d_ctarget = detail.get("completeness_target", 0.5)
+            if multi_snr_details is not None and len(multi_snr_details) > 1:
+                # --- Multi-SNR: draw all thresholds with distinct colours ---
+                for idx, detail in enumerate(multi_snr_details):
+                    d_snr = detail.get("snr_limit")
+                    d_bracket = detail.get("bracket_steps", [])
+                    d_bisect = detail.get("bisect_steps", [])
+                    d_lmag = detail.get("inject_lmag", np.nan)
+                    d_ctarget = detail.get("completeness_target", 0.5)
 
-                c_brk, c_bis = _palette[idx % len(_palette)]
-                mk = _markers[idx % len(_markers)]
-                tag = f"S/N$\\geq${d_snr:.0f}" if d_snr is not None else f"#{idx+1}"
+                    c_brk, c_bis = _palette[idx % len(_palette)]
+                    mk = _markers[idx % len(_markers)]
+                    tag = f"S/N$\\geq${d_snr:.0f}" if d_snr is not None else f"#{idx+1}"
 
-                if d_bracket:
-                    bm, bc, _ = zip(*d_bracket)
-                    bc_pct = np.asarray(bc, float) * 100.0
+                    if d_bracket:
+                        bm, bc, _ = zip(*d_bracket)
+                        bc_pct = np.asarray(bc, float) * 100.0
+                        bm = np.asarray(bm, float)
+                        ax.scatter(bm, bc_pct, s=16, color=c_brk, alpha=0.85,
+                                   edgecolors="none", marker=mk,
+                                   label=f"Bracket ({tag})", zorder=4)
+                        for i in range(len(bm) - 1):
+                            ax.annotate("", xy=(bm[i+1], bc_pct[i+1]),
+                                        xytext=(bm[i], bc_pct[i]),
+                                        arrowprops=dict(arrowstyle="->", color=c_brk,
+                                                        lw=0.5, alpha=0.6))
+
+                    if d_bisect:
+                        bm, bc, _ = zip(*d_bisect)
+                        bc_pct = np.asarray(bc, float) * 100.0
+                        bm = np.asarray(bm, float)
+                        ax.scatter(bm, bc_pct, s=16, color=c_bis, alpha=0.85,
+                                   edgecolors="none", marker=mk,
+                                   label=f"Bisection ({tag})", zorder=5)
+                        for i in range(len(bm) - 1):
+                            ax.annotate("", xy=(bm[i+1], bc_pct[i+1]),
+                                        xytext=(bm[i], bc_pct[i]),
+                                        arrowprops=dict(arrowstyle="->", color=c_bis,
+                                                        lw=0.5, alpha=0.6))
+
+                    d_adopted = float(d_lmag) if np.isfinite(d_lmag) else np.nan
+                    if np.isfinite(d_adopted):
+                        ax.axvline(d_adopted, color=c_brk, lw=0.8, ls="--",
+                                   label=f"m50 ({tag})", zorder=6, alpha=0.9)
+                        ax.scatter([d_adopted], [float(d_ctarget) * 100.0],
+                                   s=32, marker="D", c=c_brk,
+                                   edgecolors="white", linewidth=0.4, zorder=7)
+            else:
+                # --- Single-SNR: original behaviour ---
+                snr_label = ""
+                if snr_limit is not None:
+                    snr_label = f" (S/N>={snr_limit:.0f})"
+
+                if bracket_steps:
+                    bm, bc, _ = zip(*bracket_steps)
+                    bc_percent = np.asarray(bc, float) * 100.0
                     bm = np.asarray(bm, float)
-                    ax.scatter(bm, bc_pct, s=16, color=c_brk, alpha=0.85,
-                               edgecolors="none", marker=mk,
-                               label=f"Bracket ({tag})", zorder=4)
+                    ax.scatter(bm, bc_percent, s=14, color="#0000FF", alpha=0.8,
+                               edgecolors="none", label=f"Bracket search{snr_label}", zorder=4)
                     for i in range(len(bm) - 1):
-                        ax.annotate("", xy=(bm[i+1], bc_pct[i+1]),
-                                    xytext=(bm[i], bc_pct[i]),
-                                    arrowprops=dict(arrowstyle="->", color=c_brk,
-                                                    lw=0.5, alpha=0.6))
+                        ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
+                                    xytext=(bm[i], bc_percent[i]),
+                                    arrowprops=dict(arrowstyle="->", color="#0000FF",
+                                                    lw=0.5, alpha=0.7))
 
-                if d_bisect:
-                    bm, bc, _ = zip(*d_bisect)
-                    bc_pct = np.asarray(bc, float) * 100.0
+                if bisect_steps:
+                    bm, bc, _ = zip(*bisect_steps)
+                    bc_percent = np.asarray(bc, float) * 100.0
                     bm = np.asarray(bm, float)
-                    ax.scatter(bm, bc_pct, s=16, color=c_bis, alpha=0.85,
-                               edgecolors="none", marker=mk,
-                               label=f"Bisection ({tag})", zorder=5)
+                    ax.scatter(bm, bc_percent, s=14, color="#00AA00", alpha=0.8,
+                               edgecolors="none", label=f"Bisection{snr_label}", zorder=5)
                     for i in range(len(bm) - 1):
-                        ax.annotate("", xy=(bm[i+1], bc_pct[i+1]),
-                                    xytext=(bm[i], bc_pct[i]),
-                                    arrowprops=dict(arrowstyle="->", color=c_bis,
-                                                    lw=0.5, alpha=0.6))
+                        ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
+                                    xytext=(bm[i], bc_percent[i]),
+                                    arrowprops=dict(arrowstyle="->", color="#00AA00",
+                                                    lw=0.5, alpha=0.7))
 
-                d_adopted = float(d_lmag) if np.isfinite(d_lmag) else np.nan
-                if np.isfinite(d_adopted):
-                    ax.axvline(d_adopted, color=c_brk, lw=0.8, ls="--",
-                               label=f"m50 ({tag})", zorder=6, alpha=0.9)
-                    ax.scatter([d_adopted], [float(d_ctarget) * 100.0],
-                               s=32, marker="D", c=c_brk,
-                               edgecolors="white", linewidth=0.4, zorder=7)
-        else:
-            # --- Single-SNR: original behaviour ---
-            snr_label = ""
-            if snr_limit is not None:
-                snr_label = f" (S/N>={snr_limit:.0f})"
+                if np.isfinite(adopted_mag):
+                    ax.axvline(adopted_mag, color="k", lw=0.6, ls="--",
+                               label=f"Adopted limit (m50){snr_label}", zorder=6)
+                    try:
+                        ax.scatter([adopted_mag], [float(completeness_target) * 100.0],
+                                   s=28, marker="D", c="k", edgecolors="white",
+                                   linewidth=0.4, zorder=7)
+                    except Exception:
+                        pass
 
-            if bracket_steps:
-                bm, bc, _ = zip(*bracket_steps)
-                bc_percent = np.asarray(bc, float) * 100.0
-                bm = np.asarray(bm, float)
-                ax.scatter(bm, bc_percent, s=14, color="#0000FF", alpha=0.8,
-                           edgecolors="none", label=f"Bracket search{snr_label}", zorder=4)
-                for i in range(len(bm) - 1):
-                    ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
-                                xytext=(bm[i], bc_percent[i]),
-                                arrowprops=dict(arrowstyle="->", color="#0000FF",
-                                                lw=0.5, alpha=0.7))
+            # Reference lines.
+            ax.axhline(50, color="0.7", lw=0.5, ls="--", zorder=0)
+            ax.text(0.02, 50, "50%", transform=ax.get_yaxis_transform(),
+                    va="bottom", ha="left", color="0.5")
 
-            if bisect_steps:
-                bm, bc, _ = zip(*bisect_steps)
-                bc_percent = np.asarray(bc, float) * 100.0
-                bm = np.asarray(bm, float)
-                ax.scatter(bm, bc_percent, s=14, color="#00AA00", alpha=0.8,
-                           edgecolors="none", label=f"Bisection{snr_label}", zorder=5)
-                for i in range(len(bm) - 1):
-                    ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
-                                xytext=(bm[i], bc_percent[i]),
-                                arrowprops=dict(arrowstyle="->", color="#00AA00",
-                                                lw=0.5, alpha=0.7))
+            if completeness_target != 0.5:
+                target_percent = completeness_target * 100
+                ax.axhline(target_percent, color="0.7", lw=0.5, ls="-.", zorder=0)
+                ax.text(0.98, target_percent, f"{int(target_percent)}%",
+                        transform=ax.get_yaxis_transform(), va="bottom",
+                        ha="right", color="0.5")
 
-            if np.isfinite(adopted_mag):
-                ax.axvline(adopted_mag, color="k", lw=0.6, ls="--",
-                           label=f"Adopted limit (m50){snr_label}", zorder=6)
-                try:
-                    ax.scatter([adopted_mag], [float(completeness_target) * 100.0],
-                               s=28, marker="D", c="k", edgecolors="white",
-                               linewidth=0.4, zorder=7)
-                except Exception:
-                    pass
+            # Add axis labels and title to main completeness plot
+            ax.set_xlabel("Injected brightness [mag]", fontsize=9)
+            ax.set_ylabel("Recovery fraction [%]", fontsize=9)
+            
+            # Optional apparent-magnitude secondary axis.
+            secax = None
+            if selected_zeropoint is not None:
+                # Capture by value to avoid late-binding lambda bug
+                _zp = float(selected_zeropoint)
+                secax = ax.secondary_xaxis(
+                    "top",
+                    functions=(
+                        lambda m, zp=_zp: m + zp,
+                        lambda m, zp=_zp: m - zp,
+                    ),
+                )
+                secax.set_xlabel("Apparent brightness [mag]")
+                # The secondary axis direction follows from the monotonic transform;
+                # do not call secax.invert_xaxis() as it would double-invert.
 
-        # Reference lines.
-        ax.axhline(50, color="0.7", lw=0.5, ls="--", zorder=0)
-        ax.text(0.02, 50, "50%", transform=ax.get_yaxis_transform(),
-                va="bottom", ha="left", color="0.5")
+            ncol = 2 if (multi_snr_details is not None and len(multi_snr_details) > 1) else 1
+            ax.legend(loc="best", fontsize=7, frameon=False, ncol=ncol)
 
-        if completeness_target != 0.5:
-            target_percent = completeness_target * 100
-            ax.axhline(target_percent, color="0.7", lw=0.5, ls="-.", zorder=0)
-            ax.text(0.98, target_percent, f"{int(target_percent)}%",
-                    transform=ax.get_yaxis_transform(), va="bottom",
-                    ha="right", color="0.5")
-
-        # Add axis labels and title to main completeness plot
-        ax.set_xlabel("Injected brightness [mag]", fontsize=9)
-        ax.set_ylabel("Recovery fraction [%]", fontsize=9)
-        
-        # Optional apparent-magnitude secondary axis.
-        secax = None
-        if selected_zeropoint is not None:
-            # Capture by value to avoid late-binding lambda bug
-            _zp = float(selected_zeropoint)
-            secax = ax.secondary_xaxis(
-                "top",
-                functions=(
-                    lambda m, zp=_zp: m + zp,
-                    lambda m, zp=_zp: m - zp,
-                ),
-            )
-            secax.set_xlabel("Apparent brightness [mag]")
-            # The secondary axis direction follows from the monotonic transform;
-            # do not call secax.invert_xaxis() as it would double-invert.
-
-        ncol = 2 if (multi_snr_details is not None and len(multi_snr_details) > 1) else 1
-        ax.legend(loc="best", fontsize=7, frameon=False, ncol=ncol)
-
-        fig.tight_layout()
+            if owns_figure:
+                fig.tight_layout()
         
         # Add injection cutout panels below main plot if data available
         if epsf_model is not None and cutout is not None and position is not None and \
@@ -3087,7 +3104,7 @@ class Limits:
                     )
 
             for i, mag_target in enumerate(mag_targets):
-                ax_inject = fig.add_subplot(gs[1, i])
+                ax_inject = fig.add_subplot(gs[inset_row, i])
                 
                 try:
                     # Create a cutout-sized grid
@@ -3372,7 +3389,7 @@ class Limits:
                     else:
                         ax_inject.set_ylabel('')
                     ax_inject.tick_params(labelsize=8)
-                except Exgception as e:
+                except Exception as e:
                     # If injection fails, just show the original cutout
                     import traceback
                     logger.warning(f"Subpanel injection failed for mag={mag_target:.2f}: {e}")
@@ -3402,7 +3419,7 @@ class Limits:
 
             # Fourth panel (bottom right, same row as injection panels): original cutout with injection site markers
             if cutout is not None and injection_df is not None and len(injection_df) > 0:
-                ax_sites = fig.add_subplot(gs[1, 3])
+                ax_sites = fig.add_subplot(gs[inset_row, 3])
                 ny, nx = cutout.shape
 
                 # Display original cutout (no injections)
@@ -3447,48 +3464,45 @@ class Limits:
                 ax_sites.tick_params(labelsize=8)
 
             # Add axis data: small grey lines at top of main plot showing injected magnitudes
-            # Plot on secondary axis (apparent magnitude) for correct positioning
-            # Mark the injected magnitudes used in the three cutout panels as
-            # short vertical red ticks near the top of the completeness plot.
-            #
-            # Use the apparent-magnitude axis if present, otherwise fall back to
-            # instrumental magnitudes (same values, different axis).
-            from matplotlib.transforms import blended_transform_factory
-            ymin, ymax = ax.get_ylim()
-            y_bottom = ymax - 0.05 * (ymax - ymin)  # 5% from top in data coordinates
-            y_top = ymax
-            if secax is not None:
-                xvals = list(mag_targets)  # already apparent mags
-                xtrans = secax.transData
-            else:
-                # Convert apparent targets back to instrumental for the primary axis.
-                if selected_zeropoint is not None and np.isfinite(float(selected_zeropoint)):
-                    xvals = [float(m) - float(selected_zeropoint) for m in mag_targets]
+            # Only when main plot is being drawn (ax and secax exist)
+            if draw_main_plot:
+                from matplotlib.transforms import blended_transform_factory
+                ymin, ymax = ax.get_ylim()
+                y_bottom = ymax - 0.05 * (ymax - ymin)  # 5% from top in data coordinates
+                y_top = ymax
+                if secax is not None:
+                    xvals = list(mag_targets)  # already apparent mags
+                    xtrans = secax.transData
                 else:
-                    xvals = list(mag_targets)
-                xtrans = ax.transData
-            transform = blended_transform_factory(xtrans, ax.transData)
-            for xv in xvals:
-                if not np.isfinite(xv):
-                    continue
-                ax.plot(
-                    [xv, xv],
-                    [y_bottom, y_top],
-                    color="red",
-                    alpha=0.55,
-                    linewidth=1.2,
-                    linestyle="--",
-                    marker=None,
-                    markevery=None,
-                    zorder=6,
-                    clip_on=False,
-                    transform=transform,
-                )
+                    # Convert apparent targets back to instrumental for the primary axis.
+                    if selected_zeropoint is not None and np.isfinite(float(selected_zeropoint)):
+                        xvals = [float(m) - float(selected_zeropoint) for m in mag_targets]
+                    else:
+                        xvals = list(mag_targets)
+                    xtrans = ax.transData
+                transform = blended_transform_factory(xtrans, ax.transData)
+                for xv in xvals:
+                    if not np.isfinite(xv):
+                        continue
+                    ax.plot(
+                        [xv, xv],
+                        [y_bottom, y_top],
+                        color="red",
+                        alpha=0.55,
+                        linewidth=1.2,
+                        linestyle="--",
+                        marker=None,
+                        markevery=None,
+                        zorder=6,
+                        clip_on=False,
+                        transform=transform,
+                    )
 
-        fig.tight_layout()
-        save_loc_png = os.path.join(write_dir, f"Completeness_{base}.png")
-        fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor="white")
-        plt.close(fig)
+        if owns_figure:
+            fig.tight_layout()
+            save_loc_png = os.path.join(write_dir, f"Completeness_{base}.png")
+            fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor="white")
+            plt.close(fig)
 
         # ---- Plot injection recovery vs magnitude (apparent vs instrumental) ----
         if bracket_steps or bisect_steps or extended_steps:
@@ -3809,7 +3823,7 @@ class Limits:
         """
         Draw a single completeness plot with bracket/bisect trajectories
         from multiple S/N threshold runs overlaid in distinct colors,
-        plus injection cutout inset panels from the primary (first) threshold.
+        plus injection cutout inset panels for EACH S/N threshold.
 
         Parameters
         ----------
@@ -3820,11 +3834,17 @@ class Limits:
         if not all_details:
             return
 
-        # Use the first (primary) threshold's detail to drive the inset panels
-        # via the existing _plot_completeness, then pass all thresholds' data
-        # for the multi-SNR overlay.
+        # Create figure with enough rows: 1 main plot + 1 row per threshold
+        n = len(all_details)
+        from matplotlib.gridspec import GridSpec
+        fig = plt.figure(figsize=set_size(540, 1 + 0.5 * n))
+        gs = GridSpec(1 + n, 4, figure=fig, height_ratios=[1.5] + [1] * n)
+
+        # Use the first (primary) threshold's detail to drive the main plot
+        # and first inset row, then add additional rows for remaining thresholds.
         primary = all_details[0]
 
+        # Main plot + first inset row (primary threshold)
         self._plot_completeness(
             None,  # No sample_mags
             None,  # No completeness_groups
@@ -3852,9 +3872,79 @@ class Limits:
             cutout_cx=primary.get("cutout_cx"),
             cutout_cy=primary.get("cutout_cy"),
             snr_limit=primary.get("snr_limit"),
-            # Pass all threshold details for combined overlay
             multi_snr_details=all_details,
+            fig=fig,
+            gs=gs,
+            inset_row=1,
+            draw_main_plot=True,
         )
+
+        # Add inset rows for remaining thresholds
+        for idx, detail in enumerate(all_details[1:], start=2):
+            self._plot_completeness(
+                None, None, None,
+                detail.get("bracket_steps", []),
+                detail.get("bisect_steps", []),
+                detail.get("inject_lmag", np.nan),
+                detail.get("completeness_target", 0.5),
+                detail.get("detection_cutoff"),
+                detail.get("zeropoint"),
+                detail.get("recovery_method"),
+                epsf_model=primary.get("epsf_model"),  # Shared
+                cutout=primary.get("cutout"),  # Shared
+                position=primary.get("position"),  # Shared
+                background_rms=primary.get("background_rms"),  # Shared
+                flux_for_mag=primary.get("flux_for_mag"),  # Shared
+                image_zeropoint=primary.get("image_zeropoint"),  # Shared
+                injection_df=primary.get("injection_df"),  # Shared
+                F_ref=primary.get("F_ref"),  # Shared
+                counts_ref=primary.get("counts_ref"),  # Shared
+                exposure_time=primary.get("exposure_time"),  # Shared
+                extended_steps=[],
+                orig_position=None,
+                target_name=self.input_yaml.get("target_name", None),
+                cutout_cx=primary.get("cutout_cx"),  # Shared
+                cutout_cy=primary.get("cutout_cy"),  # Shared
+                snr_limit=detail.get("snr_limit"),
+                multi_snr_details=None,
+                fig=fig,
+                gs=gs,
+                inset_row=idx,
+                draw_main_plot=False,
+            )
+
+        # Add S/N threshold labels on the left side of each inset row
+        for idx, detail in enumerate(all_details, start=1):
+            d_snr = detail.get("snr_limit")
+            if d_snr is not None:
+                # Add label as figure text to avoid GridSpec cell conflicts
+                try:
+                    # Compute position: left of each inset row
+                    n_rows = 1 + len(all_details)
+                    y_pos = 1.0 - (idx + 0.5) / n_rows  # Center of each row
+                    fig.text(
+                        0.02, y_pos, f"S/N ≥ {d_snr:.0f}",
+                        fontsize=10, fontweight="bold",
+                        ha="left", va="center", rotation=90,
+                    )
+                except Exception:
+                    pass
+
+        fig.tight_layout()
+        fpath = str(self.input_yaml.get("fpath", "frame"))
+        base = os.path.splitext(os.path.basename(fpath))[0]
+        write_dir = (
+            str(self.input_yaml.get("write_dir"))
+            if self.input_yaml.get("write_dir") not in (None, "", "None")
+            else os.path.dirname(fpath)
+        )
+        if not write_dir:
+            write_dir = "."
+        os.makedirs(write_dir, exist_ok=True)
+        save_loc_png = os.path.join(write_dir, f"Completeness_{base}.png")
+        fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        logger.info("Combined completeness plot saved: %s", save_loc_png)
 
     # -----------------------------------------------------------------------
     # Multi-S/N injection limiting magnitude
