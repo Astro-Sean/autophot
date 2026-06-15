@@ -1768,7 +1768,7 @@ class Zeropoint:
         import os
 
         apply_autophot_mplstyle()
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(340, 2.0), sharex=True)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(540, 2.0), sharex=True)
         fig.subplots_adjust(hspace=0.45)
 
         inlier_color = get_ransac_color('color_term_piece')
@@ -2587,7 +2587,7 @@ class Zeropoint:
 
             # ---- Plot ------------------------------------------------------
             apply_autophot_mplstyle()
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(340, 2.0), sharex=True)
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(540, 2.0), sharex=True)
             fig.subplots_adjust(hspace=0.45)
 
             inlier_color = get_ransac_color('color_term')

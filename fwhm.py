@@ -548,7 +548,7 @@ class Find_FWHM:
                 )
                 plt.ioff()
                 apply_autophot_mplstyle()
-                fig, ax = plt.subplots(figsize=set_size(340, 1))
+                fig, ax = plt.subplots(figsize=set_size(540, 1))
 
                 inlier_color = get_ransac_color('linearity')
                 outlier_color = get_ransac_color('outliers')

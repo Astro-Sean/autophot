@@ -2200,7 +2200,7 @@ class Catalog:
 
             apply_autophot_mplstyle()
             plt.ioff()
-            fig, ax1 = plt.subplots(figsize=set_size(340, 1))
+            fig, ax1 = plt.subplots(figsize=set_size(540, 1))
 
             if fit_line:
                 predicted = fit_line(inst_mag_linear)
