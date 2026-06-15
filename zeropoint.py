@@ -1475,7 +1475,7 @@ class Zeropoint:
                         flux_type,
                         zp_final,
                         zp_err,
-                        n_sources_used,
+                        n_inl,
                         mad_zp,
                     )
 
