@@ -46,19 +46,22 @@ logger = logging.getLogger(__name__)
 
 class ColoredLevelFormatter(logging.Formatter):
     """
-    Logging formatter with ANSI color highlights based on log level.
+    Logging formatter with consistent, minimal color coding.
 
-    Uses colors only when stdout is a TTY; otherwise it behaves like a normal
-    logging.Formatter (no ANSI escape sequences).
-    
-    Compact format for routine messages to reduce visual clutter.
+    Principle: Only warnings and errors get color. Routine output (INFO, DEBUG)
+    remains plain black for clean, professional appearance.
+
+    Color scheme:
+        - INFO/DEBUG:     Plain black (no color)
+        - WARNING:        Yellow (attention needed, not critical)
+        - ERROR:          Red (action required)
+        - CRITICAL:       Bold red (urgent failure)
     """
 
     RESET = "\033[0m"
     BOLD = "\033[1m"
-    BLUE = "\033[34m"
     RED = "\033[31m"
-    DIM = "\033[2m"
+    YELLOW = "\033[33m"
 
     def __init__(self, *args, use_color: bool = True, compact: bool = True, **kwargs):
         super().__init__(*args, **kwargs)
@@ -98,21 +101,15 @@ class ColoredLevelFormatter(logging.Formatter):
         if not use_color:
             return base
 
+        # Only warnings and errors get color - everything else is plain
         if record.levelno >= logging.CRITICAL:
             return f"{self.BOLD}{self.RED}{base}{self.RESET}"
         if record.levelno >= logging.ERROR:
-            return f"{self.BOLD}{self.RED}{base}{self.RESET}"
+            return f"{self.RED}{base}{self.RESET}"
         if record.levelno >= logging.WARNING:
-            # Keep warnings high-contrast without extra color coding.
-            return f"{self.BOLD}{base}{self.RESET}"
-        if record.levelno >= logging.DEBUG:
-            # Debug output: blue for quick visual scanning.
-            return f"{self.BLUE}{base}{self.RESET}"
-
-        # INFO/default: dim timestamp for cleaner look
-        if self._compact and base.startswith("  "):
-            # Repeated timestamp line - keep compact
-            return base
+            return f"{self.YELLOW}{base}{self.RESET}"
+        
+        # INFO/DEBUG: plain black (no color)
         return base
 
 
