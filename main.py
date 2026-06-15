@@ -3370,10 +3370,15 @@ def run_photometry():
         # =============================================================================
         # When template subtraction was used, build the ePSF from the *original* (pre-alignment)
         # science image so that star cutouts are not degraded by resampling (SWarp/AstroAlign).
+        # This can be overridden with psf_build_from_aligned=True to use the aligned image.
         epsf_model = None
         PSFSources = None
+        build_from_aligned = bool(
+            phot_cfg.get("psf_build_from_aligned", False)
+        )
         if (
-            template_available
+            not build_from_aligned
+            and template_available
             and science_path_original != fpath
             and os.path.exists(science_path_original)
             and (not do_aperture_ONLY or prepare_template)
@@ -3453,6 +3458,10 @@ def run_photometry():
             and epsf_model is None
             and len(IsolatedSources) >= min_sources_for_psf
         ):
+            if build_from_aligned:
+                logging.info(
+                    "Building PSF from aligned image (psf_build_from_aligned=True)."
+                )
             try:
                 Calibrate_Catalog = Catalog(input_yaml=input_yaml)
                 epsf_model, PSFSources = PSF(
