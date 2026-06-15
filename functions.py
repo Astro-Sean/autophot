@@ -776,32 +776,157 @@ def log_step(msg: str) -> str:
     return f"\n\n\n— {m} —\n"
 
 
-def border_msg(msg: str, body: str = "-", corner: str = "+") -> str:
+def border_msg(msg: str, body: str = "─", corner: str = "┌", 
+               metadata: str | None = None, width: int = 70) -> str:
     """
-    3-line banner for major log sections, with a blank line before and after.
+    Clean bordered banner for major log sections.
+
+    Parameters
+    ----------
+    msg : str
+        Main section title (centered if shorter than width)
+    body : str
+        Border character (default: box-drawing '─')
+    corner : str
+        Corner character (default: '┌'/'└' with '┐'/'┘')
+    metadata : str | None
+        Optional second line with key=value pairs
+    width : int
+        Total banner width in characters
 
     Example:
-        logging.info(border_msg("Filter check"))
+        logging.info(border_msg("Template Preparation", metadata="align=SWarp catalog=Gaia"))
     """
     text = str(msg).strip()
     if not text:
         return ""
 
-    line = text
-    border = body * len(line)
-
-    # Bold the title line on interactive terminals.
-    # (ANSI sequences are ignored by non-TTY log capture.)
+    # Use simple ASCII if box-drawing may not render
     try:
-        use_bold = sys.stdout.isatty()
+        use_unicode = sys.stdout.encoding == 'utf-8'
     except Exception:
-        use_bold = False
-    if use_bold:
-        bold_prefix = "\033[1m"
-        reset_suffix = "\033[0m"
-        line = f"{bold_prefix}{line}{reset_suffix}"
+        use_unicode = False
+    
+    if not use_unicode:
+        body = "-"
+        corner = "+"
+        left_corner = "+"
+        right_corner = "+"
+    else:
+        left_corner = corner
+        right_corner = "┐" if corner == "┌" else "┘"
 
-    return f"\n{border}\n{line}\n{border}\n"
+    # Truncate or pad title to fit
+    max_title = width - 4  # space for corners and padding
+    if len(text) > max_title:
+        text = text[:max_title-3] + "..."
+    
+    # Center the title
+    padding = max_title - len(text)
+    left_pad = padding // 2
+    right_pad = padding - left_pad
+    centered = f"{' ' * left_pad}{text}{' ' * right_pad}"
+
+    # Build lines
+    border_line = body * width
+    title_line = f"{left_corner}{centered}{right_corner}"
+    
+    lines = [f"\n{border_line}", title_line]
+    
+    if metadata:
+        meta_clean = str(metadata).strip()[:max_title]
+        meta_padded = f" {meta_clean}{' ' * (max_title - len(meta_clean) - 1)}"
+        lines.append(f"│{meta_padded}│")
+    
+    lines.append(border_line)
+    return "\n".join(lines) + "\n"
+
+
+def metrics_table(metrics: dict[str, tuple], title: str | None = None, width: int = 70) -> str:
+    """
+    Format a compact two-column metrics table.
+
+    Parameters
+    ----------
+    metrics : dict[str, tuple]
+        Dictionary of label -> (value, unit_or_note)
+        Example: {"Seeing FWHM": (3.5, "px"), "Zeropoint": (25.34, "mag")}
+    title : str | None
+        Optional title line printed above the table
+    width : int
+        Total width of the formatted block
+
+    Returns
+    -------
+    str
+        Formatted multi-line string ready for logging.info()
+    """
+    if not metrics:
+        return ""
+
+    lines: list[str] = []
+    if title:
+        lines.append(f"┌─ {title}{' ' * (width - len(title) - 4)}┐")
+    else:
+        lines.append(f"┌{'─' * (width - 2)}┐")
+
+    max_label = max(len(k) for k in metrics.keys())
+    value_space = width - max_label - 10  # spacing for "│  label... value  │"
+
+    for label, (value, unit) in metrics.items():
+        val_str = f"{value} {unit}".strip()
+        if len(val_str) > value_space:
+            val_str = val_str[:value_space-3] + "..."
+        line = f"│  {label:<{max_label}}  {val_str:>{value_space}}  │"
+        lines.append(line[:width])  # safety truncate
+
+    lines.append(f"└{'─' * (width - 2)}┘")
+    return "\n".join(lines)
+
+
+def compact_status(filename: str, results: dict) -> str:
+    """
+    One-line status summary for completed image processing.
+
+    Parameters
+    ----------
+    filename : str
+        Base filename (will be truncated if too long)
+    results : dict
+        Must contain keys: 'mag', 'mag_err', 'snr', 'detected' (bool),
+        optionally 'zp', 'n_cal', 'template'
+
+    Example output:
+        ✓ SN2024pba_ZTF_r.fits  r=18.34±0.03  S/N=12.5  ✓ Detection
+    """
+    base = os.path.basename(filename)
+    if len(base) > 30:
+        base = "..." + base[-27:]
+
+    mag = results.get('mag', float('nan'))
+    mag_err = results.get('mag_err', float('nan'))
+    snr = results.get('snr', float('nan'))
+    detected = results.get('detected', False)
+    zp = results.get('zp')
+    n_cal = results.get('n_cal')
+
+    parts = [f"{'✓' if detected else '○'} {base:>30}"]
+
+    if np.isfinite(mag) and np.isfinite(mag_err):
+        parts.append(f"m={mag:.2f}±{mag_err:.2f}")
+
+    if np.isfinite(snr):
+        parts.append(f"S/N={snr:.1f}")
+
+    if zp is not None and np.isfinite(zp):
+        parts.append(f"zp={zp:.2f}")
+
+    if n_cal is not None:
+        parts.append(f"cal={n_cal}")
+
+    parts.append("✓ Detection" if detected else "○ Limit")
+
+    return "  ".join(parts)
 
 
 # Telescope/instrument config: images must have FITS header keywords TELESCOP and INSTRUME.

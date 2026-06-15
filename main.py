@@ -115,6 +115,8 @@ from functions import (
     AutophotYaml,
     log_step,
     border_msg,
+    metrics_table,
+    compact_status,
     convert_to_mjd_astropy,
     get_instrument_config,
     load_telescope_config,
