@@ -768,6 +768,7 @@ def find_conda_env(env_name: str) -> Optional[str]:
             ["conda", "env", "list"],
             capture_output=True,
             text=True,
+            timeout=30,
         )
         for line in proc.stdout.splitlines():
             if env_name in line:
@@ -963,6 +964,7 @@ def install_pyzogy() -> None:
             [sys.executable, "setup.py", "install"],
             cwd=str(dest),
             check=True,
+            timeout=120,
         )
         logger.info("PyZOGY installed successfully")
 
@@ -5001,9 +5003,11 @@ class Templates:
                 sfft_env[_k] = "1"
 
             cmd = _build_sfft_cmd(current_excluded, current_matching_sources, template_work_fpath, outputFpath)
+            sfft_timeout = float(ts_sub.get("sfft_timeout", 300))
             with open(log_path, "w") as lf:
                 subprocess.run(
-                    cmd, check=True, text=True, stdout=lf, stderr=lf, env=sfft_env
+                    cmd, check=True, text=True, stdout=lf, stderr=lf, env=sfft_env,
+                    timeout=sfft_timeout
                 )
 
             # Optional one-pass feedback: exclude SFFT post-anomaly sources and rerun.
@@ -5082,6 +5086,7 @@ class Templates:
                             stdout=lf,
                             stderr=lf,
                             env=sfft_env,
+                            timeout=sfft_timeout,
                         )
                 elif n_post > 0:
                     logger.info(

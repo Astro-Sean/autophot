@@ -659,10 +659,11 @@ NNW
                     stderr=subprocess.PIPE,
                     check=True,
                     text=True,
+                    timeout=10,
                 )
                 self._executables[name] = cmd
                 return cmd
-            except (OSError, subprocess.CalledProcessError):
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 continue
         raise FileNotFoundError(f"Executable not found: {name}")
 

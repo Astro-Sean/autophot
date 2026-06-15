@@ -152,7 +152,7 @@ def test_skip_resampling(science_path, reference_path, output_dir, verbose=1):
             # Clean up temporary config file
             try:
                 os.unlink(config_path)
-            except:
+            except Exception:
                 pass
     
     # Summary

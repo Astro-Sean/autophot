@@ -1024,7 +1024,7 @@ class SExtractorWrapper:
                 check_image_path = temp_dir / f"{base_name}_PYSEx_CHECK.fits"
                 cmd.extend(["-CHECKIMAGE_NAME", str(check_image_path)])
 
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             if result.returncode != 0:
                 raise RuntimeError(f"SExtractor failed: {result.stderr}")
 

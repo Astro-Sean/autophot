@@ -266,7 +266,7 @@ class AlignmentMethodAnalyzer:
             from astropy.wcs.utils import proj_plane_pixel_scales
             scales = proj_plane_pixel_scales(wcs)
             return scales[0] * 3600.0  # Convert to arcsec/pixel
-        except:
+        except Exception:
             return None
     
     def _make_recommendation(self, analysis):
