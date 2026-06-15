@@ -1843,7 +1843,7 @@ class Limits:
                 _n_tot = len(det_flags)
                 _bar_width = 20
                 logger.info(
-                    "  inject m=%+7.3f | %5.1f%%  (%d/%d detected)",
+                    "inject m=%+7.3f | %5.1f%%  (%d/%d detected)",
                     m, 100.0 * _rate, _n_det, _n_tot,
                 )
 
