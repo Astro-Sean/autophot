@@ -87,14 +87,26 @@ class ColoredLevelFormatter(logging.Formatter):
             
             if self._msg_count == 1:
                 # First message ever: no blank line, show timestamp
-                base = f"{time_str}  {msg_clean}"
+                # But skip timestamp for bordered messages (they have their own visual structure)
+                first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
+                if first_line.startswith("─"):
+                    base = msg_clean
+                else:
+                    base = f"{time_str}  {msg_clean}"
             elif time_str == self._last_time:
                 # Same second as previous: no blank line, indent only
-                base = f"  {msg_clean}"
+                # Don't indent bordered messages (they have their own visual structure)
+                first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
+                if first_line.startswith("─"):
+                    base = msg_clean
+                else:
+                    base = f"  {msg_clean}"
             else:
                 # New timestamp: blank line before, show timestamp
                 # But skip blank line for bordered messages (they have their own visual separation)
-                if msg_clean.startswith("─"):
+                # Check first non-empty line for box-drawing character
+                first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
+                if first_line.startswith("─"):
                     base = f"{time_str}  {msg_clean}"
                 else:
                     base = f"\n{time_str}  {msg_clean}"
@@ -879,7 +891,7 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
         lines.append(f"│{meta_padded}│")
     
     lines.append(border_line)
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines)
 
 
 def metrics_table(metrics: dict[str, tuple], title: str | None = None, width: int = 70) -> str:
