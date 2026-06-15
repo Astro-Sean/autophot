@@ -1761,78 +1761,10 @@ def download_2mass_template(
 # =============================================================================
 # Constrained Slope Regressor
 # =============================================================================
+# Canonical implementation lives in zeropoint.PenalisedSlopeRegressor.
+# Alias kept here so all call sites in this file continue to work unchanged.
 
-
-class ConstrainedSlopeRegressor(BaseEstimator, RegressorMixin):
-    """
-    Ordinary-least-squares linear fit with an optional soft constraint
-    that penalises slopes far from a target value, or a fixed slope.
-
-    This is designed for the photometric magnitude-comparison fit where
-    a slope of ~1.0 is physically expected (flux-consistent sources).
-    When *fixed_slope* is set, only the intercept is fitted (slope fixed).
-
-    Parameters
-    ----------
-    slope_constraint : float
-        Target slope value (default 1.0).
-    slope_tolerance : float
-        Half-width of the zero-penalty zone around *slope_constraint*.
-    enforce : bool
-        If False, the constraint is disabled entirely.
-    fixed_slope : float, optional
-        If set, slope is fixed to this value and only intercept is fitted
-        (mean(y - fixed_slope * x)). Takes precedence over enforce.
-    """
-
-    def __init__(
-        self,
-        slope_constraint: float = 1.0,
-        slope_tolerance: float = 0.1,
-        enforce: bool = True,
-        fixed_slope: Optional[float] = None,
-    ):
-        self.slope_constraint = slope_constraint
-        self.slope_tolerance = slope_tolerance
-        self.enforce = enforce
-        self.fixed_slope = fixed_slope
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "ConstrainedSlopeRegressor":
-        if check_X_y is None or not _SKLEARN_AVAILABLE:
-            raise ModuleNotFoundError(
-                "scikit-learn is required for ConstrainedSlopeRegressor."
-            )
-        X, y = check_X_y(X, y)
-        x = X.ravel()
-
-        if self.fixed_slope is not None:
-            self.slope_ = float(self.fixed_slope)
-            self.intercept_ = float(np.nanmean(y - self.fixed_slope * x))
-            return self
-
-        def _loss(params: np.ndarray) -> float:
-            slope, intercept = params
-            mse = np.mean((y - (slope * x + intercept)) ** 2)
-            if self.enforce:
-                violation = max(
-                    0.0, abs(slope - self.slope_constraint) - self.slope_tolerance
-                )
-                return mse + 100.0 * violation
-            return mse
-
-        init = [1.0, float(np.mean(y) - np.mean(x))]
-        result = minimize(_loss, init, method="L-BFGS-B")
-        self.slope_, self.intercept_ = result.x
-        return self
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        if check_is_fitted is None or check_array is None or not _SKLEARN_AVAILABLE:
-            raise ModuleNotFoundError(
-                "scikit-learn is required for ConstrainedSlopeRegressor.predict."
-            )
-        check_is_fitted(self)
-        X = check_array(X)
-        return self.slope_ * X.ravel() + self.intercept_
+from zeropoint import PenalisedSlopeRegressor as ConstrainedSlopeRegressor  # noqa: E402
 
 
 # =============================================================================
@@ -1906,9 +1838,13 @@ class Templates:
         subset = dataframe.head(nsources)
         logger.info("Creating source mask with %d sources", len(subset))
 
-        for _, row in subset.iterrows():
-            ap = CircularAperture((row["x_pix"], row["y_pix"]), r=radius)
-            mask += ap.to_mask().to_image(shape=shape).astype(np.int32)
+        positions = list(zip(subset["x_pix"].values, subset["y_pix"].values))
+        if positions:
+            aps = CircularAperture(positions, r=radius)
+            for ap_mask in aps.to_mask(method="center"):
+                img = ap_mask.to_image(shape=shape)
+                if img is not None:
+                    mask += img.astype(np.int32)
 
         # Collapse overlapping apertures
         mask = np.clip(mask, 0, 1)
@@ -2300,11 +2236,11 @@ class Templates:
             # segmentation footprints BEFORE removing them from tbl.
             # Previously these were silently dropped, so bloomed/saturated
             # stars were never present in the output mask.
-            for _, bad_src in tbl[is_saturated | is_negative].iterrows():
-                seg_pixels = seg.data == bad_src["label"]
+            for bad_src in tbl[is_saturated | is_negative].itertuples(index=False):
+                seg_pixels = seg.data == bad_src.label
                 mask[seg_pixels] = 1
-                cx = (bad_src["bbox_xmin"] + bad_src["bbox_xmax"]) / 2
-                cy = (bad_src["bbox_ymin"] + bad_src["bbox_ymax"]) / 2
+                cx = (bad_src.bbox_xmin + bad_src.bbox_xmax) / 2
+                cy = (bad_src.bbox_ymin + bad_src.bbox_ymax) / 2
                 masked_centres.append((float(cx), float(cy)))
 
             if remove_large_sources:
@@ -2327,34 +2263,38 @@ class Templates:
 
             # --- Mask bright-catalog overlaps ---
             if bright_sources is not None and len(bright_sources) > 0:
-                for _, src in tbl.iterrows():
-                    cx = (src["bbox_xmin"] + src["bbox_xmax"]) / 2
-                    cy = (src["bbox_ymin"] + src["bbox_ymax"]) / 2
+                bright_xy = list(zip(bright_sources["x_pix"].values,
+                                     bright_sources["y_pix"].values))
+                for src in tbl.itertuples(index=False):
+                    cx = (src.bbox_xmin + src.bbox_xmax) / 2
+                    cy = (src.bbox_ymin + src.bbox_ymax) / 2
+                    src_dict = src._asdict()
                     overlaps = any(
-                        self.does_box_overlap(src, (bs["x_pix"], bs["y_pix"]), padding)
-                        for _, bs in bright_sources.iterrows()
+                        self.does_box_overlap(src_dict, bxy, padding)
+                        for bxy in bright_xy
                     )
                     if overlaps:
-                        seg_pixels = seg.data == src["label"]
+                        seg_pixels = seg.data == src.label
                         mask[seg_pixels] = 1
                         masked_centres.append((cx, cy))
 
             # --- Mask remaining flagged sources (skip if near target) ---
             invalid_bbox_count = 0
-            for _, src in tbl.iterrows():
-                cx = (src["bbox_xmin"] + src["bbox_xmax"]) / 2
-                cy = (src["bbox_ymin"] + src["bbox_ymax"]) / 2
+            for src in tbl.itertuples(index=False):
+                cx = (src.bbox_xmin + src.bbox_xmax) / 2
+                cy = (src.bbox_ymin + src.bbox_ymax) / 2
+                src_dict = src._asdict()
 
                 if any(
-                    self.does_box_overlap(src, pos, padding) for pos in ignore_position
+                    self.does_box_overlap(src_dict, pos, padding) for pos in ignore_position
                 ):
                     continue
 
                 # Guard against degenerate/invalid segmentation boxes.
-                x_min = float(src["bbox_xmin"])
-                x_max = float(src["bbox_xmax"])
-                y_min = float(src["bbox_ymin"])
-                y_max = float(src["bbox_ymax"])
+                x_min = float(src.bbox_xmin)
+                x_max = float(src.bbox_xmax)
+                y_min = float(src.bbox_ymin)
+                y_max = float(src.bbox_ymax)
                 if not np.all(np.isfinite([x_min, x_max, y_min, y_max, cx, cy])):
                     invalid_bbox_count += 1
                     continue

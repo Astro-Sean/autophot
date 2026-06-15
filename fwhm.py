@@ -699,7 +699,10 @@ class Find_FWHM:
                 )
                 if sigma is not None:
                     min_sigma = 0.5 / SQRT2LOG2
-                    max_sigma = 30 / SQRT2LOG2
+                    _max_sigma_px = float(
+                        (self.input_yaml or {}).get("fwhm_max_sigma_px", 30)
+                    )
+                    max_sigma = _max_sigma_px / SQRT2LOG2
                     params["sigmax"].set(value=sigma, min=min_sigma, max=max_sigma)
                     params["sigmay"].set(value=sigma, min=min_sigma, max=max_sigma)
                     params["sigmay"].set(expr="sigmax")

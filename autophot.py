@@ -533,14 +533,31 @@ try:
     )
     from prepare import Prepare  # type: ignore
 except Exception as _exc:  # pragma: no cover
-    _IMPORT_ERROR_AUTOPHOT_DEPS = _exc
-    log_step = None  # type: ignore
-    AutophotYaml = None  # type: ignore
-    concatenate_csv_files = None  # type: ignore
-    print_progress_bar = None  # type: ignore
-    log_exception = None  # type: ignore
-    sanitize_photometric_filters = None  # type: ignore
-    Prepare = None  # type: ignore
+    # If the normal import fails (e.g. in Spyder where sys.path may not
+    # contain the package directory), fall back to importing from the
+    # same directory as this file.
+    _fallback_dir = os.path.dirname(os.path.abspath(__file__))
+    if _fallback_dir not in sys.path:
+        sys.path.insert(0, _fallback_dir)
+    try:
+        from functions import (  # type: ignore
+            AutophotYaml,
+            concatenate_csv_files,
+            log_step,
+            log_exception,
+            print_progress_bar,
+            sanitize_photometric_filters,
+        )
+        from prepare import Prepare  # type: ignore
+    except Exception as _exc2:
+        _IMPORT_ERROR_AUTOPHOT_DEPS = _exc2
+        log_step = None  # type: ignore
+        AutophotYaml = None  # type: ignore
+        concatenate_csv_files = None  # type: ignore
+        print_progress_bar = None  # type: ignore
+        log_exception = None  # type: ignore
+        sanitize_photometric_filters = None  # type: ignore
+        Prepare = None  # type: ignore
 
 
 # =============================================================================

@@ -1818,7 +1818,7 @@ class Plot:
                 try:
                     from astropy.wcs import utils as wcs_utils
                     pixel_scale = wcs_utils.proj_plane_pixel_scales(imageWCS)[0] * 3600  # Convert to arcsec
-                except:
+                except Exception:
                     pass
 
             if pixel_scale is not None and pixel_scale > 0:

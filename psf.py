@@ -1180,6 +1180,14 @@ class PoissonLikelihoodFitter:
 # ===========================================================================
 
 
+def _first_col(df, candidates):
+    """Return the first column name from *candidates* that exists in *df*, or None."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
 class PSF:
     """
     Point Spread Function construction, fitting, and diagnostics.
@@ -3891,47 +3899,58 @@ class PSF:
                 # Ensure _inverted_fit column exists as boolean type
                 if "_inverted_fit" not in combined.columns:
                     combined["_inverted_fit"] = False
-                
-                # Use .loc for robust column updates instead of fragile iloc/get_loc pattern
-                for _, inv_row in combined_inv_good.iterrows():
-                    idx_val = inv_row["idx"]
-                    # Find the row in combined with matching idx
-                    mask = combined["idx"] == idx_val
-                    if np.any(mask):
-                        row_idx = combined[mask].index[0]
-                        # Mark as inverted fit
-                        combined.loc[row_idx, "_inverted_fit"] = True
-                        # Copy inverted fit values (they'll be negated later)
-                        for col in ["x_fit", "xcenter_fit", "x_0_fit"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = inv_row[col]
-                                break
-                        for col in ["y_fit", "ycenter_fit", "y_0_fit"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = inv_row[col]
-                                break
-                        for col in ["flux_fit", "flux"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = -1.0 * inv_row[col]  # Negative flux
-                                break
-                        for col in ["flux_fit_err", "flux_err", "flux_uncertainty"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = inv_row[col]
-                                break
-                        for col in ["x_fit_err", "x_err", "xcenter_fit_err"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = inv_row[col]
-                                break
-                        for col in ["y_fit_err", "y_err", "ycenter_fit_err"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = inv_row[col]
-                                break
-                        if "flags" in inv_row and "flags" in combined.columns:
-                            combined.loc[row_idx, "flags"] = inv_row["flags"]
-                        for col in ["cfit", "qfit", "reduced_chi2", "chi2_red"]:
-                            if col in inv_row and col in combined.columns:
-                                combined.loc[row_idx, col] = inv_row[col]
-                                break
+
+                # --- Vectorised update of combined with inverted-fit results ---
+                # Resolve which column name is actually present for each logical field.
+                x_col   = _first_col(combined, ["x_fit", "xcenter_fit", "x_0_fit"])
+                y_col   = _first_col(combined, ["y_fit", "ycenter_fit", "y_0_fit"])
+                fx_col  = _first_col(combined, ["flux_fit", "flux"])
+                fe_col  = _first_col(combined, ["flux_fit_err", "flux_err", "flux_uncertainty"])
+                xe_col  = _first_col(combined, ["x_fit_err", "x_err", "xcenter_fit_err"])
+                ye_col  = _first_col(combined, ["y_fit_err", "y_err", "ycenter_fit_err"])
+                gof_col = _first_col(combined, ["cfit", "qfit", "reduced_chi2", "chi2_red"])
+
+                ix_col  = _first_col(combined_inv_good, ["x_fit", "xcenter_fit", "x_0_fit"])
+                iy_col  = _first_col(combined_inv_good, ["y_fit", "ycenter_fit", "y_0_fit"])
+                ifx_col = _first_col(combined_inv_good, ["flux_fit", "flux"])
+                ife_col = _first_col(combined_inv_good, ["flux_fit_err", "flux_err", "flux_uncertainty"])
+                ixe_col = _first_col(combined_inv_good, ["x_fit_err", "x_err", "xcenter_fit_err"])
+                iye_col = _first_col(combined_inv_good, ["y_fit_err", "y_err", "ycenter_fit_err"])
+                igof_col = _first_col(combined_inv_good, ["cfit", "qfit", "reduced_chi2", "chi2_red"])
+
+                # Build a lookup: idx_val -> row label in combined
+                idx_to_label = {
+                    idx_val: combined[combined["idx"] == idx_val].index[0]
+                    for idx_val in combined_inv_good["idx"].values
+                    if np.any(combined["idx"] == idx_val)
+                }
+
+                if idx_to_label:
+                    row_labels = list(idx_to_label.values())
+                    inv_subset = combined_inv_good[
+                        combined_inv_good["idx"].isin(idx_to_label)
+                    ].copy()
+                    inv_subset.index = [
+                        idx_to_label[v] for v in inv_subset["idx"].values
+                    ]
+
+                    combined.loc[row_labels, "_inverted_fit"] = True
+                    if x_col and ix_col:
+                        combined.loc[row_labels, x_col] = inv_subset[ix_col].values
+                    if y_col and iy_col:
+                        combined.loc[row_labels, y_col] = inv_subset[iy_col].values
+                    if fx_col and ifx_col:
+                        combined.loc[row_labels, fx_col] = -1.0 * inv_subset[ifx_col].values
+                    if fe_col and ife_col:
+                        combined.loc[row_labels, fe_col] = inv_subset[ife_col].values
+                    if xe_col and ixe_col:
+                        combined.loc[row_labels, xe_col] = inv_subset[ixe_col].values
+                    if ye_col and iye_col:
+                        combined.loc[row_labels, ye_col] = inv_subset[iye_col].values
+                    if "flags" in combined_inv_good.columns and "flags" in combined.columns:
+                        combined.loc[row_labels, "flags"] = inv_subset["flags"].values
+                    if gof_col and igof_col:
+                        combined.loc[row_labels, gof_col] = inv_subset[igof_col].values
             else:
                 log.info("Inverted PSF fit did not improve any sources.")
 
@@ -3940,18 +3959,24 @@ class PSF:
             try:
                 # Create a copy of sources with inverted fit results for plotting
                 inv_plot_sources = sources.copy()
-                # Update with inverted fit positions
-                for _, inv_row in combined_inv_good.iterrows():
-                    idx_val = inv_row["idx"]
-                    if idx_val < len(inv_plot_sources):
-                        for col in ["x_fit", "xcenter_fit", "x_0_fit"]:
-                            if col in inv_row:
-                                inv_plot_sources.at[idx_val, "x_fit"] = inv_row[col]
-                                break
-                        for col in ["y_fit", "ycenter_fit", "y_0_fit"]:
-                            if col in inv_row:
-                                inv_plot_sources.at[idx_val, "y_fit"] = inv_row[col]
-                                break
+                # Vectorised position update for plotting
+                _ix_col = _first_col(combined_inv_good, ["x_fit", "xcenter_fit", "x_0_fit"])
+                _iy_col = _first_col(combined_inv_good, ["y_fit", "ycenter_fit", "y_0_fit"])
+                valid_inv = combined_inv_good[
+                    combined_inv_good["idx"] < len(inv_plot_sources)
+                ]
+                if "x_fit" not in inv_plot_sources.columns:
+                    inv_plot_sources["x_fit"] = np.nan
+                if "y_fit" not in inv_plot_sources.columns:
+                    inv_plot_sources["y_fit"] = np.nan
+                if _ix_col and len(valid_inv) > 0:
+                    inv_plot_sources.iloc[
+                        valid_inv["idx"].values, inv_plot_sources.columns.get_loc("x_fit")
+                    ] = valid_inv[_ix_col].values
+                if _iy_col and len(valid_inv) > 0:
+                    inv_plot_sources.iloc[
+                        valid_inv["idx"].values, inv_plot_sources.columns.get_loc("y_fit")
+                    ] = valid_inv[_iy_col].values
                 
                 # Plot with inverted image data and the fitted PSF model
                 self.plot(
@@ -4404,19 +4429,16 @@ class PSF:
             if "x_pix" in sources and "y_pix" in sources:
                 fwhm = float(self.input_yaml.get("fwhm", 3.0))
                 r = fwhm / 2.0
-                for _, row in sources.iterrows():
-                    ax1.add_patch(
-                        Circle(
-                            (row["x_pix"], row["y_pix"]),
-                            r,
-                            edgecolor="#FF00FF",
-                            facecolor="none",
-                            lw=1.2,
-                            alpha=0.9,
-                            zorder=10,
-                            label="Input position",
-                        )
-                    )
+                from matplotlib.collections import PatchCollection as _PC
+                _circles = [
+                    Circle((row["x_pix"], row["y_pix"]), r)
+                    for _, row in sources[["x_pix", "y_pix"]].iterrows()
+                ]
+                if _circles:
+                    pc = _PC(_circles, edgecolors="#FF00FF", facecolors="none",
+                              linewidths=1.2, alpha=0.9, zorder=10,
+                              label="Input position")
+                    ax1.add_collection(pc)
                 # Add dashed box showing fitting bounds region
                 phot_cfg = self.input_yaml.get("photometry", {})
                 cfg_xy_bounds_arcsec = phot_cfg.get("fitting_xy_bounds", 3.0)
@@ -4427,82 +4449,62 @@ class PSF:
                         pixel_scale = float(pixel_scale)
                         if pixel_scale > 0:
                             fitting_radius_px = cfg_xy_bounds_arcsec / pixel_scale
-                            for _, row in sources.iterrows():
-                                x_center = row["x_pix"]
-                                y_center = row["y_pix"]
-                                ax1.add_patch(
-                                    Rectangle(
-                                        (x_center - fitting_radius_px, y_center - fitting_radius_px),
-                                        2 * fitting_radius_px,
-                                        2 * fitting_radius_px,
-                                        edgecolor="cyan",
-                                        facecolor="none",
-                                        lw=1.0,
-                                        ls="--",
-                                        alpha=0.6,
-                                        label="Fitting bounds",
-                                    )
+                            _rects = [
+                                Rectangle(
+                                    (row["x_pix"] - fitting_radius_px,
+                                     row["y_pix"] - fitting_radius_px),
+                                    2 * fitting_radius_px,
+                                    2 * fitting_radius_px,
                                 )
+                                for _, row in sources[["x_pix", "y_pix"]].iterrows()
+                            ]
+                            if _rects:
+                                rc = _PC(_rects, edgecolors="cyan", facecolors="none",
+                                          linewidths=1.0, linestyles="--", alpha=0.6,
+                                          label="Fitting bounds")
+                                ax1.add_collection(rc)
                     except Exception:
                         pass
 
             if "x_fit" in sources and "y_fit" in sources:
                 fwhm = float(self.input_yaml.get("fwhm", 3.0))
                 r = fwhm / 2.0
-                for _fit_i, (_, row) in enumerate(sources.iterrows()):
-                    # Cross with length 2r (horizontal and vertical lines)
-                    ax1.plot(
-                        [row["x_fit"] - r, row["x_fit"] + r],
-                        [row["y_fit"], row["y_fit"]],
-                        color="red",
-                        lw=1.2,
-                        alpha=0.9,
-                        zorder=11,
-                        label="Fitted position" if _fit_i == 0 else None,
-                    )
-                    ax1.plot(
-                        [row["x_fit"], row["x_fit"]],
-                        [row["y_fit"] - r, row["y_fit"] + r],
-                        color="red",
-                        lw=1.2,
-                        alpha=0.9,
-                        zorder=11,
-                    )
-                    # Keep the aperture circle as reference
-                    ax1.add_patch(
-                        Circle(
-                            (row["x_fit"], row["y_fit"]),
-                            aperture_radius,
-                            edgecolor="white",
-                            facecolor="none",
-                            lw=0.5,
-                            ls="--",
-                            alpha=0.6,
-                            zorder=9,
-                        )
-                    )
-                    xe, ye = row.get("x_fit_err", np.nan), row.get("y_fit_err", np.nan)
+                xf = sources["x_fit"].values
+                yf = sources["y_fit"].values
+                # Horizontal bars of crosses
+                ax1.plot(
+                    np.column_stack([xf - r, xf + r]).T,
+                    np.column_stack([yf, yf]).T,
+                    color="red", lw=1.2, alpha=0.9, zorder=11,
+                )
+                # Vertical bars of crosses (label only once)
+                ax1.plot(
+                    np.column_stack([xf, xf]).T,
+                    np.column_stack([yf - r, yf + r]).T,
+                    color="red", lw=1.2, alpha=0.9, zorder=11,
+                    label="Fitted position",
+                )
+                # Aperture reference circles
+                _ap_circles = [Circle((x, y), aperture_radius) for x, y in zip(xf, yf)]
+                if _ap_circles:
+                    apc = _PC(_ap_circles, edgecolors="white", facecolors="none",
+                               linewidths=0.5, linestyles="--", alpha=0.6, zorder=9)
+                    ax1.add_collection(apc)
+                # Error ellipses where finite and within bounds
+                xe_arr = sources.get("x_fit_err", pd.Series(np.nan, index=sources.index)).values
+                ye_arr = sources.get("y_fit_err", pd.Series(np.nan, index=sources.index)).values
+                _ellipses, _dummy = [], []
+                for x, y, xe, ye in zip(xf, yf, xe_arr, ye_arr):
                     if (
-                        np.isfinite(xe)
-                        and np.isfinite(ye)
-                        and xe > 0
-                        and ye > 0
-                        and xe < scale
-                        and ye < scale
+                        np.isfinite(xe) and np.isfinite(ye)
+                        and xe > 0 and ye > 0
+                        and xe < scale and ye < scale
                     ):
-                        ax1.add_patch(
-                            Ellipse(
-                                (row["x_fit"], row["y_fit"]),
-                                2 * xe,
-                                2 * ye,
-                                angle=0,
-                                edgecolor="red",
-                                facecolor="none",
-                                lw=0.5,
-                                alpha=0.6,
-                                zorder=9,
-                            )
-                        )
+                        _ellipses.append(Ellipse((x, y), 2 * xe, 2 * ye, angle=0))
+                if _ellipses:
+                    ec = _PC(_ellipses, edgecolors="red", facecolors="none",
+                              linewidths=0.5, alpha=0.6, zorder=9)
+                    ax1.add_collection(ec)
 
             # ---- Projections helper ----------------------------------------
             # Right-panel step is drawn separately with _draw_right_step so the profile

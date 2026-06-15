@@ -1894,40 +1894,51 @@ class Catalog:
                 catalog_i, catalogName=catalogName, update_names_only=True
             )
 
-            # Collect new rows to avoid repeated concat in loop
+            # Vectorised cross-match: build sky coords for both tables at once,
+            # call match_to_catalog_sky once (O(N log N)), then split into new /
+            # update groups.  Falls back to per-row path when output_catalog is
+            # empty (first catalog iteration).
             new_rows = []
-            
-            # Loop over each entry in the current catalog
-            for index, entry in catalog_i.iterrows():
-                ra = entry["RA"]
-                dec = entry["DEC"]
-
-                # Check if the source exists in the output catalog
-                existing_source = self.find_source(
-                    ra, dec, output_catalog, tolerance=tolerance_arcsec
+            if output_catalog.empty:
+                # No existing sources yet — all entries are new.
+                new_rows = [{col: entry.get(col, np.nan) for col in cols}
+                            for _, entry in catalog_i.iterrows()]
+            else:
+                coords_existing = SkyCoord(
+                    ra=output_catalog["RA"].values * u.degree,
+                    dec=output_catalog["DEC"].values * u.degree,
                 )
+                coords_new = SkyCoord(
+                    ra=catalog_i["RA"].values * u.degree,
+                    dec=catalog_i["DEC"].values * u.degree,
+                )
+                idx_match, sep2d, _ = coords_new.match_to_catalog_sky(coords_existing)
+                tol_deg = tolerance_arcsec / 3600.0
+                matched = sep2d.deg < tol_deg
 
-                if existing_source.empty:
-                    # Source does not exist, add to new rows list
-                    new_row = {col: entry.get(col, np.nan) for col in cols}
-                    new_rows.append(new_row)
-                else:
-                    # Source exists, update the row with missing filter data
-                    index = existing_source.index[0]
-                    for filter_name in updated_filter_list:
-                        if filter_name in entry and pd.isna(
-                            output_catalog.at[index, filter_name]
-                        ):
-                            output_catalog.at[index, filter_name] = entry[filter_name]
-            
-            # Concatenate all new rows at once for performance
+                for i, (is_matched, entry) in enumerate(
+                    zip(matched, catalog_i.itertuples(index=False))
+                ):
+                    entry_dict = entry._asdict()
+                    if not is_matched:
+                        new_rows.append({col: entry_dict.get(col, np.nan) for col in cols})
+                    else:
+                        out_idx = output_catalog.index[idx_match[i]]
+                        for filter_name in updated_filter_list:
+                            if filter_name in entry_dict and pd.isna(
+                                output_catalog.at[out_idx, filter_name]
+                            ):
+                                output_catalog.at[out_idx, filter_name] = entry_dict[filter_name]
+
             if new_rows:
                 new_rows_df = pd.DataFrame(new_rows)
-                n_before = len(output_catalog)
                 output_catalog = pd.concat(
                     [output_catalog, new_rows_df], ignore_index=True
                 )
-                logger.info(f"Added {len(new_rows_df)} sources from {catalogName}, catalog now has {len(output_catalog)} sources")
+                logger.info(
+                    "Added %d sources from %s, catalog now has %d sources",
+                    len(new_rows_df), catalogName, len(output_catalog),
+                )
 
         # Final deduplication: remove any duplicate sources that may have been added
         if not output_catalog.empty:
@@ -2960,9 +2971,6 @@ class Catalog:
 
         # Measure the sources using aperture photometry
         selectedCatalog = initialAperture.measure(sources=selectedCatalog)
-
-        # Rename the flux column to reflect the aperture measurement
-        selectedCatalog.rename(columns={"flux": "flux_AP"}, inplace=True)
 
         # Calculate the instrumental magnitude based on the measured flux (mag() does not mutate flux_AP)
         instMag = mag(selectedCatalog["flux_AP"])

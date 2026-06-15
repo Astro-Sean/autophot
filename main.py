@@ -536,7 +536,7 @@ def run_photometry():
     """
 
     # Use 0-based indexing to match numpy array convention
-    index = 0
+    wcs_origin = 0
     start = time.time()
 
     #  Filter Out Astropy Warnings
@@ -599,12 +599,12 @@ def run_photometry():
     #  Helper Function: Update Target Pixel Coordinates
     # Updates the target's pixel coordinates after any changes to the WCS.
     # Uses origin=0 (0-based) to match numpy array convention.
-    def update_target_pixel_coords(input_yaml, imageWCS, index=0):
-        """Update target pixel coordinates after WCS changes. index is WCS origin (0=0-based)."""
+    def update_target_pixel_coords(input_yaml, imageWCS, wcs_origin=0):
+        """Update target pixel coordinates after WCS changes. wcs_origin is WCS origin (0=0-based)."""
         target_x_pix, target_y_pix = imageWCS.all_world2pix(
             input_yaml["target_ra"],
             input_yaml["target_dec"],
-            index,
+            wcs_origin,
         )
         input_yaml["target_x_pix"] = target_x_pix
         input_yaml["target_y_pix"] = target_y_pix
@@ -2042,9 +2042,6 @@ def run_photometry():
             input_yaml["cosmic_rays"].get("remove_cmrays", False)
             and not already_cleaned
         ):
-            # if telescope == "PS1":
-            #     pass
-            # else:
             logging.info(
                 log_step(
                     f"Remove cosmic rays / streaks: {base_filename}"
@@ -2419,7 +2416,7 @@ def run_photometry():
                     equinox="J2000",
                 )
                 target_x_pix, target_y_pix = update_target_pixel_coords(
-                    input_yaml, imageWCS, index
+                    input_yaml, imageWCS, wcs_origin
                 )
                 if not (
                     (0 <= target_x_pix < image.shape[1])
@@ -2442,7 +2439,7 @@ def run_photometry():
                     equinox="J2000",
                 )
                 target_x_pix, target_y_pix = imageWCS.all_world2pix(
-                    target_ra, target_dec, index
+                    target_ra, target_dec, wcs_origin
                 )
                 input_yaml["target_ra"] = target_ra
                 input_yaml["target_dec"] = target_dec
@@ -2480,7 +2477,7 @@ def run_photometry():
                 input_yaml["target_ra"] = target_coords.ra.degree
                 input_yaml["target_dec"] = target_coords.dec.degree
                 target_x_pix, target_y_pix = update_target_pixel_coords(
-                    input_yaml, imageWCS, index
+                    input_yaml, imageWCS, wcs_origin
                 )
             except Exception as e:
                 logging.error("FAILED to get coordinates from FITS header: %s", e)
@@ -2526,7 +2523,7 @@ def run_photometry():
         # =============================================================================
         # Ensure target pixel coordinates are consistent with the final WCS.
         target_x_pix, target_y_pix = update_target_pixel_coords(
-            input_yaml, imageWCS, index
+            input_yaml, imageWCS, wcs_origin
         )
         input_yaml["target_x_pix"] = target_x_pix
         input_yaml["target_y_pix"] = target_y_pix
@@ -2663,7 +2660,7 @@ def run_photometry():
         
 
         target_x_pix, target_y_pix = update_target_pixel_coords(
-            input_yaml, imageWCS, index
+            input_yaml, imageWCS, wcs_origin
         )
         input_yaml["target_x_pix"] = target_x_pix
         input_yaml["target_y_pix"] = target_y_pix
@@ -3634,13 +3631,6 @@ def run_photometry():
                             color_coeff_errors[1] if color_coeff_errors is not None else None
                         )
 
-        # Gets the zeropoint and plots the histogram.
-        # CatalogSources, image_zeropoint = GetZeropoint.fit_zeropoint(catalog=CatalogSources,
-        #                                                    fixed_color_slope= ImageColorTerm,
-        #                                                    fixed_color_slope_err= ImageColorTermError,
-        #                                                    )
-
-        # Gets the zeropoint and plots the histogram.
         fit_mode = "piecewise" if n_segments > 1 else "polynomial"
         CatalogSources, image_zeropoint = GetZeropoint.estimate_zeropoint(
             catalog=CatalogSources,
@@ -3680,7 +3670,7 @@ def run_photometry():
                 xpix_variable_sources, ypix_variable_sources = imageWCS.all_world2pix(
                     variable_sources["RA"].values,
                     variable_sources["DEC"].values,
-                    index,
+                    wcs_origin,
                 )
                 variable_sources["x_pix"] = xpix_variable_sources
                 variable_sources["y_pix"] = ypix_variable_sources
@@ -3695,7 +3685,7 @@ def run_photometry():
                 ypix_list = []
                 for i, (ra, dec) in enumerate(zip(variable_sources["RA"].values, variable_sources["DEC"].values)):
                     try:
-                        xpix, ypix = imageWCS.all_world2pix([ra], [dec], index)
+                        xpix, ypix = imageWCS.all_world2pix([ra], [dec], wcs_origin)
                         xpix_list.append(xpix[0])
                         ypix_list.append(ypix[0])
                         valid_indices.append(i)
@@ -3865,7 +3855,7 @@ def run_photometry():
                     )
                     # Stores the target pixel coordinates.
                     target_x_pix, target_y_pix = update_target_pixel_coords(
-                        input_yaml, science_wcs, index
+                        input_yaml, science_wcs, wcs_origin
                     )
                     # Creates a cutout for the science image.
                     # Use pixel coordinates directly to avoid WCS round-trip NaN failures
@@ -3944,7 +3934,7 @@ def run_photometry():
             target_x, target_y = imageWCS.all_world2pix(
                 input_yaml["target_ra"],
                 input_yaml["target_dec"],
-                index,
+                wcs_origin,
             )
             input_yaml["target_x_pix"] = target_x
             input_yaml["target_y_pix"] = target_y
@@ -4143,7 +4133,7 @@ def run_photometry():
             dec_vals = merged_sources.get("DEC")
             if (ra_vals is not None) and (dec_vals is not None):
                 x_pix, y_pix = imageWCS.all_world2pix(
-                    ra_vals.values, dec_vals.values, index
+                    ra_vals.values, dec_vals.values, wcs_origin
                 )
                 merged_sources["x_pix"] = x_pix
                 merged_sources["y_pix"] = y_pix
@@ -4536,7 +4526,7 @@ def run_photometry():
                 xpix_variable_sources, ypix_variable_sources = imageWCS.all_world2pix(
                     variable_sources["RA"].values,
                     variable_sources["DEC"].values,
-                    index,
+                    wcs_origin,
                 )
                 variable_sources["x_pix"] = xpix_variable_sources
                 variable_sources["y_pix"] = ypix_variable_sources
@@ -4743,15 +4733,9 @@ def run_photometry():
                 PreformSubtraction = False
                 image = get_image(fpath)
 
-            # Background subtraction disabled on difference image to preserve
-            # original flux values. SFFT handles flux scaling internally.
-            # elif PreformSubtraction:
-            #     logging.info("Measuring background from difference image")
-            #     bg_remover = BackgroundSubtractor(input_yaml)
-            #     result = bg_remover.remove(image, plot=False, fwhm=ImageFWHM)
-            #     background_surface = result["background"]
-            #     background_rms = result["background_rms"]
-            #     image = np.asarray(image, dtype=float) - np.asarray(background_surface, dtype=float)
+            # Difference image background is already zeroed (sigma-clipped median,
+            # with target exclusion) inside templates.subtract() before writing the
+            # FITS file.  Do not re-subtract here.
 
         # Gets the header of the image.
         header = get_header(fpath)
@@ -4763,7 +4747,7 @@ def run_photometry():
         target_x_pix, target_y_pix = imageWCS.all_world2pix(
             input_yaml["target_ra"],
             input_yaml["target_dec"],
-            index,
+            wcs_origin,
         )
 
         # Prevent downstream local background failures when WCS maps the
@@ -5386,7 +5370,7 @@ def run_photometry():
             target_x_pix_expected, target_y_pix_expected = imageWCS.all_world2pix(
                 input_yaml["target_ra"],
                 input_yaml["target_dec"],
-                index,
+                wcs_origin,
             )
             # Ensure the header contains the aperture radius (pixels) used for plots.
             # Some instruments do not provide APER; derive it from the config.
@@ -6660,7 +6644,7 @@ def run_photometry():
             x_pix_IsolatedSources, y_pix_IsolatedSources = imageWCS.all_world2pix(
                 IsolatedSources["RA"].values,
                 IsolatedSources["DEC"].values,
-                index,
+                wcs_origin,
             )
             # Adds the pixel coordinates to the IsolatedSources DataFrame.
             IsolatedSources["x_pix"] = x_pix_IsolatedSources

@@ -40,6 +40,7 @@ default_input:
   read_noise: 0.0 # float --- Runtime fallback read noise (e-) if header key is missing.
   pixel_scale: null # float|null --- Runtime fallback pixel scale (arcsec/pixel) if not in telescope DB/header.
   fwhm: 3.0 # float --- Runtime fallback seeing FWHM (pixels) if not measured/available.
+  fwhm_max_sigma_px: 30 # float --- Maximum Gaussian sigma (pixels) allowed in 2-D FWHM fitting; prevents blow-up on very extended sources or poor cutouts.
   science_fwhm: null # float|null --- Runtime: measured science-image FWHM (pixels) (set internally).
   scale: 0 # float|int --- Runtime: plotting/cutout scale selector (set internally; pipeline-specific).
   saturate: .inf # float --- Runtime fallback saturation level (ADU) if header key is missing.
@@ -391,7 +392,6 @@ default_input:
     hotpants_exe_loc: hotpants # str --- HOTPANTS executable name/path (defaults to `hotpants` on PATH).
     hotpants_timeout: 100 # int --- Timeout (seconds) for HOTPANTS subtraction call.
 
-    scale_template_to_science: False # bool --- If True, scale template to better match science image photometric level before subtraction. DISABLED to prevent oversubtraction (user request).
     subtraction_max_masked_fraction: 0.90 # float --- Abort subtraction if masked fraction exceeds this value.
     image_shape: null # list[int]|null --- Optional expected image shape (ny, nx) for validation; null disables check.
     use_catalog_for_matching: True # bool --- If True, use catalog sources (when available) for matching/registration heuristics.

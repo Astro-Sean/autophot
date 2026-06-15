@@ -559,7 +559,7 @@ def plot_lightcurve(
     dpi=150,
     plot_color=False,
     color_match_days=0.5,
-    ls="-",
+    ls="",
 ):
     """Plot a publication-ready lightcurve with detections and limits.
 
@@ -1314,26 +1314,40 @@ def plot_lightcurve(
             phase_pts, color_pts, err_pts = [], [], []
             phase_ul, color_ul = [], []  # upper limit on color (downward triangle v)
             phase_ll, color_ll = [], []  # lower limit on color (upward triangle ^)
-            for _, row in d1.iterrows():
-                mjd1 = row["mjd"]
-                dt = np.abs(mjd2 - mjd1)
-                if np.min(dt) > color_match_days:
+            mjd1_arr = d1["mjd"].values
+            mag1_arr = d1["mag"].values
+            err1_arr = d1["err"].values
+            det1_arr = d1["det"].values
+            lmag1_arr = d1["lmag"].values
+            # Vectorised nearest-epoch match via searchsorted on sorted mjd2
+            ins = np.searchsorted(mjd2, mjd1_arr)
+            j_arr = np.where(
+                ins >= len(mjd2), len(mjd2) - 1,
+                np.where(
+                    ins == 0, 0,
+                    np.where(
+                        np.abs(mjd2[ins] - mjd1_arr) <= np.abs(mjd2[ins - 1] - mjd1_arr),
+                        ins, ins - 1
+                    )
+                )
+            )
+            dt_arr = np.abs(mjd2[j_arr] - mjd1_arr)
+            for i in range(len(mjd1_arr)):
+                if dt_arr[i] > color_match_days:
                     continue
-                j = np.argmin(dt)
-                phase = (mjd1 + mjd2[j]) / 2 - reference_epoch
-                det1 = row["det"]
+                j = j_arr[i]
+                phase = (mjd1_arr[i] + mjd2[j]) / 2 - reference_epoch
+                det1 = det1_arr[i]
                 if det1 and det2[j]:
                     phase_pts.append(phase)
-                    color_pts.append(row["mag"] - mag2[j])
-                    err_pts.append(np.sqrt(row["err"] ** 2 + err2_arr[j] ** 2))
+                    color_pts.append(mag1_arr[i] - mag2[j])
+                    err_pts.append(np.sqrt(err1_arr[i] ** 2 + err2_arr[j] ** 2))
                 elif det1 and not det2[j]:
-                    # b1 detected, b2 limit: true b2 >= lmag2 => color <= mag1 - lmag2 -> upper limit (v)
                     phase_ul.append(phase)
-                    color_ul.append(row["mag"] - lmag2[j])
+                    color_ul.append(mag1_arr[i] - lmag2[j])
                 elif not det1 and det2[j]:
-                    # b1 limit, b2 detected: true b1 >= lmag1 => color >= lmag1 - mag2 -> lower limit (^)
                     phase_ll.append(phase)
-                    color_ll.append(row["lmag"] - mag2[j])
+                    color_ll.append(lmag1_arr[i] - mag2[j])
             label = f"{b1}-{b2}"
             c = COLOR_INDEX_COLORS.get(label, cols.get(b1, "k"))
             if phase_pts:
@@ -1801,18 +1815,34 @@ def generate_photometry_table(
             err2_arr = d2["err"].values
             det2 = d2["det"].values
             lmag2 = d2["lmag"].values
-            for _, row in d1.iterrows():
-                dt = np.abs(mjd2 - row["mjd"])
-                if np.min(dt) > color_match_days:
+            mjd1_arr = d1["mjd"].values
+            mag1_arr = d1["mag"].values
+            err1_arr_tbl = d1["err"].values
+            det1_arr_tbl = d1["det"].values
+            lmag1_arr_tbl = d1["lmag"].values
+            ins = np.searchsorted(mjd2, mjd1_arr)
+            j_arr = np.where(
+                ins >= len(mjd2), len(mjd2) - 1,
+                np.where(
+                    ins == 0, 0,
+                    np.where(
+                        np.abs(mjd2[ins] - mjd1_arr) <= np.abs(mjd2[ins - 1] - mjd1_arr),
+                        ins, ins - 1
+                    )
+                )
+            )
+            dt_arr = np.abs(mjd2[j_arr] - mjd1_arr)
+            for i in range(len(mjd1_arr)):
+                if dt_arr[i] > color_match_days:
                     continue
-                j = np.argmin(dt)
-                mjd_mid = (row["mjd"] + mjd2[j]) / 2
+                j = j_arr[i]
+                mjd_mid = (mjd1_arr[i] + mjd2[j]) / 2
                 date_str = Time(mjd_mid, format="mjd").iso
                 phase = (mjd_mid - reference_epoch) if reference_epoch else np.nan
                 color_name = f"{b1}-{b2}"
-                if row["det"] and det2[j]:
-                    color_value = row["mag"] - mag2[j]
-                    err_val = np.sqrt(row["err"] ** 2 + err2_arr[j] ** 2)
+                if det1_arr_tbl[i] and det2[j]:
+                    color_value = mag1_arr[i] - mag2[j]
+                    err_val = np.sqrt(err1_arr_tbl[i] ** 2 + err2_arr[j] ** 2)
                     color_rows.append(
                         {
                             "MJD": round(mjd_mid, 3),
@@ -1824,8 +1854,8 @@ def generate_photometry_table(
                             "Limit": "-",
                         }
                     )
-                elif row["det"] and not det2[j]:
-                    color_value = row["mag"] - lmag2[j]
+                elif det1_arr_tbl[i] and not det2[j]:
+                    color_value = mag1_arr[i] - lmag2[j]
                     color_rows.append(
                         {
                             "MJD": round(mjd_mid, 3),
@@ -1837,8 +1867,8 @@ def generate_photometry_table(
                             "Limit": "upper",
                         }
                     )
-                elif not row["det"] and det2[j]:
-                    color_value = row["lmag"] - mag2[j]
+                elif not det1_arr_tbl[i] and det2[j]:
+                    color_value = lmag1_arr_tbl[i] - mag2[j]
                     color_rows.append(
                         {
                             "MJD": round(mjd_mid, 3),

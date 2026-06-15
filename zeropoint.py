@@ -650,13 +650,13 @@ class Zeropoint:
                     n_flags, zp_max_flags,
                 )
 
-            # Reject sources where PSF inst mag deviates strongly from AP inst mag —
             mask = (
                 valid_mags
                 & (sources[filter_col] >= upperMaglimit)
                 & (sources[filter_col] <= lowerMaglimit)
                 & (sources["threshold"] >= threshold_limit)
                 & (~non_linear_mask)
+                & (~saturated_mask)
                 & (~flags_mask)
             )
             cleaned = sources.loc[mask].copy()

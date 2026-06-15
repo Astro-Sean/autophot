@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autophot"
-version = "1.0.3"
+version = "1.0.4"
 description = "AutoPHOT object photometry pipeline (CCD/NIR; calibrated aperture/PSF photometry; template subtraction)."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
@@ -20,17 +20,18 @@ dependencies = [
   "ccdproc==2.5.1",
   "emcee==3.1.6",
   "lmfit==1.3.4",
-  "matplotlib==3.10.8",
+  "matplotlib==3.10.9",
   "numpy==2.4.6",
   "pandas==3.0.1",
   "photutils==3.0.0",
   "PyYAML==6.0.3",
-  "reproject==0.19.0",
-  "requests==2.32.5",
-  "scikit-image==0.25.0",
-  "scikit-learn==1.8.0",
-  "scipy==1.17.0",
-  "tqdm==4.67.3",
+  "reproject==0.20.0",
+  "requests==2.34.2",
+  "scikit-image==0.26.0",
+  "scikit-learn==1.9.0",
+  "scipy==1.17.1",
+  "sfft==1.7.1",
+  "tqdm==4.68.2",
 ]
 
 [project.optional-dependencies]
