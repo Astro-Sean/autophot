@@ -1130,7 +1130,7 @@ class Zeropoint:
                     xs + ZP - zp_std,
                     xs + ZP + zp_std,
                     color=colors[flux_type],
-                    alpha=get_alpha("light"),
+                    alpha=get_alpha("very_light"),
                 )
 
                 global_xmins.append(xs[0])
@@ -1861,7 +1861,7 @@ class Zeropoint:
             y_plot_upper = y_plot + np.abs(y_err_upper)
             y_plot_lower = y_plot - np.abs(y_err_lower)
 
-            label_text = f"Piecewise {overall_method}: bp={bp:.3f}, slope1={slope1:.3f}, slope2={slope2:.3f}"
+            label_text = f"Piecewise {overall_method}: bp={bp:.3f}\u00b1{bp_err:.3f}, slope1={slope1:.3f}\u00b1{slope1_err:.3f}, slope2={slope2:.3f}\u00b1{slope2_err:.3f}"
 
             ax1.plot(
                 x_plot,
@@ -2630,7 +2630,7 @@ class Zeropoint:
             x_plot = np.linspace(xi.min() * 0.95, xi.max() * 1.05, 200)
             if poly_order == 1:
                 y_plot = plot_intercept + plot_slope * x_plot
-                label_text = f"Linear: slope={plot_slope:.3f} +/- {coefficient_errors[1]:.3f}"
+                label_text = f"Linear: slope={plot_slope:.3f} \u00b1 {coefficient_errors[1]:.3f}"
             else:
                 y_plot = plot_intercept + plot_slope * x_plot + plot_quad * x_plot**2
                 label_text = f"Quad: quad={plot_quad:.3f}, slope={plot_slope:.3f}"
