@@ -1433,7 +1433,8 @@ class Zeropoint:
 
                     # Zeropoint uncertainty: always use empirical scatter (SE of median).
                     # Per your convention, we do not use inverse-variance weighting for errors.
-                    zp_err = float(zp_std)
+                    # Add floor to prevent misleading zero errors (minimum 0.001 mag = 1 mmag)
+                    zp_err = max(float(zp_std), 0.001)
 
                     zp_params[flux_type].update(
                         {
