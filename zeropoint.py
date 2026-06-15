@@ -1053,13 +1053,17 @@ class Zeropoint:
         fixed_color_coeff_errors = None,
         fit_mode="polynomial",
         n_segments=1,
+        fit_method="ransac",  # "ransac" or "odr"
     ):
         """
-        Fit ZP = m_cat - m_inst[+/-c*(c1-c2)] vs m_inst via RANSAC.
+        Fit ZP = m_cat - m_inst[+/-c*(c1-c2)] vs m_inst via RANSAC or ODR.
         Supports linear, quadratic, and piecewise linear color terms.
 
         Parameters
         ----------
+        fit_method : str
+            "ransac" for RANSAC-based robust fit (default), or "odr" for
+            Orthogonal Distance Regression with proper X,Y error handling.
         fixed_color_coeffs : tuple or None
             For linear: (intercept, slope)
             For quadratic: (intercept, slope, quad_coeff)
@@ -1155,21 +1159,32 @@ class Zeropoint:
                         n_segments=n_segments,
                     )
 
-                # RANSAC still uses weights for outlier rejection conditioning, but
-                # we do not propagate inverse-variance weighting into reported errors.
+                # Select fitting method: RANSAC (default) or ODR
                 yerr = np.sqrt(delta_mag_err**2 + color_corr_err**2)
-                weights = 1.0 / (yerr**2 + 1e-12)
-
-                ZP, _, inlier_short, cov = self._robust_RANSAC_fit(
-                    inst_mag,
-                    delta_mag,
-                    weights,
-                    x_err=inst_mag_err,
-                    max_trials=max_trials,
-                    ransac_min_samples=ransac_min_samples,
-                    random_state=random_state,
-                )
-                zp_std = float(np.sqrt(np.clip(cov[0, 0], 0, np.inf)))
+                
+                if fit_method.lower() == "odr":
+                    # ODR: proper X,Y error handling with perpendicular variance
+                    ZP, zp_std, inlier_short = self._odr_slope1_fit(
+                        inst_mag,
+                        inst_mag + delta_mag,  # y = m_cal
+                        inst_mag_err,          # x_err
+                        yerr,                  # y_err
+                    )
+                    # Build dummy cov matrix for compatibility
+                    cov = np.diag([zp_std**2, 0.0]) if np.isfinite(zp_std) else np.diag([np.nan, 0.0])
+                else:
+                    # RANSAC: robust outlier rejection with median-based ZP
+                    weights = 1.0 / (yerr**2 + 1e-12)
+                    ZP, _, inlier_short, cov = self._robust_RANSAC_fit(
+                        inst_mag,
+                        delta_mag,
+                        weights,
+                        x_err=inst_mag_err,
+                        max_trials=max_trials,
+                        ransac_min_samples=ransac_min_samples,
+                        random_state=random_state,
+                    )
+                    zp_std = float(np.sqrt(np.clip(cov[0, 0], 0, np.inf)))
 
                 fit_params[flux_type].update(
                     {
