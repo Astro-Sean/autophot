@@ -2682,12 +2682,15 @@ class PSF:
                 norm=norm_i,
                 interpolation="none",
             )
-            ctr = [stars[i].shape[1] / 2, stars[i].shape[0] / 2]
+            # Use actual cutout_center if available, fallback to geometric center
+            # cutout_center is (y, x) but we need (x, y) for matplotlib
+            cy, cx = getattr(stars[i], "cutout_center", (stars[i].shape[0] / 2, stars[i].shape[1] / 2))
+            ctr = [cx, cy]
             ax.add_patch(
                 Circle(
                     ctr,
                     aperture_radius,
-                    color="#FF00FF",
+                    color="white",
                     ls="-",
                     fill=False,
                     lw=0.5,
