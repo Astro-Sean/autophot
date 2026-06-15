@@ -25,9 +25,9 @@ text.usetex: False
 axes.linewidth: 0.4
 axes.edgecolor: "333333"
 
-# Remove top and right spines (non-data ink)
-axes.spines.top: False
-axes.spines.right: False
+# Keep top and right spines visible (user preference)
+axes.spines.top: True
+axes.spines.right: True
 axes.spines.left: True
 axes.spines.bottom: True
 
@@ -55,9 +55,9 @@ ytick.labelsize: 8
 xtick.major.pad: 2
 ytick.major.pad: 2
 
-# Turn off top/right ticks (removed spines)
-xtick.top: False
-ytick.right: False
+# Keep top/right ticks visible (matching visible spines)
+xtick.top: True
+ytick.right: True
 
 # Minor ticks for precision (Tufte: more data resolution)
 xtick.minor.visible: True
