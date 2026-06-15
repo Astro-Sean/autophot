@@ -525,6 +525,7 @@ _IMPORT_ERROR_AUTOPHOT_DEPS: Exception | None = None
 try:
     from functions import (  # type: ignore
         AutophotYaml,
+        border_msg,
         concatenate_csv_files,
         log_step,
         log_exception,
@@ -542,6 +543,7 @@ except Exception as _exc:  # pragma: no cover
     try:
         from functions import (  # type: ignore
             AutophotYaml,
+            border_msg,
             concatenate_csv_files,
             log_step,
             log_exception,
@@ -552,6 +554,7 @@ except Exception as _exc:  # pragma: no cover
     except Exception as _exc2:
         _IMPORT_ERROR_AUTOPHOT_DEPS = _exc2
         log_step = None  # type: ignore
+        border_msg = None  # type: ignore
         AutophotYaml = None  # type: ignore
         concatenate_csv_files = None  # type: ignore
         print_progress_bar = None  # type: ignore
@@ -1344,7 +1347,7 @@ class AutomatedPhotometry:
         # Common preprocessing defaults used by main.py
         default_input["preprocessing"].setdefault("trim_image", 0)
 
-        _log(log_step(f"Default input: {default_input_path}"))
+        _log(border_msg("Configuration") if border_msg else log_step(f"Default input: {default_input_path}"))
         _log(f"Configuration loaded in {time.perf_counter() - t0:.3f} seconds.")
         return default_input
 
@@ -1775,7 +1778,7 @@ class AutomatedPhotometry:
         python_executable = sys.executable
 
         if do_photometry:
-            _log(log_step("AutoPhOT photometry run"))
+            _log(border_msg("AutoPhOT Photometry Run") if border_msg else log_step("AutoPhOT photometry run"))
 
             # List of available filters (excluding error columns)
             filt_list = [
@@ -1787,7 +1790,7 @@ class AutomatedPhotometry:
 
             # Optional: Enrich target metadata from TNS
             try:
-                _log(log_step("TNS check"))
+                _log(border_msg("TNS Check") if border_msg else log_step("TNS check"))
                 tns_coords = prepare_db.check_tns()
                 default_input.update(
                     {

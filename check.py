@@ -27,6 +27,7 @@ from typing import List, Dict, Any, Optional
 from difflib import get_close_matches
 from tqdm import tqdm
 from collections import defaultdict
+from functions import border_msg
 
 # -----------------------------------------------------------------------------
 # GLOBAL CONFIGURATION
@@ -437,13 +438,13 @@ class FitsInfo:
         Returns:
             list: Filenames with complete headers
         """
-        self.logger.info(log_step(f"File check: {len(self.flist)} FITS"))
+        self.logger.info(border_msg(f"File check: {len(self.flist)} FITS"))
 
         # PHASE 1: CLASSIFY FILES BY HEADER COMPLETENESS
         incorrect_files, correct_files = [], []
         tele_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
 
-        self.logger.info(log_step("Headers (basic)"))
+        self.logger.info(border_msg("Headers (basic)"))
         flist_iter = tqdm(self.flist) if len(self.flist) > 1 else self.flist
         for fname in flist_iter:
             header = get_header(fname)
@@ -558,7 +559,7 @@ class FitsInfo:
                         self.logger.info("Skipping optional keyword extraction (non-interactive mode)")
 
         # PHASE 3: FILTER KEYWORDS FOR ALL VALID FILES (skip files without TELESCOP/INSTRUME, e.g. templates)
-        self.logger.info(log_step(f"Filters: {len(correct_files)} files"))
+        self.logger.info(border_msg(f"Filters: {len(correct_files)} files"))
         correct_iter = tqdm(correct_files) if len(correct_files) > 1 else correct_files
         for fname in correct_iter:
             header = get_header(fname)
