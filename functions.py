@@ -78,24 +78,32 @@ class ColoredLevelFormatter(logging.Formatter):
             record.msg = msg_clean
             record.args = ()
         
-        # Compact format: suppress repeated timestamps and level names for INFO
+        # Compact format: group messages by timestamp
+        # - Same-second messages: no blank line, indented
+        # - New timestamp: blank line before, show timestamp
         if self._compact and record.levelno == logging.INFO:
             time_str = self.formatTime(record, "%H:%M:%S")
-            # Suppress timestamp if same as previous (reduces visual noise)
-            if time_str == self._last_time:
+            self._msg_count += 1
+            
+            if self._msg_count == 1:
+                # First message ever: no blank line, show timestamp
+                base = f"{time_str}  {msg_clean}"
+            elif time_str == self._last_time:
+                # Same second as previous: no blank line, indent only
                 base = f"  {msg_clean}"
             else:
-                base = f"{time_str}  {msg_clean}"
-                self._last_time = time_str
+                # New timestamp: blank line before, show timestamp
+                base = f"\n{time_str}  {msg_clean}"
+            
+            self._last_time = time_str
         else:
+            # Non-compact or non-INFO: use standard format with blank line before
             base = super().format(record)
+            self._msg_count += 1
+            if self._msg_count > 1:
+                base = f"\n{base}"
         
         record.msg, record.args = old_msg, old_args
-        
-        # Add blank line before every message (except first)
-        self._msg_count += 1
-        if self._msg_count > 1:
-            base = f"\n{base}"
         
         if not self._use_color:
             return base
