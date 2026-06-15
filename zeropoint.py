@@ -1433,6 +1433,7 @@ class Zeropoint:
                 set_mag_axes_inverted_xy, ransac_grid, ransac_savefig, get_ransac_color,
             )
 
+            plt.ioff()
             apply_autophot_mplstyle()
             fig, ax = plt.subplots(1, 1, figsize=set_size(540, 1))
             inlier_masks_full = {
@@ -2228,6 +2229,7 @@ class Zeropoint:
         from matplotlib.gridspec import GridSpec
         import os
 
+        plt.ioff()
         apply_autophot_mplstyle()
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(540, 2.0), sharex=True)
         fig.subplots_adjust(hspace=0.45)
@@ -3075,6 +3077,7 @@ class Zeropoint:
             plot_quad = coefficients[2] if poly_order == 2 else 0.0
 
             # ---- Plot ------------------------------------------------------
+            plt.ioff()
             apply_autophot_mplstyle()
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=set_size(540, 2.0), sharex=True)
             fig.subplots_adjust(hspace=0.45)

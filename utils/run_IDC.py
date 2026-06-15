@@ -4520,7 +4520,7 @@ NNW
             )
 
             apply_autophot_mplstyle()
-            fig, ax = plt.subplots(figsize=set_size(340, 1))
+            fig, ax = plt.subplots(figsize=set_size(540, 1))
             sci_mag = np.array(sci_cat_matched["MAG_APER"], dtype=float)
             ref_mag = np.array(ref_cat_matched["MAG_APER"], dtype=float)
             ax.errorbar(

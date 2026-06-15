@@ -3629,9 +3629,9 @@ class Templates:
             ransac_legend_top_outside, set_mag_axes_inverted_xy,
         )
 
-        apply_autophot_mplstyle()
         plt.ioff()
-        fig, ax = plt.subplots(figsize=set_size(340, 1))
+        apply_autophot_mplstyle()
+        fig, ax = plt.subplots(figsize=set_size(540, 1))
 
         # Outliers first so inliers sit on top
         rej = ~robust["is_inlier"].to_numpy(bool)
