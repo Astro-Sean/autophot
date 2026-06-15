@@ -902,14 +902,20 @@ class Zeropoint:
         
         delta_in = delta[inlier_mask_local]
         var_in = var_perp[inlier_mask_local]
-        weights = 1.0 / np.clip(var_in, 1e-12, None)
-        weights = weights / weights.sum() if weights.sum() > 0 else weights
+        
+        # Unnormalized weights for proper error calculation
+        w_raw = 1.0 / np.clip(var_in, 1e-12, None)
+        w_sum = w_raw.sum()
+        
+        # Normalized weights for weighted mean
+        weights = w_raw / w_sum if w_sum > 0 else w_raw
         
         # Weighted mean (ZP estimate)
         zp = np.average(delta_in, weights=weights)
         
-        # ZP uncertainty from weighted standard error + empirical scatter
-        var_zp = 1.0 / weights.sum() if weights.sum() > 0 else np.nan
+        # ZP uncertainty from weighted standard error formula:
+        # σ² = 1 / Σ(1/σ²_i) = 1 / w_sum
+        var_zp = 1.0 / w_sum if w_sum > 0 else np.nan
         zp_err = np.sqrt(var_zp)
         
         # Add empirical scatter component (unexplained variance)
