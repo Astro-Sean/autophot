@@ -3649,7 +3649,7 @@ def run_photometry():
                         )
 
         fit_mode = "piecewise" if n_segments > 1 else "polynomial"
-        CatalogSources, image_zeropoint = GetZeropoint.estimate_zeropoint(
+        CatalogSources, image_zeropoint = GetZeropoint.fit_zeropoint(
             catalog=CatalogSources,
             fixed_color_coeffs=color_coeffs,
             fixed_color_coeff_errors=color_coeff_errors,
