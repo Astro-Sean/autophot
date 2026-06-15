@@ -776,7 +776,7 @@ def log_step(msg: str) -> str:
     return f"\n\n\n— {m} —\n"
 
 
-def border_msg(msg: str, body: str = "─", corner: str = "┌", 
+def border_msg(msg: str, body: str = "─", corner: str = "+", 
                metadata: str | None = None, width: int = 70) -> str:
     """
     Clean bordered banner for major log sections.

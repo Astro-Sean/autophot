@@ -1437,17 +1437,36 @@ class PSF:
                 log.error("[robust_extract_stars] No valid cutouts after NaN/mask filtering")
                 return EPSFStars([]), Table()
 
-            # Assign per-pixel weights if provided.
-            weight_nddata = NDData(weightmap)
-            weight_cutouts = extract_stars(weight_nddata, stars_tbl, size=cutout_shape)
-
-            if len(weight_cutouts) == len(epsfstars):
-                for star, wcut in zip(epsfstars, weight_cutouts):
-                    star.weights = wcut.data.astype(float)
-            else:
-                log.warning(
-                    "[robust_extract_stars] Weight/star count mismatch; skipping weights"
-                )
+            # Assign per-pixel weights if provided (lazy: skip if uniform)
+            if weightmap is not None:
+                # Check if weightmap is uniform (all same value) - skip extraction in that case
+                weight_arr = np.asarray(weightmap)
+                if weight_arr.size > 0:
+                    weight_min = np.nanmin(weight_arr)
+                    weight_max = np.nanmax(weight_arr)
+                    weight_variation = (weight_max - weight_min) / max(abs(weight_min), 1e-10)
+                    
+                    if weight_variation < 0.01:  # <1% variation = effectively uniform
+                        # Use scalar weight - no need to extract per-star weights
+                        uniform_weight = float(np.nanmean(weight_arr))
+                        for star in epsfstars:
+                            star.weights = uniform_weight
+                        log.info(
+                            "[robust_extract_stars] Using uniform weight %.4g (skipping per-star extraction)",
+                            uniform_weight
+                        )
+                    else:
+                        # Non-uniform weights: extract per-star weight maps
+                        weight_nddata = NDData(weightmap)
+                        weight_cutouts = extract_stars(weight_nddata, stars_tbl, size=cutout_shape)
+                        
+                        if len(weight_cutouts) == len(epsfstars):
+                            for star, wcut in zip(epsfstars, weight_cutouts):
+                                star.weights = wcut.data.astype(float)
+                        else:
+                            log.warning(
+                                "[robust_extract_stars] Weight/star count mismatch; skipping weights"
+                            )
 
             return epsfstars, stars_tbl
 
@@ -1463,6 +1482,22 @@ class PSF:
         """2-D power spectrum of *cutout* via FFT."""
         return np.abs(fftshift(fft2(cutout))) ** 2
 
+    def compute_power_spectrum_batch(self, cutouts: np.ndarray) -> np.ndarray:
+        """Batch 2-D power spectrum for multiple cutouts via FFT.
+        
+        Parameters
+        ----------
+        cutouts : np.ndarray
+            Stack of cutouts with shape (N, ny, nx)
+            
+        Returns
+        -------
+        np.ndarray
+            Power spectra with shape (N, ny, nx)
+        """
+        # Vectorized FFT along last two axes
+        return np.abs(fftshift(fft2(cutouts, axes=(1, 2)), axes=(1, 2))) ** 2
+
     def detect_fft_outliers(
         self,
         epsfstars,
@@ -1477,15 +1512,16 @@ class PSF:
         deviations. Scale (dispersion) is MAD or std per pixel across stars. This avoids
         rejecting good stars when a few contaminants inflate the variance.
         """
-        spectra = []
-        for st in epsfstars:
-            d = st.data.copy()
-            d -= np.nanmin(d)
-            # Preserve NaNs instead of setting to 0.0
-            d[d < 0] = np.nan
-            spectra.append(self.compute_power_spectrum(d))
-
-        spectra = np.array(spectra, dtype=float)
+        # Batch preprocessing: stack all cutouts and normalize
+        cutouts = np.stack([st.data for st in epsfstars])
+        # Subtract minimum per cutout, preserve NaNs for negative values
+        cutouts_min = np.nanmin(cutouts, axis=(1, 2), keepdims=True)
+        cutouts_norm = cutouts - cutouts_min
+        cutouts_norm = np.where(cutouts_norm < 0, np.nan, cutouts_norm)
+        
+        # Batch FFT computation (vectorized, no Python loop)
+        spectra = self.compute_power_spectrum_batch(cutouts_norm)
+        
         med = np.nanmedian(spectra, axis=0)
         if use_mad:
             # MAD along axis=0; 1.4826 for consistency with Gaussian
@@ -3510,6 +3546,8 @@ class PSF:
 
             if not iterative:
                 nd_for_fit = nd_override if nd_override is not None else ndimage
+                # Add SourceGrouper for consistent handling of overlapping sources
+                # Improves both accuracy and performance in crowded fields
                 psfphot = PSFPhotometry(
                     psf_model=epsf_model_copy,
                     fitter=fitter,
@@ -3517,6 +3555,7 @@ class PSF:
                     fit_shape=fit_shape,
                     aperture_radius=aperture_radius,
                     local_bkg_estimator=localbkg,
+                    grouper=group_maker,  # Added for overlapping source handling
                     xy_bounds=xy_bounds_this,
                     progress_bar=False,
                 )
