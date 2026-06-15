@@ -86,28 +86,26 @@ class ColoredLevelFormatter(logging.Formatter):
             self._msg_count += 1
             
             if self._msg_count == 1:
-                # First message ever: no blank line, show timestamp
-                # But skip timestamp for bordered messages (they have their own visual structure)
+                # First message ever: show timestamp (or just bordered message if bordered)
                 first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
                 if first_line.startswith("─"):
-                    base = msg_clean
+                    base = f"\n{msg_clean}"
                 else:
                     base = f"{time_str}  {msg_clean}"
             elif time_str == self._last_time:
                 # Same second as previous: no blank line, indent only
-                # Don't indent bordered messages (they have their own visual structure)
+                # For bordered messages: blank line before, no indent
                 first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
                 if first_line.startswith("─"):
-                    base = msg_clean
+                    base = f"\n{msg_clean}"
                 else:
                     base = f"  {msg_clean}"
             else:
-                # New timestamp: blank line before, show timestamp
-                # But skip blank line for bordered messages (they have their own visual separation)
-                # Check first non-empty line for box-drawing character
+                # New timestamp: blank line before
+                # For bordered messages: blank line before, but no timestamp (they have their own header)
                 first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
                 if first_line.startswith("─"):
-                    base = f"{time_str}  {msg_clean}"
+                    base = f"\n{msg_clean}"
                 else:
                     base = f"\n{time_str}  {msg_clean}"
             
