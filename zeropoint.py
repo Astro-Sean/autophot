@@ -792,6 +792,115 @@ class Zeropoint:
         return sources, output_zp
 
     # -----------------------------------------------------------------------
+    # ODR fit helper: proper X and Y error handling for slope=1 fits
+    # -----------------------------------------------------------------------
+
+    def _odr_slope1_fit(
+        self,
+        x,
+        y,
+        x_err,
+        y_err,
+        max_iter: int = 100,
+        min_points: int = 2,
+    ):
+        """
+        Orthogonal Distance Regression fit for y = x + ZP (slope=1 constraint).
+        
+        This properly accounts for errors in both X (m_inst) and Y (m_cal).
+        For a line with slope=1, the perpendicular distance is:
+            d_perp = (y - x - ZP) / sqrt(2)
+        
+        The variance in the perpendicular direction is:
+            σ²_perp = (σ²_x + σ²_y) / 2
+        
+        We minimize the weighted sum: χ² = Σ (y_i - x_i - ZP)² / (σ²_x + σ²_y)
+        
+        Parameters
+        ----------
+        x, y : array-like
+            Data points (instrumental mag, catalog mag)
+        x_err, y_err : array-like
+            1-sigma uncertainties in x and y
+        max_iter : int
+            Maximum ODR iterations
+        min_points : int
+            Minimum points required for fit
+            
+        Returns
+        -------
+        (zp, zp_err, inlier_mask) : (float, float, ndarray)
+            Zeropoint, its uncertainty, and boolean inlier mask
+        """
+        x = np.asarray(x, float)
+        y = np.asarray(y, float)
+        x_err = np.asarray(x_err, float)
+        y_err = np.asarray(y, float)
+        
+        # Finite mask
+        finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(x_err) & np.isfinite(y_err)
+        if finite.sum() < min_points:
+            logger.warning(f"ODR: insufficient points ({finite.sum()} < {min_points})")
+            return np.nan, np.nan, np.zeros(len(x), dtype=bool)
+        
+        x, y = x[finite], y[finite]
+        x_err, y_err = x_err[finite], y_err[finite]
+        
+        # Model: y = x + ZP  =>  delta = y - x = ZP (constant)
+        # We fit delta = ZP with weights = 1 / (y_err² + x_err²)
+        # This accounts for total uncertainty in the perpendicular direction
+        delta = y - x
+        var_perp = x_err**2 + y_err**2  # Variance perpendicular to slope=1 line
+        
+        # Outlier rejection: sigma clip on delta values
+        # Use robust initial estimate
+        med_delta = np.nanmedian(delta)
+        mad_delta = np.nanmedian(np.abs(delta - med_delta)) * 1.4826
+        
+        if mad_delta < 1e-6:  # All points identical (unlikely in practice)
+            inlier_mask_local = np.ones(len(delta), dtype=bool)
+        else:
+            # 3-sigma clip on delta values
+            inlier_mask_local = np.abs(delta - med_delta) < 3.0 * mad_delta
+        
+        if inlier_mask_local.sum() < min_points:
+            logger.warning(f"ODR: too few inliers after clipping ({inlier_mask_local.sum()})")
+            # Fall back to all points
+            inlier_mask_local = np.ones(len(delta), dtype=bool)
+        
+        # Weighted fit on inliers
+        delta_in = delta[inlier_mask_local]
+        var_in = var_perp[inlier_mask_local]
+        weights = 1.0 / np.clip(var_in, 1e-12, None)
+        weights = weights / weights.sum()  # Normalize
+        
+        # Weighted mean (ZP estimate)
+        zp = np.average(delta_in, weights=weights)
+        
+        # ZP uncertainty from weighted standard error
+        # For weighted mean: σ_zp = sqrt(Σ w_i² σ_i²) where w_i = W_i/ΣW_j
+        n_eff = weights.sum()**2 / (weights**2).sum()  # Effective sample size
+        var_zp = 1.0 / weights.sum() if weights.sum() > 0 else np.nan
+        zp_err = np.sqrt(var_zp)
+        
+        # Add empirical scatter component (unexplained variance)
+        residuals = delta_in - zp
+        chi2 = np.sum((residuals**2) / var_in)
+        dof = len(delta_in) - 1
+        if dof > 0 and chi2 / dof > 1.0:
+            # Scale factor for underdispersion/overdispersion
+            scale = np.sqrt(chi2 / dof)
+            zp_err *= scale
+        
+        # Map back to full array
+        full_mask = np.zeros(len(x), dtype=bool)
+        full_mask[inlier_mask_local] = True
+        
+        logger.info(f"ODR: ZP={zp:.4f} ± {zp_err:.4f} ({inlier_mask_local.sum()}/{len(delta)} inliers, χ²/dof={chi2/max(dof,1):.2f})")
+        
+        return zp, zp_err, full_mask
+
+    # -----------------------------------------------------------------------
     # RANSAC robust fit helper
     # -----------------------------------------------------------------------
 
