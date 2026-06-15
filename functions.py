@@ -863,11 +863,11 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
     # Apply bold to the title text only (not the padding)
     centered = f"{' ' * left_pad}{BOLD}{visible_text}{RESET}{' ' * right_pad}"
 
-    # Build lines
+    # Build lines (no leading newline - formatter handles spacing)
     border_line = body * width
     title_line = f"{left_corner}{centered}{right_corner}"
     
-    lines = [f"\n{border_line}", title_line]
+    lines = [border_line, title_line]
     
     if metadata:
         meta_clean = str(metadata).strip()[:max_title]
