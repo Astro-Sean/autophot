@@ -1821,12 +1821,16 @@ def generate_photometry_table(
             det1_arr_tbl = d1["det"].values
             lmag1_arr_tbl = d1["lmag"].values
             ins = np.searchsorted(mjd2, mjd1_arr)
+            # searchsorted can return len(mjd2) when all mjd1 values are after all mjd2 values.
+            # np.where evaluates all arguments eagerly, so we need a clipped version
+            # for safe indexing into mjd2.
+            ins_safe = np.clip(ins, 0, len(mjd2) - 1)
             j_arr = np.where(
                 ins >= len(mjd2), len(mjd2) - 1,
                 np.where(
                     ins == 0, 0,
                     np.where(
-                        np.abs(mjd2[ins] - mjd1_arr) <= np.abs(mjd2[ins - 1] - mjd1_arr),
+                        np.abs(mjd2[ins_safe] - mjd1_arr) <= np.abs(mjd2[ins_safe - 1] - mjd1_arr),
                         ins, ins - 1
                     )
                 )
