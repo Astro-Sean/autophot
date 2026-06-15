@@ -278,6 +278,7 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
     x_max = min(image_data.shape[1] - 1, x_max + buffer_pixels)
 
     # Check if target is included (if provided)
+    expanded = False
     if target_x is not None and target_y is not None:
         # Convert to 0-indexed for array checking
         tx_0idx, ty_0idx = target_x - 1, target_y - 1
@@ -285,12 +286,16 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
         # Expand bounds to include target if needed
         if tx_0idx < x_min:
             x_min = max(0, int(tx_0idx) - buffer_pixels)
+            expanded = True
         if tx_0idx > x_max:
             x_max = min(image_data.shape[1] - 1, int(tx_0idx) + buffer_pixels)
+            expanded = True
         if ty_0idx < y_min:
             y_min = max(0, int(ty_0idx) - buffer_pixels)
+            expanded = True
         if ty_0idx > y_max:
             y_max = min(image_data.shape[0] - 1, int(ty_0idx) + buffer_pixels)
+            expanded = True
 
         # Final verification: ensure target is within bounds
         if not (x_min <= tx_0idx <= x_max and y_min <= ty_0idx <= y_max):
@@ -307,6 +312,7 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
             x_max = min(image_data.shape[1] - 1, x_max)
             y_min = max(0, y_min)
             y_max = min(image_data.shape[0] - 1, y_max)
+            expanded = True
             logging.warning(f"NaN boundary trimming: forced bounds to include target: x=[{x_min},{x_max}], y=[{y_min},{y_max}]")
         elif expanded:
             logging.info(f"NaN boundary trimming: successfully expanded bounds to include target")
