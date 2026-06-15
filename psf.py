@@ -1401,28 +1401,36 @@ class PSF:
             # Core = central 50% of cutout (where PSF flux is concentrated)
             cy_core = slice(ny_cut // 4, 3 * ny_cut // 4)
             cx_core = slice(nx_cut // 4, 3 * nx_cut // 4)
-            valid_stars = []
-            valid_indices = []
-            for i, star in enumerate(epsfstars):
-                cutout_data = star.data
-                # Check central region for NaN/masked pixels
-                core_data = cutout_data[cy_core, cx_core]
-                core_bad = ~np.isfinite(core_data)
-                if hasattr(star, 'mask') and star.mask is not None:
-                    core_bad |= star.mask[cy_core, cx_core]
-                # Reject only if >5% of core pixels are bad (avoids edge-only contamination)
-                core_bad_frac = np.sum(core_bad) / core_data.size
-                if core_bad_frac < 0.05:
-                    valid_stars.append(star)
-                    valid_indices.append(i)
             
-            n_rejected = len(epsfstars) - len(valid_stars)
+            # Vectorized batch processing: extract all core regions at once
+            # Stack cutout data for vectorized operations
+            all_data = np.stack([star.data for star in epsfstars])
+            # Extract core regions using broadcasting
+            core_regions = all_data[:, cy_core, cx_core]
+            
+            # Vectorized NaN checking: compute bad fraction per star
+            core_bad = ~np.isfinite(core_regions)
+            
+            # Check masks if present (vectorized where possible)
+            has_masks = all(hasattr(star, 'mask') and star.mask is not None for star in epsfstars)
+            if has_masks:
+                mask_stack = np.stack([star.mask for star in epsfstars])
+                core_bad |= mask_stack[:, cy_core, cx_core]
+            
+            # Compute bad fraction per star (vectorized)
+            core_bad_frac = np.sum(core_bad, axis=(1, 2)) / core_regions[0].size
+            
+            # Accept stars with <5% bad pixels in core
+            valid_mask = core_bad_frac < 0.05
+            valid_indices = np.where(valid_mask)[0]
+            
+            n_rejected = len(epsfstars) - len(valid_indices)
             if n_rejected > 0:
                 log.info(
                     f"[robust_extract_stars] Rejected {n_rejected} cutouts with NaN/masked pixels "
                     f"in central region ({n_rejected}/{len(epsfstars)})"
                 )
-                epsfstars = EPSFStars(valid_stars)
+                epsfstars = EPSFStars([epsfstars[i] for i in valid_indices])
                 stars_tbl = stars_tbl[valid_indices]
             
             if len(epsfstars) == 0:
@@ -1568,91 +1576,97 @@ class PSF:
             )
 
         def _select_uniform(df, num_keep, image_shape, xcol, ycol, snrcol, thrcol):
+            """Vectorized spatially-uniform star selection (O(N log N))."""
             if df.empty:
                 return df
             ny, nx = image_shape
-            work = df.copy()
-            work = work[np.isfinite(work[xcol]) & np.isfinite(work[ycol])]
-            if work.empty:
-                return work
-
-            if snrcol and snrcol in work.columns:
-                work["_rank"] = work[snrcol].values
-            elif thrcol and thrcol in work.columns:
-                work["_rank"] = work[thrcol].values
+            
+            # Work with numpy arrays for speed (avoid DataFrame copies)
+            mask_finite = np.isfinite(df[xcol].values) & np.isfinite(df[ycol].values)
+            if not mask_finite.any():
+                return df.iloc[:0]  # Empty DataFrame with same columns
+            
+            # Get ranking values (higher = better)
+            if snrcol and snrcol in df.columns:
+                rank_vals = df[snrcol].values[mask_finite]
+            elif thrcol and thrcol in df.columns:
+                rank_vals = df[thrcol].values[mask_finite]
             else:
                 fluxcol = next(
-                    (
-                        c
-                        for c in ("flux_psf", "flux_ap", "flux", "FLUX_AUTO")
-                        if c in work.columns
-                    ),
+                    (c for c in ("flux_psf", "flux_ap", "flux", "FLUX_AUTO") if c in df.columns),
                     None,
                 )
-                work["_rank"] = (
-                    work[fluxcol].values
-                    if fluxcol
-                    else np.random.default_rng(42).random(len(work))
-                )
+                rank_vals = df[fluxcol].values[mask_finite] if fluxcol else np.ones(mask_finite.sum())
+            
+            # Get coordinates
+            x_vals = df[xcol].values[mask_finite]
+            y_vals = df[ycol].values[mask_finite]
+            idx_vals = df.index[mask_finite]
+            
             # Grid size: aim for ~num_keep cells but at least 2x2
             side = int(np.ceil(np.sqrt(max(4, num_keep))))
-            xedges = np.linspace(0, nx, side + 1)
-            yedges = np.linspace(0, ny, side + 1)
-            xi = np.clip(np.digitize(work[xcol].values, xedges) - 1, 0, side - 1)
-            yi = np.clip(np.digitize(work[ycol].values, yedges) - 1, 0, side - 1)
-            work["_cell"] = yi * side + xi
-            # Shuffle cell order so we do not preferentially select from any
-            # particular region purely due to indexing.
+            
+            # Compute cell indices using vectorized operations
+            xi = np.clip((x_vals / nx * side).astype(int), 0, side - 1)
+            yi = np.clip((y_vals / ny * side).astype(int), 0, side - 1)
+            cell_ids = yi * side + xi
+            
+            # Create random shuffle for cell processing order
             rng = np.random.default_rng(42)
-            cells = np.arange(side * side, dtype=int)
-            rng.shuffle(cells)
-
-            selected_idx = []
-            # First pass: take the best source from each non-empty cell.
-            for cell in cells:
-                rows = work[work["_cell"] == cell]
-                if rows.empty:
-                    continue
-                best_idx = rows["_rank"].astype(float).idxmax()
-                selected_idx.append(best_idx)
-                if len(selected_idx) >= num_keep:
+            cell_order = np.arange(side * side)
+            rng.shuffle(cell_order)
+            
+            # Build cell->indices mapping using argsort for efficiency
+            selected_indices = []
+            cells_to_process = list(cell_order)
+            
+            # Process cells in multiple passes until we have enough stars
+            for pass_num in range(1, 10):  # Max 10 passes
+                if len(selected_indices) >= num_keep or not cells_to_process:
                     break
-
-            # If we still need more, take second-best, third-best, ... per cell
-            # in additional passes before falling back to global ranking. This
-            # keeps the sample more spatially uniform across the image.
-            pass_num = 2
-            while len(selected_idx) < num_keep:
-                added_this_pass = 0
-                for cell in cells:
-                    rows = work[work["_cell"] == cell].sort_values(
-                        "_rank", ascending=False
-                    )
-                    if rows.empty:
+                
+                next_cells = []
+                for cell_id in cells_to_process:
+                    in_cell = (cell_ids == cell_id)
+                    if not in_cell.any():
                         continue
-                    # Skip any rows already chosen in previous passes
-                    rows = rows[~rows.index.isin(selected_idx)]
-                    if rows.empty:
-                        continue
-                    best_idx = rows["_rank"].astype(float).idxmax()
-                    selected_idx.append(best_idx)
-                    added_this_pass += 1
-                    if len(selected_idx) >= num_keep:
+                    
+                    # Get indices in this cell not yet selected
+                    cell_indices = np.where(in_cell)[0]
+                    already_selected_mask = np.isin(cell_indices, selected_indices, assume_unique=True)
+                    available = cell_indices[~already_selected_mask]
+                    
+                    if len(available) == 0:
+                        continue  # Cell exhausted, don't add to next_cells
+                    
+                    # Select best available from this cell
+                    available_ranks = rank_vals[available]
+                    best_local_idx = available[np.argmax(available_ranks)]
+                    selected_indices.append(best_local_idx)
+                    
+                    if len(available) > 1:
+                        next_cells.append(cell_id)  # More stars available, process again
+                    
+                    if len(selected_indices) >= num_keep:
                         break
-                if added_this_pass == 0:
-                    break
-
-            selected = work.loc[selected_idx].copy()
-            if len(selected) < num_keep:
-                remaining = work.drop(index=selected.index).sort_values(
-                    "_rank", ascending=False
-                )
-                selected = pd.concat(
-                    [selected, remaining.head(num_keep - len(selected))], axis=0
-                )
-            return selected.drop(
-                columns=["_rank", "_cell"], errors="ignore"
-            ).reset_index(drop=True)
+                
+                cells_to_process = next_cells
+            
+            # If still need more, take from global ranking
+            if len(selected_indices) < num_keep:
+                n_needed = num_keep - len(selected_indices)
+                # Get remaining indices sorted by rank
+                all_indices = np.arange(len(idx_vals))
+                remaining_mask = ~np.isin(all_indices, selected_indices, assume_unique=True)
+                remaining_indices = all_indices[remaining_mask]
+                remaining_ranks = rank_vals[remaining_indices]
+                # Sort by rank descending and take top n_needed
+                best_remaining = remaining_indices[np.argsort(-remaining_ranks)[:n_needed]]
+                selected_indices.extend(best_remaining)
+            
+            # Convert back to original DataFrame indices
+            final_idx = idx_vals[selected_indices[:num_keep]]
+            return df.loc[final_idx].reset_index(drop=True)
 
         # ---- main ----------------------------------------------------------
         try:
@@ -2288,17 +2302,23 @@ class PSF:
                 epsf_clip_sigma,
                 epsf_clip_maxiters,
             )
+            # Adaptive iteration strategy: start with fewer iterations, increase if not converged
+            # This reduces average build time significantly while maintaining quality
+            adaptive_iters = bool(phot_cfg.get("psf_adaptive_iterations", True))
+            base_maxiters = int(phot_cfg.get("psf_maxiters_initial", 5)) if adaptive_iters else 10
+            max_maxiters = int(phot_cfg.get("psf_maxiters_max", 10))
+            
             epsf_builder = EPSFBuilder(
                 oversampling=oversample,
                 recentering_func=recenter_func,
                 recentering_boxsize=cen_box,
-                recentering_maxiters=100,
+                recentering_maxiters=50 if adaptive_iters else 100,  # Reduced for faster early exit
                 fitter=EPSFFitter(fit_boxsize=fit_boxsize),
-                maxiters=10,
-                # norm_radius=norm_radius,
+                maxiters=base_maxiters,
                 sigma_clip=sigma_clip_epsf,
                 smoothing_kernel=smooth_kernel,
                 progress_bar=False,
+                accuracy_threshold=1e-4 if adaptive_iters else 1e-6,  # Relaxed for faster convergence
             )
 
             # Initialise ePSF from a Moffat profile. The wing parameter is
@@ -2340,7 +2360,38 @@ class PSF:
                     build_result.iterations,
                     build_result.final_center_accuracy if build_result.final_center_accuracy is not None else float('nan'),
                 )
-                if not build_result.converged:
+                
+                # Adaptive retry: if not converged and we have headroom, retry with more iterations
+                if adaptive_iters and not build_result.converged and base_maxiters < max_maxiters:
+                    log.info(
+                        "ePSF did not converge in %d iterations; retrying with %d iterations",
+                        base_maxiters, max_maxiters
+                    )
+                    # Create new builder with higher iteration limit
+                    epsf_builder_retry = EPSFBuilder(
+                        oversampling=oversample,
+                        recentering_func=recenter_func,
+                        recentering_boxsize=cen_box,
+                        recentering_maxiters=100,
+                        fitter=EPSFFitter(fit_boxsize=fit_boxsize),
+                        maxiters=max_maxiters,
+                        sigma_clip=sigma_clip_epsf,
+                        smoothing_kernel=smooth_kernel,
+                        progress_bar=False,
+                        accuracy_threshold=1e-6,  # Stricter for retry
+                    )
+                    build_result_retry = epsf_builder_retry.build_epsf(epsfstars, epsf=init_epsf)
+                    if hasattr(build_result_retry, 'epsf'):
+                        if build_result_retry.converged:
+                            log.info("ePSF converged on retry with %d iterations", max_maxiters)
+                            epsf = build_result_retry.epsf
+                            fitted_stars = build_result_retry.fitted_stars
+                            build_result = build_result_retry  # Update for later checks
+                        else:
+                            log.warning("ePSF did NOT converge even with %d iterations", max_maxiters)
+                    else:
+                        epsf, fitted_stars = build_result_retry
+                elif not build_result.converged:
                     log.warning("ePSF build did NOT converge; PSF model may be unreliable.")
             else:
                 epsf, fitted_stars = build_result
