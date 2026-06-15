@@ -852,34 +852,63 @@ class Zeropoint:
         delta = y - x
         var_perp = x_err**2 + y_err**2  # Variance perpendicular to slope=1 line
         
-        # Outlier rejection: sigma clip on delta values
-        # Use robust initial estimate
-        med_delta = np.nanmedian(delta)
-        mad_delta = np.nanmedian(np.abs(delta - med_delta)) * 1.4826
+        # Iterative robust outlier rejection (similar to RANSAC but deterministic)
+        # Start with all points and iteratively clip outliers
+        inlier_mask_local = np.ones(len(delta), dtype=bool)
+        zp = np.nanmedian(delta)  # Initial estimate
         
-        if mad_delta < 1e-6:  # All points identical (unlikely in practice)
-            inlier_mask_local = np.ones(len(delta), dtype=bool)
-        else:
-            # 3-sigma clip on delta values
-            inlier_mask_local = np.abs(delta - med_delta) < 3.0 * mad_delta
+        for iteration in range(max_iter):
+            n_before = inlier_mask_local.sum()
+            
+            # Compute weighted ZP from current inliers
+            delta_in = delta[inlier_mask_local]
+            var_in = var_perp[inlier_mask_local]
+            weights = 1.0 / np.clip(var_in, 1e-12, None)
+            weights = weights / weights.sum() if weights.sum() > 0 else weights
+            zp_new = np.average(delta_in, weights=weights)
+            
+            # Compute residuals and robust scatter
+            residuals = delta - zp_new
+            med_res = np.nanmedian(residuals[inlier_mask_local])
+            mad_res = np.nanmedian(np.abs(residuals[inlier_mask_local] - med_res)) * 1.4826
+            
+            if mad_res < 1e-6:  # All points identical
+                break
+            
+            # 3-sigma clip based on perpendicular distance
+            # Include measurement uncertainty in threshold
+            threshold = 3.0 * np.sqrt(mad_res**2 + np.median(var_perp))
+            inlier_mask_local = np.abs(residuals) < threshold
+            
+            n_after = inlier_mask_local.sum()
+            
+            # Check for convergence
+            if n_after == n_before:
+                logger.debug(f"ODR converged at iteration {iteration + 1}")
+                break
+            
+            if n_after < min_points:
+                logger.warning(f"ODR: too few inliers after clipping ({n_after}), reverting to iteration {iteration}")
+                # Revert to previous iteration
+                inlier_mask_local = np.abs(residuals) < (3.0 * mad_res)
+                break
+            
+            zp = zp_new
         
+        # Final fit on converged inliers
         if inlier_mask_local.sum() < min_points:
-            logger.warning(f"ODR: too few inliers after clipping ({inlier_mask_local.sum()})")
-            # Fall back to all points
+            logger.warning(f"ODR: insufficient inliers ({inlier_mask_local.sum()}), using all points")
             inlier_mask_local = np.ones(len(delta), dtype=bool)
         
-        # Weighted fit on inliers
         delta_in = delta[inlier_mask_local]
         var_in = var_perp[inlier_mask_local]
         weights = 1.0 / np.clip(var_in, 1e-12, None)
-        weights = weights / weights.sum()  # Normalize
+        weights = weights / weights.sum() if weights.sum() > 0 else weights
         
         # Weighted mean (ZP estimate)
         zp = np.average(delta_in, weights=weights)
         
-        # ZP uncertainty from weighted standard error
-        # For weighted mean: σ_zp = sqrt(Σ w_i² σ_i²) where w_i = W_i/ΣW_j
-        n_eff = weights.sum()**2 / (weights**2).sum()  # Effective sample size
+        # ZP uncertainty from weighted standard error + empirical scatter
         var_zp = 1.0 / weights.sum() if weights.sum() > 0 else np.nan
         zp_err = np.sqrt(var_zp)
         
@@ -888,7 +917,6 @@ class Zeropoint:
         chi2 = np.sum((residuals**2) / var_in)
         dof = len(delta_in) - 1
         if dof > 0 and chi2 / dof > 1.0:
-            # Scale factor for underdispersion/overdispersion
             scale = np.sqrt(chi2 / dof)
             zp_err *= scale
         
@@ -977,64 +1005,54 @@ class Zeropoint:
             return ZP, slope, full, np.diag([total_zp_err**2, slope_err**2])
 
         # RANSAC threshold from MAD of residuals (unweighted centre).
-        r0 = y - np.nanmedian(y)
-        mad = np.nanmedian(np.abs(r0)) * 1.4826 + 1e-12
-
-        # The fitted model is a constant (0-slope), which has exactly 1 DOF.
-        # Two points are sufficient to determine the intercept; using N/3 or N*0.3
-        # makes RANSAC over-restrictive on small catalogs, often finding no consensus
-        # set and falling back to all-point median (including outliers).
-        n_points = len(x)
-        effective_min_samples = max(ransac_min_samples, 2)
-
-        # Use 3*MAD as the inlier threshold without capping: the 0.15 mag cap
-        # was too tight for fields with genuine photometric scatter > 0.05 mag
-        # (non-photometric nights, crowded fields, filter mismatches), causing
-        # RANSAC to reject most valid inliers and produce a biased ZP.
-        residual_threshold = max(3.0 * mad, 0.05)
-
-        ransac = RANSACRegressor(
-            PenalisedSlopeRegressor(
-                slope_constraint=0.0,
-                slope_tolerance=slope_tolerance,
-                penalty_weight=penalty_weight,
-            ),
-            residual_threshold=residual_threshold,
-            max_trials=max_trials,
-            min_samples=effective_min_samples,
-            random_state=random_state,
+        # Compute Y-errors from weights for ODR
+        mag_err = 1.0 / np.sqrt(np.clip(w0, 1e-12, None))
+        
+        # Use ODR with robust outlier rejection
+        # ODR properly accounts for errors in both X and Y dimensions
+        logger.info("Using ODR fit with robust outlier rejection (X,Y errors).")
+        
+        # y = m_cat (catalog magnitude), x = m_inst (instrumental magnitude)
+        # delta_mag = m_cat - m_inst, so m_cat = delta_mag + m_inst
+        y_cal = y + x  # catalog magnitude
+        y_err = mag_err  # Y-error from weights
+        
+        ZP, zp_std, inlier_mask = self._odr_slope1_fit(
+            x, y_cal, x_err, y_err,
+            max_iter=10,  # Iterative sigma clipping
+            min_points=ransac_min_samples,
         )
-        ransac.fit(x[:, None], y)
-        inlier_mask = ransac.inlier_mask_
-        logger.info(f"RANSAC: {inlier_mask.sum()}/{n_points} inliers (threshold={residual_threshold:.3f}, min_samples={effective_min_samples})")
+        
+        # Map inlier_mask back to original array size
+        full_mask = np.zeros(orig_size, dtype=bool)
+        full_mask[keep_idx] = inlier_mask
+        
+        logger.info(f"ODR: {inlier_mask.sum()}/{len(x)} inliers, ZP={ZP:.4f} ± {zp_std:.4f}")
+        
+        # If ODR fails or rejects too many points, fall back to simple median
+        if not np.isfinite(ZP) or inlier_mask.sum() < 2:
+            logger.warning("ODR failed or found too few inliers; falling back to median.")
+            yv = y[np.isfinite(y)]
+            ZP = float(np.nanmedian(yv)) if yv.size else np.nan
+            mad0 = float(median_abs_deviation(yv, nan_policy="omit")) if yv.size else np.nan
+            n0 = int(yv.size)
+            zp_se = (1.858 * mad0 / np.sqrt(n0)) if n0 >= 2 else mad0
+            mean_x_err = float(np.nanmedian(x_err)) if x_err.size else 0.0
+            zp_std = float(np.sqrt(zp_se**2 + mean_x_err**2))
+            full_mask = np.zeros(orig_size, dtype=bool)
+            full_mask[keep_idx] = True
+            return ZP, slope, full_mask, np.diag([zp_std**2, slope_err**2])
+        
+        # If ODR rejects >50% of points, warn but keep the result
+        if inlier_mask.sum() < 0.5 * len(x) and len(x) > 10:
+            logger.warning(f"ODR rejected >50% of points ({inlier_mask.sum()}/{len(x)}); consider checking data quality")
 
-        # If RANSAC rejects too many points (>50%), fall back to all points
-        # The fit may have larger scatter but uses more data
-        if inlier_mask.sum() < 2:
-            inlier_mask = np.ones(len(x), dtype=bool)
-            logger.warning("RANSAC found too few inliers; using all points.")
-        elif inlier_mask.sum() < 0.5 * n_points and n_points > 10:
-            logger.warning(f"RANSAC rejected >50% of points ({inlier_mask.sum()}/{n_points}); consider checking data quality")
-
-        xi, yi, xi_err = x[inlier_mask], y[inlier_mask], x_err[inlier_mask]
-        yi = yi[np.isfinite(yi)]
-        intercept = float(np.nanmedian(yi)) if yi.size else np.nan
-        mad_i = float(median_abs_deviation(yi, nan_policy="omit")) if yi.size else np.nan
-        n_i = int(yi.size)
-        intercept_err = (1.858 * mad_i / np.sqrt(n_i)) if n_i >= 2 else mad_i
-
-        # Propagate X-error (m_inst uncertainty) into ZP error.
-        # For ZP = median(delta_mag) where delta_mag = m_cat - m_inst,
-        # the error from m_inst uncertainty propagates directly.
-        mean_x_err = float(np.nanmedian(xi_err)) if xi_err.size else 0.0
-        total_zp_err = float(np.sqrt(intercept_err**2 + mean_x_err**2))
-
-        cov = np.diag([total_zp_err**2, slope_err**2])
-        full = np.zeros(orig_size, dtype=bool)
-        full[keep_idx[inlier_mask]] = True
-
-        logger.info(f"ZP = {intercept:.4f} +/- {total_zp_err:.4f} (scatter={intercept_err:.4f}, x_err={mean_x_err:.4f})")
-        return intercept, slope, full, cov
+        # ODR already computed ZP and error - use those results directly
+        # zp_std already includes X-error propagation from ODR
+        cov = np.diag([zp_std**2, slope_err**2])
+        
+        logger.info(f"ZP = {ZP:.4f} +/- {zp_std:.4f} (ODR fit with X,Y errors)")
+        return ZP, slope, full_mask, cov
 
     # -----------------------------------------------------------------------
     # Public: RANSAC-based zeropoint fit
@@ -1053,17 +1071,18 @@ class Zeropoint:
         fixed_color_coeff_errors = None,
         fit_mode="polynomial",
         n_segments=1,
-        fit_method="ransac",  # "ransac" or "odr"
+        fit_method="odr",  # "odr" (default) or "ransac"
     ):
         """
-        Fit ZP = m_cat - m_inst[+/-c*(c1-c2)] vs m_inst via RANSAC or ODR.
+        Fit ZP = m_cat - m_inst[+/-c*(c1-c2)] vs m_inst via ODR or RANSAC.
         Supports linear, quadratic, and piecewise linear color terms.
 
         Parameters
         ----------
         fit_method : str
-            "ransac" for RANSAC-based robust fit (default), or "odr" for
-            Orthogonal Distance Regression with proper X,Y error handling.
+            "odr" for Orthogonal Distance Regression (default), or "ransac" for
+            RANSAC-based robust fit. ODR properly accounts for errors in both
+            X and Y dimensions with iterative outlier rejection.
         fixed_color_coeffs : tuple or None
             For linear: (intercept, slope)
             For quadratic: (intercept, slope, quad_coeff)
