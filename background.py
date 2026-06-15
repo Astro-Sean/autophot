@@ -77,7 +77,7 @@ from scipy.ndimage import (
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 # --- Local ---
-from functions import log_step, set_size, log_warning_from_exception
+from functions import border_msg, log_step, set_size, log_warning_from_exception
 from wcs import get_wcs
 
 
@@ -1119,11 +1119,9 @@ class BackgroundSubtractor:
                 # execution time stays minimal.
                 bkg_data = np.asarray(bkg.background, dtype=float)
 
+                self.logger.info(border_msg("Background estimation"))
                 self.logger.info(
-                    "Background2D final:\n  Attempt: %d\n"
-                    "  Box size: %s\n"
-                    "  Filter size: %d\n"
-                    "  Exclude percentile: %.1f",
+                    "Attempt: %d | Box: %s | Filter: %d | Exclude: %.1f%%",
                     i + 1,
                     bs,
                     fs,
