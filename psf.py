@@ -2700,7 +2700,7 @@ class PSF:
                 transform=ax.transAxes,
                 va="top",
                 ha="right",
-                color="#0000FF",
+                color="white",
                 fontsize=6,
             )
             ax.set_xticks([])

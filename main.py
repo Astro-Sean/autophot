@@ -115,6 +115,8 @@ from functions import (
     AutophotYaml,
     log_step,
     border_msg,
+    PlainFormatter,
+    ColoredLevelFormatter,
     metrics_table,
     compact_status,
     convert_to_mjd_astropy,
@@ -790,19 +792,24 @@ def run_photometry():
         else:
             log_level = logging.DEBUG
 
-        # Sets up logging to file with improved configuration.
-        logging.basicConfig(
-            level=log_level,
-            format="%(asctime)s - %(levelname)s - %(message)s",
+        # Sets up logging to file with plain formatter (no ANSI codes).
+        log_file = os.path.join(cur_dir, f"LOG_{input_yaml['base']}.log")
+        file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+        file_handler.setLevel(log_level)
+        plain_formatter = PlainFormatter(
+            fmt="%(asctime)s - %(levelname)s - %(message)s",
             datefmt="%H:%M:%S",
-            filename=os.path.join(cur_dir, f"LOG_{input_yaml['base']}.log"),
-            filemode="w",
-            encoding="utf-8",  # Explicit encoding for better compatibility
-            force=True,  # Ensures this overrides any existing config
         )
+        file_handler.setFormatter(plain_formatter)
+        
+        # Add filter for message normalization
         normalize_filter = LogMessageNormalizeFilter(width=150)
-        for _h in logging.getLogger("").handlers:
-            _h.addFilter(normalize_filter)
+        file_handler.addFilter(normalize_filter)
+        
+        # Get root logger and add file handler
+        root_logger = logging.getLogger("")
+        root_logger.setLevel(log_level)
+        root_logger.addHandler(file_handler)
 
         # Creates a console handler with improved settings.
         console = logging.StreamHandler()

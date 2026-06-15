@@ -10,6 +10,7 @@ Created on Wed Sep 28 09:58:29 2022
 import numpy as np
 
 import os
+import re
 import sys
 import warnings
 import pandas as pd
@@ -44,9 +45,26 @@ from photutils.aperture import RectangularAperture
 logger = logging.getLogger(__name__)
 
 
+class PlainFormatter(logging.Formatter):
+    """
+    Plain text formatter for log files - strips ANSI escape codes.
+    
+    Ensures log files contain clean, readable text without terminal
+    formatting codes (bold, color, etc.) that are added by border_msg
+    and other formatting functions.
+    """
+    ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    
+    def format(self, record: logging.LogRecord) -> str:
+        # Get base formatted message
+        msg = super().format(record)
+        # Strip all ANSI escape codes
+        return self.ANSI_ESCAPE.sub('', msg)
+
+
 class ColoredLevelFormatter(logging.Formatter):
     """
-    Logging formatter with consistent, minimal color coding.
+    Logging formatter with consistent, minimal color coding for terminal output.
 
     Principle: Only warnings and errors get color. Routine output (INFO, DEBUG)
     remains plain black for clean, professional appearance.
