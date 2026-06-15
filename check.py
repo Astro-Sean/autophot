@@ -444,7 +444,8 @@ class FitsInfo:
         tele_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
 
         self.logger.info(log_step("Headers (basic)"))
-        for fname in tqdm(self.flist):
+        flist_iter = tqdm(self.flist) if len(self.flist) > 1 else self.flist
+        for fname in flist_iter:
             header = get_header(fname)
             if not header:
                 continue
@@ -492,7 +493,9 @@ class FitsInfo:
         self.logger.info(
             "Telescopes discovered in headers: %s", ", ".join(tele_dict.keys())
         )
-        for tele, inst_groups in tqdm(tele_dict.items()):
+        tele_items = list(tele_dict.items())
+        tele_iter = tqdm(tele_items) if len(tele_items) > 1 else tele_items
+        for tele, inst_groups in tele_iter:
             db.setdefault(tele, {})
             
             # Always use INSTRUME as the block key
@@ -556,7 +559,8 @@ class FitsInfo:
 
         # PHASE 3: FILTER KEYWORDS FOR ALL VALID FILES (skip files without TELESCOP/INSTRUME, e.g. templates)
         self.logger.info(log_step(f"Filters: {len(correct_files)} files"))
-        for fname in tqdm(correct_files):
+        correct_iter = tqdm(correct_files) if len(correct_files) > 1 else correct_files
+        for fname in correct_iter:
             header = get_header(fname)
             tele_key = next(
                 (k for k in KEYWORD_ALIASES["TELESCOP"] if k in header), None

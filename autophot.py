@@ -2093,8 +2093,13 @@ class AutomatedPhotometry:
                                         break
                         gc.collect()
                     else:
-                        from tqdm import tqdm
-                        for file in tqdm(file_list, desc="Processing", unit="file", total=len(file_list)):
+                        # Only show progress bar for multiple files
+                        if len(file_list) > 1:
+                            from tqdm import tqdm
+                            file_iter = tqdm(file_list, desc="Processing", unit="file", total=len(file_list))
+                        else:
+                            file_iter = file_list
+                        for file in file_iter:
                             try:
                                 fname, rc = _run_main_subprocess(
                                     python_executable,

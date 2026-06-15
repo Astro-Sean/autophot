@@ -50,16 +50,21 @@ class ColoredLevelFormatter(logging.Formatter):
 
     Uses colors only when stdout is a TTY; otherwise it behaves like a normal
     logging.Formatter (no ANSI escape sequences).
+    
+    Compact format for routine messages to reduce visual clutter.
     """
 
     RESET = "\033[0m"
     BOLD = "\033[1m"
     BLUE = "\033[34m"
     RED = "\033[31m"
+    DIM = "\033[2m"
 
-    def __init__(self, *args, use_color: bool = True, **kwargs):
+    def __init__(self, *args, use_color: bool = True, compact: bool = True, **kwargs):
         super().__init__(*args, **kwargs)
         self._use_color = use_color
+        self._compact = compact
+        self._last_time = None
 
     def format(self, record: logging.LogRecord) -> str:
         msg_raw = record.getMessage()
@@ -68,8 +73,21 @@ class ColoredLevelFormatter(logging.Formatter):
         if msg_clean != msg_raw:
             record.msg = msg_clean
             record.args = ()
-        base = super().format(record)
+        
+        # Compact format: suppress repeated timestamps and level names for INFO
+        if self._compact and record.levelno == logging.INFO:
+            time_str = self.formatTime(record, "%H:%M:%S")
+            # Suppress timestamp if same as previous (reduces visual noise)
+            if time_str == self._last_time:
+                base = f"  {msg_clean}"
+            else:
+                base = f"{time_str}  {msg_clean}"
+                self._last_time = time_str
+        else:
+            base = super().format(record)
+        
         record.msg, record.args = old_msg, old_args
+        
         if not self._use_color:
             return base
 
@@ -91,7 +109,10 @@ class ColoredLevelFormatter(logging.Formatter):
             # Debug output: blue for quick visual scanning.
             return f"{self.BLUE}{base}{self.RESET}"
 
-        # INFO/default: plain text (terminal default color, typically black/white).
+        # INFO/default: dim timestamp for cleaner look
+        if self._compact and base.startswith("  "):
+            # Repeated timestamp line - keep compact
+            return base
         return base
 
 
@@ -762,18 +783,15 @@ def beta_psf(n, flux_psf, flux_psf_err):
 
 def log_step(msg: str) -> str:
     """
-    Short one-line marker for routine pipeline steps.
+    Compact one-line marker for routine pipeline steps.
 
-    Puts a blank line between the ``INFO -`` line and the ``— … —`` line, and
-    one after the marker. Message body starts with two newlines so the body is
-    not flush under the prefix.
-    Prefer for frequently called stages; use :func:`border_msg` for major
-    user-visible section breaks.
+    Uses minimal decoration to reduce visual clutter while maintaining
+    clear section markers. Prefer for frequently called stages.
     """
     m = str(msg).strip()
     if not m:
         return ""
-    return f"\n\n\n— {m} —\n"
+    return f"[{m}]"
 
 
 def border_msg(msg: str, body: str = "─", corner: str = "+", 
