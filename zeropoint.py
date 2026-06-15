@@ -1429,12 +1429,24 @@ class Zeropoint:
                         median_abs_deviation(inlier_deltas, nan_policy="omit")
                     )
                     # SE(median) ~ 1.858 * MAD/sqrt(N) (1.253*sigma/sqrt(N), sigma~1.4826*MAD)
-                    zp_std = (1.858 * mad_zp / np.sqrt(n_inl)) if n_inl >= 2 else mad_zp
+                    se_median = (1.858 * mad_zp / np.sqrt(n_inl)) if n_inl >= 2 else mad_zp
 
-                    # Zeropoint uncertainty: always use empirical scatter (SE of median).
-                    # Per your convention, we do not use inverse-variance weighting for errors.
+                    # Per-source measurement uncertainty: average of propagated errors
+                    # (flux_err + catmag_err + color_corr_err) already in inlier_delta_err
+                    mean_per_source_err = float(np.nanmedian(inlier_delta_err)) if len(inlier_delta_err) > 0 else 0.0
+
+                    # Total zeropoint error: combine empirical scatter and measurement errors
+                    # Empirical scatter captures unmodeled systematics (flat-fielding, color terms, etc.)
+                    # Per-source errors capture photometric measurement uncertainties
+                    zp_err = float(np.sqrt(se_median**2 + mean_per_source_err**2))
+
                     # Add floor to prevent misleading zero errors (minimum 0.001 mag = 1 mmag)
-                    zp_err = max(float(zp_std), 0.001)
+                    zp_err = max(zp_err, 0.001)
+
+                    logger.debug(
+                        "[%s] ZP error breakdown: SE_median=%.4f, mean_src_err=%.4f, combined=%.4f (N=%d, MAD=%.4f)",
+                        flux_type, se_median, mean_per_source_err, zp_err, n_inl, mad_zp,
+                    )
 
                     zp_params[flux_type].update(
                         {
