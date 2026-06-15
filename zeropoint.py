@@ -974,6 +974,8 @@ class Zeropoint:
         n_steps: int = 1000,
         outlier_sigma: float = 3.0,
         min_points: int = 2,
+        robust: bool = True,
+        V_out: float = 1.0,
     ):
         """
         MCMC fit for y = x + ZP (slope=1 constraint) with proper X,Y errors.
@@ -982,10 +984,22 @@ class Zeropoint:
         Following the methodology from:
         https://github.com/nikhil-sarin/2Derrors
         
-        The likelihood accounts for total variance perpendicular to slope=1:
-            σ²_perp = σ²_x + σ²_y
+        Supports two modes:
         
-        log L = -0.5 * Σ[(y_i - x_i - ZP)² / σ²_perp_i] - 0.5 * Σ log(σ²_perp_i)
+        **robust=True (default):** Gaussian mixture model with in-model outlier
+        handling. Each data point is modeled as a mixture of a main component
+        (tight Gaussian around ZP with variance = σ²_perp) and an outlier
+        component (broad Gaussian with variance = σ²_perp + V_out).
+        
+        Parameters: [ZP, f_out]
+        - f_out = outlier fraction (prior: uniform [0, 0.5])
+        - V_out = outlier variance scale (fixed, default 1.0 mag²)
+        
+        Likelihood (mixture):
+            L_i = (1-f_out) * N(ZP, σ²_perp) + f_out * N(ZP, σ²_perp + V_out)
+        
+        **robust=False:** Single Gaussian likelihood (pre-clip outliers).
+            log L = -0.5 * Σ[(y_i - x_i - ZP)² / σ²_perp_i] - 0.5 * Σ log(σ²_perp_i)
         
         Parameters
         ----------
@@ -1000,9 +1014,15 @@ class Zeropoint:
         n_steps : int
             Production steps
         outlier_sigma : float
-            Sigma-clipping threshold for outlier rejection
+            Sigma-clipping threshold for pre-MCMC outlier rejection (robust=False only)
         min_points : int
             Minimum points required for fit
+        robust : bool
+            If True, use Gaussian mixture model for in-model outlier handling.
+            If False, use single Gaussian with pre-MCMC sigma-clipping.
+        V_out : float
+            Outlier variance scale in mag² (only used when robust=True).
+            Default 1.0 mag² gives ~1 mag outlier scatter.
             
         Returns
         -------
@@ -1033,13 +1053,13 @@ class Zeropoint:
         delta = y - x
         var_perp = x_err**2 + y_err**2
         
-        # Initial robust estimate for outlier rejection
+        # Initial robust estimate for starting point
         med_delta = np.nanmedian(delta)
         mad_delta = np.nanmedian(np.abs(delta - med_delta)) * 1.4826
         if mad_delta < 1e-6:
             mad_delta = np.nanstd(delta)
         
-        # Initial sigma-clip to remove obvious outliers
+        # Initial sigma-clip to remove extreme outliers (used for starting guess only)
         inlier_mask = np.abs(delta - med_delta) < outlier_sigma * mad_delta
         if inlier_mask.sum() < min_points:
             inlier_mask = np.ones(len(delta), dtype=bool)
@@ -1047,71 +1067,153 @@ class Zeropoint:
         delta_in = delta[inlier_mask]
         var_in = var_perp[inlier_mask]
         
-        # Log-prior: broad uniform around initial estimate
+        # Starting guess for ZP
         zp_guess = np.average(delta_in, weights=1.0/np.clip(var_in, 1e-12, None))
         zp_spread = max(1.0, 5 * mad_delta)  # Broad prior
         
-        def log_prior(zp):
-            if abs(zp - zp_guess) < zp_spread:
+        if robust:
+            # ================================================================
+            # ROBUST MODE: Gaussian mixture model with in-model outliers
+            # ================================================================
+            # Parameters: theta = [ZP, f_out]
+            #   f_out = outlier fraction
+            #   V_out = outlier variance (fixed)
+            
+            ndim = 2
+            
+            def log_prior(theta):
+                zp, f_out = theta
+                if abs(zp - zp_guess) > zp_spread:
+                    return -np.inf
+                if f_out < 0.0 or f_out > 0.5:
+                    return -np.inf
                 return 0.0
-            return -np.inf
-        
-        def log_likelihood(zp):
-            # Gaussian likelihood with variance = x_err² + y_err²
-            resid = delta_in - zp
-            # Include the log(var) term for proper normalization
-            return -0.5 * np.sum((resid**2) / var_in + np.log(2 * np.pi * var_in))
-        
-        def log_probability(zp):
-            lp = log_prior(zp)
-            if not np.isfinite(lp):
+            
+            def log_likelihood(theta):
+                zp, f_out = theta
+                resid = delta - zp
+                
+                # Main component: tight Gaussian
+                logL_main = -0.5 * ((resid**2) / var_perp + np.log(2 * np.pi * var_perp))
+                
+                # Outlier component: broad Gaussian (var_perp + V_out)
+                var_out = var_perp + V_out
+                logL_out = -0.5 * ((resid**2) / var_out + np.log(2 * np.pi * var_out))
+                
+                # Mixture likelihood
+                L_main = np.exp(logL_main)
+                L_out = np.exp(logL_out)
+                L_mix = (1.0 - f_out) * L_main + f_out * L_out
+                
+                # Clip tiny values to avoid log(0)
+                L_mix = np.clip(L_mix, 1e-300, None)
+                return np.sum(np.log(L_mix))
+            
+            def log_probability(theta):
+                lp = log_prior(theta)
+                if not np.isfinite(lp):
+                    return -np.inf
+                return lp + log_likelihood(theta)
+            
+            # Initialize walkers
+            n_walkers_eff = min(n_walkers, max(8, len(delta) // 2))
+            n_walkers_eff = max(n_walkers_eff, 8)  # Minimum 8 for 2D
+            
+            # Starting positions
+            pos_zp = zp_guess + 0.01 * np.random.randn(n_walkers_eff, 1)
+            pos_fout = 0.05 + 0.02 * np.random.randn(n_walkers_eff, 1)
+            pos = np.hstack([pos_zp, pos_fout])
+            
+            sampler = emcee.EnsembleSampler(n_walkers_eff, ndim, log_probability)
+            
+            # Burn-in
+            sampler.run_mcmc(pos, n_burn, progress=False)
+            sampler.reset()
+            
+            # Production run
+            sampler.run_mcmc(None, n_steps, progress=False)
+            
+            # Extract posterior
+            samples = sampler.get_chain(flat=True)
+            zp_samples = samples[:, 0]
+            f_out_samples = samples[:, 1]
+            
+            zp = np.median(zp_samples)
+            zp_err = np.std(zp_samples)
+            f_out = np.median(f_out_samples)
+            
+            # Compute posterior probability of each point being an inlier
+            resid = delta - zp
+            L_main = np.exp(-0.5 * (resid**2) / var_perp) / np.sqrt(2 * np.pi * var_perp)
+            var_out = var_perp + V_out
+            L_out = np.exp(-0.5 * (resid**2) / var_out) / np.sqrt(2 * np.pi * var_out)
+            
+            # P(inlier | data) = (1-f_out) * L_main / L_mix
+            L_mix = (1.0 - f_out) * L_main + f_out * L_out
+            p_inlier = (1.0 - f_out) * L_main / L_mix
+            
+            # Inliers: points with high probability of belonging to main component
+            inlier_threshold = 0.5
+            final_mask = p_inlier > inlier_threshold
+            
+            logger.info(
+                f"MCMC (robust): ZP={zp:.4f} ± {zp_err:.4f}, "
+                f"f_out={f_out:.3f} ({final_mask.sum()}/{len(delta)} inliers, "
+                f"n_walkers={n_walkers_eff}, n_steps={n_steps})"
+            )
+            
+        else:
+            # ================================================================
+            # STANDARD MODE: Single Gaussian with pre-clip outliers
+            # ================================================================
+            
+            def log_prior(zp):
+                if abs(zp - zp_guess) < zp_spread:
+                    return 0.0
                 return -np.inf
-            return lp + log_likelihood(zp)
+            
+            def log_likelihood(zp):
+                resid = delta_in - zp
+                return -0.5 * np.sum((resid**2) / var_in + np.log(2 * np.pi * var_in))
+            
+            def log_probability(zp):
+                lp = log_prior(zp)
+                if not np.isfinite(lp):
+                    return -np.inf
+                return lp + log_likelihood(zp)
+            
+            n_walkers_eff = min(n_walkers, max(4, len(delta_in) // 2))
+            n_walkers_eff = max(n_walkers_eff, 4)
+            
+            pos = zp_guess + 0.01 * np.random.randn(n_walkers_eff, 1)
+            sampler = emcee.EnsembleSampler(n_walkers_eff, 1, log_probability)
+            
+            sampler.run_mcmc(pos, n_burn, progress=False)
+            sampler.reset()
+            sampler.run_mcmc(None, n_steps, progress=False)
+            
+            samples = sampler.get_chain(flat=True).flatten()
+            zp = np.median(samples)
+            zp_err = np.std(samples)
+            
+            # Post-MCMC outlier rejection
+            residuals = delta - zp
+            med_res = np.nanmedian(residuals[inlier_mask])
+            mad_res = np.nanmedian(np.abs(residuals[inlier_mask] - med_res)) * 1.4826
+            if mad_res < 1e-6:
+                mad_res = np.nanstd(residuals[inlier_mask])
+            threshold = outlier_sigma * np.sqrt(mad_res**2 + np.median(var_perp))
+            final_mask = np.abs(residuals) < threshold
+            f_out = 1.0 - final_mask.mean()
+            
+            logger.info(
+                f"MCMC (standard): ZP={zp:.4f} ± {zp_err:.4f} "
+                f"({final_mask.sum()}/{len(delta)} inliers, f_out={f_out:.3f})"
+            )
         
-        # Set up emcee sampler
-        # Need at least 2*n_walkers points for good sampling
-        n_walkers = min(n_walkers, max(4, len(delta_in) // 2))
-        n_walkers = max(n_walkers, 4)  # Minimum 4 walkers
-        
-        # Initialize walkers around initial guess
-        pos = zp_guess + 0.01 * np.random.randn(n_walkers, 1)
-        
-        sampler = emcee.EnsembleSampler(n_walkers, 1, log_probability)
-        
-        # Burn-in
-        sampler.run_mcmc(pos, n_burn, progress=False)
-        sampler.reset()
-        
-        # Production run
-        sampler.run_mcmc(None, n_steps, progress=False)
-        
-        # Extract posterior
-        samples = sampler.get_chain(flat=True).flatten()
-        
-        # Compute ZP and uncertainty from posterior
-        zp = np.median(samples)
-        zp_err = np.std(samples)
-        
-        # Refine inlier mask using MCMC result
-        residuals = delta - zp
-        med_res = np.nanmedian(residuals[inlier_mask])
-        mad_res = np.nanmedian(np.abs(residuals[inlier_mask] - med_res)) * 1.4826
-        if mad_res < 1e-6:
-            mad_res = np.nanstd(residuals[inlier_mask])
-        
-        # Final outlier rejection with measurement uncertainty
-        threshold = outlier_sigma * np.sqrt(mad_res**2 + np.median(var_perp))
-        final_mask = np.abs(residuals) < threshold
-        
-        # Map back to full array
+        # Map back to full array (including non-finite points)
         full_mask = np.zeros(len(x), dtype=bool)
         full_mask[final_mask] = True
-        
-        logger.info(
-            f"MCMC: ZP={zp:.4f} ± {zp_err:.4f} "
-            f"({final_mask.sum()}/{len(delta)} inliers, "
-            f"n_walkers={n_walkers}, n_steps={n_steps})"
-        )
         
         return zp, zp_err, full_mask
 
