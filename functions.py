@@ -68,6 +68,7 @@ class ColoredLevelFormatter(logging.Formatter):
         self._use_color = use_color
         self._compact = compact
         self._last_time = None
+        self._msg_count = 0
 
     def format(self, record: logging.LogRecord) -> str:
         msg_raw = record.getMessage()
@@ -90,6 +91,11 @@ class ColoredLevelFormatter(logging.Formatter):
             base = super().format(record)
         
         record.msg, record.args = old_msg, old_args
+        
+        # Add blank line before every message (except first)
+        self._msg_count += 1
+        if self._msg_count > 1:
+            base = f"\n{base}"
         
         if not self._use_color:
             return base
@@ -794,12 +800,12 @@ def log_step(msg: str) -> str:
 def border_msg(msg: str, body: str = "─", corner: str = "+", 
                metadata: str | None = None, width: int = 70) -> str:
     """
-    Clean bordered banner for major log sections.
+    Clean bordered banner for major log sections with bold title.
 
     Parameters
     ----------
     msg : str
-        Main section title (centered if shorter than width)
+        Main section title (centered if shorter than width, rendered in bold)
     body : str
         Border character (default: box-drawing '─')
     corner : str
@@ -822,6 +828,10 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
     except Exception:
         use_unicode = False
     
+    # ANSI bold codes for title
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+    
     if not use_unicode:
         body = "-"
         corner = "+"
@@ -831,16 +841,19 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
         left_corner = corner
         right_corner = "+" if corner == "+" else "+"
 
-    # Truncate or pad title to fit
+    # Truncate or pad title to fit (account for bold escape codes in width)
     max_title = width - 4  # space for corners and padding
-    if len(text) > max_title:
-        text = text[:max_title-3] + "..."
+    # Visible text length (bold codes don't count toward display width)
+    visible_text = text
+    if len(visible_text) > max_title:
+        visible_text = visible_text[:max_title-3] + "..."
     
     # Center the title
-    padding = max_title - len(text)
+    padding = max_title - len(visible_text)
     left_pad = padding // 2
     right_pad = padding - left_pad
-    centered = f"{' ' * left_pad}{text}{' ' * right_pad}"
+    # Apply bold to the title text only (not the padding)
+    centered = f"{' ' * left_pad}{BOLD}{visible_text}{RESET}{' ' * right_pad}"
 
     # Build lines
     border_line = body * width
