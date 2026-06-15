@@ -125,7 +125,7 @@ class Zeropoint:
     get()                 - simple sigma-clipped offset measurement
     fit_zeropoint()       - MCMC Bayesian fit (ZP vs m_inst)
     estimate_zeropoint()  - sigma-clip histogram method
-    fit_color_term()      - RANSAC + ODR colour-term fit
+    fit_color_term()      - WLS + sigma-clip colour-term fit
     weighted_average()    - inverse-variance weighted mean
     """
 
@@ -2196,29 +2196,58 @@ class Zeropoint:
                 bp_err = coefficient_errors[0][0] if coefficient_errors[0] else 0.0
                 slope1_err = coefficient_errors[1][0] if len(coefficient_errors[1]) > 0 else 0.0
                 slope2_err = coefficient_errors[1][1] if len(coefficient_errors[1]) > 1 else 0.0
-                intercept_err = coefficient_errors[2] if coefficient_errors[2] else 0.0
+                # coefficient_errors[2] may be a tuple with (intercept_err, cov1, cov2) or just intercept_err
+                if isinstance(coefficient_errors[2], tuple):
+                    intercept_err = coefficient_errors[2][0] if len(coefficient_errors[2]) > 0 else 0.0
+                    cov1 = coefficient_errors[2][1] if len(coefficient_errors[2]) > 1 else None
+                    cov2 = coefficient_errors[2][2] if len(coefficient_errors[2]) > 2 else None
+                else:
+                    intercept_err = coefficient_errors[2] if coefficient_errors[2] else 0.0
+                    cov1 = cov2 = None
             else:
                 bp_err = slope1_err = slope2_err = intercept_err = 0.0
+                cov1 = cov2 = None
 
             # Plot two line segments
             y_plot = np.zeros_like(x_plot)
-            y_plot_upper = np.zeros_like(x_plot)
-            y_plot_lower = np.zeros_like(x_plot)
             mask1 = x_plot <= bp
             mask2 = x_plot > bp
             y_plot[mask1] = intercept + slope1 * x_plot[mask1]
             y_plot[mask2] = (intercept + slope1 * bp) + slope2 * (x_plot[mask2] - bp)
 
-            # Calculate error bands (propagate slope and intercept errors)
-            y_err_upper = np.zeros_like(x_plot)
-            y_err_lower = np.zeros_like(x_plot)
-            y_err_upper[mask1] = intercept_err + slope1_err * x_plot[mask1]
-            y_err_lower[mask1] = intercept_err + slope1_err * x_plot[mask1]
-            y_err_upper[mask2] = (intercept_err + slope1_err * bp) + slope2_err * (x_plot[mask2] - bp)
-            y_err_lower[mask2] = (intercept_err + slope1_err * bp) + slope2_err * (x_plot[mask2] - bp)
+            # Calculate error bands with proper covariance propagation
+            # For y = slope*x + intercept: var(y) = x²*var(slope) + var(intercept) + 2x*cov(slope,intercept)
+            y_err = np.zeros_like(x_plot)
+            
+            # Segment 1 errors
+            x1_seg = x_plot[mask1]
+            if cov1 is not None and np.any(np.isfinite(cov1)):
+                var_y1 = (x1_seg**2 * cov1[0, 0] + cov1[1, 1] + 2 * x1_seg * cov1[0, 1])
+                y_err[mask1] = np.sqrt(np.clip(var_y1, 0, None))
+            else:
+                # Fallback: no covariance, sum in quadrature
+                y_err[mask1] = np.sqrt((slope1_err * x1_seg)**2 + intercept_err**2)
+            
+            # Segment 2 errors (at x relative to breakpoint)
+            x2_seg = x_plot[mask2] - bp
+            intercept2 = intercept + slope1 * bp  # Effective intercept at breakpoint
+            # Approximate error on intercept2 from segment1 parameters
+            if cov1 is not None and np.any(np.isfinite(cov1)):
+                var_int2 = cov1[1, 1] + bp**2 * cov1[0, 0] + 2 * bp * cov1[0, 1]
+                int2_err = np.sqrt(max(0, var_int2))
+            else:
+                int2_err = np.sqrt(intercept_err**2 + (slope1_err * bp)**2)
+            
+            if cov2 is not None and np.any(np.isfinite(cov2)):
+                var_y2 = (x2_seg**2 * cov2[0, 0] + cov2[1, 1] + 2 * x2_seg * cov2[0, 1])
+                # Add variance from intercept2 error (independent approximation)
+                var_y2 += int2_err**2
+                y_err[mask2] = np.sqrt(np.clip(var_y2, 0, None))
+            else:
+                y_err[mask2] = np.sqrt((slope2_err * x2_seg)**2 + int2_err**2)
 
-            y_plot_upper = y_plot + np.abs(y_err_upper)
-            y_plot_lower = y_plot - np.abs(y_err_lower)
+            y_plot_upper = y_plot + y_err
+            y_plot_lower = y_plot - y_err
 
             label_text = f"Piecewise {overall_method}: bp={bp:.3f}\u00b1{bp_err:.3f}, slope1={slope1:.3f}\u00b1{slope1_err:.3f}, slope2={slope2:.3f}\u00b1{slope2_err:.3f}"
 
@@ -2350,23 +2379,97 @@ class Zeropoint:
         plt.close(fig)
         logger.info(f"fit_color_term: saved piecewise color term plot to {plot_file}")
 
-    def _fit_piecewise_linear(self, x, y, x_err, y_err, n_segments):
+    def _fit_piecewise_linear(self, x, y, x_err, y_err, n_segments, outlier_sigma=3.0):
         """
-        Fit piecewise linear color term with n segments using RANSAC regression for outlier rejection.
+        Fit piecewise linear color term with n segments using weighted least squares
+        with robust outlier rejection (sigma clipping).
 
         For n segments, there are n-1 breakpoints. Each segment is a linear fit.
         Segments are continuous at breakpoints.
 
+        Parameters
+        ----------
+        outlier_sigma : float
+            Sigma-clipping threshold for outlier rejection
+
         Returns
         -------
-        (coefficients, coefficient_errors, inlier_mask) : (tuple, tuple, ndarray)
+        (coefficients, coefficient_errors, inlier_mask, method) : (tuple, tuple, ndarray, str)
             coefficients: (breakpoints, slopes, intercept)
                 breakpoints: tuple of n-1 breakpoint x-values
                 slopes: tuple of n slopes
                 intercept: single intercept (first segment intercept)
             coefficient_errors: corresponding errors
             inlier_mask: boolean array indicating which points are inliers
+            method: fitting method used
         """
+
+        def weighted_linear_fit(x_seg, y_seg, yerr_seg):
+            """Fit y = slope*x + intercept with weights = 1/yerr².
+            Returns (slope, intercept, slope_err, intercept_err, cov)"""
+            # Remove points with zero or invalid errors
+            valid = (yerr_seg > 0) & np.isfinite(yerr_seg) & np.isfinite(x_seg) & np.isfinite(y_seg)
+            if valid.sum() < 2:
+                return np.nan, np.nan, np.nan, np.nan, np.full((2, 2), np.nan)
+
+            x_v, y_v, ye_v = x_seg[valid], y_seg[valid], yerr_seg[valid]
+            weights = 1.0 / ye_v**2
+
+            # Weighted least squares via numpy.polyfit (degree 1)
+            # polyfit returns highest power first: [slope, intercept]
+            try:
+                coeffs, cov = np.polyfit(x_v, y_v, 1, w=np.sqrt(weights), cov=True)
+            except Exception:
+                # Fallback if cov fails
+                coeffs = np.polyfit(x_v, y_v, 1, w=np.sqrt(weights))
+                # Estimate covariance from residuals
+                resid = y_v - (coeffs[0] * x_v + coeffs[1])
+                chi2 = np.sum(weights * resid**2)
+                dof = len(x_v) - 2
+                if dof > 0:
+                    scale = max(1.0, chi2 / dof)
+                else:
+                    scale = 1.0
+                # Approximate covariance: scale * (X^T W X)^{-1}
+                X = np.vstack([x_v, np.ones(len(x_v))]).T
+                W = np.diag(weights)
+                XtWX = X.T @ W @ X
+                try:
+                    cov = scale * np.linalg.inv(XtWX)
+                except Exception:
+                    cov = np.full((2, 2), np.nan)
+
+            slope, intercept = coeffs[0], coeffs[1]
+            if np.any(np.isfinite(cov)):
+                slope_err = np.sqrt(max(0, cov[0, 0]))
+                intercept_err = np.sqrt(max(0, cov[1, 1]))
+            else:
+                slope_err = intercept_err = np.nan
+
+            return slope, intercept, slope_err, intercept_err, cov
+
+        def sigma_clip_segment(x_seg, y_seg, yerr_seg, sigma=outlier_sigma, max_iter=10):
+            """Iterative sigma clipping for a segment."""
+            mask = np.ones(len(x_seg), dtype=bool)
+            for _ in range(max_iter):
+                slope, intercept, _, _, _ = weighted_linear_fit(
+                    x_seg[mask], y_seg[mask], yerr_seg[mask]
+                )
+                if not np.isfinite(slope):
+                    break
+                pred = slope * x_seg + intercept
+                resid = y_seg - pred
+                mad = np.median(np.abs(resid[mask] - np.median(resid[mask]))) * 1.4826
+                if mad < 1e-12:
+                    break
+                new_mask = np.abs(resid) < sigma * mad
+                if new_mask.sum() == mask.sum():
+                    break
+                mask = new_mask
+                if mask.sum() < 2:
+                    mask = np.ones(len(x_seg), dtype=bool)
+                    break
+            return mask
 
         # Sort data by x
         sort_idx = np.argsort(x)
@@ -2380,9 +2483,8 @@ class Zeropoint:
             # Check minimum data requirements
             if len(x) < 8:
                 logger.warning(f"fit_color_term: insufficient data ({len(x)} points) for piecewise fitting, falling back to linear")
-                slope, intercept = np.polyfit(x, y, 1)
-                slope_err = np.std(y - (slope * x + intercept)) / np.sqrt(len(x))
-                return ((), (slope,), intercept), ((), (slope_err,), slope_err), np.ones(len(x), dtype=bool), "linear"
+                slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(x, y, y_err)
+                return ((), (slope,), intercept), ((), (slope_err,), intercept_err), np.ones(len(x), dtype=bool), "WLS"
 
             # Search for optimal breakpoint using grid search on full data
             x_min, x_max = x_sorted.min(), x_sorted.max()
@@ -2391,38 +2493,33 @@ class Zeropoint:
             search_max = x_max - 0.05 * x_range
 
             def objective(bp):
-                """Objective function: weighted residual sum of squares (no continuity penalty)"""
-                # Fit two segments
+                """Objective function: weighted chi-squared"""
                 mask1 = x_sorted <= bp
                 mask2 = x_sorted > bp
 
                 if np.sum(mask1) < 3 or np.sum(mask2) < 3:
-                    return 1e10  # Penalty for insufficient data
+                    return 1e10
 
                 # Segment 1
                 x1, y1, ye1 = x_sorted[mask1], y_sorted[mask1], y_err_sorted[mask1]
-                try:
-                    slope1, intercept1 = np.polyfit(x1, y1, 1)
-                    resid1 = y1 - (slope1 * x1 + intercept1)
-                    chi2_1 = np.sum((resid1 / ye1)**2)
-                except Exception:
+                slope1, intercept1, _, _, _ = weighted_linear_fit(x1, y1, ye1)
+                if not np.isfinite(slope1):
                     return 1e10
+                resid1 = y1 - (slope1 * x1 + intercept1)
+                chi2_1 = np.sum((resid1 / ye1)**2)
 
                 # Segment 2
                 x2, y2, ye2 = x_sorted[mask2], y_sorted[mask2], y_err_sorted[mask2]
-                try:
-                    slope2, intercept2 = np.polyfit(x2, y2, 1)
-                    resid2 = y2 - (slope2 * x2 + intercept2)
-                    chi2_2 = np.sum((resid2 / ye2)**2)
-                except Exception:
+                slope2, intercept2, _, _, _ = weighted_linear_fit(x2, y2, ye2)
+                if not np.isfinite(slope2):
                     return 1e10
+                resid2 = y2 - (slope2 * x2 + intercept2)
+                chi2_2 = np.sum((resid2 / ye2)**2)
 
-                # No continuity penalty - allow segments to be independent
                 return chi2_1 + chi2_2
 
-            # Try grid search for robust breakpoint finding
+            # Grid search for optimal breakpoint
             try:
-                # Test 50 candidate breakpoints evenly spaced
                 bp_candidates = np.linspace(search_min, search_max, 50)
                 best_bp = bp_candidates[0]
                 best_score = 1e10
@@ -2437,116 +2534,48 @@ class Zeropoint:
                 logger.info(f"fit_color_term: grid search found optimal breakpoint at {optimal_bp:.3f}")
             except Exception as exc:
                 logger.warning(f"fit_color_term: breakpoint optimization failed ({exc}), falling back to linear")
-                slope, intercept = np.polyfit(x, y, 1)
-                slope_err = np.std(y - (slope * x + intercept)) / np.sqrt(len(x))
-                return ((), (slope,), intercept), ((), (slope_err,), slope_err), np.ones(len(x), dtype=bool), "linear"
+                slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(x, y, y_err)
+                return ((), (slope,), intercept), ((), (slope_err,), intercept_err), np.ones(len(x), dtype=bool), "WLS"
 
-            # Apply RANSAC regression to each segment separately for outlier rejection
+            # Fit each segment with weighted least squares + sigma clipping
             mask1 = x_sorted <= optimal_bp
             mask2 = x_sorted > optimal_bp
 
-            # Segment 1 RANSAC regression
+            # Segment 1
             x1, y1 = x_sorted[mask1], y_sorted[mask1]
             ye1 = y_err_sorted[mask1]
-            method1 = "none"
-            if len(x1) >= 4:
-                try:
-                    ransac1 = RANSACRegressor(
-                        PenalisedSlopeRegressor(
-                            slope_constraint=0.0,
-                            slope_tolerance=0.5,
-                            penalty_weight=100.0,
-                        ),
-                        residual_threshold=0.1,
-                        max_trials=1000,
-                        min_samples=max(2, int(0.2 * len(x1))),
-                        random_state=42,
-                    )
-                    X1 = x1.reshape(-1, 1)
-                    ransac1.fit(X1, y1)
-                    inlier_mask1 = ransac1.inlier_mask_
-                    x1_clean = x1[inlier_mask1]
-                    y1_clean = y1[inlier_mask1]
-                    slope1, intercept1 = ransac1.estimator_.slope_, ransac1.estimator_.intercept_
-                    method1 = "RANSAC"
-                    logger.info(f"fit_color_term: segment 1 RANSAC: {np.sum(inlier_mask1)}/{len(x1)} inliers")
-                except Exception:
-                    logger.warning("fit_color_term: segment 1 RANSAC failed, using polyfit")
-                    x1_clean, y1_clean = x1, y1
-                    slope1, intercept1 = np.polyfit(x1, y1, 1)
-                    inlier_mask1 = np.ones(len(x1), dtype=bool)
-                    method1 = "polyfit"
-            else:
-                x1_clean, y1_clean = x1, y1
-                slope1, intercept1 = np.polyfit(x1, y1, 1)
-                inlier_mask1 = np.ones(len(x1), dtype=bool)
-                method1 = "polyfit"
+            inlier_mask1 = sigma_clip_segment(x1, y1, ye1)
+            slope1, intercept1, slope1_err, intercept1_err, cov1 = weighted_linear_fit(
+                x1[inlier_mask1], y1[inlier_mask1], ye1[inlier_mask1]
+            )
+            method1 = "WLS"
+            logger.info(f"fit_color_term: segment 1 WLS: {np.sum(inlier_mask1)}/{len(x1)} inliers")
 
-            # Segment 2 RANSAC regression
+            # Segment 2
             x2, y2 = x_sorted[mask2], y_sorted[mask2]
             ye2 = y_err_sorted[mask2]
-            method2 = "none"
-            if len(x2) >= 4:
-                try:
-                    ransac2 = RANSACRegressor(
-                        PenalisedSlopeRegressor(
-                            slope_constraint=0.0,
-                            slope_tolerance=0.5,
-                            penalty_weight=100.0,
-                        ),
-                        residual_threshold=0.1,
-                        max_trials=1000,
-                        min_samples=max(2, int(0.2 * len(x2))),
-                        random_state=42,
-                    )
-                    X2 = x2.reshape(-1, 1)
-                    ransac2.fit(X2, y2)
-                    inlier_mask2 = ransac2.inlier_mask_
-                    x2_clean = x2[inlier_mask2]
-                    y2_clean = y2[inlier_mask2]
-                    slope2, intercept2 = ransac2.estimator_.slope_, ransac2.estimator_.intercept_
-                    method2 = "RANSAC"
-                    logger.info(f"fit_color_term: segment 2 RANSAC: {np.sum(inlier_mask2)}/{len(x2)} inliers")
-                except Exception:
-                    logger.warning("fit_color_term: segment 2 RANSAC failed, using polyfit")
-                    x2_clean, y2_clean = x2, y2
-                    slope2, intercept2 = np.polyfit(x2, y2, 1)
-                    inlier_mask2 = np.ones(len(x2), dtype=bool)
-                    method2 = "polyfit"
-            else:
-                x2_clean, y2_clean = x2, y2
-                slope2, intercept2 = np.polyfit(x2, y2, 1)
-                inlier_mask2 = np.ones(len(x2), dtype=bool)
-                method2 = "polyfit"
+            inlier_mask2 = sigma_clip_segment(x2, y2, ye2)
+            slope2, intercept2, slope2_err, intercept2_err, cov2 = weighted_linear_fit(
+                x2[inlier_mask2], y2[inlier_mask2], ye2[inlier_mask2]
+            )
+            method2 = "WLS"
+            logger.info(f"fit_color_term: segment 2 WLS: {np.sum(inlier_mask2)}/{len(x2)} inliers")
 
             # Check if we have enough inliers
-            if len(x1_clean) < 2 or len(x2_clean) < 2:
-                logger.warning(f"fit_color_term: insufficient inliers (seg1: {len(x1_clean)}, seg2: {len(x2_clean)}), falling back to linear")
-                slope, intercept = np.polyfit(x, y, 1)
-                slope_err = np.std(y - (slope * x + intercept)) / np.sqrt(len(x))
-                return ((), (slope,), intercept), ((), (slope_err,), slope_err), np.ones(len(x), dtype=bool), "linear"
+            if inlier_mask1.sum() < 2 or inlier_mask2.sum() < 2:
+                logger.warning(f"fit_color_term: insufficient inliers (seg1: {inlier_mask1.sum()}, seg2: {inlier_mask2.sum()}), falling back to linear")
+                slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(x, y, y_err)
+                return ((), (slope,), intercept), ((), (slope_err,), intercept_err), np.ones(len(x), dtype=bool), "WLS"
 
-            # Do NOT enforce continuity - let segments be independent
-            # This allows each segment to fit its data without artificial constraints
+            # Coefficients: intercept from segment 1, slopes from both
             coefficients = ((optimal_bp,), (slope1, slope2), intercept1)
 
-            # Error estimates based on RANSAC fit residuals
-            if len(x1_clean) > 1:
-                residuals1 = y1_clean - (slope1 * x1_clean + intercept1)
-                slope1_err = np.std(residuals1) / np.sqrt(len(x1_clean))
-            else:
-                slope1_err = 0.0
-
-            if len(x2_clean) > 1:
-                residuals2 = y2_clean - (slope2 * x2_clean + intercept2)
-                slope2_err = np.std(residuals2) / np.sqrt(len(x2_clean))
-            else:
-                slope2_err = 0.0
-
+            # Error estimates from weighted least squares covariance
             bp_err = x_range * 0.05  # Rough estimate: 5% of range
-            coefficient_errors = ((bp_err,), (slope1_err, slope2_err), slope1_err)
+            # Store intercept_err, cov1, cov2 for proper error propagation in plots
+            coefficient_errors = ((bp_err,), (slope1_err, slope2_err), (intercept1_err, cov1, cov2))
 
-            # Combine inlier masks from segment-specific RANSAC
+            # Combine inlier masks
             combined_inlier_mask_sorted = np.zeros(len(x_sorted), dtype=bool)
             combined_inlier_mask_sorted[mask1] = inlier_mask1
             combined_inlier_mask_sorted[mask2] = inlier_mask2
@@ -2554,28 +2583,27 @@ class Zeropoint:
             inlier_mask = np.zeros(len(x), dtype=bool)
             inlier_mask[sort_idx] = combined_inlier_mask_sorted
 
-            # Determine overall method (use segment with more points as primary)
-            overall_method = method1 if len(x1) >= len(x2) else method2
+            overall_method = "WLS"
 
             logger.info(
                 f"fit_color_term: piecewise linear: breakpoint={optimal_bp:.3f}, "
-                f"slope1={slope1:.4f} ({method1}), slope2={slope2:.4f} ({method2}), intercept={intercept1:.4f}"
+                f"slope1={slope1:.4f}±{slope1_err:.4f}, slope2={slope2:.4f}±{slope2_err:.4f}, "
+                f"intercept={intercept1:.4f}±{intercept1_err:.4f}"
             )
 
             return coefficients, coefficient_errors, inlier_mask, overall_method
         else:
-            # For n > 2, fall back to linear (not implemented yet)
+            # For n > 2, fall back to linear
             logger.warning(f"fit_color_term: n_segments={n_segments} not yet implemented, falling back to linear")
-            slope, intercept = np.polyfit(x, y, 1)
-            slope_err = np.std(y - (slope * x + intercept)) / np.sqrt(len(x))
-            return ((), (slope,), intercept), ((), (slope_err,), slope_err), np.ones(len(x), dtype=bool), "linear"
+            slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(x, y, y_err)
+            return ((), (slope,), intercept), ((), (slope_err,), intercept_err), np.ones(len(x), dtype=bool), "WLS"
 
     def fit_color_term(self, catalog: pd.DataFrame):
         """
         Fit the colour term c in ZP(m_inst) = a + c*(col1 - col2) via
-        RANSAC regression (robust outlier rejection) followed by ODR (error-in-variables
-        refinement on inliers). Can also fit quadratic: a + b*x + c*x^2,
-        or piecewise linear with n segments.
+        weighted least squares (WLS) with iterative sigma-clipping for outlier
+        rejection. Can also fit quadratic: a + b*x + c*x^2, or piecewise
+        linear with n segments.
 
         Returns
         -------
@@ -2731,7 +2759,7 @@ class Zeropoint:
                     except Exception as exc:
                         logger.warning(f"fit_color_term: extreme color filtering failed: {exc}")
 
-            # 1. Pre-RANSAC sigma clipping to remove extreme outliers
+            # 1. Pre-fit sigma clipping to remove extreme outliers
             try:
                 ols_slope_pre = np.polyfit(x, y, 1)[0]
                 ols_intercept_pre = np.median(y - ols_slope_pre * x)
@@ -2739,10 +2767,10 @@ class Zeropoint:
                 pre_clip = sigma_clip(ols_resid_pre, sigma=5, maxiters=3, masked=True)
                 n_pre_outliers = np.sum(pre_clip.mask)
                 if n_pre_outliers > 0:
-                    logger.info(f"fit_color_term: pre-RANSAC clipping removed {n_pre_outliers} extreme outliers")
+                    logger.info(f"fit_color_term: pre-fit clipping removed {n_pre_outliers} extreme outliers")
                     x, y, x_err, y_err = x[~pre_clip.mask], y[~pre_clip.mask], x_err[~pre_clip.mask], y_err[~pre_clip.mask]
             except Exception as exc:
-                logger.debug(f"fit_color_term: pre-RANSAC clipping skipped: {exc}")
+                logger.debug(f"fit_color_term: pre-fit clipping skipped: {exc}")
 
             _min_sources_cfg = int(zp_cfg.get("min_source_no", 5))
             min_sources = max(3, _min_sources_cfg)  # Hard floor of 3 for statistical validity
@@ -2783,14 +2811,14 @@ class Zeropoint:
             except Exception as exc:
                 logger.debug(f"fit_color_term: stratified sampling check skipped: {exc}")
 
-            # 6. RANSAC regression for robust outlier rejection
+            # 6. Robust weighted least squares with sigma-clip outlier rejection
             # For polynomial fitting, use polynomial features
             if poly_order == 1:
                 X_poly = x[:, None]
             else:
                 X_poly = np.column_stack([x**2, x])
 
-            # RANSAC loop for polynomial fitting
+            # Robust fitting loop for polynomial fitting
             inlier_mask = None
             n_inliers = 0
 
@@ -2842,17 +2870,17 @@ class Zeropoint:
             n_inliers = np.sum(inlier_mask)
 
             if inlier_mask is None or n_inliers < 5:
-                logger.warning("fit_color_term: RANSAC failed to find sufficient inliers, using all points")
+                logger.warning("fit_color_term: robust fit failed to find sufficient inliers, using all points")
                 inlier_mask = np.ones(len(x), dtype=bool)
                 n_inliers = len(x)
 
-            logger.info(f"fit_color_term: RANSAC found {n_inliers} inliers")
+            logger.info(f"fit_color_term: robust fit found {n_inliers} inliers")
 
             min_inlier_frac = 0.25
             min_inliers = max(5, int(len(x) * min_inlier_frac))
 
             if n_inliers < min_inliers:
-                logger.warning(f"fit_color_term: RANSAC inliers {n_inliers} < {min_inliers} ({int(100*min_inlier_frac)}%), using sigma-clip fallback")
+                logger.warning(f"fit_color_term: inliers {n_inliers} < {min_inliers} ({int(100*min_inlier_frac)}%), using sigma-clip fallback")
                 # Sigma-clip fallback
                 r0 = y - np.nanmedian(y)
                 clipped = sigma_clip(
