@@ -859,9 +859,13 @@ class Zeropoint:
             mad0 = float(median_abs_deviation(yv, nan_policy="omit")) if yv.size else np.nan
             n0 = int(yv.size)
             zp_se = (1.858 * mad0 / np.sqrt(n0)) if n0 >= 2 else mad0
+            # Include X-error in sparse-data fallback too
+            x_err_finite = x_err[np.isfinite(y)]
+            mean_x_err = float(np.nanmedian(x_err_finite)) if x_err_finite.size else 0.0
+            total_zp_err = float(np.sqrt(zp_se**2 + mean_x_err**2))
             full = np.zeros(orig_size, dtype=bool)
             full[keep_idx] = True
-            return ZP, slope, full, np.diag([zp_se**2, slope_err**2])
+            return ZP, slope, full, np.diag([total_zp_err**2, slope_err**2])
 
         # RANSAC threshold from MAD of residuals (unweighted centre).
         r0 = y - np.nanmedian(y)
@@ -903,18 +907,24 @@ class Zeropoint:
         elif inlier_mask.sum() < 0.5 * n_points and n_points > 10:
             logger.warning(f"RANSAC rejected >50% of points ({inlier_mask.sum()}/{n_points}); consider checking data quality")
 
-        xi, yi = x[inlier_mask], y[inlier_mask]
+        xi, yi, xi_err = x[inlier_mask], y[inlier_mask], x_err[inlier_mask]
         yi = yi[np.isfinite(yi)]
         intercept = float(np.nanmedian(yi)) if yi.size else np.nan
         mad_i = float(median_abs_deviation(yi, nan_policy="omit")) if yi.size else np.nan
         n_i = int(yi.size)
         intercept_err = (1.858 * mad_i / np.sqrt(n_i)) if n_i >= 2 else mad_i
 
-        cov = np.diag([intercept_err**2, slope_err**2])
+        # Propagate X-error (m_inst uncertainty) into ZP error.
+        # For ZP = median(delta_mag) where delta_mag = m_cat - m_inst,
+        # the error from m_inst uncertainty propagates directly.
+        mean_x_err = float(np.nanmedian(xi_err)) if xi_err.size else 0.0
+        total_zp_err = float(np.sqrt(intercept_err**2 + mean_x_err**2))
+
+        cov = np.diag([total_zp_err**2, slope_err**2])
         full = np.zeros(orig_size, dtype=bool)
         full[keep_idx[inlier_mask]] = True
 
-        logger.info(f"ZP = {intercept:.4f} +/- {intercept_err:.4f}")
+        logger.info(f"ZP = {intercept:.4f} +/- {total_zp_err:.4f} (scatter={intercept_err:.4f}, x_err={mean_x_err:.4f})")
         return intercept, slope, full, cov
 
     # -----------------------------------------------------------------------
