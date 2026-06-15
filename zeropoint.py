@@ -1471,10 +1471,12 @@ class Zeropoint:
                         )
 
                     logger.info(
-                        "[%s] Zeropoint: %.3f +/- %.3f mag",
+                        "[%s] Zeropoint: %.3f +/- %.3f mag (N=%d, MAD=%.4f)",
                         flux_type,
                         zp_final,
                         zp_err,
+                        n_sources_used,
+                        mad_zp,
                     )
 
                     # ---- Histogram (colour-corrected) ----------------------
@@ -1493,6 +1495,13 @@ class Zeropoint:
                     # n_inliers = number of unique catalog sources surviving all cuts
                     # vmask_sigma_idx contains the catalog indices of sources that survive all filtering steps
                     n_sources_used = len(vmask_sigma_idx)
+
+                    # Debug: log counts at each stage to diagnose discrepancies
+                    logger.debug(
+                        f"[{flux_type}] Source counts: vmask={vmask.sum()}, "
+                        f"finite_mask={finite_mask.sum()}, inlier_mask={inlier_mask.sum()}, "
+                        f"finite2={finite2.sum()}, final={n_sources_used}"
+                    )
 
                     _corr_tag = (
                         "color corr., "
