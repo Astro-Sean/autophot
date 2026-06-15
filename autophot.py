@@ -1347,7 +1347,7 @@ class AutomatedPhotometry:
         # Common preprocessing defaults used by main.py
         default_input["preprocessing"].setdefault("trim_image", 0)
 
-        _log(border_msg("Configuration") if border_msg else log_step(f"Default input: {default_input_path}"))
+        _log(log_step("Configuration"))
         _log(f"Configuration loaded in {time.perf_counter() - t0:.3f} seconds.")
         return default_input
 
@@ -1790,7 +1790,7 @@ class AutomatedPhotometry:
 
             # Optional: Enrich target metadata from TNS
             try:
-                _log(border_msg("TNS Check") if border_msg else log_step("TNS check"))
+                _log(log_step("TNS check"))
                 tns_coords = prepare_db.check_tns()
                 default_input.update(
                     {
