@@ -2344,7 +2344,8 @@ class PSF:
             base_maxiters = int(phot_cfg.get("psf_maxiters_initial", 5)) if adaptive_iters else 10
             max_maxiters = int(phot_cfg.get("psf_maxiters_max", 10))
             
-            epsf_builder = EPSFBuilder(
+            # Build EPSFBuilder kwargs - accuracy_threshold may not be supported in all photutils versions
+            epsf_builder_kwargs = dict(
                 oversampling=oversample,
                 recentering_func=recenter_func,
                 recentering_boxsize=cen_box,
@@ -2354,8 +2355,17 @@ class PSF:
                 sigma_clip=sigma_clip_epsf,
                 smoothing_kernel=smooth_kernel,
                 progress_bar=False,
-                accuracy_threshold=1e-4 if adaptive_iters else 1e-6,  # Relaxed for faster convergence
             )
+            # Only add accuracy_threshold if supported (photutils >= 1.9)
+            try:
+                import inspect
+                sig = inspect.signature(EPSFBuilder.__init__)
+                if 'accuracy_threshold' in sig.parameters:
+                    epsf_builder_kwargs['accuracy_threshold'] = 1e-4 if adaptive_iters else 1e-6
+            except Exception:
+                pass  # If inspect fails, try without accuracy_threshold
+            
+            epsf_builder = EPSFBuilder(**epsf_builder_kwargs)
 
             # Initialise ePSF from a Moffat profile. The wing parameter is
             # configurable; larger values approach Gaussian-like cores.
@@ -2404,6 +2414,7 @@ class PSF:
                         base_maxiters, max_maxiters
                     )
                     # Create new builder with higher iteration limit
+                    # Note: accuracy_threshold not used here to maintain compatibility
                     epsf_builder_retry = EPSFBuilder(
                         oversampling=oversample,
                         recentering_func=recenter_func,
@@ -2414,7 +2425,6 @@ class PSF:
                         sigma_clip=sigma_clip_epsf,
                         smoothing_kernel=smooth_kernel,
                         progress_bar=False,
-                        accuracy_threshold=1e-6,  # Stricter for retry
                     )
                     build_result_retry = epsf_builder_retry.build_epsf(epsfstars, epsf=init_epsf)
                     if hasattr(build_result_retry, 'epsf'):

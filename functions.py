@@ -814,7 +814,7 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
         right_corner = "+"
     else:
         left_corner = corner
-        right_corner = "┐" if corner == "┌" else "┘"
+        right_corner = "+" if corner == "+" else "+"
 
     # Truncate or pad title to fit
     max_title = width - 4  # space for corners and padding
