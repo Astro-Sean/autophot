@@ -852,6 +852,14 @@ class Zeropoint:
         delta = y - x
         var_perp = x_err**2 + y_err**2  # Variance perpendicular to slope=1 line
         
+        # DEBUG: log input statistics to diagnose large errors
+        logger.debug(
+            f"ODR INPUT: n={len(x)}, x_err median={np.nanmedian(x_err):.4f}, "
+            f"x_err range=[{np.nanmin(x_err):.4f}, {np.nanmax(x_err):.4f}], "
+            f"y_err median={np.nanmedian(y_err):.4f}, "
+            f"y_err range=[{np.nanmin(y_err):.4f}, {np.nanmax(y_err):.4f}]"
+        )
+        
         # Iterative robust outlier rejection (similar to RANSAC but deterministic)
         # Start with all points and iteratively clip outliers
         inlier_mask_local = np.ones(len(delta), dtype=bool)
@@ -922,9 +930,18 @@ class Zeropoint:
         residuals = delta_in - zp
         chi2 = np.sum((residuals**2) / var_in)
         dof = len(delta_in) - 1
+        
+        # DEBUG: log intermediate values for error diagnosis
+        logger.debug(
+            f"ODR DEBUG: n_inliers={len(delta_in)}, w_sum={w_sum:.2f}, "
+            f"var_zp={var_zp:.6f}, zp_err_before_scale={np.sqrt(var_zp):.6f}, "
+            f"chi2={chi2:.2f}, dof={dof}, chi2/dof={chi2/max(dof,1):.2f}"
+        )
+        
         if dof > 0 and chi2 / dof > 1.0:
             scale = np.sqrt(chi2 / dof)
             zp_err *= scale
+            logger.debug(f"ODR DEBUG: scaled zp_err by {scale:.2f} → {zp_err:.4f}")
         
         # Map back to full array
         full_mask = np.zeros(len(x), dtype=bool)
