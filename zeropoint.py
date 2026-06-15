@@ -947,6 +947,14 @@ class Zeropoint:
         full_mask = np.zeros(len(x), dtype=bool)
         full_mask[inlier_mask_local] = True
         
+        # Sanity check: ZP error should typically be < 0.1 mag for decent data
+        if zp_err > 0.1:
+            logger.warning(
+                f"ODR: ZP error ({zp_err:.3f} mag) is unusually large. "
+                f"Typical range: 0.001-0.01 mag. Check input errors: "
+                f"x_err median={np.nanmedian(x_err):.3f}, y_err median={np.nanmedian(y_err):.3f}"
+            )
+        
         logger.info(f"ODR: ZP={zp:.4f} ± {zp_err:.4f} ({inlier_mask_local.sum()}/{len(delta)} inliers, χ²/dof={chi2/max(dof,1):.2f})")
         
         return zp, zp_err, full_mask
