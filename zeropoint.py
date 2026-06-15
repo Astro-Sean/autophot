@@ -123,7 +123,7 @@ class Zeropoint:
     --------------
     clean()               - magnitude / SNR quality filter
     get()                 - simple sigma-clipped offset measurement
-    fit_zeropoint()       - RANSAC-weighted fit (ZP vs m_inst)
+    fit_zeropoint()       - MCMC Bayesian fit (ZP vs m_inst)
     estimate_zeropoint()  - sigma-clip histogram method
     fit_color_term()      - RANSAC + ODR colour-term fit
     weighted_average()    - inverse-variance weighted mean
@@ -960,6 +960,162 @@ class Zeropoint:
         return zp, zp_err, full_mask
 
     # -----------------------------------------------------------------------
+    # MCMC fit helper (default) - robust Bayesian fitting with X,Y errors
+    # -----------------------------------------------------------------------
+
+    def _mcmc_fit(
+        self,
+        x,
+        y,
+        x_err,
+        y_err,
+        n_walkers: int = 32,
+        n_burn: int = 500,
+        n_steps: int = 1000,
+        outlier_sigma: float = 3.0,
+        min_points: int = 2,
+    ):
+        """
+        MCMC fit for y = x + ZP (slope=1 constraint) with proper X,Y errors.
+        
+        Uses emcee ensemble sampler for robust posterior estimation.
+        Following the methodology from:
+        https://github.com/nikhil-sarin/2Derrors
+        
+        The likelihood accounts for total variance perpendicular to slope=1:
+            σ²_perp = σ²_x + σ²_y
+        
+        log L = -0.5 * Σ[(y_i - x_i - ZP)² / σ²_perp_i] - 0.5 * Σ log(σ²_perp_i)
+        
+        Parameters
+        ----------
+        x, y : array-like
+            Data points (instrumental mag, catalog mag)
+        x_err, y_err : array-like
+            1-sigma uncertainties in x and y
+        n_walkers : int
+            Number of MCMC walkers
+        n_burn : int
+            Burn-in steps
+        n_steps : int
+            Production steps
+        outlier_sigma : float
+            Sigma-clipping threshold for outlier rejection
+        min_points : int
+            Minimum points required for fit
+            
+        Returns
+        -------
+        (zp, zp_err, inlier_mask) : (float, float, ndarray)
+            Zeropoint (median), its uncertainty (std), and boolean inlier mask
+        """
+        try:
+            import emcee
+        except ImportError:
+            logger.warning("emcee not available, falling back to ODR")
+            return self._odr_slope1_fit(x, y, x_err, y_err, min_points=min_points)
+        
+        x = np.asarray(x, float)
+        y = np.asarray(y, float)
+        x_err = np.asarray(x_err, float)
+        y_err = np.asarray(y_err, float)
+        
+        # Finite mask
+        finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(x_err) & np.isfinite(y_err)
+        if finite.sum() < min_points:
+            logger.warning(f"MCMC: insufficient points ({finite.sum()} < {min_points})")
+            return np.nan, np.nan, np.zeros(len(x), dtype=bool)
+        
+        x, y = x[finite], y[finite]
+        x_err, y_err = x_err[finite], y_err[finite]
+        
+        # Model: y = x + ZP  =>  delta = y - x = ZP (constant)
+        delta = y - x
+        var_perp = x_err**2 + y_err**2
+        
+        # Initial robust estimate for outlier rejection
+        med_delta = np.nanmedian(delta)
+        mad_delta = np.nanmedian(np.abs(delta - med_delta)) * 1.4826
+        if mad_delta < 1e-6:
+            mad_delta = np.nanstd(delta)
+        
+        # Initial sigma-clip to remove obvious outliers
+        inlier_mask = np.abs(delta - med_delta) < outlier_sigma * mad_delta
+        if inlier_mask.sum() < min_points:
+            inlier_mask = np.ones(len(delta), dtype=bool)
+        
+        delta_in = delta[inlier_mask]
+        var_in = var_perp[inlier_mask]
+        
+        # Log-prior: broad uniform around initial estimate
+        zp_guess = np.average(delta_in, weights=1.0/np.clip(var_in, 1e-12, None))
+        zp_spread = max(1.0, 5 * mad_delta)  # Broad prior
+        
+        def log_prior(zp):
+            if abs(zp - zp_guess) < zp_spread:
+                return 0.0
+            return -np.inf
+        
+        def log_likelihood(zp):
+            # Gaussian likelihood with variance = x_err² + y_err²
+            resid = delta_in - zp
+            # Include the log(var) term for proper normalization
+            return -0.5 * np.sum((resid**2) / var_in + np.log(2 * np.pi * var_in))
+        
+        def log_probability(zp):
+            lp = log_prior(zp)
+            if not np.isfinite(lp):
+                return -np.inf
+            return lp + log_likelihood(zp)
+        
+        # Set up emcee sampler
+        # Need at least 2*n_walkers points for good sampling
+        n_walkers = min(n_walkers, max(4, len(delta_in) // 2))
+        n_walkers = max(n_walkers, 4)  # Minimum 4 walkers
+        
+        # Initialize walkers around initial guess
+        pos = zp_guess + 0.01 * np.random.randn(n_walkers, 1)
+        
+        sampler = emcee.EnsembleSampler(n_walkers, 1, log_probability)
+        
+        # Burn-in
+        sampler.run_mcmc(pos, n_burn, progress=False)
+        sampler.reset()
+        
+        # Production run
+        sampler.run_mcmc(None, n_steps, progress=False)
+        
+        # Extract posterior
+        samples = sampler.get_chain(flat=True).flatten()
+        
+        # Compute ZP and uncertainty from posterior
+        zp = np.median(samples)
+        zp_err = np.std(samples)
+        
+        # Refine inlier mask using MCMC result
+        residuals = delta - zp
+        med_res = np.nanmedian(residuals[inlier_mask])
+        mad_res = np.nanmedian(np.abs(residuals[inlier_mask] - med_res)) * 1.4826
+        if mad_res < 1e-6:
+            mad_res = np.nanstd(residuals[inlier_mask])
+        
+        # Final outlier rejection with measurement uncertainty
+        threshold = outlier_sigma * np.sqrt(mad_res**2 + np.median(var_perp))
+        final_mask = np.abs(residuals) < threshold
+        
+        # Map back to full array
+        full_mask = np.zeros(len(x), dtype=bool)
+        full_mask[final_mask] = True
+        
+        logger.info(
+            f"MCMC: ZP={zp:.4f} ± {zp_err:.4f} "
+            f"({final_mask.sum()}/{len(delta)} inliers, "
+            f"n_walkers={n_walkers}, n_steps={n_steps})"
+        )
+        
+        return zp, zp_err, full_mask
+
+    # -----------------------------------------------------------------------
     # RANSAC robust fit helper
     # -----------------------------------------------------------------------
 
@@ -1102,18 +1258,18 @@ class Zeropoint:
         fixed_color_coeff_errors = None,
         fit_mode="polynomial",
         n_segments=1,
-        fit_method="odr",  # "odr" (default) or "ransac"
+        fit_method="mcmc",  # "mcmc" (default), "odr", or "ransac"
     ):
         """
-        Fit ZP = m_cat - m_inst[+/-c*(c1-c2)] vs m_inst via ODR or RANSAC.
+        Fit ZP = m_cat - m_inst[+/-c*(c1-c2)] vs m_inst via MCMC, ODR, or RANSAC.
         Supports linear, quadratic, and piecewise linear color terms.
 
         Parameters
         ----------
         fit_method : str
-            "odr" for Orthogonal Distance Regression (default), or "ransac" for
-            RANSAC-based robust fit. ODR properly accounts for errors in both
-            X and Y dimensions with iterative outlier rejection.
+            "mcmc" for Bayesian MCMC (default), "odr" for Orthogonal Distance
+            Regression, or "ransac" for RANSAC-based robust fit.
+            MCMC provides robust posterior estimates with proper X,Y errors.
         fixed_color_coeffs : tuple or None
             For linear: (intercept, slope)
             For quadratic: (intercept, slope, quad_coeff)
@@ -1209,10 +1365,20 @@ class Zeropoint:
                         n_segments=n_segments,
                     )
 
-                # Select fitting method: RANSAC (default) or ODR
+                # Select fitting method: MCMC (default), ODR, or RANSAC
                 yerr = np.sqrt(delta_mag_err**2 + color_corr_err**2)
                 
-                if fit_method.lower() == "odr":
+                if fit_method.lower() == "mcmc":
+                    # MCMC: Bayesian posterior with proper X,Y error handling
+                    ZP, zp_std, inlier_short = self._mcmc_fit(
+                        inst_mag,
+                        inst_mag + delta_mag,  # y = m_cal
+                        inst_mag_err,          # x_err
+                        yerr,                  # y_err
+                    )
+                    # Build dummy cov matrix for compatibility
+                    cov = np.diag([zp_std**2, 0.0]) if np.isfinite(zp_std) else np.diag([np.nan, 0.0])
+                elif fit_method.lower() == "odr":
                     # ODR: proper X,Y error handling with perpendicular variance
                     ZP, zp_std, inlier_short = self._odr_slope1_fit(
                         inst_mag,
