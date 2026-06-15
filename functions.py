@@ -93,7 +93,11 @@ class ColoredLevelFormatter(logging.Formatter):
                 base = f"  {msg_clean}"
             else:
                 # New timestamp: blank line before, show timestamp
-                base = f"\n{time_str}  {msg_clean}"
+                # But skip blank line for bordered messages (they have their own visual separation)
+                if msg_clean.startswith("─"):
+                    base = f"{time_str}  {msg_clean}"
+                else:
+                    base = f"\n{time_str}  {msg_clean}"
             
             self._last_time = time_str
         else:
