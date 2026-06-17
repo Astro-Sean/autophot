@@ -736,15 +736,26 @@ class MCMCFitter:
                     # get_chain() is (nsteps, nwalkers, ndim); time axis is 0
                     tau = autocorr.integrated_time(self.sampler.get_chain(), axis=0)
                     tau_est = np.nanmean(tau)
-                    if np.isfinite(tau_est) and tau_est < self.adaptive_tau_target:
+                    # Require both: tau < threshold AND sufficient independent samples
+                    n_samples = total_steps * self.nwalkers
+                    target_tau_mult = 50  # Same as zeropoint default
+                    if np.isfinite(tau_est) and tau_est < self.adaptive_tau_target and n_samples > target_tau_mult * tau_est:
                         log.info(
-                            "[MCMC] Converged at %d steps, tau=%.1f",
+                            "[MCMC] Converged at %d steps, tau=%.1f, n_samples=%d",
                             total_steps,
                             tau_est,
+                            n_samples,
                         )
                         break
-                except Exception as exc:
+                except emcee.autocorr.AutocorrError as exc:
                     log.debug("[MCMC] tau estimation failed: %s", exc)
+
+        # Warn if max_steps reached without convergence
+        if total_steps >= max_steps:
+            log.warning(
+                "[MCMC] Reached max_steps (%d) without full convergence; results may be unreliable",
+                max_steps,
+            )
 
         acc = float(np.mean(self.sampler.acceptance_fraction))
         tau_arr = None
