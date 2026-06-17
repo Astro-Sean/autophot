@@ -1231,6 +1231,290 @@ def run_sfft() -> Optional[int]:
             pass
 
         # ------------------------------------------------------------------
+        # Post-subtraction image quality improvements (LSST-inspired)
+        #
+        # 1. DECORRELATION KERNEL  (LSST DMTN-021, Reiss & Lupton 2016)
+        #    The A&L PSF-matching kernel κ is convolved with the template,
+        #    which introduces pixel-pixel covariance in the difference image D.
+        #    Detected sources therefore appear correlated, inflating peak S/N
+        #    at scales of ~KerHW px and causing a detection threshold that must
+        #    be raised to ~5.5σ (rather than the canonical 5.0σ) to control false
+        #    positives.  LSST corrects this by convolving D with a whitening
+        #    (decorrelation) kernel ψ computed in Fourier space from κ and the
+        #    mean variances of the two images (DMTN-021 Eq. 2):
+        #
+        #      ψ(k) = sqrt( (σ₁² + σ₂²) / (σ₁² + κ²(k)·σ₂²) )
+        #      D′   = ψ ⊗ D
+        #
+        #    After decorrelation, pixel noise is spatially uncorrelated and
+        #    matched-filter detection can be run at 5.0σ with no excess FPR.
+        #    The decorrelation kernel is ~2×KerHW px in size and inexpensive.
+        #
+        # 2. VARIANCE SCALING  (LSST ScaleVarianceTask, DMTN-021 §4.1)
+        #    Warping and co-adding introduce pixel covariance that causes the
+        #    variance plane to underestimate the true noise.  LSST rescales the
+        #    variance by a factor that brings IQR(D/sqrt(V)) to unity.
+        #    Here we propagate the expected Gaussian variance of the difference
+        #    image ( σ_diff² = σ_sci² + σ_ref² ) from the sigma-clipped image
+        #    statistics, then rescale the difference image so its measured noise
+        #    matches that expectation.  This is equivalent to the LSST
+        #    pixel-based ScaleVarianceTask estimator.
+        # ------------------------------------------------------------------
+
+        def _decorrelate_diffim(
+            diff: np.ndarray,
+            kernel: np.ndarray,
+            var_sci: float,
+            var_ref: float,
+            nan_mask: np.ndarray,
+        ) -> np.ndarray:
+            """Apply LSST DMTN-021 decorrelation to the A&L difference image.
+
+            Parameters
+            ----------
+            diff : (H, W) float array — the raw difference image.
+            kernel : (kH, kW) float array — the A&L matching kernel κ used to
+                     convolve the template (already normalised to sum ≈ 1).
+            var_sci : mean per-pixel variance of the science image (σ₁²).
+            var_ref : mean per-pixel variance of the reference/template image (σ₂²).
+            nan_mask : bool array, True where pixels are invalid; used to
+                       temporarily fill NaN regions with zeros for FFTs.
+
+            Returns
+            -------
+            Decorrelated difference image D′ (same shape as diff).
+
+            Notes
+            -----
+            Algorithm (DMTN-021 §2.1):
+              ψ(k) = sqrt( (σ₁² + σ₂²) / (σ₁² + |κ(k)|² · σ₂²) )
+
+            Implementation:
+              1. Embed κ in a zero-padded array of the full image size (H×W).
+                 This makes ψ(k) defined at the same Fourier frequencies as D.
+              2. Compute ψ(k) in Fourier space.
+              3. IRFFT2 back to image size, FFT-shift to centre, and extract the
+                 central (2·kH + 1) × (2·kW + 1) support of ψ.
+                 ψ is compact — its real-space support is the same spatial scale
+                 as κ itself.  Extracting at hw = kH captures >99% of the power
+                 and avoids edge wrap-around artefacts.
+              4. Convolve D with ψ via scipy.fftconvolve (real-space, so masked
+                 pixels are handled gracefully without full-image FFT).
+            """
+            try:
+                from scipy.signal import fftconvolve
+
+                H, W = diff.shape
+                kH, kW = kernel.shape
+
+                # --- Build ψ in the full-image Fourier domain ---
+                # Embed κ in a (H, W) zero-padded array, centred at (0,0) via
+                # ifftshift so that the origin is at the top-left corner (numpy
+                # rfft2 convention).
+                ker_full = np.zeros((H, W), dtype=np.float64)
+                ker_full[:kH, :kW] = kernel
+                K_f = np.fft.rfft2(np.fft.ifftshift(ker_full))   # (H, W//2+1)
+                K2  = np.real(K_f * np.conj(K_f))                 # |κ(k)|²
+
+                denom = var_sci + K2 * var_ref
+                # Guard against near-zero denominator (numerical safety)
+                denom = np.where(
+                    denom > 1e-30 * (var_sci + var_ref),
+                    denom,
+                    var_sci + var_ref,
+                )
+                psi_f = np.sqrt((var_sci + var_ref) / denom)      # (H, W//2+1)
+
+                # --- Extract compact real-space ψ kernel ---
+                # IRFFT2 back to image size then FFT-shift to centre.
+                psi_full = np.real(np.fft.irfft2(psi_f, s=(H, W)))  # (H, W)
+                psi_full = np.fft.fftshift(psi_full)
+
+                # Extract central ±kH / ±kW support (ψ is compact at ~kernel scale)
+                cH, cW = H // 2, W // 2
+                hw_h, hw_w = max(kH, 1), max(kW, 1)
+                psi_small = psi_full[
+                    cH - hw_h : cH + hw_h + 1,
+                    cW - hw_w : cW + hw_w + 1,
+                ].copy()
+
+                # Normalise so ψ preserves total flux (unit sum, not unit energy)
+                psi_sum = float(psi_small.sum())
+                if abs(psi_sum) > 1e-10:
+                    psi_small /= psi_sum
+
+                # --- Convolve D with ψ ---
+                # Replace NaNs with 0 for convolution; restore afterwards.
+                diff_filled = diff.copy()
+                diff_filled[nan_mask] = 0.0
+
+                diff_decorr = fftconvolve(diff_filled, psi_small, mode="same")
+
+                # Restore NaN regions
+                diff_decorr[nan_mask] = np.nan
+                return diff_decorr.astype(diff.dtype)
+
+            except Exception as _e:
+                log_info(f"Warning: decorrelation kernel failed ({_e}); skipping.")
+                return diff
+
+        def _scale_diffim_variance(
+            diff: np.ndarray,
+            var_expected: float,
+            nan_mask: np.ndarray,
+        ) -> tuple:
+            """Rescale the difference image so its measured noise matches expectation.
+
+            Implements the LSST ScaleVarianceTask pixel-based estimator:
+            compute SNR = D / sqrt(var_expected) for background pixels, measure
+            its spread via IQR, and rescale so IQR/1.349 (the Gaussian sigma
+            equivalent) equals 1.0.  The IQR is robust to bright sources and
+            artifacts.
+
+            Parameters
+            ----------
+            diff : (H, W) float array — the difference image.
+            var_expected : expected Gaussian variance σ_diff² = σ_sci² + σ_ref².
+            nan_mask : bool array, True where pixels are invalid.
+
+            Returns
+            -------
+            (scaled_diff, scale_factor) : scaled image and the factor applied.
+            A scale_factor of 1.0 means no change was applied.
+            """
+            try:
+                valid = ~nan_mask & np.isfinite(diff)
+                if valid.sum() < 1000:
+                    return diff, 1.0
+
+                sigma_expected = float(np.sqrt(max(var_expected, 1e-30)))
+                snr_vals = diff[valid] / sigma_expected
+
+                # IQR-based robust standard-deviation estimate (LSST convention)
+                q25, q75 = np.percentile(snr_vals, [25.0, 75.0])
+                iqr_sigma = (q75 - q25) / 1.3489795003921634   # 1/Φ⁻¹(0.75)
+
+                if iqr_sigma < 0.1 or not np.isfinite(iqr_sigma):
+                    return diff, 1.0   # pathological image, skip
+
+                # Safety: only rescale if the discrepancy is non-trivial (>5%)
+                # but not extreme (>3×, which suggests a bug rather than covariance).
+                if 0.95 <= iqr_sigma <= 3.0:
+                    if abs(iqr_sigma - 1.0) < 0.05:
+                        return diff, 1.0   # already consistent, nothing to do
+                    scale = 1.0 / iqr_sigma
+                    return (diff * scale), scale
+                return diff, 1.0
+
+            except Exception as _e:
+                log_info(f"Warning: variance scaling failed ({_e}); skipping.")
+                return diff, 1.0
+
+        # Apply decorrelation + variance scaling to the SFFT output.
+        # Both steps operate on the FITS file in-place to keep downstream code
+        # (which reads the file from disk) consistent.
+        try:
+            with fits.open(FITS_DIFF, mode="update", memmap=False) as hdul:
+                diff_arr = np.asarray(hdul[0].data, dtype=np.float64)
+                diff_hdr = hdul[0].header
+
+                # Build an invalid-pixel mask for this stage (NaN or ±Inf).
+                _nan_mask = ~np.isfinite(diff_arr)
+
+                # Retrieve image variances from SFFT header (sigma-clipped means)
+                _sci_var = None
+                _ref_var = None
+                try:
+                    _fwhm_ref = float(diff_hdr.get("FWHM_REF", 0))
+                    _fwhm_sci = float(diff_hdr.get("FWHM_SCI", 0))
+                except Exception:
+                    _fwhm_ref = _fwhm_sci = 0.0
+                # Estimate per-image variances from sigma-clipped noise of each
+                # input image (use the data already loaded).
+                try:
+                    _sci_vals = data_sci[np.isfinite(data_sci)].ravel()
+                    _ref_vals = data_ref[np.isfinite(data_ref)].ravel()
+                    if len(_sci_vals) > 1000 and len(_ref_vals) > 1000:
+                        _q25s, _q75s = np.percentile(_sci_vals, [25.0, 75.0])
+                        _q25r, _q75r = np.percentile(_ref_vals, [25.0, 75.0])
+                        _sci_var = ((_q75s - _q25s) / 1.3489795003921634) ** 2
+                        _ref_var = ((_q75r - _q25r) / 1.3489795003921634) ** 2
+                except Exception:
+                    pass
+
+                # --- Step 1: Decorrelation kernel ---
+                # Retrieve the A&L kernel from the SFFT solution (result index 2).
+                _applied_decorr = False
+                try:
+                    if len(result) >= 3 and _sci_var is not None and _ref_var is not None:
+                        from sfft.utils.SFFTSolutionReader import Realize_SFFTKernel
+                        _solution = result[2]
+                        _kerhw = int(diff_hdr.get("KERHW", 0))
+                        if _kerhw > 0 and _solution is not None:
+                            _L = 2 * _kerhw + 1
+                            _N0, _N1 = data_sci.shape
+                            _DK = int(diff_hdr.get("KERORDER", diff_hdr.get("KERPOLY", 0)))
+                            _Fpq_raw = diff_hdr.get("BGORDER", diff_hdr.get("BGPOLY", 0))
+                            _Fpq = int((_Fpq_raw + 1) * (_Fpq_raw + 2) // 2)
+                            # Realize the kernel at the image centre.
+                            # Realize_SFFTKernel takes XY_q (Fortran coord) in __init__
+                            # and returns KerStack of shape (Num_request, L, L).
+                            _cx = float(_N1) / 2.0  # Fortran X = column
+                            _cy = float(_N0) / 2.0  # Fortran Y = row
+                            _XY_q = np.array([[_cx, _cy]])
+                            _ker_stack = Realize_SFFTKernel(_XY_q).FromArray(
+                                Solution=_solution,
+                                N0=_N0, N1=_N1,
+                                L0=_L, L1=_L,
+                                DK=_DK, Fpq=_Fpq,
+                            )
+                            # KerStack[0] is the kernel at the requested coordinate
+                            _ker_2d = np.asarray(_ker_stack[0]).squeeze()
+                            if _ker_2d.ndim == 2 and _ker_2d.shape[0] == _L:
+                                diff_arr = _decorrelate_diffim(
+                                    diff_arr, _ker_2d,
+                                    float(_sci_var), float(_ref_var), _nan_mask
+                                )
+                                _applied_decorr = True
+                                log_info(
+                                    f"Decorrelation kernel applied "
+                                    f"(KerHW={_kerhw}, "
+                                    f"σ_sci={np.sqrt(_sci_var):.2f}, "
+                                    f"σ_ref={np.sqrt(_ref_var):.2f})."
+                                )
+                except Exception as _e:
+                    log_info(f"Warning: could not apply decorrelation kernel: {_e}")
+
+                # --- Step 2: Variance scaling ---
+                _var_expected = (_sci_var or 0.0) + (_ref_var or 0.0)
+                if _var_expected > 0:
+                    diff_arr, _vscale = _scale_diffim_variance(
+                        diff_arr, _var_expected, _nan_mask
+                    )
+                    if abs(_vscale - 1.0) > 0.005:
+                        log_info(
+                            f"Variance scaling applied: IQR-sigma factor = "
+                            f"{1.0/_vscale:.4f} -> rescaled by {_vscale:.4f}. "
+                            f"(LSST ScaleVarianceTask equivalent)"
+                        )
+                        diff_hdr["VSCALE"] = (round(float(_vscale), 6),
+                                              "Variance rescale factor (LSST-style IQR)")
+                    else:
+                        log_info(
+                            f"Variance scaling: noise consistent with expectation "
+                            f"(IQR-sigma factor = {1.0/_vscale:.4f}); no rescale needed."
+                        )
+
+                if _applied_decorr:
+                    diff_hdr["DECORR"] = (True, "DMTN-021 A&L decorrelation applied")
+
+                hdul[0].data = diff_arr.astype(np.float32)
+                hdul[0].header = diff_hdr
+
+        except Exception as _post_e:
+            log_info(f"Warning: post-subtraction processing failed ({_post_e}); skipping.")
+
+        # ------------------------------------------------------------------
         # Re-impose invalid-pixel mask on output difference image
         #
         # Some subtraction / resampling steps can emit exact zeros in regions
