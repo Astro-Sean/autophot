@@ -21,7 +21,7 @@ import warnings
 
 # Add parent directory to path to import functions.py
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from functions import ColoredLevelFormatter, LogMessageNormalizeFilter, set_size, safe_fits_write
+from functions import ColoredLevelFormatter, LogMessageNormalizeFilter, set_size, safe_fits_write, border_msg
 
 # Limit BLAS/OpenMP threads before any scientific imports (avoids libgomp
 # "Resource temporarily unavailable" when this script is run as a subprocess
@@ -1260,6 +1260,9 @@ def run_sfft() -> Optional[int]:
         #    matches that expectation.  This is equivalent to the LSST
         #    pixel-based ScaleVarianceTask estimator.
         # ------------------------------------------------------------------
+        log_info(border_msg("Post-subtraction quality improvements", metadata="LSST-inspired", use_ansi=False))
+        log_info("  Decorrelation kernel (DMTN-021) — whitens A&L convolution noise")
+        log_info("  Variance scaling (ScaleVarianceTask) — IQR-based noise calibration")
 
         def _decorrelate_diffim(
             diff: np.ndarray,
@@ -1477,36 +1480,37 @@ def run_sfft() -> Optional[int]:
                                 )
                                 _applied_decorr = True
                                 log_info(
-                                    f"Decorrelation kernel applied "
-                                    f"(KerHW={_kerhw}, "
-                                    f"σ_sci={np.sqrt(_sci_var):.2f}, "
-                                    f"σ_ref={np.sqrt(_ref_var):.2f})."
+                                    f"Decorrelation kernel applied: KerHW={_kerhw} px, "
+                                    f"σ_sci={np.sqrt(_sci_var):.2f}, σ_ref={np.sqrt(_ref_var):.2f}"
                                 )
                 except Exception as _e:
                     log_info(f"Warning: could not apply decorrelation kernel: {_e}")
 
                 # --- Step 2: Variance scaling ---
                 _var_expected = (_sci_var or 0.0) + (_ref_var or 0.0)
+                _applied_vscale = False
                 if _var_expected > 0:
                     diff_arr, _vscale = _scale_diffim_variance(
                         diff_arr, _var_expected, _nan_mask
                     )
+                    _applied_vscale = True
                     if abs(_vscale - 1.0) > 0.005:
                         log_info(
-                            f"Variance scaling applied: IQR-sigma factor = "
-                            f"{1.0/_vscale:.4f} -> rescaled by {_vscale:.4f}. "
-                            f"(LSST ScaleVarianceTask equivalent)"
+                            f"Variance scaling applied: IQR-sigma factor={1.0/_vscale:.4f} -> rescaled by {_vscale:.4f}"
                         )
                         diff_hdr["VSCALE"] = (round(float(_vscale), 6),
                                               "Variance rescale factor (LSST-style IQR)")
                     else:
                         log_info(
-                            f"Variance scaling: noise consistent with expectation "
-                            f"(IQR-sigma factor = {1.0/_vscale:.4f}); no rescale needed."
+                            f"Variance scaling: noise consistent (IQR-sigma factor={1.0/_vscale:.4f}); no rescale"
                         )
 
+                # Summary of which improvements were applied
                 if _applied_decorr:
                     diff_hdr["DECORR"] = (True, "DMTN-021 A&L decorrelation applied")
+                decorr_status = "ON" if _applied_decorr else "OFF (kernel unavailable)"
+                vscale_status = "ON" if _applied_vscale else "OFF (insufficient data)"
+                log_info(f"Post-subtraction summary: decorrelation={decorr_status}, variance scaling={vscale_status}")
 
                 hdul[0].data = diff_arr.astype(np.float32)
                 hdul[0].header = diff_hdr
