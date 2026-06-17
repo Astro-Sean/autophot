@@ -839,6 +839,15 @@ class Catalog:
                     .to_pandas()
                     .fillna(np.nan)
                 )
+                # Deduplicate cached catalog to prevent duplicates from previous runs
+                if not selectedCatalog.empty and {"RA", "DEC"}.issubset(selectedCatalog.columns):
+                    n_before = len(selectedCatalog)
+                    selectedCatalog = _skycoord_dedup_keep_one(selectedCatalog, sep_threshold_arcsec=0.1)
+                    n_dups = n_before - len(selectedCatalog)
+                    if n_dups > 0:
+                        logger.warning(
+                            f"Removed {n_dups} duplicates from cached {catalogName.upper()} catalog"
+                        )
 
             else:
                 selectedCatalog = []
@@ -1534,6 +1543,14 @@ class Catalog:
                         f"Filter column '{image_filter}' not found in output catalog; "
                         f"available columns: {list(outputCatalog.columns)}"
                     )
+
+            # Final deduplication before returning
+            if not outputCatalog.empty and {"RA", "DEC"}.issubset(outputCatalog.columns):
+                n_before = len(outputCatalog)
+                outputCatalog = _skycoord_dedup_keep_one(outputCatalog, sep_threshold_arcsec=0.1)
+                n_dups = n_before - len(outputCatalog)
+                if n_dups > 0:
+                    logger.info(f"Removed {n_dups} duplicates during catalog cleaning")
 
             logger.info(f"{len(outputCatalog)} sources in output catalog")
             logger.debug(f"Output catalog columns: {list(outputCatalog.columns)}")

@@ -2805,6 +2805,13 @@ def run_photometry():
             get_local_sources=False,
             border=border,
         )
+        # Deduplicate immediately after cleaning to prevent duplicates from propagating
+        if CatalogSources is not None and len(CatalogSources) > 0:
+            n_pre = len(CatalogSources)
+            CatalogSources = _remove_catalog_duplicates(CatalogSources, method='astropy', sep_threshold=0.1)
+            n_post = len(CatalogSources)
+            if n_post < n_pre:
+                logging.info(f"Removed {n_pre - n_post} duplicates from cleaned catalog")
         if CatalogSources is None or len(CatalogSources) == 0:
             logging.warning(
                 "No catalog sources available after cleaning; skipping catalog-based calibration for this image."
