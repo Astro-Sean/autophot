@@ -1027,7 +1027,7 @@ class Zeropoint:
         Returns
         -------
         (zp, zp_err, inlier_mask) : (float, float, ndarray)
-            Zeropoint (median), its uncertainty (std), and boolean inlier mask
+            Zeropoint (median), its uncertainty (percentile-based), and boolean inlier mask
         """
         try:
             import emcee
@@ -1137,9 +1137,14 @@ class Zeropoint:
             samples = sampler.get_chain(flat=True)
             zp_samples = samples[:, 0]
             f_out_samples = samples[:, 1]
-            
+
+            # Percentile-based error (16/50/84) to capture asymmetry
             zp = np.median(zp_samples)
-            zp_err = np.std(zp_samples)
+            zp_p16 = np.percentile(zp_samples, 16)
+            zp_p84 = np.percentile(zp_samples, 84)
+            zp_err_lo = zp - zp_p16
+            zp_err_hi = zp_p84 - zp
+            zp_err = max(zp_err_lo, zp_err_hi)  # Conservative symmetric error
             f_out = np.median(f_out_samples)
             
             # Compute posterior probability of each point being an inlier
@@ -1194,7 +1199,11 @@ class Zeropoint:
             
             samples = sampler.get_chain(flat=True).flatten()
             zp = np.median(samples)
-            zp_err = np.std(samples)
+            zp_p16 = np.percentile(samples, 16)
+            zp_p84 = np.percentile(samples, 84)
+            zp_err_lo = zp - zp_p16
+            zp_err_hi = zp_p84 - zp
+            zp_err = max(zp_err_lo, zp_err_hi)  # Conservative symmetric error
             
             # Post-MCMC outlier rejection
             residuals = delta - zp
