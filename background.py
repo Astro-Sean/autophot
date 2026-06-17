@@ -1428,8 +1428,8 @@ class BackgroundSubtractor:
                 band = grow & (~m)
 
                 # Smooth background using only unmasked pixels.
-                bkg_u = bkg.copy()
-                bkg_u[m] = np.nan
+                # Use np.where to avoid a full copy: feed NaN only to the filter.
+                bkg_u = np.where(m, np.nan, bkg)
                 w = np.isfinite(bkg_u).astype(float)
                 # Gaussian smoothing + normalization by weights.
                 raw_sig = cfg_bkg.get("global_mask_edge_flatten_sigma_px", None)
@@ -1440,6 +1440,7 @@ class BackgroundSubtractor:
                 smooth = num / np.maximum(den, 1e-12)
 
                 if np.any(band) and np.any(np.isfinite(smooth[band])):
+                    # Only copy once (when we actually need to modify bkg).
                     bkg = bkg.copy()
                     bkg[band] = smooth[band]
                     bkg_surface = bkg
