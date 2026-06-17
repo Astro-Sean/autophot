@@ -837,8 +837,8 @@ def log_step(msg: str) -> str:
     return f"[{m}]"
 
 
-def border_msg(msg: str, body: str = "─", corner: str = "+", 
-               metadata: str | None = None, width: int = 70) -> str:
+def border_msg(msg: str, body: str = "─", corner: str = "+",
+               metadata: str | None = None, width: int = 70, use_ansi: bool | None = None) -> str:
     """
     Clean bordered banner for major log sections with bold title.
 
@@ -854,6 +854,8 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
         Optional second line with key=value pairs
     width : int
         Total banner width in characters
+    use_ansi : bool | None
+        Force ANSI codes on/off. If None, auto-detect based on TTY.
 
     Example:
         logging.info(border_msg("Template Preparation", metadata="align=SWarp catalog=Gaia"))
@@ -867,11 +869,18 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
         use_unicode = sys.stdout.encoding == 'utf-8'
     except Exception:
         use_unicode = False
-    
-    # ANSI bold codes for title
-    BOLD = "\033[1m"
-    RESET = "\033[0m"
-    
+
+    # Detect if output is a TTY (terminal) for ANSI codes
+    if use_ansi is None:
+        try:
+            use_ansi = sys.stdout.isatty()
+        except Exception:
+            use_ansi = False
+
+    # ANSI bold codes for title (only if TTY)
+    BOLD = "\033[1m" if use_ansi else ""
+    RESET = "\033[0m" if use_ansi else ""
+
     if not use_unicode:
         body = "-"
         corner = "+"
@@ -887,7 +896,7 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
     visible_text = text
     if len(visible_text) > max_title:
         visible_text = visible_text[:max_title-3] + "..."
-    
+
     # Center the title
     padding = max_title - len(visible_text)
     left_pad = padding // 2
@@ -898,14 +907,14 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
     # Build lines (no leading newline - formatter handles spacing)
     border_line = body * width
     title_line = f"{left_corner}{centered}{right_corner}"
-    
+
     lines = [border_line, title_line]
-    
+
     if metadata:
         meta_clean = str(metadata).strip()[:max_title]
         meta_padded = f" {meta_clean}{' ' * (max_title - len(meta_clean) - 1)}"
         lines.append(f"│{meta_padded}│")
-    
+
     lines.append(border_line)
     return "\n".join(lines)
 
