@@ -685,13 +685,9 @@ def run_photometry():
             if len(coords) >= 2:
                 idx_match, sep2, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
                 thr = sep_threshold * u.arcsec
-                n = len(catalog_df)
-                drop = np.zeros(n, dtype=bool)
-                for i in range(n):
-                    # If source i is close to source j and j < i, source i is the
-                    # duplicate — mark it for removal (j was already kept).
-                    if sep2[i] <= thr and idx_match[i] < i:
-                        drop[i] = True
+                # Vectorized: drop source i if its nearest neighbour j is closer
+                # than the threshold AND has a lower index (j is the kept copy).
+                drop = (sep2 <= thr) & (idx_match < np.arange(len(catalog_df)))
                 catalog_df = catalog_df[~drop].reset_index(drop=True)
         else:
             # Fallback to pandas method if astropy method not applicable
@@ -2294,24 +2290,19 @@ def run_photometry():
                     "retrying per source and skipping non-convergent points",
                     exc,
                 )
-                x_pix = np.full(len(variable_sources), np.nan, dtype=float)
-                y_pix = np.full(len(variable_sources), np.nan, dtype=float)
-                for i, (ra_deg, dec_deg) in enumerate(
-                    zip(
-                        variable_sources["RA"].to_numpy(dtype=float),
-                        variable_sources["DEC"].to_numpy(dtype=float),
+                # Try bulk conversion with quiet=True so WCS returns NaN for
+                # non-convergent sources instead of raising (avoids per-source loop).
+                ra_arr = variable_sources["RA"].to_numpy(dtype=float)
+                dec_arr = variable_sources["DEC"].to_numpy(dtype=float)
+                try:
+                    xy = imageWCS.all_world2pix(
+                        np.column_stack([ra_arr, dec_arr]), 0, quiet=True
                     )
-                ):
-                    try:
-                        x_pix[i], y_pix[i] = imageWCS.all_world2pix([ra_deg], [dec_deg], 0)
-                    except Exception as src_exc:
-                        logging.debug(
-                            "Skipping variable source RA=%.7f Dec=%.7f due to WCS "
-                            "conversion failure: %s",
-                            ra_deg,
-                            dec_deg,
-                            src_exc,
-                        )
+                    x_pix = xy[:, 0].astype(float)
+                    y_pix = xy[:, 1].astype(float)
+                except Exception:
+                    x_pix = np.full(len(variable_sources), np.nan, dtype=float)
+                    y_pix = np.full(len(variable_sources), np.nan, dtype=float)
                 n_failed = int(np.count_nonzero(~np.isfinite(x_pix) | ~np.isfinite(y_pix)))
                 if n_failed > 0:
                     logging.warning(
@@ -4496,17 +4487,13 @@ def run_photometry():
                             fwhm_pix = float(input_yaml.get("science_fwhm", ImageFWHM))
                             crowd_r = 2.5 * max(fwhm_pix, 1.0)
                             max_nei = 1
+                            # query_ball_point accepts the full array at once —
+                            # avoids a Python loop over every matched source.
                             sci_counts = np.array(
-                                [
-                                    len(sci_tree.query_ball_point(pt, crowd_r)) - 1
-                                    for pt in ms_xy
-                                ]
+                                [len(nb) - 1 for nb in sci_tree.query_ball_point(ms_xy, crowd_r)]
                             )
                             ref_counts = np.array(
-                                [
-                                    len(ref_tree.query_ball_point(pt, crowd_r)) - 1
-                                    for pt in ms_xy
-                                ]
+                                [len(nb) - 1 for nb in ref_tree.query_ball_point(ms_xy, crowd_r)]
                             )
                             isolated = (sci_counts <= max_nei) & (ref_counts <= max_nei)
                             ms = ms[isolated]
@@ -5362,8 +5349,7 @@ def run_photometry():
                         input_yaml=input_yaml,
                         image=inverted_image,
                     )
-                    # Measure on inverted image
-                    TargetPositionInverted = TargetPosition.copy()
+                    # Measure on inverted image (no copy needed — .measure() returns a new DataFrame)
                     TargetPositionInverted = AperturePhotometryInverted.measure(
                         sources=TargetPositionInverted,
                         plot=True,

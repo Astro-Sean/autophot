@@ -105,25 +105,20 @@ def cross_match_sources(given_catalog, variable_catalog, match_radius_pix=5):
     x_var = variable_catalog["x_pix"].values
     y_var = variable_catalog["y_pix"].values
 
-    keep_mask = np.ones(len(given_catalog), dtype=bool)
-    removed_indices = []
+    # Build a KDTree on the variable sources for O(N log M) matching instead
+    # of the previous O(N*M) per-source distance loop.
+    from scipy.spatial import cKDTree as _cKDTree
+    var_tree = _cKDTree(np.column_stack([x_var, y_var]))
+    given_xy = np.column_stack([x_given, y_given])
+    dist_nearest, idx_nearest = var_tree.query(given_xy, k=1, workers=1)
+    keep_mask = dist_nearest > match_radius_pix
 
-    for i, (xg, yg) in enumerate(zip(x_given, y_given)):
-        dx = x_var - xg
-        dy = y_var - yg
-        dist = np.sqrt(dx**2 + dy**2)
-        within_radius = dist <= match_radius_pix
-
-        if np.any(within_radius):
-            matched_var_idx = np.where(within_radius)[0][
-                0
-            ]  # First matched variable source index
-            keep_mask[i] = False
-            removed_indices.append(i)
-            otype = variable_catalog.iloc[matched_var_idx]["OTYPE_opt"]
-            logger.debug(
-                f"Removing source at index {i} (x={xg:.2f}, y={yg:.2f}) due to match with variable source [{otype}]"
-            )
+    removed_indices = np.where(~keep_mask)[0].tolist()
+    for i in removed_indices:
+        otype = variable_catalog.iloc[idx_nearest[i]]["OTYPE_opt"]
+        logger.debug(
+            f"Removing source at index {i} (x={x_given[i]:.2f}, y={y_given[i]:.2f}) due to match with variable source [{otype}]"
+        )
 
     filtered_catalog = given_catalog[keep_mask].reset_index(drop=True)
     logger.info(f"Number of sources removed due to matching: {len(removed_indices)}")
@@ -173,11 +168,9 @@ def _skycoord_dedup_keep_one(catalog_df, sep_threshold_arcsec=0.1):
     )
     idx_match, sep2, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
     thr = sep_threshold_arcsec * u.arcsec
-    n = len(catalog_df)
-    drop = np.zeros(n, dtype=bool)
-    for i in range(n):
-        if sep2[i] <= thr and idx_match[i] < i:
-            drop[i] = True
+    # Vectorized: drop source i if its nearest neighbour j is closer than the
+    # threshold AND has a lower index (meaning j is the "first" copy to keep).
+    drop = (sep2 <= thr) & (idx_match < np.arange(len(catalog_df)))
     return catalog_df[~drop].reset_index(drop=True)
 
 
@@ -1990,8 +1983,14 @@ class Catalog:
             new_rows = []
             if output_catalog.empty:
                 # No existing sources yet — all entries are new.
-                new_rows = [{col: entry.get(col, np.nan) for col in cols}
-                            for _, entry in catalog_i.iterrows()]
+                # Use to_dict('records') instead of iterrows() to avoid creating
+                # a Series object per row (much faster for large catalogs).
+                catalog_cols = [c for c in cols if c in catalog_i.columns]
+                missing_cols = [c for c in cols if c not in catalog_i.columns]
+                sub = catalog_i[catalog_cols].copy()
+                for c in missing_cols:
+                    sub[c] = np.nan
+                new_rows = sub[cols].to_dict("records")
             else:
                 coords_existing = SkyCoord(
                     ra=output_catalog["RA"].values * u.degree,
@@ -2005,19 +2004,30 @@ class Catalog:
                 tol_deg = tolerance_arcsec / 3600.0
                 matched = sep2d.deg < tol_deg
 
-                for i, (is_matched, entry) in enumerate(
-                    zip(matched, catalog_i.itertuples(index=False))
-                ):
-                    entry_dict = entry._asdict()
-                    if not is_matched:
-                        new_rows.append({col: entry_dict.get(col, np.nan) for col in cols})
-                    else:
-                        out_idx = output_catalog.index[idx_match[i]]
-                        for filter_name in updated_filter_list:
-                            if filter_name in entry_dict and pd.isna(
-                                output_catalog.at[out_idx, filter_name]
-                            ):
-                                output_catalog.at[out_idx, filter_name] = entry_dict[filter_name]
+                # Split new (unmatched) sources via boolean mask — no iterrows()
+                new_mask = ~matched
+                if new_mask.any():
+                    catalog_cols = [c for c in cols if c in catalog_i.columns]
+                    missing_cols = [c for c in cols if c not in catalog_i.columns]
+                    sub = catalog_i.loc[new_mask, catalog_cols].copy()
+                    for c in missing_cols:
+                        sub[c] = np.nan
+                    new_rows = sub[cols].to_dict("records")
+
+                # Vectorised fill-in of missing filter values for matched sources
+                if matched.any():
+                    matched_new_idx = np.where(matched)[0]
+                    out_indices = output_catalog.index[idx_match[matched_new_idx]]
+                    for filter_name in updated_filter_list:
+                        if filter_name not in catalog_i.columns:
+                            continue
+                        new_vals = catalog_i[filter_name].to_numpy()
+                        existing_vals = output_catalog.loc[out_indices, filter_name].to_numpy()
+                        fill_mask = pd.isna(existing_vals) & pd.notna(new_vals[matched_new_idx])
+                        if fill_mask.any():
+                            output_catalog.loc[
+                                out_indices[fill_mask], filter_name
+                            ] = new_vals[matched_new_idx[fill_mask]]
 
             if new_rows:
                 new_rows_df = pd.DataFrame(new_rows)
