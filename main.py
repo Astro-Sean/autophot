@@ -2001,6 +2001,11 @@ def run_photometry():
         background_rms = np.asarray(result["background_rms"], dtype=np.float32)
         defects_mask = np.asarray(result["defects_mask"], dtype=bool)
         hardware_defects_mask = np.asarray(result["hardware_defects_mask"], dtype=bool)
+        # Drop the result dict — it holds references to 4-6 full-image arrays
+        # (background, rms, defects_mask, hardware_defects_mask, source_mask,
+        # subtracted image) that are no longer needed here.  Without this the
+        # dict keeps all of them alive until a new `result =` assignment.
+        del result
 
         logging.info(f"Preliminary FWHM: {ImageFWHM:.1f} pixels")
 
@@ -2377,6 +2382,7 @@ def run_photometry():
         background_rms = np.asarray(result["background_rms"], dtype=np.float32)
         defects_mask = np.asarray(result["defects_mask"], dtype=bool)
         hardware_defects_mask = np.asarray(result["hardware_defects_mask"], dtype=bool)
+        del result
 
         # Cache background results for potential reuse after template subtraction
         fpath_before_subtraction = fpath
@@ -2732,6 +2738,7 @@ def run_photometry():
             background_rms = np.asarray(result["background_rms"], dtype=np.float32)
             defects_mask = np.asarray(result["defects_mask"], dtype=bool)
             hardware_defects_mask = np.asarray(result["hardware_defects_mask"], dtype=bool)
+            del result
 
         # Save the background_rms array with '.weight' inserted before the suffix
         base, ext = os.path.splitext(fpath)

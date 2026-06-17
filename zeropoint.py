@@ -1146,8 +1146,10 @@ class Zeropoint:
             zp_err_hi = zp_p84 - zp
             zp_err = max(zp_err_lo, zp_err_hi)  # Conservative symmetric error
             f_out = np.median(f_out_samples)
-            # Release chain immediately — it can be several MB and is no longer needed.
-            del samples, zp_samples, f_out_samples
+            # Release chain and sampler — the sampler object retains the full
+            # chain internally (n_walkers × n_steps × n_params) even after
+            # get_chain(); freeing it now prevents accumulation across images.
+            del samples, zp_samples, f_out_samples, sampler
             
             # Compute posterior probability of each point being an inlier
             resid = delta - zp
@@ -1208,7 +1210,7 @@ class Zeropoint:
             zp_err_lo = zp - zp_p16
             zp_err_hi = zp_p84 - zp
             zp_err = max(zp_err_lo, zp_err_hi)  # Conservative symmetric error
-            del samples
+            del samples, sampler
             
             # Post-MCMC outlier rejection
             residuals = delta - zp
