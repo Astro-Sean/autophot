@@ -2406,14 +2406,23 @@ class Catalog:
                 inlier_inst_mag = inst_mag_linear[inlier_mask]
                 
                 if len(inlier_catalog) > 5:
-                    # Calculate residuals for all inliers
-                    predicted_mag = fit_line(inlier_inst_mag.reshape(-1, 1))
-                    residuals = catalog_mag_linear[inlier_mask] - predicted_mag
-                    
+                    # Calculate residuals for all inliers.
+                    # sklearn LinearRegression.predict() can return shape (N,1) rather
+                    # than (N,) depending on the version.  Flatten immediately so that
+                    # the subtraction is always (N,)-(N,) and cannot broadcast to (N,N),
+                    # which would silently corrupt central_start/central_end and cause an
+                    # IndexError when those values are used to index sorted_flux (size N).
+                    predicted_mag = np.asarray(
+                        fit_line(inlier_inst_mag.reshape(-1, 1))
+                    ).flatten()
+                    residuals = (
+                        np.asarray(catalog_mag_linear[inlier_mask]).flatten() - predicted_mag
+                    )
+
                     # Sort by flux (bright to faint - smaller mag = brighter)
                     sort_idx = np.argsort(inlier_flux)[::-1]  # Bright first
                     sorted_flux = inlier_flux[sort_idx]
-                    sorted_residuals = np.asarray(residuals[sort_idx]).flatten()  # Ensure 1D
+                    sorted_residuals = residuals[sort_idx]  # already 1D
                     sorted_mag = inlier_inst_mag[sort_idx]
                     
                     # TIGHT residual threshold: use 2-sigma instead of 3-sigma for stricter selection
