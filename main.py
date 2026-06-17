@@ -658,29 +658,59 @@ def run_photometry():
             )
         elif method == 'pandas':
             # Pixel-space fallback
-            _rx = np.round(catalog_df["x_pix"].to_numpy(dtype=float), 2)
-            _ry = np.round(catalog_df["y_pix"].to_numpy(dtype=float), 2)
-            catalog_df = (
-                catalog_df.assign(_rx=_rx, _ry=_ry)
-                .sort_values(["_rx", "_ry"])
-                .drop_duplicates(subset=["_rx", "_ry"], keep="first")
-                .drop(columns=["_rx", "_ry"])
-                .reset_index(drop=True)
-            )
+            if {"x_pix", "y_pix"}.issubset(catalog_df.columns):
+                _rx = np.round(catalog_df["x_pix"].to_numpy(dtype=float), 2)
+                _ry = np.round(catalog_df["y_pix"].to_numpy(dtype=float), 2)
+                catalog_df = (
+                    catalog_df.assign(_rx=_rx, _ry=_ry)
+                    .sort_values(["_rx", "_ry"])
+                    .drop_duplicates(subset=["_rx", "_ry"], keep="first")
+                    .drop(columns=["_rx", "_ry"])
+                    .reset_index(drop=True)
+                )
         elif method == 'astropy' and {"RA", "DEC"}.issubset(catalog_df.columns):
-            # Astropy method with angular separation
+            # Astropy method with angular separation.
+            # nthneighbor=2 finds the nearest *other* source for each entry.
+            # For each close pair (sep < threshold) we keep the lower-index member
+            # and drop the higher-index one — this guarantees exactly one copy
+            # survives rather than both being dropped.
             from astropy.coordinates import SkyCoord
             import astropy.units as u
-            
+
             coords = SkyCoord(
                 ra=catalog_df["RA"].values * u.degree,
                 dec=catalog_df["DEC"].values * u.degree
             )
-            
+
             if len(coords) >= 2:
-                idx_match, sep, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
-                keep_mask = sep > sep_threshold * u.arcsec
-                catalog_df = catalog_df[keep_mask].reset_index(drop=True)
+                idx_match, sep2, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
+                thr = sep_threshold * u.arcsec
+                n = len(catalog_df)
+                drop = np.zeros(n, dtype=bool)
+                for i in range(n):
+                    # If source i is close to source j and j < i, source i is the
+                    # duplicate — mark it for removal (j was already kept).
+                    if sep2[i] <= thr and idx_match[i] < i:
+                        drop[i] = True
+                catalog_df = catalog_df[~drop].reset_index(drop=True)
+        else:
+            # Fallback to pandas method if astropy method not applicable
+            if {"RA", "DEC"}.issubset(catalog_df.columns):
+                catalog_df = (
+                    catalog_df.sort_values(["RA", "DEC"])
+                    .drop_duplicates(subset=["RA", "DEC"], keep="first")
+                    .reset_index(drop=True)
+                )
+            elif {"x_pix", "y_pix"}.issubset(catalog_df.columns):
+                _rx = np.round(catalog_df["x_pix"].to_numpy(dtype=float), 2)
+                _ry = np.round(catalog_df["y_pix"].to_numpy(dtype=float), 2)
+                catalog_df = (
+                    catalog_df.assign(_rx=_rx, _ry=_ry)
+                    .sort_values(["_rx", "_ry"])
+                    .drop_duplicates(subset=["_rx", "_ry"], keep="first")
+                    .drop(columns=["_rx", "_ry"])
+                    .reset_index(drop=True)
+                )
         
         n_post = len(catalog_df)
         if n_post < n_pre:
@@ -3544,6 +3574,10 @@ def run_photometry():
 
         Calibrate_Catalog = Catalog(input_yaml=input_yaml)
         GetZeropoint = Zeropoint(input_yaml=input_yaml)
+        # Preserve the full measured catalog for writing to the CALIB file.
+        # GetZeropoint.clean() applies strict quality cuts that are appropriate
+        # for ZP fitting but would silently drop many sources from the output.
+        CatalogSources_for_calib = CatalogSources.copy() if CatalogSources is not None else None
         CatalogSources = GetZeropoint.clean(sources=CatalogSources)
 
         # Check linearity of catalog sources before fitting zeropoint
@@ -3775,10 +3809,14 @@ def run_photometry():
             # Saves the cleaned catalog and PSF sources to CSV files.
             # Use the FITS filename stem for consistent naming.
             CatalogSources.to_csv(
-                os.path.join(cur_dir, f"imageCalib_template_{input_yaml['base']}.csv")
+                os.path.join(cur_dir, f"imageCalib_template_{input_yaml['base']}.csv"),
+                index=False,
+                float_format="%.6f",
             )
             IsolatedSources.to_csv(
-                os.path.join(cur_dir, f"PSFSources_template_{input_yaml['base']}.csv")
+                os.path.join(cur_dir, f"PSFSources_template_{input_yaml['base']}.csv"),
+                index=False,
+                float_format="%.6f",
             )
 
             # Writes the modified image and header to the new FITS file.
@@ -6604,60 +6642,71 @@ def run_photometry():
 
         # Opens the file in write mode to add the output string and target/zeropoint info.
         with open(calibration_file, "w") as file:
-            file.write("# Output dictionary")
-            file.write(output_str + "")
+            file.write("# Output dictionary\n")
+            file.write(output_str)
             file.write("\n" + "\n".join(target_lines))
             file.write("\n" + "\n".join(zp_lines))
 
-        # Append sequence star catalog (CatalogSources) if available
-        if CatalogSources is not None and not CatalogSources.empty:
+        # Append sequence star catalog to CALIB file.
+        # Use CatalogSources_for_calib (full measured catalog, saved before
+        # GetZeropoint.clean() trimmed it for ZP fitting) so that all measured
+        # sequence stars are recorded, not just the strict ZP-fitting subset.
+        _calib_df = CatalogSources_for_calib
+        if _calib_df is not None and not _calib_df.empty:
+            _calib_df = _calib_df.copy()
+
             # Ensure PSF columns exist (NaN if PSF fitting was skipped)
             for col in ["x_fit", "y_fit", "x_fit_err", "y_fit_err",
                         "flux_PSF", "flux_PSF_err", "fwhm", "fwhm_psf"]:
-                if col not in CatalogSources.columns:
-                    CatalogSources[col] = np.nan
+                if col not in _calib_df.columns:
+                    _calib_df[col] = np.nan
 
             # Prefer per-source SExtractor fwhm over constant fwhm_psf for CALIB output
-            if "fwhm" in CatalogSources.columns and "fwhm_psf" in CatalogSources.columns:
-                # Fill any missing fwhm from fwhm_psf as fallback, then drop fwhm_psf
-                CatalogSources["fwhm"] = CatalogSources["fwhm"].fillna(CatalogSources["fwhm_psf"])
-                CatalogSources.drop(columns=["fwhm_psf"], inplace=True)
+            if "fwhm" in _calib_df.columns and "fwhm_psf" in _calib_df.columns:
+                _calib_df["fwhm"] = _calib_df["fwhm"].fillna(_calib_df["fwhm_psf"])
+                _calib_df.drop(columns=["fwhm_psf"], inplace=True)
 
             # Disambiguate duplicate SNR columns:
             #   SNR  = aperture photometry SNR (aperture_sum / sqrt_var)
             #   snr  = maxPixel / noiseSky (from functions.snr)
             #   SNR_err is never populated — drop it
-            if "SNR" in CatalogSources.columns:
-                CatalogSources.rename(columns={"SNR": "snr_ap"}, inplace=True)
-            if "snr" in CatalogSources.columns:
-                CatalogSources.rename(columns={"snr": "snr_peak"}, inplace=True)
-            if "SNR_err" in CatalogSources.columns:
-                CatalogSources.drop(columns=["SNR_err"], inplace=True)
+            if "SNR" in _calib_df.columns:
+                _calib_df.rename(columns={"SNR": "snr_ap"}, inplace=True)
+            if "snr" in _calib_df.columns:
+                _calib_df.rename(columns={"snr": "snr_peak"}, inplace=True)
+            if "SNR_err" in _calib_df.columns:
+                _calib_df.drop(columns=["SNR_err"], inplace=True)
 
             # Drop columns that are entirely NaN / empty to keep CALIB tidy
-            _all_nan = CatalogSources.columns[
-                CatalogSources.isna().all() | (CatalogSources.astype(str) == "").all()
+            _all_nan = _calib_df.columns[
+                _calib_df.isna().all() | (_calib_df.astype(str) == "").all()
             ].tolist()
             if _all_nan:
                 logging.debug(f"Dropping {len(_all_nan)} all-NaN columns from CALIB: {_all_nan}")
-                CatalogSources = CatalogSources.drop(columns=_all_nan)
+                _calib_df = _calib_df.drop(columns=_all_nan)
 
-            # Use consolidated duplicate removal function
-            CatalogSources_dedup = _remove_catalog_duplicates(
-                CatalogSources,
-                method='astropy',
-                sep_threshold=0.1  # Only remove exact duplicates
-            )
-
-            logging.info(f"Writing {len(CatalogSources_dedup)} catalog sources to CALIB file")
-            with open(calibration_file, "a", newline='') as file:
-                file.write("\n# Sequence star catalog used for calibration\n")
-                CatalogSources_dedup.to_csv(file, index=False, float_format="%.6f")
-                file.flush()  # Ensure data is written immediately
-        elif CatalogSources is not None:
+            # Safety check: ensure catalog still has rows and columns after cleanup
+            if _calib_df.empty or len(_calib_df.columns) == 0:
+                logging.warning("CatalogSources became empty after column cleanup; skipping catalog write")
+            else:
+                # Remove exact duplicate coordinates
+                _calib_df_dedup = _remove_catalog_duplicates(
+                    _calib_df,
+                    method='astropy',
+                    sep_threshold=0.1,
+                )
+                if _calib_df_dedup is not None and not _calib_df_dedup.empty:
+                    logging.info(f"Writing {len(_calib_df_dedup)} catalog sources to CALIB file")
+                    with open(calibration_file, "a", newline='') as file:
+                        file.write("\n# Sequence star catalog used for calibration\n")
+                        _calib_df_dedup.to_csv(file, index=False, float_format="%.6f")
+                        file.flush()
+                else:
+                    logging.warning("CatalogSources_dedup is empty after deduplication; skipping catalog write")
+        elif _calib_df is not None:
             logging.warning("CatalogSources is empty - no catalog sources will be written")
         else:
-            pass  # No catalog sources available, silently skip
+            logging.debug("No catalog sources available to write to CALIB file")
 
         # Redoes the sources if enabled.
         if input_yaml["photometry"].get("redo_sources", False):
@@ -6713,12 +6762,10 @@ def run_photometry():
             )
 
             for path in (isolated_sources_std, isolated_sources_legacy):
-                # Opens the file in write mode to add the output string first.
+                # Write header comment and catalog data in a single open.
                 with open(path, "w") as file:
-                    file.write("# Output dictionary")
-                    file.write(output_str + "")
-                # Opens the file again in append mode to add the clean catalog.
-                with open(path, "a") as file:
+                    file.write("# Output dictionary\n")
+                    file.write(output_str)
                     IsolatedSources.to_csv(file, index=False, float_format="%.6f")
 
         #  Global Photometry
