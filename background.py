@@ -434,12 +434,14 @@ class BackgroundSubtractor:
         )
 
         mask = np.zeros(image.shape, dtype=bool)
-        # Avoid an unconditional full copy when possible (NumPy 2.0+ supports copy=).
+        # float32 is sufficient precision for iterative source-masking.
+        # Using float32 halves the memory footprint vs float64 (~64 MB saved
+        # for a 4096×4096 image).  Avoid an unconditional full copy when possible.
         try:
-            residual = np.asarray(image, dtype=np.float64, copy=False)
+            residual = np.asarray(image, dtype=np.float32, copy=False)
         except (TypeError, ValueError):
             # NumPy <2.0 raises TypeError for copy= keyword; NumPy 2.0+ raises ValueError if copy cannot be avoided
-            residual = np.asarray(image, dtype=np.float64)
+            residual = np.asarray(image, dtype=np.float32)
 
         # Safety: cap mask fraction so Background2D always has enough data to
         # fit a gradient.  If the mask exceeds this, stop iterating.
@@ -1117,7 +1119,7 @@ class BackgroundSubtractor:
                 # Use the raw Background2D background map without any
                 # additional median or Gaussian post-processing so that
                 # execution time stays minimal.
-                bkg_data = np.asarray(bkg.background, dtype=float)
+                bkg_data = np.asarray(bkg.background, dtype=np.float32)
 
                 self.logger.info(border_msg("Background estimation"))
                 self.logger.info(
@@ -1150,8 +1152,8 @@ class BackgroundSubtractor:
         # All attempts failed - flat fallback.
         self.logger.warning("All Background2D attempts failed - using global stats")
         gmean, gmed, gstd = sigma_clipped_stats(image, sigma=3.0, mask=mask)
-        bkg_surface = np.full_like(image, gmed, dtype=float)
-        bkg_rms = np.full_like(image, max(gstd, 1.0), dtype=float)
+        bkg_surface = np.full_like(image, gmed, dtype=np.float32)
+        bkg_rms = np.full_like(image, max(gstd, 1.0), dtype=np.float32)
         return True, bkg_surface, bkg_rms, gmed
 
     # -------------------------------------------------------------------------

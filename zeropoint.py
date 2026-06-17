@@ -1146,6 +1146,8 @@ class Zeropoint:
             zp_err_hi = zp_p84 - zp
             zp_err = max(zp_err_lo, zp_err_hi)  # Conservative symmetric error
             f_out = np.median(f_out_samples)
+            # Release chain immediately — it can be several MB and is no longer needed.
+            del samples, zp_samples, f_out_samples
             
             # Compute posterior probability of each point being an inlier
             resid = delta - zp
@@ -1197,13 +1199,16 @@ class Zeropoint:
             sampler.reset()
             sampler.run_mcmc(None, n_steps, progress=False)
             
-            samples = sampler.get_chain(flat=True).flatten()
-            zp = np.median(samples)
-            zp_p16 = np.percentile(samples, 16)
-            zp_p84 = np.percentile(samples, 84)
+            # flat=True already returns a 1-D array; .flatten() would create a
+            # redundant copy — use the chain directly and release it promptly.
+            samples = sampler.get_chain(flat=True)
+            zp = float(np.median(samples))
+            zp_p16 = float(np.percentile(samples, 16))
+            zp_p84 = float(np.percentile(samples, 84))
             zp_err_lo = zp - zp_p16
             zp_err_hi = zp_p84 - zp
             zp_err = max(zp_err_lo, zp_err_hi)  # Conservative symmetric error
+            del samples
             
             # Post-MCMC outlier rejection
             residuals = delta - zp

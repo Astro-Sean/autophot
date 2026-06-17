@@ -911,6 +911,10 @@ class MCMCFitter:
         self.fit_info["per_source"].append(record)
         self.fit_info["samples"][self.counter] = chain
         self.fit_info["log_prob"] = logp
+        # Release the raw chain and log-prob arrays now that summary stats are
+        # extracted — the full chain can be ~8 MB per source (50 walkers × 5000
+        # steps × 4 params) and accumulates across all sources in a batch.
+        del chain, logp
         self.fit_info["param_errs"] = perr_sym
         self.fit_info["param_errs_lower"] = perr_lo
         self.fit_info["param_errs_upper"] = perr_hi
@@ -2586,8 +2590,11 @@ class PSF:
             x_phys = np.arange(nx)
             y_phys = np.arange(ny)
             # Projections should be robust to NaNs in the PSF array.
-            hx = np.nanmean(np.asarray(data, dtype=float), axis=0)
-            hy = np.nanmean(np.asarray(data, dtype=float), axis=1)
+            # Convert once and reuse for both axes to avoid a second allocation.
+            _data_f = np.asarray(data, dtype=float)
+            hx = np.nanmean(_data_f, axis=0)
+            hy = np.nanmean(_data_f, axis=1)
+            del _data_f
 
             ax_B.step(x_phys, hx, color="#00FF00", lw=0.5, where="mid")
             ax_R.step(hy, y_phys, color="#00FF00", lw=0.5, where="mid")

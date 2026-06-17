@@ -3476,6 +3476,9 @@ def run_photometry():
                         mask=result_orig["defects_mask"],
                         background_rms=result_orig["background_rms"],
                     )
+                    # Release the original full-resolution image immediately after
+                    # PSF build — it is no longer needed and can be ~64MB.
+                    del image_orig, result_orig
                     if epsf_model is not None:
                         logging.info(
                             "PSF built from original (pre-alignment) science image to avoid resampling degradation."
@@ -4910,10 +4913,10 @@ def run_photometry():
                 # Safety: if the LPI correction would remove essentially all signal in the PSF core,
                 # skip it (this indicates the regression learned the source, not the background).
                 try:
-                    stamp_after = np.array(image[y1:y2, x1:x2], dtype=float, copy=False)
+                    stamp_after = np.array(image[y1:y2, x1:x2], dtype=np.float32, copy=False)
                 except ValueError:
                     # NumPy 2.0+ raises ValueError if copy cannot be avoided
-                    stamp_after = np.asarray(image[y1:y2, x1:x2], dtype=float)
+                    stamp_after = np.asarray(image[y1:y2, x1:x2], dtype=np.float32)
                 yy0, xx0 = np.mgrid[0 : bg_pred.shape[0], 0 : bg_pred.shape[1]]
                 rr0 = np.hypot(xx0 - half, yy0 - half)
                 core = rr0 <= float(inner_r)
@@ -5085,11 +5088,11 @@ def run_photometry():
             try:
                 y0b, y1b, x0b, x1b = [int(v) for v in local_cutout_box]
                 cutout_y0, cutout_x0 = int(y0b), int(x0b)
-                target_cutout = np.asarray(image[y0b:y1b, x0b:x1b], dtype=float)
+                target_cutout = np.asarray(image[y0b:y1b, x0b:x1b], dtype=np.float32)
                 # Background RMS cutout (if available) so error models match.
                 if background_rms is not None and np.ndim(background_rms) == 2:
                     target_cutout_rms = np.asarray(
-                        background_rms[y0b:y1b, x0b:x1b], dtype=float
+                        background_rms[y0b:y1b, x0b:x1b], dtype=np.float32
                     )
                 cutout_target_x = float(bg_target_x_pix) - float(x0b)
                 cutout_target_y = float(bg_target_y_pix) - float(y0b)
@@ -5459,7 +5462,7 @@ def run_photometry():
                     if p.exists():
                         sci_weight_path = p
                         with fits.open(p) as hdul:
-                            weight_map_sci = np.asarray(hdul[0].data, dtype=float)
+                            weight_map_sci = np.asarray(hdul[0].data, dtype=np.float32)
                         break
                 if sci_weight_path is None:
                     pass  # Weight maps are optional, no warning needed
@@ -5475,7 +5478,7 @@ def run_photometry():
                     if p.exists():
                         ref_weight_path = p
                         with fits.open(p) as hdul:
-                            weight_map_ref = np.asarray(hdul[0].data, dtype=float)
+                            weight_map_ref = np.asarray(hdul[0].data, dtype=np.float32)
                         break
                 if ref_weight_path is None:
                     pass  # Weight maps are optional, no warning needed
@@ -5543,7 +5546,7 @@ def run_photometry():
             _ty = float(TargetPosition["y_fit"].iloc[0])
             _half = max(10, int(np.ceil(3 * ImageFWHM)))
             cutout = Cutout2D(_sci, (_tx, _ty), (2 * _half + 1, 2 * _half + 1), mode="partial", fill_value=np.nan)
-            _cutout = np.asarray(cutout.data, dtype=float)
+            _cutout = np.asarray(cutout.data, dtype=np.float32)
             gaussian_fits = Find_FWHM(input_yaml=input_yaml).fit_gaussian(
                 _cutout,
                 x=cutout.input_position_cutout[0],
@@ -6025,12 +6028,16 @@ def run_photometry():
                         # no sources, so we want to inject in those regions too.
                         is_diff_image = "diff_" in os.path.basename(str(fpath))
                         if is_diff_image:
-                            image_for_limits = np.where(hardware_defects_mask, np.nan, image).astype(np.float32)
+                            # Copy at float32 precision then mask in-place — avoids creating a
+                            # temporary float64 intermediate that np.where().astype() would produce.
+                            image_for_limits = np.asarray(image, dtype=np.float32)
+                            image_for_limits[hardware_defects_mask] = np.nan
                             logging.info(
                                 "Limiting magnitude: using hardware_defects_mask (no source masking) for difference image."
                             )
                         else:
-                            image_for_limits = np.where(defects_mask, np.nan, image).astype(np.float32)
+                            image_for_limits = np.asarray(image, dtype=np.float32)
+                            image_for_limits[defects_mask] = np.nan
                         try:
                             lim_cfg_local = input_yaml.get("limiting_magnitude") or {}
                             revert_lift = bool(lim_cfg_local.get("revert_target_dc_bias_for_injection", False))
