@@ -11,6 +11,9 @@ source:
 # IMPORTANT: This package requires conda-forge channel
 # Install with: conda install -c conda-forge -c astro-juanlu autophot
 # Or add conda-forge to your channels: conda config --add channels conda-forge
+#
+# NOTE: sfft is not available on conda-forge. Install via pip:
+#   pip install sfft==1.7.1
 
 build:
   noarch: python
@@ -65,7 +68,6 @@ requirements:
     - scikit-image ==0.26.0
     - scikit-learn ==1.9.0
     - scipy ==1.17.1
-    - sfft ==1.7.1
     - tqdm ==4.68.2
 
 test:
@@ -87,7 +89,6 @@ test:
     - emcee ==3.1.6
     - corner ==2.2.3
     - ccdproc ==2.5.1
-    - sfft ==1.7.1
 
 about:
   home: https://github.com/Astro-Sean/autophot
