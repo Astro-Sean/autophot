@@ -25,23 +25,23 @@ requirements:
     - wheel
     - numpy ==2.4.6
     - pandas ==3.0.1
-    - scikit-image ==0.25.0
-    - matplotlib ==3.10.8
+    - scikit-image ==0.26.0
+    - matplotlib ==3.10.9
     - astroquery ==0.4.11
     - photutils ==3.0.0
     - lmfit ==1.3.4
     - emcee ==3.1.6
     - corner ==2.2.3
     - ccdproc ==2.5.1
-    - scipy ==1.17.0
-    - reproject ==0.19.0
-    - requests ==2.32.5
+    - scipy ==1.17.1
+    - reproject ==0.20.0
+    - requests ==2.34.2
     - pyyaml ==6.0.3
     - astroalign ==2.6.2
     - astropy ==7.2.0
     - astroscrappy ==1.2.0
-    - tqdm ==4.67.3
-    - scikit-learn ==1.8.0
+    - tqdm ==4.68.2
+    - scikit-learn ==1.9.0
   run:
     - python >=3.11,<3.12
     - astroalign ==2.6.2
@@ -55,17 +55,18 @@ requirements:
     - ccdproc ==2.5.1
     - emcee ==3.1.6
     - lmfit ==1.3.4
-    - matplotlib ==3.10.8
+    - matplotlib ==3.10.9
     - numpy ==2.4.6
     - pandas ==3.0.1
     - photutils ==3.0.0
     - pyyaml ==6.0.3
-    - reproject ==0.19.0
-    - requests ==2.32.5
-    - scikit-image ==0.25.0
-    - scikit-learn ==1.8.0
-    - scipy ==1.17.0
-    - tqdm ==4.67.3
+    - reproject ==0.20.0
+    - requests ==2.34.2
+    - scikit-image ==0.26.0
+    - scikit-learn ==1.9.0
+    - scipy ==1.17.1
+    - sfft ==1.7.1
+    - tqdm ==4.68.2
 
 test:
   imports:
@@ -78,14 +79,15 @@ test:
   requires:
     - python >=3.11,<3.12
     - pandas ==3.0.1
-    - scikit-image ==0.25.0
-    - matplotlib ==3.10.8
+    - scikit-image ==0.26.0
+    - matplotlib ==3.10.9
     - astroquery ==0.4.11
     - photutils ==3.0.0
     - lmfit ==1.3.4
     - emcee ==3.1.6
     - corner ==2.2.3
     - ccdproc ==2.5.1
+    - sfft ==1.7.1
 
 about:
   home: https://github.com/Astro-Sean/autophot
