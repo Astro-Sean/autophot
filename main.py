@@ -4806,6 +4806,42 @@ def run_photometry():
         # Gets the header of the image.
         header = get_header(fpath)
 
+        # -----------------------------------------------------------------------
+        # VSCALE error propagation (LSST-style variance rescaling)
+        #
+        # run_sfft.py may have rescaled the difference image by a factor of
+        # 1/VSCALE (IQR-based noise calibration).  The background_rms array
+        # that was computed from the science image is therefore stale: it
+        # reflects the pre-subtraction noise level rather than the noise of the
+        # written difference image.
+        #
+        # Applying the same scale factor to background_rms here ensures that all
+        # downstream error models (aperture, PSF, limiting magnitude injection)
+        # see a noise floor consistent with the difference image pixels.
+        #
+        # Note: if remove_local_surface runs below, it recomputes background_rms
+        # from the diff image directly, which is already consistent with the
+        # rescaled pixels — so the correction below is safe in both cases (it is
+        # overwritten by the recomputed value when remove_local_surface is active).
+        # -----------------------------------------------------------------------
+        if PreformSubtraction:
+            _vscale_header = float(header.get("VSCALE", 1.0))
+            if _vscale_header != 1.0 and np.isfinite(_vscale_header) and _vscale_header > 0:
+                if background_rms is not None:
+                    background_rms = background_rms * _vscale_header
+                if abs(_vscale_header - 1.0) > 0.1:
+                    logging.warning(
+                        "VSCALE=%.4f in difference image header: background_rms rescaled "
+                        "by the same factor to keep error model consistent with image pixels. "
+                        "A VSCALE far from 1.0 may indicate noise model assumptions need review.",
+                        _vscale_header,
+                    )
+                else:
+                    logging.info(
+                        "VSCALE=%.4f applied to background_rms for consistent error model on difference image.",
+                        _vscale_header,
+                    )
+
         # Gets the WCS information from the header.
         imageWCS = get_wcs(header)
 
