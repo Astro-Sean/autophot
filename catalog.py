@@ -133,6 +133,55 @@ def cross_match_sources(given_catalog, variable_catalog, match_radius_pix=5):
 
 
 # =============================================================================
+# Deduplication helper
+# =============================================================================
+
+def _skycoord_dedup_keep_one(catalog_df, sep_threshold_arcsec=0.1):
+    """
+    Remove duplicate sky positions from *catalog_df*, keeping exactly one
+    member of each close pair rather than dropping both.
+
+    Algorithm
+    ---------
+    For every source i, find its nearest *other* source (nthneighbor=2) and
+    its index j.  If sep(i,j) < threshold AND j < i then source i is the
+    later-arriving duplicate and is marked for removal.  This guarantees the
+    lower-index entry of any close pair survives.
+
+    Parameters
+    ----------
+    catalog_df : pd.DataFrame  — must contain "RA" and "DEC" columns (degrees)
+    sep_threshold_arcsec : float — angular separation below which two sources
+                                   are considered duplicates (default 0.1 arcsec)
+
+    Returns
+    -------
+    pd.DataFrame  — deduplicated catalog with reset integer index
+    """
+    import numpy as np
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+
+    if catalog_df is None or len(catalog_df) < 2:
+        return catalog_df
+    if not {"RA", "DEC"}.issubset(catalog_df.columns):
+        return catalog_df
+
+    coords = SkyCoord(
+        ra=catalog_df["RA"].values * u.degree,
+        dec=catalog_df["DEC"].values * u.degree,
+    )
+    idx_match, sep2, _ = coords.match_to_catalog_sky(coords, nthneighbor=2)
+    thr = sep_threshold_arcsec * u.arcsec
+    n = len(catalog_df)
+    drop = np.zeros(n, dtype=bool)
+    for i in range(n):
+        if sep2[i] <= thr and idx_match[i] < i:
+            drop[i] = True
+    return catalog_df[~drop].reset_index(drop=True)
+
+
+# =============================================================================
 # =============================================================================
 # #
 # =============================================================================
@@ -812,48 +861,48 @@ class Catalog:
                         self._require_nonempty_catalog(
                             selectedCatalog, catalogName, target_coords, radius
                         )
+                    else:
+                        # Columns to extract (RA/DEC, r-band + error, others optional)
+                        selected_cols = [
+                            "ID",
+                            "ra",
+                            "dec",
+                            "rmag",
+                            "e_rmag",
+                            "gmag",
+                            "e_gmag",
+                            "imag",
+                            "e_imag",
+                            "zmag",
+                            "e_zmag",
+                            "umag",
+                            "e_umag",
+                            "Bmag",
+                            "e_Bmag",
+                            "Vmag",
+                            "e_Vmag",
+                            "Jmag",
+                            "e_Jmag",
+                            "Hmag",
+                            "e_Hmag",
+                            "Kmag",
+                            "e_Kmag",
+                            "GAIAmag",
+                            "e_GAIAmag",
+                            "Tmag",
+                            "e_Tmag",
+                        ]
 
-                    # Columns to extract (RA/DEC, r-band + error, others optional)
-                    selected_cols = [
-                        "ID",
-                        "ra",
-                        "dec",
-                        "rmag",
-                        "e_rmag",
-                        "gmag",
-                        "e_gmag",
-                        "imag",
-                        "e_imag",
-                        "zmag",
-                        "e_zmag",
-                        "umag",
-                        "e_umag",
-                        "Bmag",
-                        "e_Bmag",
-                        "Vmag",
-                        "e_Vmag",
-                        "Jmag",
-                        "e_Jmag",
-                        "Hmag",
-                        "e_Hmag",
-                        "Kmag",
-                        "e_Kmag",
-                        "GAIAmag",
-                        "e_GAIAmag",
-                        "Tmag",
-                        "e_Tmag",
-                    ]
+                        # Ensure all selected columns exist in the result table
+                        available_cols = [
+                            col for col in selected_cols if col in result.colnames
+                        ]
 
-                    # Ensure all selected columns exist in the result table
-                    available_cols = [
-                        col for col in selected_cols if col in result.colnames
-                    ]
-
-                    # Build final catalog table
-                    selectedCatalog = result[available_cols].to_pandas()
-                    # Write directly to target directory instead of cwd to avoid wrong directory writes
-                    csv_path = os.path.join(target_dir, f"{fname}.csv")
-                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
+                        # Build final catalog table
+                        selectedCatalog = result[available_cols].to_pandas()
+                        # Write directly to target directory instead of cwd to avoid wrong directory writes
+                        csv_path = os.path.join(target_dir, f"{fname}.csv")
+                        selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName == "gaia":
                     # For Gaia DR3+XP, use a smaller radius than the full catalog
@@ -887,6 +936,9 @@ class Catalog:
 
                     # Build final catalog table
                     selectedCatalog = result
+                    self._require_nonempty_catalog(
+                        selectedCatalog, catalogName, target_coords, radius
+                    )
                     # Write directly to target directory instead of cwd to avoid wrong directory writes
                     csv_path = os.path.join(target_dir, f"{fname}.csv")
                     selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
@@ -971,18 +1023,22 @@ class Catalog:
                     else:
                         selectedCatalog = catalog_search[0].to_pandas()
                         if catalogName == "sdss":
-                            selectedCatalog = selectedCatalog[
-                                selectedCatalog["mode"] == 1
-                            ]
-                            selectedCatalog = selectedCatalog[
-                                selectedCatalog["cl"] == 6
-                            ]
-                        # Write directly to target directory instead of cwd to avoid wrong directory writes
-                        csv_path = os.path.join(target_dir, f"{fname}.csv")
-                        selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
+                            # Guard column existence before filtering
+                            if "mode" in selectedCatalog.columns:
+                                selectedCatalog = selectedCatalog[
+                                    selectedCatalog["mode"] == 1
+                                ]
+                            if "cl" in selectedCatalog.columns:
+                                selectedCatalog = selectedCatalog[
+                                    selectedCatalog["cl"] == 6
+                                ]
+                    # Validate before writing (covers both empty-query and post-filter empty)
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
+                    # Write directly to target directory instead of cwd to avoid wrong directory writes
+                    csv_path = os.path.join(target_dir, f"{fname}.csv")
+                    selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
 
                 elif catalogName == "skymapper":
                     logger.info(
@@ -997,20 +1053,27 @@ class Catalog:
                     }
                     # Write temp file to target_dir instead of cwd to avoid wrong directory writes
                     temp_vot_path = os.path.join(target_dir, "temp.vot")
-                    with open(temp_vot_path, "wb") as f:
+                    try:
                         logger.info("Downloading Sequence Stars from SkyMapper")
-                        response = requests.get(server, params=params)
-                        f.write(response.content)
-                    selectedCatalog = (
-                        parse_single_table(temp_vot_path)
-                        .to_table(use_names_over_ids=True)
-                        .to_pandas()
-                    )
-                    selectedCatalog = selectedCatalog[
-                        selectedCatalog["class_star"] > 0.8
-                    ]
-                    selectedCatalog = selectedCatalog[selectedCatalog["flags"] <= 1]
-                    os.remove(temp_vot_path)
+                        response = requests.get(server, params=params, timeout=60)
+                        response.raise_for_status()
+                        with open(temp_vot_path, "wb") as f:
+                            f.write(response.content)
+                        selectedCatalog = (
+                            parse_single_table(temp_vot_path)
+                            .to_table(use_names_over_ids=True)
+                            .to_pandas()
+                        )
+                    finally:
+                        if os.path.exists(temp_vot_path):
+                            os.remove(temp_vot_path)
+                    # Guard column existence before filtering
+                    if "class_star" in selectedCatalog.columns:
+                        selectedCatalog = selectedCatalog[
+                            selectedCatalog["class_star"] > 0.8
+                        ]
+                    if "flags" in selectedCatalog.columns:
+                        selectedCatalog = selectedCatalog[selectedCatalog["flags"] <= 1]
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
@@ -1087,13 +1150,22 @@ class Catalog:
                         "yMeanPSFMag",
                         "yMeanPSFMagErr",
                     ]
-                    selectedCatalog = selectedCatalog[columns]
-                    coords = SkyCoord(
-                        ra=selectedCatalog["raMean"].values * u.deg,
-                        dec=selectedCatalog["decMean"].values * u.deg,
-                    )
-                    distances = target_coords.separation(coords)
-                    selectedCatalog["distance"] = distances.arcsecond
+                    # Only keep columns that are present in the API response
+                    missing_cols = [c for c in columns if c not in selectedCatalog.columns]
+                    if missing_cols:
+                        logger.warning(
+                            "Pan-STARRS response missing expected columns: %s — they will be absent from the catalog",
+                            missing_cols,
+                        )
+                    available_columns = [c for c in columns if c in selectedCatalog.columns]
+                    selectedCatalog = selectedCatalog[available_columns]
+                    if {"raMean", "decMean"}.issubset(selectedCatalog.columns):
+                        coords = SkyCoord(
+                            ra=selectedCatalog["raMean"].values * u.deg,
+                            dec=selectedCatalog["decMean"].values * u.deg,
+                        )
+                        distances = target_coords.separation(coords)
+                        selectedCatalog["distance"] = distances.arcsecond
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
                     )
@@ -1860,22 +1932,22 @@ class Catalog:
         if os.path.isfile(fpath):
             logger.info(f"Loading existing custom catalog from {fpath}")
             existing_catalog = pd.read_csv(fpath)
-            if not existing_catalog.empty:
-                # Deduplicate existing catalog (only remove exact duplicates)
-                coords_existing = SkyCoord(
-                    ra=existing_catalog["RA"].values * u.degree,
-                    dec=existing_catalog["DEC"].values * u.degree
+            if not existing_catalog.empty and {"RA", "DEC"}.issubset(existing_catalog.columns):
+                # Deduplicate: keep one member of every close pair
+                n_before = len(existing_catalog)
+                existing_catalog = _skycoord_dedup_keep_one(existing_catalog, sep_threshold_arcsec=0.1)
+                n_dups = n_before - len(existing_catalog)
+                if n_dups > 0:
+                    logger.warning(
+                        f"Removed {n_dups} duplicates from existing cached catalog — resaving clean version"
+                    )
+                    existing_catalog.to_csv(fpath, index=False, float_format="%.6f")
+            elif not existing_catalog.empty:
+                logger.warning(
+                    "Existing cached catalog at %s is missing RA/DEC columns — skipping deduplication",
+                    fpath,
                 )
-                if len(coords_existing) >= 2:
-                    idx_match, sep, _ = coords_existing.match_to_catalog_sky(coords_existing, nthneighbor=2)
-                    keep_mask = sep > 0.1 * u.arcsec  # Only remove exact duplicates within 0.1 arcsec
-                    existing_catalog = existing_catalog[keep_mask].reset_index(drop=True)
-                    n_dups = len(coords_existing) - len(existing_catalog)
-                    if n_dups > 0:
-                        logger.warning(f"Removed {n_dups} duplicates from existing cached catalog - RESAVING clean version")
-                        # Save the deduplicated catalog back to file
-                        existing_catalog.to_csv(fpath, index=False, float_format="%.6f")
-                return existing_catalog
+            return existing_catalog
         
         output_catalog = pd.DataFrame(columns=cols)
 
@@ -1940,24 +2012,18 @@ class Catalog:
                     len(new_rows_df), catalogName, len(output_catalog),
                 )
 
-        # Final deduplication: remove any duplicate sources that may have been added
+        # Final deduplication: keep exactly one member of every close pair
         if not output_catalog.empty:
-            coords_final = SkyCoord(
-                ra=output_catalog["RA"].values * u.degree,
-                dec=output_catalog["DEC"].values * u.degree
+            n_before_dedup = len(output_catalog)
+            output_catalog = _skycoord_dedup_keep_one(output_catalog, sep_threshold_arcsec=0.1)
+            n_removed = n_before_dedup - len(output_catalog)
+            logger.info(
+                f"Final catalog: {len(output_catalog)} sources (removed {n_removed} duplicates)"
             )
-            # Only remove exact duplicates (within 0.1 arcsec), not legitimate nearby sources
-            if len(coords_final) >= 2:
-                idx_match, sep, _ = coords_final.match_to_catalog_sky(coords_final, nthneighbor=2)
-                keep_mask = sep > 0.1 * u.arcsec  # Keep sources with no very close neighbour within 0.1 arcsec
-                n_before_dedup = len(output_catalog)
-                output_catalog = output_catalog[keep_mask].reset_index(drop=True)
-                n_removed = n_before_dedup - len(output_catalog)
-                logger.info(f"Final catalog: {len(output_catalog)} sources (removed {n_removed} duplicates)")
-                if n_removed > 0:
-                    logger.warning(f"Removed {n_removed} duplicate sources from final combined catalog")
-            else:
-                logger.info(f"Final catalog: {len(output_catalog)} sources (only 1 source, no duplicate removal needed)")
+            if n_removed > 0:
+                logger.warning(
+                    f"Removed {n_removed} duplicate sources from final combined catalog"
+                )
         
         # Final output catalog is ready
         output_catalog.to_csv(fpath, index=False, float_format="%.6f")
