@@ -3410,13 +3410,15 @@ def run_photometry():
         # =============================================================================
         # Build PSF Model
         # =============================================================================
-        # When template subtraction was used, build the ePSF from the *original* (pre-alignment)
-        # science image so that star cutouts are not degraded by resampling (SWarp/AstroAlign).
-        # This can be overridden with psf_build_from_aligned=True to use the aligned image.
+        # By default, build the ePSF from the aligned image to ensure the PSF model
+        # matches the data it will be applied to. This avoids PSF shape mismatches when
+        # resampling changes pixel scale or introduces distortion.
+        # To build from the original (pre-alignment) image instead (to avoid interpolation
+        # artifacts in the PSF model itself), set psf_build_from_aligned=False.
         epsf_model = None
         PSFSources = None
         build_from_aligned = bool(
-            phot_cfg.get("psf_build_from_aligned", False)
+            phot_cfg.get("psf_build_from_aligned", True)
         )
         if (
             not build_from_aligned
