@@ -239,6 +239,36 @@ fi
 
 log "Package ready: ${PACKAGE_PATH}"
 
+# -----------------------------------------------------------------------------
+# Test the package in a fresh conda environment before upload
+# -----------------------------------------------------------------------------
+TEST_ENV_NAME="autophot_test_$$"
+log "---"
+log "Creating test conda environment: ${TEST_ENV_NAME}"
+conda create -y -n "${TEST_ENV_NAME}" python=3.11 -c conda-forge >/dev/null 2>&1 || die "Failed to create test environment"
+
+log "Installing autophot package in test environment..."
+conda install -y -n "${TEST_ENV_NAME}" -c conda-forge -c "${CHANNEL_USERNAME}" --override-channels autophot || {
+  log "WARNING: Failed to install from channel, trying local package..."
+  conda install -y -n "${TEST_ENV_NAME}" "${PACKAGE_PATH}" || {
+    conda env remove -y -n "${TEST_ENV_NAME}" >/dev/null 2>&1
+    die "Failed to install autophot in test environment"
+  }
+}
+
+log "Testing autophot installation..."
+if conda run -n "${TEST_ENV_NAME}" autophot-main -h >/dev/null 2>&1; then
+  log "Test passed: autophot-main -h succeeded"
+else
+  log "Test failed: autophot-main -h failed"
+  conda env remove -y -n "${TEST_ENV_NAME}" >/dev/null 2>&1
+  die "Package test failed; aborting upload"
+fi
+
+log "Cleaning up test environment..."
+conda env remove -y -n "${TEST_ENV_NAME}" >/dev/null 2>&1
+log "Test environment removed successfully"
+
 UPLOAD_ARGS=("${PACKAGE_PATH}" "--user" "${CHANNEL_USERNAME}")
 if [[ -n "${LABEL}" ]]; then
   UPLOAD_ARGS+=("--label" "${LABEL}")
