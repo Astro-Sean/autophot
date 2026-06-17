@@ -47,9 +47,16 @@ from typing import Optional, Tuple
 
 
 def _odd(n: int) -> int:
-    """Return n if odd, else n+1."""
-    n = int(n)
-    return n + (n % 2 == 0)
+    """Return n unchanged (as int).
+
+    Historical note: this function used to round up to the next odd integer,
+    based on the incorrect assumption that KerHW must be odd.  SFFT constructs
+    the kernel as (2*KerHW + 1) × (2*KerHW + 1), so the *full kernel* is
+    always odd-sized regardless of whether KerHW is even or odd.  Forcing KerHW
+    to be odd (e.g. 4 → 5) inflates the kernel from 9×9 to 11×11 for no reason.
+    The function is kept for call-site compatibility but now just casts to int.
+    """
+    return int(n)
 
 
 def run_sfft() -> Optional[int]:
@@ -652,20 +659,17 @@ def run_sfft() -> Optional[int]:
     detect_minarea = max(3, int(np.ceil(psf_area_min * 0.5)))
     detect_maxarea = 0
 
-    # Kernel half-width: user override, or auto. Use 1.5*FWHM (HOTPANTS default)
-    # to avoid over-smoothing moderately large sources while still being large enough
-    # to fit both science and template PSFs. KerHWLimit (min, max): SFFT clamps
-    # kernel half-width to this range. Keep max large enough that large sci/ref
-    # FWHM differences are not clamped.
-    # Increased max to 50 to match templates.py and handle sparse fields with large scale values
-    KER_HW_LIMIT_MIN = 2
-    KER_HW_LIMIT_MAX = 50
+    # Kernel half-width: user override, or auto-computed from FWHM values.
+    # Physics-based sizing: kernel must contain the convolution that transforms
+    # the narrower PSF into the broader one: FWHM_conv = sqrt(FWHM_broad^2 - FWHM_narrow^2).
+    # The kernel half-width is: ceil(multiplier * FWHM_conv), floored at FWHM_broad.
+    # For undersampled images (FWHM < 2 px), the multiplier is auto-boosted to capture PSF wings.
+    # Limits are configurable to handle various instrument characteristics.
+    KER_HW_LIMIT_MIN = int(getattr(args, "kernel_hw_min", 3) or 3)
+    KER_HW_LIMIT_MAX = int(getattr(args, "kernel_hw_max", 50) or 50)
     KerHWLimit = (KER_HW_LIMIT_MIN, KER_HW_LIMIT_MAX)
 
-    # Physics-based kernel sizing: kernel half-width must contain the convolution
-    # that transforms the narrower PSF into the broader one.
-    # FWHM_conv = sqrt(FWHM_broad^2 - FWHM_narrow^2); kernel_hw = ceil(mult * FWHM_conv).
-    # Floor at FWHM_broad so the kernel always covers one full PSF footprint.
+    # Physics-based kernel sizing with adaptive multiplier for robustness
     if float(args.kernel_half_width) == 0:
         fwhm_broad = max(template_fwhm, science_fwhm)
         fwhm_narrow = min(template_fwhm, science_fwhm)
@@ -673,15 +677,39 @@ def run_sfft() -> Optional[int]:
             fwhm_conv = np.sqrt(max(fwhm_broad ** 2 - fwhm_narrow ** 2, 0.0))
         else:
             fwhm_conv = fwhm_broad
-        _mult = float(getattr(args, "kernel_hw_fwhm_multiplier", 2.0) or 2.0)
+        
+        # Read multiplier with robust defaults and clamping
+        _mult = float(getattr(args, "kernel_hw_fwhm_multiplier", 2.5) or 2.5)
         if not np.isfinite(_mult) or _mult <= 0:
-            _mult = 2.0
-        ker_hw_from_conv = int(np.ceil(_mult * fwhm_conv))
+            _mult = 2.5
+        _mult = max(1.0, min(_mult, 5.0))  # clamp to reasonable range
+        
+        # Adaptive multiplier: boost for undersampled images to capture PSF wings
+        _mult_effective = _mult
+        if fwhm_broad < 2.0:
+            _mult_effective = min(_mult * 1.5, 4.0)
+            log_info(
+                f"Undersampled PSF (FWHM={fwhm_broad:.2f}px); "
+                f"boosting multiplier: {_mult:.2f} -> {_mult_effective:.2f}"
+            )
+        
+        # Warn for very large FWHM differences
+        if fwhm_conv > 10.0:
+            log_info(
+                f"WARNING: Large PSF difference ({fwhm_conv:.1f}px). "
+                f"Subtraction quality may be degraded."
+            )
+        
+        ker_hw_from_conv = int(np.ceil(_mult_effective * fwhm_conv))
         ker_hw_floor = int(np.ceil(fwhm_broad))
-        kernel_half_width = _odd(max(5, max(ker_hw_from_conv, ker_hw_floor)))
+        # Ensure Nyquist sampling for the kernel
+        nyquist_hw = int(np.ceil(fwhm_conv)) if fwhm_conv > 0 else KER_HW_LIMIT_MIN
+        
+        kernel_half_width = _odd(max(KER_HW_LIMIT_MIN, max(ker_hw_from_conv, ker_hw_floor, nyquist_hw)))
         log_info(
-            f"Auto kernel half-width: mult={_mult:.1f} FWHM_conv={fwhm_conv:.2f} "
-            f"floor={ker_hw_floor} -> {kernel_half_width} px"
+            f"Auto kernel half-width: base_mult={_mult:.2f} effective_mult={_mult_effective:.2f} "
+            f"FWHM_conv={fwhm_conv:.2f} hw_conv={ker_hw_from_conv} hw_floor={ker_hw_floor} "
+            f"hw_nyquist={nyquist_hw} -> {kernel_half_width} px (limits: {KER_HW_LIMIT_MIN}-{KER_HW_LIMIT_MAX})"
         )
     else:
         kernel_half_width = float(args.kernel_half_width)
@@ -690,12 +718,12 @@ def run_sfft() -> Optional[int]:
     k_lo, k_hi = KerHWLimit
     if kernel_half_width < k_lo:
         log_info(
-            f"Kernel half width {kernel_half_width:.1f} px below limit {k_lo}; clamping."
+            f"Kernel half width {kernel_half_width:.1f} px below minimum {k_lo}; clamping."
         )
         kernel_half_width = k_lo
     if kernel_half_width > k_hi:
         log_info(
-            f"Kernel half width {kernel_half_width:.1f} px above limit {k_hi}; clamping."
+            f"Kernel half width {kernel_half_width:.1f} px above maximum {k_hi}; clamping to prevent excessive computation."
         )
         kernel_half_width = k_hi
 
