@@ -659,57 +659,97 @@ def run_sfft() -> Optional[int]:
     detect_minarea = max(3, int(np.ceil(psf_area_min * 0.5)))
     detect_maxarea = 0
 
-    # Kernel half-width: user override, or auto-computed from FWHM values.
-    # Physics-based sizing: kernel must contain the convolution that transforms
-    # the narrower PSF into the broader one: FWHM_conv = sqrt(FWHM_broad^2 - FWHM_narrow^2).
-    # The kernel half-width is: ceil(multiplier * FWHM_conv), floored at FWHM_broad.
-    # For undersampled images (FWHM < 2 px), the multiplier is auto-boosted to capture PSF wings.
-    # Limits are configurable to handle various instrument characteristics.
+    # ---------------------------------------------------------------------------
+    # Kernel half-width sizing
+    # ---------------------------------------------------------------------------
+    # Literature basis:
+    #
+    #   SFFT (Hu et al. 2022, ApJ 936):
+    #       KerHW = int(KerHWRatio * max(FWHM_REF, FWHM_SCI)), KerHWRatio in [1.5, 2.5].
+    #       The kernel must enclose the broader PSF, not just the difference kernel.
+    #       SFFT source comment: "Ratio of kernel half-width to FWHM (typically 1.5–2.5)."
+    #
+    #   Alard & Lupton 1998 / Astier (private comm. cited in Miller et al. 2008):
+    #       sigma_kernel = 0.5 * |sigma_sci - sigma_ref|  (sigma = FWHM/2.355)
+    #       L = 8 * sigma_kernel + 5  =>  KerHW = (L-1)/2 = 4*sigma_kernel + 2
+    #       = 4*(FWHM_broad-FWHM_narrow)/(2*2.355) + 2  ≈ 0.85*FWHM_diff + 2
+    #       This sets a *minimum* — the kernel must contain the PSF mismatch lobe.
+    #
+    #   LSST ip_diffim (PsfMatchConfigAL):
+    #       kernel_size = kernelSizeFwhmScaling * sigma_largest_Gaussian_basis
+    #       kernelSizeFwhmScaling = 6.0 (default); sigma_basis ≈ FWHM_broad/2.355
+    #       => kernel_size ≈ 6 * FWHM_broad/2.355 ≈ 2.55 * FWHM_broad
+    #       KerHW = (kernel_size - 1)/2 ≈ 1.28 * FWHM_broad  (min 10, max 17)
+    #
+    #   Israel 2007 (Astron. Nachr.):
+    #       Kernel half-width must be >= 3*sigma_conv to enclose 99.7% of the
+    #       matching Gaussian; undersizing causes structured residuals.
+    #       sigma_conv = sqrt(sigma_broad^2 - sigma_narrow^2) = fwhm_conv/2.355
+    #       => minimum contribution: ceil(3 * fwhm_conv / 2.355)
+    #
+    # Design decision — two independent lower bounds, take the larger:
+    #
+    #   hw_broad:  multiplier * FWHM_broad
+    #              The kernel must contain the broader PSF's support. This is the
+    #              primary term from SFFT (ratio 2.0) and LSST (effective ratio ~1.28).
+    #              We use a user-configurable multiplier (default 2.0) applied to FWHM_broad.
+    #
+    #   hw_conv:   ceil(3 * sigma_conv) = ceil(3 * fwhm_conv / 2.355)
+    #              Ensures the PSF-difference lobe is fully enclosed (Israel 2007).
+    #              Active only when PSF sizes differ substantially; for identical PSFs
+    #              fwhm_conv -> 0 so this term vanishes.
+    #
+    # Undersampled images (FWHM_broad < 2 px): PSF wings extend far relative to
+    # pixel size. Boost the broad-PSF multiplier (not the difference term) by 1.5×
+    # to capture ringing artefacts, capped at 4.0.
+    # ---------------------------------------------------------------------------
     KER_HW_LIMIT_MIN = int(getattr(args, "kernel_hw_min", 3) or 3)
     KER_HW_LIMIT_MAX = int(getattr(args, "kernel_hw_max", 50) or 50)
     KerHWLimit = (KER_HW_LIMIT_MIN, KER_HW_LIMIT_MAX)
 
-    # Physics-based kernel sizing with adaptive multiplier for robustness
     if float(args.kernel_half_width) == 0:
         fwhm_broad = max(template_fwhm, science_fwhm)
         fwhm_narrow = min(template_fwhm, science_fwhm)
-        if fwhm_broad > fwhm_narrow and fwhm_broad > 0:
-            fwhm_conv = np.sqrt(max(fwhm_broad ** 2 - fwhm_narrow ** 2, 0.0))
-        else:
-            fwhm_conv = fwhm_broad
-        
-        # Read multiplier with robust defaults and clamping
-        _mult = float(getattr(args, "kernel_hw_fwhm_multiplier", 2.5) or 2.5)
+
+        # PSF-difference FWHM (quadrature subtraction of Gaussians).
+        fwhm_conv = np.sqrt(max(fwhm_broad ** 2 - fwhm_narrow ** 2, 0.0))
+
+        # --- multiplier on fwhm_broad (primary sizing term) ---
+        _mult = float(getattr(args, "kernel_hw_fwhm_multiplier", 2.0) or 2.0)
         if not np.isfinite(_mult) or _mult <= 0:
-            _mult = 2.5
-        _mult = max(1.0, min(_mult, 5.0))  # clamp to reasonable range
-        
-        # Adaptive multiplier: boost for undersampled images to capture PSF wings
+            _mult = 2.0
+        _mult = max(1.0, min(_mult, 5.0))
+
+        # Boost for undersampled images: wings extend beyond pixel grid.
+        # Apply to fwhm_broad term only (that's where the support deficit arises).
         _mult_effective = _mult
         if fwhm_broad < 2.0:
             _mult_effective = min(_mult * 1.5, 4.0)
             log_info(
-                f"Undersampled PSF (FWHM={fwhm_broad:.2f}px); "
-                f"boosting multiplier: {_mult:.2f} -> {_mult_effective:.2f}"
+                f"Undersampled PSF (FWHM_broad={fwhm_broad:.2f}px): "
+                f"boosting broad-PSF multiplier {_mult:.2f} -> {_mult_effective:.2f}"
             )
-        
-        # Warn for very large FWHM differences
+
+        # hw_broad: must contain the broader PSF support (SFFT / LSST convention).
+        hw_broad = int(np.ceil(_mult_effective * fwhm_broad))
+
+        # hw_conv: must enclose the PSF-difference lobe to 3-sigma (Israel 2007).
+        # sigma_conv = fwhm_conv / 2.355; 3*sigma_conv = 3*fwhm_conv/2.355 ≈ 1.274*fwhm_conv.
+        SIGMA_FWHM = 2.3548200450309493   # 2*sqrt(2*ln2)
+        hw_conv = int(np.ceil(3.0 * fwhm_conv / SIGMA_FWHM)) if fwhm_conv > 0 else 0
+
         if fwhm_conv > 10.0:
             log_info(
-                f"WARNING: Large PSF difference ({fwhm_conv:.1f}px). "
-                f"Subtraction quality may be degraded."
+                f"WARNING: large PSF mismatch (FWHM_conv={fwhm_conv:.1f}px). "
+                "Subtraction quality may be degraded; consider reselecting the template."
             )
-        
-        ker_hw_from_conv = int(np.ceil(_mult_effective * fwhm_conv))
-        ker_hw_floor = int(np.ceil(fwhm_broad))
-        # Ensure Nyquist sampling for the kernel
-        nyquist_hw = int(np.ceil(fwhm_conv)) if fwhm_conv > 0 else KER_HW_LIMIT_MIN
-        
-        kernel_half_width = _odd(max(KER_HW_LIMIT_MIN, max(ker_hw_from_conv, ker_hw_floor, nyquist_hw)))
+
+        kernel_half_width = max(KER_HW_LIMIT_MIN, hw_broad, hw_conv)
         log_info(
-            f"Auto kernel half-width: base_mult={_mult:.2f} effective_mult={_mult_effective:.2f} "
-            f"FWHM_conv={fwhm_conv:.2f} hw_conv={ker_hw_from_conv} hw_floor={ker_hw_floor} "
-            f"hw_nyquist={nyquist_hw} -> {kernel_half_width} px (limits: {KER_HW_LIMIT_MIN}-{KER_HW_LIMIT_MAX})"
+            f"Auto kernel half-width: mult={_mult:.2f} (eff={_mult_effective:.2f}) "
+            f"FWHM_broad={fwhm_broad:.2f}px FWHM_conv={fwhm_conv:.2f}px "
+            f"hw_broad={hw_broad} hw_conv={hw_conv} -> {kernel_half_width} px "
+            f"(limits: {KER_HW_LIMIT_MIN}-{KER_HW_LIMIT_MAX})"
         )
     else:
         kernel_half_width = float(args.kernel_half_width)
