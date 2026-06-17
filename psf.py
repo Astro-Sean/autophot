@@ -924,6 +924,11 @@ class MCMCFitter:
             np.mean(self.sampler.acceptance_fraction)
         )
         self.fit_info["total_steps"] = int(self.sampler.iteration)
+        # Release the sampler object so its internal chain buffer
+        # (n_walkers × n_steps × n_params) is freed for each source.
+        # The chain extracted above is already stored in fit_info["samples"]
+        # for corner-plot use; we don't need the sampler any further.
+        self.sampler = None
 
         self.counter += 1
         log.info(f"[MCMC] elapsed={time.time() - t0:.3f}s")
