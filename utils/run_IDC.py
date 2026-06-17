@@ -1607,24 +1607,54 @@ NNW
 
             # Pre-compute SWarp resampling methods so Phase 1b can use them.
             # (Moved here from below so science-first GAIA SWarp has access.)
-            sci_is_undersampled = fwhm_sci_pix < 2.0
-            ref_is_undersampled = fwhm_ref_pix < 2.0
+            # Use configurable undersampled threshold (default 2.5 px)
+            undersampled_thresh = float(
+                self.input_yaml.get("undersampled_fwhm_threshold", 2.5)
+                if isinstance(self.input_yaml, dict)
+                else 2.5
+            )
+            sci_is_undersampled = fwhm_sci_pix < undersampled_thresh
+            ref_is_undersampled = fwhm_ref_pix < undersampled_thresh
 
-            def _swarp_resampling_type(is_undersampled: bool, fwhm_pix: float) -> str:
+            def _swarp_resampling_type(
+                is_undersampled: bool, fwhm_pix: float, threshold: float = 2.5
+            ) -> str:
+                """
+                Select SWarp resampling type based on FWHM for optimal PSF preservation.
+
+                Three-tier strategy:
+                - BILINEAR: FWHM < 1.5 px (best for very small/undersampled PSFs)
+                - LANCZOS2: 1.5 <= FWHM < threshold (balanced quality/preservation)
+                - LANCZOS3: FWHM >= threshold (full quality for well-sampled)
+                """
                 if is_undersampled is None:
                     is_undersampled = False
                 if fwhm_pix is None or not np.isfinite(fwhm_pix):
-                    self.logger.warning("Invalid FWHM (%s), defaulting to LANCZOS3", fwhm_pix)
+                    self.logger.warning(
+                        "Invalid FWHM (%s), defaulting to LANCZOS3", fwhm_pix
+                    )
                     return "LANCZOS3"
-                if is_undersampled or fwhm_pix < 2.0:
-                    return "LANCZOS2"
-                return "LANCZOS3"
+                # Three-tier selection based on FWHM
+                if fwhm_pix < 1.5:
+                    method = "BILINEAR"
+                    reason = "FWHM < 1.5 px (very undersampled)"
+                elif fwhm_pix < threshold:
+                    method = "LANCZOS2"
+                    reason = f"FWHM < {threshold} px (undersampled)"
+                else:
+                    method = "LANCZOS3"
+                    reason = f"FWHM >= {threshold} px (well-sampled)"
+                self.logger.debug(
+                    "SWarp resampling: %s selected (%s, FWHM=%.2f px)",
+                    method, reason, fwhm_pix
+                )
+                return method
 
             sci_resampling_method = _swarp_resampling_type(
-                sci_is_undersampled, fwhm_sci_pix
+                sci_is_undersampled, fwhm_sci_pix, undersampled_thresh
             )
             ref_resampling_method = _swarp_resampling_type(
-                ref_is_undersampled, fwhm_ref_pix
+                ref_is_undersampled, fwhm_ref_pix, undersampled_thresh
             )
 
             # ------------------------------------------------------------------
@@ -2089,28 +2119,46 @@ NNW
             # With COMBINE=N, SWarp clips each .resamp.fits to the image's sky footprint.
             # Science has no .head file (it defines the output grid via its WCS + CRPIX at center).
             # Reference has its SCAMP .head placed next to it so SWarp applies WCS correction.
-            # Use LANCZOS3 for all resampling except undersampled data (< 2 px FWHM)
-            # where NEAREST preserves pixel values without interpolation blur.
-            sci_undersampled = sci_is_undersampled if sci_is_undersampled is not None else False
-            ref_undersampled = ref_is_undersampled if ref_is_undersampled is not None else False
+            # Determine combined resampling method for simultaneous SWarp
+            # Use the more conservative (lower quality) of the two images to preserve PSFs
+            sci_undersampled = (
+                sci_is_undersampled if sci_is_undersampled is not None else False
+            )
+            ref_undersampled = (
+                ref_is_undersampled if ref_is_undersampled is not None else False
+            )
             sci_fwhm_valid = fwhm_sci_pix is not None and np.isfinite(fwhm_sci_pix)
             ref_fwhm_valid = fwhm_ref_pix is not None and np.isfinite(fwhm_ref_pix)
 
-            if sci_undersampled or ref_undersampled:
+            # Use three-tier strategy for combined resampling
+            # Default to most conservative method if either image needs it
+            if sci_fwhm_valid and fwhm_sci_pix < 1.5:
+                combined_resampling_method = "BILINEAR"
+                reason = f"science FWHM < 1.5 px ({fwhm_sci_pix:.2f})"
+            elif ref_fwhm_valid and fwhm_ref_pix < 1.5:
+                combined_resampling_method = "BILINEAR"
+                reason = f"reference FWHM < 1.5 px ({fwhm_ref_pix:.2f})"
+            elif sci_undersampled or ref_undersampled:
                 combined_resampling_method = "LANCZOS2"
-            elif sci_fwhm_valid and fwhm_sci_pix < 2.0:
+                reason = "undersampled image(s) present"
+            elif sci_fwhm_valid and fwhm_sci_pix < undersampled_thresh:
                 combined_resampling_method = "LANCZOS2"
-            elif ref_fwhm_valid and fwhm_ref_pix < 2.0:
+                reason = f"science FWHM < {undersampled_thresh} px"
+            elif ref_fwhm_valid and fwhm_ref_pix < undersampled_thresh:
                 combined_resampling_method = "LANCZOS2"
+                reason = f"reference FWHM < {undersampled_thresh} px"
             else:
                 combined_resampling_method = "LANCZOS3"
+                reason = "both images well-sampled"
 
             swarp_config_combined = {
                 **swarp_config,
                 "RESAMPLING_TYPE": combined_resampling_method,
             }
 
-            self.logger.info("SWarp resampling: %s", combined_resampling_method)
+            self.logger.info(
+                "SWarp resampling: %s (%s)", combined_resampling_method, reason
+            )
 
             # Run SWarp separately on each image with COMBINE=Y.
             # With COMBINE=N, SWarp clips each .resamp.fits to the input image sky footprint,
@@ -2237,10 +2285,32 @@ NNW
                     
             else:
                 # "common_grid" (default): Both images resampled to science grid
+                # Each image uses its own optimal resampling method for PSF preservation
                 resample_dir_sci = resample_dir / "sci"
                 resample_dir_ref = resample_dir / "ref"
                 resample_dir_sci.mkdir(parents=True, exist_ok=True)
                 resample_dir_ref.mkdir(parents=True, exist_ok=True)
+
+                # Build separate configs for science and reference with their optimal methods
+                swarp_config_sci = {
+                    **swarp_config,
+                    "RESAMPLING_TYPE": sci_resampling_method,
+                    "COMBINE": "Y",
+                    "COMBINE_TYPE": "MEDIAN",
+                }
+                swarp_config_ref = {
+                    **swarp_config,
+                    "RESAMPLING_TYPE": ref_resampling_method,
+                    "COMBINE": "Y",
+                    "COMBINE_TYPE": "MEDIAN",
+                }
+
+                self.logger.info(
+                    "Common-grid: using independent resampling methods "
+                    "(sci=%s, ref=%s)",
+                    sci_resampling_method,
+                    ref_resampling_method,
+                )
 
                 # Phase 1 already corrected science; skip re-SWarping it here.
                 if science_first_astrometry:
@@ -2248,12 +2318,15 @@ NNW
                     self.logger.info("Common-grid: using Phase 1 science (skip SWarp)")
                     swarp_res_sci = {"corrected_image": str(aligned_sci)}
                 else:
-                    self.logger.debug("Running SWarp on science image (COMBINE=Y)...")
+                    self.logger.debug(
+                        "Running SWarp on science image with %s...",
+                        sci_resampling_method,
+                    )
                     swarp_res_sci = self.run_swarp(
                         [str(sci_image_for_swarp)],
                         scamp_results=None,
                         output_dir=str(resample_dir_sci),
-                        config=swarp_config_each,
+                        config=swarp_config_sci,
                         no_weight_maps=True,
                     )
                     if swarp_res_sci is None:
@@ -2263,12 +2336,15 @@ NNW
                         )
                     aligned_sci = Path(swarp_res_sci["corrected_image"])
 
-                self.logger.debug("Running SWarp on reference image (COMBINE=Y)...")
+                self.logger.debug(
+                    "Running SWarp on reference image with %s...",
+                    ref_resampling_method,
+                )
                 swarp_res_ref = self.run_swarp(
                     [str(ref_image_copy)],
                     scamp_results=None,
                     output_dir=str(resample_dir_ref),
-                    config=swarp_config_each,
+                    config=swarp_config_ref,
                     no_weight_maps=True,
                 )
 
@@ -2278,8 +2354,25 @@ NNW
                         science_image, reference_image, output_dir
                     )
 
-                # With COMBINE=Y the output is the co-added file (output.fits), not .resamp.fits
+                # With COMBINE=Y the output is the co-added file (output.fits)
                 aligned_ref = Path(swarp_res_ref["corrected_image"])
+
+                # Reproject reference to match science grid if methods differed
+                if sci_resampling_method != ref_resampling_method:
+                    self.logger.info(
+                        "Reprojecting reference to match science grid "
+                        "(different resampling methods used)"
+                    )
+                    try:
+                        aligned_ref = self._reproject_to_match(
+                            str(aligned_ref),
+                            str(aligned_sci),
+                            str(resample_dir_ref / "reference_reprojected.fits"),
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            "Reproject failed (%s), using SWarp output directly", e
+                        )
 
                 if not aligned_sci.exists() or not aligned_ref.exists():
                     self.logger.info(
@@ -2882,6 +2975,59 @@ NNW
                 return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
             except Exception:
                 return sci_data.shape[1], sci_data.shape[0], float(sci_wcs.wcs.crval[0]), float(sci_wcs.wcs.crval[1])
+
+    def _reproject_to_match(
+        self, source_image: str, target_image: str, output_path: str
+    ) -> Path:
+        """
+        Reproject source image to match target image's WCS grid.
+
+        Parameters
+        ----------
+        source_image : str
+            Path to image to reproject (reference)
+        target_image : str
+            Path to image defining the target WCS grid (science)
+        output_path : str
+            Path for output reprojected image
+
+        Returns
+        -------
+        Path
+            Path to reprojected output image
+        """
+        from astropy.io import fits
+        from astropy.wcs import WCS
+        from reproject import reproject_interp
+
+        with fits.open(target_image) as target_hdul:
+            target_wcs = WCS(target_hdul[0].header)
+            target_shape = target_hdul[0].data.shape
+
+        with fits.open(source_image) as source_hdul:
+            source_data = source_hdul[0].data
+            source_header = source_hdul[0].header.copy()
+
+        # Reproject reference onto science grid
+        reprojected_data, footprint = reproject_interp(
+            (source_data, WCS(source_header)),
+            target_wcs,
+            shape_out=target_shape,
+            order="bilinear",
+        )
+
+        # Update header with target WCS
+        output_header = source_header.copy()
+        output_header.update(target_wcs.to_header())
+        output_header["REPROJ"] = (True, "Reprojected to match science grid")
+
+        # Write output
+        fits.PrimaryHDU(data=reprojected_data, header=output_header).writeto(
+            output_path, overwrite=True
+        )
+
+        self.logger.debug(f"Reprojected {source_image} -> {output_path}")
+        return Path(output_path)
 
     def _align_fallback_reproject_then_astroalign(
         self,
