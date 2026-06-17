@@ -4104,15 +4104,16 @@ class Templates:
             # We also enforce a floor of ceil(FWHM_broad) so the kernel always covers at least
             # one full PSF footprint, which is required for flux-conserving photometry.
             #
-            # The multiplier is configurable (default 2.0) and can be overridden entirely via
-            # kernel_hw_override for debugging.
-            KER_HW_MIN = 3
-            KER_HW_MAX = 50
+            # The multiplier is configurable and can be overridden entirely via
+            # kernel_hw_override for debugging. For undersampled images (FWHM < 2 px), the
+            # multiplier is automatically increased to capture extended PSF wings.
+            ts_cfg_ker = self.input_yaml.get("template_subtraction", {})
+            KER_HW_MIN = int(ts_cfg_ker.get("kernel_hw_min", 3))
+            KER_HW_MAX = int(ts_cfg_ker.get("kernel_hw_max", 50))
             fwhm_ref = float(template_fwhm)
             fwhm_sci = float(science_fwhm)
             fwhm_broad = max(fwhm_ref, fwhm_sci)
             fwhm_narrow = min(fwhm_ref, fwhm_sci)
-            ts_cfg_ker = self.input_yaml.get("template_subtraction", {})
 
             # Override: user directly specifies kernel half-width in pixels
             _ker_hw_override = ts_cfg_ker.get("kernel_hw_override", None)
@@ -4127,13 +4128,15 @@ class Templates:
                     _ker_hw_override = None
 
             if _ker_hw_override is None:
-                # Read user multiplier, default 2.0
+                # Read user multiplier with robust defaults
                 try:
-                    _mult = float(ts_cfg_ker.get("kernel_hw_fwhm_multiplier") or 2.0)
+                    _mult = float(ts_cfg_ker.get("kernel_hw_fwhm_multiplier") or 2.5)
                     if not np.isfinite(_mult) or _mult <= 0:
-                        _mult = 2.0
+                        _mult = 2.5
+                    # Clamp to reasonable range to prevent extreme values
+                    _mult = max(1.0, min(_mult, 5.0))
                 except (TypeError, ValueError):
-                    _mult = 2.0
+                    _mult = 2.5
 
                 # FWHM of the convolution kernel (quadrature difference)
                 if fwhm_broad > fwhm_narrow and fwhm_broad > 0:
@@ -4141,21 +4144,50 @@ class Templates:
                 else:
                     fwhm_conv = fwhm_broad  # identical PSFs: kernel ≈ delta function; use broad as floor
 
+                # Adaptive multiplier: boost for undersampled images to capture PSF wings
+                # FWHM < 2 px is typically undersampled (Nyquist requires FWHM >= 2 px)
+                _mult_effective = _mult
+                if fwhm_broad < 2.0:
+                    _mult_effective = min(_mult * 1.5, 4.0)  # cap boost at 4.0 total
+                    logger.debug(
+                        "Undersampled PSF detected (FWHM=%.2f < 2 px); "
+                        "boosting kernel multiplier: %.2f -> %.2f",
+                        fwhm_broad, _mult, _mult_effective,
+                    )
+
+                # Warn for very large FWHM differences (potential quality issues)
+                if fwhm_conv > 10.0:
+                    logger.warning(
+                        "Large PSF FWHM difference detected (%.1f px). "
+                        "Subtraction quality may be degraded. "
+                        "Consider using better-matched templates.",
+                        fwhm_conv,
+                    )
+
                 # Half-width must comfortably contain the kernel and floor at the broad PSF
-                ker_hw_from_conv = int(np.ceil(_mult * fwhm_conv))
+                ker_hw_from_conv = int(np.ceil(_mult_effective * fwhm_conv))
                 ker_hw_floor = int(np.ceil(fwhm_broad))
-                ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_from_conv, ker_hw_floor)))
+                
+                # Ensure at least Nyquist sampling for the kernel (2 pixels per FWHM)
+                nyquist_hw = int(np.ceil(fwhm_conv)) if fwhm_conv > 0 else KER_HW_MIN
+                
+                ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_from_conv, ker_hw_floor, nyquist_hw)))
+                
                 logger.info(
                     "Kernel sizing:\n  FWHM_sci: %.2f px\n"
                     "  FWHM_ref: %.2f px\n"
                     "  FWHM_broad: %.2f px\n"
                     "  FWHM_conv: %.2f px\n"
+                    "  Base multiplier: %.2f\n"
+                    "  Effective multiplier: %.2f\n"
                     "  hw_conv: %d px\n"
                     "  hw_floor: %d px\n"
-                    "  kernel_hw: %d px\n"
-                    "  Multiplier: %.1f",
+                    "  hw_nyquist: %d px\n"
+                    "  kernel_hw: %d px (clamped to %d-%d)",
                     fwhm_sci, fwhm_ref, fwhm_broad, fwhm_conv,
-                    ker_hw_from_conv, ker_hw_floor, ker_hw, _mult,
+                    _mult, _mult_effective,
+                    ker_hw_from_conv, ker_hw_floor, nyquist_hw,
+                    ker_hw, KER_HW_MIN, KER_HW_MAX,
                 )
 
             scale = max(ker_hw, 5)

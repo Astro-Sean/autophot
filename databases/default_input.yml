@@ -383,8 +383,10 @@ default_input:
     preserve_scamp_logs: False # bool --- If True, keep SCAMP log files on failure for debugging. Useful when diagnosing astrometric alignment issues.
     method: sfft # str --- Subtraction backend (sfft default; hotpants or zogy optional where available).
     kernel_order: 0 # int --- Polynomial order for the SFFT kernel flux scaling model.
-    kernel_hw_fwhm_multiplier: 3.0 # float|null --- Multiplier applied to the FWHM of the convolution kernel when sizing the subtraction kernel half-width. If null, uses 2.0 (recommended). The kernel FWHM is computed as sqrt(FWHM_broad^2 - FWHM_narrow^2); kernel_hw = ceil(multiplier * FWHM_conv). Lower values (e.g. 1.5) give a tighter kernel; higher (e.g. 2.5) allow more fitting freedom at the cost of computation.
+    kernel_hw_fwhm_multiplier: 2.5 # float|null --- Multiplier applied to the FWHM of the convolution kernel when sizing the subtraction kernel half-width. If null, uses 2.0 (recommended). The kernel FWHM is computed as sqrt(FWHM_broad^2 - FWHM_narrow^2); kernel_hw = ceil(multiplier * FWHM_conv). Lower values (e.g. 1.5) give a tighter kernel; higher (e.g. 3.0) allow more fitting freedom at the cost of computation. For undersampled images (FWHM < 2 px), the multiplier is automatically boosted by 1.5x to capture extended PSF wings.
     kernel_hw_override: null # int|null --- If set, directly overrides the auto-computed kernel half-width in pixels. Use for debugging or when automatic sizing is wrong.
+    kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
+    kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
     download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).
     templates_size: 10 # float --- Template cutout size (arcmin) around target when building/using templates.
 
@@ -484,3 +486,4 @@ default_input:
     reject_nonlinear_sources: True # bool --- If True, reject likely saturated/non-linear zeropoint stars using peak_flux vs saturate.
     nonlinear_peak_frac: 0.85 # float --- Reject zeropoint stars when peak_flux >= nonlinear_peak_frac * saturate.
     saturation_peak_frac: 0.99 # float --- Log subset considered saturated when peak_flux >= saturation_peak_frac * saturate.
+    color_term_density_downsample: null # float|null --- Fraction of sources to keep in dense color regions during color-term fitting (e.g., 0.5 keeps 50%). Set to null to disable downsampling. Use to reduce cluster bias in fields with highly non-uniform color distributions.
