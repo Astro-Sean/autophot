@@ -3969,10 +3969,12 @@ class PSF:
                 
                 # Preserve difference-image (normal) PSF parameters before they are overwritten
                 # so outputs can report both negative/oversubtracted diff flux and inverted-image fit.
+                # np.asarray(..., dtype=...) already allocates a new array when
+                # a type conversion is needed; no extra .copy() required.
                 snap_flux_e = np.asarray(
                     self._first_present(combined, ["flux_fit", "flux"], unit=u.electron),
                     dtype=float,
-                ).copy()
+                )
                 snap_flux_err_e = np.asarray(
                     self._first_present(
                         combined,
@@ -3980,34 +3982,34 @@ class PSF:
                         unit=u.electron,
                     ),
                     dtype=float,
-                ).copy()
+                )
                 snap_x = np.asarray(
                     self._first_present(combined, ["x_fit", "xcenter_fit", "x_0_fit"]),
                     dtype=float,
-                ).copy()
+                )
                 snap_y = np.asarray(
                     self._first_present(combined, ["y_fit", "ycenter_fit", "y_0_fit"]),
                     dtype=float,
-                ).copy()
+                )
                 snap_xe = np.asarray(
                     self._first_present(
                         combined, ["x_fit_err", "x_err", "xcenter_fit_err"]
                     ),
                     dtype=float,
-                ).copy()
+                )
                 snap_ye = np.asarray(
                     self._first_present(
                         combined, ["y_fit_err", "y_err", "ycenter_fit_err"]
                     ),
                     dtype=float,
-                ).copy()
-                snap_cfit = np.asarray(self._first_present(combined, ["cfit"]), dtype=float).copy()
-                snap_qfit = np.asarray(self._first_present(combined, ["qfit"]), dtype=float).copy()
+                )
+                snap_cfit = np.asarray(self._first_present(combined, ["cfit"]), dtype=float)
+                snap_qfit = np.asarray(self._first_present(combined, ["qfit"]), dtype=float)
                 snap_chi2 = np.asarray(
                     self._first_present(combined, ["reduced_chi2", "chi2_red"]),
                     dtype=float,
-                ).copy()
-                snap_flags = np.asarray(combined.get("flags", 0), dtype=int).copy()
+                )
+                snap_flags = np.asarray(combined.get("flags", 0), dtype=int)
                 
                 # Ensure _inverted_fit column exists as boolean type
                 if "_inverted_fit" not in combined.columns:
@@ -4543,10 +4545,8 @@ class PSF:
                 fwhm = float(self.input_yaml.get("fwhm", 3.0))
                 r = fwhm / 2.0
                 from matplotlib.collections import PatchCollection as _PC
-                _circles = [
-                    Circle((row["x_pix"], row["y_pix"]), r)
-                    for _, row in sources[["x_pix", "y_pix"]].iterrows()
-                ]
+                _xy = sources[["x_pix", "y_pix"]].to_numpy(dtype=float)
+                _circles = [Circle((x, y), r) for x, y in _xy]
                 if _circles:
                     pc = _PC(_circles, edgecolors="#FF00FF", facecolors="none",
                               linewidths=1.2, alpha=0.9, zorder=10,
@@ -4564,12 +4564,11 @@ class PSF:
                             fitting_radius_px = cfg_xy_bounds_arcsec / pixel_scale
                             _rects = [
                                 Rectangle(
-                                    (row["x_pix"] - fitting_radius_px,
-                                     row["y_pix"] - fitting_radius_px),
+                                    (x - fitting_radius_px, y - fitting_radius_px),
                                     2 * fitting_radius_px,
                                     2 * fitting_radius_px,
                                 )
-                                for _, row in sources[["x_pix", "y_pix"]].iterrows()
+                                for x, y in _xy
                             ]
                             if _rects:
                                 rc = _PC(_rects, edgecolors="cyan", facecolors="none",
