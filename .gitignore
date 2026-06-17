@@ -85,8 +85,6 @@ Thumbs.db
 # Token / secret files
 autophot_tokens.py
 
-# Local helper scripts (except build_and_upload_conda.sh)
-scripts/gaia_custom_catalog_from_curves.py
-scripts/merge_apply_wcs_from_fits.py
-scripts/solve_apply_wcs.py
+# Local helper scripts
+scripts/
 
