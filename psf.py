@@ -30,7 +30,6 @@ try:
 except Exception:  # pragma: no cover
     corner = None
 import emcee
-from emcee import autocorr
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from matplotlib.gridspec import GridSpec
@@ -733,8 +732,8 @@ class MCMCFitter:
             # Start autocorrelation checks only after enough steps per walker.
             if total_steps >= self.min_autocorr_N:
                 try:
-                    # get_chain() is (nsteps, nwalkers, ndim); time axis is 0
-                    tau = autocorr.integrated_time(self.sampler.get_chain(), axis=0)
+                    # Use sampler's get_autocorr_time() method (correct emcee API)
+                    tau = self.sampler.get_autocorr_time(quiet=True)
                     tau_est = np.nanmean(tau)
                     # Require both: tau < threshold AND sufficient independent samples
                     n_samples = total_steps * self.nwalkers
