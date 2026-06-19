@@ -452,10 +452,14 @@ class MCMCFitter:
     --------------------------
     * model.copy() in log_likelihood: each walker evaluation uses an isolated
       model copy so concurrent parameter assignments don't cross-contaminate.
-    * Relative jitter in _jitter_within_bounds: abs_jitter = max(scale*|p0|, scale)
-      so flux walkers (O(1e4)) and position walkers (O(1)) both spread well.
-    * Boundary reflection with epsilon guard: walkers never land exactly on a
-      bound (which would give log_prior = -inf and stall the chain).
+    * Parameter-aware jitter in _jitter_within_bounds: position parameters
+      (x_0, y_0) get an absolute pixel jitter ``scale``, while flux/shape
+      parameters get a relative jitter ``scale * max(|p0|, 1)``.  This prevents
+      the old ``scale * |p0|`` rule from producing ~2 px position scatter for
+      coordinates near 100, which was far larger than the PSF posterior width
+      and caused walkers to pile up at bounds.
+    * Rejection-sampling boundary guard: out-of-bound trials are resampled
+      rather than reflected, eliminating boundary-clustering artifacts.
     * Mixed proposal moves: 70% StretchMove + 30% DEMove for better mixing in
       correlated PSF posteriors.
     * Variance floor: per-pixel variance clipped to 1e-30 to prevent
@@ -476,9 +480,9 @@ class MCMCFitter:
         thin: int = 10,
         random_state=None,
         inplace=None,
-        adaptive_tau_target: int = 30,
-        min_autocorr_N: int = 50,
-        batch_steps: int = 50,
+        adaptive_tau_target: int = 50,
+        min_autocorr_N: int = 100,
+        batch_steps: int = 100,
         jitter_scale: float = 0.02,
         use_nddata_uncertainty: bool = False,
         gain: float = 1.0,
@@ -585,34 +589,52 @@ class MCMCFitter:
     def _jitter_within_bounds(self, initial_params, model, scale: float = None):
         """Scatter walkers near initial params with parameter-aware scaling.
 
-        Uses a relative jitter for each parameter so that flux (O(1e4)) and
-        position (O(1)) walkers both spread meaningfully.  The small absolute
-        jitter_scale=0.01 was too tight for flux, causing all walkers to
-        cluster at the same point and the sampler to stall.
+        * Position parameters (x_0, y_0) get an absolute jitter in pixels
+          (``scale``), not a relative jitter proportional to their absolute
+          coordinate.  The old ``scale * abs(p)`` gave ~2 px scatter for
+          x_0=100 with scale=0.02, which is orders of magnitude larger than
+          the PSF posterior width and caused walkers to pile up at bounds.
+        * Flux / amplitude parameters get a relative jitter
+          ``scale * max(|p0|, 1)`` so bright and faint sources both get
+          meaningful spread.
+        * Out-of-bound trials are rejected and resampled rather than
+          reflected, eliminating boundary-clustering artifacts.
         """
         if scale is None:
             scale = self.jitter_scale
         ndim = len(initial_params)
         pos = np.empty((self.nwalkers, ndim), float)
-        # Per-parameter absolute jitter: max(relative * |p0|, scale) so that
-        # tiny parameters (e.g. sub-pixel position offsets) still get jittered.
-        abs_jitter = np.array(
-            [max(scale * abs(p), scale) for p in initial_params], float
-        )
         _eps = 1e-6  # keep walkers strictly inside bounds
+
+        def _jitter_for_param(p0, name):
+            n = name.lower()
+            if any(k in n for k in ("x_0", "y_0", "xcenter", "ycenter", "x_mean", "y_mean")):
+                # Absolute pixel jitter; coordinate-independent
+                return float(scale)
+            # Relative jitter for flux / shape / other scale parameters
+            return float(scale * max(abs(p0), 1.0))
+
+        abs_jitter = np.array(
+            [_jitter_for_param(p, n) for p, n in zip(initial_params, model.param_names)],
+            float,
+        )
+
         for i in range(self.nwalkers):
-            trial = initial_params + abs_jitter * self.random_state.randn(ndim)
+            trial = np.empty(ndim, float)
             for j, name in enumerate(model.param_names):
                 lo, hi = getattr(model, name).bounds
                 lo = -1e18 if lo is None else lo
                 hi = 1e18 if hi is None else hi
-                # Reflect off boundaries, then clamp with epsilon so the
-                # walker never sits exactly on a bound (log_prior returns -inf).
-                if trial[j] <= lo:
-                    trial[j] = lo + _eps + abs(lo - trial[j])
-                if trial[j] >= hi:
-                    trial[j] = hi - _eps - abs(trial[j] - hi)
-                trial[j] = float(np.clip(trial[j], lo + _eps, hi - _eps))
+                # Rejection sample within bounds (almost always accepted with
+                # the small jitter scales used here; avoids reflection artifacts).
+                for _ in range(100):
+                    val = initial_params[j] + abs_jitter[j] * self.random_state.randn()
+                    if lo + _eps <= val <= hi - _eps:
+                        trial[j] = val
+                        break
+                else:
+                    # Fallback: clamp to interior (extremely rare)
+                    trial[j] = float(np.clip(initial_params[j], lo + _eps, hi - _eps))
             pos[i] = trial
         return pos
 
@@ -720,6 +742,10 @@ class MCMCFitter:
                 max_steps,
             )
 
+        # Adaptive convergence should only apply when nsteps was not explicitly
+        # set (nsteps=None).  When a fixed nsteps is given, we must honour it.
+        adaptive = self.nsteps is None
+
         while total_steps < max_steps:
             batch_n = min(self.batch_steps, max_steps - total_steps)
             self.sampler.run_mcmc(
@@ -729,28 +755,30 @@ class MCMCFitter:
             )
             total_steps += batch_n
 
+            if not adaptive:
+                continue
+
             # Start autocorrelation checks only after enough steps per walker.
             if total_steps >= self.min_autocorr_N:
                 try:
-                    # Use sampler's get_autocorr_time() method (correct emcee API)
                     tau = self.sampler.get_autocorr_time(quiet=True)
                     tau_est = np.nanmean(tau)
-                    # Require both: tau < threshold AND sufficient independent samples
-                    n_samples = total_steps * self.nwalkers
-                    target_tau_mult = 50  # Same as zeropoint default
-                    if np.isfinite(tau_est) and tau_est < self.adaptive_tau_target and n_samples > target_tau_mult * tau_est:
+                    # Standard emcee recommendation: each walker must run for at
+                    # least 50 * tau steps.  The old code multiplied
+                    # total_steps by nwalkers, which diluted the threshold by
+                    # nwalkers (e.g. 20 walkers => only 2.5*tau per walker).
+                    if np.isfinite(tau_est) and total_steps > 50 * tau_est:
                         log.info(
-                            "[MCMC] Converged at %d steps, tau=%.1f, n_samples=%d",
+                            "[MCMC] Converged at %d steps, tau=%.1f",
                             total_steps,
                             tau_est,
-                            n_samples,
                         )
                         break
                 except emcee.autocorr.AutocorrError as exc:
                     log.debug("[MCMC] tau estimation failed: %s", exc)
 
         # Warn if max_steps reached without convergence
-        if total_steps >= max_steps:
+        if total_steps >= max_steps and adaptive:
             log.warning(
                 "[MCMC] Reached max_steps (%d) without full convergence; results may be unreliable",
                 max_steps,
@@ -874,14 +902,29 @@ class MCMCFitter:
         if tau_arr is not None and np.any(np.isfinite(tau_arr)):
             tau_max = float(np.nanmax(tau_arr))
             if tau_max >= 1:
+                # Emcee docs recommend discarding the first 10--50 * tau steps as
+                # burn-in.  The old 2*tau was far too short, leaving significant
+                # burn-in contamination in the corner-plot samples.
                 discard = max(
-                    discard, min(int(2 * tau_max), self.sampler.iteration // 2)
+                    discard, min(int(10 * tau_max), self.sampler.iteration // 2)
                 )
                 # Ensure thinning is not weaker than tau/2 (reduce correlated samples).
                 thin = max(1, thin, int(np.ceil(tau_max / 2)))
 
         chain = self.sampler.get_chain(discard=discard, thin=thin, flat=True)
         logp = self.sampler.get_log_prob(discard=discard, thin=thin, flat=True)
+
+        # Warn when the effective sample size is too low for reliable contours.
+        if chain.shape[0] > 0 and tau_arr is not None:
+            tau_max_post = float(np.nanmax(tau_arr))
+            if tau_max_post >= 1:
+                n_eff = chain.shape[0] / tau_max_post
+                if n_eff < 100:
+                    log.warning(
+                        "[MCMC] Low effective sample size: n_eff ≈ %.0f "
+                        "(chain length %d, tau ≈ %.1f). Corner contours may be noisy.",
+                        n_eff, chain.shape[0], tau_max_post,
+                    )
 
         if chain.shape[0] == 0:
             log.error("[MCMC] No samples after burn-in/thinning.")

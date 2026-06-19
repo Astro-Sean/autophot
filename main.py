@@ -1487,43 +1487,47 @@ def run_photometry():
             # No gain specified in telescope.yml, use header lookup
             try:
                 gain, gain_header_key = gain_e_per_adu_from_header(header, [])
+                logging.info(
+                    "Gain: %.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
+                )
             except ValueError as exc:
-                if is_template:
-                    logging.warning(
-                        "Template image has no usable GAIN in FITS header (%s). "
-                        "Using gain=1.0 e-/ADU. For Pan-STARRS stacks, consider "
-                        "utils/fix_panstarrs_headers.py or add GAIN if pixels are not ADU.",
-                        exc,
-                    )
-                    gain, gain_header_key = 1.0, "assumed_1.0_template_no_header_gain"
-                else:
-                    raise ValueError(
-                        f"No valid detector gain (e-/ADU) in FITS header for {fpath!r}: {exc}"
-                    ) from exc
-            logging.info(
-                "Gain: %.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
-            )
+                img_type = "template" if is_template else "science"
+                logging.warning(
+                    "%s image has no usable GAIN in FITS header (%s). "
+                    "Falling back to input_yaml['gain']=%.2f e-/ADU. "
+                    "Set 'gain' in input YAML or telescope.yml if this is incorrect.",
+                    img_type.capitalize(),
+                    exc,
+                    float(input_yaml.get("gain", 1.0)),
+                )
+                gain = float(resolve_gain_e_per_adu(None, input_yaml))
+                gain_header_key = f"fallback_from_yaml_gain_{gain:.2f}"
+                logging.info(
+                    "Gain: %.5g e-/ADU (from input_yaml fallback)", float(gain)
+                )
         else:
             # telescope.yml gain is a header keyword string
             pref_gain = [primary_gain]
             try:
                 gain, gain_header_key = gain_e_per_adu_from_header(header, pref_gain)
+                logging.info(
+                    "Gain: %.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
+                )
             except ValueError as exc:
-                if is_template:
-                    logging.warning(
-                        "Template image has no usable GAIN in FITS header (%s). "
-                        "Using gain=1.0 e-/ADU. For Pan-STARRS stacks, consider "
-                        "utils/fix_panstarrs_headers.py or add GAIN if pixels are not ADU.",
-                        exc,
-                    )
-                    gain, gain_header_key = 1.0, "assumed_1.0_template_no_header_gain"
-                else:
-                    raise ValueError(
-                        f"No valid detector gain (e-/ADU) in FITS header for {fpath!r}: {exc}"
-                    ) from exc
-            logging.info(
-                "Gain: %.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
-            )
+                img_type = "template" if is_template else "science"
+                logging.warning(
+                    "%s image has no usable GAIN in FITS header (%s). "
+                    "Falling back to input_yaml['gain']=%.2f e-/ADU. "
+                    "Set 'gain' in input YAML or telescope.yml if this is incorrect.",
+                    img_type.capitalize(),
+                    exc,
+                    float(input_yaml.get("gain", 1.0)),
+                )
+                gain = float(resolve_gain_e_per_adu(None, input_yaml))
+                gain_header_key = f"fallback_from_yaml_gain_{gain:.2f}"
+                logging.info(
+                    "Gain: %.5g e-/ADU (from input_yaml fallback)", float(gain)
+                )
 
         #  Update WCS Pixel Scale
         # Updates the pixel scale in the input YAML.
