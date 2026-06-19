@@ -600,6 +600,20 @@ class Zeropoint:
                     threshold_limit,
                 )
 
+            # Also enforce an explicit S/N cut on photometric SNR columns.
+            for _snr_col in ("snr", "SNR", "snr_ap", "snr_psf"):
+                if _snr_col in sources.columns:
+                    _bad = sources[_snr_col] < 3.0
+                    n_bad = int(_bad.sum())
+                    if n_bad > 0:
+                        logger.info(
+                            "Removing %d sources with %s < 3.0",
+                            n_bad,
+                            _snr_col,
+                        )
+                        low_snr = low_snr | _bad
+                    break
+
             # Reject likely saturated/non-linear calibrators when peak flux is available.
             zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
             reject_nonlinear = bool(zp_cfg.get("reject_nonlinear_sources", True))
@@ -654,7 +668,7 @@ class Zeropoint:
                 valid_mags
                 & (sources[filter_col] >= upperMaglimit)
                 & (sources[filter_col] <= lowerMaglimit)
-                & (sources["threshold"] >= threshold_limit)
+                & (~low_snr)
                 & (~non_linear_mask)
                 & (~saturated_mask)
                 & (~flags_mask)
@@ -976,6 +990,8 @@ class Zeropoint:
         min_points: int = 2,
         robust: bool = True,
         V_out: float = 1.0,
+        max_steps: int = 10000,
+        tau_factor: float = 50.0,
     ):
         """
         MCMC fit for y = x + ZP (slope=1 constraint) with proper X,Y errors.
@@ -1012,7 +1028,9 @@ class Zeropoint:
         n_burn : int
             Burn-in steps
         n_steps : int
-            Production steps
+            Initial production steps per batch. The sampler runs in batches and
+            checks convergence after each batch until the chain length exceeds
+            ``tau_factor * tau`` for all parameters.
         outlier_sigma : float
             Sigma-clipping threshold for pre-MCMC outlier rejection (robust=False only)
         min_points : int
@@ -1023,6 +1041,11 @@ class Zeropoint:
         V_out : float
             Outlier variance scale in mag² (only used when robust=True).
             Default 1.0 mag² gives ~1 mag outlier scatter.
+        max_steps : int
+            Hard cap on total production steps to prevent infinite runtime.
+        tau_factor : float
+            Convergence criterion: stop when chain length > tau_factor * tau
+            for all parameters (default 50, following emcee recommendations).
             
         Returns
         -------
@@ -1058,29 +1081,20 @@ class Zeropoint:
         mad_delta = np.nanmedian(np.abs(delta - med_delta)) * 1.4826
         if mad_delta < 1e-6:
             mad_delta = np.nanstd(delta)
-        
-        # Initial sigma-clip to remove extreme outliers (used for starting guess only)
-        inlier_mask = np.abs(delta - med_delta) < outlier_sigma * mad_delta
-        if inlier_mask.sum() < min_points:
-            inlier_mask = np.ones(len(delta), dtype=bool)
-        
-        delta_in = delta[inlier_mask]
-        var_in = var_perp[inlier_mask]
-        
-        # Starting guess for ZP
-        zp_guess = np.average(delta_in, weights=1.0/np.clip(var_in, 1e-12, None))
+
         zp_spread = max(1.0, 5 * mad_delta)  # Broad prior
-        
+
         if robust:
             # ================================================================
             # ROBUST MODE: Gaussian mixture model with in-model outliers
             # ================================================================
-            # Parameters: theta = [ZP, f_out]
-            #   f_out = outlier fraction
-            #   V_out = outlier variance (fixed)
-            
+            # No pre-MCMC sigma-clip is needed: the mixture likelihood handles
+            # outliers internally via f_out.  Use the median of ALL points for the
+            # initial guess (median is robust to ~50 % contamination).
+            zp_guess = med_delta
+
             ndim = 2
-            
+
             def log_prior(theta):
                 zp, f_out = theta
                 if abs(zp - zp_guess) > zp_spread:
@@ -1115,28 +1129,79 @@ class Zeropoint:
                     return -np.inf
                 return lp + log_likelihood(theta)
             
-            # Initialize walkers
+            # Initialize walkers with boundary-aware rejection sampling.
+            # The old code used 0.05 ± 0.02 for f_out, which easily produced
+            # negative values that gave log_prior = -inf and stalled walkers.
             n_walkers_eff = min(n_walkers, max(8, len(delta) // 2))
             n_walkers_eff = max(n_walkers_eff, 8)  # Minimum 8 for 2D
-            
-            # Starting positions
-            pos_zp = zp_guess + 0.01 * np.random.randn(n_walkers_eff, 1)
-            pos_fout = 0.05 + 0.02 * np.random.randn(n_walkers_eff, 1)
-            pos = np.hstack([pos_zp, pos_fout])
-            
+
+            rng = np.random.default_rng()
+            pos = np.empty((n_walkers_eff, ndim), float)
+            for i in range(n_walkers_eff):
+                for _ in range(100):
+                    trial_zp = zp_guess + 0.01 * rng.standard_normal()
+                    trial_fout = 0.05 + 0.02 * rng.standard_normal()
+                    if abs(trial_zp - zp_guess) < zp_spread and 0.0 < trial_fout < 0.5:
+                        pos[i] = [trial_zp, trial_fout]
+                        break
+                else:
+                    # Fallback: clamp to interior
+                    pos[i] = [zp_guess, 0.05]
+
             sampler = emcee.EnsembleSampler(n_walkers_eff, ndim, log_probability)
-            
+
             # Burn-in
             sampler.run_mcmc(pos, n_burn, progress=False)
             sampler.reset()
-            
-            # Production run
-            sampler.run_mcmc(None, n_steps, progress=False)
-            
-            # Extract posterior
-            samples = sampler.get_chain(flat=True)
+
+            # ---- Adaptive production: run in batches until convergence ----
+            total_steps = 0
+            batch_size = min(n_steps, 500)  # Check every 500 steps for responsiveness
+            tau_max_old = np.inf
+            converged = False
+            while total_steps < max_steps:
+                sampler.run_mcmc(None, batch_size, progress=False)
+                total_steps += batch_size
+                try:
+                    tau_arr = sampler.get_autocorr_time(quiet=True)
+                    tau_max = float(np.nanmax(tau_arr))
+                    # Converged when chain length > tau_factor * tau for all params
+                    if np.all(tau_arr * tau_factor < total_steps):
+                        # Also require tau to be stable (<10% change)
+                        if abs(tau_max - tau_max_old) / tau_max < 0.1:
+                            converged = True
+                            break
+                    tau_max_old = tau_max
+                except Exception:
+                    # Autocorrelation time unreliable on short chains; keep running
+                    pass
+
+            if not converged:
+                logger.warning(
+                    f"MCMC did not converge within {total_steps} steps; "
+                    f"results may be unreliable."
+                )
+
+            # Thin by autocorrelation time when available
+            try:
+                tau_arr = sampler.get_autocorr_time(quiet=True)
+                tau_max = float(np.nanmax(tau_arr))
+                thin = max(1, int(np.ceil(tau_max / 2)))
+            except Exception:
+                thin = 1
+                tau_max = np.nan
+
+            samples = sampler.get_chain(flat=True, thin=thin)
             zp_samples = samples[:, 0]
             f_out_samples = samples[:, 1]
+
+            # Warn if effective sample size is too low
+            n_eff = len(zp_samples) / tau_max if tau_max >= 1 else len(zp_samples)
+            if n_eff < 100:
+                logger.warning(
+                    f"ZP MCMC low ESS: n_eff ≈ {n_eff:.0f} "
+                    f"(chain {len(zp_samples)}, tau ≈ {tau_max:.1f})"
+                )
 
             # Percentile-based error (16/50/84) to capture asymmetry
             zp = np.median(zp_samples)
@@ -1168,14 +1233,25 @@ class Zeropoint:
             logger.info(
                 f"MCMC (robust): ZP={zp:.4f} ± {zp_err:.4f}, "
                 f"f_out={f_out:.3f} ({final_mask.sum()}/{len(delta)} inliers, "
-                f"n_walkers={n_walkers_eff}, n_steps={n_steps})"
+                f"n_walkers={n_walkers_eff}, n_steps={total_steps})"
             )
             
         else:
             # ================================================================
             # STANDARD MODE: Single Gaussian with pre-clip outliers
             # ================================================================
-            
+            # Pre-MCMC sigma-clip is required here because the single-Gaussian
+            # likelihood has no in-model outlier component.
+            inlier_mask = np.abs(delta - med_delta) < outlier_sigma * mad_delta
+            if inlier_mask.sum() < min_points:
+                inlier_mask = np.ones(len(delta), dtype=bool)
+
+            delta_in = delta[inlier_mask]
+            var_in = var_perp[inlier_mask]
+            zp_guess = np.average(
+                delta_in, weights=1.0 / np.clip(var_in, 1e-12, None)
+            )
+
             def log_prior(zp):
                 if abs(zp - zp_guess) < zp_spread:
                     return 0.0
@@ -1193,23 +1269,70 @@ class Zeropoint:
             
             n_walkers_eff = min(n_walkers, max(4, len(delta_in) // 2))
             n_walkers_eff = max(n_walkers_eff, 4)
-            
-            pos = zp_guess + 0.01 * np.random.randn(n_walkers_eff, 1)
+
+            rng = np.random.default_rng()
+            pos = np.empty((n_walkers_eff, 1), float)
+            for i in range(n_walkers_eff):
+                for _ in range(100):
+                    trial = zp_guess + 0.01 * rng.standard_normal()
+                    if abs(trial - zp_guess) < zp_spread:
+                        pos[i] = trial
+                        break
+                else:
+                    pos[i] = zp_guess
             sampler = emcee.EnsembleSampler(n_walkers_eff, 1, log_probability)
-            
+
             sampler.run_mcmc(pos, n_burn, progress=False)
             sampler.reset()
-            sampler.run_mcmc(None, n_steps, progress=False)
-            
-            # flat=True already returns a 1-D array; .flatten() would create a
-            # redundant copy — use the chain directly and release it promptly.
-            samples = sampler.get_chain(flat=True)
+
+            # ---- Adaptive production: run in batches until convergence ----
+            total_steps = 0
+            batch_size = min(n_steps, 500)
+            tau_max_old = np.inf
+            converged = False
+            while total_steps < max_steps:
+                sampler.run_mcmc(None, batch_size, progress=False)
+                total_steps += batch_size
+                try:
+                    tau_arr = sampler.get_autocorr_time(quiet=True)
+                    tau_max = float(np.nanmax(tau_arr))
+                    if np.all(tau_arr * tau_factor < total_steps):
+                        if abs(tau_max - tau_max_old) / tau_max < 0.1:
+                            converged = True
+                            break
+                    tau_max_old = tau_max
+                except Exception:
+                    pass
+
+            if not converged:
+                logger.warning(
+                    f"MCMC did not converge within {total_steps} steps; "
+                    f"results may be unreliable."
+                )
+
+            # Thin by autocorrelation time when available
+            try:
+                tau_arr = sampler.get_autocorr_time(quiet=True)
+                tau_max = float(np.nanmax(tau_arr))
+                thin = max(1, int(np.ceil(tau_max / 2)))
+            except Exception:
+                thin = 1
+                tau_max = np.nan
+
+            samples = sampler.get_chain(flat=True, thin=thin)
             zp = float(np.median(samples))
             zp_p16 = float(np.percentile(samples, 16))
             zp_p84 = float(np.percentile(samples, 84))
             zp_err_lo = zp - zp_p16
             zp_err_hi = zp_p84 - zp
             zp_err = max(zp_err_lo, zp_err_hi)  # Conservative symmetric error
+
+            n_eff = len(samples) / tau_max if tau_max >= 1 else len(samples)
+            if n_eff < 100:
+                logger.warning(
+                    f"ZP MCMC (standard) low ESS: n_eff ≈ {n_eff:.0f} "
+                    f"(chain {len(samples)}, tau ≈ {tau_max:.1f})"
+                )
             del samples, sampler
             
             # Post-MCMC outlier rejection
@@ -1224,7 +1347,7 @@ class Zeropoint:
             
             logger.info(
                 f"MCMC (standard): ZP={zp:.4f} ± {zp_err:.4f} "
-                f"({final_mask.sum()}/{len(delta)} inliers, f_out={f_out:.3f})"
+                f"({final_mask.sum()}/{len(delta)} inliers, f_out={f_out:.3f}, n_steps={total_steps})"
             )
         
         # Map back to full array (including non-finite points)
