@@ -554,8 +554,11 @@ class FitsInfo:
                         entry["pixel_scale"] = ps_default
                         entry["filter_key_0"] = "FILTER"
 
-                        # Skip optional keyword extraction (non-interactive)
-                        self.logger.info("Skipping optional keyword extraction (non-interactive mode)")
+                        # Ask user to confirm auto-detected keywords
+                        hdr_for_confirm = get_header(sample_file) if sample_file is not None else {}
+                        self._confirm_instrument_keywords(
+                            entry, hdr_for_confirm, tele, inst_name
+                        )
 
         # PHASE 3: FILTER KEYWORDS FOR ALL VALID FILES (skip files without TELESCOP/INSTRUME, e.g. templates)
         self.logger.info(log_step(f"Filters: {len(correct_files)} files"))
@@ -822,6 +825,93 @@ class FitsInfo:
         # Last resort: use FILTER as default
         self.logger.warning("No suitable filter key found, using 'FILTER' as default")
         return "FILTER"
+
+    def _confirm_instrument_keywords(self, entry, sample_header, tele, inst_name):
+        """
+        Interactively confirm auto-detected keywords for a newly discovered
+        instrument.  Falls back to the auto-detected values on EOF (non-
+        interactive pipelines).
+
+        When a standard keyword is not found in the header, the user is shown
+        the available header keys and can either:
+        * pick the correct keyword name,
+        * enter a numeric value (stored directly, e.g. gain=2.5),
+        * or ``skip`` to leave the entry unset.
+        """
+        try:
+            # Confirm pixel scale
+            ps = entry.get("pixel_scale", 0.4)
+            confirmed_ps = self.ask_question(
+                f"Confirm pixel scale for {tele}+{inst_name} (arcsec/pix)",
+                default_answer=float(ps),
+                expect_answer_type=float,
+            )
+            entry["pixel_scale"] = float(confirmed_ps)
+
+            # Confirm filter key
+            fk = entry.get("filter_key_0", "FILTER")
+            confirmed_fk = self.ask_question(
+                f"Confirm filter header key for {tele}+{inst_name}",
+                default_answer=str(fk),
+                expect_answer_type=str,
+            )
+            entry["filter_key_0"] = str(confirmed_fk)
+
+            # Confirm optional keywords
+            for logical, info in OPTIONAL_KEYWORDS.items():
+                auto = auto_accept_header_key(sample_header, logical)
+                if auto is None:
+                    aliases = KEYWORD_ALIASES.get(logical, [])
+                    for a in aliases:
+                        if a in sample_header:
+                            auto = a
+                            break
+                default = auto or "skip"
+                units_hint = info.get("units", "")
+                base_prompt = (
+                    f"Confirm {logical} keyword for {tele}+{inst_name}"
+                    + (f" ({units_hint})" if units_hint else "")
+                )
+
+                # If nothing was found, show the user what's in the header
+                if auto is None and sample_header:
+                    # Suggest keys that contain the logical name as substring
+                    related = sorted(
+                        {k for k in sample_header if logical.lower() in k.lower()}
+                    )
+                    related_str = (
+                        f"  Related keys in header: {', '.join(related)}"
+                        if related
+                        else "  No related keys found in header."
+                    )
+                    base_prompt += (
+                        f"\n  [Auto-detect failed] {related_str}\n"
+                        f"  Enter keyword name, a numeric value, or 'skip':"
+                    )
+
+                ans = self.ask_question(
+                    base_prompt,
+                    default_answer=str(default),
+                    expect_answer_type=str,
+                    ignore_word="skip",
+                )
+                if ans == "skip":
+                    continue
+                # Numeric values are stored directly (e.g. gain=2.5)
+                try:
+                    numeric = float(ans)
+                    entry[logical] = numeric
+                    self.logger.info(
+                        "Set %s for %s+%s to fixed value %.4f", logical, tele, inst_name, numeric
+                    )
+                except ValueError:
+                    entry[logical] = str(ans)
+
+        except (EOFError, OSError):
+            self.logger.info(
+                "Non-interactive mode detected; using auto-detected keywords for %s+%s.",
+                tele, inst_name,
+            )
 
     def _load_db(self):
         """Load existing telescope.yml from wdir or return empty dict.
