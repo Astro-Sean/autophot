@@ -2405,6 +2405,11 @@ class Catalog:
                 inlier_flux = flux[inlier_mask]
                 inlier_inst_mag = inst_mag_linear[inlier_mask]
                 
+                # Keep all RANSAC inliers for zeropoint fitting. The aggressive
+                # flux-range selection below removes too many valid faint sources
+                # (photon noise is mistaken for non-linearity on modern CCDs).
+                clean_catalog = inlier_catalog
+                
                 if len(inlier_catalog) > 5:
                     # Calculate residuals for all inliers.
                     # sklearn LinearRegression.predict() can return shape (N,1) rather
@@ -2521,43 +2526,40 @@ class Catalog:
                                 f"Robust linear selection: flux range {min_linear_flux:.1f} - {max_linear_flux:.1f}, "
                                 f"residual thresh {residual_threshold:.3f} mag, "
                                 f"cut {n_bright_cut} bright + {n_faint_cut} faint + {n_outlier_cut} outlier, "
-                                f"kept {n_selected} sources"
+                                f"would keep {n_selected} sources (keeping all {len(inlier_catalog)} inliers for ZP fit)"
                             )
                             
                             if n_selected > 0:
-                                clean_catalog = clean_catalog[final_linear_mask]
-                                # Update saturation range from final selection
+                                # Saturation range is informational only; we keep all inliers
+                                # for zeropoint fitting to avoid over-aggressive faint-end cuts.
                                 saturation_range = [
-                                    np.percentile(clean_catalog["flux_AP"].values, 0.5),
-                                    np.percentile(clean_catalog["flux_AP"].values, 99.5)
+                                    np.percentile(clean_catalog["flux_AP"].values[final_linear_mask], 0.5),
+                                    np.percentile(clean_catalog["flux_AP"].values[final_linear_mask], 99.5)
                                 ]
                             else:
                                 # No sources passed tight criteria, fall back to central region only
                                 central_flux_mask = (flux >= sorted_flux[central_end]) & (flux <= sorted_flux[central_start])
                                 if np.sum(central_flux_mask) > 0:
-                                    clean_catalog = clean_catalog[central_flux_mask]
-                                    logger.warning(f"No sources passed tight criteria, using central {len(clean_catalog)} sources")
+                                    logger.warning(f"No sources passed tight criteria, using central {np.sum(central_flux_mask)} sources")
                                 else:
-                                    clean_catalog = inlier_catalog
-                                    logger.warning(f"No sources passed tight criteria, using all {len(clean_catalog)} inliers")
+                                    logger.warning(f"No sources passed tight criteria, using all {len(inlier_catalog)} inliers")
                         else:
                             # Invalid range, use central region
                             central_flux_mask = (flux >= sorted_flux[central_end]) & (flux <= sorted_flux[central_start])
                             if np.sum(central_flux_mask) > 0:
-                                clean_catalog = clean_catalog[central_flux_mask]
+                                pass
                     else:
                         # No cuts needed but still apply tight residual filter
                         tight_residual_mask = np.abs(residuals) < residual_threshold
                         n_tight_outliers = (~tight_residual_mask).sum()
                         if n_tight_outliers > 0:
-                            logger.info(f"Applying tight residual filter: removed {n_tight_outliers} sources")
-                        clean_catalog = inlier_catalog[tight_residual_mask]
+                            logger.info(f"Tight residual filter would remove {n_tight_outliers} sources (keeping all inliers)")
                 else:
                     # Too few sources for robust selection
                     clean_catalog = inlier_catalog
                     logger.warning(f"Only {len(inlier_catalog)} inliers, skipping robust selection")
 
-            logger.info(f"Returning {len(clean_catalog)} linear sources")
+            logger.info(f"Returning {len(clean_catalog)} sources for zeropoint fitting")
             return clean_catalog, fit_params, saturation_range
 
         except Exception as e:
