@@ -236,7 +236,7 @@ def _injection_worker(args):
 
     Returns
     -------
-    (detection_flag, beta_p) : (bool, float)
+    (detection_flag, beta_p, recovered_flux, recovered_flux_err) : (bool, float, float, float)
     """
     (
         x_inj,
@@ -267,7 +267,7 @@ def _injection_worker(args):
             # If so, reject this injection site to avoid biasing recovery statistics
             invalid_fraction = np.sum(invalid) / invalid.size
             if invalid_fraction > 0.1:  # More than 10% of PSF would be masked
-                return False, 0.0, np.nan
+                return False, 0.0, np.nan, np.nan
             psf_img = np.asarray(psf_img, dtype=float)
             psf_img[invalid] = 0.0
         new_img = cutout + psf_img
@@ -278,7 +278,7 @@ def _injection_worker(args):
         # Guard: if the combined image is all-NaN, photometry cannot proceed.
         n_finite = int(np.count_nonzero(np.isfinite(new_img)))
         if n_finite == 0:
-            return False, 0.0, np.nan
+            return False, 0.0, np.nan, np.nan
 
         # Compute beta using the canonical aperture-based formalism (n=3) so
         # beta thresholds remain comparable across runs/methods.
@@ -296,7 +296,7 @@ def _injection_worker(args):
         area_px = float(mres["area"].iloc[0])
 
         if not (np.isfinite(noise_sky) and noise_sky > 0):
-            return False, 0.0, np.nan
+            return False, 0.0, np.nan, np.nan
 
         beta_p = beta_aperture(
             n=beta_n,
@@ -310,6 +310,7 @@ def _injection_worker(args):
         method = str(recovery_method).strip().upper() if recovery_method is not None else "AP"
         snr_val = np.nan
         flux_hat = np.nan  # Initialize before PSF block
+        flux_err = np.nan  # Initialize flux error
         if method == "PSF":
             try:
                 # Fast PSF-flux estimate using weighted least squares on a local stamp.
@@ -401,6 +402,7 @@ def _injection_worker(args):
                             snr_val = float(flux_hat) / flux_err
             except Exception:
                 snr_val = np.nan
+                flux_err = np.nan
         elif method == "EMCEE":
             # Robust (but slow) PSF photometry recovery using the same MCMCFitter
             # used by the main PSF pipeline. For performance and stability, this
@@ -479,13 +481,16 @@ def _injection_worker(args):
                         snr_val = np.abs(flux_hat) / flux_err
                 except Exception:
                     snr_val = np.nan
+                    flux_err = np.nan
             except Exception:
                 snr_val = np.nan
+                flux_err = np.nan
 
         # For PSF / EMCEE methods we require method-consistent S/N.
         # Do not silently fall back to AP S/N here, which can make limits too deep.
         if method in ("PSF", "EMCEE"):
             recovered_flux = flux_hat if np.isfinite(flux_hat) else np.nan
+            recovered_flux_err = flux_err if np.isfinite(flux_err) else np.nan
             if not np.isfinite(snr_val):
                 # snr_val is NaN when the WLS/MCMC fit failed (e.g. too few valid
                 # pixels in the stamp).  Return non-detection rather than crashing.
@@ -493,15 +498,20 @@ def _injection_worker(args):
                 # stamp footprint is larger than the aperture disk used by site filtering.
                 # Such sites should ideally be rejected by an upstream stamp-validity
                 # check; treat this as a conservative non-detection.
-                return False, beta_p, recovered_flux
+                return False, beta_p, recovered_flux, recovered_flux_err
         else:
             # AP recovery: aperture S/N is the method-consistent detection statistic.
             if not np.isfinite(snr_val):
                 try:
                     snr_val = float(mres["SNR"].iloc[0])
                 except Exception:
-                    return False, beta_p, np.nan
+                    return False, beta_p, np.nan, np.nan
             recovered_flux = float(mres["flux_AP"].iloc[0])
+            # Get flux error from aperture measurement
+            try:
+                recovered_flux_err = float(mres["flux_AP_err"].iloc[0])
+            except Exception:
+                recovered_flux_err = np.nan
 
         effective_snr_limit = float(snr_limit) if snr_limit is not None else 3.0
         # For forced photometry / limiting-magnitude experiments, use absolute SNR
@@ -511,10 +521,10 @@ def _injection_worker(args):
         det_snr = np.isfinite(snr_val) and (np.abs(snr_val) >= effective_snr_limit)
         # Flux must be finite; sign is not a gating criterion for recovery.
         det_flux = np.isfinite(recovered_flux)
-        return (det_snr and det_flux), beta_p, recovered_flux
+        return (det_snr and det_flux), beta_p, recovered_flux, recovered_flux_err
 
     except Exception:
-        return False, 0.0, np.nan
+        return False, 0.0, np.nan, np.nan
 
 
 # ===========================================================================
@@ -1820,11 +1830,9 @@ class Limits:
                 """
                 # Use full precision to avoid cache key collisions during bisection
                 cache_key = f"{m:.12f}"
-                if cache_key in _trial_cache:
+                if cache_key in _trial_cache and not return_flags:
                     cached = _trial_cache[cache_key]
-                    if return_flags:
-                        return cached
-                    return cached[:3]
+                    return cached  # Returns (det_rate, beta_med, flux_med, flux_err_med)
 
                 F = flux_for_mag(m)
                 x_inj_all = _x_inj_all
@@ -1855,6 +1863,7 @@ class Limits:
                 det_flags = np.array([r[0] for r in results], dtype=bool)
                 betas = np.array([r[1] for r in results], dtype=float)
                 recovered_fluxes = np.array([r[2] for r in results], dtype=float)
+                recovered_flux_errs = np.array([r[3] for r in results], dtype=float)
 
                 # Per-trial progress line with visual completeness bar.
                 _rate = float(det_flags.mean()) if len(det_flags) else 0.0
@@ -1869,14 +1878,15 @@ class Limits:
                 det_rate = float(det_flags.mean()) if len(det_flags) else 0.0
                 beta_med = float(np.nanmedian(betas)) if betas.size else np.nan
                 flux_med = float(np.nanmedian(recovered_fluxes)) if recovered_fluxes.size else np.nan
+                flux_err_med = float(np.nanmedian(recovered_flux_errs)) if recovered_flux_errs.size else np.nan
 
                 if return_flags:
                     # Cache only the scalars; return flags (uncached) for caller use.
-                    _trial_cache[cache_key] = (det_rate, beta_med, flux_med)
-                    return det_rate, beta_med, flux_med, det_flags
+                    _trial_cache[cache_key] = (det_rate, beta_med, flux_med, flux_err_med)
+                    return det_rate, beta_med, flux_med, flux_err_med, det_flags
 
-                _trial_cache[cache_key] = (det_rate, beta_med, flux_med)
-                return det_rate, beta_med, flux_med
+                _trial_cache[cache_key] = (det_rate, beta_med, flux_med, flux_err_med)
+                return det_rate, beta_med, flux_med, flux_err_med
 
             # =================================================================
             # Single ProcessPoolExecutor for the ENTIRE search (or serial if n_jobs==1)
@@ -1897,24 +1907,24 @@ class Limits:
                 if plot_injection_recovery:
                     # Start at artificially bright magnitude for visualization in the plot
                     m_bright = -10.0  # Very bright starting point
-                    c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
+                    c_bright, _, f_bright, _ = run_trials_at_mag(m_bright, pool=pool)
                     going_faint = c_bright >= completeness_target
                     m_faint, c_faint = m_bright, c_bright
                     f_faint = f_bright
-                    bracket_steps.append((m_bright, c_bright, f_bright))
+                    bracket_steps.append((m_bright, c_bright, f_bright, np.nan))
                 else:
                     # Skip the -10.0 trial; start from data-driven initial guess instead
                     m_bright = float(initialGuess) if np.isfinite(initialGuess) else -5.0
-                    c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
+                    c_bright, _, f_bright, _ = run_trials_at_mag(m_bright, pool=pool)
                     going_faint = c_bright >= completeness_target
                     m_faint, c_faint = m_bright, c_bright
                     f_faint = f_bright
-                    bracket_steps.append((m_bright, c_bright, f_bright))
+                    bracket_steps.append((m_bright, c_bright, f_bright, np.nan))
 
                 for _ in range(max_steps):
                     m_test = m_faint + step if going_faint else m_bright - step
-                    c_test, _, f_test = run_trials_at_mag(m_test, pool=pool)
-                    bracket_steps.append((m_test, c_test, f_test))
+                    c_test, _, f_test, _ = run_trials_at_mag(m_test, pool=pool)
+                    bracket_steps.append((m_test, c_test, f_test, np.nan))
 
                     if going_faint:
                         # Track the last detected point so bisection starts from the
@@ -1951,15 +1961,15 @@ class Limits:
                         float(initialGuess) + 2.0,
                     ):
                         m_bright = float(guess)
-                        c_bright, _, f_bright = run_trials_at_mag(m_bright, pool=pool)
+                        c_bright, _, f_bright, _ = run_trials_at_mag(m_bright, pool=pool)
                         going_faint = c_bright >= completeness_target
                         m_faint, c_faint = m_bright, c_bright
                         f_faint = f_bright
-                        bracket_steps.append((m_bright, c_bright, f_bright))
+                        bracket_steps.append((m_bright, c_bright, f_bright, np.nan))
                         for _ in range(35):
                             m_test = m_faint + step if going_faint else m_bright - step
-                            c_test, _, f_test = run_trials_at_mag(m_test, pool=pool)
-                            bracket_steps.append((m_test, c_test, f_test))
+                            c_test, _, f_test, _ = run_trials_at_mag(m_test, pool=pool)
+                            bracket_steps.append((m_test, c_test, f_test, np.nan))
                             if going_faint:
                                 prev_m, prev_c, prev_f = m_faint, c_faint, f_faint
                                 m_faint, c_faint = m_test, c_test
@@ -2019,8 +2029,8 @@ class Limits:
 
                     for _ in range(30):
                         mid_m = 0.5 * (lo_m + hi_m)
-                        mid_c, _, mid_f = run_trials_at_mag(mid_m, pool=pool)
-                        bisect_steps.append((mid_m, mid_c, mid_f))
+                        mid_c, _, mid_f, mid_f_err = run_trials_at_mag(mid_m, pool=pool)
+                        bisect_steps.append((mid_m, mid_c, mid_f, mid_f_err))
 
                         if mid_c >= completeness_target:
                             lo_m, lo_c = mid_m, mid_c
@@ -2048,6 +2058,7 @@ class Limits:
                     # faithful than returning the last midpoint when the recovery
                     # fraction is quantized by a finite number of trials.
                     inject_lmag = 0.5 * (lo_m + hi_m)
+                    inject_lmag_err = np.nan  # Initialize error
                     try:
                         denom = float(hi_c - lo_c)
                         if np.isfinite(denom) and abs(denom) > 0:
@@ -2055,17 +2066,28 @@ class Limits:
                             if np.isfinite(w):
                                 w = float(np.clip(w, 0.0, 1.0))
                                 inject_lmag = float(lo_m + w * (hi_m - lo_m))
+                                # Propagate binomial errors through interpolation
+                                # Error in w: σ_w = sqrt((σ_lo_c/denom)² + (σ_hi_c * w/denom)²)
+                                # where σ_lo_c = sqrt(lo_c * (1-lo_c) / n_trials)
+                                # and σ_hi_c = sqrt(hi_c * (1-hi_c) / n_trials)
+                                if n_trials > 0:
+                                    sigma_lo_c = np.sqrt(max(lo_c * (1 - lo_c) / n_trials, 0))
+                                    sigma_hi_c = np.sqrt(max(hi_c * (1 - hi_c) / n_trials, 0))
+                                    sigma_w = np.sqrt((sigma_lo_c / denom)**2 + (sigma_hi_c * w / denom)**2)
+                                    # Error in inject_lmag: σ_m = sqrt((1-w)² * σ_lo_m² + w² * σ_hi_m² + (hi_m-lo_m)² * σ_w²)
+                                    # For now, assume lo_m and hi_m have negligible error compared to binomial sampling
+                                    inject_lmag_err = abs(hi_m - lo_m) * sigma_w
                     except Exception:
                         pass
                     logger.info(
-                        "    Bisection converged: m50=%.4f (bracket width=%.4f mag)",
-                        float(inject_lmag), abs(hi_m - lo_m),
+                        "    Bisection converged: m50=%.4f +/- %.4f (bracket width=%.4f mag)",
+                        float(inject_lmag), float(inject_lmag_err) if np.isfinite(inject_lmag_err) else np.nan, abs(hi_m - lo_m),
                     )
 
                     # Optional: fit a smooth completeness curve with emcee and solve for m50.
                     if completeness_solver == "logistic_emcee":
                         try:
-                            inject_lmag, m50_err = self._solve_m50_logistic_emcee(
+                            inject_lmag_emcee, m50_err_emcee = self._solve_m50_logistic_emcee(
                                 run_trials_at_mag=run_trials_at_mag,
                                 pool=pool,
                                 m_guess=float(inject_lmag),
@@ -2073,11 +2095,17 @@ class Limits:
                                 completeness_target=float(completeness_target),
                                 lim_cfg=lim_cfg,
                             )
-                            if np.isfinite(m50_err):
+                            # Combine binomial sampling error with MCMC posterior error
+                            if np.isfinite(m50_err_emcee) and np.isfinite(inject_lmag_err):
+                                inject_lmag_err = np.sqrt(m50_err_emcee**2 + inject_lmag_err**2)
+                            elif np.isfinite(m50_err_emcee):
+                                inject_lmag_err = m50_err_emcee
+                            inject_lmag = inject_lmag_emcee
+                            if np.isfinite(m50_err_emcee):
                                 logger.info(
                                     "Injected limiting magnitude (logistic_emcee): m50=%.3f +/- %.3f (instrumental mag)",
                                     float(inject_lmag),
-                                    float(m50_err),
+                                    float(inject_lmag_err),
                                 )
                         except Exception as exc:
                             logger.warning(
