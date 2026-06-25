@@ -2157,7 +2157,9 @@ class Catalog:
             # This avoids scattered low S/N inliers that break the linearity fit
             flux = clean_catalog["flux_AP"].values
             flux_err = clean_catalog["flux_AP_err"].values
-            snr_values = np.abs(flux) / flux_err  # Renamed to avoid shadowing imported snr function
+            # Add protection for division by zero
+            flux_err_safe = np.maximum(flux_err, 1e-10)
+            snr_values = np.abs(flux) / flux_err_safe  # Renamed to avoid shadowing imported snr function
 
             # Find a high S/N threshold that gives a continuous bright subset
             # Start with S/N > 50 for very high quality, then relax if needed
@@ -2245,15 +2247,20 @@ class Catalog:
                 inlier_X = X[inlier_mask]
                 inlier_y = y[inlier_mask]
                 residuals = inlier_y - (slope * inlier_X.flatten() + intercept)
-                residual_std = np.std(residuals)
+                residual_std = np.std(residuals, ddof=1)  # Use sample std (unbiased)
                 n_points = len(inlier_X)
                 x_mean = np.mean(inlier_X)
-                x_var = np.var(inlier_X)
+                x_var = np.var(inlier_X, ddof=1)  # Use sample variance (unbiased)
 
                 # Standard error of the intercept
-                intercept_error = residual_std * np.sqrt(
-                    1 / n_points + x_mean**2 / ((n_points - 1) * x_var)
-                )
+                # Add protection for zero variance
+                if x_var <= 0 or not np.isfinite(x_var):
+                    logger.warning("Zero or invalid variance in instrumental magnitudes")
+                    intercept_error = np.nan
+                else:
+                    intercept_error = residual_std * np.sqrt(
+                        1 / n_points + x_mean**2 / ((n_points - 1) * x_var)
+                    )
 
                 # Update fit parameters
                 fit_params.update(
@@ -2815,7 +2822,7 @@ class Catalog:
             term2 = np.sqrt(((mxx - myy) / 2) ** 2 + mxy**2)
             a = term1 + term2
             b = term1 - term2
-            return 1 - np.sqrt(b / a)  # 0=perfect circle
+            return 1 - np.sqrt(b / max(a, 1e-10))  # 0=perfect circle
 
         def norm(array):
             """

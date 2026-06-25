@@ -264,7 +264,7 @@ class BackgroundSubtractor:
         if n_masked > 0:
             self.logger.info(
                 f"Galaxy mask excludes {n_masked} px "
-                f"({100.0 * n_masked / image.size:.2f}%)"
+                f"({100.0 * n_masked / image.size if image.size > 0 else 0.0:.2f}%)"
             )
         return mask
 
@@ -560,7 +560,7 @@ class BackgroundSubtractor:
         self.logger.info(
             "Source mask contains %d pixels (%.2f%% of the image) after %d iteration(s)",
             n_masked,
-            100.0 * n_masked / image.size,
+            100.0 * n_masked / image.size if image.size > 0 else 0.0,
             min(iteration + 1, n_iterations),
         )
         return mask
@@ -580,7 +580,7 @@ class BackgroundSubtractor:
             sat_mask = binary_dilation(sat_mask, structure=selem, iterations=1)
             self.logger.info(
                 f"Saturation mask: {np.sum(sat_mask)} px "
-                f"({100.0 * np.sum(sat_mask) / image.size:.2f}%)"
+                f"({100.0 * np.sum(sat_mask) / image.size if image.size > 0 else 0.0:.2f}%)"
             )
         return sat_mask
 
@@ -1102,12 +1102,12 @@ class BackgroundSubtractor:
 
                 bkg_rms = np.asarray(bkg.background_rms, dtype=float)
                 rms_median = np.nanmedian(bkg_rms)
+                # Add validation for NaN median before using in floor calculation
+                if not np.isfinite(rms_median) or not np.any(np.isfinite(bkg_rms)):
+                    rms_median = 1.0  # Fallback to reasonable default
                 # More adaptive floor: use 10% of median instead of 50%
                 # This preserves more realistic noise variations while preventing zeros
-                rms_floor = max(rms_median * 0.1, 1e-30)
-                # Also add an absolute minimum floor based on read noise
-                # Typical CCD read noise is ~5-10 e-, so floor at 1 e- is reasonable
-                rms_floor = max(rms_floor, 1.0)
+                rms_floor = max(rms_median * 0.1, 1.0)  # Combined with absolute floor
                 # Preserve NaNs for chip gaps, only clip finite values
                 bkg_rms = np.where(
                     np.isfinite(bkg_rms),
@@ -1238,7 +1238,7 @@ class BackgroundSubtractor:
         total = image.size
         n_nan = int(np.count_nonzero(nan_mask))
         self.logger.info(
-            f"NaN pixels: {n_nan} ({100.0 * n_nan / total:.2f}%)"
+            f"NaN pixels: {n_nan} ({100.0 * n_nan / total if total > 0 else 0.0:.2f}%)"
         )
 
         # Derive FWHM in pixels (if provided); otherwise allow helper to estimate.
