@@ -1089,8 +1089,6 @@ class Catalog:
                     )
                     # Use direct API request to handle string "None" values properly
                     try:
-                        import requests
-                        
                         ra = float(target_coords.ra.degree)
                         dec = float(target_coords.dec.degree)
                         # radius_deg is already computed from the caller's radius (arcmin)
