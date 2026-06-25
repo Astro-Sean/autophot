@@ -429,8 +429,27 @@ def _compute_detection_mask(
     Compute detection mask used consistently across lightcurve products.
 
     Detection rule:
-    - SNR cut (if use_SNR_limit) or mag < lmag (otherwise).
+    - Prefer an explicit is_detection/detected flag when present.
+    - Otherwise: SNR cut (if use_SNR_limit) or mag < lmag (otherwise).
     """
+    # Prefer explicit detection flags from upstream (e.g. main.py), falling
+    # back to SNR/magnitude-based inference when absent. This keeps downstream
+    # classification in sync with the detection decision made by the pipeline.
+    for flag_col in ("is_detection", "detected", "is_detected"):
+        if flag_col in df.columns:
+            flags = df[flag_col]
+            try:
+                is_bool_like = flags.dtype == bool or flags.isin(
+                    [0, 1, True, False, np.nan]
+                ).all()
+            except Exception:
+                is_bool_like = False
+            if is_bool_like:
+                try:
+                    return np.asarray(flags.fillna(False).astype(bool), dtype=bool)
+                except Exception:
+                    pass
+
     mag = pd.to_numeric(df[mag_col], errors="coerce").to_numpy(dtype=float, copy=False)
     err = pd.to_numeric(df[err_col], errors="coerce").to_numpy(dtype=float, copy=False)
     lim_col = (

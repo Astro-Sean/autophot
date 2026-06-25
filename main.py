@@ -6352,6 +6352,27 @@ def run_photometry():
                 output["snr"] = snr_ap
         except Exception:
             pass
+
+        # Explicit detection flag for downstream light-curve processing.
+        # Forced photometry is always performed; this records whether the measured
+        # S/N exceeds the configured detection threshold. Using the best
+        # available SNR (max of PSF/AP) gives a single, clear detection state.
+        try:
+            best_snr = float(output.get("snr", np.nan))
+            det_thresh = float(detection_limit)
+            is_finite_measurement = (
+                bool(np.isfinite(best_snr))
+                and (
+                    bool(np.isfinite(output.get("mag_psf", np.nan)))
+                    or bool(np.isfinite(output.get("mag_ap", np.nan)))
+                )
+            )
+            output["is_detection"] = bool(
+                is_finite_measurement and best_snr >= det_thresh
+            )
+        except Exception:
+            output["is_detection"] = False
+
         try:
             if "flux_AP" in TargetPosition.columns:
                 output["flux_ap"] = float(TargetPosition.at[idx, "flux_AP"])
@@ -6558,6 +6579,7 @@ def run_photometry():
             "snr_ap",
             "threshold",
             "beta",
+            "is_detection",
             # fluxes
             "flux_psf",
             "flux_psf_err",
