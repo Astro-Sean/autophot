@@ -52,6 +52,7 @@ default_input:
     trim_image: 0 # float --- If >0, trim to a (2*trim_image) arcmin box centred on the target.
 
   photometry:
+    detection_limit: 3.0 # float --- S/N threshold for declaring a forced-photometry measurement a "detection" in the output. Forced photometry is always performed at the target position; this only controls the detection flag. ZTF/LSST automated source detection typically uses 5.0 sigma, but for forced photometry at known coordinates (ZTF forced-photometry service) SNT=3 is common.
     aperture_size: 1.7 # float --- Aperture radius in units of FWHM (pixels = `aperture_size * fwhm`).
     enforce_nonnegative_local_background: False # bool --- If True, clamp annulus-estimated local background to >=0 before subtraction (prevents flux inflation when local sky is negative from over-subtraction/miscalibration).
     apply_aperture_correction: False # bool --- If True, apply aperture correction from PSF stars to aperture mags.
@@ -310,8 +311,8 @@ default_input:
     use_catalog: null # str|null --- Optional catalog to seed/guide source detection (if supported).
 
   limiting_magnitude:
-    beta_limit: 0.5 # float --- Beta threshold used to declare an injected source recovered (primary criterion; higher is more conservative).
-    detection_limit: null # float|null --- Optional S/N detection threshold. If set, a trial counts as recovered only if (S/N >= detection_limit) AND (beta >= beta_limit). If null, recovery is beta-only.
+    beta_limit: 0.5 # float --- Legacy beta diagnostic threshold. Injected-source recovery is now gated by S/N only; beta is computed for diagnostics and completeness plots but does not affect the detection decision.
+    detection_limit: null # float|null --- S/N threshold for declaring an injected source recovered in limiting-magnitude experiments. If null, recovery requires S/N >= 3.0. Higher values (e.g., 5.0) match the detection thresholds used by ZTF and LSST automated pipelines.
     completeness_target: 0.5 # float --- Target recovery fraction at the limiting magnitude (Harris 1990 completeness definition; 0.5 = 50% completeness).
     recovery_method: auto # str --- "auto" matches the transient: aperture-only -> AP, PSF path -> PSF. Or set explicitly: PSF, AP, EMCEE/MCMC.
     completeness_solver: bisect # str --- How to solve for the limiting magnitude at completeness_target: "bisect" (default; bracket+bisection on recovery fraction) or "logistic_emcee" (fit a smooth logistic completeness curve with emcee and take m50).
