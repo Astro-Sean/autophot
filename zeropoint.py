@@ -267,8 +267,10 @@ class Zeropoint:
         -------
         inst_mag, inst_mag_err, delta_mag, delta_mag_err : ndarrays
         """
-        inst_mag = -2.5 * np.log10(flux)
-        inst_mag_err = (2.5 / np.log(10.0)) * (flux_err / flux)
+        # Add safety check to prevent division by zero and log10(0)
+        flux_safe = np.maximum(flux, 1e-10)
+        inst_mag = -2.5 * np.log10(flux_safe)
+        inst_mag_err = (2.5 / np.log(10.0)) * (flux_err / flux_safe)
         delta_mag = catmag - inst_mag
         delta_mag_err = np.sqrt(inst_mag_err**2 + catmag_err**2)
         return inst_mag, inst_mag_err, delta_mag, delta_mag_err
@@ -2982,9 +2984,11 @@ class Zeropoint:
             x_err = np.sqrt(
                 clean[f"{color1}_err"] ** 2 + clean[f"{color2}_err"] ** 2
             ).values
+            # Add safety check to prevent division by zero in magnitude error
+            flux_ap_safe = np.maximum(flux_ap, 1e-10)
             y_err = np.sqrt(
                 clean[f"{use_filter}_err"] ** 2
-                + (2.5 / np.log(10) * flux_err / flux_ap) ** 2
+                + (2.5 / np.log(10) * flux_err / flux_ap_safe) ** 2
             ).values
 
             finite = (
@@ -2998,7 +3002,8 @@ class Zeropoint:
             flux_ap, flux_err = flux_ap[finite], flux_err[finite]
 
             # Filter by S/N >= 5
-            snr = np.abs(flux_ap) / flux_err
+            flux_err_safe = np.maximum(flux_err, 1e-10)
+            snr = np.abs(flux_ap) / flux_err_safe
             snr_mask = snr >= 5
             n_before_snr = len(x)
             x, y, x_err, y_err = x[snr_mask], y[snr_mask], x_err[snr_mask], y_err[snr_mask]
