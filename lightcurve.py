@@ -368,51 +368,67 @@ def _lmag_to_apparent(df: pd.DataFrame, zp_col: str) -> pd.Series:
 
 def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: list = None) -> dict:
     """Convert limiting magnitudes for multiple S/N thresholds to apparent magnitudes.
-    
-    Returns a dictionary with keys like 'Limit_3sigma', 'Limit_5sigma' containing apparent magnitudes.
+
+    Returns a dictionary with keys like 'Limit_3S2N', 'Limit_5S2N' containing apparent magnitudes.
     """
     if snr_thresholds is None:
         snr_thresholds = [3.0, 5.0]
-    
+
     result = {}
-    
+
     # Default single S/N limiting magnitude (backward compatibility)
     result['Limit'] = _lmag_to_apparent(df, zp_col)
-    
+
     # Multi-S/N limiting magnitudes
     for snr in snr_thresholds:
         # Look for S/N-specific limiting magnitude columns
-        snr_col = f"limiting_inst_mag_snr_{snr}"
+        # main.py outputs apparent magnitude columns as limiting_mag_{snr:.0f}s2n
+        # Also check for legacy instrumental column names for backward compatibility
+        apparent_col = f"limiting_mag_{snr:.0f}s2n"
+        inst_col = f"limiting_inst_mag_snr_{snr}"
         fallback_col = f"lmag_snr_{snr}"
-        
+
         # Find the appropriate column for this S/N threshold
         col = None
-        if snr_col in df.columns:
-            col = snr_col
+        if apparent_col in df.columns:
+            # Already apparent magnitude (from main.py)
+            col = apparent_col
+            is_apparent = True
+        elif inst_col in df.columns:
+            # Instrumental magnitude, needs conversion
+            col = inst_col
+            is_apparent = False
         elif fallback_col in df.columns:
+            # Legacy apparent magnitude column
             col = fallback_col
+            is_apparent = True
         elif "limiting_inst_mag" in df.columns:
             # Fallback to single limiting magnitude if S/N-specific not available
             col = "limiting_inst_mag"
+            is_apparent = False
         elif "lmag" in df.columns:
             col = "lmag"
-        
+            is_apparent = True
+
         if col is None:
-            result[f'Limit_{snr}sigma'] = pd.Series(np.nan, index=df.index, dtype=float)
+            result[f'Limit_{snr}S2N'] = pd.Series(np.nan, index=df.index, dtype=float)
             continue
-        
+
         li = pd.to_numeric(df[col], errors="coerce")
         zp = pd.to_numeric(df[zp_col], errors="coerce")
-        
+
         # Calculate apparent limiting magnitude for this S/N threshold
-        limiting_mag = li + zp
-        
+        if is_apparent:
+            limiting_mag = li
+        else:
+            limiting_mag = li + zp
+
         # Return NaN for invalid limiting magnitudes
         invalid_mask = (~np.isfinite(limiting_mag)) | (limiting_mag < 15) | (limiting_mag > 30)
         limiting_mag.loc[invalid_mask] = np.nan
-        
+
         result[f'Limit_{snr}S2N'] = limiting_mag.round(3)
-    
+
     return result
 
 
@@ -844,6 +860,7 @@ def plot_lightcurve(
         upper_limit_snr = 5.0  # Default ZTF SNU
         upper_limit_col = f"limiting_mag_{upper_limit_snr:.0f}s2n"
         if upper_limit_col in df.columns:
+            # main.py outputs apparent magnitude columns directly
             df["lmag_upper"] = pd.to_numeric(df[upper_limit_col], errors="coerce")
             # Use 5σ limit where valid, otherwise fall back to 50% completeness limit
             valid_upper = np.isfinite(df["lmag_upper"]) & (df["lmag_upper"] > 10) & (df["lmag_upper"] < 30)
@@ -1259,12 +1276,14 @@ def plot_lightcurve(
             upper_limit_snr = 5.0
             upper_limit_col = f"limiting_mag_{upper_limit_snr:.0f}s2n"
             if upper_limit_col in d1.columns:
+                # main.py outputs apparent magnitude columns directly
                 d1["lmag_upper"] = pd.to_numeric(d1[upper_limit_col], errors="coerce")
                 valid_upper = np.isfinite(d1["lmag_upper"]) & (d1["lmag_upper"] > 10) & (d1["lmag_upper"] < 30)
                 d1.loc[~valid_upper, "lmag_upper"] = d1.loc[~valid_upper, "lmag"]
             else:
                 d1["lmag_upper"] = d1["lmag"]
             if upper_limit_col in d2.columns:
+                # main.py outputs apparent magnitude columns directly
                 d2["lmag_upper"] = pd.to_numeric(d2[upper_limit_col], errors="coerce")
                 valid_upper = np.isfinite(d2["lmag_upper"]) & (d2["lmag_upper"] > 10) & (d2["lmag_upper"] < 30)
                 d2.loc[~valid_upper, "lmag_upper"] = d2.loc[~valid_upper, "lmag"]
@@ -1573,6 +1592,7 @@ def generate_photometry_table(
         upper_limit_snr = 5.0  # Default ZTF SNU
         upper_limit_col = f"limiting_mag_{upper_limit_snr:.0f}s2n"
         if upper_limit_col in data.columns:
+            # main.py outputs apparent magnitude columns directly
             data["lmag_upper"] = pd.to_numeric(data[upper_limit_col], errors="coerce")
             # Use 5σ limit where valid, otherwise fall back to 50% completeness limit
             valid_upper = np.isfinite(data["lmag_upper"]) & (data["lmag_upper"] > 10) & (data["lmag_upper"] < 30)
