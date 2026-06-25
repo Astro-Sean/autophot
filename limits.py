@@ -3578,10 +3578,13 @@ class Limits:
         inst_mags = np.array([step[0] for step in all_steps])
         det_rates = np.array([step[1] for step in all_steps])
         recovered_fluxes = np.array([step[2] for step in all_steps])
+        # Extract flux errors if available (step[3] if present)
+        recovered_flux_errs = np.array([step[3] for step in all_steps]) if len(all_steps[0]) > 3 else None
 
         
         # Convert to apparent magnitudes
         injected_apparent = inst_mags + selected_zeropoint
+        # TODO: Add zeropoint error propagation when zeropoint error is available
 
         # Convert recovered flux to instrumental magnitude, then to apparent
         # The recovered flux units depend on recovery_method:
@@ -3592,23 +3595,54 @@ class Limits:
         recovery_method_upper = str(recovery_method).strip().upper() if recovery_method is not None else "AP"
         if recovery_method_upper == "AP":
             # AP method: flux_AP is already e-/s, apply mag() directly
-            recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
+            recovered_fluxes_safe = np.maximum(recovered_fluxes, 1e-30)
+            recovered_inst = -2.5 * np.log10(recovered_fluxes_safe)
+            # Add magnitude error propagation
+            if recovered_flux_errs is not None:
+                recovered_flux_errs_safe = np.maximum(recovered_flux_errs, 1e-30)
+                recovered_inst_err = (2.5 / np.log(10)) * (recovered_flux_errs_safe / recovered_fluxes_safe)
+            else:
+                recovered_inst_err = np.full_like(recovered_inst, np.nan)
         else:
             # PSF/EMCEE methods: flux_hat is PSF flux parameter (dimensionless)
             # Convert to physical flux rate: flux_e_per_s = flux_hat * counts_ref / exposure_time
             if counts_ref is not None and exposure_time is not None and counts_ref > 0 and exposure_time > 0:
                 recovered_flux_e_per_s = recovered_fluxes * counts_ref / exposure_time
-                recovered_inst = -2.5 * np.log10(np.maximum(recovered_flux_e_per_s, 1e-30))
+                recovered_flux_e_per_s_safe = np.maximum(recovered_flux_e_per_s, 1e-30)
+                recovered_inst = -2.5 * np.log10(recovered_flux_e_per_s_safe)
+                # Add magnitude error propagation
+                if recovered_flux_errs is not None:
+                    # Error propagation: δ(F*counts_ref/t) = δF * counts_ref/t
+                    recovered_flux_e_per_s_err = recovered_flux_errs * counts_ref / exposure_time
+                    recovered_flux_e_per_s_err_safe = np.maximum(recovered_flux_e_per_s_err, 1e-30)
+                    recovered_inst_err = (2.5 / np.log(10)) * (recovered_flux_e_per_s_err_safe / recovered_flux_e_per_s_safe)
+                else:
+                    recovered_inst_err = np.full_like(recovered_inst, np.nan)
             else:
                 # Fallback: treat as raw integrated e- divided by exposure_time.
                 if exposure_time is not None and exposure_time > 0:
                     recovered_flux_e_per_s = recovered_fluxes / exposure_time
-                    recovered_inst = -2.5 * np.log10(np.maximum(recovered_flux_e_per_s, 1e-30))
+                    recovered_flux_e_per_s_safe = np.maximum(recovered_flux_e_per_s, 1e-30)
+                    recovered_inst = -2.5 * np.log10(recovered_flux_e_per_s_safe)
+                    # Add magnitude error propagation
+                    if recovered_flux_errs is not None:
+                        recovered_flux_e_per_s_err = recovered_flux_errs / exposure_time
+                        recovered_flux_e_per_s_err_safe = np.maximum(recovered_flux_e_per_s_err, 1e-30)
+                        recovered_inst_err = (2.5 / np.log(10)) * (recovered_flux_e_per_s_err_safe / recovered_flux_e_per_s_safe)
+                    else:
+                        recovered_inst_err = np.full_like(recovered_inst, np.nan)
                 else:
-                    recovered_inst = -2.5 * np.log10(np.maximum(recovered_fluxes, 1e-30))
+                    recovered_fluxes_safe = np.maximum(recovered_fluxes, 1e-30)
+                    recovered_inst = -2.5 * np.log10(recovered_fluxes_safe)
+                    recovered_inst_err = np.full_like(recovered_inst, np.nan)
         
         logger.info(f"Debug: recovered_inst sample: {recovered_inst[:3]}")
         recovered_apparent = recovered_inst + selected_zeropoint
+        # Add magnitude error propagation to apparent magnitude
+        if recovered_inst_err is not None:
+            recovered_apparent_err = np.sqrt(recovered_inst_err**2)  # TODO: add zeropoint error when available
+        else:
+            recovered_apparent_err = np.full_like(recovered_apparent, np.nan)
 
         # Separate detected vs non-detected (use 50% threshold)
         detected_mask = det_rates >= 0.5
