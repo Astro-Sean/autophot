@@ -495,8 +495,13 @@ def _injection_worker(args):
             recovered_flux = float(mres["flux_AP"].iloc[0])
 
         effective_snr_limit = float(snr_limit) if snr_limit is not None else 3.0
-        det_snr = np.isfinite(snr_val) and (snr_val >= effective_snr_limit)
-        det_flux = np.isfinite(recovered_flux) and (float(recovered_flux) > 0.0)
+        # For forced photometry / limiting-magnitude experiments, use absolute SNR
+        # to allow negative PSF fits (which are valid non-detections) to be counted
+        # as recovered when their |SNR| meets the threshold. This avoids biasing
+        # recovery statistics against sources that happen to fit slightly negative.
+        det_snr = np.isfinite(snr_val) and (np.abs(snr_val) >= effective_snr_limit)
+        # Flux must be finite; sign is not a gating criterion for recovery.
+        det_flux = np.isfinite(recovered_flux)
         return (det_snr and det_flux), beta_p, recovered_flux
 
     except Exception:

@@ -52,7 +52,12 @@ default_input:
     trim_image: 0 # float --- If >0, trim to a (2*trim_image) arcmin box centred on the target.
 
   photometry:
-    detection_limit: 3.0 # float --- S/N threshold for declaring a forced-photometry measurement a "detection" in the output. Forced photometry is always performed at the target position; this only controls the detection flag. ZTF/LSST automated source detection typically uses 5.0 sigma, but for forced photometry at known coordinates (ZTF forced-photometry service) SNT=3 is common.
+    # Detection thresholds:
+    # - For forced photometry at known coordinates (typical use case): detection_limit=3.0 (SNT=3 in ZTF)
+    # - For discovery-style automated source detection: set detection_limit=5.0 to match ZTF/LSST
+    # - The upper_limit_snr=5.0 (SNU=5 in ZTF) is used for upper limits on non-detections
+    detection_limit: 3.0 # float --- S/N threshold for declaring a forced-photometry measurement a "detection" in the output (SNT in ZTF terminology). Forced photometry is always performed at the target position; this only controls the detection flag. ZTF/LSST automated source detection typically uses 5.0 sigma, but for forced photometry at known coordinates (ZTF forced-photometry service) SNT=3 is common.
+    upper_limit_snr: 5.0 # float --- S/N threshold for reporting upper limits for non-detections (SNU in ZTF terminology). If the multi-SNR limiting-magnitude machinery includes this threshold, the corresponding limit is used for non-detection upper limits; otherwise the 50% completeness limit is used.
     aperture_size: 1.7 # float --- Aperture radius in units of FWHM (pixels = `aperture_size * fwhm`).
     enforce_nonnegative_local_background: False # bool --- If True, clamp annulus-estimated local background to >=0 before subtraction (prevents flux inflation when local sky is negative from over-subtraction/miscalibration).
     apply_aperture_correction: False # bool --- If True, apply aperture correction from PSF stars to aperture mags.
@@ -312,7 +317,7 @@ default_input:
 
   limiting_magnitude:
     beta_limit: 0.5 # float --- Legacy beta diagnostic threshold. Injected-source recovery is now gated by S/N only; beta is computed for diagnostics and completeness plots but does not affect the detection decision.
-    detection_limit: null # float|null --- S/N threshold for declaring an injected source recovered in limiting-magnitude experiments. If null, recovery requires S/N >= 3.0. Higher values (e.g., 5.0) match the detection thresholds used by ZTF and LSST automated pipelines.
+    detection_limit: null # float|null --- S/N threshold for declaring an injected source recovered in limiting-magnitude experiments. If null, recovery requires S/N >= 3.0. Higher values (e.g., 5.0) match the detection thresholds used by ZTF and LSST automated pipelines. For discovery-style runs, set this to 5.0 to be consistent with photometry.detection_limit.
     completeness_target: 0.5 # float --- Target recovery fraction at the limiting magnitude (Harris 1990 completeness definition; 0.5 = 50% completeness).
     recovery_method: auto # str --- "auto" matches the transient: aperture-only -> AP, PSF path -> PSF. Or set explicitly: PSF, AP, EMCEE/MCMC.
     completeness_solver: bisect # str --- How to solve for the limiting magnitude at completeness_target: "bisect" (default; bracket+bisection on recovery fraction) or "logistic_emcee" (fit a smooth logistic completeness curve with emcee and take m50).
@@ -342,8 +347,12 @@ default_input:
     completeness_plot_nmags: 9 # int --- Number of magnitudes sampled across completeness_plot_span_mag for the completeness bar chart.
     plot_injection_recovery: false # bool --- If true, generate the InjectionRecovery plot showing injected vs recovered magnitudes. If false, skip this plot.
     n_jobs: 1 # int --- Worker processes for injection/recovery and background-limit trials (per-image). 1 = serial; >1 can speed up Monte Carlo trials.
-    
-    # Dual S/N detection threshold configuration
+
+    # Dual S/N detection threshold configuration (ZTF-style SNT/SNU split)
+    # - snr_thresholds: compute limits at multiple S/N levels (e.g., [3.0, 5.0])
+    # - The first threshold (typically 3.0) is used for detection decisions (SNT)
+    # - The second threshold (typically 5.0) is used for upper limits on non-detections (SNU)
+    # - If photometry.upper_limit_snr is in this list, that threshold is used for upper limits
     snr_thresholds: [3.0, 5.0] # list[float] --- S/N thresholds to calculate for detection limits (e.g., [3.0, 5.0]). Default [3.0] for backward compatibility.
     adaptive_snr_selection: true # bool --- Use adaptive S/N threshold selection in plots (use 5σ limit when source S/N<3).
     report_all_limits: true # bool --- Include all S/N limits in output tables and CALIB files.

@@ -550,7 +550,7 @@ def _compute_detection_mask(
                 np.isfinite(mag)
                 & np.isfinite(err)
                 & np.isfinite(snr_from_err)
-                & (snr_from_err >= 3.0)  # Default SNR threshold
+                & (snr_from_err >= float(snr_limit))  # Use configured threshold
             )
 
     return np.asarray(detected, dtype=bool)
@@ -838,7 +838,19 @@ def plot_lightcurve(
         # Note: band_offset is NOT applied to the limiting mag as it's used for detection thresholds,
         # not for visual plot positioning.
         df["lmag"] = _lmag_to_apparent(df, zp_col)
-        
+
+        # ZTF-style SNU (upper limit): prefer 5σ limit if available, otherwise use 50% completeness limit
+        # This matches the ZTF forced-photometry service where SNU=5 is used for upper limits.
+        upper_limit_snr = 5.0  # Default ZTF SNU
+        upper_limit_col = f"limiting_mag_{upper_limit_snr:.0f}s2n"
+        if upper_limit_col in df.columns:
+            df["lmag_upper"] = pd.to_numeric(df[upper_limit_col], errors="coerce")
+            # Use 5σ limit where valid, otherwise fall back to 50% completeness limit
+            valid_upper = np.isfinite(df["lmag_upper"]) & (df["lmag_upper"] > 10) & (df["lmag_upper"] < 30)
+            df.loc[~valid_upper, "lmag_upper"] = df.loc[~valid_upper, "lmag"]
+        else:
+            df["lmag_upper"] = df["lmag"]
+
         # Initialize plot_mag and plot_err for this band's df
         df["plot_mag"] = df["apparent_mag"]
         df["plot_err"] = df["apparent_mag_err"]
@@ -1028,9 +1040,11 @@ def plot_lightcurve(
 
         if show_limits and not nondetects.empty:
             has_limits_plotted = True
+            # Use ZTF-style SNU (5σ) upper limit for non-detections where available
+            limit_col = "lmag_upper" if "lmag_upper" in nondetects.columns else "lmag"
             ax.errorbar(
                 nondetects.mjd - reference_epoch,
-                nondetects["lmag"] + band_offset,
+                nondetects[limit_col] + band_offset,
                 color=c,
                 ecolor=c,
                 markeredgecolor=c,
@@ -1240,6 +1254,22 @@ def plot_lightcurve(
             d2["err"] = d2[err2]
             d1["lmag"] = _lmag_to_apparent(d1, zp1)
             d2["lmag"] = _lmag_to_apparent(d2, zp2)
+
+            # ZTF-style SNU (upper limit): prefer 5σ limit if available
+            upper_limit_snr = 5.0
+            upper_limit_col = f"limiting_mag_{upper_limit_snr:.0f}s2n"
+            if upper_limit_col in d1.columns:
+                d1["lmag_upper"] = pd.to_numeric(d1[upper_limit_col], errors="coerce")
+                valid_upper = np.isfinite(d1["lmag_upper"]) & (d1["lmag_upper"] > 10) & (d1["lmag_upper"] < 30)
+                d1.loc[~valid_upper, "lmag_upper"] = d1.loc[~valid_upper, "lmag"]
+            else:
+                d1["lmag_upper"] = d1["lmag"]
+            if upper_limit_col in d2.columns:
+                d2["lmag_upper"] = pd.to_numeric(d2[upper_limit_col], errors="coerce")
+                valid_upper = np.isfinite(d2["lmag_upper"]) & (d2["lmag_upper"] > 10) & (d2["lmag_upper"] < 30)
+                d2.loc[~valid_upper, "lmag_upper"] = d2.loc[~valid_upper, "lmag"]
+            else:
+                d2["lmag_upper"] = d2["lmag"]
             if use_SNR_limit:
                 if method == "PSF" and "snr_psf" in d1.columns:
                     snr1 = np.asarray(d1["snr_psf"], dtype=float)
@@ -1328,8 +1358,12 @@ def plot_lightcurve(
             err2_arr = d2["err"].values
             det2 = d2["det"].values
             lmag2 = d2["lmag"].values
+            lmag1_arr = d1["lmag"].values
+            lmag2_upper = d2["lmag_upper"].values if "lmag_upper" in d2.columns else lmag2
+            lmag1_upper = d1["lmag_upper"].values if "lmag_upper" in d1.columns else lmag1_arr
             # Color = b1 - b2. Limit direction: b1 det + b2 limit -> true color <= color_value (upper limit, v);
             # b1 limit + b2 det -> true color >= color_value (lower limit, ^).
+            # Use ZTF-style 5σ upper limits (lmag_upper) where available.
             phase_pts, color_pts, err_pts = [], [], []
             phase_ul, color_ul = [], []  # upper limit on color (downward triangle v)
             phase_ll, color_ll = [], []  # lower limit on color (upward triangle ^)
@@ -1337,7 +1371,6 @@ def plot_lightcurve(
             mag1_arr = d1["mag"].values
             err1_arr = d1["err"].values
             det1_arr = d1["det"].values
-            lmag1_arr = d1["lmag"].values
             # Vectorised nearest-epoch match via searchsorted on sorted mjd2
             ins = np.searchsorted(mjd2, mjd1_arr)
             j_arr = np.where(
@@ -1363,10 +1396,10 @@ def plot_lightcurve(
                     err_pts.append(np.sqrt(err1_arr[i] ** 2 + err2_arr[j] ** 2))
                 elif det1 and not det2[j]:
                     phase_ul.append(phase)
-                    color_ul.append(mag1_arr[i] - lmag2[j])
+                    color_ul.append(mag1_arr[i] - lmag2_upper[j])
                 elif not det1 and det2[j]:
                     phase_ll.append(phase)
-                    color_ll.append(lmag1_arr[i] - mag2[j])
+                    color_ll.append(lmag1_upper[i] - mag2[j])
             label = f"{b1}-{b2}"
             c = COLOR_INDEX_COLORS.get(label, cols.get(b1, "k"))
             if phase_pts:
@@ -1535,6 +1568,17 @@ def generate_photometry_table(
         zp_num = pd.to_numeric(data[zp_col], errors="coerce")
         # Pipeline stores limiting mag in instrumental system; detection cut uses apparent mags.
         data["lmag"] = lmag_inst + zp_num
+
+        # ZTF-style SNU (upper limit): prefer 5σ limit if available, otherwise use 50% completeness limit
+        upper_limit_snr = 5.0  # Default ZTF SNU
+        upper_limit_col = f"limiting_mag_{upper_limit_snr:.0f}s2n"
+        if upper_limit_col in data.columns:
+            data["lmag_upper"] = pd.to_numeric(data[upper_limit_col], errors="coerce")
+            # Use 5σ limit where valid, otherwise fall back to 50% completeness limit
+            valid_upper = np.isfinite(data["lmag_upper"]) & (data["lmag_upper"] > 10) & (data["lmag_upper"] < 30)
+            data.loc[~valid_upper, "lmag_upper"] = data.loc[~valid_upper, "lmag"]
+        else:
+            data["lmag_upper"] = data["lmag"]
         if col.startswith("inst_"):
             data["__app_mag_det__"] = pd.to_numeric(data[col], errors="coerce") + zp_num
             _det_mag_col = "__app_mag_det__"
@@ -1680,7 +1724,12 @@ def generate_photometry_table(
         if not nondetects.empty:
             # Calculate limiting magnitudes for multiple S/N thresholds
             limiting_mags_nd = _lmag_to_apparent_multi_snr(nondetects, zp_col)
-            
+
+            # ZTF-style: use 5σ upper limit for the primary "Limit" column in non-detections
+            # This matches the ZTF forced-photometry service where SNU=5 is used for upper limits
+            if 'Limit_5S2N' in limiting_mags_nd:
+                limiting_mags_nd['Limit'] = limiting_mags_nd['Limit_5S2N']
+
             # Build the row data with all limiting magnitude columns
             nd_row_data = {
                 'Filter': band_label,
@@ -1689,7 +1738,7 @@ def generate_photometry_table(
                 'Mag': pd.Series(np.nan, index=nondetects.index, dtype=float),
                 'Error': pd.Series(np.nan, index=nondetects.index, dtype=float),
             }
-            
+
             # Add all limiting magnitude columns
             for limit_key, limit_values in limiting_mags_nd.items():
                 nd_row_data[limit_key] = limit_values
@@ -1834,11 +1883,13 @@ def generate_photometry_table(
             err2_arr = d2["err"].values
             det2 = d2["det"].values
             lmag2 = d2["lmag"].values
+            lmag2_upper = d2["lmag_upper"].values if "lmag_upper" in d2.columns else lmag2
             mjd1_arr = d1["mjd"].values
             mag1_arr = d1["mag"].values
             err1_arr_tbl = d1["err"].values
             det1_arr_tbl = d1["det"].values
             lmag1_arr_tbl = d1["lmag"].values
+            lmag1_upper = d1["lmag_upper"].values if "lmag_upper" in d1.columns else lmag1_arr_tbl
             ins = np.searchsorted(mjd2, mjd1_arr)
             # searchsorted can return len(mjd2) when all mjd1 values are after all mjd2 values.
             # np.where evaluates all arguments eagerly, so we need a clipped version
@@ -1878,7 +1929,7 @@ def generate_photometry_table(
                         }
                     )
                 elif det1_arr_tbl[i] and not det2[j]:
-                    color_value = mag1_arr[i] - lmag2[j]
+                    color_value = mag1_arr[i] - lmag2_upper[j]
                     color_rows.append(
                         {
                             "MJD": round(mjd_mid, 3),
@@ -1891,7 +1942,7 @@ def generate_photometry_table(
                         }
                     )
                 elif not det1_arr_tbl[i] and det2[j]:
-                    color_value = lmag1_arr_tbl[i] - mag2[j]
+                    color_value = lmag1_upper[i] - mag2[j]
                     color_rows.append(
                         {
                             "MJD": round(mjd_mid, 3),
@@ -1976,20 +2027,28 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
         """
         Best-effort detection classification for one photometry row.
 
-        Prefer an explicit is_detection/detected flag when present, but override
-        it when the row contains enough photometric fields to recompute the
-        detection rule (guards against stale/missing columns in large runs).
+        Prefer an explicit is_detection/detected flag when present, falling back
+        to SNR-based inference only when the flag is absent. This keeps the
+        classification in sync with the per-image detection decision made by
+        the pipeline.
         """
-        # If we have enough information, recompute detection state using the
-        # same logic as plot_lightcurve() (SNR gate + optional beta).
-        try:
-            # beta: do not let missing/low beta veto detections with good SNR
-            beta = row_obj.get("beta", np.nan)
-            try:
-                beta = float(beta)
-            except Exception:
-                beta = np.nan
+        # Prefer explicit detection flags from upstream (e.g. main.py)
+        for k in ("is_detection", "detected", "is_detected"):
+            if k in row_obj and pd.notna(row_obj.get(k)):
+                v = row_obj.get(k)
+                if isinstance(v, str):
+                    vv = v.strip().lower()
+                    if vv in {"true", "t", "1", "yes", "y", "det"}:
+                        return True
+                    if vv in {"false", "f", "0", "no", "n", "nondet", "limit"}:
+                        return False
+                try:
+                    return bool(int(v))
+                except Exception:
+                    return bool(v)
 
+        # Fallback: recompute from SNR if explicit flag is absent
+        try:
             method_u = str(method).upper()
             snr_val = np.nan
             if method_u == "PSF":
@@ -2004,7 +2063,7 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
                     fp = float(fp) if pd.notna(fp) else np.nan
                     fe = float(fe) if pd.notna(fe) else np.nan
                     if np.isfinite(fp) and np.isfinite(fe) and fe > 0:
-                        snr_val = fp / fe
+                        snr_val = np.abs(fp) / fe  # Use absolute for negative fits
             else:
                 for k in ("snr_ap", "SNR_AP", "snr", "SNR"):
                     if k in row_obj and pd.notna(row_obj.get(k)):
@@ -2016,35 +2075,13 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
                     fa = float(fa) if pd.notna(fa) else np.nan
                     fe = float(fe) if pd.notna(fe) else np.nan
                     if np.isfinite(fa) and np.isfinite(fe) and fe > 0:
-                        snr_val = fa / fe
-
-            # Now compute beta_ok after snr_val is known
-            beta_available = np.isfinite(beta)
-            # Beta is informational for detection classification. For actual
-            # photometric detection, SNR is the primary criterion. A source with
-            # SNR >= limit is a detection regardless of beta value.
-            beta_ok = (not beta_available) or (beta > float(beta_limit)) or (snr_val >= float(snr_limit))
+                        snr_val = np.abs(fa) / fe
 
             if np.isfinite(snr_val):
-                detected_by_snr = snr_val >= float(snr_limit)
-                return bool(detected_by_snr and beta_ok)
+                return bool(snr_val >= float(snr_limit))
         except Exception:
             pass
 
-        # Fall back to explicit flags when present.
-        for k in ("is_detection", "detected", "is_detected"):
-            if k in row_obj and pd.notna(row_obj.get(k)):
-                v = row_obj.get(k)
-                if isinstance(v, str):
-                    vv = v.strip().lower()
-                    if vv in {"true", "t", "1", "yes", "y", "det"}:
-                        return True
-                    if vv in {"false", "f", "0", "no", "n", "nondet", "limit"}:
-                        return False
-                try:
-                    return bool(int(v))
-                except Exception:
-                    return bool(v)
         # If this function is called with detections_<...>.csv, rows are detections by construction.
         return True
 
