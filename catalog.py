@@ -2138,8 +2138,10 @@ class Catalog:
             # Calculate instrumental magnitude
             flux = catalog["flux_AP"].values
             flux_err = catalog["flux_AP_err"].values
-            inst_mag = -2.5 * np.log10(flux)
-            inst_mag_err = 2.5 / np.log(10) * (flux_err / flux)
+            # Add safety check to prevent division by zero and log10(0)
+            flux_safe = np.maximum(flux, 1e-10)
+            inst_mag = -2.5 * np.log10(flux_safe)
+            inst_mag_err = 2.5 / np.log(10) * (flux_err / flux_safe)
             catalog_mag = catalog[use_filter].values
             catalog_mag_err = catalog[f"{use_filter}_err"].values
 
@@ -2155,14 +2157,14 @@ class Catalog:
             # This avoids scattered low S/N inliers that break the linearity fit
             flux = clean_catalog["flux_AP"].values
             flux_err = clean_catalog["flux_AP_err"].values
-            snr = np.abs(flux) / flux_err
+            snr_values = np.abs(flux) / flux_err  # Renamed to avoid shadowing imported snr function
 
             # Find a high S/N threshold that gives a continuous bright subset
             # Start with S/N > 50 for very high quality, then relax if needed
             min_snr_thresholds = [100, 75, 50, 30, 20, 10]
             selected_indices = None
             for min_snr in min_snr_thresholds:
-                high_snr_mask = snr >= min_snr
+                high_snr_mask = snr_values >= min_snr
                 n_high_snr = np.sum(high_snr_mask)
                 if n_high_snr >= 15:  # Need at least 15 sources for robust fit
                     selected_indices = high_snr_mask
@@ -2175,10 +2177,12 @@ class Catalog:
                 clean_catalog = clean_catalog[selected_indices].copy()
                 flux = clean_catalog["flux_AP"].values
                 flux_err = clean_catalog["flux_AP_err"].values
-                snr = snr[selected_indices]
+                snr_values = snr_values[selected_indices]
 
-            inst_mag_linear = -2.5 * np.log10(flux)
-            inst_mag_err_linear = 2.5 / np.log(10) * (flux_err / flux)
+            # Add safety check for division by zero
+            flux_safe = np.maximum(flux, 1e-10)
+            inst_mag_linear = -2.5 * np.log10(flux_safe)
+            inst_mag_err_linear = 2.5 / np.log(10) * (flux_err / flux_safe)
             catalog_mag_linear = clean_catalog[use_filter].values
             catalog_mag_err_linear = clean_catalog[f"{use_filter}_err"].values
 

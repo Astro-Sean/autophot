@@ -1269,12 +1269,12 @@ class WCSSolver:
     ) -> bool:
         """Run solve-field with given args; return True if wcs_file was created."""
         try:
-            with open(logpath, "a", encoding="utf-8") as logf:
-                logf.write(" ".join(map(str, args)) + "\n")
-                kwargs = dict(shell=False, stdout=logf, stderr=subprocess.STDOUT)
-                if os.name != "nt":
-                    kwargs["preexec_fn"] = os.setsid
-                pro = subprocess.Popen(args, **kwargs)
+            logf = open(logpath, "a", encoding="utf-8")
+            logf.write(" ".join(map(str, args)) + "\n")
+            kwargs = dict(shell=False, stdout=logf, stderr=subprocess.STDOUT)
+            if os.name != "nt":
+                kwargs["preexec_fn"] = os.setsid
+            pro = subprocess.Popen(args, **kwargs)
             try:
                 pro.wait(timeout=timeout_sec)
             except subprocess.TimeoutExpired:
@@ -1285,6 +1285,8 @@ class WCSSolver:
                         pro.kill()
                 else:
                     pro.kill()
+            finally:
+                logf.close()
                 pro.wait()
                 logger.warning("solve-field exceeded timeout (%s s)", timeout_sec)
             self.clean_log(logpath)

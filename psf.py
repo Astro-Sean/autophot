@@ -1049,7 +1049,10 @@ class PoissonLikelihoodFitter:
         epsilon = 1e-8
         n_params = len(params)
         dmodel_dparams = []
-        
+
+        # Evaluate model at original parameters before perturbation
+        model_0 = model(x, y)
+
         try:
             for i in range(n_params):
                 params_plus = params.copy()
@@ -4319,6 +4322,12 @@ class PSF:
         # Populate inverted flux columns if available
         if combined_inv is not None:
             idx_out_inv = np.asarray(combined_inv["idx"], int)
+            # Add bounds checking to prevent index out of bounds
+            valid_idx_mask = np.isin(idx_out_inv, updated.index)
+            if not np.all(valid_idx_mask):
+                invalid_count = len(idx_out_inv) - np.sum(valid_idx_mask)
+                log.warning(f"Skipping {invalid_count} inverted fit results with invalid indices")
+                idx_out_inv = idx_out_inv[valid_idx_mask]
             flux_fit_inv = self._first_present(combined_inv, ["flux_fit", "flux"], unit=u.electron)
             flux_err_inv = self._first_present(
                 combined_inv, ["flux_fit_err", "flux_err", "flux_uncertainty"], unit=u.electron

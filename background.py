@@ -205,7 +205,14 @@ class BackgroundSubtractor:
         rotation_angle = self.get_rotation_angle(header)
 
         xy_pixel_scales = awcs.utils.proj_plane_pixel_scales(wcs)
+        # Add validation for pixel scale to prevent division by zero
+        if len(xy_pixel_scales) == 0:
+            self.logger.warning("Empty pixel scales from WCS, skipping galaxy masking")
+            return np.zeros_like(image, dtype=bool)
         pix_scale_arcsec = xy_pixel_scales[0] * 3600.0
+        if pix_scale_arcsec <= 0 or not np.isfinite(pix_scale_arcsec):
+            self.logger.warning(f"Invalid pixel scale ({pix_scale_arcsec}), skipping galaxy masking")
+            return np.zeros_like(image, dtype=bool)
 
         valid = galaxies["galdim_majaxis"].apply(
             lambda x: isinstance(x, (int, float)) and not pd.isna(x) and x > 0
