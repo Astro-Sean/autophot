@@ -1227,16 +1227,43 @@ class PoissonLikelihoodFitter:
         
         # Update model with final parameters
         model.parameters = params
-        
+
         self.fit_info["iterations"] = iteration + 1
         self.fit_info["final_lnL"] = lnL
         self.fit_info["converged"] = converged
-        
+
         if not converged:
             log.warning(f"[PoissonFitter] Did not converge in {self.maxiters} iterations")
-        
+
         log.info(f"[PoissonFitter] Final lnL: {lnL:.3f}, iterations: {iteration + 1}")
-        
+
+        # Compute parameter errors from Hessian (inverse of Hessian = covariance matrix)
+        try:
+            # Re-compute Hessian at final parameters
+            final_model = model(x, y)
+            _, final_hessian = self._compute_derivatives(data, final_model, x, y, params, param_names)
+
+            # Invert Hessian to get covariance matrix
+            cov_matrix = np.linalg.inv(final_hessian)
+
+            # Check for valid covariance matrix
+            if np.all(np.isfinite(cov_matrix)) and np.all(np.diag(cov_matrix) > 0):
+                # Parameter errors are sqrt of diagonal elements
+                param_errors = np.sqrt(np.diag(cov_matrix))
+
+                # Store errors in model (if supported)
+                if hasattr(model, 'stds'):
+                    model.stds = param_errors
+                if hasattr(model, 'cov_matrix'):
+                    from astropy.stats import Covariance
+                    model.cov_matrix = Covariance(cov_matrix)
+
+                log.info(f"[PoissonFitter] Parameter errors computed from Hessian")
+            else:
+                log.warning(f"[PoissonFitter] Invalid covariance matrix, errors not set")
+        except Exception as e:
+            log.warning(f"[PoissonFitter] Failed to compute parameter errors: {e}")
+
         return model
 
 
