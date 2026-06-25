@@ -2406,12 +2406,13 @@ class Catalog:
                 inlier_catalog = clean_catalog[inlier_mask].copy()
                 inlier_flux = flux[inlier_mask]
                 inlier_inst_mag = inst_mag_linear[inlier_mask]
-                
+
                 # Keep all RANSAC inliers for zeropoint fitting. The aggressive
                 # flux-range selection below removes too many valid faint sources
                 # (photon noise is mistaken for non-linearity on modern CCDs).
-                clean_catalog = inlier_catalog
-                
+                # NOTE: Don't reassign clean_catalog yet - we need the full arrays
+                # for mask computation. We'll reassign after selection is complete.
+
                 if len(inlier_catalog) > 5:
                     # Calculate residuals for all inliers.
                     # sklearn LinearRegression.predict() can return shape (N,1) rather
@@ -2518,7 +2519,10 @@ class Catalog:
                             
                             # Combined mask: must be in flux range AND have good residual
                             final_linear_mask = linear_flux_mask & linear_residual_mask
-                            
+
+                            # Store final_linear_mask as instance variable for later use
+                            self.linear_residual_mask = linear_residual_mask
+
                             n_bright_cut = np.sum(flux > max_linear_flux)
                             n_faint_cut = np.sum(flux < min_linear_flux)
                             n_outlier_cut = np.sum(linear_flux_mask & ~linear_residual_mask)
@@ -2534,20 +2538,37 @@ class Catalog:
                             if n_selected > 0:
                                 # Saturation range is informational only; we keep all inliers
                                 # for zeropoint fitting to avoid over-aggressive faint-end cuts.
+                                # Recompute flux range mask on clean_catalog to avoid array length mismatch
+                                clean_flux = clean_catalog["flux_AP"].values
+                                clean_linear_mask = (clean_flux >= min_linear_flux) & (clean_flux <= max_linear_flux)
+                                # Apply residual mask to clean_catalog by indexing with inlier_mask first
+                                clean_inlier_residual_mask = linear_residual_mask[inlier_mask]
+                                if len(clean_inlier_residual_mask) == len(clean_catalog):
+                                    clean_linear_mask = clean_linear_mask & clean_inlier_residual_mask
                                 saturation_range = [
-                                    np.percentile(clean_catalog["flux_AP"].values[final_linear_mask], 0.5),
-                                    np.percentile(clean_catalog["flux_AP"].values[final_linear_mask], 99.5)
+                                    np.percentile(clean_catalog["flux_AP"].values[clean_linear_mask], 0.5),
+                                    np.percentile(clean_catalog["flux_AP"].values[clean_linear_mask], 99.5)
                                 ]
                             else:
                                 # No sources passed tight criteria, fall back to central region only
-                                central_flux_mask = (flux >= sorted_flux[central_end]) & (flux <= sorted_flux[central_start])
+                                # Recompute central mask on inlier_catalog to avoid array length mismatch
+                                clean_flux = clean_catalog["flux_AP"].values
+                                clean_sorted_flux = np.sort(clean_flux)[::-1]
+                                central_start = max(0, len(clean_sorted_flux) // 3)
+                                central_end = min(len(clean_sorted_flux), 2 * len(clean_sorted_flux) // 3)
+                                central_flux_mask = (clean_flux >= clean_sorted_flux[central_end]) & (clean_flux <= clean_sorted_flux[central_start])
                                 if np.sum(central_flux_mask) > 0:
                                     logger.warning(f"No sources passed tight criteria, using central {np.sum(central_flux_mask)} sources")
                                 else:
                                     logger.warning(f"No sources passed tight criteria, using all {len(inlier_catalog)} inliers")
                         else:
                             # Invalid range, use central region
-                            central_flux_mask = (flux >= sorted_flux[central_end]) & (flux <= sorted_flux[central_start])
+                            # Recompute central mask on inlier_catalog to avoid array length mismatch
+                            clean_flux = clean_catalog["flux_AP"].values
+                            clean_sorted_flux = np.sort(clean_flux)[::-1]
+                            central_start = max(0, len(clean_sorted_flux) // 3)
+                            central_end = min(len(clean_sorted_flux), 2 * len(clean_sorted_flux) // 3)
+                            central_flux_mask = (clean_flux >= clean_sorted_flux[central_end]) & (clean_flux <= clean_sorted_flux[central_start])
                             if np.sum(central_flux_mask) > 0:
                                 pass
                     else:
@@ -2558,8 +2579,10 @@ class Catalog:
                             logger.info(f"Tight residual filter would remove {n_tight_outliers} sources (keeping all inliers)")
                 else:
                     # Too few sources for robust selection
-                    clean_catalog = inlier_catalog
                     logger.warning(f"Only {len(inlier_catalog)} inliers, skipping robust selection")
+
+                # Now reassign clean_catalog to inlier_catalog after all mask computations
+                clean_catalog = inlier_catalog
 
             logger.info(f"Returning {len(clean_catalog)} sources for zeropoint fitting")
             return clean_catalog, fit_params, saturation_range
