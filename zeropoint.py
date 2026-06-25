@@ -993,6 +993,7 @@ class Zeropoint:
         max_steps: int = 50000,
         tau_factor: float = 50.0,
         adaptive: bool = True,
+        min_autocorr_N: int = 100,
     ):
         """
         MCMC fit for y = x + ZP (slope=1 constraint) with proper X,Y errors.
@@ -1052,6 +1053,9 @@ class Zeropoint:
             If True (default), automatically increase max_steps and batch size
             until convergence is achieved. If False, uses fixed n_steps.
             Recommended to keep True for production use.
+        min_autocorr_N : int
+            Minimum number of steps before starting autocorrelation time checks
+            (default 100, following PSF fitter convention).
             
         Returns
         -------
@@ -1161,6 +1165,7 @@ class Zeropoint:
             sampler.reset()
 
             # ---- Adaptive production: run in batches until convergence ----
+            # Following PSF fitter logic for consistency
             total_steps = 0
             # Start with reasonable batch size, will adapt based on tau
             batch_size = min(n_steps, 500)
@@ -1173,28 +1178,30 @@ class Zeropoint:
                 sampler.run_mcmc(None, batch_size, progress=False)
                 total_steps += batch_size
                 
+                # Start autocorrelation checks only after enough steps (following PSF fitter)
+                if total_steps < min_autocorr_N:
+                    continue
+                    
                 try:
                     tau_arr = sampler.get_autocorr_time(quiet=True)
-                    tau_max = float(np.nanmax(tau_arr))
+                    tau_est = float(np.nanmean(tau_arr))
                     
                     # Adaptive batch size: use ~10 * tau to ensure good mixing
-                    if adaptive and np.isfinite(tau_max) and tau_max > 0:
-                        new_batch_size = int(min(10 * tau_max, 2000))
+                    if adaptive and np.isfinite(tau_est) and tau_est > 0:
+                        new_batch_size = int(min(10 * tau_est, 2000))
                         if new_batch_size > batch_size and new_batch_size < max_steps - total_steps:
                             batch_size = new_batch_size
-                            logger.debug(f"Adaptive batch size increased to {batch_size} (tau={tau_max:.1f})")
+                            logger.debug(f"Adaptive batch size increased to {batch_size} (tau={tau_est:.1f})")
                     
-                    # Converged when chain length > tau_factor * tau for all params
-                    if np.all(tau_arr * tau_factor < total_steps):
+                    # Convergence criterion: total_steps > tau_factor * tau (following PSF fitter)
+                    if np.isfinite(tau_est) and total_steps > tau_factor * tau_est:
                         # Also require tau to be stable (<10% change)
-                        # Add check for tau_max > 0 to prevent division by zero
-                        if tau_max > 1e-10 and abs(tau_max - tau_max_old) / tau_max < 0.1:
+                        if tau_est > 1e-10 and abs(tau_est - tau_max_old) / tau_est < 0.1:
                             n_consecutive_stable += 1
                             if n_consecutive_stable >= min_stable_checks:
                                 converged = True
                                 logger.info(
-                                    f"MCMC converged after {total_steps} steps "
-                                    f"(tau_max={tau_max:.1f}, tau_factor={tau_factor})"
+                                    f"[ZP MCMC] Converged at {total_steps} steps, tau={tau_est:.1f}"
                                 )
                                 break
                         else:
@@ -1202,33 +1209,47 @@ class Zeropoint:
                     else:
                         n_consecutive_stable = 0  # Reset if not yet met length criterion
                     
-                    tau_max_old = tau_max
+                    tau_max_old = tau_est
                     
                     # Log progress periodically
                     if total_steps % 2000 == 0:
                         logger.debug(
-                            f"MCMC progress: {total_steps} steps, "
-                            f"tau_max={tau_max:.1f}, "
-                            f"required={tau_factor * tau_max:.0f} steps"
+                            f"[ZP MCMC] Progress: {total_steps} steps, "
+                            f"tau={tau_est:.1f}, "
+                            f"required={tau_factor * tau_est:.0f} steps"
                         )
                         
-                except Exception:
+                except Exception as exc:
                     # Autocorrelation time unreliable on short chains; keep running
                     n_consecutive_stable = 0
+                    logger.debug(f"[ZP MCMC] tau estimation failed: {exc}")
                     pass
 
-            if not converged:
-                logger.warning(
-                    f"MCMC did not converge within {total_steps} steps; "
-                    f"results may be unreliable."
-                )
-
-            # Thin by autocorrelation time when available
+            # Log acceptance fraction and final tau (following PSF fitter)
+            acc = float(np.mean(sampler.acceptance_fraction))
+            tau_arr = None
             try:
                 tau_arr = sampler.get_autocorr_time(quiet=True)
+                tau_est = float(np.nanmean(tau_arr))
+                logger.info(f"[ZP MCMC] acc={acc:.3f}  tau~{tau_est:.1f}")
+            except Exception:
+                logger.info(f"[ZP MCMC] acc={acc:.3f}")
+
+            if not 0.15 <= acc <= 0.7:
+                logger.warning("[ZP MCMC] Suboptimal acceptance; consider tuning n_walkers")
+
+            # Warn if max_steps reached without convergence (following PSF fitter)
+            if not converged and adaptive:
+                logger.warning(
+                    f"[ZP MCMC] Reached max_steps ({max_steps}) without full convergence; "
+                    f"results may be unreliable"
+                )
+
+            # Thin by autocorrelation time when available (following PSF fitter)
+            if tau_arr is not None and np.any(np.isfinite(tau_arr)):
                 tau_max = float(np.nanmax(tau_arr))
                 thin = max(1, int(np.ceil(tau_max / 2)))
-            except Exception:
+            else:
                 thin = 1
                 tau_max = np.nan
 
