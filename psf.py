@@ -2089,11 +2089,21 @@ class PSF:
                 )
                 build_boost_cap = max(build_boost_cap, build_boost_cap_u)
             build_sampling_boost = float(min(build_sampling_boost, max(1.0, build_boost_cap)))
-            if undersampled and oversample <= 1:
+            
+            # Adaptive oversampling for undersampled data
+            # Undersampled images (FWHM <= 2.5 px) need higher oversampling to properly sample PSF core
+            auto_oversample = bool(phot_cfg.get("psf_auto_oversample_undersampled", True))
+            if undersampled and oversample <= 1 and auto_oversample:
+                original_oversample = oversample
+                oversample = 4  # Increase to 4x for undersampled data
+                log.info(
+                    "Auto-increasing oversample from %dx to %dx for undersampled data (FWHM=%.2f pix)",
+                    original_oversample, oversample, fwhm
+                )
+            elif undersampled and oversample <= 1 and not auto_oversample:
                 log.info(
                     "Image appears undersampled (FWHM=%.2f pix) and psf_oversample=%d; "
-                    "consider increasing psf_oversample in the config if enough PSF "
-                    "stars are available.",
+                    "consider increasing psf_oversample in the config or enabling psf_auto_oversample_undersampled",
                     fwhm,
                     oversample,
                 )
@@ -2327,6 +2337,18 @@ class PSF:
             smooth_size = phot_cfg.get("psf_smoothing_kernel_size", None)
             smooth_scale = float(phot_cfg.get("psf_smoothing_kernel_size_scale_fwhm", 0.8))
             smooth_max = int(phot_cfg.get("psf_smoothing_kernel_size_max", 9))
+            
+            # Adaptive smoothing kernel selection based on sampling
+            # Gaussian kernel is better for undersampled data, quartic for well-sampled
+            auto_kernel = bool(phot_cfg.get("psf_adaptive_smoothing_kernel", True))
+            if auto_kernel and undersampled:
+                original_kind = smooth_kind
+                smooth_kind = "gaussian"
+                log.info(
+                    "Adaptive smoothing kernel: using 'gaussian' instead of '%s' for undersampled data (FWHM=%.2f pix)",
+                    original_kind, fwhm
+                )
+            
             smooth_kernel = get_smoothing_kernel(
                 fwhm,
                 oversample=oversample,
@@ -2352,6 +2374,28 @@ class PSF:
             epsf_clip_maxiters = int(
                 max(1, phot_cfg.get("psf_build_sigma_clip_maxiters", 15))
             )
+            
+            # Adaptive sigma clipping based on number of PSF stars
+            # With few stars (<20), use less aggressive clipping to avoid over-pruning
+            # With many stars (>100), can use more aggressive clipping
+            auto_sigma_clip = bool(phot_cfg.get("psf_adaptive_sigma_clip", True))
+            if auto_sigma_clip:
+                n_stars = len(df)
+                if n_stars < 20:
+                    epsf_clip_sigma = 3.0
+                    epsf_clip_maxiters = 5
+                    log.info(
+                        "Adaptive sigma clipping: using less aggressive settings (sigma=%.1f, maxiters=%d) for %d stars",
+                        epsf_clip_sigma, epsf_clip_maxiters, n_stars
+                    )
+                elif n_stars > 100:
+                    epsf_clip_sigma = 5.0
+                    epsf_clip_maxiters = 20
+                    log.info(
+                        "Adaptive sigma clipping: using more aggressive settings (sigma=%.1f, maxiters=%d) for %d stars",
+                        epsf_clip_sigma, epsf_clip_maxiters, n_stars
+                    )
+            
             sigma_clip_epsf = SigmaClip(
                 sigma=epsf_clip_sigma,
                 cenfunc=np.nanmedian,
@@ -2453,7 +2497,17 @@ class PSF:
                 import inspect
                 sig = inspect.signature(EPSFBuilder.__init__)
                 if 'accuracy_threshold' in sig.parameters:
-                    epsf_builder_kwargs['accuracy_threshold'] = 1e-4 if adaptive_iters else 1e-6
+                    # Adaptive accuracy threshold based on sampling
+                    # Undersampled data needs more lenient threshold (harder to achieve high accuracy)
+                    if undersampled:
+                        accuracy_threshold = 1e-3  # More lenient for undersampled
+                        log.info(
+                            "Adaptive accuracy threshold: using %.0e for undersampled data (FWHM=%.2f pix)",
+                            accuracy_threshold, fwhm
+                        )
+                    else:
+                        accuracy_threshold = 1e-4 if adaptive_iters else 1e-6
+                    epsf_builder_kwargs['accuracy_threshold'] = accuracy_threshold
             except Exception:
                 pass  # If inspect fails, try without accuracy_threshold
             
