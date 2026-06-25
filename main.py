@@ -6337,9 +6337,10 @@ def run_photometry():
             output["snr_psf"] = float(output.get("SNR_PSF", np.nan))
         except Exception:
             output["snr_psf"] = np.nan
-        
+
         # Update generic snr column to use the best available SNR (prefer PSF if higher)
         # This ensures the default snr column reflects the most reliable detection statistic
+        # IMPORTANT: This must happen BEFORE the detection flag computation below
         try:
             snr_ap = output.get("snr_ap", np.nan)
             snr_psf = output.get("snr_psf", np.nan)
