@@ -4270,12 +4270,18 @@ class PSF:
         ] = df_out[["x_fit", "y_fit", "x_fit_err", "y_fit_err"]].to_numpy()
         # Flux in e/s (same convention as aperture) so AP and PSF mags share the same zeropoint.
         # flux_fit_e is total flux in electrons from the PSF fit; divide by exposure_time for e/s.
-        updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF"])] = (
-            df_out["flux_fit_e"].to_numpy() / exposure_time
-        )
-        updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF_err"])] = (
-            df_out["flux_err_e"].to_numpy() / exposure_time
-        )
+        # Validate exposure_time before division
+        if not np.isfinite(exposure_time) or exposure_time <= 0:
+            log.warning(f"Invalid exposure_time ({exposure_time}), setting flux and errors to NaN")
+            updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF"])] = np.nan
+            updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF_err"])] = np.nan
+        else:
+            updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF"])] = (
+                df_out["flux_fit_e"].to_numpy() / exposure_time
+            )
+            updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF_err"])] = (
+                df_out["flux_err_e"].to_numpy() / exposure_time
+            )
 
         # Compute per-source PSF SNR: |flux| / flux_err (same convention as main.py)
         with np.errstate(divide="ignore", invalid="ignore"):

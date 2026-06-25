@@ -53,6 +53,9 @@ def _flux_for_mag_cached(m: float, counts_ref: float, exposure_time: float) -> f
     """
     flux_e_per_s = 10.0 ** (-0.4 * m)
     aperture_e_in_frame = flux_e_per_s * float(exposure_time)
+    # Add protection for division by zero
+    if counts_ref <= 0 or not np.isfinite(counts_ref):
+        return np.nan
     return aperture_e_in_frame / float(counts_ref)
 
 
@@ -1439,8 +1442,12 @@ class Limits:
             # recovered limiting magnitude ~2.5*log10(gain) mag spuriously deep.
             counts_ref = counts_ref_adu * float(_gain_canon)  # now in e⁻
             # F_ref = counts_ref (e⁻) / exposure_time → e⁻/s, same units as flux_AP
-            F_ref = counts_ref / float(local_input_yaml["exposure_time"])
             exposure_time = float(local_input_yaml["exposure_time"])
+            if exposure_time <= 0 or not np.isfinite(exposure_time):
+                logger.warning(f"Invalid exposure_time ({exposure_time}) in limits calculation")
+                F_ref = np.nan
+            else:
+                F_ref = counts_ref / exposure_time
 
             # Guard: check if calibration failed
             if not (np.isfinite(counts_ref) and counts_ref > 0
