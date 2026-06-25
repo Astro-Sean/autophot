@@ -6358,18 +6358,14 @@ def run_photometry():
         # Forced photometry is always performed; this records whether the measured
         # S/N exceeds the configured detection threshold. Using the best
         # available SNR (max of PSF/AP) gives a single, clear detection state.
+        # Note: We check SNR only (not magnitude finiteness) because magnitudes are
+        # populated later in the code (after zeropoint application). The SNR is
+        # sufficient for detection classification.
         try:
             best_snr = float(output.get("snr", np.nan))
             det_thresh = float(detection_limit)
-            is_finite_measurement = (
-                bool(np.isfinite(best_snr))
-                and (
-                    bool(np.isfinite(output.get("mag_psf", np.nan)))
-                    or bool(np.isfinite(output.get("mag_ap", np.nan)))
-                )
-            )
             output["is_detection"] = bool(
-                is_finite_measurement and best_snr >= det_thresh
+                np.isfinite(best_snr) and best_snr >= det_thresh
             )
         except Exception:
             output["is_detection"] = False
