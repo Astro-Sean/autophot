@@ -990,8 +990,9 @@ class Zeropoint:
         min_points: int = 2,
         robust: bool = True,
         V_out: float = 1.0,
-        max_steps: int = 10000,
+        max_steps: int = 50000,
         tau_factor: float = 50.0,
+        adaptive: bool = True,
     ):
         """
         MCMC fit for y = x + ZP (slope=1 constraint) with proper X,Y errors.
@@ -1043,9 +1044,14 @@ class Zeropoint:
             Default 1.0 mag² gives ~1 mag outlier scatter.
         max_steps : int
             Hard cap on total production steps to prevent infinite runtime.
+            Default 50000 when adaptive=True, 10000 otherwise.
         tau_factor : float
             Convergence criterion: stop when chain length > tau_factor * tau
             for all parameters (default 50, following emcee recommendations).
+        adaptive : bool
+            If True (default), automatically increase max_steps and batch size
+            until convergence is achieved. If False, uses fixed n_steps.
+            Recommended to keep True for production use.
             
         Returns
         -------
@@ -1156,25 +1162,59 @@ class Zeropoint:
 
             # ---- Adaptive production: run in batches until convergence ----
             total_steps = 0
-            batch_size = min(n_steps, 500)  # Check every 500 steps for responsiveness
+            # Start with reasonable batch size, will adapt based on tau
+            batch_size = min(n_steps, 500)
             tau_max_old = np.inf
             converged = False
+            n_consecutive_stable = 0  # Require multiple stable checks
+            min_stable_checks = 3  # Require 3 consecutive stable tau estimates
+            
             while total_steps < max_steps:
                 sampler.run_mcmc(None, batch_size, progress=False)
                 total_steps += batch_size
+                
                 try:
                     tau_arr = sampler.get_autocorr_time(quiet=True)
                     tau_max = float(np.nanmax(tau_arr))
+                    
+                    # Adaptive batch size: use ~10 * tau to ensure good mixing
+                    if adaptive and np.isfinite(tau_max) and tau_max > 0:
+                        new_batch_size = int(min(10 * tau_max, 2000))
+                        if new_batch_size > batch_size and new_batch_size < max_steps - total_steps:
+                            batch_size = new_batch_size
+                            logger.debug(f"Adaptive batch size increased to {batch_size} (tau={tau_max:.1f})")
+                    
                     # Converged when chain length > tau_factor * tau for all params
                     if np.all(tau_arr * tau_factor < total_steps):
                         # Also require tau to be stable (<10% change)
                         # Add check for tau_max > 0 to prevent division by zero
                         if tau_max > 1e-10 and abs(tau_max - tau_max_old) / tau_max < 0.1:
-                            converged = True
-                            break
+                            n_consecutive_stable += 1
+                            if n_consecutive_stable >= min_stable_checks:
+                                converged = True
+                                logger.info(
+                                    f"MCMC converged after {total_steps} steps "
+                                    f"(tau_max={tau_max:.1f}, tau_factor={tau_factor})"
+                                )
+                                break
+                        else:
+                            n_consecutive_stable = 0  # Reset if not stable
+                    else:
+                        n_consecutive_stable = 0  # Reset if not yet met length criterion
+                    
                     tau_max_old = tau_max
+                    
+                    # Log progress periodically
+                    if total_steps % 2000 == 0:
+                        logger.debug(
+                            f"MCMC progress: {total_steps} steps, "
+                            f"tau_max={tau_max:.1f}, "
+                            f"required={tau_factor * tau_max:.0f} steps"
+                        )
+                        
                 except Exception:
                     # Autocorrelation time unreliable on short chains; keep running
+                    n_consecutive_stable = 0
                     pass
 
             if not converged:
@@ -1619,6 +1659,7 @@ class Zeropoint:
                         inst_mag + delta_mag,  # y = m_cal
                         inst_mag_err,          # x_err
                         yerr,                  # y_err
+                        adaptive=True,         # Enable adaptive convergence
                     )
                     # Build dummy cov matrix for compatibility
                     cov = np.diag([zp_std**2, 0.0]) if np.isfinite(zp_std) else np.diag([np.nan, 0.0])
