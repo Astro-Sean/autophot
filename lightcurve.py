@@ -550,12 +550,13 @@ def _compute_detection_mask(
             & (snr >= float(snr_limit))
         )
         # Debug logging for detection decision
-        if len(snr) > 0:
+        if len(snr) > 0 and len(detected) > 0:
             logging.info(f"_compute_detection_mask: method={method}, snr_source={snr_source}, snr={snr[0]:.3f}, limit={snr_limit}, detected={detected[0]}")
     else:
         # Use magnitude comparison with limiting magnitude if available and reasonable
         # Otherwise fall back to SNR-based detection using magnitude errors
-        valid_lmag = np.isfinite(lmag) & (lmag > 10)  # Limiting mag should be positive and reasonable (> 10)
+        MIN_REASONABLE_LIMITING_MAG = 10.0  # Limiting mag should be positive and reasonable
+        valid_lmag = np.isfinite(lmag) & (lmag > MIN_REASONABLE_LIMITING_MAG)
         if np.any(valid_lmag):
             # Use limiting magnitude where valid and reasonable
             detected = np.isfinite(mag) & np.isfinite(err) & (mag < lmag)
@@ -964,13 +965,13 @@ def plot_lightcurve(
                 # Check if this is already an apparent magnitude (band-specific inverted column)
                 is_apparent = band_inv_mag_col is not None
                 if not is_apparent and zp_col in df.columns:
-                    # Convert instrumental to apparent
-                    df.loc[inverted_only, "inv_apparent_mag"] = df.loc[inverted_only, inv_mag_col] + df.loc[inverted_only, zp_col] + band_offset
+                    # Convert instrumental to apparent (band_offset added later when assigning to plot_mag)
+                    df.loc[inverted_only, "inv_apparent_mag"] = df.loc[inverted_only, inv_mag_col] + df.loc[inverted_only, zp_col]
                     if inv_err_col and inv_err_col in df.columns:
                         df.loc[inverted_only, "inv_apparent_mag_err"] = df.loc[inverted_only, inv_err_col]
                     else:
                         df.loc[inverted_only, "inv_apparent_mag_err"] = np.nan
-                    df.loc[inverted_only, "plot_mag"] = df.loc[inverted_only, "inv_apparent_mag"]
+                    df.loc[inverted_only, "plot_mag"] = df.loc[inverted_only, "inv_apparent_mag"] + band_offset
                     df.loc[inverted_only, "plot_err"] = df.loc[inverted_only, "inv_apparent_mag_err"]
                 else:
                     # Already apparent magnitude
@@ -1299,14 +1300,14 @@ def plot_lightcurve(
                     and "flux_psf_err" in d1.columns
                 ):
                     snr1 = np.divide(
-                        d1["flux_psf"],
+                        np.abs(d1["flux_psf"]),  # Use absolute flux to handle negative PSF fits
                         d1["flux_psf_err"],
                         out=np.full(len(d1), np.nan),
                         where=(np.asarray(d1["flux_psf_err"]) > 0)
                         & np.isfinite(d1["flux_psf_err"]),
                     )
                     snr2 = np.divide(
-                        d2["flux_psf"],
+                        np.abs(d2["flux_psf"]),  # Use absolute flux to handle negative PSF fits
                         d2["flux_psf_err"],
                         out=np.full(len(d2), np.nan),
                         where=(np.asarray(d2["flux_psf_err"]) > 0)
@@ -1827,14 +1828,14 @@ def generate_photometry_table(
                     and "flux_psf_err" in d1.columns
                 ):
                     snr1 = np.divide(
-                        d1["flux_psf"],
+                        np.abs(d1["flux_psf"]),  # Use absolute flux to handle negative PSF fits
                         d1["flux_psf_err"],
                         out=np.full(len(d1), np.nan),
                         where=(np.asarray(d1["flux_psf_err"]) > 0)
                         & np.isfinite(d1["flux_psf_err"]),
                     )
                     snr2 = np.divide(
-                        d2["flux_psf"],
+                        np.abs(d2["flux_psf"]),  # Use absolute flux to handle negative PSF fits
                         d2["flux_psf_err"],
                         out=np.full(len(d2), np.nan),
                         where=(np.asarray(d2["flux_psf_err"]) > 0)

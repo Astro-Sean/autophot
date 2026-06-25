@@ -260,6 +260,11 @@ def _injection_worker(args):
         #   and avoids bias near chip gaps / bands).
         invalid = ~np.isfinite(cutout)
         if np.any(invalid):
+            # Check if PSF would have significant overlap with invalid pixels
+            # If so, reject this injection site to avoid biasing recovery statistics
+            invalid_fraction = np.sum(invalid) / invalid.size
+            if invalid_fraction > 0.1:  # More than 10% of PSF would be masked
+                return False, 0.0, np.nan
             psf_img = np.asarray(psf_img, dtype=float)
             psf_img[invalid] = 0.0
         new_img = cutout + psf_img
@@ -378,8 +383,9 @@ def _injection_worker(args):
                     aw = a * w  # broadcast weights across rows
                     m = aw @ a.T  # 2x2
                     b = aw @ data[ok].ravel()  # 2,
+                    # Use pseudo-inverse for numerical stability with ill-conditioned matrices
                     try:
-                        cov = np.linalg.inv(m)
+                        cov = np.linalg.pinv(m)
                     except Exception:
                         cov = None
                     if cov is not None and np.all(np.isfinite(cov)):
@@ -1805,7 +1811,8 @@ class Limits:
                 the per-trial detection flags (needed for the optional logistic
                 fit), but we still avoid caching large per-trial arrays.
                 """
-                cache_key = f"{round(m, 4)}"
+                # Use full precision to avoid cache key collisions during bisection
+                cache_key = f"{m:.12f}"
                 if cache_key in _trial_cache:
                     cached = _trial_cache[cache_key]
                     if return_flags:

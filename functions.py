@@ -738,11 +738,14 @@ class SuppressStdout:
         import sys, os
 
         self._original_stdout = sys.stdout
+        self._opened_devnull = True
         sys.stdout = open(os.devnull, "w")
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-
-        sys.stdout.close()
+        # Only close stdout if we opened it (i.e., os.devnull)
+        # Don't close permanently if it was already open
+        if self._opened_devnull:
+            sys.stdout.close()
         sys.stdout = self._original_stdout
 
 
@@ -1976,6 +1979,11 @@ def rebin(arr, new_shape):
     :rtype: array
 
     """
+    # Add divisibility check to prevent ValueError
+    if arr.shape[0] % new_shape[0] != 0 or arr.shape[1] % new_shape[1] != 0:
+        raise ValueError(
+            f"Array dimensions {arr.shape} are not evenly divisible by new_shape {new_shape}"
+        )
     shape = (
         new_shape[0],
         arr.shape[0] // new_shape[0],

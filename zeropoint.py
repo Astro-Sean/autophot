@@ -1168,7 +1168,8 @@ class Zeropoint:
                     # Converged when chain length > tau_factor * tau for all params
                     if np.all(tau_arr * tau_factor < total_steps):
                         # Also require tau to be stable (<10% change)
-                        if abs(tau_max - tau_max_old) / tau_max < 0.1:
+                        # Add check for tau_max > 0 to prevent division by zero
+                        if tau_max > 1e-10 and abs(tau_max - tau_max_old) / tau_max < 0.1:
                             converged = True
                             break
                     tau_max_old = tau_max
@@ -1297,7 +1298,8 @@ class Zeropoint:
                     tau_arr = sampler.get_autocorr_time(quiet=True)
                     tau_max = float(np.nanmax(tau_arr))
                     if np.all(tau_arr * tau_factor < total_steps):
-                        if abs(tau_max - tau_max_old) / tau_max < 0.1:
+                        # Add check for tau_max > 0 to prevent division by zero
+                        if tau_max > 1e-10 and abs(tau_max - tau_max_old) / tau_max < 0.1:
                             converged = True
                             break
                     tau_max_old = tau_max
