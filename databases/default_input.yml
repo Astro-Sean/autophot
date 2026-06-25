@@ -114,6 +114,9 @@ default_input:
     psf_adaptive_iterations: True # bool --- Enable adaptive EPSFBuilder iteration strategy (start with fewer iterations, increase only if not converged).
     psf_maxiters_initial: 5 # int --- Initial EPSFBuilder max iterations when adaptive_iterations is True (lower = faster, but may need retry).
     psf_maxiters_max: 10 # int --- Maximum EPSFBuilder iterations for retry when adaptive_iterations is True and initial run didn't converge.
+    psf_auto_oversample_undersampled: True # bool --- Automatically increase oversampling to 4x for undersampled images (FWHM <= 2.5 px).
+    psf_adaptive_sigma_clip: True # bool --- Adapt sigma clipping parameters based on number of PSF stars (less aggressive with few stars, more aggressive with many).
+    psf_adaptive_smoothing_kernel: True # bool --- Use Gaussian smoothing kernel for undersampled data, quartic for well-sampled data.
     psf_fit_boxsize_scale_fwhm: 2.5 # float --- EPSF star-fitting box size in FWHM units (larger captures more wings; too small can make PSF too narrow).
     psf_fit_box_min_arcsec: 2.5 # float --- Minimum PSF build fit-box size in arcsec (converted to pixels via pixel_scale).
     psf_cutout_size_scale_fwhm: 10.0 # float --- EPSF star-cutout size in FWHM units (controls total wing coverage in PSF build).
