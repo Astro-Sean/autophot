@@ -867,7 +867,8 @@ def flux_to_mag(
     """
     with np.errstate(divide="ignore", invalid="ignore"):
         mag = -2.5 * np.log10(flux)
-        mag_err = (2.5 / np.log(10)) * (flux_err / flux)
+        # Add conditional to handle zero flux properly
+        mag_err = np.where(flux > 0, (2.5 / np.log(10)) * (flux_err / flux), np.nan)
     return mag, mag_err
 
 

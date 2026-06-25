@@ -389,18 +389,21 @@ class Find_FWHM:
             # --- Convert fluxes -> magnitudes ---
             flux = df["flux_AP"].values.astype(float)
             peak = df["maxPixel"].values.astype(float)
-            df["m_inst"] = -2.5 * np.log10(flux)
-            df["m_peak"] = -2.5 * np.log10(peak)
+            # Add safety check for log10
+            flux_safe = np.maximum(flux, 1e-10)
+            peak_safe = np.maximum(peak, 1e-10)
+            df["m_inst"] = -2.5 * np.log10(flux_safe)
+            df["m_peak"] = -2.5 * np.log10(peak_safe)
 
             # --- Magnitude errors ---
             if "flux_AP_err" in df.columns and np.any(np.isfinite(df["flux_AP_err"])):
                 fe = df["flux_AP_err"].values.astype(float)
-                df["m_inst_err"] = (2.5 / np.log(10)) * (fe / flux)
+                df["m_inst_err"] = (2.5 / np.log(10)) * (fe / flux_safe)
             else:
                 df["m_inst_err"] = np.nan
             if "maxPixel_err" in df.columns and np.any(np.isfinite(df["maxPixel_err"])):
                 pe = df["maxPixel_err"].values.astype(float)
-                df["m_peak_err"] = (2.5 / np.log(10)) * (pe / peak)
+                df["m_peak_err"] = (2.5 / np.log(10)) * (pe / peak_safe)
             else:
                 df["m_peak_err"] = np.nan
 
@@ -885,7 +888,9 @@ class Find_FWHM:
                 _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
                 df["x_pix"] = df[_xcol]
                 df["y_pix"] = df[_ycol]
-                df["s2n"] = df["peak"] / std
+                # Add safety check to prevent division by zero
+                std_safe = np.maximum(std, 1e-12)
+                df["s2n"] = df["peak"] / std_safe
                 fwhm_list = []
                 half = int(max(default_scale, np.ceil(scale_multiplier * fwhm / 2)))
                 for _, r in df.iterrows():
@@ -1145,6 +1150,8 @@ class Find_FWHM:
                 if rr.size == 0:
                     continue
                 line_vals = data[rr, cc]
+                if len(line_vals) == 0:
+                    continue
                 if (
                     np.count_nonzero(line_vals > threshold) / len(line_vals)
                     < min_line_frac
