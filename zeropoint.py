@@ -851,7 +851,7 @@ class Zeropoint:
         x = np.asarray(x, float)
         y = np.asarray(y, float)
         x_err = np.asarray(x_err, float)
-        y_err = np.asarray(y, float)
+        y_err = np.asarray(y_err, float)
         
         # Finite mask
         finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(x_err) & np.isfinite(y_err)
