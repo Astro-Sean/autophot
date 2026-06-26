@@ -2868,7 +2868,7 @@ class Limits:
                     tag = f"S/N$\\geq${d_snr:.0f}" if d_snr is not None else f"#{idx+1}"
 
                     if d_bracket:
-                        bm, bc, _ = zip(*d_bracket)
+                        bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in d_bracket])
                         bc_pct = np.asarray(bc, float) * 100.0
                         bm = np.asarray(bm, float)
                         ax.scatter(bm, bc_pct, s=16, color=c_brk, alpha=0.85,
@@ -2881,7 +2881,7 @@ class Limits:
                                                         lw=0.5, alpha=0.6))
 
                     if d_bisect:
-                        bm, bc, _ = zip(*d_bisect)
+                        bm, bc, _ = zip(*[(s[0], s[1], s[2]) for s in d_bisect])
                         bc_pct = np.asarray(bc, float) * 100.0
                         bm = np.asarray(bm, float)
                         ax.scatter(bm, bc_pct, s=16, color=c_bis, alpha=0.85,
