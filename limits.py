@@ -2025,7 +2025,7 @@ class Limits:
                         hi_f = float(f_faint) if "f_faint" in locals() else np.nan
                     except Exception:
                         hi_f = np.nan
-                    bisect_steps = [(lo_m, lo_c, lo_f), (hi_m, hi_c, hi_f)]
+                    bisect_steps = [(lo_m, lo_c, lo_f, np.nan), (hi_m, hi_c, hi_f, np.nan)]
 
                     for _ in range(30):
                         mid_m = 0.5 * (lo_m + hi_m)
@@ -3015,6 +3015,7 @@ class Limits:
                     try:
                         m0 = float(s[0])
                         c0 = float(s[1])
+                        # s[2] is flux, s[3] is flux_err (not used here)
                     except Exception:
                         continue
                     if np.isfinite(m0) and np.isfinite(c0):
