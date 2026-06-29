@@ -1974,6 +1974,10 @@ class PSF:
             oversample = max(
                 1, int(self.input_yaml["photometry"].get("psf_oversample", 1))
             )
+            
+            # Adaptive oversampling parameters
+            oversample_psf = bool(self.input_yaml["photometry"].get("oversample_psf", False))
+            oversample_psf_fwhm = float(self.input_yaml["photometry"].get("oversample_psf_fwhm", 1.5))
 
             if make_template_psf:
                 # Template header may lack APER/FWHM; gain must be present (e-/ADU).
@@ -2074,15 +2078,11 @@ class PSF:
                 build_sampling_boost += 0.10
             build_boost_cap = float(phot_cfg.get("psf_build_sampling_boost_max", 1.6))
 
-            # Detect undersampling: FWHM <= 2 pixels is a typical regime where
-            # a PSF spans only a handful of pixels across the core and is at
-            # high risk of aliasing.  We *do not* change the oversampling
-            # factor automatically (user controls this via config), but we
-            # still adapt centroiding and cutout sizes below.
-            undersampled_fwhm_threshold = float(
-                phot_cfg.get("undersampled_fwhm_threshold", 2.5)
-            )
+            # Detect undersampling: use the same threshold as adaptive oversampling
+            # If oversample_psf is True, use oversample_psf_fwhm; otherwise use default 2.5 px
+            undersampled_fwhm_threshold = oversample_psf_fwhm if oversample_psf else 2.5
             undersampled = fwhm <= undersampled_fwhm_threshold
+            
             if undersampled:
                 build_boost_cap_u = float(
                     phot_cfg.get("psf_build_sampling_boost_max_undersampled", 2.2)
@@ -2090,22 +2090,15 @@ class PSF:
                 build_boost_cap = max(build_boost_cap, build_boost_cap_u)
             build_sampling_boost = float(min(build_sampling_boost, max(1.0, build_boost_cap)))
             
-            # Adaptive oversampling for undersampled data
-            # Undersampled images (FWHM <= 2.5 px) need higher oversampling to properly sample PSF core
-            auto_oversample = bool(phot_cfg.get("psf_auto_oversample_undersampled", True))
-            if undersampled and oversample <= 1 and auto_oversample:
+            # Adaptive oversampling based on FWHM threshold
+            # Only applies when oversample_psf=True and current oversample <= 1
+            if oversample_psf and undersampled and oversample <= 1:
                 original_oversample = oversample
                 oversample = 4  # Increase to 4x for undersampled data
                 log.info(
-                    "Auto-increasing oversample from %dx to %dx for undersampled data (FWHM=%.2f pix)",
-                    original_oversample, oversample, fwhm
-                )
-            elif undersampled and oversample <= 1 and not auto_oversample:
-                log.info(
-                    "Image appears undersampled (FWHM=%.2f pix) and psf_oversample=%d; "
-                    "consider increasing psf_oversample in the config or enabling psf_auto_oversample_undersampled",
-                    fwhm,
-                    oversample,
+                    "Adaptive PSF oversampling: FWHM=%.2f px <= %.2f px threshold, "
+                    "increasing oversample from %dx to %dx",
+                    fwhm, undersampled_fwhm_threshold, original_oversample, oversample
                 )
             if undersampled and bool(
                 phot_cfg.get("psf_disable_build_quality_cuts_undersampled", True)
