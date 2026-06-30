@@ -5839,7 +5839,7 @@ def run_photometry():
         # Calibrates the magnitudes for each method (AP, PSF)
 
         for method in ["AP", "PSF"]:
-            if method not in image_zeropoint:
+            if method not in image_zeropoint or "zeropoint" not in image_zeropoint[method]:
                 logging.info(f"{method} zeropoint not available - skipping")
                 continue
             idx = 0
@@ -6030,16 +6030,16 @@ def run_photometry():
                         if rec_method in {"MCMC", "EMCEE"}:
                             rec_method = "EMCEE"
                         if rec_method in {"PSF", "EMCEE"}:
-                            if "PSF" in image_zeropoint:
+                            if "PSF" in image_zeropoint and "zeropoint" in image_zeropoint["PSF"]:
                                 zeropoint = image_zeropoint["PSF"]["zeropoint"]
-                            elif "AP" in image_zeropoint:
+                            elif "AP" in image_zeropoint and "zeropoint" in image_zeropoint["AP"]:
                                 zeropoint = image_zeropoint["AP"]["zeropoint"]
                             else:
                                 zeropoint = None
                         else:
-                            if "AP" in image_zeropoint:
+                            if "AP" in image_zeropoint and "zeropoint" in image_zeropoint["AP"]:
                                 zeropoint = image_zeropoint["AP"]["zeropoint"]
-                            elif "PSF" in image_zeropoint:
+                            elif "PSF" in image_zeropoint and "zeropoint" in image_zeropoint["PSF"]:
                                 zeropoint = image_zeropoint["PSF"]["zeropoint"]
                             else:
                                 zeropoint = None

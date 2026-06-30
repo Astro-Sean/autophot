@@ -1867,9 +1867,9 @@ class AutomatedPhotometry:
                     if download_kind is True:
                         download_kind = "panstarrs"
 
+                    filters_str = ", ".join(sorted(required_filters)) if required_filters else "None"
                     _log(
-                        "Downloading templates for science image filters: %s",
-                        ", ".join(sorted(required_filters)) if required_filters else "None"
+                        f"Downloading templates for science image filters: {filters_str}"
                     )
 
                     if download_kind == "panstarrs":
