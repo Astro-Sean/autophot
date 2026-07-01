@@ -278,7 +278,7 @@ class BackgroundSubtractor:
         fwhm_pixels: float = None,
         mesh_scale: float = 10.0,
         region_fraction_limit: float = 0.20,
-        min_box: int = 64,
+        min_box: int = 128,
     ):
         """
         Derive Background2D box and smoothing-filter sizes from the image PSF.
@@ -288,7 +288,7 @@ class BackgroundSubtractor:
         * mesh_scale = 6 -> boxes are ~6x FWHM.  Large enough that individual
           sources don't dominate a box, but small enough that the mesh resolves
           real sky gradients (vignetting, scattered light, etc.).
-        * min_box = 32 prevents pathologically small meshes.
+        * min_box = 128 matches LSST's bin size for better sky tracking.
         * filter_size is 3 or 5 **mesh boxes** (NOT pixels!).  In Background2D
           this is a median filter applied to the *mesh grid*, so filter_size=3
           means a 3x3 box neighbourhood.  Values much larger than 5 flatten
@@ -437,7 +437,7 @@ class BackgroundSubtractor:
         # Optional: update residual between iterations using a quick Background2D
         # fit (closer to the notebook's "detect -> estimate -> subtract -> detect").
         update_residual_with_background2d = bool(
-            cfg_bkg.get("source_mask_iterative_bkg_update", False)
+            cfg_bkg.get("source_mask_iterative_bkg_update", True)
         )
 
         mask = np.zeros(image.shape, dtype=bool)
