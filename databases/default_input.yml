@@ -473,7 +473,7 @@ default_input:
     global_mask_edge_flatten_sigma_px: null # float|null --- Gaussian smoothing sigma (pixels) for mask-edge flattening. If null, defaults to radius/2.
     source_mask_convolve: True # bool --- If True, Gaussian-smooth before detection (slower; can reduce mask fragmentation).
     source_mask_convolve_first_iter_only: True # bool --- If source_mask_convolve=True, smooth only on iteration 0 (faster).
-    source_mask_iterative_bkg_update: False # bool --- If True, update residual between mask iterations using a quick coarse Background2D fit.
+    source_mask_iterative_bkg_update: True # bool --- If True, update residual between mask iterations using a quick coarse Background2D fit.
 
     local_mesh_scale: 0.8 # float --- Background2D box-size scale factor relative to FWHM (local background).
     local_min_box: 6 # int --- Minimum Background2D box size (pixels).
