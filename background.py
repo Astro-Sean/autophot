@@ -383,7 +383,7 @@ class BackgroundSubtractor:
         nsigma: float = 2.5,
         npixels: int = 3,
         fwhm_pixels: float = 3.0,
-        dilate_factor: float = 1.2,
+        dilate_factor: float = 3.0,
         n_iterations: int = 3,  # NEW: iterative masking
     ) -> np.ndarray:
         """
@@ -429,7 +429,7 @@ class BackgroundSubtractor:
         )
         # Inspired by the STScI notebook: convolve before thresholding so
         # structured noise doesn't fragment detections into tiny islands.
-        use_convolved_detection = bool(cfg_bkg.get("source_mask_convolve", False))
+        use_convolved_detection = bool(cfg_bkg.get("source_mask_convolve", True))
         # When True, only smooth on the first iteration (avoids N full-image convolves).
         convolve_first_iter_only = bool(
             cfg_bkg.get("source_mask_convolve_first_iter_only", True)
@@ -995,7 +995,7 @@ class BackgroundSubtractor:
             params = dict(
                 nsigma=3.0,
                 n_iterations=2,
-                dilate_factor=1.2,
+                dilate_factor=3.0,
                 mesh_scale=10.0,
                 exclude_percentile=90.0,
             )
@@ -1003,7 +1003,7 @@ class BackgroundSubtractor:
             params = dict(
                 nsigma=2.5,
                 n_iterations=3,
-                dilate_factor=1.5,
+                dilate_factor=3.0,
                 mesh_scale=8.0,
                 exclude_percentile=85.0,
             )
@@ -1011,7 +1011,7 @@ class BackgroundSubtractor:
             params = dict(
                 nsigma=2.2,
                 n_iterations=3,
-                dilate_factor=1.6,
+                dilate_factor=3.0,
                 mesh_scale=8.0,
                 exclude_percentile=80.0,
             )
@@ -1019,7 +1019,7 @@ class BackgroundSubtractor:
             params = dict(
                 nsigma=2.2,
                 n_iterations=4,
-                dilate_factor=1.8,
+                dilate_factor=3.0,
                 mesh_scale=7.0,
                 exclude_percentile=80.0,
             )
@@ -1030,7 +1030,7 @@ class BackgroundSubtractor:
                 "Background: fast_mode=True - using lighter masking and coarser mesh for speed."
             )
             params["n_iterations"] = max(1, min(params["n_iterations"], 2))
-            params["dilate_factor"] = min(params["dilate_factor"], 2.0)
+            params["dilate_factor"] = min(params["dilate_factor"], 3.0)
             params["mesh_scale"] = max(5.0, params["mesh_scale"] * 0.8)
 
         params["regime"] = regime
@@ -1855,7 +1855,7 @@ class BackgroundSubtractor:
             nsigma=3,
             npixels=5,
             fwhm_pixels=fwhm_pixels,
-            dilate_factor=1.5,
+            dilate_factor=3.0,
             n_iterations=2,
         )
         if precomputed_rms is not None:
