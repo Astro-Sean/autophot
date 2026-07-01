@@ -471,7 +471,7 @@ default_input:
     global_mask_edge_flatten: True # bool --- If True, damp Background2D interpolation overshoot near masked regions by replacing a thin band around mask edges with a smooth estimate from nearby unmasked pixels.
     global_mask_edge_flatten_radius_px: null # float|null --- Flatten band radius (pixels). If null, defaults to max(2, ~1*FWHM).
     global_mask_edge_flatten_sigma_px: null # float|null --- Gaussian smoothing sigma (pixels) for mask-edge flattening. If null, defaults to radius/2.
-    source_mask_convolve: False # bool --- If True, Gaussian-smooth before detection (slower; can reduce mask fragmentation).
+    source_mask_convolve: True # bool --- If True, Gaussian-smooth before detection (slower; can reduce mask fragmentation).
     source_mask_convolve_first_iter_only: True # bool --- If source_mask_convolve=True, smooth only on iteration 0 (faster).
     source_mask_iterative_bkg_update: False # bool --- If True, update residual between mask iterations using a quick coarse Background2D fit.
 
