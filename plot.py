@@ -1010,7 +1010,7 @@ class Plot:
                         lower_left,
                         square_size,
                         square_size,
-                        edgecolor="orange",
+                        edgecolor="red",
                         facecolor="none",
                         label="Reference Sources",
                         zorder=1,
