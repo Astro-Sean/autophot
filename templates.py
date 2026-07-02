@@ -2281,56 +2281,9 @@ class Templates:
                         mask[seg_pixels] = 1
                         masked_centres.append((cx, cy))
 
-            # --- Mask remaining flagged sources (skip if near target) ---
-            invalid_bbox_count = 0
-            for src in tbl.itertuples(index=False):
-                cx = (src.bbox_xmin + src.bbox_xmax) / 2
-                cy = (src.bbox_ymin + src.bbox_ymax) / 2
-                src_dict = src._asdict()
-
-                if any(
-                    self.does_box_overlap(src_dict, pos, padding) for pos in ignore_position
-                ):
-                    continue
-
-                # Guard against degenerate/invalid segmentation boxes.
-                x_min = float(src.bbox_xmin)
-                x_max = float(src.bbox_xmax)
-                y_min = float(src.bbox_ymin)
-                y_max = float(src.bbox_ymax)
-                if not np.all(np.isfinite([x_min, x_max, y_min, y_max, cx, cy])):
-                    invalid_bbox_count += 1
-                    continue
-
-                # Photutils bounding boxes can be tight; enforce at least 1 pixel.
-                w = max(1.0, x_max - x_min)
-                h = max(1.0, y_max - y_min)
-                if w <= 0 or h <= 0:
-                    invalid_bbox_count += 1
-                    continue
-
-                # Clamp aperture to image bounds
-                cx_clamped = np.clip(cx, 0, mask.shape[1] - 1)
-                cy_clamped = np.clip(cy, 0, mask.shape[0] - 1)
-
-                try:
-                    rect = RectangularAperture((cx_clamped, cy_clamped), w=w, h=h, theta=0)
-                    rect_img = rect.to_mask().to_image(shape=mask.shape)
-                    if rect_img is None:
-                        invalid_bbox_count += 1
-                        continue
-                    mask += rect_img.astype(np.int32)
-                    masked_centres.append((cx_clamped, cy_clamped))
-                except Exception as e:
-                    logger.warning(f"create_image_mask: failed to create aperture for source at ({cx}, {cy}): {e}")
-                    invalid_bbox_count += 1
-                    continue
-
-            if invalid_bbox_count > 0:
-                logger.warning(
-                    "create_image_mask: skipped %d invalid/degenerate segmentation boxes.",
-                    invalid_bbox_count,
-                )
+            # NOTE: Do NOT mask remaining unsaturated sources - they are needed
+            # for flux calibration and kernel fitting. Only saturated/negative
+            # sources and bright catalog overlaps should be masked.
 
             # Collapse overlapping regions
             mask = np.clip(mask, 0, 1)
