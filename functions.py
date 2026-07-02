@@ -2094,7 +2094,7 @@ def remove_wcs_from_header(header):
 
 def convert_ra_dec_to_hms_dms(ra_deg, dec_deg):
     # Create a SkyCoord object using RA and DEC in degrees
-    coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="fk5", equinox="J2000")
+    coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
     # Convert to the required format
     ra_str = coord.ra.to_string(unit=u.hour, sep=":", precision=1)
     dec_str = coord.dec.to_string(sep=":", precision=1, alwayssign=True)

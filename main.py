@@ -1550,7 +1550,7 @@ def run_photometry():
                     "Provide target_ra/target_dec or remove target_name."
                 )
             target_coords = SkyCoord(
-                target_ra, target_dec, unit=(u.deg, u.deg), frame="fk5", equinox="J2000"
+                target_ra, target_dec, unit=(u.deg, u.deg), frame="icrs"
             )
             input_yaml["target_ra"] = target_coords.ra.degree
             input_yaml["target_dec"] = target_coords.dec.degree
@@ -1561,8 +1561,7 @@ def run_photometry():
                 input_yaml["target_ra"],
                 input_yaml["target_dec"],
                 unit=(u.deg, u.deg),
-                frame="fk5",
-                equinox="J2000",
+                frame="icrs",
             )
             input_yaml["target_ra"] = target_coords.ra.degree
             input_yaml["target_dec"] = target_coords.dec.degree
@@ -1595,8 +1594,7 @@ def run_photometry():
                             ra_val,
                             dec_val,
                             unit=(ra_unit, dec_unit),
-                            frame="fk5",
-                            equinox="J2000",
+                            frame="icrs",
                         )
                         input_yaml["target_ra"] = float(target_coords.ra.degree)
                         input_yaml["target_dec"] = float(target_coords.dec.degree)
@@ -2284,8 +2282,7 @@ def run_photometry():
             coords = SkyCoord(
                 ra=variable_sources["RA"].values * u.deg,
                 dec=variable_sources["DEC"].values * u.deg,
-                frame="fk5",
-                equinox="J2000",
+                frame="icrs",
             )
             # Converts sky coordinates to pixel coordinates using WCS.
             try:
@@ -2442,8 +2439,7 @@ def run_photometry():
                     center[0][0],
                     center[1][0],
                     unit=(u.deg, u.deg),
-                    frame="fk5",
-                    equinox="J2000",
+                    frame="icrs",
                 )
                 input_yaml["target_ra"] = target_coords.ra.degree
                 input_yaml["target_dec"] = target_coords.dec.degree
@@ -2458,8 +2454,7 @@ def run_photometry():
                     target_ra,
                     target_dec,
                     unit=(u.deg, u.deg),
-                    frame="fk5",
-                    equinox="J2000",
+                    frame="icrs",
                 )
                 target_x_pix, target_y_pix = update_target_pixel_coords(
                     input_yaml, imageWCS, wcs_origin
@@ -2481,8 +2476,7 @@ def run_photometry():
                     target_ra,
                     target_dec,
                     unit=(u.deg, u.deg),
-                    frame="fk5",
-                    equinox="J2000",
+                    frame="icrs",
                 )
                 target_x_pix, target_y_pix = imageWCS.all_world2pix(
                     target_ra, target_dec, wcs_origin
@@ -2517,8 +2511,7 @@ def run_photometry():
                     header["RA"],
                     header["DEC"],
                     unit=(u.deg, u.deg),
-                    frame="fk5",
-                    equinox="J2000",
+                    frame="icrs",
                 )
                 input_yaml["target_ra"] = target_coords.ra.degree
                 input_yaml["target_dec"] = target_coords.dec.degree
@@ -3101,16 +3094,14 @@ def run_photometry():
             ra=target_coords.ra,
             dec=target_coords.dec,
             unit="deg",
-            frame="fk5",
-            equinox="J2000",
+            frame="icrs",
         )
 
         source_coords = SkyCoord(
             ra=IsolatedSources["RA"] * u.degree,
             dec=IsolatedSources["DEC"] * u.degree,
             unit="deg",
-            frame="fk5",
-            equinox="J2000",
+            frame="icrs",
         )
 
         # Calculates separations.
@@ -3926,8 +3917,7 @@ def run_photometry():
                         ra=science_center_world[0],
                         dec=science_center_world[1],
                         unit="deg",
-                        frame="fk5",
-                        equinox="J2000",
+                        frame="icrs",
                     )
                     # Stores the target pixel coordinates.
                     target_x_pix, target_y_pix = update_target_pixel_coords(
@@ -5683,8 +5673,7 @@ def run_photometry():
             target_ra,
             target_dec,
             unit=(u.deg, u.deg),
-            frame="fk5",
-            equinox="J2000",
+            frame="icrs",
         )
 
         # Converts pixel coordinates to world coordinates.
@@ -5700,8 +5689,7 @@ def run_photometry():
             extracted_position[0],
             extracted_position[1],
             unit=(u.deg, u.deg),
-            frame="fk5",
-            equinox="J2000",
+            frame="icrs",
         )
         separation = coords_science_i.separation(target_coords).arcsecond
         try:
@@ -5814,8 +5802,7 @@ def run_photometry():
                 extracted_position[0],
                 extracted_position[1],
                 unit=(u.deg, u.deg),
-                frame="fk5",
-                equinox="J2000",
+                frame="icrs",
             )
             # Builds sky coordinates for (xpix + xpix_err, ypix) and (xpix, ypix + ypix_err).
             # pixel_to_world uses 0-based indexing by default (matching numpy arrays)

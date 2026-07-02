@@ -2058,7 +2058,8 @@ class Templates:
         snr_limit: int = 3000,
         create_source_mask: bool = True,
         ignore_position: Optional[List[Tuple[float, float]]] = None,
-        remove_large_sources: bool = True,
+        remove_large_sources: bool = False,
+        mask_bright_catalog_overlaps: bool = False,
         bright_sources: Optional[pd.DataFrame] = None,
     ) -> Tuple[np.ndarray, List[Tuple[float, float]]]:
         """
@@ -2066,10 +2067,9 @@ class Templates:
 
         Sources are detected via sigma-clipped thresholding and
         segmentation.  The mask includes:
-          - Saturated sources (peak > saturation level).
           - Negative-peak sources (likely artefacts).
-          - Anomalously large sources (optional, via sigma-clip on area).
-          - Sources overlapping known bright-catalog objects.
+          - Anomalously large sources (optional, via sigma-clip on area, disabled by default).
+          - Sources overlapping known bright-catalog objects (optional, disabled by default).
 
         Parameters
         ----------
@@ -2080,6 +2080,8 @@ class Templates:
         ignore_position : list of (x, y)
             Positions whose enclosing source should *not* be masked
             (typically the transient target).
+        mask_bright_catalog_overlaps : bool
+            If True, mask sources overlapping bright catalog objects (default False).
 
         Returns
         -------
@@ -2232,14 +2234,11 @@ class Templates:
                 return mask, masked_centres
 
             # Flag categories
-            is_saturated = tbl["max_value"] > saturate_frac * sat_lvl
             is_negative = tbl["max_value"] < 0
 
-            # Mask saturated and negative sources directly from their
+            # Mask negative-peak sources (likely artefacts) directly from their
             # segmentation footprints BEFORE removing them from tbl.
-            # Previously these were silently dropped, so bloomed/saturated
-            # stars were never present in the output mask.
-            for bad_src in tbl[is_saturated | is_negative].itertuples(index=False):
+            for bad_src in tbl[is_negative].itertuples(index=False):
                 seg_pixels = seg.data == bad_src.label
                 mask[seg_pixels] = 1
                 cx = (bad_src.bbox_xmin + bad_src.bbox_xmax) / 2
@@ -2253,19 +2252,19 @@ class Templates:
                     is_large = clipped.mask
                 else:
                     is_large = np.zeros(len(tbl), dtype=bool)
-                # Keep all sources EXCEPT the bad ones (saturated, negative, or large)
-                tbl = tbl[~(is_saturated | is_negative | is_large)]
+                # Keep all sources EXCEPT the bad ones (negative or large)
+                tbl = tbl[~(is_negative | is_large)]
             else:
-                # Keep all sources EXCEPT the bad ones (saturated or negative)
-                tbl = tbl[~(is_saturated | is_negative)]
+                # Keep all sources EXCEPT the bad ones (negative)
+                tbl = tbl[~(is_negative)]
 
             # Check if all sources were filtered out
             if len(tbl) == 0:
                 logger.warning("create_image_mask: all sources filtered out; returning empty mask.")
                 return mask, masked_centres
 
-            # --- Mask bright-catalog overlaps ---
-            if bright_sources is not None and len(bright_sources) > 0:
+            # --- Mask bright-catalog overlaps (optional) ---
+            if mask_bright_catalog_overlaps and bright_sources is not None and len(bright_sources) > 0:
                 bright_xy = list(zip(bright_sources["x_pix"].values,
                                      bright_sources["y_pix"].values))
                 for src in tbl.itertuples(index=False):
@@ -3996,8 +3995,9 @@ class Templates:
                 else {}
             )
             # Get saturation fraction for source filtering (consistent with PSF building)
+            # Use higher threshold (0.98) for template subtraction to avoid masking point sources
             subtraction_saturate_frac = float(
-                ts_cfg_inp.get("subtraction_saturate_fraction", 0.90)
+                ts_cfg_inp.get("subtraction_saturate_fraction", 0.98)
             )
             if _as_bool(ts_cfg_inp.get("inpaint_template_cores", False), False) and np.isfinite(
                 template_saturate
@@ -4179,7 +4179,7 @@ class Templates:
             ).astype(np.int32)
 
             # Segmentation-based source masks
-            # Template: less aggressive masking (no large source removal, smaller padding)
+            # Template: less aggressive masking (no large source removal, no bright catalog overlaps, smaller padding)
             template_seg_mask, template_seg_centers = self.create_image_mask(
                 templateImage,
                 sat_lvl=template_saturate,
@@ -4188,9 +4188,10 @@ class Templates:
                 create_source_mask=False,
                 ignore_position=target_location,
                 remove_large_sources=False,  # Don't remove large sources in template
+                mask_bright_catalog_overlaps=False,  # Don't mask bright catalog overlaps to preserve point sources
                 padding=int(2 * template_fwhm),  # Smaller padding for template
             )
-            # Science: less aggressive masking (only saturated/negative, not large sources)
+            # Science: less aggressive masking (only saturated/negative, not large sources, not bright catalog overlaps)
             science_seg_mask, science_seg_centers = self.create_image_mask(
                 scienceImage,
                 sat_lvl=science_saturate,
@@ -4199,6 +4200,7 @@ class Templates:
                 create_source_mask=False,
                 ignore_position=target_location,
                 remove_large_sources=False,  # Don't remove large sources to avoid masking too many
+                mask_bright_catalog_overlaps=False,  # Don't mask bright catalog overlaps to preserve point sources
                 padding=int(DEFAULT_FWHM_PADDING_MULTIPLIER * science_fwhm),
             )
 
