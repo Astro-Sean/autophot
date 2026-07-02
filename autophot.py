@@ -667,7 +667,7 @@ def find_variable_sources(
     Simbad.ROW_LIMIT = 500
 
     centre_coord = SkyCoord(
-        ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="fk5", equinox="J2000"
+        ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs"
     )
     _log(
         f"Querying SIMBAD within {radius_arcmin}' of "
@@ -800,7 +800,7 @@ def find_variable_sources(
     ra_qty = df["RA"].astype(float) * u.deg
     dec_qty = df["DEC"].astype(float) * u.deg
 
-    # source_coords = SkyCoord(ra=ra_qty, dec=dec_qty, frame="fk5", equinox="J2000")
+    # source_coords = SkyCoord(ra=ra_qty, dec=dec_qty, frame="icrs")
     # separations = centre_coord.separation(source_coords).to(u.arcmin).value
     # df["separation_arcmin"] = separations
 
