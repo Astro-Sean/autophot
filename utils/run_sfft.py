@@ -1601,6 +1601,11 @@ def run_sfft() -> Optional[int]:
                             "SFFT catalog schema may differ from expected version."
                         )
                         return
+                    
+                    # Get input sources count from matching_sources
+                    n_input = len(matching_sources) if matching_sources is not None else 0
+                    n_final = len(ast_ss)
+                    
                     x_data = ast_ss["MAG_REF_REF"]
                     ex_data = ast_ss["MAGERR_REF_REF"]
                     y_data = ast_ss["MAG_REF_SCI"] - ast_ss["MAG_REF_REF"]
@@ -1625,7 +1630,7 @@ def run_sfft() -> Optional[int]:
                         elinewidth=0.9,
                         markeredgewidth=0.9,
                         alpha=0.85,
-                        label="MAG(SCI) - MAG(REF)",
+                        label=f"Final sources ({n_final})",
                     )
                     ax.hlines(
                         [median, lower, upper],
@@ -1640,6 +1645,7 @@ def run_sfft() -> Optional[int]:
                     ax.set_ylabel("MAG_REF (SCI) - MAG_REF (REF)")
                     ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
                     ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=9)
+                    ax.set_title(f"SFFT source matching: {n_input} input -> {n_final} final sources", fontsize=10)
                     png_path = os.path.join(out_dir, f"VarCheck_{out_base}.png")
                     try:
                         plt.savefig(

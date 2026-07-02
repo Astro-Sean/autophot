@@ -4435,10 +4435,12 @@ def run_photometry():
                 # Cross-match science and template sources for subtraction
                 if len(image_sources) > 5:
                     template_obj = Templates(input_yaml=input_yaml)
+                    logging.info(f"Flux-consistent matching: input {len(image_sources)} sources")
                     MatchingSources, _ = template_obj.find_flux_consistent_sources(
                         image_sources,
                         template_sources,
                     )
+                    logging.info(f"Flux-consistent matching: output {len(MatchingSources)} sources")
                 else:
                     MatchingSources = image_sources
 
@@ -4468,6 +4470,7 @@ def run_photometry():
                     # crowded stars with close neighbours in either image).
                     # ------------------------------------------------------------------
                     ms = MatchingSources.copy()
+                    n_before_refine = len(ms)
                     try:
                         # Size-based outlier rejection (robust sigma-clipping on FWHM)
                         size_col = None
@@ -4487,6 +4490,12 @@ def run_photometry():
                                 good_size = finite & (
                                     np.abs(size - med) <= n_sigma * mad
                                 )
+                                n_size_rejected = len(ms) - good_size.sum()
+                                if n_size_rejected > 0:
+                                    logging.info(
+                                        f"Size-based rejection: removed {n_size_rejected} sources "
+                                        f"(FWHM sigma-clipping, n_sigma={n_sigma})"
+                                    )
                                 ms = ms[good_size]
 
                         # Crowding rejection: require each prior star to be relatively isolated
@@ -4528,7 +4537,20 @@ def run_photometry():
                                 [len(nb) - 1 for nb in ref_tree.query_ball_point(ms_xy, crowd_r)]
                             )
                             isolated = (sci_counts <= max_nei) & (ref_counts <= max_nei)
+                            n_crowd_rejected = len(ms) - isolated.sum()
+                            if n_crowd_rejected > 0:
+                                logging.info(
+                                    f"Crowding rejection: removed {n_crowd_rejected} sources "
+                                    f"(radius={crowd_r:.1f}px, max_nei={max_nei})"
+                                )
                             ms = ms[isolated]
+
+                        n_after_refine = len(ms)
+                        if n_after_refine < n_before_refine:
+                            logging.info(
+                                f"Source refinement: {n_before_refine} -> {n_after_refine} sources "
+                                f"({n_before_refine - n_after_refine} removed)"
+                            )
 
                         MatchingSources = ms
                     except Exception as e:
