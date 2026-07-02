@@ -286,7 +286,7 @@ class Plot:
                                 square_size,
                                 square_size,
                                 linewidth=0.5,
-                                edgecolor="r",
+                                edgecolor="blue",
                                 facecolor="none",
                                 alpha=0.5,
                             )
