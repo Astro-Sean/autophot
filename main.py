@@ -4391,6 +4391,22 @@ def run_photometry():
                         relaxed,
                     )
 
+                # Exclude sources that fall within masked regions (hardware defects)
+                # to avoid using contaminated sources for flux matching
+                if hardware_defects_mask_cached is not None:
+                    x_int = template_sources["x_pix"].astype(int).values
+                    y_int = template_sources["y_pix"].astype(int).values
+                    # Clip to image bounds
+                    x_int = np.clip(x_int, 0, hardware_defects_mask_cached.shape[1] - 1)
+                    y_int = np.clip(y_int, 0, hardware_defects_mask_cached.shape[0] - 1)
+                    not_masked = ~hardware_defects_mask_cached[y_int, x_int]
+                    well_aligned_mask = well_aligned_mask & not_masked
+                    n_masked = len(not_masked) - not_masked.sum()
+                    if n_masked > 0:
+                        logging.info(
+                            f"Excluded {n_masked} sources falling within masked regions"
+                        )
+
                 # Apply the mask to both image_sources and template_sources
                 image_sources = image_sources[well_aligned_mask]
                 template_sources = template_sources[well_aligned_mask]
