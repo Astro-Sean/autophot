@@ -5581,16 +5581,29 @@ def run_photometry():
             # Check for decorrelated difference image for additional panel
             diff_decorrelated = None
             try:
+                # Check if photometry-optimized image exists (indicates decorrelation was applied)
                 photometry_diff_path = differenceFpath.replace(".fits", "_photometry.fits")
-                # If photometry image exists, the main image is decorrelated
+                
                 if os.path.isfile(photometry_diff_path):
-                    # Load the main (decorrelated) difference image for the additional panel
-                    with fits.open(differenceFpath) as hdul:
-                        diff_data_check = hdul[0].data
-                        diff_header_check = hdul[0].header
-                    if diff_header_check.get("DECORR", (False, ""))[0]:
-                        diff_decorrelated = diff_data_check
-                        logger.info("Adding decorrelated difference image as additional panel in subtraction check")
+                    # Photometry image exists, so the main difference image should be decorrelated
+                    # Load the main difference image (which should be decorrelated)
+                    main_diff_path = differenceFpath.replace("_photometry.fits", ".fits")
+                    if os.path.isfile(main_diff_path):
+                        with fits.open(main_diff_path) as hdul:
+                            diff_header_check = hdul[0].header
+                            decorr_status = diff_header_check.get("DECORR", (False, ""))
+                            logger.info(f"Main difference image DECORR header: {decorr_status}")
+                            
+                            if decorr_status[0]:
+                                # Main image is decorrelated, use it for the additional panel
+                                diff_decorrelated = hdul[0].data
+                                logger.info("Adding decorrelated difference image as additional panel in subtraction check")
+                            else:
+                                logger.info("Main difference image exists but DECORR=False, skipping additional panel")
+                    else:
+                        logger.info(f"Main difference image not found at {main_diff_path}")
+                else:
+                    logger.info("Photometry-optimized image not found, assuming no decorrelation applied")
             except Exception as e:
                 logger.warning(f"Could not load decorrelated difference image: {e}")
             
