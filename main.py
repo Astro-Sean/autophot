@@ -5586,28 +5586,24 @@ def run_photometry():
                 base_name = os.path.splitext(os.path.basename(fpath))[0]
                 diff_path = write_dir / f"diff_{base_name}.fits"
                 
-                # Check if photometry-optimized image exists (indicates decorrelation was applied)
-                photometry_diff_path = write_dir / f"diff_{base_name}_photometry.fits"
+                # Check if decorrelated image exists (indicates decorrelation was applied)
+                decorr_diff_path = write_dir / f"diff_{base_name}_decorr.fits"
                 
-                if photometry_diff_path.exists():
-                    # Photometry image exists, so the main difference image should be decorrelated
-                    # Load the main difference image (which should be decorrelated)
-                    if diff_path.exists():
-                        with fits.open(diff_path) as hdul:
-                            diff_header_check = hdul[0].header
-                            decorr_status = diff_header_check.get("DECORR", (False, ""))
-                            logger.info(f"Main difference image DECORR header: {decorr_status}")
-                            
-                            if decorr_status[0]:
-                                # Main image is decorrelated, use it for the additional panel
-                                diff_decorrelated = hdul[0].data
-                                logger.info("Adding decorrelated difference image as additional panel in subtraction check")
-                            else:
-                                logger.info("Main difference image exists but DECORR=False, skipping additional panel")
-                    else:
-                        logger.info(f"Main difference image not found at {diff_path}")
+                if decorr_diff_path.exists():
+                    # Decorrelated image exists, load it for the additional panel
+                    with fits.open(decorr_diff_path) as hdul:
+                        diff_header_check = hdul[0].header
+                        decorr_status = diff_header_check.get("DECORR", (False, ""))
+                        logger.info(f"Decorrelated difference image DECORR header: {decorr_status}")
+                        
+                        if decorr_status[0]:
+                            # Decorrelated image is correctly marked, use it for the additional panel
+                            diff_decorrelated = hdul[0].data
+                            logger.info("Adding decorrelated difference image as additional panel in subtraction check")
+                        else:
+                            logger.info("Decorrelated image exists but DECORR=False, skipping additional panel")
                 else:
-                    logger.info("Photometry-optimized image not found, assuming no decorrelation applied")
+                    logger.info("Decorrelated difference image not found, assuming no decorrelation applied")
             except Exception as e:
                 logger.warning(f"Could not load decorrelated difference image: {e}")
             

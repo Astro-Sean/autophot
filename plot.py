@@ -99,7 +99,9 @@ class Plot:
         target_ra (float or None): Target RA in degrees for marking on weight maps.
         target_dec (float or None): Target Dec in degrees for marking on weight maps.
         masked_source_centers (list or None): List of (x, y) tuples for masked point source centers to mark with red 'x'.
-        diff_decorrelated (ndarray or None): Decorrelated difference image for additional panel (SFFT v1.5.0+).
+        diff_decorrelated (ndarray or None): Decorrelated difference image for additional panel (SFFT v1.5.0+). 
+                                              If provided, main diff is non-decorrelated (for photometry), 
+                                              diff_decorrelated is decorrelated (for detection).
         """
         import matplotlib.pyplot as plt
         from functions import set_size
@@ -131,7 +133,7 @@ class Plot:
             
             # Add decorrelated difference image if provided
             if diff_decorrelated is not None:
-                images["Decorrelated"] = diff_decorrelated
+                images["Decorrelated (Detection)"] = diff_decorrelated
             
             # Store dimensions for each image
             image_dims = {}
