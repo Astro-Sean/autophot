@@ -5578,6 +5578,22 @@ def run_photometry():
             target_ra = input_yaml.get("target_ra")
             target_dec = input_yaml.get("target_dec")
             
+            # Check for decorrelated difference image for additional panel
+            diff_decorrelated = None
+            try:
+                photometry_diff_path = differenceFpath.replace(".fits", "_photometry.fits")
+                # If photometry image exists, the main image is decorrelated
+                if os.path.isfile(photometry_diff_path):
+                    # Load the main (decorrelated) difference image for the additional panel
+                    with fits.open(differenceFpath) as hdul:
+                        diff_data_check = hdul[0].data
+                        diff_header_check = hdul[0].header
+                    if diff_header_check.get("DECORR", (False, ""))[0]:
+                        diff_decorrelated = diff_data_check
+                        logger.info("Adding decorrelated difference image as additional panel in subtraction check")
+            except Exception as e:
+                logger.warning(f"Could not load decorrelated difference image: {e}")
+            
             # Plots the template subtraction check.
             makePlots.subtraction_check(
                 image=get_image(fpath_nosub),
@@ -5601,6 +5617,7 @@ def run_photometry():
                 target_dec=target_dec,
                 masked_source_centers=masked_centers,
                 kernel_half_width=kernel_half_width,
+                diff_decorrelated=diff_decorrelated,
             )
 
         # Target FWHM should reflect the *measured target* width on this frame,

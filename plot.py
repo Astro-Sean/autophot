@@ -78,6 +78,7 @@ class Plot:
         target_dec=None,
         masked_source_centers=None,
         kernel_half_width=None,
+        diff_decorrelated=None,
     ):
         """
         Perform and visualize a subtraction check of astronomical images using zscale with percentile cleaning.
@@ -98,6 +99,7 @@ class Plot:
         target_ra (float or None): Target RA in degrees for marking on weight maps.
         target_dec (float or None): Target Dec in degrees for marking on weight maps.
         masked_source_centers (list or None): List of (x, y) tuples for masked point source centers to mark with red 'x'.
+        diff_decorrelated (ndarray or None): Decorrelated difference image for additional panel (SFFT v1.5.0+).
         """
         import matplotlib.pyplot as plt
         from functions import set_size
@@ -126,6 +128,10 @@ class Plot:
             zscale = ZScaleInterval()
 
             images = {"Image": image, "Reference": ref, "Difference": diff}
+            
+            # Add decorrelated difference image if provided
+            if diff_decorrelated is not None:
+                images["Decorrelated"] = diff_decorrelated
             
             # Store dimensions for each image
             image_dims = {}
@@ -164,11 +170,18 @@ class Plot:
                     vmins[key] = np.nanmin(img_data)
                     vmaxs[key] = np.nanmax(img_data)
 
-            # Set up figure with 1x3 layout for three images (Image, Reference, Difference)
-            fig = plt.figure(figsize=(15, 5), constrained_layout=False)
-            gs = GridSpec(1, 3, figure=fig, width_ratios=[1, 1, 1], wspace=0.08)
-            axes = [fig.add_subplot(gs[0, i]) for i in range(3)]
-            plt.subplots_adjust(left=0.05, right=0.97, top=0.93, bottom=0.08)
+            # Set up figure layout based on number of images
+            n_images = len(images)
+            if n_images == 4:  # With decorrelated image
+                fig = plt.figure(figsize=(20, 5), constrained_layout=False)
+                gs = GridSpec(1, 4, figure=fig, width_ratios=[1, 1, 1, 1], wspace=0.08)
+                axes = [fig.add_subplot(gs[0, i]) for i in range(4)]
+                plt.subplots_adjust(left=0.03, right=0.98, top=0.93, bottom=0.08)
+            else:  # Standard 3-panel layout
+                fig = plt.figure(figsize=(15, 5), constrained_layout=False)
+                gs = GridSpec(1, 3, figure=fig, width_ratios=[1, 1, 1], wspace=0.08)
+                axes = [fig.add_subplot(gs[0, i]) for i in range(3)]
+                plt.subplots_adjust(left=0.05, right=0.97, top=0.93, bottom=0.08)
 
             img_height, img_width = image.shape
             margin = 0.05
@@ -187,8 +200,8 @@ class Plot:
                     inset = 1.0 if side == "high" else 0.0
                     return side, main, inset
 
-            # Plot images with zscale scaling (Image, Reference, Difference)
-            image_titles = ["Image", "Reference", "Difference"]
+            # Plot images with zscale scaling
+            image_titles = list(images.keys())
             # Use first image's shape for all panels to ensure identical display
             if "Image" not in images:
                 logger.error("subtraction_check: 'Image' key not found in images dictionary")
@@ -258,7 +271,7 @@ class Plot:
                     )
                     
                     # Map axes to panel names for correct dimension lookup
-                    panel_names = ["Image", "Reference", "Difference"]
+                    panel_names = list(images.keys())
                     
                     for panel_idx, ax in enumerate(axes):  # Both panels
                         panel_name = panel_names[panel_idx]
@@ -510,11 +523,14 @@ class Plot:
                             )
                         )
 
-            # Optional mask overlay (skip difference image)
+            # Optional mask overlay (skip difference and decorrelated images)
             if mask is not None:
                 red_overlay = colors.ListedColormap(["none", "#FF0000"])
                 for i, ax in enumerate(fig.axes[:-1]):
-                    if ax not in inset_axes_list and i != 2:  # Skip difference image (index 2)
+                    if ax not in inset_axes_list:
+                        # Skip difference image (index 2) and decorrelated image (index 3 if present)
+                        if i == 2 or (n_images == 4 and i == 3):
+                            continue
                         ax.imshow(mask, cmap=red_overlay, alpha=0.5, origin="lower")
 
             # Add markers for expected and fitted locations
