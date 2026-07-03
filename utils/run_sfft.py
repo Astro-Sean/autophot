@@ -450,7 +450,7 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-min_prior_sources",
         type=int,
-        default=10,
+        default=3,
         help="Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT will perform its own source matching.",
     )
     parser.add_argument(
@@ -644,7 +644,7 @@ def run_sfft() -> Optional[int]:
     masked_sources = _sanitize_xy_sources(masked_sources, "Masked sources", nx, ny)
     
     # Improve prior source validation: require minimum sources for reliable kernel fitting
-    MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 10) or 10)
+    MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 3) or 3)
     if matching_sources is not None and len(matching_sources) < MIN_PRIOR_SOURCES:
         log_info(
             f"Warning: Only {len(matching_sources)} prior sources provided "
@@ -1224,7 +1224,7 @@ def run_sfft() -> Optional[int]:
                 log_info(
                     f"SFFT ESP failed with singular matrix when using priors ({e}). "
                     "This typically occurs when:"
-                    "  1. Too few prior sources for reliable kernel fitting"
+                    "  1. Too few prior sources for reliable kernel fitting (default minimum: 3)"
                     "  2. Prior sources are collinear or poorly distributed"
                     "  3. Prior sources have large positional errors"
                     "Retrying without prior-selected / prior-banned sources."
