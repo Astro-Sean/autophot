@@ -1406,16 +1406,18 @@ def run_sfft() -> Optional[int]:
         log_info("  Decorrelation kernel (DMTN-021) — whitens A&L convolution noise")
         log_info("  Variance scaling (ScaleVarianceTask) — IQR-based noise calibration")
 
-        # Apply SFFT noise decorrelation if requested (SFFT v1.5.0+)
-        if decorrelate_noise and _HAS_DECORRELATION:
-            try:
-                log_info("Applying SFFT noise decorrelation...")
-                decorrelator = DeCorrelationCalculator()
-                # SFFT decorrelation requires the kernel and variance information
-                # For now, we'll use the simpler LSST decorrelation as fallback
-                log_info("SFFT decorrelation requires kernel information; using LSST decorrelation instead")
-            except Exception as e:
-                log_info(f"Warning: SFFT decorrelation failed: {e}. Using LSST decorrelation.")
+        # Apply noise decorrelation if requested
+        # Note: SFFT's DeCorrelation_Calculator requires kernel information from the SFFT solution
+        # which is not easily accessible in the current pipeline architecture. The LSST decorrelation
+        # (DMTN-021) provides equivalent noise whitening and is used as the primary method.
+        if decorrelate_noise:
+            if _HAS_DECORRELATION:
+                log_info("SFFT decorrelation available but requires kernel information from SFFT solution.")
+                log_info("Using LSST decorrelation (DMTN-021) as equivalent alternative.")
+            else:
+                log_info("SFFT decorrelation not available (SFFT v1.5.0+ required).")
+                log_info("Using LSST decorrelation (DMTN-021) as equivalent alternative.")
+            # LSST decorrelation will be applied below in the _decorrelate_diffim function
 
         def _decorrelate_diffim(
             diff: np.ndarray,
