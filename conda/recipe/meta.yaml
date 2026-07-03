@@ -1,5 +1,5 @@
 {% set name = "autophot" %}
-{% set version = "1.0.12" %}
+{% set version = "1.0.13" %}
 
 package:
   name: {{ name|lower }}
