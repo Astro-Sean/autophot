@@ -369,17 +369,15 @@ def _lmag_to_apparent(df: pd.DataFrame, zp_col: str) -> pd.Series:
 def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: list = None) -> dict:
     """Convert limiting magnitudes for multiple S/N thresholds to apparent magnitudes.
 
-    Returns a dictionary with keys like 'Limit_3S2N', 'Limit_5S2N' containing apparent magnitudes.
+    Returns a dictionary with keys like 'Limit_3p0S2N', 'Limit_5p0S2N' containing apparent magnitudes.
+    Note: Decimal points in column names are replaced with 'p' for compatibility.
     """
     if snr_thresholds is None:
         snr_thresholds = [3.0, 5.0]
 
     result = {}
 
-    # Default single S/N limiting magnitude (backward compatibility)
-    result['Limit'] = _lmag_to_apparent(df, zp_col)
-
-    # Multi-S/N limiting magnitudes
+    # Multi-S/N limiting magnitudes only (no general Limit column)
     for snr in snr_thresholds:
         # Look for S/N-specific limiting magnitude columns
         # main.py outputs apparent magnitude columns as limiting_mag_{snr:.0f}s2n
@@ -410,8 +408,11 @@ def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: l
             col = "lmag"
             is_apparent = True
 
+        # Create column name with 'p' instead of decimal point
+        col_name = f'Limit_{snr:.1f}S2N'.replace('.', 'p')
+        
         if col is None:
-            result[f'Limit_{snr}S2N'] = pd.Series(np.nan, index=df.index, dtype=float)
+            result[col_name] = pd.Series(np.nan, index=df.index, dtype=float)
             continue
 
         li = pd.to_numeric(df[col], errors="coerce")
@@ -427,7 +428,7 @@ def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: l
         invalid_mask = (~np.isfinite(limiting_mag)) | (limiting_mag < 15) | (limiting_mag > 30)
         limiting_mag.loc[invalid_mask] = np.nan
 
-        result[f'Limit_{snr}S2N'] = limiting_mag.round(3)
+        result[col_name] = limiting_mag.round(3)
 
     return result
 
@@ -1746,11 +1747,6 @@ def generate_photometry_table(
             # Calculate limiting magnitudes for multiple S/N thresholds
             limiting_mags_nd = _lmag_to_apparent_multi_snr(nondetects, zp_col)
 
-            # ZTF-style: use 5σ upper limit for the primary "Limit" column in non-detections
-            # This matches the ZTF forced-photometry service where SNU=5 is used for upper limits
-            if 'Limit_5S2N' in limiting_mags_nd:
-                limiting_mags_nd['Limit'] = limiting_mags_nd['Limit_5S2N']
-
             # Build the row data with all limiting magnitude columns
             nd_row_data = {
                 'Filter': band_label,
@@ -1776,7 +1772,7 @@ def generate_photometry_table(
 
     if not phot_table:
         # Default columns including multi-SNR limiting magnitudes
-        default_cols = ["MJD", "Date", "Mag", "Error", "Filter", "Limit", "Limit_3S2N", "Limit_5S2N"]
+        default_cols = ["MJD", "Date", "Mag", "Error", "Filter", "Limit_3p0S2N", "Limit_5p0S2N"]
         out_phot = pd.DataFrame(columns=default_cols)
     else:
         out_phot = pd.concat(phot_table, ignore_index=True)
