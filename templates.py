@@ -4972,6 +4972,8 @@ class Templates:
                     cmd_local += ["-use_bspline_kernel", "true"]
                 if ts_sub.get("sfft_decorrelate_noise", True):
                     cmd_local += ["-decorrelate_noise", "true"]
+                if ts_sub.get("sfft_save_original_diff", True):
+                    cmd_local += ["-save_original_diff", "true"]
 
                 # Kernel half-width limits
                 kernel_hw_min = ts_sub.get("sfft_kernel_hw_min", 3)
