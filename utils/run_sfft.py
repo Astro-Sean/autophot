@@ -426,13 +426,13 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-use_bspline_kernel",
         type=str,
-        default="false",
+        default="true",
         help="Use B-Spline kernel matching (SFFT v1.5.0+). 'true' enables B-Spline kernel for complex PSF variations.",
     )
     parser.add_argument(
         "-decorrelate_noise",
         type=str,
-        default="false",
+        default="true",
         help="Apply noise decorrelation to difference image (SFFT v1.5.0+). 'true' whitens correlated noise.",
     )
     parser.add_argument(
