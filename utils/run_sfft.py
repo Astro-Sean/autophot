@@ -448,6 +448,12 @@ def run_sfft() -> Optional[int]:
         help="Maximum kernel half-width in pixels.",
     )
     parser.add_argument(
+        "-min_prior_sources",
+        type=int,
+        default=10,
+        help="Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT will perform its own source matching.",
+    )
+    parser.add_argument(
         "-coarse_var_rejection",
         type=str,
         default="false",
@@ -636,7 +642,17 @@ def run_sfft() -> Optional[int]:
     ny, nx = data_sci.shape
     matching_sources = _sanitize_xy_sources(matching_sources, "Matching sources", nx, ny)
     masked_sources = _sanitize_xy_sources(masked_sources, "Masked sources", nx, ny)
-    if matching_sources is None:
+    
+    # Improve prior source validation: require minimum sources for reliable kernel fitting
+    MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 10) or 10)
+    if matching_sources is not None and len(matching_sources) < MIN_PRIOR_SOURCES:
+        log_info(
+            f"Warning: Only {len(matching_sources)} prior sources provided "
+            f"(minimum {MIN_PRIOR_SOURCES} required for reliable kernel fitting). "
+            "Letting SFFT perform source matching instead."
+        )
+        matching_sources = None
+    elif matching_sources is None:
         log_info("No valid prior matching sources after checks; SFFT will perform source matching.")
 
     # --- Ensure GAIN and SATURATE in FITS (pass values, not keywords) ---
@@ -805,6 +821,11 @@ def run_sfft() -> Optional[int]:
             log_info(
                 f"WARNING: large PSF mismatch (FWHM_conv={fwhm_conv:.1f}px). "
                 "Subtraction quality may be degraded; consider reselecting the template."
+            )
+        elif fwhm_conv > 5.0:
+            log_info(
+                f"INFO: moderate PSF mismatch (FWHM_conv={fwhm_conv:.1f}px). "
+                "Kernel sizing will be adjusted accordingly."
             )
 
         kernel_half_width = max(KER_HW_LIMIT_MIN, hw_broad, hw_conv)
@@ -1201,8 +1222,12 @@ def run_sfft() -> Optional[int]:
                 # after applying XY_PriorSelect / XY_PriorBan). Retry once letting
                 # SFFT perform its own source matching with no priors.
                 log_info(
-                    f"SFFT ESP failed with singular matrix when using priors ({e}); "
-                    "retrying without prior-selected / prior-banned sources."
+                    f"SFFT ESP failed with singular matrix when using priors ({e}). "
+                    "This typically occurs when:"
+                    "  1. Too few prior sources for reliable kernel fitting"
+                    "  2. Prior sources are collinear or poorly distributed"
+                    "  3. Prior sources have large positional errors"
+                    "Retrying without prior-selected / prior-banned sources."
                 )
                 result = Easy_SparsePacket.ESP(
                     FITS_REF=FITS_REF,
