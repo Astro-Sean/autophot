@@ -12,8 +12,7 @@ source:
 # Install with: conda install -c conda-forge -c astro-juanlu autophot
 # Or add conda-forge to your channels: conda config --add channels conda-forge
 #
-# NOTE: sfft is not available on conda-forge. Install via pip:
-#   pip install sfft==1.7.3
+# SFFT and its dependencies are now included in the recipe.
 
 build:
   noarch: python
@@ -45,6 +44,12 @@ requirements:
     - astroscrappy ==1.2.0
     - tqdm >=4.68
     - scikit-learn >=1.9
+    # SFFT dependencies
+    - fastremap >=1.20
+    - llvmlite >=0.36
+    - numba >=0.53
+    - pyfftw >=0.12
+    - sep >=1.0
   run:
     - python >=3.11
     - astroalign >=2.6.2
@@ -69,6 +74,12 @@ requirements:
     - scikit-learn >=1.9
     - scipy >=1.17
     - tqdm >=4.68
+    # SFFT dependencies
+    - fastremap >=1.20
+    - llvmlite >=0.36
+    - numba >=0.53
+    - pyfftw >=0.12
+    - sep >=1.0
 
 test:
   imports:
@@ -89,6 +100,12 @@ test:
     - emcee >=3.1.6
     - corner >=2.2.3
     - ccdproc >=2.5.1
+    # SFFT dependencies
+    - fastremap >=1.20
+    - llvmlite >=0.36
+    - numba >=0.53
+    - pyfftw >=0.12
+    - sep >=1.0
 
 about:
   home: https://github.com/Astro-Sean/autophot
