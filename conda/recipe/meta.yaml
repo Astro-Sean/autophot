@@ -1,5 +1,5 @@
 {% set name = "autophot" %}
-{% set version = "1.0.11" %}
+{% set version = "1.0.12" %}
 
 package:
   name: {{ name|lower }}
@@ -13,7 +13,7 @@ source:
 # Or add conda-forge to your channels: conda config --add channels conda-forge
 #
 # NOTE: sfft is not available on conda-forge. Install via pip:
-#   pip install sfft==1.7.1
+#   pip install sfft==1.7.3
 
 build:
   noarch: python
@@ -22,53 +22,53 @@ build:
 
 requirements:
   host:
-    - python >=3.11,<3.12
+    - python >=3.11
     - pip
     - setuptools
     - wheel
-    - numpy ==2.4.6
-    - pandas ==3.0.1
-    - scikit-image ==0.26.0
-    - matplotlib ==3.10.9
-    - astroquery ==0.4.11
-    - photutils ==3.0.0
-    - lmfit ==1.3.4
-    - emcee ==3.1.6
-    - corner ==2.2.3
-    - ccdproc ==2.5.1
-    - scipy ==1.17.1
-    - reproject ==0.20.0
-    - requests ==2.34.2
-    - pyyaml ==6.0.3
-    - astroalign ==2.6.2
-    - astropy ==7.2.0
+    - numpy >=2.0
+    - pandas >=3.0
+    - scikit-image >=0.24
+    - matplotlib >=3.10
+    - astroquery >=0.4.11
+    - photutils >=3.0
+    - lmfit >=1.3.4
+    - emcee >=3.1.6
+    - corner >=2.2.3
+    - ccdproc >=2.5.1
+    - scipy >=1.17
+    - reproject >=0.20
+    - requests >=2.34
+    - pyyaml >=6.0
+    - astroalign >=2.6.2
+    - astropy >=7.0
     - astroscrappy ==1.2.0
-    - tqdm ==4.68.2
-    - scikit-learn ==1.9.0
+    - tqdm >=4.68
+    - scikit-learn >=1.9
   run:
-    - python >=3.11,<3.12
-    - astroalign ==2.6.2
-    - astropy ==7.2.0
-    - astroquery ==0.4.11
+    - python >=3.11
+    - astroalign >=2.6.2
+    - astropy >=7.0
+    - astroquery >=0.4.11
     - astromatic-source-extractor
     - astromatic-scamp
     - astromatic-swarp
     - astroscrappy ==1.2.0
-    - corner ==2.2.3
-    - ccdproc ==2.5.1
-    - emcee ==3.1.6
-    - lmfit ==1.3.4
-    - matplotlib ==3.10.9
-    - numpy ==2.4.6
-    - pandas ==3.0.1
-    - photutils ==3.0.0
-    - pyyaml ==6.0.3
-    - reproject ==0.20.0
-    - requests ==2.34.2
-    - scikit-image ==0.26.0
-    - scikit-learn ==1.9.0
-    - scipy ==1.17.1
-    - tqdm ==4.68.2
+    - corner >=2.2.3
+    - ccdproc >=2.5.1
+    - emcee >=3.1.6
+    - lmfit >=1.3.4
+    - matplotlib >=3.10
+    - numpy >=2.0
+    - pandas >=3.0
+    - photutils >=3.0
+    - pyyaml >=6.0
+    - reproject >=0.20
+    - requests >=2.34
+    - scikit-image >=0.24
+    - scikit-learn >=1.9
+    - scipy >=1.17
+    - tqdm >=4.68
 
 test:
   imports:
@@ -79,16 +79,16 @@ test:
   commands:
     - autophot-main -h
   requires:
-    - python >=3.11,<3.12
-    - pandas ==3.0.1
-    - scikit-image ==0.26.0
-    - matplotlib ==3.10.9
-    - astroquery ==0.4.11
-    - photutils ==3.0.0
-    - lmfit ==1.3.4
-    - emcee ==3.1.6
-    - corner ==2.2.3
-    - ccdproc ==2.5.1
+    - python >=3.11
+    - pandas >=3.0
+    - scikit-image >=0.24
+    - matplotlib >=3.10
+    - astroquery >=0.4.11
+    - photutils >=3.0
+    - lmfit >=1.3.4
+    - emcee >=3.1.6
+    - corner >=2.2.3
+    - ccdproc >=2.5.1
 
 about:
   home: https://github.com/Astro-Sean/autophot
