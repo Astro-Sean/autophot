@@ -5586,24 +5586,44 @@ def run_photometry():
                 base_name = os.path.splitext(os.path.basename(fpath))[0]
                 diff_path = write_dir / f"diff_{base_name}.fits"
                 
-                # Check if decorrelated image exists (indicates decorrelation was applied)
-                decorr_diff_path = write_dir / f"diff_{base_name}_decorr.fits"
+                # Check for both old and new naming conventions
+                # New: diff_*_decorr.fits (decorrelated), diff.fits (non-decorrelated)
+                # Old: diff_*_photometry.fits (non-decorrelated), diff.fits (decorrelated)
+                decorr_diff_path_new = write_dir / f"diff_{base_name}_decorr.fits"
+                photometry_diff_path_old = write_dir / f"diff_{base_name}_photometry.fits"
                 
-                if decorr_diff_path.exists():
-                    # Decorrelated image exists, load it for the additional panel
-                    with fits.open(decorr_diff_path) as hdul:
+                # Try new naming convention first
+                if decorr_diff_path_new.exists():
+                    with fits.open(decorr_diff_path_new) as hdul:
                         diff_header_check = hdul[0].header
                         decorr_status = diff_header_check.get("DECORR", (False, ""))
-                        logger.info(f"Decorrelated difference image DECORR header: {decorr_status}")
+                        logger.info(f"Decorrelated difference image (new naming) DECORR header: {decorr_status}")
                         
                         if decorr_status[0]:
-                            # Decorrelated image is correctly marked, use it for the additional panel
                             diff_decorrelated = hdul[0].data
                             logger.info("Adding decorrelated difference image as additional panel in subtraction check")
                         else:
                             logger.info("Decorrelated image exists but DECORR=False, skipping additional panel")
+                
+                # Fall back to old naming convention
+                elif photometry_diff_path_old.exists():
+                    # Old convention: main diff.fits is decorrelated, _photometry.fits is non-decorrelated
+                    # So we need to load the main diff.fits as the decorrelated version
+                    if diff_path.exists():
+                        with fits.open(diff_path) as hdul:
+                            diff_header_check = hdul[0].header
+                            decorr_status = diff_header_check.get("DECORR", (False, ""))
+                            logger.info(f"Main difference image (old naming) DECORR header: {decorr_status}")
+                            
+                            if decorr_status[0]:
+                                diff_decorrelated = hdul[0].data
+                                logger.info("Adding decorrelated difference image (old naming) as additional panel in subtraction check")
+                            else:
+                                logger.info("Main difference image (old naming) has DECORR=False, skipping additional panel")
+                    else:
+                        logger.info(f"Main difference image not found at {diff_path}")
                 else:
-                    logger.info("Decorrelated difference image not found, assuming no decorrelation applied")
+                    logger.info("No decorrelated difference image found (checked both naming conventions)")
             except Exception as e:
                 logger.warning(f"Could not load decorrelated difference image: {e}")
             
