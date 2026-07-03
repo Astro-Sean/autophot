@@ -618,15 +618,19 @@ class Find_FWHM:
                     # Check if any data extends into saturation regime
                     peak_values = df["maxPixel"].values
                     if np.any(peak_values > 0.9 * saturate):  # If data reaches 90% of saturation
-                        # Mark saturation regime on the plot
-                        ax.axvline(saturate_mag, color='red', linestyle=':', lw=get_line_width('medium'),
-                                  alpha=get_alpha('medium'), label=f'Saturation ({saturate:.0f} ADU)')
-                        
-                        # Shade the saturation region (brighter side, which is left side on inverted axis)
-                        # On inverted axis: xlim[1] is left (brighter), xlim[0] is right (fainter)
+                        # Check if x-axis extends enough into saturation region
+                        # On inverted axis: brighter magnitudes are left (smaller values)
                         xlim = ax.get_xlim()
-                        ax.axvspan(saturate_mag, xlim[1], color='red', 
-                                   alpha=get_alpha('very_light'), label='Saturation regime')
+                        # Only plot if saturation level is within the x-axis range
+                        if xlim[0] <= saturate_mag <= xlim[1]:
+                            # Mark saturation regime on the plot with grey color
+                            ax.axvline(saturate_mag, color='gray', linestyle=':', lw=get_line_width('medium'),
+                                      alpha=get_alpha('medium'), label=f'Saturation ({saturate:.0f} ADU)')
+                            
+                            # Shade the saturation region (brighter side, which is left side on inverted axis)
+                            # On inverted axis: xlim[1] is left (brighter), xlim[0] is right (fainter)
+                            ax.axvspan(saturate_mag, xlim[1], color='gray', 
+                                       alpha=get_alpha('very_light'), label='Saturation regime')
                 
                 ax.set_xlabel(
                     r"Instrumental magnitude [$-2.5\,\log_{{10}}(\mathrm{{Flux}})$]"
