@@ -985,17 +985,17 @@ class Zeropoint:
         y,
         x_err,
         y_err,
-        n_walkers: int = 32,
-        n_burn: int = 500,
-        n_steps: int = 1000,
+        n_walkers: int = 64,
+        n_burn: int = 1000,
+        n_steps: int = 3000,
         outlier_sigma: float = 3.0,
         min_points: int = 2,
         robust: bool = True,
         V_out: float = 1.0,
-        max_steps: int = 50000,
-        tau_factor: float = 50.0,
+        max_steps: int = 100000,
+        tau_factor: float = 30.0,
         adaptive: bool = True,
-        min_autocorr_N: int = 100,
+        min_autocorr_N: int = 200,
     ):
         """
         MCMC fit for y = x + ZP (slope=1 constraint) with proper X,Y errors.
@@ -1261,7 +1261,7 @@ class Zeropoint:
 
             # Warn if effective sample size is too low
             n_eff = len(zp_samples) / tau_max if tau_max >= 1 else len(zp_samples)
-            if n_eff < 100:
+            if n_eff < 200:  # Increased from 100 to 200 for better reliability
                 logger.warning(
                     f"ZP MCMC low ESS: n_eff ≈ {n_eff:.0f} "
                     f"(chain {len(zp_samples)}, tau ≈ {tau_max:.1f})"
@@ -1393,7 +1393,7 @@ class Zeropoint:
             zp_err = max(zp_err_lo, zp_err_hi)  # Conservative symmetric error
 
             n_eff = len(samples) / tau_max if tau_max >= 1 else len(samples)
-            if n_eff < 100:
+            if n_eff < 200:  # Increased from 100 to 200 for better reliability
                 logger.warning(
                     f"ZP MCMC (standard) low ESS: n_eff ≈ {n_eff:.0f} "
                     f"(chain {len(samples)}, tau ≈ {tau_max:.1f})"
