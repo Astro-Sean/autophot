@@ -3,9 +3,7 @@
 """
 Created on Wed Sep 28 13:55:18 2022
 @author: seanbrennan
-"""
 
-"""
 Photometry pipeline for CCD/NIR images.
 
 Inputs:
@@ -28,7 +26,6 @@ Preprocessing:
     - Background modeling: Estimates and subtracts the background noise.
     - Trim/recrop: Trims or recrops the image to focus on the region of interest.
     - Optional north-up reprojection: Aligns the image so that north is up and east is left.
-"""
 
 Sources:
     - Builds or downloads a catalog of reference sources.
