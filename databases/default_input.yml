@@ -400,8 +400,6 @@ default_input:
     kernel_order: 0 # int --- Polynomial order for the SFFT kernel flux scaling model.
     kernel_hw_fwhm_multiplier: 2.5 # float|null --- Multiplier applied to the FWHM of the convolution kernel when sizing the subtraction kernel half-width. If null, uses 2.0 (recommended). The kernel FWHM is computed as sqrt(FWHM_broad^2 - FWHM_narrow^2); kernel_hw = ceil(multiplier * FWHM_conv). Lower values (e.g. 1.5) give a tighter kernel; higher (e.g. 3.0) allow more fitting freedom at the cost of computation. For undersampled images (FWHM < 2 px), the multiplier is automatically boosted by 1.5x to capture extended PSF wings.
     kernel_hw_override: null # int|null --- If set, directly overrides the auto-computed kernel half-width in pixels. Use for debugging or when automatic sizing is wrong.
-    kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
-    kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
     download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).
     templates_size: 10 # float --- Template cutout size (arcmin) around target when building/using templates.
 
@@ -443,6 +441,14 @@ default_input:
     sfft_post_anomaly_match_radius_px: 1.5 # float --- Radius (pixels) for removing prior-selected matches near post-anomaly sources on retry.
     sfft_pass_masked_sources: False # bool --- If True, pass excluded/masked sources to SFFT via -masked_sources argument. If False, SFFT will not receive source bans from the pipeline.
     sfft_manual_matching_sources: null # list[list[float]]|null --- Optional list of [x, y] pixel coordinates to use as prior matching sources for SFFT. If provided, overrides automatic source matching. Example: [[100.5, 200.3], [150.2, 300.1]]
+
+    # SFFT v1.5.0+ advanced features (enabled by default)
+    sfft_use_bspline_kernel: True # bool --- Use B-Spline kernel matching for complex PSF variations (SFFT v1.5.0+). Better for non-Gaussian PSFs.
+    sfft_decorrelate_noise: True # bool --- Apply noise decorrelation to difference image (SFFT v1.5.0+). Whitens correlated noise using LSST DMTN-021 method.
+    sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
+    sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
+    sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
+    sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
 
     inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).
     inpaint_method: biharmonic # str --- Inpainting algorithm name (e.g. biharmonic).
