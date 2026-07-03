@@ -1600,7 +1600,19 @@ def generate_photometry_table(
             data = data[mask.fillna(False)].copy()
             if data.empty:
                 continue
-        band_label = label_map.get(str(band).strip().lower(), band)
+        
+        # Use the actual filter value from the data instead of mapped label
+        # This ensures the Filter column in the output matches the input data
+        if fcol is not None and not fcol.empty:
+            # Get the most common filter value for this band
+            band_filters = fcol[mask.fillna(False)]
+            if not band_filters.empty:
+                filter_value = band_filters.mode()[0] if len(band_filters.mode()) > 0 else str(band)
+                band_label = str(filter_value).strip()
+            else:
+                band_label = label_map.get(str(band).strip().lower(), band)
+        else:
+            band_label = label_map.get(str(band).strip().lower(), band)
         # Robust numeric coercion: CSV concatenation can yield strings like "nan".
         if "beta" in data.columns:
             data["beta"] = pd.to_numeric(data["beta"], errors="coerce")
@@ -1733,6 +1745,19 @@ def generate_photometry_table(
                 is_apparent = False
             
             if inv_mag_col and inv_mag_col in inv_detects.columns:
+                # Use the actual filter value from the data instead of mapped label
+                fcol_inv = photometry_filter_series(inv_detects)
+                if fcol_inv is not None and not fcol_inv.empty:
+                    # Get the most common filter value for this band
+                    band_filters_inv = fcol_inv[mask.fillna(False)]
+                    if not band_filters_inv.empty:
+                        filter_value_inv = band_filters_inv.mode()[0] if len(band_filters_inv.mode()) > 0 else str(band)
+                        band_label = str(filter_value_inv).strip()
+                    else:
+                        band_label = label_map.get(str(band).strip().lower(), band)
+                else:
+                    band_label = label_map.get(str(band).strip().lower(), band)
+                
                 if is_apparent:
                     # Already apparent magnitude
                     mag_value = inv_detects[inv_mag_col]
@@ -1774,6 +1799,15 @@ def generate_photometry_table(
         if not nondetects.empty:
             # Calculate limiting magnitudes for multiple S/N thresholds
             limiting_mags_nd = _lmag_to_apparent_multi_snr(nondetects, zp_col, input_yaml=input_yaml)
+
+            # Use the actual filter value from the data instead of mapped label
+            fcol_nd = photometry_filter_series(nondetects)
+            if fcol_nd is not None and not fcol_nd.empty:
+                # Get the most common filter value for this band
+                filter_value_nd = fcol_nd.mode()[0] if len(fcol_nd.mode()) > 0 else str(band)
+                band_label = str(filter_value_nd).strip()
+            else:
+                band_label = label_map.get(str(band).strip().lower(), band)
 
             # Build the row data with all limiting magnitude columns
             nd_row_data = {
