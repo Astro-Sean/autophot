@@ -1383,13 +1383,25 @@ class Plot:
                 
                 if all_snr_values:
                     median_snr = np.median(all_snr_values)
+                    # Get configured S/N thresholds for adaptive selection
+                    lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
+                    snr_thresholds = lim_cfg.get("snr_thresholds", [3.0, 5.0])
+                    
                     # Use 5σ limit if median S/N < 3, otherwise use 3σ
-                    if median_snr < 3.0 and "Limit_5p0S2N" in data.columns:
-                        adaptive_limit_col = "Limit_5p0S2N"
-                        logger.info(f"Adaptive S/N selection: median S/N={median_snr:.2f} < 3, using 5σ limiting magnitude")
+                    if median_snr < 3.0 and len(snr_thresholds) >= 2:
+                        # Use the second (higher) threshold
+                        higher_threshold = sorted(snr_thresholds)[1]
+                        adaptive_limit_col = f'Limit_{higher_threshold:.1f}S2N'.replace('.', 'p')
+                        if adaptive_limit_col not in data.columns:
+                            adaptive_limit_col = "Limit_5p0S2N"  # Fallback
+                        logger.info(f"Adaptive S/N selection: median S/N={median_snr:.2f} < 3, using {higher_threshold}σ limiting magnitude")
                     else:
-                        adaptive_limit_col = "Limit_3p0S2N" if "Limit_3p0S2N" in data.columns else "Limit"
-                        logger.info(f"Adaptive S/N selection: median S/N={median_snr:.2f} >= 3, using 3σ limiting magnitude")
+                        # Use the first (lower) threshold
+                        lower_threshold = sorted(snr_thresholds)[0]
+                        adaptive_limit_col = f'Limit_{lower_threshold:.1f}S2N'.replace('.', 'p')
+                        if adaptive_limit_col not in data.columns:
+                            adaptive_limit_col = "Limit_3p0S2N"  # Fallback
+                        logger.info(f"Adaptive S/N selection: median S/N={median_snr:.2f} >= 3, using {lower_threshold}σ limiting magnitude")
         if data.columns.duplicated().any():
             data = data.loc[:, ~data.columns.duplicated()].copy()
 
