@@ -45,6 +45,25 @@ from sfft.EasyCrowdedPacket import Easy_CrowdedPacket
 from sfft.utils.SkyLevelEstimator import SkyLevel_Estimator
 from typing import Optional, Tuple
 
+# Simple logging function for early use (before main logger setup)
+def _early_log(msg: str) -> None:
+    print(msg)
+
+# NumPy 2.0 compatibility: handle removed functions
+# numpy.in1d was removed in NumPy 2.0, but SFFT still uses it
+if not hasattr(np, 'in1d'):
+    # Add compatibility shim for numpy.in1d (removed in NumPy 2.0)
+    def in1d(ar1, ar2, assume_unique=False, invert=False):
+        """Compatibility shim for numpy.in1d (removed in NumPy 2.0)."""
+        ar1 = np.asarray(ar1)
+        ar2 = np.asarray(ar2)
+        if assume_unique:
+            ar2 = np.unique(ar2)
+        mask = np.isin(ar1, ar2, assume_unique=assume_unique, invert=invert)
+        return mask
+    np.in1d = in1d
+    _early_log("Added numpy.in1d compatibility shim for NumPy 2.x")
+
 # NumPy 2.0 compatibility: handle numpy.char removal
 # Most modern code doesn't use numpy.char, but we provide fallback if needed
 try:
