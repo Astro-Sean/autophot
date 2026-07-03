@@ -1647,14 +1647,48 @@ def run_photometry():
         #  Log Telescope and Instrument Metadata
         # Logs the telescope and instrument metadata.
 
+        # Format observation date and time first (as requested)
+        date = Time([date_mjd], format="mjd", scale="utc")
+        date_str = date.iso[0].split(" ")[0]  # Date part
+        time_str = date.iso[0].split(" ")[1]  # Time part
+        
+        # Format time as requested (e.g., "8:00pm")
+        try:
+            time_obj = datetime.strptime(time_str, "%H:%M:%S.%f")
+            time_obj = datetime.strptime(time_obj.strftime("%H:%M:%S"), "%H:%M:%S")
+            formatted_time = time_obj.strftime("%-I%p").lower()
+        except:
+            formatted_time = time_str  # Fallback to original format if parsing fails
+        
+        # Format date as dd-mm-year
+        try:
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            formatted_date = date_obj.strftime("%d-%m-%Y")
+        except:
+            formatted_date = date_str  # Fallback to original format if parsing fails
+        
+        logging.info(f"Observation: {formatted_date} at {formatted_time}")
+
         logging.info(f"Telescope: {telescope}, Instrument: {instrument}, Filter: {imageFilter}")
 
         if pixel_scale:
             logging.info("Pixel scale: %.3f arcsec/pixel", pixel_scale)
             input_yaml["pixel_scale"] = pixel_scale
 
-        date = Time([date_mjd], format="mjd", scale="utc")
-        date = date.iso[0].split(" ")[0]
+        # Log additional image parameters
+        logging.info(f"Gain: {gain:.3f} e-/ADU")
+        if np.isfinite(saturate) and saturate != SATURATE_INTERNAL_FALLBACK:
+            logging.info(f"Saturation: {saturate:.1f} ADU")
+        else:
+            logging.info("Saturation: not available (no limit)")
+        
+        if readnoise > 0:
+            logging.info(f"Read noise: {readnoise:.3f} e-")
+        else:
+            logging.info("Read noise: not available")
+        
+        if "airmass" in input_yaml and input_yaml["airmass"]:
+            logging.info(f"Airmass: {input_yaml['airmass']:.3f}")
 
         header["gain"] = gain
         # saturate already written to header at line 1130 (if finite)
