@@ -4966,6 +4966,19 @@ class Templates:
                         "-pac_ratio_thresh",
                         str(float(ts_sub["sfft_pac_ratio_thresh"])),
                     ]
+
+                # New SFFT v1.5.0+ features
+                if ts_sub.get("sfft_use_bspline_kernel", False):
+                    cmd_local += ["-use_bspline_kernel", "true"]
+                if ts_sub.get("sfft_decorrelate_noise", False):
+                    cmd_local += ["-decorrelate_noise", "true"]
+
+                # Kernel half-width limits
+                kernel_hw_min = ts_sub.get("sfft_kernel_hw_min", 3)
+                kernel_hw_max = ts_sub.get("sfft_kernel_hw_max", 50)
+                cmd_local += ["-kernel_hw_min", str(int(kernel_hw_min))]
+                cmd_local += ["-kernel_hw_max", str(int(kernel_hw_max))]
+
                 if sfft_crowded:
                     cmd_local.append("-crowded")
                 return cmd_local
