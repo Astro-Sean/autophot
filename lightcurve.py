@@ -1600,19 +1600,24 @@ def generate_photometry_table(
             data = data[mask.fillna(False)].copy()
             if data.empty:
                 continue
+            # Get the filter column from the filtered data for accurate filter values
+            fcol_filtered = photometry_filter_series(data)
+        else:
+            fcol_filtered = None
         
         # Use the actual filter value from the data instead of mapped label
         # This ensures the Filter column in the output matches the input data
-        if fcol is not None and not fcol.empty:
+        if fcol_filtered is not None and not fcol_filtered.empty:
             # Get the most common filter value for this band
-            band_filters = fcol[mask.fillna(False)]
-            if not band_filters.empty:
-                filter_value = band_filters.mode()[0] if len(band_filters.mode()) > 0 else str(band)
-                band_label = str(filter_value).strip()
-            else:
-                band_label = label_map.get(str(band).strip().lower(), band)
+            filter_value = fcol_filtered.mode()[0] if len(fcol_filtered.mode()) > 0 else str(band)
+            band_label = str(filter_value).strip()
         else:
             band_label = label_map.get(str(band).strip().lower(), band)
+        
+        # Debug logging to track which bands are being processed
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Processing band: {band}, band_label: {band_label}, data rows: {len(data)}")
         # Robust numeric coercion: CSV concatenation can yield strings like "nan".
         if "beta" in data.columns:
             data["beta"] = pd.to_numeric(data["beta"], errors="coerce")
@@ -1749,12 +1754,8 @@ def generate_photometry_table(
                 fcol_inv = photometry_filter_series(inv_detects)
                 if fcol_inv is not None and not fcol_inv.empty:
                     # Get the most common filter value for this band
-                    band_filters_inv = fcol_inv[mask.fillna(False)]
-                    if not band_filters_inv.empty:
-                        filter_value_inv = band_filters_inv.mode()[0] if len(band_filters_inv.mode()) > 0 else str(band)
-                        band_label = str(filter_value_inv).strip()
-                    else:
-                        band_label = label_map.get(str(band).strip().lower(), band)
+                    filter_value_inv = fcol_inv.mode()[0] if len(fcol_inv.mode()) > 0 else str(band)
+                    band_label = str(filter_value_inv).strip()
                 else:
                     band_label = label_map.get(str(band).strip().lower(), band)
                 
