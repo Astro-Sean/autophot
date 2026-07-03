@@ -385,6 +385,7 @@ class BackgroundSubtractor:
         fwhm_pixels: float = 3.0,
         dilate_factor: float = 3.0,
         n_iterations: int = 3,  # NEW: iterative masking
+        dilate_iterations: int = 3,  # NEW: configurable dilation iterations
     ) -> np.ndarray:
         """
         Iteratively detect and mask sources.
@@ -402,6 +403,9 @@ class BackgroundSubtractor:
             Dilation radius = dilate_factor x fwhm_pixels.  Raised to 3.0 to
             cover PSF wings and diffuse halos that otherwise leak flux into
             background boxes.
+        dilate_iterations : int
+            Number of binary_dilation iterations to apply. Higher values extend
+            masks further around sources for more complete masking.
         """
         # Guard against pathological or unknown FWHM values so the kernel
         # construction never divides by zero or creates a degenerate kernel.
@@ -427,6 +431,10 @@ class BackgroundSubtractor:
             if isinstance(self.config, dict)
             else {}
         )
+        # Allow override of dilation parameters from config
+        dilate_factor = float(cfg_bkg.get("source_mask_dilate_factor", dilate_factor))
+        dilate_iterations = int(cfg_bkg.get("source_mask_dilate_iterations", dilate_iterations))
+        
         # Inspired by the STScI notebook: convolve before thresholding so
         # structured noise doesn't fragment detections into tiny islands.
         use_convolved_detection = bool(cfg_bkg.get("source_mask_convolve", True))
@@ -490,10 +498,9 @@ class BackgroundSubtractor:
                     break
 
                 new_mask = segm.data.astype(bool)
-                # Dilate to cover source wings / PSF halos - 2 iterations is
-                # enough with dilate_factor=2.0; 3 was too aggressive and
-                # caused the mask to swallow most of the sky.
-                new_mask = binary_dilation(new_mask, structure=selem, iterations=2)
+                # Dilate to cover source wings / PSF halos - use configurable iterations
+                # Higher iterations (3-4) provide more complete galaxy/source masking
+                new_mask = binary_dilation(new_mask, structure=selem, iterations=dilate_iterations)
 
                 combined = mask | new_mask
 
@@ -906,7 +913,8 @@ class BackgroundSubtractor:
                 "regime": "unknown",
                 "nsigma": 2.5,
                 "n_iterations": 3,
-                "dilate_factor": 2.0,
+                "dilate_factor": 4.0,  # Increased for complete source masking
+                "dilate_iterations": 3,  # 3 iterations for complete masking
                 "mesh_scale": 6.0,
                 "exclude_percentile": 90.0,
             }
@@ -989,13 +997,15 @@ class BackgroundSubtractor:
         )
 
         # Map regime -> tuned parameters. The dilate_factor values control how
-        # far masks expand around detected sources; keep them modest so marked
-        # regions remain compact in the diagnostics.
+        # far masks expand around detected sources; use higher values (4.0-5.0)
+        # for complete galaxy/source masking to ensure all source flux is excluded.
+        # dilate_iterations controls how many dilation passes to apply.
         if regime == "sparse":
             params = dict(
                 nsigma=3.0,
                 n_iterations=2,
-                dilate_factor=3.0,
+                dilate_factor=5.0,  # Increased for complete source masking
+                dilate_iterations=3,  # 3 iterations for complete masking
                 mesh_scale=10.0,
                 exclude_percentile=90.0,
             )
@@ -1003,7 +1013,8 @@ class BackgroundSubtractor:
             params = dict(
                 nsigma=2.5,
                 n_iterations=3,
-                dilate_factor=3.0,
+                dilate_factor=4.0,  # Increased for complete source masking
+                dilate_iterations=3,  # 3 iterations for complete masking
                 mesh_scale=8.0,
                 exclude_percentile=85.0,
             )
@@ -1011,7 +1022,8 @@ class BackgroundSubtractor:
             params = dict(
                 nsigma=2.2,
                 n_iterations=3,
-                dilate_factor=3.0,
+                dilate_factor=4.0,  # Increased for complete source masking
+                dilate_iterations=3,  # 3 iterations for complete masking
                 mesh_scale=8.0,
                 exclude_percentile=80.0,
             )
@@ -1019,7 +1031,8 @@ class BackgroundSubtractor:
             params = dict(
                 nsigma=2.2,
                 n_iterations=4,
-                dilate_factor=3.0,
+                dilate_factor=5.0,  # Increased for complete source masking
+                dilate_iterations=4,  # 4 iterations for complex fields
                 mesh_scale=7.0,
                 exclude_percentile=80.0,
             )
@@ -1261,7 +1274,8 @@ class BackgroundSubtractor:
                 "regime": "crowded",
                 "nsigma": 2.5,
                 "n_iterations": 3,
-                "dilate_factor": 2.0,
+                "dilate_factor": 4.0,  # Increased for complete source masking in crowded fields
+                "dilate_iterations": 3,  # 3 iterations for complete masking
                 "mesh_scale": 5.0,
                 "exclude_percentile": 85.0,
             }
@@ -1335,6 +1349,7 @@ class BackgroundSubtractor:
             fwhm_pixels=fwhm_pixels if fwhm_pixels is not None else 3.0,
             dilate_factor=dilate_factor,
             n_iterations=n_iter_src,
+            dilate_iterations=regime_params.get("dilate_iterations", 3),
         )
 
         # ---- SIMBAD galaxy mask (with expanded ellipses) ----
@@ -1660,6 +1675,7 @@ class BackgroundSubtractor:
             fwhm_pixels=fwhm_pixels,
             dilate_factor=dilate_factor,
             n_iterations=local_mask_iterations,
+            dilate_iterations=2,  # Use 2 iterations for local cutout (less aggressive)
         )
 
         # Optional: mask the target core region explicitly.
@@ -1857,6 +1873,7 @@ class BackgroundSubtractor:
             fwhm_pixels=fwhm_pixels,
             dilate_factor=3.0,
             n_iterations=2,
+            dilate_iterations=2,  # Use 2 iterations for RMS estimation (less aggressive)
         )
         if precomputed_rms is not None:
             bkg_rms_full = precomputed_rms
