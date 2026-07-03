@@ -4980,7 +4980,7 @@ class Templates:
                 cmd_local += ["-kernel_hw_max", str(int(kernel_hw_max))]
 
                 # Prior source validation
-                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 10)
+                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 3)
                 cmd_local += ["-min_prior_sources", str(int(min_prior_sources))]
 
                 if sfft_crowded:

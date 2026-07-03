@@ -447,7 +447,7 @@ default_input:
     sfft_decorrelate_noise: True # bool --- Apply noise decorrelation to difference image (SFFT v1.5.0+). Whitens correlated noise using LSST DMTN-021 method.
     sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
     sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
-    sfft_min_prior_sources: 10 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT will perform its own source matching.
+    sfft_min_prior_sources: 3 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT will perform its own source matching.
     sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
     sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
 
