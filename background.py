@@ -913,8 +913,8 @@ class BackgroundSubtractor:
                 "regime": "unknown",
                 "nsigma": 2.5,
                 "n_iterations": 3,
-                "dilate_factor": 4.0,  # Increased for complete source masking
-                "dilate_iterations": 3,  # 3 iterations for complete masking
+                "dilate_factor": 2.5,  # Moderate dilation for balanced masking
+                "dilate_iterations": 2,  # 2 iterations for balanced masking
                 "mesh_scale": 6.0,
                 "exclude_percentile": 90.0,
             }
@@ -997,15 +997,15 @@ class BackgroundSubtractor:
         )
 
         # Map regime -> tuned parameters. The dilate_factor values control how
-        # far masks expand around detected sources; use higher values (4.0-5.0)
-        # for complete galaxy/source masking to ensure all source flux is excluded.
+        # far masks expand around detected sources; use moderate values (2.0-3.0)
+        # for balanced masking that excludes source cores while preserving sky.
         # dilate_iterations controls how many dilation passes to apply.
         if regime == "sparse":
             params = dict(
                 nsigma=3.0,
                 n_iterations=2,
-                dilate_factor=5.0,  # Increased for complete source masking
-                dilate_iterations=3,  # 3 iterations for complete masking
+                dilate_factor=2.5,  # Moderate dilation for balanced masking
+                dilate_iterations=2,  # 2 iterations for balanced masking
                 mesh_scale=10.0,
                 exclude_percentile=90.0,
             )
@@ -1013,8 +1013,8 @@ class BackgroundSubtractor:
             params = dict(
                 nsigma=2.5,
                 n_iterations=3,
-                dilate_factor=4.0,  # Increased for complete source masking
-                dilate_iterations=3,  # 3 iterations for complete masking
+                dilate_factor=2.5,  # Moderate dilation for balanced masking
+                dilate_iterations=2,  # 2 iterations for balanced masking
                 mesh_scale=8.0,
                 exclude_percentile=85.0,
             )
@@ -1022,8 +1022,8 @@ class BackgroundSubtractor:
             params = dict(
                 nsigma=2.2,
                 n_iterations=3,
-                dilate_factor=4.0,  # Increased for complete source masking
-                dilate_iterations=3,  # 3 iterations for complete masking
+                dilate_factor=2.5,  # Moderate dilation for balanced masking
+                dilate_iterations=2,  # 2 iterations for balanced masking
                 mesh_scale=8.0,
                 exclude_percentile=80.0,
             )
@@ -1031,8 +1031,8 @@ class BackgroundSubtractor:
             params = dict(
                 nsigma=2.2,
                 n_iterations=4,
-                dilate_factor=5.0,  # Increased for complete source masking
-                dilate_iterations=4,  # 4 iterations for complex fields
+                dilate_factor=3.0,  # Slightly higher for complex fields
+                dilate_iterations=3,  # 3 iterations for complex fields
                 mesh_scale=7.0,
                 exclude_percentile=80.0,
             )
@@ -1274,8 +1274,8 @@ class BackgroundSubtractor:
                 "regime": "crowded",
                 "nsigma": 2.5,
                 "n_iterations": 3,
-                "dilate_factor": 4.0,  # Increased for complete source masking in crowded fields
-                "dilate_iterations": 3,  # 3 iterations for complete masking
+                "dilate_factor": 2.5,  # Moderate dilation for balanced masking in crowded fields
+                "dilate_iterations": 2,  # 2 iterations for balanced masking
                 "mesh_scale": 5.0,
                 "exclude_percentile": 85.0,
             }
