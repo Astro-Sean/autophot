@@ -1384,11 +1384,11 @@ class Plot:
                 if all_snr_values:
                     median_snr = np.median(all_snr_values)
                     # Use 5σ limit if median S/N < 3, otherwise use 3σ
-                    if median_snr < 3.0 and "Limit_5S2N" in data.columns:
-                        adaptive_limit_col = "Limit_5S2N"
+                    if median_snr < 3.0 and "Limit_5p0S2N" in data.columns:
+                        adaptive_limit_col = "Limit_5p0S2N"
                         logger.info(f"Adaptive S/N selection: median S/N={median_snr:.2f} < 3, using 5σ limiting magnitude")
                     else:
-                        adaptive_limit_col = "Limit_3S2N" if "Limit_3S2N" in data.columns else "Limit"
+                        adaptive_limit_col = "Limit_3p0S2N" if "Limit_3p0S2N" in data.columns else "Limit"
                         logger.info(f"Adaptive S/N selection: median S/N={median_snr:.2f} >= 3, using 3σ limiting magnitude")
         if data.columns.duplicated().any():
             data = data.loc[:, ~data.columns.duplicated()].copy()
