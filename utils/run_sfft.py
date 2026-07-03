@@ -436,6 +436,12 @@ def run_sfft() -> Optional[int]:
         help="Apply noise decorrelation to difference image (SFFT v1.5.0+). 'true' whitens correlated noise.",
     )
     parser.add_argument(
+        "-save_original_diff",
+        type=str,
+        default="true",
+        help="Save original (non-decorrelated) difference image for photometry. 'true' saves both decorrelated and original versions.",
+    )
+    parser.add_argument(
         "-kernel_hw_min",
         type=int,
         default=3,
@@ -1001,6 +1007,7 @@ def run_sfft() -> Optional[int]:
     # --- New SFFT Features (v1.5.0+) ---
     use_bspline_kernel = _parse_bool_str("use_bspline_kernel", args.use_bspline_kernel)
     decorrelate_noise = _parse_bool_str("decorrelate_noise", args.decorrelate_noise)
+    save_original_diff = _parse_bool_str("save_original_diff", args.save_original_diff)
 
     if use_bspline_kernel and not _HAS_BSPLINE:
         log_info("Warning: B-Spline kernel requested but not available (SFFT v1.5.0+ required). Using standard kernel.")
@@ -1628,6 +1635,7 @@ def run_sfft() -> Optional[int]:
                 # --- Step 1: Decorrelation kernel ---
                 # Retrieve the A&L kernel from the SFFT solution (result index 2).
                 _applied_decorr = False
+                _diff_arr_original = diff_arr.copy()  # Save original before decorrelation
                 try:
                     if len(result) >= 3 and _sci_var is not None and _ref_var is not None:
                         from sfft.utils.SFFTSolutionReader import Realize_MatchingKernel
@@ -1688,6 +1696,29 @@ def run_sfft() -> Optional[int]:
                 # Summary of which improvements were applied
                 if _applied_decorr:
                     diff_hdr["DECORR"] = (True, "DMTN-021 A&L decorrelation applied")
+                    # IMPORTANT: Decorrelation is applied for detection quality but
+                    # photometry should be performed on the original (non-decorrelated)
+                    # difference image to preserve proper noise characteristics for
+                    # error estimation. The decorrelated image is saved for reference
+                    # but photometry pipelines should use the original difference image.
+                    log_info(
+                        "NOTE: Decorrelation applied for improved detection quality. "
+                        "For photometry, consider using the original (non-decorrelated) "
+                        "difference image to preserve proper noise characteristics."
+                    )
+                    
+                    # Save original (non-decorrelated) difference image if requested
+                    if save_original_diff and FITS_DIFF:
+                        _orig_diff_path = FITS_DIFF.replace(".fits", "_original.fits")
+                        try:
+                            _orig_hdr = diff_hdr.copy()
+                            _orig_hdr["DECORR"] = (False, "Original (non-decorrelated) difference image")
+                            _orig_hdr["COMMENT"] = "Use this image for photometry to preserve noise characteristics"
+                            safe_fits_write(_orig_diff_path, _diff_arr_original.astype(np.float32), _orig_hdr, overwrite=True)
+                            log_info(f"Saved original (non-decorrelated) difference image: {_orig_diff_path}")
+                        except Exception as _save_e:
+                            log_info(f"Warning: Could not save original difference image: {_save_e}")
+                    
                 decorr_status = "ON" if _applied_decorr else "OFF (kernel unavailable)"
                 vscale_status = "ON" if _applied_vscale else "OFF (insufficient data)"
                 log_info(f"Post-subtraction summary: decorrelation={decorr_status}, variance scaling={vscale_status}")
