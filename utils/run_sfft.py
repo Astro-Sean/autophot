@@ -663,7 +663,13 @@ def run_sfft() -> Optional[int]:
 
     # --- Ensure GAIN and SATURATE in FITS (pass values, not keywords) ---
     # Write values into headers so SFFT/MeLOn find the keywords (avoids KeyError when SATURATE missing).
-    SATURATE_FALLBACK = 1e30  # finite value for "no saturation" (FITS cannot store inf)
+    # Use consistent fallback values with main.py
+    try:
+        from main import SATURATE_INTERNAL_FALLBACK, SATURATE_FITS_FALLBACK
+    except ImportError:
+        # Fallback if main module not available
+        SATURATE_INTERNAL_FALLBACK = np.inf
+        SATURATE_FITS_FALLBACK = 1e30
 
     def _ensure_gain_saturate(
         fits_path: str, gain: Optional[float], saturate: Optional[float], label: str
@@ -679,7 +685,8 @@ def run_sfft() -> Optional[int]:
                     h.comments["GAIN"] = "Gain (e/ADU) provided by autophot for SFFT"
                     log_info(f"{label}: set GAIN = {gval}")
                 if saturate is not None:
-                    sval = float(saturate) if np.isfinite(saturate) else SATURATE_FALLBACK
+                    # Use FITS-compatible fallback for infinite values
+                    sval = float(saturate) if np.isfinite(saturate) else SATURATE_FITS_FALLBACK
                     h["SATURATE"] = sval
                     h.comments["SATURATE"] = (
                         "Effective saturation (ADU) after autophot background handling for SFFT"
@@ -720,8 +727,8 @@ def run_sfft() -> Optional[int]:
         if args.saturate_ref is not None
         else hdr_ref.get("SATURATE", hdr_ref.get("saturate"))
     )
-    sat_sci = _float_or_default(sat_sci_raw, SATURATE_FALLBACK)
-    sat_ref = _float_or_default(sat_ref_raw, SATURATE_FALLBACK)
+    sat_sci = _float_or_default(sat_sci_raw, SATURATE_FITS_FALLBACK)
+    sat_ref = _float_or_default(sat_ref_raw, SATURATE_FITS_FALLBACK)
 
     _ensure_gain_saturate(FITS_SCI, gain_sci, sat_sci, "Science")
     _ensure_gain_saturate(FITS_REF, gain_ref, sat_ref, "Reference")
