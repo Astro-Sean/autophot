@@ -436,10 +436,10 @@ def run_sfft() -> Optional[int]:
         help="Apply noise decorrelation to difference image (SFFT v1.5.0+). 'true' whitens correlated noise.",
     )
     parser.add_argument(
-        "-save_original_diff",
+        "-save_decorrelated",
         type=str,
         default="true",
-        help="Save original (non-decorrelated) difference image for photometry. 'true' saves both decorrelated and original versions.",
+        help="Save decorrelated difference image separately as *_decorr.fits. 'true' saves both versions.",
     )
     parser.add_argument(
         "-kernel_hw_min",
@@ -1007,7 +1007,7 @@ def run_sfft() -> Optional[int]:
     # --- New SFFT Features (v1.5.0+) ---
     use_bspline_kernel = _parse_bool_str("use_bspline_kernel", args.use_bspline_kernel)
     decorrelate_noise = _parse_bool_str("decorrelate_noise", args.decorrelate_noise)
-    save_original_diff = _parse_bool_str("save_original_diff", args.save_original_diff)
+    save_decorrelated = _parse_bool_str("save_decorrelated", args.save_decorrelated)
 
     if use_bspline_kernel and not _HAS_BSPLINE:
         log_info("Warning: B-Spline kernel requested but not available (SFFT v1.5.0+ required). Using standard kernel.")
@@ -1695,32 +1695,29 @@ def run_sfft() -> Optional[int]:
 
                 # Summary of which improvements were applied
                 if _applied_decorr:
-                    diff_hdr["DECORR"] = (True, "DMTN-021 A&L decorrelation applied")
-                    # IMPORTANT: Decorrelation is applied for detection quality but
-                    # photometry should be performed on the original (non-decorrelated)
-                    # difference image to preserve proper noise characteristics for
-                    # error estimation.
-                    log_info(
-                        "NOTE: Decorrelation applied for improved detection quality. "
-                        "Original (non-decorrelated) image saved for photometry."
-                    )
-                    
-                    # Save original (non-decorrelated) difference image for photometry
-                    if save_original_diff and FITS_DIFF:
-                        _photometry_diff_path = FITS_DIFF.replace(".fits", "_photometry.fits")
+                    # Save decorrelated image separately with _decorr suffix
+                    if save_decorrelated and FITS_DIFF:
+                        _decorr_diff_path = FITS_DIFF.replace(".fits", "_decorr.fits")
                         try:
-                            _orig_hdr = diff_hdr.copy()
-                            _orig_hdr["DECORR"] = (False, "Original (non-decorrelated) difference image for photometry")
-                            _orig_hdr["COMMENT"] = "Use this image for photometry to preserve noise characteristics"
-                            _orig_hdr["PURPOSE"] = "PHOTOMETRY"
-                            safe_fits_write(_photometry_diff_path, _diff_arr_original.astype(np.float32), _orig_hdr, overwrite=True)
-                            log_info(f"Saved photometry-optimized difference image: {_photometry_diff_path}")
+                            _decorr_hdr = diff_hdr.copy()
+                            _decorr_hdr["DECORR"] = (True, "DMTN-021 A&L decorrelation applied")
+                            _decorr_hdr["COMMENT"] = "Decorated difference image for improved detection quality"
+                            _decorr_hdr["PURPOSE"] = "DETECTION"
+                            safe_fits_write(_decorr_diff_path, diff_arr.astype(np.float32), _decorr_hdr, overwrite=True)
+                            log_info(f"Saved decorrelated difference image: {_decorr_diff_path}")
                             
-                            # Add reference to photometry image in main (decorrelated) image header
-                            diff_hdr["PHOTDIFF"] = (os.path.basename(_photometry_diff_path), 
-                                                   "Path to photometry-optimized (non-decorrelated) difference image")
+                            # The main FITS_DIFF should be the non-decorrelated version for photometry
+                            # Restore the original (non-decorrelated) difference image
+                            diff_arr = _diff_arr_original
+                            diff_hdr["DECORR"] = (False, "Original (non-decorrelated) difference image for photometry")
+                            diff_hdr["COMMENT"] = "Use this image for photometry to preserve noise characteristics"
+                            diff_hdr["PURPOSE"] = "PHOTOMETRY"
+                            log_info(
+                                "Main difference image is non-decorrelated (for photometry). "
+                                "Decorrelated version saved as *_decorr.fits (for detection)."
+                            )
                         except Exception as _save_e:
-                            log_info(f"Warning: Could not save photometry difference image: {_save_e}")
+                            log_info(f"Warning: Could not save decorrelated difference image: {_save_e}")
                     
                 decorr_status = "ON" if _applied_decorr else "OFF (kernel unavailable)"
                 vscale_status = "ON" if _applied_vscale else "OFF (insufficient data)"
@@ -1760,11 +1757,11 @@ def run_sfft() -> Optional[int]:
                             f"!= diff shape {diff.shape}; cannot reapply invalid mask."
                         )
                 
-                # Also apply mask to photometry-optimized image if it exists
-                if save_original_diff and decorrelate_noise:
-                    _photometry_diff_path = FITS_DIFF.replace(".fits", "_photometry.fits")
-                    if os.path.isfile(_photometry_diff_path):
-                        with fits.open(_photometry_diff_path, mode="update", memmap=False) as hdul:
+                # Also apply mask to decorrelated image if it exists
+                if save_decorrelated and decorrelate_noise:
+                    _decorr_diff_path = FITS_DIFF.replace(".fits", "_decorr.fits")
+                    if os.path.isfile(_decorr_diff_path):
+                        with fits.open(_decorr_diff_path, mode="update", memmap=False) as hdul:
                             diff = np.asarray(hdul[0].data, dtype=float)
                             if diff.shape == combined_invalid_mask.shape:
                                 n_before = int(np.count_nonzero(~np.isfinite(diff)))
@@ -1773,12 +1770,12 @@ def run_sfft() -> Optional[int]:
                                 hdul.flush()
                                 n_after = int(np.count_nonzero(~np.isfinite(diff)))
                                 log_info(
-                                    f"Invalid mask applied to photometry diff: {n_before} -> {n_after} finite pixels"
+                                    f"Invalid mask applied to decorrelated diff: {n_before} -> {n_after} finite pixels"
                                 )
                             else:
                                 log_info(
                                     f"Warning: combined_invalid_mask shape {combined_invalid_mask.shape} "
-                                    f"!= photometry diff shape {diff.shape}; cannot reapply invalid mask."
+                                    f"!= decorrelated diff shape {diff.shape}; cannot reapply invalid mask."
                                 )
                 
                 n_mask = int(np.count_nonzero(combined_invalid_mask))
