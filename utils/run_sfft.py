@@ -1630,7 +1630,7 @@ def run_sfft() -> Optional[int]:
                 _applied_decorr = False
                 try:
                     if len(result) >= 3 and _sci_var is not None and _ref_var is not None:
-                        from sfft.utils.SFFTSolutionReader import Realize_SFFTKernel
+                        from sfft.utils.SFFTSolutionReader import Realize_MatchingKernel
                         _solution = result[2]
                         _kerhw = int(diff_hdr.get("KERHW", 0))
                         if _kerhw > 0 and _solution is not None:
@@ -1640,12 +1640,12 @@ def run_sfft() -> Optional[int]:
                             _Fpq_raw = diff_hdr.get("BGORDER", diff_hdr.get("BGPOLY", 0))
                             _Fpq = int((_Fpq_raw + 1) * (_Fpq_raw + 2) // 2)
                             # Realize the kernel at the image centre.
-                            # Realize_SFFTKernel takes XY_q (Fortran coord) in __init__
+                            # Realize_MatchingKernel takes XY_q (Fortran coord) in __init__
                             # and returns KerStack of shape (Num_request, L, L).
                             _cx = float(_N1) / 2.0  # Fortran X = column
                             _cy = float(_N0) / 2.0  # Fortran Y = row
                             _XY_q = np.array([[_cx, _cy]])
-                            _ker_stack = Realize_SFFTKernel(_XY_q).FromArray(
+                            _ker_stack = Realize_MatchingKernel(_XY_q).FromArray(
                                 Solution=_solution,
                                 N0=_N0, N1=_N1,
                                 L0=_L, L1=_L,
