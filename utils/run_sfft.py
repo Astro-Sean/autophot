@@ -60,7 +60,7 @@ except ImportError:
     _HAS_BSPLINE = False
 
 try:
-    from sfft.utils.DeCorrelationCalculator import DeCorrelationCalculator
+    from sfft.utils.DeCorrelationCalculator import DeCorrelation_Calculator as DeCorrelationCalculator
     _HAS_DECORRELATION = True
 except ImportError:
     _HAS_DECORRELATION = False

@@ -32,6 +32,12 @@ dependencies = [
   "scipy>=1.17",
   "sfft==1.7.3",
   "tqdm>=4.68",
+  # SFFT dependencies
+  "fastremap>=1.20",
+  "llvmlite>=0.36",
+  "numba>=0.53",
+  "pyfftw>=0.12",
+  "sep>=1.0",
 ]
 
 [project.optional-dependencies]
