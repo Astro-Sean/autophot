@@ -366,14 +366,40 @@ def _lmag_to_apparent(df: pd.DataFrame, zp_col: str) -> pd.Series:
     return limiting_mag
 
 
-def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: list = None) -> dict:
+def _lmag_to_apparent_multi_snr(df: pd.DataFrame, zp_col: str, snr_thresholds: list = None, input_yaml: dict = None) -> dict:
     """Convert limiting magnitudes for multiple S/N thresholds to apparent magnitudes.
 
     Returns a dictionary with keys like 'Limit_3p0S2N', 'Limit_5p0S2N' containing apparent magnitudes.
     Note: Decimal points in column names are replaced with 'p' for compatibility.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        DataFrame containing limiting magnitude data
+    zp_col : str
+        Column name for zeropoint values
+    snr_thresholds : list, optional
+        List of S/N thresholds (e.g., [3.0, 5.0]). If None, reads from input_yaml config.
+    input_yaml : dict, optional
+        Configuration dictionary. If provided and snr_thresholds is None, 
+        reads snr_thresholds from limiting_magnitude.snr_thresholds config.
+    
+    Returns:
+    --------
+    dict
+        Dictionary with keys like 'Limit_3p0S2N', 'Limit_5p0S2N' containing apparent magnitudes.
     """
+    # Get S/N thresholds from config if not explicitly provided
     if snr_thresholds is None:
-        snr_thresholds = [3.0, 5.0]
+        if input_yaml is not None:
+            lim_cfg = input_yaml.get("limiting_magnitude") or {}
+            snr_thresholds = lim_cfg.get("snr_thresholds", [3.0, 5.0])
+        else:
+            snr_thresholds = [3.0, 5.0]
+    
+    # Ensure snr_thresholds is a list
+    if not isinstance(snr_thresholds, list):
+        snr_thresholds = [snr_thresholds]
 
     result = {}
 
@@ -1525,6 +1551,7 @@ def generate_photometry_table(
     use_SNR_limit=False,
     include_color_table=True,
     color_match_days=0.5,
+    input_yaml=None,
 ):
     """Generate a photometry table with MJD, ISO date, magnitude, error, filter, and limit value.
     Optionally build a same-night colour evolution table (e.g. g-r, r-i).
@@ -1538,6 +1565,7 @@ def generate_photometry_table(
         use_SNR_limit: If True, use SNR for detection; else use lmag.
         include_color_table: If True and data has a 'filter' column and >1 row, write a colour table.
         color_match_days: Max separation (days) for same-night colour pairs.
+        input_yaml: Configuration dictionary for reading S/N thresholds from config.
     """
     complete_data = pd.read_csv(output_file)
     complete_data = _normalize_photometry_columns(complete_data)
@@ -1663,7 +1691,7 @@ def generate_photometry_table(
                 mag_values = detects[col]
             
             # Calculate limiting magnitudes for multiple S/N thresholds
-            limiting_mags = _lmag_to_apparent_multi_snr(detects, zp_col)
+            limiting_mags = _lmag_to_apparent_multi_snr(detects, zp_col, input_yaml=input_yaml)
             
             # Build the row data with all limiting magnitude columns
             row_data = {
@@ -1718,7 +1746,7 @@ def generate_photometry_table(
                     else pd.Series(np.nan, index=inv_detects.index, dtype=float)
                 )
                 # Calculate limiting magnitudes for multiple S/N thresholds
-                limiting_mags_inv = _lmag_to_apparent_multi_snr(inv_detects, zp_col)
+                limiting_mags_inv = _lmag_to_apparent_multi_snr(inv_detects, zp_col, input_yaml=input_yaml)
                 
                 # Build the row data with all limiting magnitude columns
                 inv_row_data = {
@@ -1745,7 +1773,7 @@ def generate_photometry_table(
 
         if not nondetects.empty:
             # Calculate limiting magnitudes for multiple S/N thresholds
-            limiting_mags_nd = _lmag_to_apparent_multi_snr(nondetects, zp_col)
+            limiting_mags_nd = _lmag_to_apparent_multi_snr(nondetects, zp_col, input_yaml=input_yaml)
 
             # Build the row data with all limiting magnitude columns
             nd_row_data = {
@@ -1771,8 +1799,16 @@ def generate_photometry_table(
             phot_table.append(nondetects)
 
     if not phot_table:
-        # Default columns including multi-SNR limiting magnitudes
-        default_cols = ["MJD", "Date", "Mag", "Error", "Filter", "Limit_3p0S2N", "Limit_5p0S2N"]
+        # Get S/N thresholds from config for default columns
+        if input_yaml is not None:
+            lim_cfg = input_yaml.get("limiting_magnitude") or {}
+            snr_thresholds = lim_cfg.get("snr_thresholds", [3.0, 5.0])
+        else:
+            snr_thresholds = [3.0, 5.0]
+        
+        # Generate column names based on configured thresholds
+        limit_cols = [f'Limit_{snr:.1f}S2N'.replace('.', 'p') for snr in snr_thresholds]
+        default_cols = ["MJD", "Date", "Mag", "Error", "Filter"] + limit_cols
         out_phot = pd.DataFrame(columns=default_cols)
     else:
         out_phot = pd.concat(phot_table, ignore_index=True)

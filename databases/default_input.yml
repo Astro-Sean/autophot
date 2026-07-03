@@ -321,6 +321,7 @@ default_input:
     use_catalog: null # str|null --- Optional catalog to seed/guide source detection (if supported).
 
   limiting_magnitude:
+    snr_thresholds: [3, 5] # list[float] --- S/N thresholds for limiting magnitude columns in lightcurve output (e.g., [3, 5] for 3σ and 5σ limits). The code will generate columns like Limit_3p0S2N, Limit_5p0S2N. Can be customized to any values (e.g., [3, 5, 10] for additional thresholds).
     beta_limit: 0.5 # float --- Legacy beta diagnostic threshold. Injected-source recovery is now gated by S/N only; beta is computed for diagnostics and completeness plots but does not affect the detection decision.
     detection_limit: null # float|null --- S/N threshold for declaring an injected source recovered in limiting-magnitude experiments. If null, recovery requires S/N >= 3.0. Higher values (e.g., 5.0) match the detection thresholds used by ZTF and LSST automated pipelines. For discovery-style runs, set this to 5.0 to be consistent with photometry.detection_limit.
     completeness_target: 0.5 # float --- Target recovery fraction at the limiting magnitude (Harris 1990 completeness definition; 0.5 = 50% completeness).
