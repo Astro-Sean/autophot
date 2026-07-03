@@ -483,8 +483,8 @@ default_input:
     source_mask_convolve: True # bool --- If True, Gaussian-smooth before detection (slower; can reduce mask fragmentation).
     source_mask_convolve_first_iter_only: True # bool --- If source_mask_convolve=True, smooth only on iteration 0 (faster).
     source_mask_iterative_bkg_update: True # bool --- If True, update residual between mask iterations using a quick coarse Background2D fit.
-    source_mask_dilate_factor: 5.0 # float --- Dilation factor for source masking (multiplier of FWHM). Higher values mask more aggressively around sources. Use 3.0-5.0 for complete galaxy/source masking, 2.0-3.0 for conservative masking.
-    source_mask_dilate_iterations: 3 # int --- Number of dilation iterations. Higher values extend masks further. Use 3-4 for complete masking, 2 for moderate masking.
+    source_mask_dilate_factor: 2.5 # float --- Dilation factor for source masking (multiplier of FWHM). Higher values mask more aggressively around sources. Use 2.0-3.0 for balanced masking, 3.0-4.0 for aggressive masking.
+    source_mask_dilate_iterations: 2 # int --- Number of dilation iterations. Higher values extend masks further. Use 2 for balanced masking, 3 for aggressive masking.
 
     local_mesh_scale: 0.8 # float --- Background2D box-size scale factor relative to FWHM (local background).
     local_min_box: 6 # int --- Minimum Background2D box size (pixels).
