@@ -4498,6 +4498,23 @@ class Templates:
                 logger.error("Difference file missing or empty")
                 return None, None, None
 
+            # Check for photometry-optimized (non-decorrelated) difference image
+            # If decorrelation was applied, use the photometry-optimized version for proper error estimation
+            photometry_diff_path = differenceFpath.replace(".fits", "_photometry.fits")
+            use_photometry_diff = False
+            if os.path.isfile(photometry_diff_path) and os.path.getsize(photometry_diff_path) > 0:
+                try:
+                    # Check if the main difference image has decorrelation applied
+                    diff_data_check, diff_header_check = read_fits(differenceFpath)
+                    if diff_header_check.get("DECORR", (False, ""))[0]:
+                        logger.info("Decorrelation detected in main difference image")
+                        logger.info(f"Using photometry-optimized difference image: {photometry_diff_path}")
+                        differenceFpath = photometry_diff_path
+                        use_photometry_diff = True
+                except Exception:
+                    # If check fails, continue with main difference image
+                    pass
+
             diff_data, diff_header = read_fits(differenceFpath)
             # ------------------------------------------------------------------
             # Preserve "no data" regions through subtraction backends.
