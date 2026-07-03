@@ -1589,7 +1589,10 @@ def generate_photometry_table(
         if trip is None:
             continue
         col, err_col, zp_col = trip
-        if trip in used_triplets:
+        # Only skip if the same triplet was used AND there's no filter column to distinguish bands
+        # If there's a filter column, we can process multiple bands with the same triplet
+        fcol_check = photometry_filter_series(complete_data)
+        if trip in used_triplets and fcol_check is None:
             continue
         used_triplets.add(trip)
 
