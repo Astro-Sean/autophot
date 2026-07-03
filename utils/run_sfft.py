@@ -1699,25 +1699,28 @@ def run_sfft() -> Optional[int]:
                     # IMPORTANT: Decorrelation is applied for detection quality but
                     # photometry should be performed on the original (non-decorrelated)
                     # difference image to preserve proper noise characteristics for
-                    # error estimation. The decorrelated image is saved for reference
-                    # but photometry pipelines should use the original difference image.
+                    # error estimation.
                     log_info(
                         "NOTE: Decorrelation applied for improved detection quality. "
-                        "For photometry, consider using the original (non-decorrelated) "
-                        "difference image to preserve proper noise characteristics."
+                        "Original (non-decorrelated) image saved for photometry."
                     )
                     
-                    # Save original (non-decorrelated) difference image if requested
+                    # Save original (non-decorrelated) difference image for photometry
                     if save_original_diff and FITS_DIFF:
-                        _orig_diff_path = FITS_DIFF.replace(".fits", "_original.fits")
+                        _photometry_diff_path = FITS_DIFF.replace(".fits", "_photometry.fits")
                         try:
                             _orig_hdr = diff_hdr.copy()
-                            _orig_hdr["DECORR"] = (False, "Original (non-decorrelated) difference image")
+                            _orig_hdr["DECORR"] = (False, "Original (non-decorrelated) difference image for photometry")
                             _orig_hdr["COMMENT"] = "Use this image for photometry to preserve noise characteristics"
-                            safe_fits_write(_orig_diff_path, _diff_arr_original.astype(np.float32), _orig_hdr, overwrite=True)
-                            log_info(f"Saved original (non-decorrelated) difference image: {_orig_diff_path}")
+                            _orig_hdr["PURPOSE"] = "PHOTOMETRY"
+                            safe_fits_write(_photometry_diff_path, _diff_arr_original.astype(np.float32), _orig_hdr, overwrite=True)
+                            log_info(f"Saved photometry-optimized difference image: {_photometry_diff_path}")
+                            
+                            # Add reference to photometry image in main (decorrelated) image header
+                            diff_hdr["PHOTDIFF"] = (os.path.basename(_photometry_diff_path), 
+                                                   "Path to photometry-optimized (non-decorrelated) difference image")
                         except Exception as _save_e:
-                            log_info(f"Warning: Could not save original difference image: {_save_e}")
+                            log_info(f"Warning: Could not save photometry difference image: {_save_e}")
                     
                 decorr_status = "ON" if _applied_decorr else "OFF (kernel unavailable)"
                 vscale_status = "ON" if _applied_vscale else "OFF (insufficient data)"
@@ -1739,6 +1742,7 @@ def run_sfft() -> Optional[int]:
         # ------------------------------------------------------------------
         try:
             if np.any(combined_invalid_mask) and FITS_DIFF and os.path.isfile(FITS_DIFF):
+                # Apply mask to main (decorrelated) difference image
                 with fits.open(FITS_DIFF, mode="update", memmap=False) as hdul:
                     diff = np.asarray(hdul[0].data, dtype=float)
                     if diff.shape == combined_invalid_mask.shape:
@@ -1747,16 +1751,40 @@ def run_sfft() -> Optional[int]:
                         hdul[0].data = diff
                         hdul.flush()
                         n_after = int(np.count_nonzero(~np.isfinite(diff)))
-                        n_mask = int(np.count_nonzero(combined_invalid_mask))
                         log_info(
-                            f"Applied combined invalid mask to diff: NaN/inf {n_before} -> {n_after} "
-                            f"(mask={n_mask} px)"
+                            f"Invalid mask applied to main diff: {n_before} -> {n_after} finite pixels"
                         )
                     else:
                         log_info(
                             f"Warning: combined_invalid_mask shape {combined_invalid_mask.shape} "
                             f"!= diff shape {diff.shape}; cannot reapply invalid mask."
                         )
+                
+                # Also apply mask to photometry-optimized image if it exists
+                if save_original_diff and decorrelate_noise:
+                    _photometry_diff_path = FITS_DIFF.replace(".fits", "_photometry.fits")
+                    if os.path.isfile(_photometry_diff_path):
+                        with fits.open(_photometry_diff_path, mode="update", memmap=False) as hdul:
+                            diff = np.asarray(hdul[0].data, dtype=float)
+                            if diff.shape == combined_invalid_mask.shape:
+                                n_before = int(np.count_nonzero(~np.isfinite(diff)))
+                                diff[combined_invalid_mask] = np.nan
+                                hdul[0].data = diff
+                                hdul.flush()
+                                n_after = int(np.count_nonzero(~np.isfinite(diff)))
+                                log_info(
+                                    f"Invalid mask applied to photometry diff: {n_before} -> {n_after} finite pixels"
+                                )
+                            else:
+                                log_info(
+                                    f"Warning: combined_invalid_mask shape {combined_invalid_mask.shape} "
+                                    f"!= photometry diff shape {diff.shape}; cannot reapply invalid mask."
+                                )
+                
+                n_mask = int(np.count_nonzero(combined_invalid_mask))
+                log_info(
+                    f"Applied combined invalid mask: {n_mask} pixels masked"
+                )
         except Exception as e:
             log_info(f"Warning: failed to reapply invalid mask to diff: {e}")
 
