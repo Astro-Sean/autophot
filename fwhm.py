@@ -601,6 +601,33 @@ class Find_FWHM:
                 )
                 ax.plot(xx, yy, color=fit_color, linestyle="--", lw=get_line_width('medium'),
                         label=f"Fit: $m_{{\\mathrm{{peak}}}} = m_{{\\mathrm{{inst}}}} + {b:.3f}$")
+                
+                # Add saturation regime marker if SATURATE is available and data extends into saturation
+                # Use consistent fallback with main.py
+                try:
+                    from main import SATURATE_INTERNAL_FALLBACK
+                except ImportError:
+                    SATURATE_INTERNAL_FALLBACK = np.inf
+                    
+                saturate = self.input_yaml.get("saturate", SATURATE_INTERNAL_FALLBACK)
+                if np.isfinite(saturate) and saturate > 0:
+                    # Convert SATURATE (ADU) to peak magnitude
+                    saturate_safe = max(saturate, 1e-10)
+                    saturate_mag = -2.5 * np.log10(saturate_safe)
+                    
+                    # Check if any data extends into saturation regime
+                    peak_values = df["maxPixel"].values
+                    if np.any(peak_values > 0.9 * saturate):  # If data reaches 90% of saturation
+                        # Mark saturation regime on the plot
+                        ax.axvline(saturate_mag, color='red', linestyle=':', lw=get_line_width('medium'),
+                                  alpha=get_alpha('medium'), label=f'Saturation ({saturate:.0f} ADU)')
+                        
+                        # Shade the saturation region (brighter side, which is left side on inverted axis)
+                        # On inverted axis: xlim[1] is left (brighter), xlim[0] is right (fainter)
+                        xlim = ax.get_xlim()
+                        ax.axvspan(saturate_mag, xlim[1], color='red', 
+                                   alpha=get_alpha('very_light'), label='Saturation regime')
+                
                 ax.set_xlabel(
                     r"Instrumental magnitude [$-2.5\,\log_{{10}}(\mathrm{{Flux}})$]"
                 )

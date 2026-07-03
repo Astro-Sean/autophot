@@ -621,7 +621,12 @@ class Zeropoint:
             reject_nonlinear = bool(zp_cfg.get("reject_nonlinear_sources", True))
             nonlin_peak_frac = float(zp_cfg.get("nonlinear_peak_frac", 0.85))
             sat_peak_frac = float(zp_cfg.get("saturation_peak_frac", 0.99))
-            saturate_level = float(self.input_yaml.get("saturate", np.inf))
+            # Use consistent fallback with main.py
+            try:
+                from main import SATURATE_INTERNAL_FALLBACK
+            except ImportError:
+                SATURATE_INTERNAL_FALLBACK = np.inf
+            saturate_level = float(self.input_yaml.get("saturate", SATURATE_INTERNAL_FALLBACK))
             non_linear_mask = np.zeros(len(sources), dtype=bool)
             saturated_mask = np.zeros(len(sources), dtype=bool)
             if (

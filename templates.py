@@ -3245,7 +3245,12 @@ class Templates:
             # Use more aggressive threshold to ensure only fully linear sources
             # Similar to zeropoint nonlinear_peak_frac (0.85) to exclude sources
             # entering the non-linear regime, not just fully saturated ones
-            saturate = self.input_yaml.get("saturate", np.inf)
+            # Use consistent fallback with main.py
+            try:
+                from main import SATURATE_INTERNAL_FALLBACK
+            except ImportError:
+                SATURATE_INTERNAL_FALLBACK = np.inf
+            saturate = self.input_yaml.get("saturate", SATURATE_INTERNAL_FALLBACK)
             nonlinear_frac = self.input_yaml.get("zeropoint", {}).get(
                 "nonlinear_peak_frac", 0.85
             )
@@ -3964,6 +3969,12 @@ class Templates:
             # Treat missing / non-finite / non-positive values as "no hard limit"
             # by mapping them to np.inf. Downstream code interprets np.inf as
             # "do not mask on saturation".
+            # Use consistent fallback values with main.py
+            try:
+                from main import SATURATE_INTERNAL_FALLBACK
+            except ImportError:
+                SATURATE_INTERNAL_FALLBACK = np.inf
+            
             def _safe_saturate(hdr: fits.Header) -> float:
                 saturate_raw_value = None
                 for k in ("SATURATE", "saturate", "SATLEVEL", "SATUR"):
@@ -3971,13 +3982,13 @@ class Templates:
                         saturate_raw_value = hdr.get(k)
                         break
                 if saturate_raw_value is None:
-                    saturate_raw_value = np.inf
+                    saturate_raw_value = SATURATE_INTERNAL_FALLBACK
                 try:
                     sat = float(saturate_raw_value)
                 except Exception:
-                    sat = np.inf
+                    sat = SATURATE_INTERNAL_FALLBACK
                 if not np.isfinite(sat) or sat <= 0:
-                    return np.inf
+                    return SATURATE_INTERNAL_FALLBACK
                 return sat
 
             science_saturate = _safe_saturate(scienceHeader)

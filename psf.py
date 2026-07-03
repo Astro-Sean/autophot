@@ -1809,7 +1809,12 @@ class PSF:
             # For small candidate pools, apply these cuts adaptively so we do not
             # over-prune and end up with an unstable ePSF from too few stars.
             phot_cfg = self.input_yaml.get("photometry", {}) or {}
-            saturate = float(self.input_yaml.get("saturate", np.inf))
+            # Use consistent fallback with main.py
+            try:
+                from main import SATURATE_INTERNAL_FALLBACK
+            except ImportError:
+                SATURATE_INTERNAL_FALLBACK = np.inf
+            saturate = float(self.input_yaml.get("saturate", SATURATE_INTERNAL_FALLBACK))
             saturate_frac = float(phot_cfg.get("psf_saturate_fraction", 0.9))
             min_psf_candidates = int(phot_cfg.get("psf_min_candidates", 8))
             min_psf_candidates = max(4, min_psf_candidates)

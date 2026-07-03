@@ -28,6 +28,7 @@ Preprocessing:
     - Background modeling: Estimates and subtracts the background noise.
     - Trim/recrop: Trims or recrops the image to focus on the region of interest.
     - Optional north-up reprojection: Aligns the image so that north is up and east is left.
+"""
 
 Sources:
     - Builds or downloads a catalog of reference sources.
@@ -100,6 +101,10 @@ from astropy.wcs.utils import proj_plane_pixel_scales
 from photutils.centroids import centroid_com, centroid_2dg, centroid_sources
 from scipy.spatial import cKDTree
 from scipy.cluster.hierarchy import fclusterdata
+
+# SATURATE handling constants - used consistently across the codebase
+SATURATE_INTERNAL_FALLBACK = np.inf  # Internal processing: no saturation limit
+SATURATE_FITS_FALLBACK = 1e30  # FITS storage: finite value for "no saturation"
 
 # Local Modules
 from aperture import (
@@ -1166,6 +1171,8 @@ def run_photometry():
         #   1) telescope.yml explicit keyword if valid and present in header
         #   2) fallback to standard 'SATURATE' header key if present
         #   3) otherwise, treat as effectively no hard saturation (inf)
+        # Note: Use module-level constants for consistent SATURATE handling
+        
         saturate_key = telescope_config.get("saturate", "SATURATE")
         if (
             saturate_key
@@ -1179,7 +1186,7 @@ def run_photometry():
             # No usable saturation keyword provided; assume effectively no hard
             # saturation so downstream masks do not classify the entire frame
             # as saturated.
-            saturate = np.inf
+            saturate = SATURATE_INTERNAL_FALLBACK
 
         # Validate saturate is a valid numeric type
         try:
@@ -1189,12 +1196,15 @@ def run_photometry():
                 f"SATURATE keyword has invalid value '{saturate}' (not a number); "
                 f"falling back to no saturation limit."
             )
-            saturate = np.inf
+            saturate = SATURATE_INTERNAL_FALLBACK
 
         input_yaml["saturate"] = saturate
         # FITS headers cannot store inf; only write saturate when it is finite.
         if np.isfinite(saturate):
             header["saturate"] = float(saturate)
+        else:
+            # For FITS compatibility, use a large finite value when saturate is inf
+            header["saturate"] = SATURATE_FITS_FALLBACK
 
         #  Handle Read Noise and Airmass (telescope.yml may use not_given_by_user)
         rn_key = telescope_config.get("readnoise", "RDNOISE")
