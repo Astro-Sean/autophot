@@ -724,14 +724,26 @@ NNW
             if np.issubdtype(original_dtype, np.integer):
                 max_possible = np.iinfo(original_dtype).max
                 if np.nanmax(data) >= 0.99 * max_possible:
-                    return float(max_possible)
-            finite = data[np.isfinite(data)]
-            if finite.size == 0:
-                return float(1e6)
-            hist, bins = np.histogram(finite, bins=1000)
-            peak_idx = int(np.argmax(hist))
-            pct = float(np.nanpercentile(finite, 99.99))
-            return float(max(bins[min(peak_idx, len(bins) - 2)], pct))
+                    satur = float(max_possible)
+            else:
+                finite = data[np.isfinite(data)]
+                if finite.size == 0:
+                    satur = float(1e6)
+                else:
+                    hist, bins = np.histogram(finite, bins=1000)
+                    peak_idx = int(np.argmax(hist))
+                    pct = float(np.nanpercentile(finite, 99.99))
+                    satur = float(max(bins[min(peak_idx, len(bins) - 2)], pct))
+            # Cap at reasonable maximum (65535 = max for 16-bit unsigned)
+            # SExtractor rejects SATUR_LEVEL values that are too large
+            max_saturation = 65535
+            if satur > max_saturation:
+                self.logger.warning(
+                    "Heuristic saturation %s exceeds SExtractor maximum; capping at %d",
+                    satur, max_saturation
+                )
+                satur = max_saturation
+            return satur
 
     # ----------------------------- SExtractor + PSFEx -----------------------------
     @staticmethod

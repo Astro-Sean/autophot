@@ -1679,6 +1679,14 @@ class Zeropoint:
 
                 # Select fitting method: MCMC (default), ODR, or RANSAC
                 yerr = np.sqrt(delta_mag_err**2 + color_corr_err**2)
+                n_sources = len(inst_mag)
+                
+                # Auto-fallback to ODR for small source counts (MCMC unreliable with N < 15)
+                if fit_method.lower() == "mcmc" and n_sources < 15:
+                    logger.info(
+                        f"Small calibrator pool ({n_sources} sources): using ODR instead of MCMC for reliable convergence"
+                    )
+                    fit_method = "odr"
                 
                 if fit_method.lower() == "mcmc":
                     # MCMC: Bayesian posterior with proper X,Y error handling
