@@ -2953,7 +2953,9 @@ def run_photometry():
             np.isfinite(ImageFWHM) and float(ImageFWHM) <= undersampled_thr
         )
 
-        header["fwhm"] = ImageFWHM
+        # Only write FWHM to header if it's finite (FITS headers reject NaN)
+        if np.isfinite(ImageFWHM):
+            header["fwhm"] = ImageFWHM
 
         # Adaptive crowded-field detection (source density + background coverage)
         try:

@@ -879,7 +879,30 @@ class SExtractorWrapper:
                 else:
                     image_data = None
             gain = float(header.get(gain_key, 1.0))
-            saturation = float(header.get(satur_key, 1e7))
+            saturation_raw = header.get(satur_key, 60000)
+            try:
+                saturation = float(saturation_raw)
+                # SExtractor rejects inf/NaN or non-positive SATUR_LEVEL values
+                if not np.isfinite(saturation) or saturation <= 0:
+                    saturation = 60000
+                # Cap at reasonable maximum (65535 = max for 16-bit unsigned)
+                # Header values like 1e30 cause "SATUR_LEVEL keyword out of range"
+                max_saturation = 65535
+                if saturation > max_saturation:
+                    logger.warning(
+                        "Saturation value %s from header exceeds SExtractor maximum; capping at %d",
+                        saturation, max_saturation
+                    )
+                    saturation = max_saturation
+            except (TypeError, ValueError):
+                saturation = 60000
+            # Format as integer string if whole number (SExtractor prefers this)
+            if float(saturation).is_integer():
+                saturation = int(saturation)
+            logger.info(
+                "SExtractor saturation: raw=%r, parsed=%s, satur_key=%s",
+                saturation_raw, saturation, satur_key,
+            )
 
             fwhm_for_kernel = float(use_FWHM)
             if not np.isfinite(fwhm_for_kernel) or fwhm_for_kernel <= 0:
