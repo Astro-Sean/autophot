@@ -417,6 +417,14 @@ class GaiaCurveCatalogBuilder:
         gaia_nearest_prefetch_min: int = 500,
         gaia_nearest_prefetch_max: int = 10000,
     ) -> pd.DataFrame:
+        out_path = Path(out_csv)
+        if out_path.exists():
+            self.logger.info(
+                "Existing Gaia custom catalog found at %s; using cached file instead of re-downloading.",
+                out_path,
+            )
+            return pd.read_csv(out_path)
+
         band_to_curve_path: Dict[str, Path] = {
             b: Path(p).expanduser().resolve() for b, p in curves.items()
         }

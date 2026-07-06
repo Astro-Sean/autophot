@@ -1413,11 +1413,19 @@ class WCSSolver:
                 satur_float = float(satur_val)
                 # SExtractor rejects inf/NaN SATUR_LEVEL values
                 if not np.isfinite(satur_float) or satur_float <= 0:
-                    satur_str = "1e7"
+                    satur_float = 1e7
+                # Cap at reasonable maximum (65535 = max for 16-bit unsigned)
+                # Header values like 1e30 cause "SATUR_LEVEL keyword out of range"
+                max_saturation = 65535
+                if satur_float > max_saturation:
+                    satur_float = max_saturation
+                # Format as integer if whole number (SExtractor prefers this)
+                if float(satur_float).is_integer():
+                    satur_str = str(int(satur_float))
                 else:
                     satur_str = str(satur_float)
             except Exception:
-                satur_str = "1e7"
+                satur_str = "65535"
 
             detect_thresh = str(_wcs_cfg_float(wcs_cfg, "sextractor_detect_thresh", 1.5))
             analysis_thresh = str(
