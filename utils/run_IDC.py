@@ -1439,54 +1439,8 @@ NNW
             # SExtractorWrapper will copy the FITS-LDAC catalog to these paths when return_raw=True
             # These are the actual SExtractor outputs with full metadata
             
-            sci_fwhm, sci_catalog, sci_scale = self.sextractor.run(
-                fits_path=str(sci_image_copy),
-                pixel_scale=sci_pix_scale,
-                seeing_fwhm=sci_seeing_fwhm,
-                catalog_type="FITS_LDAC",
-                use_FWHM=sci_hdr_fwhm if sci_hdr_fwhm else 0.0,
-                crowded=sextractor_crowded,
-                use_for_matching=True,  # Retain more sources for alignment
-                mdir=str(science_aligned_dir),
-                return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
-            )
-            
-            ref_fwhm, ref_catalog, ref_scale = self.sextractor.run(
-                fits_path=str(ref_image_copy),
-                pixel_scale=ref_pix_scale,
-                seeing_fwhm=ref_seeing_fwhm,
-                catalog_type="FITS_LDAC",
-                use_FWHM=ref_hdr_fwhm if ref_hdr_fwhm else 0.0,
-                crowded=sextractor_crowded,
-                use_for_matching=True,  # Retain more sources for alignment
-                mdir=str(reference_aligned_dir),
-                return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
-            )
-            
-            # SExtractorWrapper with return_raw=True creates .fits files in a temp subdirectory
-            # The temp directory is cleaned up after the context manager exits, so we need to
-            # copy the catalog before cleanup. Since we can't access the temp dir after cleanup,
-            # we'll use a workaround: copy the input FITS to have the same stem as the expected catalog.
-            # Then SExtractorWrapper will create the catalog with the correct name.
-            
-            # Copy science and reference images with the expected catalog stems
-            sci_image_for_catalog = science_aligned_dir / "science_image.fits"
-            ref_image_for_catalog = reference_aligned_dir / "reference_image.fits"
-            
-            # These are already the correct names from earlier, so SExtractorWrapper will create
-            # science_image_PYSEx_CAT.fits and reference_image_PYSEx_CAT.fits in the temp dir
-            # We need to modify SExtractorWrapper to not clean up when return_raw=True, or
-            # copy the catalog before cleanup. For now, let's create the catalogs directly
-            # by running SExtractorWrapper with a custom output path.
-            
-            # Actually, the simplest solution is to just use the pandas DataFrame and
-            # write the FITS-LDAC ourselves (the original approach), but ensure we use
-            # the correct SExtractor column names from the raw Table.
-            
-            # Let me revert to the manual FITS-LDAC writing approach, but this time
-            # use the column names from the raw Table instead of mapping from pandas.
-            
-            # Re-run SExtractorWrapper to get the raw Table with correct column names
+            # Pass 1: initial source detection with header/default FWHM for scale estimation.
+            # Pass 2 (below) re-runs with FWHM-based scale for alignment-quality catalogs.
             sci_fwhm, sci_catalog_raw, sci_scale = self.sextractor.run(
                 fits_path=str(sci_image_copy),
                 pixel_scale=sci_pix_scale,
@@ -1877,6 +1831,13 @@ NNW
             crossid_radius = max(3.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 3.0)
             self.logger.info("Cross-match radius: %.2f arcsec", crossid_radius)
 
+            # Configurable minimum matched sources for a reliable SCAMP solution.
+            # SCAMP needs at least ~6 matched sources for a linear WCS fit
+            # (shift, scale, rotation = 4 params, plus 2 for robustness).
+            align_cfg = iy.get("template_subtraction", {}) if isinstance(iy, dict) else {}
+            min_matched = int(align_cfg.get("alignment_min_matched_sources", 6))
+            max_match_radius = float(align_cfg.get("alignment_max_match_radius_arcsec", 30.0))
+
             def _do_match(radius_arcsec: float):
                 return self.filter_matched_sources(
                     sci_cat_path=sci_sex["catalog_path"],
@@ -1888,6 +1849,25 @@ NNW
 
             try:
                 _num_matched, _ = _do_match(crossid_radius)
+                # Retry with larger radius if too few matches
+                if _num_matched < min_matched and crossid_radius < max_match_radius:
+                    retry_radius = min(crossid_radius * 2.0, max_match_radius)
+                    self.logger.warning(
+                        "Only %d matched sources (< %d minimum). Retrying with %.1f\" radius (was %.1f\").",
+                        _num_matched, min_matched, retry_radius, crossid_radius,
+                    )
+                    _num_matched, _ = _do_match(retry_radius)
+                    crossid_radius = retry_radius
+
+                if _num_matched < min_matched:
+                    self.logger.warning(
+                        "Only %d matched sources after retry (< %d minimum). "
+                        "Falling back to reproject/AstroAlign.",
+                        _num_matched, min_matched,
+                    )
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
             except Exception as e:
                 self.logger.warning(
                     "Source matching failed: %s. Falling back to reproject/AstroAlign.",
@@ -1953,6 +1933,8 @@ NNW
                 "ASTREF_WEIGHT": "1",  # Weight by magnitude (prioritize bright, well-measured)
                 "VERBOSE_TYPE": "FULL" if self.verbose_level >= 2 else "NORMAL",
                 "WRITE_XML": "Y",
+                # Relax ellipticity cut for sparse fields to include more sources
+                "ELLIPTICITY_MAX": 0.9 if is_sparse_field else 0.5,
             }
             scamp_config_ref = {
                 **scamp_config_base,
@@ -2078,6 +2060,31 @@ NNW
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
+
+                # Quality gate: check SCAMP astrometric residual
+                scamp_distortion = scamp_result.get("distortion") if isinstance(scamp_result, dict) else None
+                max_scamp_residual = float(align_cfg.get("alignment_max_scamp_residual_arcsec", 2.0))
+                if isinstance(scamp_distortion, dict):
+                    scamp_rms = scamp_distortion.get("astrometric_rms_arcsec")
+                    scamp_nstars = scamp_distortion.get("n_matched_stars")
+                    if scamp_rms is not None and scamp_rms > max_scamp_residual:
+                        self.logger.warning(
+                            "SCAMP astrometric residual too large (%.3f\" > %.1f\"). "
+                            "Falling back to reproject/AstroAlign.",
+                            scamp_rms, max_scamp_residual,
+                        )
+                        return self._align_fallback_reproject_then_astroalign(
+                            science_image, reference_image, output_dir
+                        )
+                    if scamp_nstars is not None and scamp_nstars < min_matched:
+                        self.logger.warning(
+                            "SCAMP matched only %d stars (< %d minimum). "
+                            "Falling back to reproject/AstroAlign.",
+                            scamp_nstars, min_matched,
+                        )
+                        return self._align_fallback_reproject_then_astroalign(
+                            science_image, reference_image, output_dir
+                        )
 
             # Copy reference .head file next to reference image only.
             # Reference .head corrects reference WCS to match science WCS.
@@ -3352,7 +3359,7 @@ NNW
 
     # -------------------------------- SCAMP + SWarp --------------------------------
     def _parse_scamp_xml(self, xml_file: str) -> Optional[Dict]:
-        """Extract a few WCS keys from SCAMP XML. Extend as needed."""
+        """Extract WCS keys, astrometric residual, and matched star count from SCAMP XML."""
         import xml.etree.ElementTree as ET
 
         try:
@@ -3373,7 +3380,45 @@ NNW
                 for child in param:
                     if child.tag in tags:
                         wcs[child.tag] = float(child.text)
-            return {"distortion_coeffs": {}, "wcs_params": wcs}
+
+            # Extract astrometric residual RMS (in arcsec) and matched star count
+            astrometric_rms = None
+            n_matched_stars = None
+            for param in root.findall(".//AstrometricResidual"):
+                for child in param:
+                    if child.tag == "AstRefResidualRMS":
+                        try:
+                            astrometric_rms = float(child.text)
+                        except (ValueError, TypeError):
+                            pass
+                    elif child.tag == "Nastrometric":
+                        try:
+                            n_matched_stars = int(child.text)
+                        except (ValueError, TypeError):
+                            pass
+
+            # Fallback: try Asterism block for star count
+            if n_matched_stars is None:
+                for param in root.findall(".//Asterism"):
+                    for child in param:
+                        if child.tag == "Nstars":
+                            try:
+                                n_matched_stars = int(child.text)
+                            except (ValueError, TypeError):
+                                pass
+
+            if astrometric_rms is not None:
+                self.logger.info(
+                    "SCAMP astrometric residual: %.4f\" (%d matched stars)",
+                    astrometric_rms, n_matched_stars or -1,
+                )
+
+            return {
+                "distortion_coeffs": {},
+                "wcs_params": wcs,
+                "astrometric_rms_arcsec": astrometric_rms,
+                "n_matched_stars": n_matched_stars,
+            }
         except Exception as e:
             self.logger.info(f"Could not parse SCAMP XML: {e}")
             return None
@@ -4518,8 +4563,8 @@ NNW
 
         sci_cat = add_mag_snr_aper(sci_cat)
         ref_cat = add_mag_snr_aper(ref_cat)
-        sci_mask = sci_cat["SNR_APER"] >= 1.0
-        ref_mask = ref_cat["SNR_APER"] >= 1.0
+        sci_mask = sci_cat["SNR_APER"] >= 3.0
+        ref_mask = ref_cat["SNR_APER"] >= 3.0
         sci_cat_filtered = sci_cat[sci_mask]
         ref_cat_filtered = ref_cat[ref_mask]
         if len(sci_cat_filtered) == 0 or len(ref_cat_filtered) == 0:
@@ -4657,9 +4702,9 @@ NNW
                             f"Median fallback kept {len(sci_cat_matched)} sources"
                         )
         else:
-            # For fewer than 5 initial matches, skip RANSAC to avoid over-filtering
+            # For fewer than 50 initial matches, skip RANSAC to avoid over-filtering
             self.logger.info(
-                f"Skipping RANSAC mag filter (only {len(sci_cat_matched)} initial matches < 5 threshold)"
+                f"Skipping RANSAC mag filter (only {len(sci_cat_matched)} initial matches < 50 threshold)"
             )
             # Calculate simple intercept for plotting
             sci_mag = np.array(sci_cat_matched["MAG_APER"], dtype=float)

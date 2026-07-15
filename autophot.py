@@ -1985,9 +1985,52 @@ class AutomatedPhotometry:
                 new_output_dir = os.path.join(os.path.dirname(work_dir), work_loc)
                 Path(new_output_dir).mkdir(parents=True, exist_ok=True)
 
-                # At this point, main.py will handle catalog building/downloading.
-                # If a catalog CSV already exists in the expected location, its
-                # own logic will re-use that file without further network access.
+                # Pre-download reference catalog(s) once, before the per-image loop.
+                # main.py will find the cached CSV and skip re-downloading.
+                _log(log_step("Reference photometric catalog (pre-download)"))
+                try:
+                    from catalog import Catalog as _Catalog
+                    _cat = _Catalog(input_yaml=backup_yaml)
+                    _use_cat = backup_yaml.get("catalog", {}).get("use_catalog")
+                    if isinstance(_use_cat, dict):
+                        _unique_cats = sorted(set(
+                            v for v in _use_cat.values()
+                            if v is not None and str(v).strip() != ""
+                        ))
+                    elif _use_cat is not None and str(_use_cat).strip() != "":
+                        _unique_cats = [str(_use_cat).strip()]
+                    else:
+                        _unique_cats = []
+                    _target_coords = SkyCoord(
+                        backup_yaml["target_ra"],
+                        backup_yaml["target_dec"],
+                        unit=(u.deg, u.deg), frame="icrs",
+                    )
+                    for _cat_name in _unique_cats:
+                        try:
+                            if backup_yaml.get("catalog", {}).get("build_catalog", False):
+                                _log(f"  Pre-building catalog: {_cat_name}")
+                                _cat.build_complete_catalog(
+                                    target_coords=_target_coords,
+                                    catalog_list=["refcat", "sdss", "pan_starrs", "apass", "2mass"],
+                                    max_separation=5,
+                                )
+                            else:
+                                _resolved = _cat._require_catalog_selected(_cat_name)
+                                _log(f"  Pre-fetching catalog: {_resolved}")
+                                _cat.download(
+                                    target_coords=_target_coords,
+                                    target_name=backup_yaml.get("target_name", "target"),
+                                    catalogName=_resolved,
+                                    catalog_custom_fpath=backup_yaml.get("catalog", {}).get(
+                                        "catalog_custom_fpath", None
+                                    ),
+                                )
+                        except Exception as _ce:
+                            _log(f"  [WARNING] Pre-fetch of '{_cat_name}' failed: {_ce}")
+                except Exception as _pe:
+                    _log(f"[WARNING] Catalog pre-download step failed: {_pe}")
+                    _log("         main.py will retry per-image (cached CSV may still exist).")
 
                 # SIMBAD variable sources near target for context
 

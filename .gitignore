@@ -1,6 +1,5 @@
 .venv/
 venv/
-__pycache__/
 *.pyc
 *.pyo
 *.pyd
@@ -19,9 +18,6 @@ __pycache__/
 .DS_Store
 
 # Data products / logs (astronomy)
-*.fits
-*.fit
-*.fts
 *.fz
 *.fits.gz
 *.head
@@ -44,21 +40,10 @@ autophot_tokens_local.py
 *.env
 
 __pycache__/
-*.py[cod]
-*.so
-*.pyd
 
 # Virtual environments
-.venv/
-venv/
-env/
 
 # Editor / IDE
-.vscode/
-.idea/
-*.code-workspace
-*.workspace
-workspace
 
 # OS metadata
 .DS_Store
@@ -70,10 +55,6 @@ Thumbs.db
 *.bak
 
 # Large data products (FITS and related)
-*.fits
-*.fit
-*.fts
-*.fits.fz
 
 # AutoPHOT-specific outputs
 *_REDUCED/
@@ -87,4 +68,7 @@ autophot_tokens.py
 
 # Local helper scripts
 scripts/
+
+# opencode config (contains API keys)
+opencode.json
 

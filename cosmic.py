@@ -16,8 +16,7 @@ import numpy as np
 import astroscrappy
 from ccdproc import cosmicray_lacosmic
 from typing import Optional, Tuple
-from photutils.background import Background2D, MedianBackground
-from scipy.ndimage import median_filter, binary_dilation, binary_fill_holes
+from scipy.ndimage import binary_dilation, binary_fill_holes
 import matplotlib.pyplot as plt
 from astropy.visualization import ZScaleInterval
 from skimage.morphology import disk
@@ -57,32 +56,6 @@ class RemoveCosmicRays:
         self.use_lacosmic = use_lacosmic
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
-    # --- Remove use_lacosmic flag ---
-    def remove_use_lacosmic(self):
-        """
-        Remove the use_lacosmic flag and ensure astroscrappy is used by default.
-        """
-        self.use_lacosmic = False
-        self.logger.info("use_lacosmic flag removed. Using astroscrappy by default.")
-
-    # --- Background Estimation ---
-    def _estimate_background(self, image: np.ndarray, box_size: int = 50) -> np.ndarray:
-        """
-        Estimate the background of the image using photutils.Background2D.
-
-        Args:
-            image: Input image as a numpy array.
-            box_size: Size of the background box (default: 50).
-
-        Returns:
-            Background image as a numpy array.
-        """
-        bkg_estimator = MedianBackground()
-        bkg = Background2D(
-            image, box_size, filter_size=(3, 3), bkg_estimator=bkg_estimator
-        )
-        return bkg.background
-
     # --- Mask Creation ---
     def _create_mask(self, image: np.ndarray, satlevel: float = np.inf) -> np.ndarray:
         """
@@ -96,7 +69,16 @@ class RemoveCosmicRays:
             Boolean mask as a numpy array.
         """
         sat_mask = image > satlevel
-        bright_mask = image > (np.median(image) + 5 * np.std(image))
+        # Use robust MAD-based sigma instead of np.std — cosmic rays and
+        # bright stars inflate std, making the mask ineffective at catching
+        # the very pixels it should protect.
+        finite = image[np.isfinite(image)]
+        if finite.size == 0:
+            return sat_mask
+        med = np.median(finite)
+        mad = np.median(np.abs(finite - med))
+        robust_sigma = 1.4826 * mad if mad > 0 else np.std(finite)
+        bright_mask = image > (med + 5 * robust_sigma)
         return sat_mask | bright_mask
 
     # --- Cosmic Ray Mask Dilation and Hole Filling ---
@@ -125,9 +107,8 @@ class RemoveCosmicRays:
             # Calculate the dilation radius
             r = max(1, int(dilate_factor * fwhm_pixels))
 
-            # Create a circular structuring element
-            y, x = np.ogrid[-r : r + 1, -r : r + 1]
-            selem = (x * x + y * y) <= r * r
+            # Use skimage's optimised disk structuring element
+            selem = disk(r)
 
             # Dilate the mask
             dilated_mask = binary_dilation(
@@ -157,8 +138,8 @@ class RemoveCosmicRays:
     ):
         """
         Plot a side-by-side comparison of the original and cleaned images.
-        Cosmic ray regions are marked in Okabe-Ito blue (original) and
-        Okabe-Ito orange (cleaned).
+        The left panel shows the original image with cosmic-ray-contaminated
+        pixels highlighted in red; the right panel shows the cleaned image.
 
         Args:
             original: Original image (before cosmic ray removal).
@@ -174,7 +155,6 @@ class RemoveCosmicRays:
         base = os.path.splitext(os.path.basename(fpath))[0]
         write_dir = os.path.dirname(fpath)
 
-        # --- Create the figure ---
         from functions import set_size
 
         fig, axes = plt.subplots(
@@ -182,41 +162,42 @@ class RemoveCosmicRays:
         )
 
         # --- Apply zscale for optimal contrast ---
-        zscale_original = ZScaleInterval()
-        vmin_original, vmax_original = zscale_original.get_limits(original)
-        zscale_cleaned = ZScaleInterval()
-        vmin_cleaned, vmax_cleaned = zscale_cleaned.get_limits(cleaned)
+        zscale = ZScaleInterval()
+        vmin, vmax = zscale.get_limits(original)
 
-        cmap = plt.get_cmap("gray").copy()
-        cmap.set_bad(color="white")
-
-        # --- Plot the original image ---
+        # --- Left panel: original with CR pixels in red ---
+        # Mask CR pixels so they show as the "bad" colour (red) in the colormap
+        original_masked = np.ma.array(original, mask=cr_mask)
+        cmap_orig = plt.get_cmap("gray").copy()
+        cmap_orig.set_bad(color="red")
         im0 = axes[0].imshow(
-            original,
-            cmap=cmap,
+            original_masked,
+            cmap=cmap_orig,
             origin="lower",
-            vmin=vmin_original,
-            vmax=vmax_original,
+            vmin=vmin,
+            vmax=vmax,
         )
-        axes[0].contour(
-            cr_mask, colors="#0000FF", alpha=0.5, linewidths=0.5
+        n_cr = int(np.count_nonzero(cr_mask))
+        axes[0].set_title(
+            f"Original ({n_cr:,} CR pixels)", fontsize=9
         )
         fig.colorbar(im0, ax=axes[0], orientation="vertical", fraction=0.046, pad=0.04)
 
-        # --- Plot the cleaned image ---
+        # --- Right panel: cleaned image ---
+        cmap_clean = plt.get_cmap("gray").copy()
+        cmap_clean.set_bad(color="white")
         im1 = axes[1].imshow(
             cleaned,
-            cmap=cmap,
+            cmap=cmap_clean,
             origin="lower",
-            vmin=vmin_cleaned,
-            vmax=vmax_cleaned
+            vmin=vmin,
+            vmax=vmax,
         )
-        axes[1].contour(cr_mask, colors="#FF0000", alpha=0.5, linewidths=0.5)
+        axes[1].set_title("Cleaned", fontsize=9)
         fig.colorbar(im1, ax=axes[1], orientation="vertical", fraction=0.046, pad=0.04)
 
-        # --- Finalize the plot (title allowed; no legends overlap here) ---
+        # --- Finalize ---
         fig.suptitle(title, fontsize=10)
-        # Leave room for the suptitle so it doesn't collide with axes/colorbars.
         plt.tight_layout(rect=[0, 0, 1, 0.95])
 
         png_path = os.path.join(write_dir, f"Cosmic_Rays_{base}.png")
@@ -239,6 +220,8 @@ class RemoveCosmicRays:
         sigclip: float = 4.5,
         sigfrac: float = 0.3,
         objlim: float = 10.0,
+        dilate_factor: float = 1.0,
+        dilate_iterations: int = 2,
         plot: bool = True,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -283,8 +266,9 @@ class RemoveCosmicRays:
             return self.image, np.zeros_like(self.image, dtype=bool)
 
         # --- Read Noise Handling ---
-        readnoise = readnoise or float(self.header.get("RDNOISE", 6.5))
-        if readnoise <= 0.0:
+        if readnoise is None:
+            readnoise = float(self.header.get("RDNOISE", 6.5))
+        if readnoise < 0.0:
             readnoise = 0.0
 
         # --- Masking ---
@@ -300,6 +284,8 @@ class RemoveCosmicRays:
         if invar is None:
             from photutils.utils import calc_total_error
 
+            if bkg_rms is None:
+                bkg_rms = np.zeros_like(self.image, dtype=np.float32)
             sigma = calc_total_error(self.image, bkg_rms, effective_gain=gain)
             invar = np.asarray(sigma, dtype=np.float32) ** 2
             self.logger.info("Computed variance map from total error.")
@@ -350,7 +336,7 @@ class RemoveCosmicRays:
                         invar=invar,
                         readnoise=readnoise,
                         satlevel=satlevel,
-                        sepmed=False,
+                        sepmed=True,
                         cleantype="medmask",
                         fsmode="median",
                         psfmodel="gauss",
@@ -366,8 +352,8 @@ class RemoveCosmicRays:
             processed_mask = self.dilate_cosmic_ray_mask(
                 cr_mask,
                 fwhm_pixels=psf_fwhm,
-                dilate_factor=1.0,
-                iterations=2,
+                dilate_factor=dilate_factor,
+                iterations=dilate_iterations,
                 fill_holes=True,
             )
 
@@ -386,25 +372,24 @@ class RemoveCosmicRays:
 
             # --- Plot Comparison ---
             if plot:
-                self.plot_comparison(self.image, clean_image, processed_mask)
+                try:
+                    self.plot_comparison(self.image, clean_image, processed_mask)
+                except Exception as plot_err:
+                    self.logger.warning("CR comparison plot failed: %s", plot_err)
 
             # --- Update Header ---
             method = (
                 "ccdproc.cosmicray_lacosmic" if self.use_lacosmic else "astroscrappy"
             )
-            self.header.update(
-                {
-                    "CRAY_RMD": (True, "Cosmic rays removed; skip CR step on rerun"),
-                    "HISTORY": f"Cosmic ray removal: {n_cr} pixels cleaned",
-                    "CRPIXELS": (n_cr, "Cosmic ray pixels removed"),
-                    "CRMETHOD": (method, "Cosmic ray removal method"),
-                    "CRSTATUS": ("success", "Cosmic ray removal successful"),
-                    "CRPARAMS": (
-                        f"sigclip={sigclip}, sigfrac={sigfrac}, psffwhm={psf_fwhm:.2f}, "
-                        f"objlim={objlim}, readnoise={readnoise}, gain={gain}",
-                        "Parameters used for cosmic ray removal",
-                    ),
-                }
+            self.header["CRAY_RMD"] = (True, "Cosmic rays removed; skip CR step on rerun")
+            self.header.add_history(f"Cosmic ray removal: {n_cr} pixels cleaned")
+            self.header["CRPIXELS"] = (n_cr, "Cosmic ray pixels removed")
+            self.header["CRMETHOD"] = (method, "Cosmic ray removal method")
+            self.header["CRSTATUS"] = ("success", "Cosmic ray removal successful")
+            self.header["CRPARAMS"] = (
+                f"sigclip={sigclip}, sigfrac={sigfrac}, psffwhm={psf_fwhm:.2f}, "
+                f"objlim={objlim}, readnoise={readnoise}, gain={gain}",
+                "Parameters used for cosmic ray removal",
             )
 
             # --- Return the cleaned image and processed mask ---

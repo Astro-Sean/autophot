@@ -18,6 +18,7 @@ import shutil
 import requests
 import random
 import string
+import time
 from functools import reduce
 from math import ceil
 from typing import Optional
@@ -623,7 +624,8 @@ class Catalog:
     # =============================================================================
     # =============================================================================
 
-    def fetch_refcat2_field(self, ra, dec, credentials, nsources=1000, sr=0.5):
+    def fetch_refcat2_field(self, ra, dec, credentials, nsources=1000, sr=0.5,
+                             max_retries=3, retry_delay=5.0):
         """
         Fetch ATLAS-RefCat2 catalog from MAST.
 
@@ -639,90 +641,104 @@ class Catalog:
             Maximum number of sources to fetch (default is 1000).
         sr : float, optional
             Search radius in degrees (default is 0.5).
+        max_retries : int, optional
+            Maximum number of retry attempts for transient MAST errors (default 3).
+        retry_delay : float, optional
+            Initial delay between retries in seconds; doubles each retry (default 5.0).
 
         Returns:
         --------
         pd.DataFrame
-            DataFrame containing the catalog data.
+            DataFrame containing the catalog data, or None if all retries fail.
         """
-        try:
-            # Generate a unique name for the catalog
-            name = f"autophot_{''.join(random.choices(string.ascii_uppercase, k=5))}"
-            logger.info(
-                f"Fetching ATLAS-RefCat2 catalog from MAST over {sr:.3f} deg field-of-view centered at ra = {ra:.1f} dec = {dec:.1f}"
-            )
+        from mastcasjobs import MastCasJobs
 
-            # Define the columns to be retrieved from the database
-            table = [
-                "RA",
-                "Dec",
-                "g",
-                "dg",
-                "r",
-                "dr",
-                "i",
-                "di",
-                "z",
-                "dz",
-                "J",
-                "dJ",
-                "H",
-                "dH",
-                "K",
-                "dK",
-            ]
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Generate a unique name for the catalog
+                name = f"autophot_{''.join(random.choices(string.ascii_uppercase, k=5))}"
+                logger.info(
+                    f"Fetching ATLAS-RefCat2 catalog from MAST over {sr:.3f} deg field-of-view centered at ra = {ra:.1f} dec = {dec:.1f}"
+                    + (f" (attempt {attempt}/{max_retries})" if attempt > 1 else "")
+                )
 
-            # Create the SQL query to fetch data from the database
-            q = """
-            SELECT TOP {max} {columns}
-            INTO MyDB.{name}
-            FROM fGetNearbyObjEq({ra}, {dec}, {sr}) as n
-            INNER JOIN refcat2 AS r ON (n.objid = r.objid)
-            WHERE r.dr < 0.1
-            ORDER BY n.distance
-            """.format(
-                max=nsources,
-                columns="r." + ",r.".join(table),
-                name=name,
-                ra=ra,
-                dec=dec,
-                sr=sr,
-            )
+                # Define the columns to be retrieved from the database
+                table = [
+                    "RA", "Dec", "g", "dg", "r", "dr",
+                    "i", "di", "z", "dz", "J", "dJ", "H", "dH", "K", "dK",
+                ]
 
-            logger.debug(f"SQL Query: {q}")
-            from mastcasjobs import MastCasJobs
+                # Create the SQL query to fetch data from the database
+                q = """
+                SELECT TOP {max} {columns}
+                INTO MyDB.{name}
+                FROM fGetNearbyObjEq({ra}, {dec}, {sr}) as n
+                INNER JOIN refcat2 AS r ON (n.objid = r.objid)
+                WHERE r.dr < 0.1
+                ORDER BY n.distance
+                """.format(
+                    max=nsources,
+                    columns="r." + ",r.".join(table),
+                    name=name,
+                    ra=ra,
+                    dec=dec,
+                    sr=sr,
+                )
 
-            # Create a job to execute the SQL query
-            job = MastCasJobs(context="HLSP_ATLAS_REFCAT2", **credentials)
-            job.drop_table_if_exists(name)
-            jobid = job.submit(q, task_name=f"refcat catalog search {ra:.5f} {dec:.5f}")
+                logger.debug(f"SQL Query: {q}")
 
-            # Monitor the status of the job
-            status = job.monitor(jobid)
+                # Create a job to execute the SQL query
+                job = MastCasJobs(context="HLSP_ATLAS_REFCAT2", **credentials)
 
-            # Check if the job status indicates an error
-            if status[0] in (3, 4):
-                raise Exception(f"Job failed with status {status[0]}: {status[1]}")
+                # drop_table_if_exists can fail with transient MAST SQL errors;
+                # since we use random table names, the table almost never exists.
+                # Make this non-fatal so the actual query can still proceed.
+                try:
+                    job.drop_table_if_exists(name)
+                except Exception as drop_err:
+                    logger.debug(
+                        f"drop_table_if_exists failed (non-fatal, table likely new): {drop_err}"
+                    )
 
-            # Retrieve the result table and drop the temporary table
-            tab = job.get_table(name, format="CSV")
-            job.drop_table_if_exists(name)
+                jobid = job.submit(q, task_name=f"refcat catalog search {ra:.5f} {dec:.5f}")
 
-            # Convert the result table to a pandas DataFrame
-            tab = tab.to_pandas()
+                # Monitor the status of the job
+                status = job.monitor(jobid)
 
-            # Remove any row where any value is zero
-            tab = tab[~(tab == 0).any(axis=1)]
-            tab.reset_index(drop=True, inplace=True)
+                # Check if the job status indicates an error
+                if status[0] in (3, 4):
+                    raise Exception(f"Job failed with status {status[0]}: {status[1]}")
 
-        except Exception as e:
-            logger.error("\n> Catalog retrieval failed! \n")
-            exc_type, exc_obj, exc_tb = sys.exc_info()
-            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            logger.error("%s %s %d %s", exc_type, fname, exc_tb.tb_lineno, e)
-            return None
+                # Retrieve the result table and drop the temporary table
+                tab = job.get_table(name, format="CSV")
+                try:
+                    job.drop_table_if_exists(name)
+                except Exception as drop_err:
+                    logger.debug(f"Post-query drop_table failed (non-fatal): {drop_err}")
 
-        return tab
+                # Convert the result table to a pandas DataFrame
+                tab = tab.to_pandas()
+
+                # Remove any row where any value is zero
+                tab = tab[~(tab == 0).any(axis=1)]
+                tab.reset_index(drop=True, inplace=True)
+
+                return tab
+
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"RefCat2 fetch attempt {attempt}/{max_retries} failed: {e}"
+                )
+                if attempt < max_retries:
+                    delay = retry_delay * (2 ** (attempt - 1))
+                    logger.info(f"Retrying in {delay:.0f}s...")
+                    time.sleep(delay)
+
+        logger.error("\n> Catalog retrieval failed after %d attempts! \n", max_retries)
+        logger.error("Last error: %s: %s", type(last_error).__name__, last_error)
+        return None
 
     # =============================================================================
     # =============================================================================
@@ -807,9 +823,7 @@ class Catalog:
             pathlib.Path(target_dir).mkdir(parents=True, exist_ok=True)
 
             # Generate file name for the catalog
-            fname = f"{target_name}_r_{radius:.1f}arcmins_{catalogName}_target_ra_{target_ra:.6f}_dec_{target_dec:.6f}".replace(
-                "", ""
-            )
+            fname = f"{target_name}_r_{radius:.1f}arcmins_{catalogName}_target_ra_{target_ra:.6f}_dec_{target_dec:.6f}"
 
             # Convert from arcmins to degrees
             radius_deg = radius / 60
@@ -1893,7 +1907,7 @@ class Catalog:
         # ZP legend to be much larger than the actual number of sources).
         target_ra = target_coords.ra.degree
         target_dec = target_coords.dec.degree
-        fname = f"{target_name}_r_{radius}arcmins_target_ra_{target_ra:.6f}_dec_{target_dec:.6f}_CUSTOM.csv".replace("", "")
+        fname = f"{target_name}_r_{radius}arcmins_target_ra_{target_ra:.6f}_dec_{target_dec:.6f}_CUSTOM.csv"
         wdir = self.input_yaml.get("wdir")
         if not wdir:
             raise ValueError("Working directory (wdir) is not set in input YAML.")

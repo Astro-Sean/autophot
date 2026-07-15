@@ -1468,8 +1468,8 @@ class BackgroundSubtractor:
                     bkg = bkg.copy()
                     bkg[band] = smooth[band]
                     bkg_surface = bkg
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.debug("Background edge flattening skipped: %s", e)
 
         self.logger.info(
             f"Background median={bkg_median:.3e} RMS={np.nanmean(bkg_rms):.3e}"
@@ -1635,20 +1635,20 @@ class BackgroundSubtractor:
             try:
                 box_size = int(local_box_size_override)
                 fixed_local_box = True
-            except Exception:
-                pass
+            except (TypeError, ValueError) as e:
+                self.logger.debug("Invalid local_box_size_override %r: %s", local_box_size_override, e)
         if local_filter_size_override is not None:
             try:
                 filter_size = int(local_filter_size_override)
-            except Exception:
-                pass
+            except (TypeError, ValueError) as e:
+                self.logger.debug("Invalid local_filter_size_override %r: %s", local_filter_size_override, e)
         else:
             # Cap smoothing to avoid an overly blurred local surface.
             try:
                 if local_filter_size_max is not None:
                     filter_size = min(int(filter_size), int(local_filter_size_max))
-            except Exception:
-                pass
+            except (TypeError, ValueError) as e:
+                self.logger.debug("Invalid local_filter_size_max %r: %s", local_filter_size_max, e)
         # Background2D expects odd filter_size >= 1
         try:
             filter_size = max(1, int(filter_size))
@@ -1756,8 +1756,8 @@ class BackgroundSubtractor:
                     ring_level = float(np.nanmedian(bkg_surface_local[ring_ref]))
                     bkg_surface_local = np.asarray(bkg_surface_local, dtype=float)
                     bkg_surface_local[flat_region] = ring_level
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug("Local background flat-region correction skipped: %s", e)
 
         # ---- Subtract locally and insert back ----
         bkg_surface_local = np.asarray(bkg_surface_local, dtype=float)

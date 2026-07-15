@@ -597,6 +597,22 @@ class SExtractorWrapper:
                     f"Rejected {rejected_sharp} sources based on sharpness (range [{sharp_lo}, {sharp_hi}])"
             )
 
+        # --- Step 7b: CLASS_STAR cut (star/galaxy separation) ---
+        # Reject extended sources (galaxies, defects) early so they don't
+        # contaminate FWHM estimation or enter the PSF candidate pool.
+        if "class_star" in sources.columns:
+            cs_min = 0.2 if relaxed_cuts else float(
+                self.config.get("photometry", {}).get("sextractor_class_star_min", 0.4)
+            )
+            cs_vals = pd.to_numeric(sources["class_star"], errors="coerce").fillna(0.0)
+            cs_ok = cs_vals >= cs_min
+            n_cs = int((~cs_ok).sum())
+            if n_cs > 0:
+                sources = sources[cs_ok].copy()
+                logger.info(
+                    "Rejected %d sources with CLASS_STAR < %.2f", n_cs, cs_min
+                )
+
         # --- Step 8: Saturation cut ---
         if saturation is not None and "peak_flux" in sources.columns:
             n_saturated = len(sources[sources["peak_flux"] >= 0.99 * saturation])
@@ -1135,7 +1151,8 @@ class SExtractorWrapper:
                             else:
                                 # Compute from FLUX_AUTO if available
                                 if 'FLUX_AUTO' in table.colnames:
-                                    table['MAG_AUTO'] = -2.5 * np.log10(table['FLUX_AUTO'])
+                                    flux_safe = np.maximum(np.asarray(table['FLUX_AUTO'], float), 1e-10)
+                                    table['MAG_AUTO'] = -2.5 * np.log10(flux_safe)
                                 else:
                                     table['MAG_AUTO'] = 0.0
                         if 'MAGERR_AUTO' not in table.colnames:
