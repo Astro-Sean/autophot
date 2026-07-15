@@ -277,7 +277,7 @@ default_input:
     curve_map_svo: null # dict[str,str]|null --- Optional band->SVO filter-ID map to fetch curves. Example: `{"g":"SDSS/SDSS.g","r":"SDSS/SDSS.r","i":"SDSS/SDSS.i"}`.
     catalog_radius: 0.25 # float --- Search radius (degrees) around target for catalog query.
     gaia_xp_radius_deg: 0.1667 # float --- Search radius (degrees) for Gaia XP query (if used).
-    gaia_xp_max_sources: 5000 # int --- Max Gaia sources for XP spectra/synthetic photometry (speed vs completeness).
+    gaia_xp_max_sources: 500 # int --- Max Gaia sources for XP spectra/synthetic photometry (speed vs completeness).
     gaia_xp_order_by: brightness # str --- `brightness` (SQL order) or `distance` (prefetch + Python sort by on-sky sep; Gaia ADQL has no ORDER BY distance).
     gaia_xp_show_progress: False # bool --- tqdm progress for GaiaXPy batched calibrate/generate.
     # Transmission-curve custom catalog (catalog.transmission_curve_map) uses these if set; else falls back to gaia_xp_max_sources / order.
@@ -288,10 +288,10 @@ default_input:
     gaia_nearest_prefetch_min: 200 # int --- Minimum prefetch TOP when using distance ordering.
     gaia_nearest_prefetch_max: 10000 # int --- Maximum prefetch TOP (archive load vs completeness tradeoff).
     # Gaia archive / GaiaXPy pacing (ESA recommends spacing heavy queries, e.g. 1 s).
-    gaia_archive_query_pause_before_sec: 1.0 # float --- Sleep before each Gaia ADQL job (seconds).
-    gaia_archive_query_pause_after_sec: 1.0 # float --- Sleep after each Gaia ADQL job (seconds).
+    gaia_archive_query_pause_before_sec: 0.25 # float --- Sleep before each Gaia ADQL job (seconds).
+    gaia_archive_query_pause_after_sec: 0.25 # float --- Sleep after each Gaia ADQL job (seconds).
     gaia_xp_batch_size: 200 # int --- Sources per GaiaXPy calibrate/generate call; use <=0 for one call (heavy).
-    gaia_xp_batch_pause_sec: 1.0 # float --- Sleep between GaiaXPy batches (seconds).
+    gaia_xp_batch_pause_sec: 0.5 # float --- Sleep between GaiaXPy batches (seconds).
     gaia_archive_max_retries: 3 # int --- Retries per ADQL batch / GaiaXPy batch on failure.
     gaia_archive_retry_base_delay_sec: 2.0 # float --- Initial backoff (seconds); doubles each retry.
     gaia_xp_generate_error_correction: True # bool --- If True, ask GaiaXPy `generate()` to apply empirical flux-error corrections (see Montegriffo+ 2022; GaiaXPy generator tutorial).
@@ -309,6 +309,7 @@ default_input:
     nonlinear_peak_frac: 0.85 # float --- Sources with peak_flux >= this fraction of the saturation level are rejected as non-linear.
     saturation_peak_frac: 0.99 # float --- Sources with peak_flux >= this fraction of saturation level are flagged as saturated (subset of non-linear reject; kept for diagnostics).
     max_flags: 2 # int --- Maximum SExtractor FLAGS value allowed for ZP calibrators (0=clean, 1=nearby source, 2=blended, etc.).
+    variable_source_match_radius_pix: 5.0 # float --- Matching radius (pixels) for removing known variable sources (from SIMBAD) from the ZP calibration catalog. Sources within this distance of a known variable are excluded from the zeropoint fit.
 
   cosmic_rays:
     remove_cmrays: False # bool --- Enable cosmic-ray removal in preprocessing.
@@ -384,8 +385,6 @@ default_input:
     # reproject_adaptive only: library default is False; True rescales pixels for flux conservation (can blur when scales match).
     reproject_adaptive_conserve_flux: False # bool --- Adaptive reprojection: conserve flux by rescaling pixels (can blur slightly when scales match).
     reproject_adaptive_center_jacobian: False # bool --- More accurate Jacobian at grid points; slower (non-smooth WCS).
-    # Subpixel refinement helps edge alignment by correcting small WCS mismatches (<1 pixel)
-    reproject_subpixel_refine: False # bool --- Apply subpixel refinement after WCS alignment (helps edge alignment).
     reproject_max_rms_pixels: 0.90 # float --- Maximum acceptable reproject alignment score (median mutual-pair residual, pixels) before fallback.
     plot_source_check_distortion_vectors: True # bool --- Overlay catalog->detected residual vectors on Sourcecheck plot.
     plot_source_check_distortion_grid_map: False # bool --- Overlay gridded distortion-magnitude heatmap (pixels) on Sourcecheck plot.

@@ -1298,8 +1298,10 @@ def run_sfft() -> Optional[int]:
             if use_bspline_kernel and _HAS_BSPLINE:
                 try:
                     log_info("Applying B-Spline kernel refinement...")
-                    # Re-run subtraction with B-Spline kernel
-                    bspline_result = BSpline_Packet.BSP(
+                    # Re-run subtraction with B-Spline kernel.
+                    # KerHWRatio was added in a later SFFT version; older builds
+                    # reject it with TypeError.  Retry without it if so.
+                    _bsp_kwargs = dict(
                         FITS_REF=FITS_REF,
                         FITS_SCI=FITS_SCI,
                         FITS_DIFF=FITS_DIFF,
@@ -1343,6 +1345,18 @@ def run_sfft() -> Optional[int]:
                         CUDA_DEVICE_4SUBTRACT=CUDA_DEVICE_4SUBTRACT,
                         NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
                     )
+                    try:
+                        bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
+                    except TypeError as _te:
+                        if "KerHWRatio" in str(_te):
+                            log_info(
+                                "B-Spline: installed SFFT does not accept KerHWRatio; "
+                                "retrying without it (GKerHW is passed explicitly)."
+                            )
+                            _bsp_kwargs.pop("KerHWRatio", None)
+                            bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
+                        else:
+                            raise
                     if bspline_result and len(bspline_result) >= 2:
                         diff_image, prep_data = bspline_result[0], bspline_result[1]
                         log_info("B-Spline kernel refinement completed successfully")
@@ -1358,6 +1372,17 @@ def run_sfft() -> Optional[int]:
             matched_sources = _to_dataframe(catalog)
 
             log_info(f"Number of sources used in matching: {len(matched_sources)}")
+
+            # Quality gate: warn when too few sources were used for kernel fitting.
+            # With < 10 sources, the kernel solution is poorly constrained and
+            # may produce dipole residuals in the difference image.
+            _n_matched = len(matched_sources)
+            if _n_matched < 10:
+                log_info(
+                    f"WARNING: Only {_n_matched} sources used for SFFT kernel fitting. "
+                    f"Kernel solution may be unreliable — dipole residuals likely. "
+                    f"Consider providing more pipeline-matched sources or relaxing source filtering."
+                )
 
             # main.py expects columns X_IMAGE_REF_SCI_MEAN, Y_IMAGE_REF_SCI_MEAN
             xcol = (

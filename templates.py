@@ -375,11 +375,6 @@ class ReprojectConfig:
     parallel: bool = False
     conserve_flux: bool = False
     center_jacobian: bool = False
-    subpixel_refine: bool = True
-    subpixel_min_shift: float = 0.05
-    subpixel_max_shift: float = 3.0
-    subpixel_min_pairs: int = 15
-
     @classmethod
     def from_yaml(cls, input_yaml: Dict[str, Any]) -> "ReprojectConfig":
         cfg = input_yaml.get("alignment", {})
@@ -392,10 +387,6 @@ class ReprojectConfig:
             parallel=bool(cfg.get("reproject_parallel", False)),
             conserve_flux=bool(cfg.get("reproject_adaptive_conserve_flux", False)),
             center_jacobian=bool(cfg.get("reproject_adaptive_center_jacobian", False)),
-            subpixel_refine=bool(cfg.get("reproject_subpixel_refine", True)),
-            subpixel_min_shift=float(cfg.get("reproject_subpixel_min_shift", 0.05)),
-            subpixel_max_shift=float(cfg.get("reproject_subpixel_max_shift", 3.0)),
-            subpixel_min_pairs=int(cfg.get("reproject_subpixel_min_pairs", 15)),
         )
 
 
@@ -652,7 +643,7 @@ def _reproject_template(
                     science_proj,
                     shape_out=shape_out,
                     roundtrip_coords=True,
-                    order="bilinear",
+                    order=cfg.interp_order,
                 )
             else:  # exact
                 aligned, footprint = reproject_exact(
@@ -5114,6 +5105,43 @@ class Templates:
                         post_anom_min_count,
                         post_anom_max_frac,
                     )
+
+            # Parse SFFT log for flux scaling discrepancy warning.
+            # SFFT's MeLOn logs two independent flux scaling estimates:
+            #   - Convolution-based: "The Flux Scaling through the Convolution ..."
+            #   - Photometric:       "The approximated Flux Scaling from Photometry ..."
+            # A large discrepancy (>3%) indicates the kernel solution may not
+            # properly match the PSF across the field, leading to dipole residuals.
+            try:
+                if log_path.exists():
+                    _log_text = log_path.read_text(errors="ignore")
+                    import re as _re
+                    _conv_match = _re.search(
+                        r"Flux Scaling through the Convolution.*?\[([\d.]+)", _log_text
+                    )
+                    _phot_match = _re.search(
+                        r"Flux Scaling from Photometry.*?\[([\d.]+)", _log_text
+                    )
+                    if _conv_match and _phot_match:
+                        _conv_scale = float(_conv_match.group(1))
+                        _phot_scale = float(_phot_match.group(1))
+                        _discrep_pct = abs(_conv_scale - _phot_scale) / max(_conv_scale, 1e-10) * 100.0
+                        if _discrep_pct > 3.0:
+                            logger.warning(
+                                "SFFT flux scaling discrepancy: convolution=%.4f vs photometric=%.4f "
+                                "(%.1f%% mismatch). Kernel may not properly match PSF across field — "
+                                "dipole residuals likely. Consider increasing source count or "
+                                "enabling sfft_const_phot_ratio=true for sparse fields.",
+                                _conv_scale, _phot_scale, _discrep_pct,
+                            )
+                        else:
+                            logger.info(
+                                "SFFT flux scaling consistent: convolution=%.4f vs photometric=%.4f "
+                                "(%.1f%% match).",
+                                _conv_scale, _phot_scale, _discrep_pct,
+                            )
+            except Exception:
+                pass
 
             logger.info("SFFT subtraction succeeded")
             return "done"
