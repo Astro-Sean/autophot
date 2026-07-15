@@ -137,7 +137,6 @@ from functions import (
     log_exception,
     log_warning_from_exception,
     odd,
-    ColoredLevelFormatter,
     LogMessageNormalizeFilter,
     safe_fits_write,
 )
@@ -1654,17 +1653,17 @@ def run_photometry():
         
         # Format time as requested (e.g., "8:00pm")
         try:
-            time_obj = datetime.strptime(time_str, "%H:%M:%S.%f")
-            time_obj = datetime.strptime(time_obj.strftime("%H:%M:%S"), "%H:%M:%S")
+            time_obj = datetime.datetime.strptime(time_str, "%H:%M:%S.%f")
+            time_obj = datetime.datetime.strptime(time_obj.strftime("%H:%M:%S"), "%H:%M:%S")
             formatted_time = time_obj.strftime("%-I%p").lower()
-        except:
+        except Exception:
             formatted_time = time_str  # Fallback to original format if parsing fails
         
         # Format date as dd-mm-year
         try:
-            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            date_obj = datetime.datetime.strptime(date_str, "%Y-%m-%d")
             formatted_date = date_obj.strftime("%d-%m-%Y")
-        except:
+        except Exception:
             formatted_date = date_str  # Fallback to original format if parsing fails
         
         logging.info(f"Observation: {formatted_date} at {formatted_time}")
@@ -2137,6 +2136,13 @@ def run_photometry():
                 )
             )
             use_lacosmic = input_yaml["cosmic_rays"].get("use_lacosmic", False)
+            _cr_cfg = input_yaml.get("cosmic_rays", {})
+            _cr_plot = bool(_cr_cfg.get("cr_plot", False))
+            _cr_sigclip = float(_cr_cfg.get("cr_sigclip", 4.5))
+            _cr_sigfrac = float(_cr_cfg.get("cr_sigfrac", 0.3))
+            _cr_objlim = float(_cr_cfg.get("cr_objlim", 10.0))
+            _cr_dilate_factor = float(_cr_cfg.get("cr_dilate_factor", 1.0))
+            _cr_dilate_iters = int(_cr_cfg.get("cr_dilate_iterations", 2))
             image, cosmic_rays_mask = RemoveCosmicRays(
                 input_yaml=input_yaml,
                 fpath=fpath,
@@ -2147,7 +2153,15 @@ def run_photometry():
                 bkg=background_surface,
                 bkg_rms=background_rms,
                 gain=gain,
+                readnoise=readnoise,
+                satlevel=saturate,
                 psf_fwhm=ImageFWHM,
+                sigclip=_cr_sigclip,
+                sigfrac=_cr_sigfrac,
+                objlim=_cr_objlim,
+                dilate_factor=_cr_dilate_factor,
+                dilate_iterations=_cr_dilate_iters,
+                plot=_cr_plot,
             )
 
         # =============================================================================
@@ -3386,7 +3400,8 @@ def run_photometry():
                 CatalogSources
             )
 
-            # Transfer per-source FWHM from SExtractor (FWHMSources) to catalog sources
+            # Transfer per-source FWHM and peak_flux from SExtractor (FWHMSources) to catalog sources.
+            # peak_flux (FLUX_MAX in ADU) is needed by zeropoint.clean() for saturation/non-linear rejection.
             if (
                 FWHMSources is not None
                 and len(FWHMSources) > 0
@@ -3405,6 +3420,10 @@ def run_photometry():
                     match_ok = distances <= 3.0
                     CatalogSources["fwhm"] = np.nan
                     CatalogSources.loc[match_ok, "fwhm"] = FWHMSources.iloc[idxs[match_ok]]["fwhm"].values
+                    # Also transfer peak_flux (SExtractor FLUX_MAX in ADU) for saturation checks
+                    if "peak_flux" in FWHMSources.columns:
+                        CatalogSources["peak_flux"] = np.nan
+                        CatalogSources.loc[match_ok, "peak_flux"] = FWHMSources.iloc[idxs[match_ok]]["peak_flux"].values
                     n_matched = int(match_ok.sum())
                     if n_matched > 0:
                         logging.info(
@@ -3413,8 +3432,12 @@ def run_photometry():
                 except Exception as e:
                     logging.warning(f"Could not match catalog sources to SExtractor FWHM: {e}")
                     CatalogSources["fwhm"] = np.nan
+                    if "peak_flux" not in CatalogSources.columns:
+                        CatalogSources["peak_flux"] = np.nan
             else:
                 CatalogSources["fwhm"] = np.nan
+                if "peak_flux" not in CatalogSources.columns:
+                    CatalogSources["peak_flux"] = np.nan
         else:
             logging.warning(
                 "No catalog sources available for photometric calibration; proceeding without catalog-based calibration."

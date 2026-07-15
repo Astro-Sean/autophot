@@ -1927,6 +1927,83 @@ class PSF:
                         ellip_max, n_keep_ellip, min_keep_ellip,
                     )
 
+            # ---- FWHM consistency cut ----
+            # Reject sources whose FWHM is inconsistent with the image FWHM.
+            # Cosmic rays have abnormally small FWHM; extended defects/galaxies
+            # have abnormally large FWHM.  This is the primary defense against
+            # cosmic rays entering the ePSF build, especially when cosmic ray
+            # removal is disabled or misses some events.
+            _fwhm_cols_psf = ("fwhm", "FWHM", "FWHM_IMAGE", "fwhm_image")
+            _fwhm_col_psf = next(
+                (c for c in _fwhm_cols_psf if c in df.columns), None
+            )
+            if _fwhm_col_psf is not None:
+                _fwhm_ref = float(
+                    self.input_yaml.get("fwhm", 3.0)
+                )
+                if not (np.isfinite(_fwhm_ref) and _fwhm_ref > 0):
+                    _fwhm_ref = 3.0
+                fwhm_min_frac = float(phot_cfg.get("psf_fwhm_min_frac", 0.5))
+                fwhm_max_frac = float(phot_cfg.get("psf_fwhm_max_frac", 2.5))
+                fwhm_lo = fwhm_min_frac * _fwhm_ref
+                fwhm_hi = fwhm_max_frac * _fwhm_ref
+                src_fwhm = pd.to_numeric(df[_fwhm_col_psf], errors="coerce")
+                ok_fwhm = src_fwhm.between(fwhm_lo, fwhm_hi, inclusive="both")
+                # Also keep rows with NaN FWHM (can't reject what we can't measure)
+                ok_fwhm = ok_fwhm | src_fwhm.isna()
+                n_keep_fwhm = int(ok_fwhm.sum())
+                min_keep_fwhm = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                )
+                if n_keep_fwhm >= min_keep_fwhm:
+                    n_drop_fwhm = int((~ok_fwhm).sum())
+                    if n_drop_fwhm > 0:
+                        df = df[ok_fwhm].copy()
+                        log.info(
+                            "PSF FWHM consistency cut ([%.2f, %.2f] px = [%.1f, %.1f] x FWHM): "
+                            "removed %d candidates (%d kept)",
+                            fwhm_lo, fwhm_hi, fwhm_min_frac, fwhm_max_frac,
+                            n_drop_fwhm, n_keep_fwhm,
+                        )
+                else:
+                    log.info(
+                        "Skipping FWHM consistency cut ([%.2f, %.2f] px): would leave only "
+                        "%d candidates (< %d).",
+                        fwhm_lo, fwhm_hi, n_keep_fwhm, min_keep_fwhm,
+                    )
+
+            # ---- CLASS_STAR cut ----
+            # Prefer star-like sources (SExtractor stellarity index).
+            # Cosmic rays can have high CLASS_STAR (point-like), so this alone
+            # won't reject them, but combined with the FWHM cut above it helps
+            # exclude galaxies and extended defects from the ePSF build.
+            class_star_min = float(phot_cfg.get("psf_class_star_min", 0.4))
+            _cs_col = next(
+                (c for c in ("class_star", "CLASS_STAR") if c in df.columns), None
+            )
+            if _cs_col is not None and np.isfinite(class_star_min) and class_star_min > 0:
+                cs_vals = pd.to_numeric(df[_cs_col], errors="coerce")
+                ok_cs = cs_vals >= class_star_min
+                n_keep_cs = int(ok_cs.sum())
+                min_keep_cs = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                )
+                if n_keep_cs >= min_keep_cs:
+                    n_drop_cs = int((~ok_cs).sum())
+                    if n_drop_cs > 0:
+                        df = df[ok_cs].copy()
+                        log.info(
+                            "PSF CLASS_STAR cut (>= %.2f): removed %d non-stellar candidates (%d kept)",
+                            class_star_min, n_drop_cs, n_keep_cs,
+                        )
+                else:
+                    log.info(
+                        "Skipping CLASS_STAR cut (>= %.2f): would leave only %d candidates (< %d).",
+                        class_star_min, n_keep_cs, min_keep_cs,
+                    )
+
             # ---- Neighbour-isolation cut ----
             # Reject stars that have a close companion within isolation_radius
             # pixels. Blended cutouts corrupt the ePSF core and wings.

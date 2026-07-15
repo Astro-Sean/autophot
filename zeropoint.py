@@ -603,7 +603,9 @@ class Zeropoint:
                 )
 
             # Also enforce an explicit S/N cut on photometric SNR columns.
-            for _snr_col in ("snr", "SNR", "snr_ap", "snr_psf"):
+            # Prefer aperture/PSF SNR (SNR, snr_ap, snr_psf) over peak pixel SNR (snr),
+            # since photometric SNR is the relevant quality metric for calibration.
+            for _snr_col in ("SNR", "snr_ap", "snr_psf", "snr"):
                 if _snr_col in sources.columns:
                     _bad = sources[_snr_col] < 3.0
                     n_bad = int(_bad.sum())
@@ -629,13 +631,18 @@ class Zeropoint:
             saturate_level = float(self.input_yaml.get("saturate", SATURATE_INTERNAL_FALLBACK))
             non_linear_mask = np.zeros(len(sources), dtype=bool)
             saturated_mask = np.zeros(len(sources), dtype=bool)
+            # Match the column name fallback pattern used in psf.py build()
+            _peak_col = next(
+                (c for c in ["peak_flux", "peak", "FLUX_MAX"] if c in sources.columns),
+                None,
+            )
             if (
                 reject_nonlinear
-                and "peak_flux" in sources.columns
+                and _peak_col is not None
                 and np.isfinite(saturate_level)
                 and saturate_level > 0
             ):
-                peak_flux = np.asarray(sources["peak_flux"], float)
+                peak_flux = np.asarray(sources[_peak_col], float)
                 finite_peak = np.isfinite(peak_flux)
                 saturated_mask = finite_peak & (peak_flux >= sat_peak_frac * saturate_level)
                 non_linear_mask = finite_peak & (
