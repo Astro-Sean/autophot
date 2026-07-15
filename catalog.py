@@ -98,7 +98,7 @@ def cross_match_sources(given_catalog, variable_catalog, match_radius_pix=5):
     filtered_catalog : pd.DataFrame
         DataFrame with matched sources removed.
     """
-    if len(variable_catalog) == 0:
+    if variable_catalog is None or len(variable_catalog) == 0:
         return given_catalog
 
     x_given = given_catalog["x_pix"].values
@@ -376,10 +376,10 @@ class Catalog:
 
         logger = logging.getLogger(__name__)
         cat_cfg = self.input_yaml.get("catalog", {}) or {}
-        query_pause_b = float(cat_cfg.get("gaia_archive_query_pause_before_sec", 1.0))
-        query_pause_a = float(cat_cfg.get("gaia_archive_query_pause_after_sec", 1.0))
+        query_pause_b = float(cat_cfg.get("gaia_archive_query_pause_before_sec", 0.25))
+        query_pause_a = float(cat_cfg.get("gaia_archive_query_pause_after_sec", 0.25))
         xp_batch_size = int(cat_cfg.get("gaia_xp_batch_size", 200))
-        xp_batch_pause = float(cat_cfg.get("gaia_xp_batch_pause_sec", 1.0))
+        xp_batch_pause = float(cat_cfg.get("gaia_xp_batch_pause_sec", 0.5))
         archive_retries = int(cat_cfg.get("gaia_archive_max_retries", 3))
         retry_base_delay = float(cat_cfg.get("gaia_archive_retry_base_delay_sec", 2.0))
         xp_order = str(cat_cfg.get("gaia_xp_order_by", "brightness")).strip().lower()
@@ -934,7 +934,7 @@ class Catalog:
                     xp_radius_deg = min(radius_deg, cfg_radius, max_gaia_deg)
                     gaia_xp_max_sources = int(
                         self.input_yaml.get("catalog", {}).get(
-                            "gaia_xp_max_sources", 5000
+                            "gaia_xp_max_sources", 500
                         )
                     )
                     gaia_xp_photometric_systems = (
