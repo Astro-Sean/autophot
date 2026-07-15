@@ -1987,7 +1987,8 @@ class AutomatedPhotometry:
 
                 # Pre-download reference catalog(s) once, before the per-image loop.
                 # main.py will find the cached CSV and skip re-downloading.
-                _log(log_step("Reference photometric catalog (pre-download)"))
+                _log("")
+                _log(border_msg("Reference Photometric Catalog") if border_msg else log_step("Reference photometric catalog (pre-download)"))
                 try:
                     from catalog import Catalog as _Catalog
                     _cat = _Catalog(input_yaml=backup_yaml)
@@ -2006,6 +2007,23 @@ class AutomatedPhotometry:
                         backup_yaml["target_dec"],
                         unit=(u.deg, u.deg), frame="icrs",
                     )
+                    # Auto-select GaiaXPy photometric systems based on required filters.
+                    # SDSS_Std covers u,g,r,i,z; JKC_Std covers U,B,V,R,I.
+                    # Only request the systems needed to avoid unnecessary archive queries.
+                    _sdss_bands = {"u", "g", "r", "i", "z"}
+                    _jkc_bands = {"U", "B", "V", "R", "I"}
+                    _req_upper = {str(f).strip().upper() for f in required_filters}
+                    _need_sdss = bool(_req_upper & _sdss_bands)
+                    _need_jkc = bool(_req_upper & _jkc_bands)
+                    _auto_phot_systems = []
+                    if _need_sdss:
+                        _auto_phot_systems.append("SDSS_Std")
+                    if _need_jkc:
+                        _auto_phot_systems.append("JKC_Std")
+                    if _auto_phot_systems:
+                        backup_yaml.setdefault("catalog", {})["gaia_xp_photometric_systems"] = _auto_phot_systems
+                        _log(f"  Auto-selected GaiaXPy systems: {_auto_phot_systems} (filters: {sorted(_req_upper)})")
+
                     for _cat_name in _unique_cats:
                         try:
                             if backup_yaml.get("catalog", {}).get("build_catalog", False):
@@ -2031,6 +2049,7 @@ class AutomatedPhotometry:
                 except Exception as _pe:
                     _log(f"[WARNING] Catalog pre-download step failed: {_pe}")
                     _log("         main.py will retry per-image (cached CSV may still exist).")
+                _log("")
 
                 # SIMBAD variable sources near target for context
 
@@ -2056,6 +2075,7 @@ class AutomatedPhotometry:
 
                 # Reduce templates first
                 if template_file_list:
+                    _log("")
                     if parallel_files and len(template_file_list) > 1:
                         # Parallelise template reductions when multiple workers requested.
                         with ProcessPoolExecutor(max_workers=n_cpu) as executor:
@@ -2098,6 +2118,7 @@ class AutomatedPhotometry:
                             gc.collect()
 
                 # Reduce science frames
+                _log("")
                 _log(log_step("Reduce/calibrate science files"))
 
                 counter = 0

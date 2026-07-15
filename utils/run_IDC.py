@@ -1348,10 +1348,17 @@ NNW
                     ref_in_bounds = (np.isfinite(ref_x) & np.isfinite(ref_y) &
                                      (ref_x >= 0) & (ref_x < ref_shape[1]) &
                                      (ref_y >= 0) & (ref_y < ref_shape[0]))
-                    if not all(ref_in_bounds):
+                    n_oob = int((~ref_in_bounds).sum())
+                    if n_oob > 0:
+                        severity = "severe" if n_oob >= 2 else "minor"
                         self.logger.warning(
-                            "Reference image may not fully cover science image region. "
-                            "Science corners in ref pixels: X=%s, Y=%s",
+                            "Reference image may not fully cover science image region "
+                            "(%d/4 corners out of bounds, %s). "
+                            "Science corners in ref pixels: X=%s, Y=%s. "
+                            "Uncovered regions will produce NaN/zero borders in the "
+                            "aligned template, increasing the masked fraction and "
+                            "reducing sources available for SFFT kernel fitting.",
+                            n_oob, severity,
                             np.round(ref_x, 1).tolist(), np.round(ref_y, 1).tolist(),
                         )
                     else:
@@ -2191,9 +2198,9 @@ NNW
             }
 
             if resample_mode == "wcs_only":
-                # Skip SWarp resampling - use SCAMP WCS correction only
+                # Skip SWarp resampling - apply SCAMP WCS correction to header only
                 self.logger.info("Skipping SWarp resampling (WCS-only alignment for template subtraction)")
-                
+
                 # Copy SCAMP-corrected reference image to aligned location
                 aligned_ref = output_dir / f"aligned_ref_{Path(reference_image).stem}.fits"
                 # Use corrected science if Phase 1 ran, otherwise original
@@ -2202,17 +2209,52 @@ NNW
                     if science_first_astrometry
                     else Path(science_image)
                 )
-                
-                # Copy reference image with SCAMP corrections applied
+
+                # Copy reference image, then apply SCAMP .head WCS to its header
                 shutil.copy2(ref_image_copy, aligned_ref)
-                
-                # Apply SCAMP head file to reference image if it exists
+
                 head_file = Path(ref_image_copy).with_suffix(".head")
                 if head_file.exists():
-                    self.logger.debug("Applying SCAMP .head file to reference image")
-                    # The head file was already applied during SCAMP processing
-                    # Just copy the corrected reference image
-                
+                    self.logger.info("Applying SCAMP .head WCS to reference image header")
+                    try:
+                        from wcs import _normalize_projection_codes
+                        scamp_header = fits.Header.fromtextfile(str(head_file))
+                        scamp_header = _normalize_projection_codes(scamp_header, inplace=False)
+                        with fits.open(aligned_ref, mode="update", memmap=False) as hdul:
+                            hdr = hdul[0].header
+                            hdr = remove_wcs_from_header(hdr)
+                            _wcs_prefixes = (
+                                "CRPIX", "CRVAL", "CTYPE", "CD", "PC", "CDELT",
+                                "CROTA", "PV", "LONPOLE", "LATPOLE", "EQUINOX",
+                                "WCSNAME", "CUNIT", "WCSAXES", "PROJP", "LTV",
+                                "LTM", "RADECSYS", "RADESYS", "RADYSYS",
+                                "LONGPOLE", "TNX", "SIP_",
+                            )
+                            _wcs_stems = ("A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_")
+                            for key in scamp_header:
+                                if key in ("NAXIS", "NAXIS1", "NAXIS2"):
+                                    continue
+                                is_wcs = any(key.startswith(p) for p in _wcs_prefixes)
+                                if not is_wcs and "_" in key:
+                                    stem = key.split("_")[0] + "_"
+                                    is_wcs = stem in _wcs_stems and key.startswith(stem.rstrip("_"))
+                                if is_wcs:
+                                    hdr[key] = scamp_header[key]
+                            hdr["NAXIS1"] = hdul[0].data.shape[1]
+                            hdr["NAXIS2"] = hdul[0].data.shape[0]
+                            hdul.flush()
+                        self.logger.info("SCAMP WCS applied to reference image: %s", aligned_ref)
+                    except Exception as e:
+                        self.logger.warning(
+                            "Failed to apply SCAMP .head to reference image: %s. "
+                            "Reference retains original WCS.", e
+                        )
+                else:
+                    self.logger.warning(
+                        "No SCAMP .head file found at %s; reference retains original WCS.",
+                        head_file,
+                    )
+
                 self.logger.info(f"WCS-only alignment complete: sci={aligned_sci}, ref={aligned_ref}")
                 
             elif resample_mode == "native_scale":
@@ -2495,111 +2537,122 @@ NNW
                         sci_wcs_info["crpix1"], sci_wcs_info["crpix2"]
                     )
 
-            # Verify output shapes match. With both SCAMP .head files placed and
-            # SWarp using a fixed CENTER/IMAGE_SIZE/PIXEL_SCALE grid, both outputs
-            # must be identical. A mismatch indicates SWarp rounding differences;
-            # adjust reference to match science shape using Cutout2D.
-            try:
-                with fits.open(aligned_sci) as _h:
-                    _sci_data = _h[0].data
-                    _sci_header = _h[0].header
-                    _sci_shape = _sci_data.shape
-                with fits.open(aligned_ref) as _h:
-                    _ref_data = _h[0].data
-                    _ref_header = _h[0].header
-                    _ref_wcs = get_wcs(_ref_header)
-                    _ref_shape = _ref_data.shape
+            # Verify output shapes match. Only relevant for common_grid mode where
+            # both images are resampled to the same grid. For wcs_only and
+            # native_scale, different shapes are expected and should not trigger
+            # trim/pad or fallback.
+            if resample_mode in ("wcs_only", "native_scale"):
+                self.logger.debug(
+                    "Skipping shape verification for resample_mode=%s", resample_mode
+                )
+            else:
+                try:
+                    with fits.open(aligned_sci) as _h:
+                        _sci_data = _h[0].data
+                        _sci_header = _h[0].header
+                        _sci_shape = _sci_data.shape
+                    with fits.open(aligned_ref) as _h:
+                        _ref_data = _h[0].data
+                        _ref_header = _h[0].header
+                        _ref_wcs = get_wcs(_ref_header)
+                        _ref_shape = _ref_data.shape
 
-                if _sci_shape != _ref_shape:
-                    dy = abs(_sci_shape[0] - _ref_shape[0])
-                    dx = abs(_sci_shape[1] - _ref_shape[1])
-                    self.logger.warning(
-                        "SWarp shape mismatch: sci=%s ref=%s (delta %d,%d)",
-                        _sci_shape, _ref_shape, dy, dx,
-                    )
-
-                    # Large shape mismatch (>500 px) means SCAMP shifted the reference
-                    # WCS enough that it no longer covers the output grid — padding with
-                    # NaN would produce a spatially misaligned image.  Trigger fallback.
-                    # Increased threshold to handle SWarp clipping when CRPIX is offset.
-                    if dy > 500 or dx > 500:
+                    if _sci_shape != _ref_shape:
+                        dy = abs(_sci_shape[0] - _ref_shape[0])
+                        dx = abs(_sci_shape[1] - _ref_shape[1])
                         self.logger.warning(
-                            "Shape mismatch too large (%d,%d); falling back to reproject/AstroAlign.",
-                            dy, dx,
-                        )
-                        return self._align_fallback_reproject_then_astroalign(
-                            science_image, reference_image, output_dir
+                            "SWarp shape mismatch: sci=%s ref=%s (delta %d,%d)",
+                            _sci_shape, _ref_shape, dy, dx,
                         )
 
-                    # Small mismatch (<=20 px): SWarp rounding artefact — safe to trim/pad.
-                    # Center the cutout on the same sky position used as the SWarp CENTER
-                    # (center_ra, center_dec) projected into the reference pixel frame, so
-                    # science and reference share the same celestial anchor point.
-                    ny_target, nx_target = _sci_shape
+                        # Large shape mismatch (>500 px) means SCAMP shifted the reference
+                        # WCS enough that it no longer covers the output grid — padding with
+                        # NaN would produce a spatially misaligned image.  Trigger fallback.
+                        # Increased threshold to handle SWarp clipping when CRPIX is offset.
+                        if dy > 500 or dx > 500:
+                            self.logger.warning(
+                                "Shape mismatch too large (%d,%d); falling back to reproject/AstroAlign.",
+                                dy, dx,
+                            )
+                            return self._align_fallback_reproject_then_astroalign(
+                                science_image, reference_image, output_dir
+                            )
 
-                    from astropy.nddata.utils import Cutout2D
+                        # Small mismatch (<=20 px): SWarp rounding artefact — safe to trim/pad.
+                        # Center the cutout on the same sky position used as the SWarp CENTER
+                        # (center_ra, center_dec) projected into the reference pixel frame, so
+                        # science and reference share the same celestial anchor point.
+                        ny_target, nx_target = _sci_shape
 
-                    # Find the pixel position of the SWarp CENTER in the reference image
-                    try:
-                        ref_cx_arr, ref_cy_arr = _ref_wcs.all_world2pix(
-                            [center_ra], [center_dec], 0
+                        from astropy.nddata.utils import Cutout2D
+
+                        # Find the pixel position of the SWarp CENTER in the reference image
+                        try:
+                            ref_cx_arr, ref_cy_arr = _ref_wcs.all_world2pix(
+                                [center_ra], [center_dec], 0
+                            )
+                            ref_cx = float(ref_cx_arr[0])
+                            ref_cy = float(ref_cy_arr[0])
+                            if not (np.isfinite(ref_cx) and np.isfinite(ref_cy)):
+                                raise ValueError(f"non-finite ref center: ({ref_cx}, {ref_cy})")
+                        except Exception as _ce:
+                            self.logger.debug(
+                                "Could not project SWarp CENTER into reference WCS (%s); using pixel center instead.", _ce
+                            )
+                            # Use correct numpy 0-based center for Cutout2D
+                            ref_cx = (_ref_shape[1] - 1) / 2.0
+                            ref_cy = (_ref_shape[0] - 1) / 2.0
+
+                        ref_cutout = Cutout2D(
+                            _ref_data,
+                            (ref_cx, ref_cy),
+                            (ny_target, nx_target),  # Cutout2D expects (height, width)
+                            wcs=_ref_wcs,
+                            mode='partial',
                         )
-                        ref_cx = float(ref_cx_arr[0])
-                        ref_cy = float(ref_cy_arr[0])
-                        if not (np.isfinite(ref_cx) and np.isfinite(ref_cy)):
-                            raise ValueError(f"non-finite ref center: ({ref_cx}, {ref_cy})")
-                    except Exception as _ce:
-                        self.logger.debug(
-                            "Could not project SWarp CENTER into reference WCS (%s); using pixel center instead.", _ce
-                        )
-                        # Use correct numpy 0-based center for Cutout2D
-                        ref_cx = (_ref_shape[1] - 1) / 2.0
-                        ref_cy = (_ref_shape[0] - 1) / 2.0
+                        _ref_data_adjusted = ref_cutout.data
+                        ref_wcs_header = ref_cutout.wcs.to_header()
 
-                    ref_cutout = Cutout2D(
-                        _ref_data,
-                        (ref_cx, ref_cy),
-                        (ny_target, nx_target),  # Cutout2D expects (height, width)
-                        wcs=_ref_wcs,
-                        mode='partial',
+                        # Apply the full cutout WCS (CD, CTYPE, CRPIX, CRVAL, etc.) to the
+                        # reference header so the WCS is self-consistent with the cutout.
+                        _ref_header = remove_wcs_from_header(_ref_header)
+                        _ref_header.update(ref_wcs_header)
+                        _ref_header['NAXIS1'] = nx_target
+                        _ref_header['NAXIS2'] = ny_target
+
+                        # Synchronize CRPIX and CRVAL between science and reference so both
+                        # images share the same celestial anchor at the image center.
+                        # CRPIX is FITS 1-based, so the center is at (nx+1)/2, (ny+1)/2.
+                        crpix1_center = (nx_target + 1) / 2.0
+                        crpix2_center = (ny_target + 1) / 2.0
+                        crval1 = _sci_header.get('CRVAL1')
+                        crval2 = _sci_header.get('CRVAL2')
+
+                        _sci_header['CRPIX1'] = crpix1_center
+                        _sci_header['CRPIX2'] = crpix2_center
+                        _ref_header['CRPIX1'] = crpix1_center
+                        _ref_header['CRPIX2'] = crpix2_center
+                        _ref_header['CRVAL1'] = crval1
+                        _ref_header['CRVAL2'] = crval2
+
+                        fits.writeto(aligned_sci, _sci_data, _sci_header, overwrite=True)
+                        fits.writeto(aligned_ref, _ref_data_adjusted, _ref_header, overwrite=True)
+
+                        self.logger.info(
+                            "Reference adjusted to science shape=%s (centered on SWarp sky CENTER, pad/trim <=20 px).",
+                            (ny_target, nx_target),
+                        )
+                    else:
+                        self.logger.info(
+                            "SWarp outputs match: both images shape=%s.", _sci_shape,
+                        )
+                except Exception as _e:
+                    self.logger.error(
+                        "Could not verify or fix SWarp output shapes: %s. Falling back.", _e
                     )
-                    _ref_data_adjusted = ref_cutout.data
-                    ref_wcs_header = ref_cutout.wcs.to_header()
-                    _ref_header['NAXIS1'] = nx_target
-                    _ref_header['NAXIS2'] = ny_target
-
-                    # Set both science and reference CRPIX and CRVAL to match exactly.
-                    # CRPIX is FITS 1-based, so the center is at (nx+1)/2, (ny+1)/2.
-                    crpix1_center = (nx_target + 1) / 2.0
-                    crpix2_center = (ny_target + 1) / 2.0
-                    crval1 = _sci_header.get('CRVAL1')
-                    crval2 = _sci_header.get('CRVAL2')
-                    
-                    _sci_header['CRPIX1'] = crpix1_center
-                    _sci_header['CRPIX2'] = crpix2_center
-                    _ref_header['CRPIX1'] = crpix1_center
-                    _ref_header['CRPIX2'] = crpix2_center
-                    _ref_header['CRVAL1'] = crval1
-                    _ref_header['CRVAL2'] = crval2
-
-                    fits.writeto(aligned_sci, _sci_data, _sci_header, overwrite=True)
-                    fits.writeto(aligned_ref, _ref_data_adjusted, _ref_header, overwrite=True)
-
-                    self.logger.info(
-                        "Reference adjusted to science shape=%s (centered on SWarp sky CENTER, pad/trim <=20 px).",
-                        (ny_target, nx_target),
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
                     )
-                else:
-                    self.logger.info(
-                        "SWarp outputs match: both images shape=%s.", _sci_shape,
-                    )
-            except Exception as _e:
-                self.logger.error(
-                    "Could not verify or fix SWarp output shapes: %s. Falling back.", _e
-                )
-                return self._align_fallback_reproject_then_astroalign(
-                    science_image, reference_image, output_dir
-                )
 
             # Overwrite the reference_image path in-place with the aligned version.
             # reference_image is already a per-science-image copy so overwriting it
@@ -2757,6 +2810,10 @@ NNW
         """
         Align the reference image onto the science image pixel grid using WCS reprojection.
         Requires valid WCS in both FITS headers. Returns same dict as align_with_astroalign, or None on failure.
+
+        Uses ReprojectConfig from input_yaml to select the reproject method (adaptive,
+        interp, exact) with automatic fallback.  This respects user-configured options
+        such as reproject_method, reproject_interp_order, and reproject_parallel.
         """
         if not HAS_REPROJECT:
             self.logger.debug(
@@ -2774,7 +2831,6 @@ NNW
                 sci_header = h_sci[0].header
                 if sci_data is None or sci_data.size == 0:
                     return None
-                # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
                 if sci_data.dtype.kind != 'f':
                     sci_data = sci_data.astype(np.float32)
             with fits.open(reference_image, mode="readonly") as h_ref:
@@ -2782,7 +2838,6 @@ NNW
                 ref_header = h_ref[0].header
                 if ref_data is None or ref_data.size == 0:
                     return None
-                # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
                 if ref_data.dtype.kind != 'f':
                     ref_data = ref_data.astype(np.float32)
             sci_wcs = get_wcs(sci_header)
@@ -2792,15 +2847,100 @@ NNW
                     "Reproject: missing WCS in science or reference header."
                 )
                 return None
-            # Reproject reference onto science grid
-            aligned_ref, footprint = reproject_interp(
-                (ref_data, ref_wcs),
-                sci_wcs,
-                shape_out=sci_data.shape,
-                order="bilinear",
-                roundtrip_coords=True,
-            )
+
+            # Build reproject config from input_yaml (same as templates.py)
+            iy = getattr(self, "input_yaml", None) or {}
+            align_cfg = iy.get("alignment", {}) if isinstance(iy, dict) else {}
+            req_method = str(align_cfg.get("reproject_method", "adaptive")).lower().strip()
+            interp_order = str(align_cfg.get("reproject_interp_order", "bicubic")).lower().strip()
+            use_parallel = bool(align_cfg.get("reproject_parallel", False))
+            roundtrip = bool(align_cfg.get("reproject_roundtrip_coords", True))
+
+            # Normalise interp_order string for reproject_interp
+            _interp_map = {
+                "nearest": "nearest-neighbor", "nearest-neighbor": "nearest-neighbor",
+                "nn": "nearest-neighbor",
+                "bilinear": "bilinear", "linear": "bilinear", "1": "bilinear",
+                "biquadratic": "biquadratic", "2": "biquadratic",
+                "bicubic": "bicubic", "cubic": "bicubic", "3": "bicubic",
+            }
+            interp_order_norm = _interp_map.get(interp_order, "bilinear")
+
+            # Method fallback chain: requested method first, then the others
+            all_methods = ("adaptive", "interp", "exact")
+            if req_method in all_methods:
+                fallbacks = [req_method] + [m for m in all_methods if m != req_method]
+            else:
+                fallbacks = ["adaptive", "interp", "exact"]
+
+            aligned_ref = None
+            footprint = None
+            used_method = None
+            last_exc = None
+
+            for m in fallbacks:
+                try:
+                    if m == "adaptive":
+                        if reproject_adaptive is None:
+                            continue
+                        aligned_ref, footprint = reproject_adaptive(
+                            (ref_data, ref_wcs),
+                            sci_wcs,
+                            shape_out=sci_data.shape,
+                            roundtrip_coords=roundtrip,
+                            parallel=use_parallel,
+                        )
+                    elif m == "interp":
+                        aligned_ref, footprint = reproject_interp(
+                            (ref_data, ref_wcs),
+                            sci_wcs,
+                            shape_out=sci_data.shape,
+                            order=interp_order_norm,
+                            roundtrip_coords=roundtrip,
+                        )
+                    else:  # exact
+                        try:
+                            from reproject import reproject_exact
+                        except ImportError:
+                            continue
+                        aligned_ref, footprint = reproject_exact(
+                            (ref_data, ref_wcs),
+                            sci_wcs,
+                            shape_out=sci_data.shape,
+                            parallel=use_parallel,
+                        )
+                    used_method = m
+                    break
+                except Exception as _e:
+                    last_exc = _e
+                    self.logger.debug("Reproject (%s) failed: %s", m, _e)
+
+            if used_method is None or aligned_ref is None or footprint is None:
+                self.logger.info("Reproject alignment failed (all methods): %s", last_exc)
+                return None
+
+            # Footprint coverage check — zero overlap means WCS mismatch
+            fp_mask = footprint.astype(bool)
+            n_footprint = int(np.sum(fp_mask))
+            n_total = int(fp_mask.size)
+            if n_footprint == 0:
+                self.logger.warning(
+                    "Reproject has zero footprint coverage (%d/%d pixels). "
+                    "Template and science WCS do not overlap.",
+                    n_footprint, n_total,
+                )
+                return None
+            if n_footprint < n_total * 0.5:
+                self.logger.warning(
+                    "Reproject footprint coverage is low: %d/%d pixels (%.1f%%). "
+                    "Large unmasked borders may affect subtraction quality.",
+                    n_footprint, n_total, 100.0 * n_footprint / n_total,
+                )
+
             aligned_ref = np.asarray(aligned_ref, dtype=float)
+            # Mask non-footprint pixels with NaN
+            aligned_ref[~fp_mask] = np.nan
+
             out_header = ref_header.copy()
             out_header = remove_wcs_from_header(out_header)
             out_header.update(sci_wcs.to_header(), relax=True)
@@ -2809,11 +2949,14 @@ NNW
             aligned_reference_fpath = output_dir / f"{base_ref}{ext_ref}"
             from functions import safe_fits_write
             safe_fits_write(str(aligned_reference_fpath), aligned_ref, out_header)
-            self.logger.info("Alignment via WCS reproject succeeded.")
+            self.logger.info(
+                "Alignment via WCS reproject succeeded (method=%s, coverage=%.1f%%).",
+                used_method, 100.0 * n_footprint / n_total,
+            )
             return {
                 "science_aligned": science_image,
                 "reference_aligned": str(aligned_reference_fpath),
-                "alignment_method": "reproject",
+                "alignment_method": f"reproject/{used_method}",
             }
         except Exception as e:
             self.logger.info("Reproject alignment failed: %s", e)
@@ -3001,6 +3144,9 @@ NNW
         """
         Reproject source image to match target image's WCS grid.
 
+        Uses reproject_interp with the configured interpolation order from
+        input_yaml (alignment.reproject_interp_order, default bicubic).
+
         Parameters
         ----------
         source_image : str
@@ -3019,6 +3165,19 @@ NNW
         from astropy.wcs import WCS
         from reproject import reproject_interp
 
+        # Read configured interpolation order from input_yaml
+        iy = getattr(self, "input_yaml", None) or {}
+        align_cfg = iy.get("alignment", {}) if isinstance(iy, dict) else {}
+        interp_order = str(align_cfg.get("reproject_interp_order", "bicubic")).lower().strip()
+        _interp_map = {
+            "nearest": "nearest-neighbor", "nearest-neighbor": "nearest-neighbor",
+            "nn": "nearest-neighbor",
+            "bilinear": "bilinear", "linear": "bilinear", "1": "bilinear",
+            "biquadratic": "biquadratic", "2": "biquadratic",
+            "bicubic": "bicubic", "cubic": "bicubic", "3": "bicubic",
+        }
+        interp_order_norm = _interp_map.get(interp_order, "bilinear")
+
         with fits.open(target_image) as target_hdul:
             target_wcs = WCS(target_hdul[0].header)
             target_shape = target_hdul[0].data.shape
@@ -3032,7 +3191,7 @@ NNW
             (source_data, WCS(source_header)),
             target_wcs,
             shape_out=target_shape,
-            order="bilinear",
+            order=interp_order_norm,
         )
 
         # Update header with target WCS

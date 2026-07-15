@@ -110,7 +110,7 @@ from aperture import (
     gain_e_per_adu_from_header,
     resolve_gain_e_per_adu,
 )
-from catalog import Catalog
+from catalog import Catalog, cross_match_sources
 from cosmic import RemoveCosmicRays
 from fwhm import Find_FWHM
 from functions import (
@@ -3649,6 +3649,39 @@ def run_photometry():
         # GetZeropoint.clean() applies strict quality cuts that are appropriate
         # for ZP fitting but would silently drop many sources from the output.
         CatalogSources_for_calib = CatalogSources.copy() if CatalogSources is not None else None
+
+        # Remove known variable sources from the calibration catalog before
+        # fitting the zeropoint.  Variable stars (Cepheids, RR Lyr, CVs, etc.)
+        # have brightness that changes with time, so their measured flux on
+        # the science image will not match the reference catalog magnitude,
+        # introducing scatter and bias into the ZP fit.
+        if (
+            CatalogSources is not None
+            and len(CatalogSources) > 0
+            and variable_sources is not None
+            and len(variable_sources) > 0
+            and {"x_pix", "y_pix"}.issubset(CatalogSources.columns)
+            and {"x_pix", "y_pix"}.issubset(variable_sources.columns)
+        ):
+            zp_cfg = input_yaml.get("zeropoint", {}) or {}
+            var_match_radius = float(zp_cfg.get("variable_source_match_radius_pix", 5.0))
+            n_before = len(CatalogSources)
+            CatalogSources = cross_match_sources(
+                CatalogSources, variable_sources, match_radius_pix=var_match_radius
+            )
+            n_removed = n_before - len(CatalogSources)
+            if n_removed > 0:
+                logging.info(
+                    "Removed %d catalog sources matching known variable sources "
+                    "(match radius=%.1f px); %d sources remain for ZP calibration.",
+                    n_removed, var_match_radius, len(CatalogSources),
+                )
+            else:
+                logging.debug(
+                    "No catalog sources matched known variable sources (radius=%.1f px).",
+                    var_match_radius,
+                )
+
         CatalogSources = GetZeropoint.clean(sources=CatalogSources)
 
         # Check linearity of catalog sources before fitting zeropoint
@@ -4152,8 +4185,15 @@ def run_photometry():
             # Coordinates array for distance/cluster operations.
             coords = MatchingSources[["x_coord", "y_coord"]].values
 
-            # Clusters the sources.
-            cluster_labels = fclusterdata(coords, t=ImageFWHM, criterion="distance")
+            if len(coords) < 2:
+                logging.info(
+                    "Only %d source(s) for template matching; skipping clustering.",
+                    len(coords),
+                )
+                cluster_labels = np.ones(len(coords), dtype=int)
+            else:
+                # Clusters the sources.
+                cluster_labels = fclusterdata(coords, t=ImageFWHM, criterion="distance")
 
             # Groups and collapses clusters.
             numeric_cols = MatchingSources.select_dtypes(include=np.number).columns
@@ -4301,10 +4341,24 @@ def run_photometry():
                     (input_yaml.get("photometry", {}) or {}).get("masked_region_proximity_fwhm_mult", 1.5)
                 )
                 proximity_threshold = ImageFWHM * proximity_fwhm_mult
-                # Query the tree for the minimum distance to any masked pixel for each source
-                min_distances, _ = tree.query(
-                    source_coords, k=1, distance_upper_bound=proximity_threshold
-                )
+
+                # Adaptive exclusion: if excluding sources near masked regions leaves
+                # too few sources for SFFT (< 5), progressively relax the threshold.
+                # This is critical for sparse fields where 40%+ of pixels may be masked.
+                min_sources_needed = 5
+                while True:
+                    min_distances, _ = tree.query(
+                        source_coords, k=1, distance_upper_bound=proximity_threshold
+                    )
+                    n_kept = int((min_distances > proximity_threshold).sum())
+                    if n_kept >= min_sources_needed or proximity_fwhm_mult <= 0.5:
+                        break
+                    proximity_fwhm_mult /= 2.0
+                    proximity_threshold = ImageFWHM * proximity_fwhm_mult
+                    logging.info(
+                        f"Relaxing masked-region proximity threshold to FWHM x {proximity_fwhm_mult:.2f} "
+                        f"({proximity_threshold:.1f} px) — only {n_kept} sources survived at previous threshold."
+                    )
 
                 excluded_sources = matched_df[min_distances <= proximity_threshold]
                 matched_df = matched_df[min_distances > proximity_threshold]

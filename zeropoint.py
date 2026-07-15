@@ -1620,14 +1620,19 @@ class Zeropoint:
             required = [
                 "flux_AP",
                 "flux_AP_err",
-                "flux_PSF",
-                "flux_PSF_err",
                 use_filter,
                 f"{use_filter}_err",
             ]
             missing = [c for c in required if c not in catalog.columns]
             if missing:
                 raise KeyError(f"Missing columns: {missing}")
+
+            # PSF photometry may not be available (e.g. too few isolated
+            # sources for ePSF build).  Add NaN placeholder columns so the
+            # PSF fitting loop below is skipped gracefully via _finite_vmask.
+            for _psf_col in ("flux_PSF", "flux_PSF_err"):
+                if _psf_col not in catalog.columns:
+                    catalog[_psf_col] = np.nan
 
             try:
                 color1, color2 = self.get_color_term_for_filter(use_filter)
