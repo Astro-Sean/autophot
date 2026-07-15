@@ -97,6 +97,10 @@ default_input:
     psf_saturate_fraction: 0.90 # float --- Nominal saturation cutoff for PSF stars (peak < fraction * saturate); auto-relaxed when candidate pool is small. Keep in sync with template_subtraction.subtraction_saturate_fraction.
     psf_elongation_max: 1.5 # float --- Maximum allowed ELONGATION (a/b axis ratio) for PSF stars; rejects trailed or blended stars. Uses ELONGATION or ELLIPTICITY column if present; skip if neither available.
     psf_isolation_radius_fwhm: 3.0 # float --- Minimum neighbour-free radius (in FWHM units) for PSF star selection; rejects stars with a close companion that would contaminate the ePSF cutout.
+    psf_fwhm_min_frac: 0.5 # float --- Minimum FWHM as fraction of image FWHM for PSF candidates; rejects cosmic rays (abnormally small FWHM). Set to 0 to disable.
+    psf_fwhm_max_frac: 2.5 # float --- Maximum FWHM as fraction of image FWHM for PSF candidates; rejects extended defects/galaxies (abnormally large FWHM). Set to a large value to disable.
+    psf_class_star_min: 0.4 # float --- Minimum SExtractor CLASS_STAR (stellarity) for PSF candidates; rejects galaxies and extended defects. Set to 0 to disable.
+    sextractor_class_star_min: 0.4 # float --- Minimum SExtractor CLASS_STAR for initial source filtering; rejects non-stellar sources early. Lowered to 0.2 automatically for matching/crowded fields.
     psf_fft_rejection: True # bool --- Enable FFT-based rejection during PSF star selection.
     psf_fft_n_sigma: 4.0 # float --- Rejection threshold (sigma units) for FFT outlier metric.
     psf_fft_min_frac_keep: 0.25 # float --- Minimum fraction of PSF stars to retain after rejection.
@@ -309,6 +313,12 @@ default_input:
   cosmic_rays:
     remove_cmrays: False # bool --- Enable cosmic-ray removal in preprocessing.
     use_lacosmic: False # bool --- Use L.A.Cosmic-style algorithm (if available/configured).
+    cr_sigclip: 4.5 # float --- Detection threshold (sigma) for cosmic ray pixels in astroscrappy/LACosmic.
+    cr_sigfrac: 0.3 # float --- Fraction of neighboring pixels required for detection (LACosmic/astroscrappy).
+    cr_objlim: 10.0 # float --- Object detection limit — rejects CRs that look like real objects (higher = more aggressive CR removal, may clip star cores).
+    cr_dilate_factor: 1.0 # float --- Dilation radius as fraction of FWHM for CR mask post-processing.
+    cr_dilate_iterations: 2 # int --- Number of dilation iterations for CR mask (covers residual CR wings/bleed).
+    cr_plot: False # bool --- Save side-by-side before/after CR removal plot.
 
   fitting:
     bkg_level: 3 # int --- Background handling mode/level (pipeline-specific; higher typically more aggressive).
@@ -391,6 +401,9 @@ default_input:
     alignment_method: swarp # str --- Science-template registration method (reproject, swarp, astroalign).
     alignment_use_extended_sources: False # bool --- If True, allow large/extended sources (galaxies) in SCAMP matching catalogs.
     alignment_max_fwhm_pix: 50.0 # float --- Max FWHM (pixels) kept when alignment_use_extended_sources=False.
+    alignment_min_matched_sources: 6 # int --- Minimum matched sources for a reliable SCAMP WCS solution. Below this, retry with larger radius or fall back to reproject/AstroAlign.
+    alignment_max_match_radius_arcsec: 30.0 # float --- Maximum cross-match radius (arcsec) when retrying with fewer sources. Prevents false matches at extreme radii.
+    alignment_max_scamp_residual_arcsec: 2.0 # float --- Maximum SCAMP astrometric residual RMS (arcsec) before falling back to reproject/AstroAlign.
     skip_resampling: True # bool --- DEPRECATED: use resample_mode instead. If True, maps to resample_mode="wcs_only".
     resample_mode: common_grid # str --- SWarp resampling mode: "common_grid" (both to science grid), "native_scale" (each keeps own pixel scale), "wcs_only" (no resampling).
     science_first_astrometry: True # bool --- If True (default), distortion-correct the science image against GAIA-DR3 first via SCAMP+SWarp, then re-detect sources and use this corrected catalog as the astrometric reference for aligning the reference image. This gives the reference image more sources to match against but resamples the science image twice.

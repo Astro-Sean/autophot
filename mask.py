@@ -9,6 +9,7 @@ Created on Wed Jul 17 13:01:06 2024
 # =============================================================================
 #
 # =============================================================================
+import logging
 
 
 def append_id(filename):
@@ -99,8 +100,6 @@ def create_image_mask(filename, layers=["CR"]):
         return None
 
     fname = os.path.basename(filename)
-
-    import logging
 
     logger = logging.getLogger(__name__)
     logger.info(log_step(f"Mask: {fname}"))

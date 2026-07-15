@@ -716,7 +716,7 @@ def wcs_world_to_pixel(
     ra_arr = ra_arr[:n]
     dec_arr = dec_arr[:n]
     try:
-        x_pix, y_pix = wcs_obj.all_world2pix(ra_arr, dec_arr, 0)
+        x_pix, y_pix = wcs_obj.all_world2pix(ra_arr, dec_arr, origin)
         return np.asarray(x_pix, dtype=float), np.asarray(y_pix, dtype=float)
     except Exception:
         x_out = np.full(n, np.nan, dtype=float)
@@ -726,7 +726,7 @@ def wcs_world_to_pixel(
                 x_i, y_i = wcs_obj.all_world2pix(
                     np.array([ra_arr[i]], dtype=float),
                     np.array([dec_arr[i]], dtype=float),
-                    0,
+                    origin,
                 )
                 x_out[i] = float(np.asarray(x_i, dtype=float)[0])
                 y_out[i] = float(np.asarray(y_i, dtype=float)[0])

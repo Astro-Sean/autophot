@@ -14,6 +14,7 @@ aperture-correction factors used to calibrate the photometry.
 import os
 import logging
 import warnings
+import multiprocessing
 
 # Safeguard: force BLAS/OpenMP to 1 thread before importing numpy (avoids exhausting
 # process/thread limits when using multiprocessing on HPC; OpenBLAS often defaults to 128).
@@ -38,6 +39,7 @@ from matplotlib.gridspec import GridSpec
 from multiprocessing import Pool, cpu_count
 from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
+import scipy.optimize
 from scipy.stats import mstats
 
 from astropy.stats import (
@@ -101,25 +103,21 @@ def resolve_exposure_time_seconds(exposure_time, input_yaml: dict) -> float:
             raise ValueError(f"Invalid exposure_time argument: {exposure_time!r}") from exc
         if np.isfinite(et) and et > 0:
             return et
-        raise ValueError(
-            f"exposure_time must be finite and > 0, got {exposure_time!r}"
-        )
+        raise ValueError(f"exposure_time must be finite and > 0 s, got {exposure_time!r}")
     raw = input_yaml.get("exposure_time")
     if raw is None:
         raise ValueError(
             "exposure_time is required: pass it to measure(), or set "
-            "input_yaml['exposure_time'] (normally from the FITS EXPTIME/EXPOSURE "
-            "header before running photometry)."
+            "input_yaml['exposure_time'] (normally from the FITS EXPTIME header "
+            "before running photometry)."
         )
     try:
         et = float(raw)
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"input_yaml['exposure_time'] is not numeric: {raw!r}"
-        ) from exc
+        raise ValueError(f"input_yaml['exposure_time'] is not numeric: {raw!r}") from exc
     if not np.isfinite(et) or et <= 0:
         raise ValueError(
-            f"input_yaml['exposure_time'] must be finite and > 0, got {raw!r}"
+            f"input_yaml['exposure_time'] must be finite and > 0 s, got {raw!r}"
         )
     return et
 

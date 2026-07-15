@@ -1428,7 +1428,7 @@ class AutophotYaml:
 
     def load(self):
 
-        if self.wdir != None:
+        if self.wdir is not None:
             file_path = os.path.join(self.wdir, self.filepath)
         else:
             file_path = self.filepath
@@ -1436,7 +1436,7 @@ class AutophotYaml:
         with open(file_path, "r") as stream:
             var = yaml.safe_load(stream)
 
-        if self.dict_name != None:
+        if self.dict_name is not None:
             data = var[self.dict_name]
         else:
             data = var
@@ -1848,7 +1848,7 @@ def gauss_1d(x, A, x0, sigma):
 def snr(maxPixel, noiseBkg):
 
     with warnings.catch_warnings():
-
+        warnings.simplefilter("ignore", RuntimeWarning)
         snr_value = maxPixel / noiseBkg
 
     return snr_value
@@ -1876,18 +1876,14 @@ def snr_err(snr_value):
 
     """
 
-    from numpy import log10, errstate
-
-    with errstate(divide="ignore", invalid="ignore"):
-        snr_err_value = 2.5 * log10(1 + (1 / snr_value))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        snr_err_value = 2.5 * np.log10(1 + (1 / snr_value))
 
     return snr_err_value
 
 
 def quadrature_add(values):
-    from numpy import sqrt
-
-    return sqrt(sum([i**2 for i in values]))
+    return np.sqrt(sum([i**2 for i in values]))
 
 
 def moffat_2d(image, x0, y0, sky, A, image_params):
@@ -1953,8 +1949,6 @@ def mag(flux):
     :return: Instrumental magnitude; NaN where flux <= 0
     :rtype: float or array
     """
-    import pandas as pd
-
     if isinstance(flux, (int, float)):
         if flux <= 0:
             return np.nan

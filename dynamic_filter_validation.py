@@ -35,7 +35,7 @@ def validate_transmission_curve(curve_path: str, filter_name: str) -> Tuple[bool
     
     try:
         # Try to read the transmission curve
-        data = pd.read_csv(curve_path, comment='#', delim_whitespace=True, header=None)
+        data = pd.read_csv(curve_path, comment='#', sep=r'\s+', header=None)
         
         if data.shape[1] < 2:
             return False, f"Transmission curve must have at least 2 columns (wavelength, throughput): {curve_path}"
