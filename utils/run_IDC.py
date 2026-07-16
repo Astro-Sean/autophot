@@ -1963,47 +1963,8 @@ NNW
 
                 if _num_matched >= 3 and _num_matched < min_matched:
                     # We have enough matches for SCAMP to solve a linear WCS
-                    # (4 parameters: shift+scale+rotation).  But if the reference
-                    # has high-order SIP/PV distortion, a linear fit would degrade
-                    # the WCS.  Try wide-offset matching to find more sources first.
-                    _min_sources_for_degree = {1: 6, 2: 12, 3: 20, 4: 30}
-                    _needed = _min_sources_for_degree.get(ref_distort_order, 999)
-                    if ref_distort_order > 1 and _num_matched < _needed:
-                        self.logger.info(
-                            "Sparse field: %d matched at %.1f\" but reference has "
-                            "distortion order %d (need %d sources). Trying wide-offset "
-                            "matching to find more sources...",
-                            _num_matched, crossid_radius, ref_distort_order, _needed,
-                        )
-                        try:
-                            shutil.copy2(sci_catalog_scamp_backup, sci_catalog_path)
-                            shutil.copy2(ref_catalog_scamp_backup, ref_catalog_path)
-                            dra, ddec = self._estimate_wcs_offset_from_headers(
-                                str(sci_image_copy), str(ref_image_copy),
-                            )
-                            offset_magnitude = float(np.sqrt(dra**2 + ddec**2))
-                            if offset_magnitude > crossid_radius:
-                                wide_radius = min(
-                                    offset_magnitude + 3.0 * crossid_radius,
-                                    max_match_radius * 3.0,
-                                )
-                                self.logger.info(
-                                    "Wide-offset: WCS header offset=%.1f\" "
-                                    "(dRA=%.1f\" dDec=%.1f\"), retrying with %.1f\" radius",
-                                    offset_magnitude, dra, ddec, wide_radius,
-                                )
-                                _prev_matched = _num_matched
-                                _num_matched, _ = _do_match(wide_radius)
-                                crossid_radius = wide_radius
-                                self.logger.info(
-                                    "Wide-offset match: %d sources (was %d)",
-                                    _num_matched, _prev_matched,
-                                )
-                        except Exception as wide_err:
-                            self.logger.warning(
-                                "Wide-offset estimation failed: %s", wide_err,
-                            )
-
+                    # (4 parameters: shift+scale/rotation).  Don't inflate the
+                    # radius — the WCS is good, we just have a sparse field.
                     self.logger.info(
                         "Sparse field: %d matched sources at %.1f\" radius (< %d default minimum). "
                         "Proceeding with SCAMP — a linear fit needs only 3-4 matches.",
@@ -3327,7 +3288,7 @@ NNW
 
             out_header = ref_header.copy()
             out_header = remove_wcs_from_header(out_header)
-            out_header.update(sci_wcs.to_header(), relax=True)
+            out_header.update(sci_wcs.to_header(relax=True))
             base_ref = Path(reference_image).stem
             ext_ref = Path(reference_image).suffix
             aligned_reference_fpath = output_dir / f"{base_ref}{ext_ref}"
