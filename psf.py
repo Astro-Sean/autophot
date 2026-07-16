@@ -1973,6 +1973,65 @@ class PSF:
                         fwhm_lo, fwhm_hi, n_keep_fwhm, min_keep_fwhm,
                     )
 
+            # ---- Robust FWHM sigma-clipping (always applied) ----
+            # Ensure all PSF sources have roughly the same FWHM by rejecting
+            # outliers relative to the candidate distribution itself. This
+            # removes extended galaxies (large FWHM) and cosmic rays (small
+            # FWHM) that survived the absolute FWHM consistency cut above.
+            if _fwhm_col_psf is not None and len(df) >= 5:
+                src_fwhm = pd.to_numeric(df[_fwhm_col_psf], errors="coerce")
+                finite_fwhm = src_fwhm[np.isfinite(src_fwhm)]
+                if len(finite_fwhm) >= 5:
+                    from astropy.stats import sigma_clip as _sigma_clip
+                    clipped = _sigma_clip(
+                        finite_fwhm.values, sigma=2.5, maxiters=3, cenfunc="median",
+                    )
+                    ok_clip = ~clipped.mask
+                    # Build mask aligned to original df
+                    ok_fwhm_clip = np.ones(len(df), dtype=bool)
+                    finite_idx = np.where(np.isfinite(src_fwhm.values))[0]
+                    ok_fwhm_clip[finite_idx] = ok_clip
+                    n_drop_clip = int((~ok_fwhm_clip).sum())
+                    if n_drop_clip > 0:
+                        df = df[ok_fwhm_clip].copy()
+                        log.info(
+                            "PSF FWHM sigma-clip (2.5 sigma): removed %d FWHM outliers (%d kept, "
+                            "median FWHM=%.2f px)",
+                            n_drop_clip, int(ok_fwhm_clip.sum()),
+                            float(np.nanmedian(finite_fwhm[~clipped.mask])),
+                        )
+
+            # ---- Sharpness cut ----
+            # IRAFStarFinder provides a "sharpness" column that discriminates
+            # point sources (~0.5-0.8 for Gaussian PSF) from extended galaxies
+            # (sharpness > 1.0). Reject sources with abnormally high sharpness.
+            _sharp_col = next(
+                (c for c in ("sharpness", "sharp", "SHARPNESS") if c in df.columns), None
+            )
+            if _sharp_col is not None:
+                sharp_max = float(phot_cfg.get("psf_sharpness_max", 1.0))
+                sharp_vals = pd.to_numeric(df[_sharp_col], errors="coerce")
+                ok_sharp = sharp_vals <= sharp_max
+                ok_sharp = ok_sharp | sharp_vals.isna()  # keep NaN (can't judge)
+                n_keep_sharp = int(ok_sharp.sum())
+                min_keep_sharp = max(
+                    min_psf_candidates,
+                    int(np.ceil(min_keep_frac_after_cut * max(1, len(df)))),
+                )
+                if n_keep_sharp >= min_keep_sharp:
+                    n_drop_sharp = int((~ok_sharp).sum())
+                    if n_drop_sharp > 0:
+                        df = df[ok_sharp].copy()
+                        log.info(
+                            "PSF sharpness cut (<= %.2f): removed %d extended candidates (%d kept)",
+                            sharp_max, n_drop_sharp, n_keep_sharp,
+                        )
+                else:
+                    log.info(
+                        "Skipping sharpness cut (<= %.2f): would leave only %d candidates (< %d).",
+                        sharp_max, n_keep_sharp, min_keep_sharp,
+                    )
+
             # ---- CLASS_STAR cut ----
             # Prefer star-like sources (SExtractor stellarity index).
             # Cosmic rays can have high CLASS_STAR (point-like), so this alone
