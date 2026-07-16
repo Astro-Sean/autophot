@@ -2060,7 +2060,7 @@ def remove_wcs_from_header(header):
     ]
     # For SIP / polynomial distortion: key starts with this stem and contains '_'
     # (e.g. A_ORDER, A_0_0, B_1_2, AP_0_0, BP_2_1, D_*, DP_*)
-    wcs_stem_underscore = ["A_", "B_", "AP_", "BP_", "D_", "DP_", "PV"]
+    wcs_stem_underscore = ["A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_"]
 
     keys = list(header.keys())
     for key in keys:

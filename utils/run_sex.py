@@ -1194,9 +1194,40 @@ class SExtractorWrapper:
                     # Copy the modified FITS file to the destination
                     shutil.copy2(catalog_path, dest_path)
                     logger.info(f"Copied FITS-LDAC catalog to {dest_path}")
-                # Calculate FWHM from raw sources before returning
+                # Calculate FWHM from point-source-quality subset before returning.
+                # The full sources_df (SNR+FLAGS filtered) is returned for SCAMP,
+                # but FWHM must be estimated from point sources only to avoid
+                # inflation by extended sources/galaxies.
                 if "FWHM_IMAGE" in sources_df.columns:
-                    fwhm_est = self.calculate_robust_fwhm(sources_df["FWHM_IMAGE"].values)
+                    fwhm_subset = sources_df.copy()
+                    # Apply FWHM range cut
+                    if relaxed_cuts:
+                        fwhm_lo, fwhm_hi = 0.5, 150.0
+                    else:
+                        fwhm_lo, fwhm_hi = 1.1, 100.0
+                    fwhm_subset = fwhm_subset[
+                        (fwhm_subset["FWHM_IMAGE"] > fwhm_lo)
+                        & (fwhm_subset["FWHM_IMAGE"] < fwhm_hi)
+                    ]
+                    # Apply CLASS_STAR cut
+                    if "CLASS_STAR" in fwhm_subset.columns:
+                        cs_min = 0.2 if relaxed_cuts else float(
+                            self.config.get("photometry", {}).get("sextractor_class_star_min", 0.4)
+                        )
+                        cs_vals = pd.to_numeric(fwhm_subset["CLASS_STAR"], errors="coerce").fillna(0.0)
+                        fwhm_subset = fwhm_subset[cs_vals >= cs_min]
+                    # Apply sharpness cut
+                    if "SHARPNESS" in fwhm_subset.columns:
+                        sharp_lo, sharp_hi = (0.1, 1.2) if relaxed_cuts else (0.2, 1.0)
+                        sharp_vals = pd.to_numeric(fwhm_subset["SHARPNESS"], errors="coerce").fillna(1.0)
+                        fwhm_subset = fwhm_subset[
+                            (sharp_vals > sharp_lo) & (sharp_vals < sharp_hi)
+                        ]
+                    # Use point-source subset for FWHM; fall back to full sample if empty
+                    if len(fwhm_subset) > 0:
+                        fwhm_est = self.calculate_robust_fwhm(fwhm_subset["FWHM_IMAGE"].values)
+                    else:
+                        fwhm_est = self.calculate_robust_fwhm(sources_df["FWHM_IMAGE"].values)
                 else:
                     fwhm_est = float(use_FWHM) if use_FWHM > 0 else 8.5
                 return fwhm_est, sources, default_scale
@@ -1255,9 +1286,33 @@ class SExtractorWrapper:
                     initial_count,
                     len(sources),
                 )
-                # Calculate FWHM
+                # Calculate FWHM from point-source-quality subset
                 if "FWHM_IMAGE" in sources.columns:
-                    fwhm_est = self.calculate_robust_fwhm(sources["FWHM_IMAGE"].values)
+                    fwhm_subset = sources.copy()
+                    if relaxed_cuts:
+                        fwhm_lo, fwhm_hi = 0.5, 150.0
+                    else:
+                        fwhm_lo, fwhm_hi = 1.1, 100.0
+                    fwhm_subset = fwhm_subset[
+                        (fwhm_subset["FWHM_IMAGE"] > fwhm_lo)
+                        & (fwhm_subset["FWHM_IMAGE"] < fwhm_hi)
+                    ]
+                    if "CLASS_STAR" in fwhm_subset.columns:
+                        cs_min = 0.2 if relaxed_cuts else float(
+                            self.config.get("photometry", {}).get("sextractor_class_star_min", 0.4)
+                        )
+                        cs_vals = pd.to_numeric(fwhm_subset["CLASS_STAR"], errors="coerce").fillna(0.0)
+                        fwhm_subset = fwhm_subset[cs_vals >= cs_min]
+                    if "SHARPNESS" in fwhm_subset.columns:
+                        sharp_lo, sharp_hi = (0.1, 1.2) if relaxed_cuts else (0.2, 1.0)
+                        sharp_vals = pd.to_numeric(fwhm_subset["SHARPNESS"], errors="coerce").fillna(1.0)
+                        fwhm_subset = fwhm_subset[
+                            (sharp_vals > sharp_lo) & (sharp_vals < sharp_hi)
+                        ]
+                    if len(fwhm_subset) > 0:
+                        fwhm_est = self.calculate_robust_fwhm(fwhm_subset["FWHM_IMAGE"].values)
+                    else:
+                        fwhm_est = self.calculate_robust_fwhm(sources["FWHM_IMAGE"].values)
                 else:
                     fwhm_est = float(use_FWHM) if use_FWHM > 0 else 8.5
                 return fwhm_est, sources, default_scale

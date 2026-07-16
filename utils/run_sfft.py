@@ -648,6 +648,17 @@ def run_sfft() -> Optional[int]:
     ny, nx = data_sci.shape
     matching_sources = _sanitize_xy_sources(matching_sources, "Matching sources", nx, ny)
     masked_sources = _sanitize_xy_sources(masked_sources, "Masked sources", nx, ny)
+
+    # SFFT's XY_PriorSelect and XY_PriorBan expect 1-based FITS pixel coordinates
+    # (SExtractor convention).  masked_sources are already converted to 1-based in
+    # main.py, but matching_sources arrive as 0-based numpy pixel coordinates.
+    # Convert matching_sources to 1-based after sanitization so the bounds check
+    # (which uses 0-based limits) remains correct.
+    if matching_sources is not None:
+        matching_sources = matching_sources + 1.0
+        log_info(
+            f"Converted {len(matching_sources)} matching sources from 0-based to 1-based FITS coordinates."
+        )
     
     # Improve prior source validation: require minimum sources for reliable kernel fitting
     MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 3) or 3)
