@@ -1248,7 +1248,20 @@ NNW
                             )
                             # Update reference image with cutout
                             _ref_header_out = _ref_h.copy()
-                            _ref_header_out.update(_ref_cutout.wcs.to_header())
+                            _ref_header_out = remove_wcs_from_header(_ref_header_out)
+                            from functions import copy_wcs_from_header as _copy_wcs
+                            _cutout_hdr = _ref_cutout.wcs.to_header(relax=True)
+                            _ref_header_out.update(_cutout_hdr)
+                            # Preserve CD matrix from the cutout WCS if to_header dropped it
+                            if not any(k.startswith('CD') for k in _cutout_hdr):
+                                _cd = _ref_cutout.wcs.wcs.cd
+                                if _cd is not None and _ref_cutout.wcs.wcs.has_cd():
+                                    _ref_header_out['CD1_1'] = _cd[0, 0]
+                                    _ref_header_out['CD1_2'] = _cd[0, 1]
+                                    _ref_header_out['CD2_1'] = _cd[1, 0]
+                                    _ref_header_out['CD2_2'] = _cd[1, 1]
+                                    for k in ['CDELT1', 'CDELT2']:
+                                        _ref_header_out.pop(k, None)
                             _ref_header_out['NAXIS1'] = _cut_w
                             _ref_header_out['NAXIS2'] = _cut_h
                             fits.writeto(
@@ -2956,7 +2969,17 @@ NNW
                             mode='partial',
                         )
                         _ref_data_adjusted = ref_cutout.data
-                        ref_wcs_header = ref_cutout.wcs.to_header()
+                        ref_wcs_header = ref_cutout.wcs.to_header(relax=True)
+                        # Preserve CD matrix from the cutout WCS if to_header dropped it
+                        if not any(k.startswith('CD') for k in ref_wcs_header):
+                            _cd = ref_cutout.wcs.wcs.cd
+                            if _cd is not None and ref_cutout.wcs.wcs.has_cd():
+                                ref_wcs_header['CD1_1'] = _cd[0, 0]
+                                ref_wcs_header['CD1_2'] = _cd[0, 1]
+                                ref_wcs_header['CD2_1'] = _cd[1, 0]
+                                ref_wcs_header['CD2_2'] = _cd[1, 1]
+                                for k in ['CDELT1', 'CDELT2']:
+                                    ref_wcs_header.pop(k, None)
 
                         # Apply the full cutout WCS (CD, CTYPE, CRPIX, CRVAL, etc.) to the
                         # reference header so the WCS is self-consistent with the cutout.
@@ -3288,7 +3311,8 @@ NNW
 
             out_header = ref_header.copy()
             out_header = remove_wcs_from_header(out_header)
-            out_header.update(sci_wcs.to_header(relax=True))
+            from functions import copy_wcs_from_header
+            copy_wcs_from_header(sci_header, out_header)
             base_ref = Path(reference_image).stem
             ext_ref = Path(reference_image).suffix
             aligned_reference_fpath = output_dir / f"{base_ref}{ext_ref}"
@@ -3541,7 +3565,19 @@ NNW
 
         # Update header with target WCS
         output_header = source_header.copy()
-        output_header.update(target_wcs.to_header())
+        output_header = remove_wcs_from_header(output_header)
+        _target_hdr = target_wcs.to_header(relax=True)
+        output_header.update(_target_hdr)
+        # Preserve CD matrix if to_header dropped it
+        if not any(k.startswith('CD') for k in _target_hdr):
+            _cd = target_wcs.wcs.cd
+            if _cd is not None and target_wcs.wcs.has_cd():
+                output_header['CD1_1'] = _cd[0, 0]
+                output_header['CD1_2'] = _cd[0, 1]
+                output_header['CD2_1'] = _cd[1, 0]
+                output_header['CD2_2'] = _cd[1, 1]
+                for k in ['CDELT1', 'CDELT2']:
+                    output_header.pop(k, None)
         output_header["REPROJ"] = (True, "Reprojected to match science grid")
 
         # Write output
@@ -3815,7 +3851,8 @@ NNW
             aligned_science_fpath = science_image
             out_hdr = ref_head.copy()
             out_hdr = remove_wcs_from_header(out_hdr)
-            out_hdr.update(sci_wcs.to_header(), relax=True)
+            from functions import copy_wcs_from_header as _copy_wcs2
+            _copy_wcs2(sci_head, out_hdr)
             _save_aligned_image(aligned_ref_img, out_hdr, aligned_reference_fpath)
             try:
                 if use_aafitrans:

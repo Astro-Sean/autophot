@@ -2086,6 +2086,53 @@ def remove_wcs_from_header(header):
     return header
 
 
+def copy_wcs_from_header(src_header, dst_header):
+    """
+    Copy all WCS keywords from src_header into dst_header.
+
+    This is the inverse of remove_wcs_from_header.  It preserves the
+    exact WCS representation (CD matrix, SIP, PV, etc.) from the source
+    header, unlike WCS.to_header() which may drop the CD matrix and
+    write CDELT=1.0.
+
+    Parameters
+    ----------
+    src_header : fits.Header
+        Source FITS header containing the WCS to copy.
+    dst_header : fits.Header
+        Destination FITS header (modified in place).
+
+    Returns
+    -------
+    fits.Header
+        The modified dst_header.
+    """
+    wcs_prefixes = [
+        "CRPIX", "CRVAL", "CTYPE", "CD", "PC", "CDELT", "CROTA",
+        "PV", "LONPOLE", "LATPOLE", "EQUINOX", "WCSNAME", "CUNIT",
+        "WCSAXES", "PROJP", "LTV", "LTM", "RADECSYS", "RADESYS",
+        "RADYSYS", "LONGPOLE", "TNX", "SIP_",
+    ]
+    wcs_stem_underscore = ["A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_"]
+
+    for key in src_header.keys():
+        if key in ("NAXIS", "NAXIS1", "NAXIS2", "COMMENT", "HISTORY"):
+            continue
+        is_wcs = False
+        for prefix in wcs_prefixes:
+            if key.startswith(prefix):
+                is_wcs = True
+                break
+        if not is_wcs:
+            stem = key.split("_")[0] + "_" if "_" in key else ""
+            if stem in wcs_stem_underscore and key.startswith(stem.rstrip("_")):
+                is_wcs = True
+        if is_wcs:
+            dst_header[key] = src_header[key]
+
+    return dst_header
+
+
 def convert_ra_dec_to_hms_dms(ra_deg, dec_deg):
     # Create a SkyCoord object using RA and DEC in degrees
     coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
