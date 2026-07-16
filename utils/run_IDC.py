@@ -3322,6 +3322,66 @@ NNW
                 "Alignment via WCS reproject succeeded (method=%s, coverage=%.1f%%).",
                 used_method, 100.0 * n_footprint / n_total,
             )
+
+            # Post-reproject alignment verification via centroid cross-match.
+            # Reproject trusts both WCS blindly — independently plate-solved
+            # images can disagree by several pixels.  Log the residual so
+            # downstream stages know the alignment quality.
+            try:
+                from photutils.detection import DAOStarFinder
+                from astropy.stats import sigma_clipped_stats as _scs
+                from scipy.spatial import cKDTree
+
+                _det_fwhm = max(
+                    float(self.input_yaml.get("fwhm", 3.0)), 2.5
+                ) if hasattr(self, "input_yaml") else 3.0
+                _sci_valid = sci_data[np.isfinite(sci_data)]
+                _ref_valid = aligned_ref[np.isfinite(aligned_ref)]
+                if len(_sci_valid) > 100 and len(_ref_valid) > 100:
+                    _, _sci_med, _sci_std = _scs(_sci_valid, sigma=3.0)
+                    _, _ref_med, _ref_std = _scs(_ref_valid, sigma=3.0)
+                    _finder = DAOStarFinder(
+                        fwhm=_det_fwhm, threshold=5.0 * _sci_std,
+                        exclude_border=True,
+                        peakmax=0.9 * float(np.nanmax(sci_data)),
+                    )
+                    _sci_src = _finder(
+                        np.where(np.isfinite(sci_data), sci_data - _sci_med, 0.0)
+                    )
+                    _ref_finder = DAOStarFinder(
+                        fwhm=_det_fwhm, threshold=5.0 * _ref_std,
+                        exclude_border=True,
+                        peakmax=0.9 * float(np.nanmax(aligned_ref)),
+                    )
+                    _ref_src = _ref_finder(
+                        np.where(np.isfinite(aligned_ref), aligned_ref - _ref_med, 0.0)
+                    )
+                    if _sci_src is not None and _ref_src is not None and len(_sci_src) >= 3 and len(_ref_src) >= 3:
+                        _sci_xy = np.column_stack([
+                            _sci_src["xcentroid"].data,
+                            _sci_src["ycentroid"].data,
+                        ])
+                        _ref_xy = np.column_stack([
+                            _ref_src["xcentroid"].data,
+                            _ref_src["ycentroid"].data,
+                        ])
+                        _tree = cKDTree(_ref_xy)
+                        _dists, _idxs = _tree.query(_sci_xy, k=1)
+                        _good = _dists < 3.0 * _det_fwhm
+                        if _good.sum() >= 3:
+                            _dx = _sci_xy[_good, 0] - _ref_xy[_idxs[_good], 0]
+                            _dy = _sci_xy[_good, 1] - _ref_xy[_idxs[_good], 1]
+                            _med_dx = float(np.median(_dx))
+                            _med_dy = float(np.median(_dy))
+                            _total = float(np.sqrt(_med_dx**2 + _med_dy**2))
+                            self.logger.info(
+                                "Post-reproject alignment: offset=(%.3f, %.3f) px, "
+                                "total=%.3f px (%d matches)",
+                                _med_dx, _med_dy, _total, int(_good.sum()),
+                            )
+            except Exception as _ve:
+                self.logger.debug("Post-reproject verification failed (non-fatal): %s", _ve)
+
             return {
                 "science_aligned": science_image,
                 "reference_aligned": str(aligned_reference_fpath),
