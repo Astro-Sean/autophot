@@ -1282,6 +1282,33 @@ NNW
 
             has_distortion = has_sip or has_pv or has_distortion_ctype
 
+            # Detect reference image distortion order for SCAMP DISTORT_DEGREES.
+            # SCAMP's .head file REPLACES the reference's WCS, so DISTORT_DEGREES
+            # must be high enough to model the reference's existing distortion.
+            # If it's too low, the .head degrades the WCS by replacing high-order
+            # SIP/PV with a lower-order polynomial, introducing systematic offsets.
+            ref_distort_order = 1  # default: linear only
+            try:
+                with fits.open(ref_image_copy) as _rh:
+                    _ref_hdr = _rh[0].header
+                    _ref_sip_order = max(
+                        int(_ref_hdr.get("A_ORDER", 0)),
+                        int(_ref_hdr.get("B_ORDER", 0)),
+                    )
+                    _ref_pv_count = sum(1 for k in _ref_hdr if k.startswith("PV_"))
+                    if _ref_sip_order > 0:
+                        ref_distort_order = _ref_sip_order
+                    elif _ref_pv_count > 0:
+                        # PV distortion: TPV with N PV keywords roughly maps to
+                        # polynomial degree (PV_0_1, PV_1_1, PV_2_1, ... PV_n_1)
+                        ref_distort_order = min(_ref_pv_count // 2, 4)
+                    _ref_ctype = str(_ref_hdr.get("CTYPE1", "")).upper()
+                    if "SIP" in _ref_ctype or "TPV" in _ref_ctype:
+                        if ref_distort_order < 2:
+                            ref_distort_order = max(ref_distort_order, 2)
+            except Exception:
+                pass
+
             # Note: We do NOT run a separate distortion correction step here.
             # The final SWarp on both images together will handle distortion correction
             # as part of the resampling process. Running distortion correction separately
@@ -2083,20 +2110,50 @@ NNW
             )
             # Adaptive SN threshold: lower minimum for sparse fields to include more sources
             sn_thresholds = "3.0,1000.0" if is_sparse_field else "5.0,1000.0"
-            # Adaptive DISTORT_DEGREES based on number of matched sources.
-            # Higher degrees can model complex relative distortions but need more sources
-            # and can overfit. Conservative thresholds ensure robustness:
-            #   - Degree 1 (linear): shift/scale/rotation, 4 params, needs ~6+ sources
-            #   - Degree 2 (quadratic): moderate distortion, 12 params, needs ~15+ sources
-            #   - Degree 3 (cubic): complex distortion, 24 params, needs ~30+ sources
-            # Note: SCAMP's internal clipping may reduce the effective source count,
-            # but with 22 matches a linear-only fit leaves systematic offsets of ~5px.
-            if _num_matched >= 30:
-                distort_degrees = 3  # Many sources: allow cubic
-            elif _num_matched >= 15:
-                distort_degrees = 2  # Moderate sources: allow quadratic
-            else:
-                distort_degrees = 1  # Few sources: linear only (most robust)
+            # Adaptive DISTORT_DEGREES: must be high enough to model the
+            # reference image's existing distortion (SIP/PV), because SCAMP's
+            # .head file REPLACES the reference WCS.  If DISTORT_DEGREES is
+            # lower than the reference's distortion order, the .head degrades
+            # the WCS — high-order SIP terms are lost and replaced with a
+            # lower-order polynomial, introducing systematic offsets of several
+            # pixels across the field.
+            #
+            # Polynomial degree N has (N+1)(N+2)/2 parameters per axis.
+            # Require at least 2 matched sources per parameter (conservative).
+            #   Degree 1:  3 params/axis,  6 total, need >= 6  sources
+            #   Degree 2:  6 params/axis, 12 total, need >= 12 sources
+            #   Degree 3: 10 params/axis, 20 total, need >= 20 sources
+            #   Degree 4: 15 params/axis, 30 total, need >= 30 sources
+            _min_sources_for_degree = {1: 6, 2: 12, 3: 20, 4: 30}
+
+            # Start with the reference's detected distortion order
+            required_degree = ref_distort_order
+
+            # Find the highest degree we can actually fit with available sources
+            feasible_degree = 1
+            for deg in range(required_degree, 0, -1):
+                if _num_matched >= _min_sources_for_degree.get(deg, 999):
+                    feasible_degree = deg
+                    break
+
+            if feasible_degree < required_degree:
+                # Not enough sources to model the reference's distortion.
+                # SCAMP would produce a .head that degrades the WCS.
+                # Fall back to reproject, which handles SIP/PV natively via
+                # astropy WCS without needing source matching.
+                self.logger.warning(
+                    "Reference has distortion order %d but only %d matched sources "
+                    "(need %d for degree %d). SCAMP would degrade the WCS. "
+                    "Falling back to reproject (handles SIP/PV natively).",
+                    required_degree, _num_matched,
+                    _min_sources_for_degree.get(required_degree, 999),
+                    required_degree,
+                )
+                return self._align_fallback_reproject_then_astroalign(
+                    science_image, reference_image, output_dir
+                )
+
+            distort_degrees = feasible_degree
             scamp_config_base = {
                 "CROSSID_RADIUS": crossid_arcsec,
                 "POSITION_MAXERR": position_maxerr_arcsec,
@@ -2111,14 +2168,15 @@ NNW
             scamp_config_ref = {
                 **scamp_config_base,
                 "FWHM_THRESHOLDS": f"{0.3*fwhm_ref_pix:.2f},{10*fwhm_ref_pix:.2f}",
-                # Linear distortion (DISTORT_DEGREES=1) for inter-image alignment.
-                # We only need shift/scale/rotation between reference and science.
+                # DISTORT_DEGREES matches the reference's SIP/PV distortion order
+                # so SCAMP's .head doesn't degrade the WCS by losing high-order terms.
                 "DISTORT_DEGREES": distort_degrees,
             }
             sparse_note = " (sparse)" if is_sparse_field else ""
             self.logger.info(
-                'SCAMP: crossid=%.1f" maxerr=%.1f" distort=%d%s',
+                'SCAMP: crossid=%.1f" maxerr=%.1f" distort=%d%s (ref SIP/PV order=%d, %d matched)',
                 crossid_arcsec, position_maxerr_arcsec, distort_degrees, sparse_note,
+                ref_distort_order, _num_matched,
             )
 
             # Allow YAML to override the automatic SWarp resampling choice for expert tuning.
