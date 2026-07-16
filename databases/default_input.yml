@@ -100,6 +100,7 @@ default_input:
     psf_fwhm_min_frac: 0.5 # float --- Minimum FWHM as fraction of image FWHM for PSF candidates; rejects cosmic rays (abnormally small FWHM). Set to 0 to disable.
     psf_fwhm_max_frac: 2.5 # float --- Maximum FWHM as fraction of image FWHM for PSF candidates; rejects extended defects/galaxies (abnormally large FWHM). Set to a large value to disable.
     psf_class_star_min: 0.4 # float --- Minimum SExtractor CLASS_STAR (stellarity) for PSF candidates; rejects galaxies and extended defects. Set to 0 to disable.
+    psf_sharpness_max: 1.0 # float --- Maximum IRAFStarFinder sharpness for PSF candidates; rejects extended galaxies (sharpness > 1.0). Set to a large value to disable.
     sextractor_class_star_min: 0.4 # float --- Minimum SExtractor CLASS_STAR for initial source filtering; rejects non-stellar sources early. Lowered to 0.2 automatically for matching/crowded fields.
     psf_fft_rejection: True # bool --- Enable FFT-based rejection during PSF star selection.
     psf_fft_n_sigma: 4.0 # float --- Rejection threshold (sigma units) for FFT outlier metric.
@@ -406,7 +407,7 @@ default_input:
     alignment_max_scamp_residual_arcsec: 2.0 # float --- Maximum SCAMP astrometric residual RMS (arcsec) before falling back to reproject/AstroAlign.
     skip_resampling: True # bool --- DEPRECATED: use resample_mode instead. If True, maps to resample_mode="wcs_only".
     resample_mode: common_grid # str --- SWarp resampling mode: "common_grid" (both to science grid), "native_scale" (each keeps own pixel scale), "wcs_only" (no resampling).
-    science_first_astrometry: True # bool --- If True (default), distortion-correct the science image against GAIA-DR3 first via SCAMP+SWarp, then re-detect sources and use this corrected catalog as the astrometric reference for aligning the reference image. This gives the reference image more sources to match against but resamples the science image twice.
+    science_first_astrometry: False # bool --- If True, distortion-correct the science image against GAIA-DR3 first via SCAMP+SWarp, then use corrected catalog as astrometric reference. If False (default), use science image's own WCS and detected sources as the astrometric anchor directly — no external catalog needed.
     gaia_cache_dir: null # str|null --- Directory to cache downloaded GAIA-DR3 reference catalogs for SCAMP. If null, uses ~/.autophot/scamp_gaia_cache. Caching avoids repeated Vizier downloads for the same field.
     gaia_cache_ttl_days: 30 # int --- Time-to-live for cached GAIA catalogs (days). GAIA-DR3 is static, so long TTLs are safe.
     preserve_scamp_logs: False # bool --- If True, keep SCAMP log files on failure for debugging. Useful when diagnosing astrometric alignment issues.

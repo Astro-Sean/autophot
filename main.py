@@ -3084,7 +3084,7 @@ def run_photometry():
             IsolatedSources = pd.DataFrame(columns=["x_pix", "y_pix"])
         else:
             # Constants
-            DISTANCE_THRESHOLD_FACTOR = 2
+            DISTANCE_THRESHOLD_FACTOR = 1
             distance_threshold = DISTANCE_THRESHOLD_FACTOR * ImageFWHM
 
             # Avoid building a huge list of masked-pixel coordinates (np.argwhere can
@@ -3120,7 +3120,18 @@ def run_photometry():
 
             # Find well isolated sources (only reduce when necessary; keep more in crowded fields)
             crowded_field = input_yaml["photometry"].get("crowded_field", False)
-            isolation_dist = (scale * 0.5) if crowded_field else scale
+            n_fwhm_sources = len(FWHMSources)
+            if crowded_field:
+                isolation_dist = scale * 0.5
+            elif n_fwhm_sources <= 20:
+                isolation_dist = scale * 0.5
+                logging.info(
+                    "Sparse field (%d sources): using relaxed isolation (min_distance=%.1f px) "
+                    "to retain more sources.",
+                    n_fwhm_sources, isolation_dist,
+                )
+            else:
+                isolation_dist = scale
             if crowded_field:
                 logging.info(
                     "Crowded field: using relaxed isolation (min_distance=%.1f px) "
@@ -4341,15 +4352,16 @@ def run_photometry():
                 proximity_threshold = ImageFWHM * proximity_fwhm_mult
 
                 # Adaptive exclusion: if excluding sources near masked regions leaves
-                # too few sources for SFFT (< 5), progressively relax the threshold.
-                # This is critical for sparse fields where 40%+ of pixels may be masked.
-                min_sources_needed = 5
+                # too few sources for SFFT (< 3), progressively relax the threshold.
+                # This is critical for sparse fields where 30-40%+ of pixels may be masked
+                # (e.g. reference doesn't fully cover science FOV).
+                min_sources_needed = 3
                 while True:
                     min_distances, _ = tree.query(
                         source_coords, k=1, distance_upper_bound=proximity_threshold
                     )
                     n_kept = int((min_distances > proximity_threshold).sum())
-                    if n_kept >= min_sources_needed or proximity_fwhm_mult <= 0.5:
+                    if n_kept >= min_sources_needed or proximity_fwhm_mult <= 0.1:
                         break
                     proximity_fwhm_mult /= 2.0
                     proximity_threshold = ImageFWHM * proximity_fwhm_mult
@@ -4369,7 +4381,7 @@ def run_photometry():
 
             df_zogy_science = None
             df_zogy_template = None
-            if len(matched_df) > 3:
+            if len(matched_df) >= 3:
                 logging.info(f"Sufficient sources for processing: {len(matched_df)}")
                 # Prepares source tables for image and template photometry.
                 image_sources = matched_df.copy()

@@ -1498,37 +1498,44 @@ NNW
             fwhm_sci_pix = float(sci_sex["fwhm"]) if "fwhm" in sci_sex else 2.5
             fwhm_ref_pix = float(ref_sex["fwhm"]) if "fwhm" in ref_sex else 2.5
 
-            # Sanity check: if alignment FWHM is unreasonable (> 50 px), fall back to header/main pipeline FWHM
-            # This can happen when alignment only detects artifacts
-            MAX_REASONABLE_FWHM = 50.0
+            # Sanity check: cap alignment FWHM using the pipeline's header FWHM.
+            # The header FWHM comes from the carefully measured measure_image step
+            # and is far more reliable than SExtractor's estimate in the presence of
+            # extended sources or galaxies that inflate the FWHM.
+            # If the alignment SExtractor returns a value > 2× the header FWHM,
+            # it's almost certainly contaminated by non-point sources.
+            FWHM_INFLATION_FACTOR = 2.0
+            if sci_hdr_fwhm and np.isfinite(sci_hdr_fwhm) and sci_hdr_fwhm > 0:
+                if fwhm_sci_pix > FWHM_INFLATION_FACTOR * sci_hdr_fwhm:
+                    self.logger.warning(
+                        "Alignment science FWHM %.1f px is inflated (> %.1f x header FWHM %.1f px); "
+                        "capping at header FWHM.",
+                        fwhm_sci_pix, FWHM_INFLATION_FACTOR, sci_hdr_fwhm,
+                    )
+                    fwhm_sci_pix = sci_hdr_fwhm
+            if ref_hdr_fwhm and np.isfinite(ref_hdr_fwhm) and ref_hdr_fwhm > 0:
+                if fwhm_ref_pix > FWHM_INFLATION_FACTOR * ref_hdr_fwhm:
+                    self.logger.warning(
+                        "Alignment reference FWHM %.1f px is inflated (> %.1f x header FWHM %.1f px); "
+                        "capping at header FWHM.",
+                        fwhm_ref_pix, FWHM_INFLATION_FACTOR, ref_hdr_fwhm,
+                    )
+                    fwhm_ref_pix = ref_hdr_fwhm
+
+            # Hard cap: if FWHM is still unreasonable (no header value available), use defaults
+            MAX_REASONABLE_FWHM = 30.0
             if fwhm_sci_pix > MAX_REASONABLE_FWHM:
                 self.logger.warning(
-                    "Alignment FWHM %.1f px is unreasonable (> %.0f px); using header/default FWHM instead",
-                    fwhm_sci_pix,
-                    MAX_REASONABLE_FWHM,
+                    "Alignment FWHM %.1f px is unreasonable (> %.0f px); using default FWHM.",
+                    fwhm_sci_pix, MAX_REASONABLE_FWHM,
                 )
-                # Try to get FWHM from header, otherwise use default
-                try:
-                    hdr = fits.getheader(str(sci_image_copy))
-                    fwhm_sci_pix = float(hdr.get("FWHM", 8.5))
-                    self.logger.info("Using FWHM from header: %.1f px", fwhm_sci_pix)
-                except Exception:
-                    fwhm_sci_pix = 8.5
-                    self.logger.info("Using default FWHM: %.1f px", fwhm_sci_pix)
-
+                fwhm_sci_pix = sci_hdr_fwhm if (sci_hdr_fwhm and sci_hdr_fwhm > 0) else 8.5
             if fwhm_ref_pix > MAX_REASONABLE_FWHM:
                 self.logger.warning(
-                    "Alignment FWHM %.1f px is unreasonable (> %.0f px); using header/default FWHM instead",
-                    fwhm_ref_pix,
-                    MAX_REASONABLE_FWHM,
+                    "Alignment FWHM %.1f px is unreasonable (> %.0f px); using default FWHM.",
+                    fwhm_ref_pix, MAX_REASONABLE_FWHM,
                 )
-                try:
-                    hdr = fits.getheader(str(ref_image_copy))
-                    fwhm_ref_pix = float(hdr.get("FWHM", 8.5))
-                    self.logger.info("Using FWHM from header: %.1f px", fwhm_ref_pix)
-                except Exception:
-                    fwhm_ref_pix = 8.5
-                    self.logger.info("Using default FWHM: %.1f px", fwhm_ref_pix)
+                fwhm_ref_pix = ref_hdr_fwhm if (ref_hdr_fwhm and ref_hdr_fwhm > 0) else 8.5
 
             # Pass 2: re-run with kernel sized from FWHM-based scale for alignment.
             # Use a smaller scale than the pipeline cutout scale to ensure proper
@@ -1777,13 +1784,12 @@ NNW
                                 )
                                 output_width = sci_shape[1]
                                 output_height = sci_shape[0]
-                                _scx = (output_width + 1) / 2.0
-                                _scy = (output_height + 1) / 2.0
-                                center_ra, center_dec = sci_wcs.all_pix2world(
-                                    [_scx], [_scy], 1
-                                )
-                                center_ra = float(center_ra[0])
-                                center_dec = float(center_dec[0])
+                                # Do NOT recompute center_ra/center_dec here.
+                                # Phase 1 SWarp used the original center (from
+                                # pre-GAIA WCS).  Recomputing from the GAIA-corrected
+                                # WCS would shift the grid center by the GAIA
+                                # correction, putting science and reference on
+                                # different grids (off by up to several pixels).
 
                             self.logger.info(
                                 "Science corrected: shape=%s scale=%.4f center=(%.6f,%.6f)",
@@ -1852,6 +1858,25 @@ NNW
             fwhm_sci_pix = float(sci_sex["fwhm"]) if "fwhm" in sci_sex else 2.5
             fwhm_ref_pix = float(ref_sex["fwhm"]) if "fwhm" in ref_sex else 2.5
 
+            # Cap pass-2 FWHM using header values (same logic as pass-1 cap).
+            # Pass-2 values are used for SCAMP CROSSID_RADIUS, so inflation here
+            # directly causes SCAMP to use a too-large search radius, accepting
+            # poor WCS solutions with ~1 px systematic offset.
+            if sci_hdr_fwhm and np.isfinite(sci_hdr_fwhm) and sci_hdr_fwhm > 0:
+                if fwhm_sci_pix > FWHM_INFLATION_FACTOR * sci_hdr_fwhm:
+                    self.logger.warning(
+                        "Pass-2 science FWHM %.1f px inflated (> %.1f x header %.1f px); capping.",
+                        fwhm_sci_pix, FWHM_INFLATION_FACTOR, sci_hdr_fwhm,
+                    )
+                    fwhm_sci_pix = sci_hdr_fwhm
+            if ref_hdr_fwhm and np.isfinite(ref_hdr_fwhm) and ref_hdr_fwhm > 0:
+                if fwhm_ref_pix > FWHM_INFLATION_FACTOR * ref_hdr_fwhm:
+                    self.logger.warning(
+                        "Pass-2 reference FWHM %.1f px inflated (> %.1f x header %.1f px); capping.",
+                        fwhm_ref_pix, FWHM_INFLATION_FACTOR, ref_hdr_fwhm,
+                    )
+                    fwhm_ref_pix = ref_hdr_fwhm
+
             fwhm_sci_arcsec = fwhm_sci_pix * sci_pix_scale
             fwhm_ref_arcsec = fwhm_ref_pix * ref_pix_scale
             self.logger.info(
@@ -1864,8 +1889,8 @@ NNW
                 sci_is_undersampled, ref_is_undersampled,
             )
 
-            crossid_radius = max(3.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 3.0)
-            self.logger.info("Cross-match radius: %.2f arcsec", crossid_radius)
+            crossid_radius = max(2.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 3.0)
+            self.logger.info("Cross-match radius: %.2f arcsec (2*FWHM)", crossid_radius)
 
             # Configurable minimum matched sources for a reliable SCAMP solution.
             # SCAMP needs at least ~6 matched sources for a linear WCS fit
@@ -1874,17 +1899,16 @@ NNW
             min_matched = int(align_cfg.get("alignment_min_matched_sources", 6))
             max_match_radius = float(align_cfg.get("alignment_max_match_radius_arcsec", 30.0))
 
-            # Adaptive minimum for sparse fields: if the science catalog has very
-            # few sources, requiring 6 matches is impossible.  Lower the gate
-            # proportionally so SCAMP can still run (a shift+scale fit needs only
-            # 4 parameters, so 3-4 matches are mathematically sufficient).
+            # Adaptive minimum for sparse fields: if the science catalog has
+            # few sources, requiring 6 matches may be impossible.  Lower the
+            # gate so SCAMP can still run (a linear fit needs only 3-4 matches).
             n_sci_sources = len(sci_sex.get("catalog", []) or [])
-            if n_sci_sources > 0 and n_sci_sources <= 10:
-                adaptive_min = max(3, int(np.ceil(0.7 * n_sci_sources)))
+            if n_sci_sources > 0 and n_sci_sources <= 25:
+                adaptive_min = max(3, int(np.ceil(0.5 * n_sci_sources)))
                 if adaptive_min < min_matched:
                     self.logger.info(
                         "Sparse field: science has only %d sources; lowering min_matched "
-                        "from %d to %d (70%% of science catalog).",
+                        "from %d to %d (50%% of science catalog).",
                         n_sci_sources, min_matched, adaptive_min,
                     )
                     min_matched = adaptive_min
@@ -1910,29 +1934,36 @@ NNW
                     _num_matched, _ = _do_match(retry_radius)
                     crossid_radius = retry_radius
 
-                if _num_matched < min_matched:
-                    # Wide-offset fallback: estimate global WCS offset and retry
-                    # with a radius that encompasses it. This handles cases where
-                    # independently plate-solved images have large WCS discrepancies.
+                if _num_matched >= 3 and _num_matched < min_matched:
+                    # We have enough matches for SCAMP to solve a linear WCS
+                    # (4 parameters: shift+scale+rotation).  Don't inflate the
+                    # radius — the WCS is good, we just have a sparse field.
                     self.logger.info(
-                        "Only %d matched sources after retry (< %d minimum). "
+                        "Sparse field: %d matched sources at %.1f\" radius (< %d default minimum). "
+                        "Proceeding with SCAMP — a linear fit needs only 3-4 matches.",
+                        _num_matched, crossid_radius, min_matched,
+                    )
+                    min_matched = _num_matched
+
+                elif _num_matched < 3:
+                    # Wide-offset fallback: estimate global WCS offset from headers
+                    # and retry with a radius that encompasses it. This handles cases
+                    # where independently plate-solved images have large WCS discrepancies.
+                    self.logger.info(
+                        "Only %d matched sources after retry (< 3 minimum). "
                         "Attempting wide-offset estimation...",
-                        _num_matched, min_matched,
+                        _num_matched,
                     )
                     try:
                         # Restore original catalogs from backup before re-matching
                         shutil.copy2(sci_catalog_scamp_backup, sci_catalog_path)
                         shutil.copy2(ref_catalog_scamp_backup, ref_catalog_path)
 
-                        # Primary: estimate offset from WCS headers (reliable even
-                        # with very few sources, since it uses the WCS solutions
-                        # directly rather than source matching)
                         dra, ddec = self._estimate_wcs_offset_from_headers(
                             str(sci_image_copy), str(ref_image_copy),
                         )
                         offset_magnitude = float(np.sqrt(dra**2 + ddec**2))
 
-                        # If header-based offset is large, use it
                         if offset_magnitude > crossid_radius:
                             # Use a radius that encompasses the offset plus scatter
                             wide_radius = min(
@@ -1983,8 +2014,7 @@ NNW
                                             min_matched = _num_matched
                         else:
                             self.logger.info(
-                                "WCS header offset too small (%.1f\"). "
-                                "Falling back to reproject/AstroAlign.",
+                                "WCS header offset too small (%.1f\").",
                                 offset_magnitude,
                             )
                     except Exception as offset_err:
@@ -1993,77 +2023,22 @@ NNW
                         )
 
                 if _num_matched < min_matched:
-                    # filter_matched_sources failed to find enough cross-matches.
-                    # Instead of immediately falling back to reproject, let SCAMP
-                    # try directly with the full science catalog as the astrometric
-                    # anchor. SCAMP has its own internal cross-matching (CROSSID_RADIUS)
-                    # that can handle large WCS offsets when given a sufficient radius.
-                    # The science sources are the anchor; SCAMP will match reference
-                    # sources against them and solve the reference WCS.
-                    self.logger.info(
-                        "filter_matched_sources found only %d/%d matches. "
-                        "Bypassing gate: SCAMP will attempt direct matching "
-                        "with full science catalog as anchor.",
+                    self.logger.warning(
+                        "Only %d matched sources after all retries (< %d minimum). "
+                        "Falling back to reproject/AstroAlign.",
                         _num_matched, min_matched,
                     )
-                    # Restore original full catalogs for SCAMP
-                    shutil.copy2(sci_catalog_scamp_backup, sci_catalog_path)
-                    shutil.copy2(ref_catalog_scamp_backup, ref_catalog_path)
-                    # Estimate WCS offset for SCAMP's CROSSID_RADIUS
-                    try:
-                        dra_hdr, ddec_hdr = self._estimate_wcs_offset_from_headers(
-                            str(sci_image_copy), str(ref_image_copy),
-                        )
-                        wcs_offset_mag = float(np.sqrt(dra_hdr**2 + ddec_hdr**2))
-                    except Exception:
-                        wcs_offset_mag = 0.0
-                    # Set crossid_radius to encompass the WCS offset
-                    if wcs_offset_mag > crossid_radius:
-                        crossid_radius = min(
-                            wcs_offset_mag + 3.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec),
-                            max_match_radius * 3.0,
-                        )
-                    self.logger.info(
-                        "SCAMP direct match: CROSSID_RADIUS=%.1f\" (WCS offset=%.1f\")",
-                        crossid_radius, wcs_offset_mag,
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
                     )
-                    # Lower min_matched so SCAMP's quality gate doesn't reject
-                    # the solution. SCAMP can solve a linear WCS (4 params) with
-                    # 3+ matches. SCAMP's own matching may find more matches than
-                    # filter_matched_sources since it uses the full catalogs.
-                    min_matched = 3
             except Exception as e:
                 self.logger.warning(
-                    "Source matching failed: %s. Attempting SCAMP direct matching "
-                    "with full science catalog as anchor.",
+                    "Source matching failed: %s. Falling back to reproject/AstroAlign.",
                     e,
                 )
-                # Restore original full catalogs for SCAMP
-                try:
-                    shutil.copy2(sci_catalog_scamp_backup, sci_catalog_path)
-                    shutil.copy2(ref_catalog_scamp_backup, ref_catalog_path)
-                except Exception:
-                    pass
-                _num_matched = 0
-                # Estimate WCS offset for SCAMP's CROSSID_RADIUS
-                try:
-                    dra_hdr, ddec_hdr = self._estimate_wcs_offset_from_headers(
-                        str(sci_image_copy), str(ref_image_copy),
-                    )
-                    wcs_offset_mag = float(np.sqrt(dra_hdr**2 + ddec_hdr**2))
-                except Exception:
-                    wcs_offset_mag = 0.0
-                if wcs_offset_mag > crossid_radius:
-                    crossid_radius = min(
-                        wcs_offset_mag + 3.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec),
-                        max_match_radius * 3.0,
-                    )
-                self.logger.info(
-                    "SCAMP direct match (after exception): CROSSID_RADIUS=%.1f\" (WCS offset=%.1f\")",
-                    crossid_radius, wcs_offset_mag,
+                return self._align_fallback_reproject_then_astroalign(
+                    science_image, reference_image, output_dir
                 )
-                # Lower min_matched so SCAMP's quality gate doesn't reject
-                min_matched = 3
 
 
             try:
@@ -2093,31 +2068,32 @@ NNW
             crossid_arcsec = max(
                 1.5 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 1.5 * pix_scale, 2.0
             )
-            # If we used a wide match radius due to WCS offset, SCAMP needs at least
-            # that radius to find the same matches
+            # Use at least the cross-match radius that succeeded
             if crossid_radius > crossid_arcsec:
                 crossid_arcsec = crossid_radius
-            # Adaptive POSITION_MAXERR: tighter for good fields (0.3"), more permissive for sparse fields
-            # With few sources, we need to allow more positional uncertainty for SCAMP to find a solution
+            # POSITION_MAXERR: acceptable residual after SCAMP fit.
+            # Must be tight enough to reject bad fits (e.g. 1.0" = 6.3px at
+            # 0.158"/px is far too permissive — SCAMP would accept a 5px
+            # systematic offset).  CROSSID_RADIUS handles initial matching
+            # permissiveness; POSITION_MAXERR is the post-fit quality bar.
             is_sparse_field = _num_matched < 30
-            position_maxerr_arcsec = max(1.5 * pix_scale, 1.0 if is_sparse_field else 0.3)
-            # When using a wide CROSSID_RADIUS due to WCS offset, SCAMP needs a
-            # correspondingly larger POSITION_MAXERR to accept the matches
-            if crossid_arcsec > 10.0:
-                position_maxerr_arcsec = max(position_maxerr_arcsec, crossid_arcsec * 0.5)
+            position_maxerr_arcsec = max(
+                1.5 * pix_scale,
+                0.3 * fwhm_ref_arcsec,
+            )
             # Adaptive SN threshold: lower minimum for sparse fields to include more sources
             sn_thresholds = "3.0,1000.0" if is_sparse_field else "5.0,1000.0"
             # Adaptive DISTORT_DEGREES based on number of matched sources.
             # Higher degrees can model complex relative distortions but need more sources
             # and can overfit. Conservative thresholds ensure robustness:
-            #   - Degree 1 (linear): shift/scale/rotation, needs ~6+ sources
-            #   - Degree 2 (quadratic): moderate distortion, needs ~20+ sources  
-            #   - Degree 3 (cubic): complex distortion, needs ~40+ sources
-            # Note: Even with many initial matches, SCAMP's internal clipping may reduce
-            # the effective source count, so we use conservative thresholds.
-            if _num_matched >= 80:
+            #   - Degree 1 (linear): shift/scale/rotation, 4 params, needs ~6+ sources
+            #   - Degree 2 (quadratic): moderate distortion, 12 params, needs ~15+ sources
+            #   - Degree 3 (cubic): complex distortion, 24 params, needs ~30+ sources
+            # Note: SCAMP's internal clipping may reduce the effective source count,
+            # but with 22 matches a linear-only fit leaves systematic offsets of ~5px.
+            if _num_matched >= 30:
                 distort_degrees = 3  # Many sources: allow cubic
-            elif _num_matched >= 40:
+            elif _num_matched >= 15:
                 distort_degrees = 2  # Moderate sources: allow quadratic
             else:
                 distort_degrees = 1  # Few sources: linear only (most robust)
@@ -2205,9 +2181,9 @@ NNW
                 # Run SCAMP on reference catalog only, using science catalog as reference.
                 # The reference .head corrects the reference WCS to match the science WCS.
                 # Only the reference .head is placed next to the reference image before SWarp.
-                # Use the backup paths (full catalogs) instead of the paths that filter_matched_sources overwrites
-                ref_cat_path = Path(ref_catalog_scamp_backup)  # Use the full catalog
-                sci_cat_path = Path(sci_catalog_scamp_backup)  # Use the full catalog
+                # Use the backup paths (full catalogs) for SCAMP
+                ref_cat_path = Path(ref_catalog_scamp_backup)
+                sci_cat_path = Path(sci_catalog_scamp_backup)
                 ref_cat_tmp = reference_aligned_dir / f"{ref_cat_path.stem}_ref.cat"
                 ref_cat_tmp_stem = ref_cat_tmp.stem
 
@@ -2265,11 +2241,6 @@ NNW
                 # Quality gate: check SCAMP astrometric residual
                 scamp_distortion = scamp_result.get("distortion") if isinstance(scamp_result, dict) else None
                 max_scamp_residual = float(align_cfg.get("alignment_max_scamp_residual_arcsec", 2.0))
-                # When using a wide CROSSID_RADIUS (bypassed gate), relax the residual
-                # threshold proportionally — the initial WCS offset means larger residuals
-                # are expected but SCAMP still produces a valid alignment solution.
-                if crossid_arcsec > 10.0:
-                    max_scamp_residual = max(max_scamp_residual, crossid_arcsec * 0.1)
                 if isinstance(scamp_distortion, dict):
                     scamp_rms = scamp_distortion.get("astrometric_rms_arcsec")
                     scamp_nstars = scamp_distortion.get("n_matched_stars")
@@ -2651,36 +2622,142 @@ NNW
             aligned_sci = sci_target
             aligned_ref = ref_target
 
-            # Verify precise alignment between science and reference images
+            # Diagnostic: measure post-SWarp alignment residual via centroid
+            # cross-match. Log-only — no pixel-level corrections are applied;
+            # SCAMP+SWarp is trusted as the definitive alignment.
+            alignment_metadata = {}
             try:
-                from alignment_verification import AlignmentVerifier
-                verifier = AlignmentVerifier(verbose_level=self.verbose_level)
-                
-                verification_results = verifier.verify_precise_alignment(
-                    str(aligned_sci), str(aligned_ref), 
-                    tolerance_pixels=0.5,
-                    output_dir=str(resample_dir / "alignment_verification")
-                )
-                
-                if verification_results.get('precise_alignment', False):
-                    self.logger.info(f"PASS Precise alignment verified (quality: {verification_results.get('alignment_quality', 'unknown')})")
+                self.logger.info("Verifying post-SWarp alignment via centroid cross-match...")
+                sci_data = fits.getdata(aligned_sci)
+                ref_data = fits.getdata(aligned_ref)
+
+                from photutils.detection import DAOStarFinder
+                from astropy.stats import sigma_clipped_stats as _scs
+
+                _det_fwhm = max(fwhm_sci_pix, 2.5)
+                _sci_valid = sci_data[np.isfinite(sci_data)]
+                _ref_valid = ref_data[np.isfinite(ref_data)]
+                if len(_sci_valid) > 100 and len(_ref_valid) > 100:
+                    _, _sci_med, _sci_std = _scs(_sci_valid, sigma=3.0)
+                    _, _ref_med, _ref_std = _scs(_ref_valid, sigma=3.0)
+
+                    sci_finder = DAOStarFinder(
+                        fwhm=_det_fwhm, threshold=5.0 * _sci_std,
+                        exclude_border=True, peakmax=0.9 * float(np.nanmax(sci_data)),
+                    )
+                    ref_finder = DAOStarFinder(
+                        fwhm=_det_fwhm, threshold=5.0 * _ref_std,
+                        exclude_border=True, peakmax=0.9 * float(np.nanmax(ref_data)),
+                    )
+
+                    _sci_for_det = np.where(np.isfinite(sci_data), sci_data - _sci_med, 0.0)
+                    _ref_for_det = np.where(np.isfinite(ref_data), ref_data - _ref_med, 0.0)
+                    sci_sources = sci_finder(_sci_for_det)
+                    ref_sources = ref_finder(_ref_for_det)
+
+                    if sci_sources is not None and ref_sources is not None:
+                        n_sci_det = len(sci_sources)
+                        n_ref_det = len(ref_sources)
+                        self.logger.info(
+                            "Alignment verification: detected %d sci / %d ref sources",
+                            n_sci_det, n_ref_det,
+                        )
+
+                        if n_sci_det >= 3 and n_ref_det >= 3:
+                            from scipy.spatial import cKDTree
+                            sci_xy = np.column_stack([
+                                sci_sources["xcentroid"].data,
+                                sci_sources["ycentroid"].data,
+                            ])
+                            ref_xy = np.column_stack([
+                                ref_sources["xcentroid"].data,
+                                ref_sources["ycentroid"].data,
+                            ])
+
+                            tree = cKDTree(ref_xy)
+                            dists, idxs = tree.query(sci_xy, k=1)
+
+                            match_tol = 3.0 * _det_fwhm
+                            good = dists < match_tol
+                            n_matched_verify = int(good.sum())
+
+                            if n_matched_verify >= 3:
+                                dx = sci_xy[good, 0] - ref_xy[idxs[good], 0]
+                                dy = sci_xy[good, 1] - ref_xy[idxs[good], 1]
+
+                                from astropy.stats import sigma_clip as _sc_verify
+                                dx_clipped = _sc_verify(dx, sigma=2.5, maxiters=3)
+                                dy_clipped = _sc_verify(dy, sigma=2.5, maxiters=3)
+                                both_ok = ~dx_clipped.mask & ~dy_clipped.mask
+
+                                if np.sum(both_ok) >= 3:
+                                    med_dx = float(np.median(dx[both_ok]))
+                                    med_dy = float(np.median(dy[both_ok]))
+                                    rms_dx = float(np.std(dx[both_ok]))
+                                    rms_dy = float(np.std(dy[both_ok]))
+                                else:
+                                    med_dx = float(np.median(dx))
+                                    med_dy = float(np.median(dy))
+                                    rms_dx = float(np.std(dx))
+                                    rms_dy = float(np.std(dy))
+
+                                total_offset = np.sqrt(med_dx**2 + med_dy**2)
+                                self.logger.info(
+                                    "Alignment verification: offset=(%.3f, %.3f) px, "
+                                    "RMS=(%.3f, %.3f) px, total=%.3f px (%d matches)",
+                                    med_dx, med_dy, rms_dx, rms_dy, total_offset,
+                                    n_matched_verify,
+                                )
+
+                                alignment_metadata = {
+                                    "offset_x": med_dx,
+                                    "offset_y": med_dy,
+                                    "rms_x": rms_dx,
+                                    "rms_y": rms_dy,
+                                    "n_matched": n_matched_verify,
+                                }
+                            else:
+                                self.logger.info(
+                                    "Alignment verification: only %d matches (< 3); skipping.",
+                                    n_matched_verify,
+                                )
+                    else:
+                        self.logger.info(
+                            "Alignment verification: insufficient source detections."
+                        )
                 else:
-                    self.logger.warning(f"WARNING Alignment quality issues detected (quality: {verification_results.get('alignment_quality', 'unknown')})")
-                    if 'wcs_consistency' in verification_results and verification_results['wcs_consistency'].get('issues'):
-                        for issue in verification_results['wcs_consistency']['issues']:
-                            self.logger.warning(f"  WCS issue: {issue}")
-                    if 'coordinate_accuracy' in verification_results:
-                        max_offset = verification_results['coordinate_accuracy'].get('max_offset_pixels', 0)
-                        self.logger.warning(f"  Max coordinate offset: {max_offset:.3f} pixels")
-                
-                alignment_metadata = verification_results
-                
-            except ImportError:
-                self.logger.info("Alignment verification module not available - skipping verification")
-                alignment_metadata = {}
+                    self.logger.info(
+                        "Alignment verification: insufficient valid pixels for stats."
+                    )
             except Exception as e:
-                self.logger.warning(f"Alignment verification failed: {e}")
+                self.logger.warning("Alignment verification failed (non-fatal): %s", e)
                 alignment_metadata = {}
+
+            # Post-SWarp quality gate: reject alignment if systematic offset
+            # is too large.  A few-pixel offset produces visible dipoles in
+            # the subtracted image.  Threshold scales with FWHM so that
+            # broader PSFs tolerate slightly larger residuals.
+            max_acceptable_offset = max(1.0 * fwhm_sci_pix, 2.0)
+            if alignment_metadata and "offset_x" in alignment_metadata:
+                _off = np.sqrt(
+                    alignment_metadata["offset_x"] ** 2
+                    + alignment_metadata["offset_y"] ** 2
+                )
+                _n_match = alignment_metadata.get("n_matched", 0)
+                if _n_match >= 5 and _off > max_acceptable_offset:
+                    self.logger.warning(
+                        "Post-SWarp alignment offset %.2f px > %.2f px threshold "
+                        "(%d matches). Falling back to reproject/AstroAlign.",
+                        _off, max_acceptable_offset, _n_match,
+                    )
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
+                else:
+                    self.logger.info(
+                        "Post-SWarp alignment accepted: offset=%.2f px (< %.2f px threshold, %d matches).",
+                        _off, max_acceptable_offset, _n_match,
+                    )
 
             # Log SWarp output WCS for both images so alignment can be verified.
             # Since CENTER = overlap sky midpoint and IMAGE_SIZE = overlap region size,
@@ -3521,7 +3598,7 @@ NNW
             fwhm_ref_pix = float(ref_sex.get("fwhm", 2.5))
             fwhm_sci_arcsec = fwhm_sci_pix * sci_pix_scale
             fwhm_ref_arcsec = fwhm_ref_pix * ref_pix_scale
-            crossid_radius = max(3.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 3.0)
+            crossid_radius = max(2.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 3.0)
 
             def _load_matched_catalogs(sci_cat_path, ref_cat_path):
                 with fits.open(sci_cat_path) as hs, fits.open(ref_cat_path) as hr:
@@ -5313,40 +5390,3 @@ NNW
         )
 
         return median_dra, median_ddec, n_consistent
-
-    def _shift_catalog_wcs(
-        self,
-        cat_path: str,
-        dra_arcsec: float,
-        ddec_arcsec: float,
-    ) -> None:
-        """
-        Shift the world coordinates in a FITS-LDAC SExtractor catalog by the
-        given offset (dRA, dDec) in arcseconds. This aligns the catalog's
-        world coordinates with the other catalog so cross-matching can succeed.
-
-        Modifies the catalog file in-place.
-        """
-        from astropy.io import fits as _fits
-        from astropy.table import Table as _Table
-
-        with _fits.open(cat_path, mode="update") as hdul:
-            tbl = _Table(hdul[2].data)
-            if "XWIN_WORLD" in tbl.colnames and "YWIN_WORLD" in tbl.colnames:
-                dec = np.array(tbl["YWIN_WORLD"], float)
-                tbl["XWIN_WORLD"] = tbl["XWIN_WORLD"] - dra_arcsec / 3600.0 / np.cos(np.radians(dec))
-                tbl["YWIN_WORLD"] = tbl["YWIN_WORLD"] - ddec_arcsec / 3600.0
-            if "X_WORLD" in tbl.colnames and "Y_WORLD" in tbl.colnames:
-                dec = np.array(tbl["Y_WORLD"], float)
-                tbl["X_WORLD"] = tbl["X_WORLD"] - dra_arcsec / 3600.0 / np.cos(np.radians(dec))
-                tbl["Y_WORLD"] = tbl["Y_WORLD"] - ddec_arcsec / 3600.0
-            if "ALPHA_J2000" in tbl.colnames and "DELTA_J2000" in tbl.colnames:
-                dec = np.array(tbl["DELTA_J2000"], float)
-                tbl["ALPHA_J2000"] = tbl["ALPHA_J2000"] - dra_arcsec / 3600.0 / np.cos(np.radians(dec))
-                tbl["DELTA_J2000"] = tbl["DELTA_J2000"] - ddec_arcsec / 3600.0
-            hdul[2].data = tbl.as_array()
-            hdul.flush()
-        self.logger.info(
-            "Shifted catalog %s by dRA=%.1f\" dDec=%.1f\"",
-            Path(cat_path).name, dra_arcsec, ddec_arcsec,
-        )
