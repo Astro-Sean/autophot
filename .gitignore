@@ -72,3 +72,4 @@ scripts/
 # opencode config (contains API keys)
 opencode.json
 
+temp_autophot/
