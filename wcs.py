@@ -832,6 +832,33 @@ def _log_sip_coefficients(wcs_obj: WCS, prefix: str = "fit_wcs_from_points") -> 
     logger.info("%s SIP coefficients: %s", prefix, _sip_summary(wcs_obj))
 
 
+def _has_nonzero_sip(header: fits.Header) -> bool:
+    """
+    Check whether a FITS header contains non-zero SIP distortion coefficients.
+
+    Returns True if any A_i_j, B_i_j, AP_i_j, or BP_i_j coefficient is non-zero.
+    Returns False if A_ORDER is absent, or if all coefficients are zero.
+    """
+    a_order = header.get("A_ORDER", 0)
+    b_order = header.get("B_ORDER", 0)
+    if a_order == 0 and b_order == 0:
+        return False
+    sip_stems = ("A_", "B_", "AP_", "BP_")
+    for key in header.keys():
+        ks = str(key)
+        if ks in ("A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"):
+            continue
+        for stem in sip_stems:
+            if ks.startswith(stem):
+                try:
+                    if float(header[ks]) != 0.0:
+                        return True
+                except (ValueError, TypeError):
+                    pass
+                break
+    return False
+
+
 def _log_header_distortion_coefficients(
     header: fits.Header, prefix: str = "astrometry.net solved"
 ) -> None:
@@ -1275,9 +1302,11 @@ class WCSSolver:
             if os.name != "nt":
                 kwargs["preexec_fn"] = os.setsid
             pro = subprocess.Popen(args, **kwargs)
+            timed_out = False
             try:
                 pro.wait(timeout=timeout_sec)
             except subprocess.TimeoutExpired:
+                timed_out = True
                 if os.name != "nt":
                     try:
                         os.killpg(os.getpgid(pro.pid), 9)
@@ -1288,7 +1317,8 @@ class WCSSolver:
             finally:
                 logf.close()
                 pro.wait()
-                logger.warning("solve-field exceeded timeout (%s s)", timeout_sec)
+                if timed_out:
+                    logger.warning("solve-field exceeded timeout (%s s)", timeout_sec)
             self.clean_log(logpath)
             return os.path.isfile(wcs_file)
         except Exception as e:
@@ -2259,7 +2289,7 @@ class WCSSolver:
                     logger.warning("Could not verify WCS - proceeding to blind solve")
 
             def _attempt_solve_with_args(scale_args_use: list[str], label: str) -> None:
-                # Step 2: Solve with (optional) SExtractor, tweak orders 2,1,0
+                # Step 2: Solve with (optional) SExtractor, tweak orders from config
                 for tweak_order in tweak_orders:
                     if os.path.isfile(wcs_file):
                         break
@@ -2295,6 +2325,147 @@ class WCSSolver:
                         logger.info(
                             "WCS solved (%s) with tweak order %s", label, tweak_order
                         )
+                        # Check if solve-field produced zero SIP coefficients
+                        # despite A_ORDER > 0. This happens when too few stars
+                        # were matched for the requested polynomial order.
+                        # Retry with lower tweak orders to get real SIP.
+                        if tweak_order > 0:
+                            try:
+                                with fits.open(wcs_file) as _wh:
+                                    _whdr = _wh[0].header
+                                if _whdr.get("A_ORDER", 0) > 0 and not _has_nonzero_sip(_whdr):
+                                    logger.warning(
+                                        "solve-field produced zero SIP coefficients "
+                                        "with tweak order %d (too few matched stars). "
+                                        "Retrying with lower tweak orders.",
+                                        tweak_order,
+                                    )
+                                    # Try lower tweak orders to get non-zero SIP
+                                    for _lower in range(tweak_order - 1, -1, -1):
+                                        if os.path.isfile(wcs_file):
+                                            os.remove(wcs_file)
+                                        _lower_args = (
+                                            common_args
+                                            + ["--tweak-order", str(_lower), "--no-verify"]
+                                            + scale_args_use
+                                        )
+                                        if use_sextractor and sextractor_cmd:
+                                            _lower_args += [
+                                                "--use-source-extractor",
+                                                "--source-extractor-path",
+                                                sextractor_cmd,
+                                                "--source-extractor-config",
+                                                str(config_file),
+                                                "--x-column",
+                                                "XWIN_IMAGE",
+                                                "--y-column",
+                                                "YWIN_IMAGE",
+                                                "--sort-column",
+                                                "MAG_AUTO",
+                                                "--sort-ascending",
+                                            ]
+                                        logger.info(
+                                            "Retrying solve with tweak order %d "
+                                            "to get non-zero SIP",
+                                            _lower,
+                                        )
+                                        if self._run_solve_field(
+                                            _lower_args, wcs_file,
+                                            timeout_sec, astrometry_log_fpath
+                                        ):
+                                            try:
+                                                with fits.open(wcs_file) as _lh:
+                                                    _lhdr = _lh[0].header
+                                                if _has_nonzero_sip(_lhdr):
+                                                    logger.info(
+                                                        "WCS solved with non-zero SIP "
+                                                        "at tweak order %d",
+                                                        _lower,
+                                                    )
+                                                    break
+                                                else:
+                                                    logger.info(
+                                                        "Tweak order %d still produced "
+                                                        "zero SIP",
+                                                        _lower,
+                                                    )
+                                            except Exception:
+                                                pass
+                                        else:
+                                            logger.warning(
+                                                "No solution with tweak order %d",
+                                                _lower,
+                                            )
+                                    # If no lower order produced non-zero SIP,
+                                    # restore the original solve (order 0 = TAN)
+                                    if not os.path.isfile(wcs_file):
+                                        logger.warning(
+                                            "Could not solve with any lower tweak order; "
+                                            "retrying original order %d",
+                                            tweak_order,
+                                        )
+                                        self._run_solve_field(
+                                            args, wcs_file, timeout_sec,
+                                            astrometry_log_fpath
+                                        )
+                                    # If we still have zero SIP, try one more time
+                                    # with lower nsigma to detect more sources
+                                    if os.path.isfile(wcs_file):
+                                        try:
+                                            with fits.open(wcs_file) as _fh:
+                                                _fhdr = _fh[0].header
+                                            if _fhdr.get("A_ORDER", 0) > 0 and not _has_nonzero_sip(_fhdr):
+                                                _orig_nsigma = solve_nsigma
+                                                _lower_nsigma = "3"
+                                                logger.info(
+                                                    "Retrying solve with nsigma=%s "
+                                                    "(was %s) to detect more sources "
+                                                    "for SIP fitting",
+                                                    _lower_nsigma, _orig_nsigma,
+                                                )
+                                                if os.path.isfile(wcs_file):
+                                                    os.remove(wcs_file)
+                                                _nsigma_args = [
+                                                    a for a in args
+                                                    if a not in ("--nsigma", _orig_nsigma)
+                                                ]
+                                                _nsigma_args = (
+                                                    _nsigma_args
+                                                    + ["--nsigma", _lower_nsigma]
+                                                )
+                                                if self._run_solve_field(
+                                                    _nsigma_args, wcs_file,
+                                                    timeout_sec, astrometry_log_fpath
+                                                ):
+                                                    try:
+                                                        with fits.open(wcs_file) as _nh:
+                                                            _nhdr = _nh[0].header
+                                                        if _has_nonzero_sip(_nhdr):
+                                                            logger.info(
+                                                                "WCS solved with non-zero SIP "
+                                                                "after lowering nsigma to %s",
+                                                                _lower_nsigma,
+                                                            )
+                                                        else:
+                                                            logger.warning(
+                                                                "Still zero SIP with nsigma=%s; "
+                                                                "field may be too sparse for "
+                                                                "distortion fitting",
+                                                                _lower_nsigma,
+                                                            )
+                                                    except Exception:
+                                                        pass
+                                                else:
+                                                    logger.warning(
+                                                        "No solution with nsigma=%s",
+                                                        _lower_nsigma,
+                                                    )
+                                        except Exception:
+                                            pass
+                            except Exception as _sip_err:
+                                logger.debug(
+                                    "SIP zero-check failed (non-fatal): %s", _sip_err
+                                )
                         break
                     logger.warning(
                         "No solution (%s) with tweak order %s", label, tweak_order
@@ -2461,6 +2632,15 @@ class WCSSolver:
                 _log_header_distortion_coefficients(
                     wcs_header, prefix="astrometry.net solved WCS"
                 )
+                if wcs_header.get("A_ORDER", 0) > 0 and not _has_nonzero_sip(wcs_header):
+                    logger.warning(
+                        "astrometry.net solved WCS has A_ORDER=%d but all SIP "
+                        "coefficients are zero (too few matched stars for the "
+                        "requested tweak order). WCS is effectively TAN (linear). "
+                        "Consider lowering solve_field_tweak_order or increasing "
+                        "source detection sensitivity.",
+                        int(wcs_header.get("A_ORDER", 0)),
+                    )
                 force_preserve_input_distortion = False
                 keep_input_wcs_full = False
                 matched_points_for_refine = None
