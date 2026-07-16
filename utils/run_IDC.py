@@ -1502,9 +1502,9 @@ NNW
             # The header FWHM comes from the carefully measured measure_image step
             # and is far more reliable than SExtractor's estimate in the presence of
             # extended sources or galaxies that inflate the FWHM.
-            # If the alignment SExtractor returns a value > 2× the header FWHM,
+            # If the alignment SExtractor returns a value > 1.5× the header FWHM,
             # it's almost certainly contaminated by non-point sources.
-            FWHM_INFLATION_FACTOR = 2.0
+            FWHM_INFLATION_FACTOR = 1.5
             if sci_hdr_fwhm and np.isfinite(sci_hdr_fwhm) and sci_hdr_fwhm > 0:
                 if fwhm_sci_pix > FWHM_INFLATION_FACTOR * sci_hdr_fwhm:
                     self.logger.warning(
@@ -2262,6 +2262,16 @@ NNW
                         return self._align_fallback_reproject_then_astroalign(
                             science_image, reference_image, output_dir
                         )
+                    if scamp_rms is None and scamp_nstars is None:
+                        self.logger.warning(
+                            "SCAMP XML parsing failed — quality gate bypassed. "
+                            "Post-SWarp verification will be the only alignment check."
+                        )
+                else:
+                    self.logger.warning(
+                        "SCAMP distortion info unavailable — quality gate bypassed. "
+                        "Post-SWarp verification will be the only alignment check."
+                    )
 
             # Copy reference .head file next to reference image only.
             # Reference .head corrects reference WCS to match science WCS.
@@ -2734,10 +2744,11 @@ NNW
                 alignment_metadata = {}
 
             # Post-SWarp quality gate: reject alignment if systematic offset
-            # is too large.  A few-pixel offset produces visible dipoles in
-            # the subtracted image.  Threshold scales with FWHM so that
-            # broader PSFs tolerate slightly larger residuals.
-            max_acceptable_offset = max(1.0 * fwhm_sci_pix, 2.0)
+            # is too large.  An offset > 0.5*FWHM produces visible dipoles in
+            # the subtracted image.  Use 0.5*FWHM as the threshold with a
+            # minimum of 2.0 px so that even broad PSFs don't tolerate
+            # multi-pixel systematic offsets.
+            max_acceptable_offset = max(0.5 * fwhm_sci_pix, 2.0)
             if alignment_metadata and "offset_x" in alignment_metadata:
                 _off = np.sqrt(
                     alignment_metadata["offset_x"] ** 2
