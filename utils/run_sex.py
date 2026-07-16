@@ -508,6 +508,16 @@ class SExtractorWrapper:
         if n_after_snr > 0:
             logger.info(f"Rejected {n_after_snr} low-SNR sources (SNR < {snr_limit:.1f})")
 
+        # --- Step 3b: FLAGS cut (before FWHM estimation) ---
+        # Apply FLAGS early so flagged/blended sources don't inflate the FWHM.
+        if "flags" in sources.columns:
+            n_flagged = int((sources["flags"] > flags).sum())
+            sources = sources[sources["flags"] <= flags].copy()
+            if n_flagged > 0:
+                logger.info(
+                    "Rejected %d sources with FLAGS > %d", n_flagged, flags
+                )
+
         # --- Step 4: Estimate FWHM if needed ---
         if fwhm_est is None and len(sources) > 0:
             fwhm_est = self.calculate_robust_fwhm(sources["fwhm"].values)
@@ -528,7 +538,7 @@ class SExtractorWrapper:
 
             mask_coords = np.empty((0, 2), dtype=np.float64)
             if ms_df is not None and len(ms_df) > 0:
-                match_radius = float(fwhm_est * 2)
+                match_radius = float(fwhm_est)
                 mask_coords = ms_df[["x_pix", "y_pix"]].to_numpy(dtype=np.float64)
                 # Filter out NaN/Inf coordinates before cKDTree
                 finite_mask = np.all(np.isfinite(mask_coords), axis=1)
@@ -575,15 +585,6 @@ class SExtractorWrapper:
                         match_radius,
                     )
 
-        # --- Step 6: FLAGS cut ---
-        if "flags" in sources.columns:
-            n_flagged = int((sources["flags"] > flags).sum())
-            sources = sources[sources["flags"] <= flags].copy()
-            if n_flagged > 0:
-                logger.info(
-                    "Rejected %d sources with FLAGS > %d", n_flagged, flags
-                )
-
         # --- Step 7: Sharpness cut (relaxed range when relaxed_cuts) ---
         if "sharpness" in sources.columns:
             sharp_lo, sharp_hi = (0.1, 1.2) if relaxed_cuts else (0.2, 1.0)
@@ -596,22 +597,6 @@ class SExtractorWrapper:
                 logger.info(
                     f"Rejected {rejected_sharp} sources based on sharpness (range [{sharp_lo}, {sharp_hi}])"
             )
-
-        # --- Step 7b: CLASS_STAR cut (star/galaxy separation) ---
-        # Reject extended sources (galaxies, defects) early so they don't
-        # contaminate FWHM estimation or enter the PSF candidate pool.
-        if "class_star" in sources.columns:
-            cs_min = 0.2 if relaxed_cuts else float(
-                self.config.get("photometry", {}).get("sextractor_class_star_min", 0.4)
-            )
-            cs_vals = pd.to_numeric(sources["class_star"], errors="coerce").fillna(0.0)
-            cs_ok = cs_vals >= cs_min
-            n_cs = int((~cs_ok).sum())
-            if n_cs > 0:
-                sources = sources[cs_ok].copy()
-                logger.info(
-                    "Rejected %d sources with CLASS_STAR < %.2f", n_cs, cs_min
-                )
 
         # --- Step 8: Saturation cut ---
         if saturation is not None and "peak_flux" in sources.columns:
@@ -1209,13 +1194,6 @@ class SExtractorWrapper:
                         (fwhm_subset["FWHM_IMAGE"] > fwhm_lo)
                         & (fwhm_subset["FWHM_IMAGE"] < fwhm_hi)
                     ]
-                    # Apply CLASS_STAR cut
-                    if "CLASS_STAR" in fwhm_subset.columns:
-                        cs_min = 0.2 if relaxed_cuts else float(
-                            self.config.get("photometry", {}).get("sextractor_class_star_min", 0.4)
-                        )
-                        cs_vals = pd.to_numeric(fwhm_subset["CLASS_STAR"], errors="coerce").fillna(0.0)
-                        fwhm_subset = fwhm_subset[cs_vals >= cs_min]
                     # Apply sharpness cut
                     if "SHARPNESS" in fwhm_subset.columns:
                         sharp_lo, sharp_hi = (0.1, 1.2) if relaxed_cuts else (0.2, 1.0)
@@ -1297,12 +1275,6 @@ class SExtractorWrapper:
                         (fwhm_subset["FWHM_IMAGE"] > fwhm_lo)
                         & (fwhm_subset["FWHM_IMAGE"] < fwhm_hi)
                     ]
-                    if "CLASS_STAR" in fwhm_subset.columns:
-                        cs_min = 0.2 if relaxed_cuts else float(
-                            self.config.get("photometry", {}).get("sextractor_class_star_min", 0.4)
-                        )
-                        cs_vals = pd.to_numeric(fwhm_subset["CLASS_STAR"], errors="coerce").fillna(0.0)
-                        fwhm_subset = fwhm_subset[cs_vals >= cs_min]
                     if "SHARPNESS" in fwhm_subset.columns:
                         sharp_lo, sharp_hi = (0.1, 1.2) if relaxed_cuts else (0.2, 1.0)
                         sharp_vals = pd.to_numeric(fwhm_subset["SHARPNESS"], errors="coerce").fillna(1.0)
