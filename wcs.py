@@ -2196,11 +2196,12 @@ class WCSSolver:
             # legacy behavior matching older AutoPHoT.
             use_crpix_center = bool(wcs_cfg.get("solve_field_crpix_center", False))
             
-            # Sigma level for sources used,
-            
+            # Sigma level for sources used by solve-field.
+            # Lower values detect more sources (useful for sparse fields).
+            solve_nsigma = str(int(wcs_cfg.get("solve_field_nsigma", 5)))
             
             common_args.insert(-1, "--nsigma")
-            common_args.insert(-1, "5")
+            common_args.insert(-1, solve_nsigma)
             if use_crpix_center:
                 common_args.insert(-1, "--crpix-center")
                 logger.info(
@@ -2233,8 +2234,8 @@ class WCSSolver:
 
             # --- Step 1: Optional verify existing WCS ---
             if not skip_verify:
-                logger.info("Attempting to verify WCS with --no-verify")
-                args_verify = common_args + ["--no-verify"] + scale_args
+                logger.info("Attempting to verify existing WCS")
+                args_verify = common_args + scale_args
                 if use_sextractor and sextractor_cmd:
                     args_verify += [
                         "--use-source-extractor",
@@ -2248,6 +2249,7 @@ class WCSSolver:
                         "YWIN_IMAGE",
                         "--sort-column",
                         "MAG_AUTO",
+                        "--sort-ascending",
                     ]
                 if self._run_solve_field(
                     args_verify, wcs_file, timeout_sec, astrometry_log_fpath

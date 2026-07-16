@@ -163,6 +163,7 @@ try:
         get_image,
         get_image_stats,
         save_to_fits,
+        remove_wcs_from_header,
     )
 except (ModuleNotFoundError, ImportError):
     # Download-only use cases shouldn't require the full photometry stack.
@@ -177,6 +178,7 @@ except (ModuleNotFoundError, ImportError):
     get_image = None
     get_image_stats = None
     save_to_fits = None
+    remove_wcs_from_header = None
 from wcs import get_wcs
 try:
     from utils import run_IDC
@@ -683,6 +685,7 @@ def _reproject_template(
     # Write output
     # ------------------------------------------------------------------
     hdr = template_header.copy()
+    hdr = remove_wcs_from_header(hdr)
     hdr.update(science_proj.to_header(), relax=True)
     hdr["NAXIS1"] = aligned.shape[1]
     hdr["NAXIS2"] = aligned.shape[0]

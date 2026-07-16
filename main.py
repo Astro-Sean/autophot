@@ -2296,12 +2296,10 @@ def run_photometry():
         # WCS Refinement (optional: enable via wcs.refine_after_solve if needed)
         # =============================================================================
         if input_yaml.get("wcs", {}).get("refine_after_solve", False) and wcs_updated:
-            try:
-                fpath = run_IDC.ImageDistortionCorrector(
-                    input_yaml=input_yaml
-                ).refine_image(fpath, reference_catalog="GAIA-EDR3")
-            except Exception as e:
-                log_exception(e, "Issue with template alignment")
+            logging.warning(
+                "wcs.refine_after_solve=True but refine_image is not implemented; "
+                "skipping WCS refinement pass."
+            )
 
         # =============================================================================
         # Variable Sources
