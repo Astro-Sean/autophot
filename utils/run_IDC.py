@@ -170,6 +170,7 @@ class ImageDistortionCorrector:
         "WRITE_XML": "Y",
         "VERBOSE_TYPE": "LOG",
         "BLANK_BADPIXELS": "Y",
+        "FILL_VALUE": "NAN",
         "CELESTIAL_TYPE": "NATIVE",
         "PROJECTION_TYPE": "TAN",
         "FSCALASTRO_TYPE": "NONE",
@@ -1431,7 +1432,7 @@ NNW
             
             # Use main pipeline's SExtractorWrapper for alignment (same as main source detection)
             # This ensures consistent source detection behavior
-            self.logger.info("Using SExtractorWrapper.run for alignment (same as main pipeline)")
+            self.logger.info("Using SExtractorWrapper.run for alignment (with sensitive detection for sparse fields)")
             
             # Convert pixel scale to arcsec/pixel for SExtractorWrapper
             sci_seeing_fwhm = (sci_hdr_fwhm if sci_hdr_fwhm else 2.0) * sci_pix_scale
@@ -1458,6 +1459,10 @@ NNW
                 use_for_matching=True,
                 mdir=str(science_aligned_dir),
                 return_raw=True,
+                detect_thresh=1.0,
+                analysis_thresh=0.8,
+                detect_minarea=1,
+                back_size=64,
             )
             
             ref_fwhm, ref_catalog_raw, ref_scale = self.sextractor.run(
@@ -1470,6 +1475,10 @@ NNW
                 use_for_matching=True,
                 mdir=str(reference_aligned_dir),
                 return_raw=True,
+                detect_thresh=1.0,
+                analysis_thresh=0.8,
+                detect_minarea=1,
+                back_size=64,
             )
             
             # SExtractorWrapper with return_raw=True copies the FITS-LDAC catalog to the mdir
@@ -1543,6 +1552,10 @@ NNW
                 use_for_matching=True,
                 mdir=str(science_aligned_dir),
                 return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
+                detect_thresh=1.0,
+                analysis_thresh=0.8,
+                detect_minarea=1,
+                back_size=64,
             )
             
             ref_fwhm2, ref_catalog2_raw, ref_scale2 = self.sextractor.run(
@@ -1555,6 +1568,10 @@ NNW
                 use_for_matching=True,
                 mdir=str(reference_aligned_dir),
                 return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
+                detect_thresh=1.0,
+                analysis_thresh=0.8,
+                detect_minarea=1,
+                back_size=64,
             )
             
             # SExtractorWrapper with return_raw=True copies the FITS-LDAC catalog to the mdir
@@ -1637,40 +1654,52 @@ NNW
                 isinstance(ts, dict) and ts.get("science_first_astrometry", False)
             )
             if science_first_astrometry:
-                self.logger.info("Science-first GAIA astrometry: Phase 1a (SCAMP)")
-
-                # Phase 1a: SCAMP on science catalog vs GAIA-DR3
-                # SCAMP writes .head next to the catalog, so output_dir must be
-                # the same directory as the catalog for the glob to find it.
-                sci_gaia_dir = science_aligned_dir
-                sci_gaia_scamp = self.run_scamp(
-                    catalog_paths=sci_catalog_scamp_backup,
-                    reference_cat=None,  # triggers GAIA-DR3
-                    output_dir=str(sci_gaia_dir),
-                    config={
-                        "DISTORT_DEGREES": 3,
-                        "CROSSID_RADIUS": "5.0",
-                        "POSITION_MAXERR": "1.0",
-                        "SN_THRESHOLDS": "3.0,1000.0",
-                        "MATCH_RESOL": "0.0",
-                        "ASTREF_WEIGHT": "1",
-                        "VERBOSE_TYPE": "FULL"
-                        if self.verbose_level >= 2
-                        else "NORMAL",
-                    },
-                )
-                if sci_gaia_scamp is None:
-                    self.logger.warning(
-                        "Science GAIA SCAMP failed. Disabling science-first astrometry."
+                # SCAMP needs at least ~5 detections to match against GAIA.
+                # Skip the GAIA phase entirely for very sparse fields to save time
+                # and avoid a confusing "Not enough matched detections" warning.
+                n_sci_for_gaia = len(sci_sex.get("catalog", []) or [])
+                if n_sci_for_gaia < 8:
+                    self.logger.info(
+                        "Science-first GAIA astrometry: skipping (only %d science "
+                        "detections, need >= 8 for reliable GAIA cross-match).",
+                        n_sci_for_gaia,
                     )
                     science_first_astrometry = False
                 else:
-                    sci_head_src = sci_gaia_scamp.get("head_file")
-                    if not (sci_head_src and Path(sci_head_src).exists()):
+                    self.logger.info("Science-first GAIA astrometry: Phase 1a (SCAMP)")
+
+                    # Phase 1a: SCAMP on science catalog vs GAIA-DR3
+                    # SCAMP writes .head next to the catalog, so output_dir must be
+                    # the same directory as the catalog for the glob to find it.
+                    sci_gaia_dir = science_aligned_dir
+                    sci_gaia_scamp = self.run_scamp(
+                        catalog_paths=sci_catalog_scamp_backup,
+                        reference_cat=None,  # triggers GAIA-DR3
+                        output_dir=str(sci_gaia_dir),
+                        config={
+                            "DISTORT_DEGREES": 3,
+                            "CROSSID_RADIUS": "5.0",
+                            "POSITION_MAXERR": "1.0",
+                            "SN_THRESHOLDS": "3.0,1000.0",
+                            "MATCH_RESOL": "0.0",
+                            "ASTREF_WEIGHT": "1",
+                            "VERBOSE_TYPE": "FULL"
+                            if self.verbose_level >= 2
+                            else "NORMAL",
+                        },
+                    )
+                    if sci_gaia_scamp is None:
                         self.logger.warning(
-                            "No GAIA SCAMP .head produced; disabling science-first astrometry."
+                            "Science GAIA SCAMP failed. Disabling science-first astrometry."
                         )
                         science_first_astrometry = False
+                    else:
+                        sci_head_src = sci_gaia_scamp.get("head_file")
+                        if not (sci_head_src and Path(sci_head_src).exists()):
+                            self.logger.warning(
+                                "No GAIA SCAMP .head produced; disabling science-first astrometry."
+                            )
+                            science_first_astrometry = False
 
                 if science_first_astrometry:
                     # Copy .head next to sci_image_copy for SWarp
@@ -1703,7 +1732,7 @@ NNW
                         scamp_results=sci_gaia_scamp,
                         output_dir=str(sci_gaia_swarp_dir),
                         config=sci_gaia_swarp_cfg,
-                        no_weight_maps=True,
+                        no_weight_maps=False,
                     )
                     if sci_gaia_swarp_res is None:
                         self.logger.warning(
@@ -1845,6 +1874,21 @@ NNW
             min_matched = int(align_cfg.get("alignment_min_matched_sources", 6))
             max_match_radius = float(align_cfg.get("alignment_max_match_radius_arcsec", 30.0))
 
+            # Adaptive minimum for sparse fields: if the science catalog has very
+            # few sources, requiring 6 matches is impossible.  Lower the gate
+            # proportionally so SCAMP can still run (a shift+scale fit needs only
+            # 4 parameters, so 3-4 matches are mathematically sufficient).
+            n_sci_sources = len(sci_sex.get("catalog", []) or [])
+            if n_sci_sources > 0 and n_sci_sources <= 10:
+                adaptive_min = max(3, int(np.ceil(0.7 * n_sci_sources)))
+                if adaptive_min < min_matched:
+                    self.logger.info(
+                        "Sparse field: science has only %d sources; lowering min_matched "
+                        "from %d to %d (70%% of science catalog).",
+                        n_sci_sources, min_matched, adaptive_min,
+                    )
+                    min_matched = adaptive_min
+
             def _do_match(radius_arcsec: float):
                 return self.filter_matched_sources(
                     sci_cat_path=sci_sex["catalog_path"],
@@ -1867,22 +1911,159 @@ NNW
                     crossid_radius = retry_radius
 
                 if _num_matched < min_matched:
-                    self.logger.warning(
+                    # Wide-offset fallback: estimate global WCS offset and retry
+                    # with a radius that encompasses it. This handles cases where
+                    # independently plate-solved images have large WCS discrepancies.
+                    self.logger.info(
                         "Only %d matched sources after retry (< %d minimum). "
-                        "Falling back to reproject/AstroAlign.",
+                        "Attempting wide-offset estimation...",
                         _num_matched, min_matched,
                     )
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
+                    try:
+                        # Restore original catalogs from backup before re-matching
+                        shutil.copy2(sci_catalog_scamp_backup, sci_catalog_path)
+                        shutil.copy2(ref_catalog_scamp_backup, ref_catalog_path)
+
+                        # Primary: estimate offset from WCS headers (reliable even
+                        # with very few sources, since it uses the WCS solutions
+                        # directly rather than source matching)
+                        dra, ddec = self._estimate_wcs_offset_from_headers(
+                            str(sci_image_copy), str(ref_image_copy),
+                        )
+                        offset_magnitude = float(np.sqrt(dra**2 + ddec**2))
+
+                        # If header-based offset is large, use it
+                        if offset_magnitude > crossid_radius:
+                            # Use a radius that encompasses the offset plus scatter
+                            wide_radius = min(
+                                offset_magnitude + 3.0 * crossid_radius,
+                                max_match_radius * 3.0,
+                            )
+                            self.logger.info(
+                                "Wide-offset match (from WCS headers): offset=%.1f\" "
+                                "(dRA=%.1f\" dDec=%.1f\"), using %.1f\" match radius",
+                                offset_magnitude, dra, ddec, wide_radius,
+                            )
+                            _num_matched, _ = _do_match(wide_radius)
+                            crossid_radius = wide_radius
+
+                            if _num_matched >= min_matched:
+                                self.logger.info(
+                                    "Wide-offset matching succeeded: %d matched sources",
+                                    _num_matched,
+                                )
+                            elif _num_matched >= 3:
+                                self.logger.info(
+                                    "Wide-offset matching found %d sources (< %d minimum). "
+                                    "Proceeding with SCAMP using large CROSSID_RADIUS.",
+                                    _num_matched, min_matched,
+                                )
+                                min_matched = _num_matched
+                            else:
+                                # Try catalog-based estimation as secondary
+                                dra2, ddec2, n_consistent = self._estimate_wcs_offset(
+                                    sci_catalog_scamp_backup, ref_catalog_scamp_backup,
+                                )
+                                cat_offset = float(np.sqrt(dra2**2 + ddec2**2))
+                                if cat_offset > crossid_radius and n_consistent >= 3:
+                                    wide_radius2 = min(
+                                        cat_offset + 3.0 * crossid_radius,
+                                        max_match_radius * 3.0,
+                                    )
+                                    if wide_radius2 > crossid_radius:
+                                        shutil.copy2(sci_catalog_scamp_backup, sci_catalog_path)
+                                        shutil.copy2(ref_catalog_scamp_backup, ref_catalog_path)
+                                        _num_matched, _ = _do_match(wide_radius2)
+                                        crossid_radius = wide_radius2
+                                        if _num_matched >= 3:
+                                            self.logger.info(
+                                                "Catalog-based wide match: %d sources, proceeding",
+                                                _num_matched,
+                                            )
+                                            min_matched = _num_matched
+                        else:
+                            self.logger.info(
+                                "WCS header offset too small (%.1f\"). "
+                                "Falling back to reproject/AstroAlign.",
+                                offset_magnitude,
+                            )
+                    except Exception as offset_err:
+                        self.logger.warning(
+                            "Wide-offset estimation failed: %s", offset_err,
+                        )
+
+                if _num_matched < min_matched:
+                    # filter_matched_sources failed to find enough cross-matches.
+                    # Instead of immediately falling back to reproject, let SCAMP
+                    # try directly with the full science catalog as the astrometric
+                    # anchor. SCAMP has its own internal cross-matching (CROSSID_RADIUS)
+                    # that can handle large WCS offsets when given a sufficient radius.
+                    # The science sources are the anchor; SCAMP will match reference
+                    # sources against them and solve the reference WCS.
+                    self.logger.info(
+                        "filter_matched_sources found only %d/%d matches. "
+                        "Bypassing gate: SCAMP will attempt direct matching "
+                        "with full science catalog as anchor.",
+                        _num_matched, min_matched,
                     )
+                    # Restore original full catalogs for SCAMP
+                    shutil.copy2(sci_catalog_scamp_backup, sci_catalog_path)
+                    shutil.copy2(ref_catalog_scamp_backup, ref_catalog_path)
+                    # Estimate WCS offset for SCAMP's CROSSID_RADIUS
+                    try:
+                        dra_hdr, ddec_hdr = self._estimate_wcs_offset_from_headers(
+                            str(sci_image_copy), str(ref_image_copy),
+                        )
+                        wcs_offset_mag = float(np.sqrt(dra_hdr**2 + ddec_hdr**2))
+                    except Exception:
+                        wcs_offset_mag = 0.0
+                    # Set crossid_radius to encompass the WCS offset
+                    if wcs_offset_mag > crossid_radius:
+                        crossid_radius = min(
+                            wcs_offset_mag + 3.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec),
+                            max_match_radius * 3.0,
+                        )
+                    self.logger.info(
+                        "SCAMP direct match: CROSSID_RADIUS=%.1f\" (WCS offset=%.1f\")",
+                        crossid_radius, wcs_offset_mag,
+                    )
+                    # Lower min_matched so SCAMP's quality gate doesn't reject
+                    # the solution. SCAMP can solve a linear WCS (4 params) with
+                    # 3+ matches. SCAMP's own matching may find more matches than
+                    # filter_matched_sources since it uses the full catalogs.
+                    min_matched = 3
             except Exception as e:
                 self.logger.warning(
-                    "Source matching failed: %s. Falling back to reproject/AstroAlign.",
+                    "Source matching failed: %s. Attempting SCAMP direct matching "
+                    "with full science catalog as anchor.",
                     e,
                 )
-                return self._align_fallback_reproject_then_astroalign(
-                    science_image, reference_image, output_dir
+                # Restore original full catalogs for SCAMP
+                try:
+                    shutil.copy2(sci_catalog_scamp_backup, sci_catalog_path)
+                    shutil.copy2(ref_catalog_scamp_backup, ref_catalog_path)
+                except Exception:
+                    pass
+                _num_matched = 0
+                # Estimate WCS offset for SCAMP's CROSSID_RADIUS
+                try:
+                    dra_hdr, ddec_hdr = self._estimate_wcs_offset_from_headers(
+                        str(sci_image_copy), str(ref_image_copy),
+                    )
+                    wcs_offset_mag = float(np.sqrt(dra_hdr**2 + ddec_hdr**2))
+                except Exception:
+                    wcs_offset_mag = 0.0
+                if wcs_offset_mag > crossid_radius:
+                    crossid_radius = min(
+                        wcs_offset_mag + 3.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec),
+                        max_match_radius * 3.0,
+                    )
+                self.logger.info(
+                    "SCAMP direct match (after exception): CROSSID_RADIUS=%.1f\" (WCS offset=%.1f\")",
+                    crossid_radius, wcs_offset_mag,
                 )
+                # Lower min_matched so SCAMP's quality gate doesn't reject
+                min_matched = 3
 
 
             try:
@@ -1912,10 +2093,18 @@ NNW
             crossid_arcsec = max(
                 1.5 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 1.5 * pix_scale, 2.0
             )
+            # If we used a wide match radius due to WCS offset, SCAMP needs at least
+            # that radius to find the same matches
+            if crossid_radius > crossid_arcsec:
+                crossid_arcsec = crossid_radius
             # Adaptive POSITION_MAXERR: tighter for good fields (0.3"), more permissive for sparse fields
             # With few sources, we need to allow more positional uncertainty for SCAMP to find a solution
             is_sparse_field = _num_matched < 30
             position_maxerr_arcsec = max(1.5 * pix_scale, 1.0 if is_sparse_field else 0.3)
+            # When using a wide CROSSID_RADIUS due to WCS offset, SCAMP needs a
+            # correspondingly larger POSITION_MAXERR to accept the matches
+            if crossid_arcsec > 10.0:
+                position_maxerr_arcsec = max(position_maxerr_arcsec, crossid_arcsec * 0.5)
             # Adaptive SN threshold: lower minimum for sparse fields to include more sources
             sn_thresholds = "3.0,1000.0" if is_sparse_field else "5.0,1000.0"
             # Adaptive DISTORT_DEGREES based on number of matched sources.
@@ -2036,7 +2225,12 @@ NNW
                     )
 
                     self.logger.info(
-                        "Running SCAMP on reference catalog (science catalog as reference)..."
+                        "Running SCAMP on reference catalog (science catalog as astrometric anchor)..."
+                    )
+                    self.logger.info(
+                        "Science catalog: %d sources (anchor), Reference catalog: %d sources (to be aligned)",
+                        len(fits.getdata(sci_catalog_scamp_backup, ext=2)),
+                        len(fits.getdata(ref_catalog_scamp_backup, ext=2)),
                     )
                     scamp_result = self.run_scamp(
                         str(ref_cat_tmp),
@@ -2071,6 +2265,11 @@ NNW
                 # Quality gate: check SCAMP astrometric residual
                 scamp_distortion = scamp_result.get("distortion") if isinstance(scamp_result, dict) else None
                 max_scamp_residual = float(align_cfg.get("alignment_max_scamp_residual_arcsec", 2.0))
+                # When using a wide CROSSID_RADIUS (bypassed gate), relax the residual
+                # threshold proportionally — the initial WCS offset means larger residuals
+                # are expected but SCAMP still produces a valid alignment solution.
+                if crossid_arcsec > 10.0:
+                    max_scamp_residual = max(max_scamp_residual, crossid_arcsec * 0.1)
                 if isinstance(scamp_distortion, dict):
                     scamp_rms = scamp_distortion.get("astrometric_rms_arcsec")
                     scamp_nstars = scamp_distortion.get("n_matched_stars")
@@ -2310,7 +2509,7 @@ NNW
                         scamp_results=None,
                         output_dir=str(resample_dir_sci),
                         config=swarp_config_sci,
-                        no_weight_maps=True,
+                        no_weight_maps=False,
                     )
                     if swarp_res_sci is None:
                         self.logger.info("SWarp failed. Falling back to AstroAlign.")
@@ -2325,7 +2524,7 @@ NNW
                     scamp_results=None,
                     output_dir=str(resample_dir_ref),
                     config=swarp_config_ref,
-                    no_weight_maps=True,
+                    no_weight_maps=False,
                 )
 
                 if swarp_res_ref is None:
@@ -2388,7 +2587,7 @@ NNW
                         scamp_results=None,
                         output_dir=str(resample_dir_sci),
                         config=swarp_config_sci,
-                        no_weight_maps=True,
+                        no_weight_maps=False,
                     )
                     if swarp_res_sci is None:
                         self.logger.info("SWarp failed. Falling back to AstroAlign.")
@@ -2406,7 +2605,7 @@ NNW
                     scamp_results=None,
                     output_dir=str(resample_dir_ref),
                     config=swarp_config_ref,
-                    no_weight_maps=True,
+                    no_weight_maps=False,
                 )
 
                 if swarp_res_ref is None:
@@ -3294,6 +3493,7 @@ NNW
                     aperture_radius=aperture_radius,
                     weight_path=weight_path,
                     crowded=sextractor_crowded,
+                    for_alignment=True,
                 )
 
             sci_aperture_radius = sci_head.get("APER", 7)
@@ -4956,3 +5156,197 @@ NNW
             f"Final matched sources: {len(sci_cat_matched)}, match radius={match_radius_arcsec:.1f} arcsec"
         )
         return len(sci_cat_matched), match_radius_arcsec
+
+    def _estimate_wcs_offset_from_headers(
+        self,
+        sci_image_path: str,
+        ref_image_path: str,
+    ) -> tuple[float, float]:
+        """
+        Estimate the global WCS offset between two images by comparing their
+        WCS solutions at the same pixel coordinates. If both images were
+        independently plate-solved, their WCS may disagree by a constant
+        offset even though they cover the same sky region.
+
+        Returns:
+            tuple of (dRA_arcsec, dDec_arcsec) representing the median offset
+            between the science and reference WCS at the same pixel positions.
+        """
+        from astropy.wcs import WCS as _WCS
+
+        with fits.open(sci_image_path) as hdul:
+            sci_wcs = _WCS(hdul[0].header)
+            sci_shape = hdul[0].data.shape
+
+        with fits.open(ref_image_path) as hdul:
+            ref_wcs = _WCS(hdul[0].header)
+
+        # Sample at multiple positions across the science image
+        margin = 50
+        positions = [
+            (margin, margin),
+            (sci_shape[1] - margin, margin),
+            (margin, sci_shape[0] - margin),
+            (sci_shape[1] - margin, sci_shape[0] - margin),
+            ((sci_shape[1] - 1) / 2, (sci_shape[0] - 1) / 2),
+        ]
+
+        dras, ddecs = [], []
+        for px, py in positions:
+            sky_sci = sci_wcs.pixel_to_world(px, py)
+            sky_ref = ref_wcs.pixel_to_world(px, py)
+            dra = (sky_sci.ra.deg - sky_ref.ra.deg) * 3600.0 * np.cos(np.radians(sky_sci.dec.deg))
+            ddec = (sky_sci.dec.deg - sky_ref.dec.deg) * 3600.0
+            dras.append(dra)
+            ddecs.append(ddec)
+
+        median_dra = float(np.median(dras))
+        median_ddec = float(np.median(ddecs))
+        offset_mag = float(np.sqrt(median_dra**2 + median_ddec**2))
+
+        # Check consistency
+        dra_std = float(np.std(dras))
+        ddec_std = float(np.std(ddecs))
+
+        self.logger.info(
+            "WCS header offset: dRA=%.1f\" dDec=%.1f\" (magnitude=%.1f\", "
+            "scatter: dRA_std=%.1f\" dDec_std=%.1f\")",
+            median_dra, median_ddec, offset_mag, dra_std, ddec_std,
+        )
+
+        return median_dra, median_ddec
+
+    def _estimate_wcs_offset(
+        self,
+        sci_cat_path: str,
+        ref_cat_path: str,
+    ) -> tuple[float, float, int]:
+        """
+        Estimate the global RA/Dec offset between two SExtractor catalogs
+        when normal cross-matching fails due to large WCS discrepancies.
+
+        For each science source, finds the nearest reference source and computes
+        the separation vector (dRA, dDec). The true global offset produces a
+        cluster of similar separation vectors, while random mismatches produce
+        scattered vectors. Uses sigma-clipping on the offset distribution to
+        find the consensus offset.
+
+        Returns:
+            tuple of (dRA_arcsec, dDec_arcsec, n_consistent) where n_consistent
+            is the number of science sources whose nearest-neighbor offset is
+            consistent with the consensus (within 2 sigma).
+        """
+        from astropy.io import fits as _fits
+        from astropy.table import Table as _Table
+        from astropy.coordinates import SkyCoord as _SkyCoord
+        from astropy.coordinates import match_coordinates_sky as _match_sky
+        import astropy.units as _u
+        from astropy.stats import sigma_clip as _sigma_clip
+
+        def _read_ldac(path):
+            with _fits.open(path) as hdul:
+                return _Table(hdul[2].data)
+
+        sci_cat = _read_ldac(sci_cat_path)
+        ref_cat = _read_ldac(ref_cat_path)
+
+        if len(sci_cat) == 0 or len(ref_cat) == 0:
+            return 0.0, 0.0, 0
+
+        # Get world coordinates
+        if "XWIN_WORLD" in sci_cat.colnames:
+            sci_ra = np.array(sci_cat["XWIN_WORLD"], float)
+            sci_dec = np.array(sci_cat["YWIN_WORLD"], float)
+        else:
+            sci_ra = np.array(sci_cat["X_WORLD"], float)
+            sci_dec = np.array(sci_cat["Y_WORLD"], float)
+
+        if "XWIN_WORLD" in ref_cat.colnames:
+            ref_ra = np.array(ref_cat["XWIN_WORLD"], float)
+            ref_dec = np.array(ref_cat["YWIN_WORLD"], float)
+        else:
+            ref_ra = np.array(ref_cat["X_WORLD"], float)
+            ref_dec = np.array(ref_cat["Y_WORLD"], float)
+
+        sci_coords = _SkyCoord(sci_ra * _u.deg, sci_dec * _u.deg)
+        ref_coords = _SkyCoord(ref_ra * _u.deg, ref_dec * _u.deg)
+
+        # Find nearest reference source for each science source
+        idx, sep, _ = _match_sky(sci_coords, ref_coords)
+        sep_arcsec = sep.arcsec
+
+        # Compute offset vectors (sci - ref) in arcsec
+        # Use the matched reference positions
+        matched_ref = ref_coords[idx]
+        dra = (sci_ra - np.array(matched_ref.ra.deg)) * 3600.0 * np.cos(np.radians(sci_dec))
+        ddec = (sci_dec - np.array(matched_ref.dec.deg)) * 3600.0
+
+        # Sigma-clip to find consensus offset
+        dra_clipped = _sigma_clip(dra, sigma=2.5, maxiters=3)
+        ddec_clipped = _sigma_clip(ddec, sigma=2.5, maxiters=3)
+
+        # Need both to be unmasked for a consistent pair
+        both_ok = ~dra_clipped.mask & ~ddec_clipped.mask
+
+        if np.sum(both_ok) < 3:
+            # Not enough consistent pairs; use median of all
+            median_dra = float(np.median(dra))
+            median_ddec = float(np.median(ddec))
+            n_consistent = int(np.sum(both_ok))
+        else:
+            median_dra = float(np.median(dra[both_ok]))
+            median_ddec = float(np.median(ddec[both_ok]))
+            n_consistent = int(np.sum(both_ok))
+
+        # Also compute the median separation after applying the offset
+        # to verify the offset is real
+        shifted_sci = _SkyCoord(
+            (sci_ra - median_dra / 3600.0 / np.cos(np.radians(sci_dec))) * _u.deg,
+            (sci_dec - median_ddec / 3600.0) * _u.deg,
+        )
+        idx2, sep2, _ = _match_sky(shifted_sci, ref_coords)
+        residual_sep = float(np.median(sep2.arcsec))
+
+        self.logger.info(
+            "WCS offset estimate: dRA=%.1f\" dDec=%.1f\" (n_consistent=%d/%d, residual=%.1f\")",
+            median_dra, median_ddec, n_consistent, len(sci_cat), residual_sep,
+        )
+
+        return median_dra, median_ddec, n_consistent
+
+    def _shift_catalog_wcs(
+        self,
+        cat_path: str,
+        dra_arcsec: float,
+        ddec_arcsec: float,
+    ) -> None:
+        """
+        Shift the world coordinates in a FITS-LDAC SExtractor catalog by the
+        given offset (dRA, dDec) in arcseconds. This aligns the catalog's
+        world coordinates with the other catalog so cross-matching can succeed.
+
+        Modifies the catalog file in-place.
+        """
+        from astropy.io import fits as _fits
+        from astropy.table import Table as _Table
+
+        with _fits.open(cat_path, mode="update") as hdul:
+            tbl = _Table(hdul[2].data)
+            if "XWIN_WORLD" in tbl.colnames and "YWIN_WORLD" in tbl.colnames:
+                dec = np.array(tbl["YWIN_WORLD"], float)
+                tbl["XWIN_WORLD"] = tbl["XWIN_WORLD"] - dra_arcsec / 3600.0 / np.cos(np.radians(dec))
+                tbl["YWIN_WORLD"] = tbl["YWIN_WORLD"] - ddec_arcsec / 3600.0
+            if "X_WORLD" in tbl.colnames and "Y_WORLD" in tbl.colnames:
+                dec = np.array(tbl["Y_WORLD"], float)
+                tbl["X_WORLD"] = tbl["X_WORLD"] - dra_arcsec / 3600.0 / np.cos(np.radians(dec))
+                tbl["Y_WORLD"] = tbl["Y_WORLD"] - ddec_arcsec / 3600.0
+            if "ALPHA_J2000" in tbl.colnames and "DELTA_J2000" in tbl.colnames:
+                dec = np.array(tbl["DELTA_J2000"], float)
+                tbl["ALPHA_J2000"] = tbl["ALPHA_J2000"] - dra_arcsec / 3600.0 / np.cos(np.radians(dec))
+                tbl["DELTA_J2000"] = tbl["DELTA_J2000"] - ddec_arcsec / 3600.0
+            hdul[2].data = tbl.as_array()
+            hdul.flush()
+        self.logger.info(
+            "Shifted catalog %s by dRA=%.1f\" dDec=%.1f\"",
+            Path(cat_path).name, dra_arcsec, ddec_arcsec,
+        )

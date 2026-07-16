@@ -178,6 +178,7 @@ default_input:
     apply_solved_to_fits: True # bool --- If True, write solved WCS back into the FITS header on disk.
     solve_field_exe_loc: solve-field # str --- `solve-field` executable name/path (defaults to `solve-field` on PATH).
     solve_field_tweak_order: 4 # int --- solve-field SIP tweak order to use (single-value mode).
+    solve_field_nsigma: 5 # int --- Sigma threshold for source detection in solve-field. Lower (e.g. 3) for sparse fields.
     prefer_scamp_tpv_after_solve: True # bool --- After solve-field succeeds, prefer SCAMP WCS (TPV/PV distortion) when available.
     # If True, preserve input non-linear distortion keywords (PV/SIP) when
     # merging solve-field WCS. Set False to fully replace distortion terms.
