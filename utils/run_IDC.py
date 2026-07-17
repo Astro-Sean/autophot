@@ -4024,13 +4024,13 @@ NNW
                 self.logger.info("AstroAlign SExtractor: using reference MAP_WEIGHT %s", ref_w)
 
             sci_sex = _extract_sources(
-                sci_image_copy, science_dir, sci_aperture_radius, weight_path=sci_w
+                sci_image_copy, science_aligned_dir, sci_aperture_radius, weight_path=sci_w
             )
             self.logger.info(
                 f"Extracting sources from reference image with aperture radius - {ref_aperture_radius:.1f} [px]"
             )
             ref_sex = _extract_sources(
-                ref_image_copy, reference_dir, ref_aperture_radius, weight_path=ref_w
+                ref_image_copy, reference_aligned_dir, ref_aperture_radius, weight_path=ref_w
             )
             fwhm_sci_pix = float(sci_sex.get("fwhm", 2.5))
             fwhm_ref_pix = float(ref_sex.get("fwhm", 2.5))
@@ -4065,7 +4065,7 @@ NNW
                     ref_image_path=str(ref_image_copy),
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
-                    output_plot_path=science_dir / f"matched_sources_{Path(sci_image_copy).stem}.png",
+                    output_plot_path=science_aligned_dir / f"matched_sources_{Path(sci_image_copy).stem}.png",
                     label_color="#FF0000",
                     label_fontsize=10,
                     circle_radius_sci=fwhm_sci_pix,
@@ -4205,12 +4205,12 @@ NNW
                 self.logger.info(f"Could not compute alignment metrics: {e}")
 
             # Remove aligned working directories and their contents after successful alignment.
-            if science_dir.exists():
-                shutil.rmtree(science_dir, ignore_errors=True)
-                self.logger.debug("Removed aligned working dir: %s", science_dir)
-            if reference_dir.exists():
-                shutil.rmtree(reference_dir, ignore_errors=True)
-                self.logger.debug("Removed aligned working dir: %s", reference_dir)
+            if science_aligned_dir.exists():
+                shutil.rmtree(science_aligned_dir, ignore_errors=True)
+                self.logger.debug("Removed aligned working dir: %s", science_aligned_dir)
+            if reference_aligned_dir.exists():
+                shutil.rmtree(reference_aligned_dir, ignore_errors=True)
+                self.logger.debug("Removed aligned working dir: %s", reference_aligned_dir)
 
             return {
                 "science_aligned": aligned_science_fpath,
