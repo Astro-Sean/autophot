@@ -2728,12 +2728,11 @@ def run_photometry():
                                     "is False: reprojection uses the WCS **on disk**, which may "
                                     "differ from a newer plate solution computed in memory. "
                                     "Expect residual source misalignment / dipoles. Fix: set "
-                                    "apply_solved_to_fits: True, enable "
-                                    "template_subtraction.subpixel_refine_before_subtraction, "
-                                    "or use alignment_method 'astroalign' / 'swarp'."
+                                    "apply_solved_to_fits: True, or use alignment_method "
+                                    "'astroalign' / 'swarp'."
                                 )
                         except Exception as e:
-                            logging.warning(f"Template subpixel refine check failed: {e}")
+                            logging.warning(f"Template alignment check failed: {e}")
 
                 except Exception as e:
                     log_exception(e, "Template alignment failed")

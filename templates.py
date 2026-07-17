@@ -306,9 +306,6 @@ class SubtractionParams:
     kernel_order: int = 0
     """Spatial kernel polynomial order for HOTPANTS / SFFT."""
 
-    allow_subpixel_shifts: bool = False
-    """If True, attempt sub-pixel alignment before subtraction."""
-
     sfft_crowded_method: bool = True
     """If True (default), use SFFT crowded-field (ECP). If False, use sparse (ESP). ECP is preferred; set False only to force ESP."""
 
@@ -3818,7 +3815,6 @@ class Templates:
         kernel_order: int = 0,
         matching_sources: Optional[List[Tuple[float, float]]] = None,
         masked_sources: Optional[List[Tuple[float, float]]] = None,
-        allow_subpixel_shifts: bool = False,
         common_sources: Optional[List[Tuple[float, float]]] = None,
         stamp_loc: Optional[str] = None,
         scienceNoise: Optional[str] = None,
