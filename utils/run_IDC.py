@@ -36,8 +36,12 @@ from astropy.table import Table
 try:
     from reproject import reproject_interp, reproject_adaptive
     HAS_REPROJECT = True
+    # Introspect reproject_adaptive for optional kwargs
+    import inspect as _inspect
+    _ADAPTIVE_PARAMS = set(_inspect.signature(reproject_adaptive).parameters.keys())
 except ImportError:
     HAS_REPROJECT = False
+    _ADAPTIVE_PARAMS = set()
 from astropy.visualization import ZScaleInterval
 import astropy.wcs as WCS
 from matplotlib.patches import Circle
@@ -3301,12 +3305,12 @@ NNW
                 )
                 interp_order_norm = "bilinear"
 
-            # Method fallback chain: requested method first, then the others
-            all_methods = ("adaptive", "interp", "exact")
+            # Method fallback chain: exact-first for best geometric accuracy
+            all_methods = ("exact", "adaptive", "interp")
             if req_method in all_methods:
                 fallbacks = [req_method] + [m for m in all_methods if m != req_method]
             else:
-                fallbacks = ["adaptive", "interp", "exact"]
+                fallbacks = ["exact", "adaptive", "interp"]
 
             aligned_ref = None
             footprint = None
@@ -3324,6 +3328,7 @@ NNW
                             shape_out=sci_data.shape,
                             roundtrip_coords=roundtrip,
                             parallel=use_parallel,
+                            **({"despike_jacobian": True} if "despike_jacobian" in _ADAPTIVE_PARAMS else {}),
                         )
                     elif m == "interp":
                         aligned_ref, footprint = reproject_interp(
@@ -3852,11 +3857,13 @@ NNW
                 interp_order_norm = "bilinear"
 
             # --- Run reproject: reference → science grid ---
-            all_methods = ("adaptive", "interp", "exact")
+            # exact is most geometrically accurate (exact pixel-area resampling);
+            # adaptive is faster fallback; interp is last resort.
+            all_methods = ("exact", "adaptive", "interp")
             if req_method in all_methods:
                 fallbacks = [req_method] + [m for m in all_methods if m != req_method]
             else:
-                fallbacks = ["adaptive", "interp", "exact"]
+                fallbacks = ["exact", "adaptive", "interp"]
 
             aligned_ref = None
             footprint = None
@@ -3876,6 +3883,7 @@ NNW
                             parallel=use_parallel,
                             conserve_flux=conserve_flux,
                             center_jacobian=center_jacobian,
+                            **({"despike_jacobian": True} if "despike_jacobian" in _ADAPTIVE_PARAMS else {}),
                         )
                     elif m == "interp":
                         aligned_ref, footprint = reproject_interp(
@@ -3973,7 +3981,7 @@ NNW
         """
         from astropy.io import fits
         from astropy.wcs import WCS
-        from reproject import reproject_interp
+        from reproject import reproject_exact, reproject_adaptive, reproject_interp
 
         # Read configured interpolation order from input_yaml
         iy = getattr(self, "input_yaml", None) or {}
@@ -3987,6 +3995,7 @@ NNW
             "bicubic": "bicubic", "cubic": "bicubic", "3": "bicubic",
         }
         interp_order_norm = _interp_map.get(interp_order, "bilinear")
+        use_parallel = bool(align_cfg.get("reproject_parallel", True))
 
         from wcs import get_wcs as _get_wcs_for_reproj
         with fits.open(target_image) as target_hdul:
@@ -4004,13 +4013,43 @@ NNW
                 self.logger.error("_reproject_to_match: get_wcs failed for source image")
                 return None
 
-        # Reproject reference onto science grid
-        reprojected_data, footprint = reproject_interp(
-            (source_data, source_wcs),
-            target_wcs,
-            shape_out=target_shape,
-            order=interp_order_norm,
-        )
+        # Reproject source onto target grid — exact-first for best accuracy
+        reprojected_data = None
+        footprint = None
+        for m in ("exact", "adaptive", "interp"):
+            try:
+                if m == "exact":
+                    reprojected_data, footprint = reproject_exact(
+                        (source_data, source_wcs),
+                        target_wcs,
+                        shape_out=target_shape,
+                        parallel=use_parallel,
+                    )
+                elif m == "adaptive":
+                    if reproject_adaptive is None:
+                        continue
+                    reprojected_data, footprint = reproject_adaptive(
+                        (source_data, source_wcs),
+                        target_wcs,
+                        shape_out=target_shape,
+                        roundtrip_coords=True,
+                        parallel=use_parallel,
+                        **({"despike_jacobian": True} if "despike_jacobian" in _ADAPTIVE_PARAMS else {}),
+                    )
+                else:
+                    reprojected_data, footprint = reproject_interp(
+                        (source_data, source_wcs),
+                        target_wcs,
+                        shape_out=target_shape,
+                        order=interp_order_norm,
+                    )
+                break
+            except Exception as _e:
+                self.logger.debug("_reproject_to_match (%s) failed: %s", m, _e)
+
+        if reprojected_data is None:
+            self.logger.error("_reproject_to_match: all reproject methods failed")
+            return None
 
         # Update header with target WCS
         from functions import update_header_from_wcs
