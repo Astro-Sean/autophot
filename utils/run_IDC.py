@@ -3264,6 +3264,15 @@ NNW
                 )
                 return None
 
+            # Pre-mask NaN pixels in reference data
+            n_nan = int(np.sum(~np.isfinite(ref_data)))
+            if n_nan > 0:
+                self.logger.info(
+                    "Reference has %d NaN pixels (%.2f%%) — replacing with 0 before reprojection.",
+                    n_nan, 100.0 * n_nan / ref_data.size,
+                )
+                ref_data = np.where(np.isfinite(ref_data), ref_data, 0.0)
+
             # Build reproject config from input_yaml (same as templates.py)
             iy = getattr(self, "input_yaml", None) or {}
             align_cfg = iy.get("alignment", {}) if isinstance(iy, dict) else {}
@@ -3281,6 +3290,16 @@ NNW
                 "bicubic": "bicubic", "cubic": "bicubic", "3": "bicubic",
             }
             interp_order_norm = _interp_map.get(interp_order, "bilinear")
+
+            # Auto-downgrade interpolation for undersampled images
+            _fwhm = float(iy.get("fwhm", 0.0)) if isinstance(iy, dict) else 0.0
+            if _fwhm > 0 and _fwhm < 2.5 and interp_order_norm in ("bicubic", "biquadratic"):
+                self.logger.info(
+                    "Undersampled image (FWHM=%.2f px < 2.5) — downgrading %s to bilinear "
+                    "to avoid ringing artifacts.",
+                    _fwhm, interp_order_norm,
+                )
+                interp_order_norm = "bilinear"
 
             # Method fallback chain: requested method first, then the others
             all_methods = ("adaptive", "interp", "exact")
@@ -3683,6 +3702,29 @@ NNW
                 self.logger.error("Reference image has no data for reproject.")
                 return None
 
+            # --- Pre-mask NaN pixels in reference data ---
+            # reproject_adaptive/interp treat NaN as 0, which creates artifacts.
+            # Replace NaNs with 0 and track the mask via footprint afterwards.
+            n_nan_ref = int(np.sum(~np.isfinite(ref_data)))
+            if n_nan_ref > 0:
+                self.logger.info(
+                    "Reference has %d NaN pixels (%.2f%%) — replacing with 0 before reprojection.",
+                    n_nan_ref, 100.0 * n_nan_ref / ref_data.size,
+                )
+                ref_data = np.where(np.isfinite(ref_data), ref_data, 0.0)
+
+            # --- Log WCS diagnostics for both images ---
+            try:
+                sci_ps = np.sqrt(abs(sci_wcs.wcs.cd[0,0]*sci_wcs.wcs.cd[1,1] - sci_wcs.wcs.cd[0,1]*sci_wcs.wcs.cd[1,0])) * 3600.0
+                sci_rot = np.degrees(np.arctan2(sci_wcs.wcs.cd[0,1], sci_wcs.wcs.cd[0,0]))
+                self.logger.info(
+                    "Reproject diagnostics — science: shape=%s, pixscale=%.3f arcsec/px, "
+                    "rotation=%.2f deg, CRPIX=(%.1f, %.1f)",
+                    sci_shape, sci_ps, sci_rot, sci_wcs.wcs.crpix[0], sci_wcs.wcs.crpix[1],
+                )
+            except Exception:
+                pass
+
             # --- Apply SCAMP .head to reference header (in memory) ---
             head_file = Path(ref_image_copy).with_suffix(".head")
             if head_file.exists():
@@ -3728,6 +3770,27 @@ NNW
                 self.logger.error("Could not build WCS from SCAMP-corrected reference header.")
                 return None
 
+            # --- Log reference WCS diagnostics ---
+            try:
+                ref_ps = np.sqrt(abs(ref_wcs_corrected.wcs.cd[0,0]*ref_wcs_corrected.wcs.cd[1,1] - ref_wcs_corrected.wcs.cd[0,1]*ref_wcs_corrected.wcs.cd[1,0])) * 3600.0
+                ref_rot = np.degrees(np.arctan2(ref_wcs_corrected.wcs.cd[0,1], ref_wcs_corrected.wcs.cd[0,0]))
+                self.logger.info(
+                    "Reproject diagnostics — reference: shape=%s, pixscale=%.3f arcsec/px, "
+                    "rotation=%.2f deg, CRPIX=(%.1f, %.1f)",
+                    ref_data.shape, ref_ps, ref_rot,
+                    ref_wcs_corrected.wcs.crpix[0], ref_wcs_corrected.wcs.crpix[1],
+                )
+                ps_ratio = ref_ps / sci_ps if sci_ps > 0 else 0.0
+                rot_diff = abs(ref_rot - sci_rot)
+                if rot_diff > 180:
+                    rot_diff = 360 - rot_diff
+                self.logger.info(
+                    "Reproject diagnostics — pixel scale ratio=%.3f, rotation difference=%.2f deg",
+                    ps_ratio, rot_diff,
+                )
+            except Exception:
+                pass
+
             # --- Read reproject config ---
             cfg = reproject_cfg or {}
             req_method = str(cfg.get("reproject_method", "adaptive")).lower().strip()
@@ -3745,6 +3808,19 @@ NNW
                 "bicubic": "bicubic", "cubic": "bicubic", "3": "bicubic",
             }
             interp_order_norm = _interp_map.get(interp_order, "bilinear")
+
+            # --- Auto-downgrade interpolation for undersampled images ---
+            # Bicubic/biquadratic introduce ringing artifacts when the PSF is
+            # undersampled (FWHM < 2.5 px).  Bilinear is safer in that regime.
+            iy = getattr(self, "input_yaml", None) or {}
+            _fwhm = float(iy.get("fwhm", 0.0)) if isinstance(iy, dict) else 0.0
+            if _fwhm > 0 and _fwhm < 2.5 and interp_order_norm in ("bicubic", "biquadratic"):
+                self.logger.info(
+                    "Undersampled image (FWHM=%.2f px < 2.5) — downgrading %s to bilinear "
+                    "to avoid ringing artifacts.",
+                    _fwhm, interp_order_norm,
+                )
+                interp_order_norm = "bilinear"
 
             # --- Run reproject: reference → science grid ---
             all_methods = ("adaptive", "interp", "exact")
