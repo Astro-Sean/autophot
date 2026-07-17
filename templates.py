@@ -371,22 +371,22 @@ class FluxMatchParams:
 @dataclass
 class ReprojectConfig:
     """Cached reproject configuration extracted once from input_yaml."""
-    method: str = "adaptive"
+    method: str = "exact"
     roundtrip: bool = True
     interp_order: Any = "bicubic"
-    parallel: bool = False
+    parallel: bool = True
     conserve_flux: bool = False
     center_jacobian: bool = False
     @classmethod
     def from_yaml(cls, input_yaml: Dict[str, Any]) -> "ReprojectConfig":
         cfg = input_yaml.get("alignment", {})
         return cls(
-            method=str(cfg.get("reproject_method", "adaptive")).lower().strip(),
+            method=str(cfg.get("reproject_method", "exact")).lower().strip(),
             roundtrip=bool(cfg.get("reproject_roundtrip_coords", True)),
             interp_order=_normalize_reproject_interp_order(
                 cfg.get("reproject_interp_order", "bicubic")
             ),
-            parallel=bool(cfg.get("reproject_parallel", False)),
+            parallel=bool(cfg.get("reproject_parallel", True)),
             conserve_flux=bool(cfg.get("reproject_adaptive_conserve_flux", False)),
             center_jacobian=bool(cfg.get("reproject_adaptive_center_jacobian", False)),
         )
@@ -436,6 +436,8 @@ def _introspect_reproject_adaptive() -> Dict[str, Any]:
             extras["_has_conserve_flux"] = True
         if "center_jacobian" in params:
             extras["_has_center_jacobian"] = True
+        if "despike_jacobian" in params:
+            extras["_has_despike_jacobian"] = True
     except (TypeError, ValueError):
         pass
     return extras
@@ -452,6 +454,8 @@ def _build_adaptive_kwargs(cfg: ReprojectConfig) -> Dict[str, Any]:
         kwargs["conserve_flux"] = cfg.conserve_flux
     if _REPROJECT_ADAPTIVE_EXTRAS.get("_has_center_jacobian"):
         kwargs["center_jacobian"] = cfg.center_jacobian
+    if _REPROJECT_ADAPTIVE_EXTRAS.get("_has_despike_jacobian"):
+        kwargs["despike_jacobian"] = True
     return kwargs
 
 
@@ -621,7 +625,7 @@ def _reproject_template(
             "Unknown reproject_method=%r; defaulting to adaptive with fallbacks.",
             cfg.method,
         )
-        fallbacks = ["adaptive", "interp", "exact"]
+        fallbacks = ["exact", "adaptive", "interp"]
 
     aligned: Optional[np.ndarray] = None
     footprint: Optional[np.ndarray] = None
