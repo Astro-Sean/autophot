@@ -349,11 +349,13 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
         )
         trimmed_data = cutout.data
         trimmed_wcs = cutout.wcs
-        # Convert WCS back to header (relax=True to preserve SIP/PV distortion keywords)
-        trimmed_header = trimmed_wcs.to_header(relax=True)
-        # Copy non-WCS keywords from original header (sanitize to remove non-ASCII)
+        # Use update_header_from_wcs to preserve CD matrix and SIP distortion
+        from functions import update_header_from_wcs
+        trimmed_header = header.copy()
+        update_header_from_wcs(trimmed_header, trimmed_wcs)
+        # Copy non-WCS keywords from original header that weren't already set
         for key in header:
-            if key not in trimmed_header and not key.startswith(('CRPIX', 'CRVAL', 'CDELT', 'CTYPE', 'CD1_', 'CD2_', 'PC1_', 'PC2_', 'NAXIS')):
+            if key not in trimmed_header and not key.startswith(('CRPIX', 'CRVAL', 'CDELT', 'CTYPE', 'CD1_', 'CD2_', 'PC1_', 'PC2_', 'NAXIS', 'A_', 'B_', 'AP_', 'BP_')):
                 try:
                     value = header[key]
                     if isinstance(value, str):
@@ -1854,7 +1856,8 @@ def run_photometry():
                 # Update image and header with cutout data
                 image = cutout.data
                 if cutout.wcs is not None:
-                    header.update(cutout.wcs.to_header(relax=True))
+                    from functions import update_header_from_wcs
+                    update_header_from_wcs(header, cutout.wcs)
 
                 # Writes the modified image and header back to the FITS file.
                 safe_fits_write(fpath, image, header)
@@ -1922,8 +1925,8 @@ def run_photometry():
 
                 # Updates the image and WCS with the cutout values.
                 image = imageCutout.data
-                imageWCS = get_wcs(imageCutout.wcs.to_header(relax=True))
-                header.update(imageWCS.to_header(relax=True), relax=True)
+                from functions import update_header_from_wcs
+                update_header_from_wcs(header, imageCutout.wcs)
 
                 # Writes the modified image and header back to the FITS file.
                 safe_fits_write(fpath, image, header)
@@ -2217,7 +2220,8 @@ def run_photometry():
                 )
                 if existingWCS and allow_fallback_on_fail:
                     logging.info("Falling back to pre-existing WCS")
-                    header.update(WCSvalues_old.to_header(relax=True), relax=True)
+                    from functions import update_header_from_wcs
+                    update_header_from_wcs(header, WCSvalues_old)
                     break
                 else:
                     raise Exception(
@@ -4042,7 +4046,8 @@ def run_photometry():
                         mode="partial",
                         fill_value=np.nan,
                     )
-                    science_header.update(science_cutout.wcs.to_header(relax=True), relax=True)
+                    from functions import update_header_from_wcs
+                    update_header_from_wcs(science_header, science_cutout.wcs)
                     # Loads the template image.
                     template_image, template_header = get_image_and_header(templateFpath)
                     template_wcs = get_wcs(template_header)
@@ -4085,7 +4090,8 @@ def run_photometry():
                         mode="partial",
                         fill_value=np.nan,
                     )
-                    template_header.update(template_cutout.wcs.to_header(relax=True), relax=True)
+                    from functions import update_header_from_wcs
+                    update_header_from_wcs(template_header, template_cutout.wcs)
                     # Saves the results.
                     safe_fits_write(fpath, science_cutout.data, science_header)
                     safe_fits_write(templateFpath, template_cutout.data, template_header)
