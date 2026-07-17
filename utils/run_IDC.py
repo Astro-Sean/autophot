@@ -998,9 +998,11 @@ NNW
                     if "SNR_WIN" in cleaned.colnames:
                         cleaned.sort("SNR_WIN", reverse=True)
                     # Add SCAMP-required columns if not present
-                    from astropy.wcs import WCS
                     try:
-                        wcs = WCS(fits.getheader(fits_image))
+                        from wcs import get_wcs as _get_wcs_for_scamp
+                        wcs = _get_wcs_for_scamp(fits.getheader(fits_image))
+                        if wcs is None:
+                            raise ValueError("get_wcs returned None")
                         if 'XWIN_WORLD' not in cleaned.colnames and 'XWIN_IMAGE' in cleaned.colnames:
                             # SExtractor uses 1-based pixel coordinates (FITS convention)
                             # astropy WCS pixel_to_world expects 0-based numpy convention
@@ -1248,20 +1250,8 @@ NNW
                             )
                             # Update reference image with cutout
                             _ref_header_out = _ref_h.copy()
-                            _ref_header_out = remove_wcs_from_header(_ref_header_out)
-                            from functions import copy_wcs_from_header as _copy_wcs
-                            _cutout_hdr = _ref_cutout.wcs.to_header(relax=True)
-                            _ref_header_out.update(_cutout_hdr)
-                            # Preserve CD matrix from the cutout WCS if to_header dropped it
-                            if not any(k.startswith('CD') for k in _cutout_hdr):
-                                _cd = _ref_cutout.wcs.wcs.cd
-                                if _cd is not None and _ref_cutout.wcs.wcs.has_cd():
-                                    _ref_header_out['CD1_1'] = _cd[0, 0]
-                                    _ref_header_out['CD1_2'] = _cd[0, 1]
-                                    _ref_header_out['CD2_1'] = _cd[1, 0]
-                                    _ref_header_out['CD2_2'] = _cd[1, 1]
-                                    for k in ['CDELT1', 'CDELT2']:
-                                        _ref_header_out.pop(k, None)
+                            from functions import update_header_from_wcs
+                            update_header_from_wcs(_ref_header_out, _ref_cutout.wcs)
                             _ref_header_out['NAXIS1'] = _cut_w
                             _ref_header_out['NAXIS2'] = _cut_h
                             fits.writeto(
@@ -2969,22 +2959,9 @@ NNW
                             mode='partial',
                         )
                         _ref_data_adjusted = ref_cutout.data
-                        ref_wcs_header = ref_cutout.wcs.to_header(relax=True)
-                        # Preserve CD matrix from the cutout WCS if to_header dropped it
-                        if not any(k.startswith('CD') for k in ref_wcs_header):
-                            _cd = ref_cutout.wcs.wcs.cd
-                            if _cd is not None and ref_cutout.wcs.wcs.has_cd():
-                                ref_wcs_header['CD1_1'] = _cd[0, 0]
-                                ref_wcs_header['CD1_2'] = _cd[0, 1]
-                                ref_wcs_header['CD2_1'] = _cd[1, 0]
-                                ref_wcs_header['CD2_2'] = _cd[1, 1]
-                                for k in ['CDELT1', 'CDELT2']:
-                                    ref_wcs_header.pop(k, None)
-
-                        # Apply the full cutout WCS (CD, CTYPE, CRPIX, CRVAL, etc.) to the
-                        # reference header so the WCS is self-consistent with the cutout.
-                        _ref_header = remove_wcs_from_header(_ref_header)
-                        _ref_header.update(ref_wcs_header)
+                        from functions import update_header_from_wcs
+                        _ref_header = _ref_header.copy()
+                        update_header_from_wcs(_ref_header, ref_cutout.wcs)
                         _ref_header['NAXIS1'] = nx_target
                         _ref_header['NAXIS2'] = ny_target
 
@@ -3607,37 +3584,34 @@ NNW
         }
         interp_order_norm = _interp_map.get(interp_order, "bilinear")
 
+        from wcs import get_wcs as _get_wcs_for_reproj
         with fits.open(target_image) as target_hdul:
-            target_wcs = WCS(target_hdul[0].header)
+            target_wcs = _get_wcs_for_reproj(target_hdul[0].header)
+            if target_wcs is None:
+                self.logger.error("_reproject_to_match: get_wcs failed for target image")
+                return None
             target_shape = target_hdul[0].data.shape
 
         with fits.open(source_image) as source_hdul:
             source_data = source_hdul[0].data
             source_header = source_hdul[0].header.copy()
+            source_wcs = _get_wcs_for_reproj(source_header)
+            if source_wcs is None:
+                self.logger.error("_reproject_to_match: get_wcs failed for source image")
+                return None
 
         # Reproject reference onto science grid
         reprojected_data, footprint = reproject_interp(
-            (source_data, WCS(source_header)),
+            (source_data, source_wcs),
             target_wcs,
             shape_out=target_shape,
             order=interp_order_norm,
         )
 
         # Update header with target WCS
+        from functions import update_header_from_wcs
         output_header = source_header.copy()
-        output_header = remove_wcs_from_header(output_header)
-        _target_hdr = target_wcs.to_header(relax=True)
-        output_header.update(_target_hdr)
-        # Preserve CD matrix if to_header dropped it
-        if not any(k.startswith('CD') for k in _target_hdr):
-            _cd = target_wcs.wcs.cd
-            if _cd is not None and target_wcs.wcs.has_cd():
-                output_header['CD1_1'] = _cd[0, 0]
-                output_header['CD1_2'] = _cd[0, 1]
-                output_header['CD2_1'] = _cd[1, 0]
-                output_header['CD2_2'] = _cd[1, 1]
-                for k in ['CDELT1', 'CDELT2']:
-                    output_header.pop(k, None)
+        update_header_from_wcs(output_header, target_wcs)
         output_header["REPROJ"] = (True, "Reprojected to match science grid")
 
         # Write output
@@ -5415,14 +5389,18 @@ NNW
             tuple of (dRA_arcsec, dDec_arcsec) representing the median offset
             between the science and reference WCS at the same pixel positions.
         """
-        from astropy.wcs import WCS as _WCS
+        from wcs import get_wcs as _get_wcs_for_offset
 
         with fits.open(sci_image_path) as hdul:
-            sci_wcs = _WCS(hdul[0].header)
+            sci_wcs = _get_wcs_for_offset(hdul[0].header)
+            if sci_wcs is None:
+                return np.nan, np.nan
             sci_shape = hdul[0].data.shape
 
         with fits.open(ref_image_path) as hdul:
-            ref_wcs = _WCS(hdul[0].header)
+            ref_wcs = _get_wcs_for_offset(hdul[0].header)
+            if ref_wcs is None:
+                return np.nan, np.nan
 
         # Sample at multiple positions across the science image
         margin = 50

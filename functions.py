@@ -2133,6 +2133,49 @@ def copy_wcs_from_header(src_header, dst_header):
     return dst_header
 
 
+def update_header_from_wcs(header, wcs_obj):
+    """
+    Update a FITS header with WCS from a WCS object (e.g. Cutout2D.wcs).
+
+    This is the correct way to update a header from a WCS object, unlike
+    ``header.update(wcs.to_header(relax=True))`` which can:
+    - Drop the CD matrix and write CDELT=1.0
+    - Leave stale WCS keywords from the old header
+
+    Steps:
+    1. Remove all old WCS keywords from the header.
+    2. Convert WCS to header with relax=True (preserves SIP/PV keywords).
+    3. Restore CD matrix if astropy dropped it.
+    4. Update the header in place.
+
+    Parameters
+    ----------
+    header : fits.Header
+        Destination FITS header (modified in place).
+    wcs_obj : astropy.wcs.WCS
+        WCS object to extract keywords from.
+
+    Returns
+    -------
+    fits.Header
+        The modified header.
+    """
+    header = remove_wcs_from_header(header)
+    wcs_hdr = wcs_obj.to_header(relax=True)
+    header.update(wcs_hdr)
+    # Preserve CD matrix from the WCS if to_header dropped it
+    if not any(k.startswith('CD') for k in wcs_hdr):
+        cd = getattr(wcs_obj.wcs, 'cd', None)
+        if cd is not None and wcs_obj.wcs.has_cd():
+            header['CD1_1'] = cd[0, 0]
+            header['CD1_2'] = cd[0, 1]
+            header['CD2_1'] = cd[1, 0]
+            header['CD2_2'] = cd[1, 1]
+            for k in ['CDELT1', 'CDELT2']:
+                header.pop(k, None)
+    return header
+
+
 def convert_ra_dec_to_hms_dms(ra_deg, dec_deg):
     # Create a SkyCoord object using RA and DEC in degrees
     coord = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")

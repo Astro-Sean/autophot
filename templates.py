@@ -1232,7 +1232,8 @@ def download_panstarrs_template(
                 }
             )
             template_wcs = get_wcs(src_header)
-            new_header.update(template_wcs.to_header(relax=True), relax=True)
+            from functions import update_header_from_wcs
+            update_header_from_wcs(new_header, template_wcs)
 
             write_fits(str(template_fpath), hdu[0].data, new_header)
 
@@ -1357,7 +1358,8 @@ def download_sdss_template(
             }
         )
         if cutout_wcs is not None:
-            new_header.update(cutout_wcs.to_header(relax=True), relax=True)
+            from functions import update_header_from_wcs
+            update_header_from_wcs(new_header, cutout_wcs)
         write_fits(str(template_fpath), cutout_data, new_header)
         logger.debug("SDSS template written: %s", template_fpath)
     except Exception:
@@ -2834,8 +2836,8 @@ class Templates:
                 mode="partial",
                 fill_value=np.nan,
             )
-            imageWCS = get_wcs(cutout.wcs.to_header(relax=True))
-            scienceHeader.update(imageWCS.to_header(relax=True), relax=True)
+            from functions import update_header_from_wcs
+            update_header_from_wcs(scienceHeader, cutout.wcs)
             scienceImage = cutout.data
 
             # Try tighter crop to largest valid rectangle
@@ -2858,7 +2860,7 @@ class Templates:
                 and border <= target_y_pix < h - border
             ):
                 scienceImage = scienceImage_tmp
-                scienceHeader.update(scienceHeader_newwcs.to_header(relax=True), relax=True)
+                update_header_from_wcs(scienceHeader, scienceHeader_newwcs)
 
             # Restore FWHM and APER from original header for alignment
             if original_fwhm is not None:
@@ -2939,8 +2941,8 @@ class Templates:
                 fill_value=np.nan,
             )
             scienceImage = scienceCutout.data
-            imageWCS = get_wcs(scienceCutout.wcs.to_header(relax=True))
-            scienceHeader.update(imageWCS.to_header(relax=True), relax=True)
+            from functions import update_header_from_wcs
+            update_header_from_wcs(scienceHeader, scienceCutout.wcs)
 
             templateCutout = Cutout2D(
                 templateImage,
@@ -2951,8 +2953,7 @@ class Templates:
                 fill_value=np.nan,
             )
             templateImage = templateCutout.data
-            templateWCS = get_wcs(templateCutout.wcs.to_header(relax=True))
-            templateHeader.update(templateWCS.to_header(relax=True), relax=True)
+            update_header_from_wcs(templateHeader, templateCutout.wcs)
 
             # Mark shared invalid regions (NaNs from chip gaps or out-of-bounds)
             mask = np.isnan(templateImage) | np.isnan(scienceImage)
@@ -2986,8 +2987,8 @@ class Templates:
             ):
                 scienceImage = scienceImage_tmp
                 templateImage = templateImage_tmp
-                scienceHeader.update(scienceHeader_newwcs.to_header(relax=True), relax=True)
-                templateHeader.update(templateHeader_newwcs.to_header(relax=True), relax=True)
+                update_header_from_wcs(scienceHeader, scienceHeader_newwcs)
+                update_header_from_wcs(templateHeader, templateHeader_newwcs)
             else:
                 logger.info("Target too close to border; keeping initial crop")
 
