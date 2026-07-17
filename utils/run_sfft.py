@@ -1359,13 +1359,42 @@ def run_sfft() -> Optional[int]:
                     try:
                         bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
                     except TypeError as _te:
-                        if "KerHWRatio" in str(_te):
+                        _te_msg = str(_te)
+                        _retry_done = False
+                        if "KerHWRatio" in _te_msg:
                             log_info(
                                 "B-Spline: installed SFFT does not accept KerHWRatio; "
                                 "retrying without it (GKerHW is passed explicitly)."
                             )
                             _bsp_kwargs.pop("KerHWRatio", None)
-                            bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
+                            _retry_done = True
+                        if "KerHWLimit" in _te_msg:
+                            log_info(
+                                "B-Spline: installed SFFT does not accept KerHWLimit; "
+                                "retrying without it (GKerHW is passed explicitly)."
+                            )
+                            _bsp_kwargs.pop("KerHWLimit", None)
+                            _retry_done = True
+                        if _retry_done:
+                            try:
+                                bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
+                            except TypeError as _te2:
+                                if "KerHWLimit" in str(_te2):
+                                    log_info(
+                                        "B-Spline: retrying without KerHWLimit after "
+                                        "KerHWRatio removal."
+                                    )
+                                    _bsp_kwargs.pop("KerHWLimit", None)
+                                    bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
+                                elif "KerHWRatio" in str(_te2):
+                                    log_info(
+                                        "B-Spline: retrying without KerHWRatio after "
+                                        "KerHWLimit removal."
+                                    )
+                                    _bsp_kwargs.pop("KerHWRatio", None)
+                                    bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
+                                else:
+                                    raise
                         else:
                             raise
                     if bspline_result and len(bspline_result) >= 2:

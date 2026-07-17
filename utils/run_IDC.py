@@ -668,6 +668,26 @@ NNW
                 continue
         raise FileNotFoundError(f"Executable not found: {name}")
 
+    def _is_executable_available(self, name: str) -> bool:
+        """Check if an executable is installed without raising. Cached for speed."""
+        if name in self._executables:
+            return True
+        for cmd in (name, f"{name}.exe"):
+            try:
+                subprocess.run(
+                    [cmd, "--version"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                    text=True,
+                    timeout=10,
+                )
+                self._executables[name] = cmd
+                return True
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                continue
+        return False
+
     @staticmethod
     def angular_distance(ra1, dec1, ra2, dec2):
         """Small-angle distance in degrees; uses cos(dec2) projection for RA."""
@@ -1180,6 +1200,40 @@ NNW
             Dictionary with paths to aligned images and alignment metadata.
         """
         try:
+            # --- Check that SCAMP and SWarp are installed ---
+            scamp_available = self._is_executable_available("scamp")
+            swarp_available = self._is_executable_available("swarp")
+
+            if not scamp_available:
+                self.logger.warning(
+                    "SCAMP executable not found. SCAMP WCS refinement will be skipped. "
+                    "Falling back to WCS-based reproject alignment (no astrometric correction)."
+                )
+            if not swarp_available and resample_mode == "native_scale":
+                self.logger.warning(
+                    "SWarp executable not found and resample_mode='native_scale' requires SWarp. "
+                    "Falling back to WCS-based reproject alignment."
+                )
+
+            # If SCAMP is not installed, we can't do astrometric refinement.
+            # Fall back to WCS-based reproject which only needs valid WCS headers.
+            if not scamp_available or (
+                not swarp_available and resample_mode == "native_scale"
+            ):
+                self.logger.info(
+                    "Missing SCAMP/SWarp — using WCS-based reproject fallback for alignment."
+                )
+                result = self._align_fallback_reproject_then_astroalign(
+                    science_image, reference_image, output_dir
+                )
+                if result is not None:
+                    return result
+                self.logger.error(
+                    "WCS-based reproject and AstroAlign both failed. "
+                    "Cannot align images without SCAMP/SWarp."
+                )
+                return None
+
             output_dir = (
                 Path(output_dir)
                 if output_dir is not None
@@ -1309,6 +1363,32 @@ NNW
                     if "SIP" in _ref_ctype or "TPV" in _ref_ctype:
                         if ref_distort_order < 2:
                             ref_distort_order = max(ref_distort_order, 2)
+            except Exception:
+                pass
+
+            # Detect science image distortion order for GAIA SCAMP DISTORT_DEGREES.
+            # Same logic as ref_distort_order: SCAMP's .head REPLACES the science WCS,
+            # so DISTORT_DEGREES must be high enough to model the science's existing
+            # distortion.  If it's too low, the .head degrades the WCS by replacing
+            # high-order SIP/PV with a lower-order polynomial, introducing systematic
+            # offsets that propagate to the reference SCAMP as well.
+            sci_distort_order = 1  # default: linear only
+            try:
+                with fits.open(sci_image_copy) as _sh:
+                    _sci_hdr_dist = _sh[0].header
+                    _sci_sip_order = max(
+                        int(_sci_hdr_dist.get("A_ORDER", 0)),
+                        int(_sci_hdr_dist.get("B_ORDER", 0)),
+                    )
+                    _sci_pv_count = sum(1 for k in _sci_hdr_dist if k.startswith("PV_"))
+                    if _sci_sip_order > 0:
+                        sci_distort_order = _sci_sip_order
+                    elif _sci_pv_count > 0:
+                        sci_distort_order = min(_sci_pv_count // 2, 4)
+                    _sci_ctype_dist = str(_sci_hdr_dist.get("CTYPE1", "")).upper()
+                    if "SIP" in _sci_ctype_dist or "TPV" in _sci_ctype_dist:
+                        if sci_distort_order < 2:
+                            sci_distort_order = max(sci_distort_order, 2)
             except Exception:
                 pass
 
@@ -1678,10 +1758,14 @@ NNW
                 return method
 
             sci_resampling_method = _swarp_resampling_type(
-                sci_is_undersampled, fwhm_sci_pix, undersampled_thresh
+                sci_is_undersampled,
+                sci_hdr_fwhm if (sci_hdr_fwhm and sci_hdr_fwhm > 0) else fwhm_sci_pix,
+                undersampled_thresh,
             )
             ref_resampling_method = _swarp_resampling_type(
-                ref_is_undersampled, fwhm_ref_pix, undersampled_thresh
+                ref_is_undersampled,
+                ref_hdr_fwhm if (ref_hdr_fwhm and ref_hdr_fwhm > 0) else fwhm_ref_pix,
+                undersampled_thresh,
             )
 
             # ------------------------------------------------------------------
@@ -1705,6 +1789,31 @@ NNW
                 else:
                     self.logger.info("Science-first GAIA astrometry: Phase 1a (SCAMP)")
 
+                    # Compute feasible DISTORT_DEGREES for science GAIA SCAMP.
+                    # Same logic as reference SCAMP: ensure enough sources for the
+                    # polynomial degree.  Using n_sci_for_gaia as a proxy — SCAMP's
+                    # internal GAIA matching typically matches 50-80% of sources.
+                    _sci_min_sources_for_degree = {1: 6, 2: 12, 3: 20, 4: 30}
+                    _sci_feasible_degree = 1
+                    for _deg in range(sci_distort_order, 0, -1):
+                        if n_sci_for_gaia >= _sci_min_sources_for_degree.get(_deg, 999):
+                            _sci_feasible_degree = _deg
+                            break
+
+                    if _sci_feasible_degree < sci_distort_order:
+                        self.logger.warning(
+                            "Science has distortion order %d but only %d sources "
+                            "(need %d for degree %d). GAIA SCAMP will use degree %d. "
+                            "If alignment is poor, consider disabling science-first astrometry.",
+                            sci_distort_order, n_sci_for_gaia,
+                            _sci_min_sources_for_degree.get(sci_distort_order, 999),
+                            sci_distort_order, _sci_feasible_degree,
+                        )
+                    self.logger.info(
+                        "Science GAIA SCAMP: DISTORT_DEGREES=%d (sci order=%d, %d sources)",
+                        _sci_feasible_degree, sci_distort_order, n_sci_for_gaia,
+                    )
+
                     # Phase 1a: SCAMP on science catalog vs GAIA-DR3
                     # SCAMP writes .head next to the catalog, so output_dir must be
                     # the same directory as the catalog for the glob to find it.
@@ -1714,7 +1823,7 @@ NNW
                         reference_cat=None,  # triggers GAIA-DR3
                         output_dir=str(sci_gaia_dir),
                         config={
-                            "DISTORT_DEGREES": 3,
+                            "DISTORT_DEGREES": _sci_feasible_degree,
                             "CROSSID_RADIUS": "5.0",
                             "POSITION_MAXERR": "1.0",
                             "SN_THRESHOLDS": "3.0,1000.0",
@@ -1907,15 +2016,29 @@ NNW
                     )
                     fwhm_ref_pix = ref_hdr_fwhm
 
+            # Recompute undersampling flags using the header FWHM when available.
+            # The SExtractor-measured FWHM can be inflated even after point-source
+            # quality cuts (e.g. ZTF science FWHM=2.03 px but SExtractor reports
+            # 2.78 px).  Using the inflated value causes LANCZOS3 to be selected
+            # for undersampled data, introducing ringing artifacts that distort
+            # the PSF and produce dipoles in the subtraction.
+            sci_fwhm_for_undersample = (
+                sci_hdr_fwhm if (sci_hdr_fwhm and sci_hdr_fwhm > 0) else fwhm_sci_pix
+            )
+            ref_fwhm_for_undersample = (
+                ref_hdr_fwhm if (ref_hdr_fwhm and ref_hdr_fwhm > 0) else fwhm_ref_pix
+            )
+            sci_is_undersampled = sci_fwhm_for_undersample < undersampled_thresh
+            ref_is_undersampled = ref_fwhm_for_undersample < undersampled_thresh
+
             fwhm_sci_arcsec = fwhm_sci_pix * sci_pix_scale
             fwhm_ref_arcsec = fwhm_ref_pix * ref_pix_scale
             self.logger.info(
-                "FWHM: sci=%.2f px (%.2f\") ref=%.2f px (%.2f\")",
+                "FWHM: sci=%.2f px (%.2f\") ref=%.2f px (%.2f\")  "
+                "[header: sci=%.2f ref=%.2f  undersampled: sci=%s ref=%s]",
                 fwhm_sci_pix, fwhm_sci_arcsec,
                 fwhm_ref_pix, fwhm_ref_arcsec,
-            )
-            self.logger.debug(
-                "Undersampling: sci=%s ref=%s",
+                sci_hdr_fwhm or -1, ref_hdr_fwhm or -1,
                 sci_is_undersampled, ref_is_undersampled,
             )
 
@@ -2394,24 +2517,33 @@ NNW
             ref_undersampled = (
                 ref_is_undersampled if ref_is_undersampled is not None else False
             )
-            sci_fwhm_valid = fwhm_sci_pix is not None and np.isfinite(fwhm_sci_pix)
-            ref_fwhm_valid = fwhm_ref_pix is not None and np.isfinite(fwhm_ref_pix)
+            # Use header-based FWHM for threshold checks — SExtractor FWHM can be
+            # inflated by extended sources, causing undersampled images to be
+            # treated as well-sampled (see BUG 92).
+            sci_fwhm_resample = (
+                sci_hdr_fwhm if (sci_hdr_fwhm and sci_hdr_fwhm > 0) else fwhm_sci_pix
+            )
+            ref_fwhm_resample = (
+                ref_hdr_fwhm if (ref_hdr_fwhm and ref_hdr_fwhm > 0) else fwhm_ref_pix
+            )
+            sci_fwhm_valid = sci_fwhm_resample is not None and np.isfinite(sci_fwhm_resample)
+            ref_fwhm_valid = ref_fwhm_resample is not None and np.isfinite(ref_fwhm_resample)
 
             # Use three-tier strategy for combined resampling
             # Default to most conservative method if either image needs it
-            if sci_fwhm_valid and fwhm_sci_pix < 1.5:
+            if sci_fwhm_valid and sci_fwhm_resample < 1.5:
                 combined_resampling_method = "BILINEAR"
-                reason = f"science FWHM < 1.5 px ({fwhm_sci_pix:.2f})"
-            elif ref_fwhm_valid and fwhm_ref_pix < 1.5:
+                reason = f"science FWHM < 1.5 px ({sci_fwhm_resample:.2f})"
+            elif ref_fwhm_valid and ref_fwhm_resample < 1.5:
                 combined_resampling_method = "BILINEAR"
-                reason = f"reference FWHM < 1.5 px ({fwhm_ref_pix:.2f})"
+                reason = f"reference FWHM < 1.5 px ({ref_fwhm_resample:.2f})"
             elif sci_undersampled or ref_undersampled:
                 combined_resampling_method = "LANCZOS2"
                 reason = "undersampled image(s) present"
-            elif sci_fwhm_valid and fwhm_sci_pix < undersampled_thresh:
+            elif sci_fwhm_valid and sci_fwhm_resample < undersampled_thresh:
                 combined_resampling_method = "LANCZOS2"
                 reason = f"science FWHM < {undersampled_thresh} px"
-            elif ref_fwhm_valid and fwhm_ref_pix < undersampled_thresh:
+            elif ref_fwhm_valid and ref_fwhm_resample < undersampled_thresh:
                 combined_resampling_method = "LANCZOS2"
                 reason = f"reference FWHM < {undersampled_thresh} px"
             else:
@@ -2444,12 +2576,8 @@ NNW
 
                 # Copy SCAMP-corrected reference image to aligned location
                 aligned_ref = output_dir / f"aligned_ref_{Path(reference_image).stem}.fits"
-                # Use corrected science if Phase 1 ran, otherwise original
-                aligned_sci = (
-                    Path(sci_image_for_swarp)
-                    if science_first_astrometry
-                    else Path(science_image)
-                )
+                # Science image is never modified — use the copy as-is
+                aligned_sci = Path(sci_image_for_swarp)
 
                 # Copy reference image, then apply SCAMP .head WCS to its header
                 shutil.copy2(ref_image_copy, aligned_ref)
@@ -2539,26 +2667,12 @@ NNW
                     "IMAGE_SIZE": f"{ref_output_width},{ref_output_height}",
                 }
                 
-                # Phase 1 already corrected science; skip re-SWarping it here.
-                if science_first_astrometry:
-                    aligned_sci = Path(sci_image_for_swarp)
-                    self.logger.info("Native-scale: using Phase 1 science (skip SWarp)")
-                    swarp_res_sci = {"corrected_image": str(aligned_sci)}
-                else:
-                    self.logger.debug("Running SWarp on science image (native scale)...")
-                    swarp_res_sci = self.run_swarp(
-                        [str(sci_image_for_swarp)],
-                        scamp_results=None,
-                        output_dir=str(resample_dir_sci),
-                        config=swarp_config_sci,
-                        no_weight_maps=False,
-                    )
-                    if swarp_res_sci is None:
-                        self.logger.info("SWarp failed. Falling back to AstroAlign.")
-                        return self._align_fallback_reproject_then_astroalign(
-                            science_image, reference_image, output_dir
-                        )
-                    aligned_sci = Path(swarp_res_sci["corrected_image"])
+                # Never resample the science image — it defines the target grid.
+                # SWarp resampling degrades the PSF and can introduce sub-pixel
+                # shifts that produce dipoles in the subtracted image.
+                aligned_sci = Path(sci_image_for_swarp)
+                swarp_res_sci = {"corrected_image": str(aligned_sci)}
+                self.logger.info("Native-scale: science image used as-is (no SWarp)")
 
                 self.logger.debug("Running SWarp on reference image (native scale)...")
                 swarp_res_ref = self.run_swarp(
@@ -2586,103 +2700,59 @@ NNW
                     )
                     
             else:
-                # "common_grid" (default): Both images resampled to science grid
-                # Each image uses its own optimal resampling method for PSF preservation
-                resample_dir_sci = resample_dir / "sci"
+                # "common_grid" (default): Reference resampled onto science grid
+                # Science image is NEVER modified — it defines the target grid.
+                # Reference is SCAMP-corrected then reprojected onto the science
+                # WCS grid (preserving rotation, CD matrix, SIP distortion).
                 resample_dir_ref = resample_dir / "ref"
-                resample_dir_sci.mkdir(parents=True, exist_ok=True)
                 resample_dir_ref.mkdir(parents=True, exist_ok=True)
 
-                # Build separate configs for science and reference with their optimal methods
-                swarp_config_sci = {
-                    **swarp_config,
-                    "RESAMPLING_TYPE": sci_resampling_method,
-                    "COMBINE": "Y",
-                    "COMBINE_TYPE": "MEDIAN",
-                }
-                swarp_config_ref = {
-                    **swarp_config,
-                    "RESAMPLING_TYPE": ref_resampling_method,
-                    "COMBINE": "Y",
-                    "COMBINE_TYPE": "MEDIAN",
-                }
+                # Science image passes through untouched
+                aligned_sci = Path(sci_image_for_swarp)
+                swarp_res_sci = {"corrected_image": str(aligned_sci)}
+                self.logger.info("Common-grid: science image used as-is (untouched)")
 
-                self.logger.info(
-                    "Common-grid: using independent resampling methods "
-                    "(sci=%s, ref=%s)",
-                    sci_resampling_method,
-                    ref_resampling_method,
+                # --- Apply SCAMP .head to reference header, then reproject ---
+                aligned_ref = self._scamp_reproject_reference_to_science(
+                    ref_image_copy=ref_image_copy,
+                    sci_image_path=str(aligned_sci),
+                    output_dir=str(resample_dir_ref),
+                    reproject_cfg=iy.get("alignment", {}) if isinstance(iy, dict) else {},
                 )
 
-                # Phase 1 already corrected science; skip re-SWarping it here.
-                if science_first_astrometry:
-                    aligned_sci = Path(sci_image_for_swarp)
-                    self.logger.info("Common-grid: using Phase 1 science (skip SWarp)")
-                    swarp_res_sci = {"corrected_image": str(aligned_sci)}
-                else:
-                    self.logger.debug(
-                        "Running SWarp on science image with %s...",
-                        sci_resampling_method,
+                if aligned_ref is None:
+                    # Reproject failed — fall back to SWarp
+                    self.logger.warning(
+                        "SCAMP+reproject failed for reference. "
+                        "Falling back to SWarp resampling."
                     )
-                    swarp_res_sci = self.run_swarp(
-                        [str(sci_image_for_swarp)],
+                    swarp_config_ref = {
+                        **swarp_config,
+                        "RESAMPLING_TYPE": ref_resampling_method,
+                        "COMBINE": "Y",
+                        "COMBINE_TYPE": "MEDIAN",
+                    }
+                    swarp_res_ref = self.run_swarp(
+                        [str(ref_image_copy)],
                         scamp_results=None,
-                        output_dir=str(resample_dir_sci),
-                        config=swarp_config_sci,
+                        output_dir=str(resample_dir_ref / "swarp_fallback"),
+                        config=swarp_config_ref,
                         no_weight_maps=False,
                     )
-                    if swarp_res_sci is None:
-                        self.logger.info("SWarp failed. Falling back to AstroAlign.")
+                    if swarp_res_ref is None:
+                        self.logger.info("SWarp fallback also failed. Trying AstroAlign.")
                         return self._align_fallback_reproject_then_astroalign(
                             science_image, reference_image, output_dir
                         )
-                    aligned_sci = Path(swarp_res_sci["corrected_image"])
-
-                self.logger.debug(
-                    "Running SWarp on reference image with %s...",
-                    ref_resampling_method,
-                )
-                swarp_res_ref = self.run_swarp(
-                    [str(ref_image_copy)],
-                    scamp_results=None,
-                    output_dir=str(resample_dir_ref),
-                    config=swarp_config_ref,
-                    no_weight_maps=False,
-                )
-
-                if swarp_res_ref is None:
-                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
-                    )
-
-                # With COMBINE=Y the output is the co-added file (output.fits)
-                aligned_ref = Path(swarp_res_ref["corrected_image"])
-
-                # Reproject reference to match science grid if methods differed
-                if sci_resampling_method != ref_resampling_method:
-                    self.logger.info(
-                        "Reprojecting reference to match science grid "
-                        "(different resampling methods used)"
-                    )
-                    try:
-                        aligned_ref = self._reproject_to_match(
-                            str(aligned_ref),
-                            str(aligned_sci),
-                            str(resample_dir_ref / "reference_reprojected.fits"),
-                        )
-                    except Exception as e:
-                        self.logger.warning(
-                            "Reproject failed (%s), using SWarp output directly", e
-                        )
+                    aligned_ref = Path(swarp_res_ref["corrected_image"])
 
                 if not aligned_sci.exists() or not aligned_ref.exists():
                     self.logger.info(
-                        "Could not find SWarp output images. Falling back to AstroAlign."
+                        "Could not find aligned output images. Falling back to AstroAlign."
                     )
                     return self._align_fallback_reproject_then_astroalign(
-                    science_image, reference_image, output_dir
-                )
+                        science_image, reference_image, output_dir
+                    )
 
             # Copy to the expected resampled_dir location for downstream logic
             resampled_dir = resample_dir
@@ -2787,6 +2857,7 @@ NNW
                                     "rms_y": rms_dy,
                                     "n_matched": n_matched_verify,
                                 }
+
                             else:
                                 self.logger.info(
                                     "Alignment verification: only %d matches (< 3); skipping.",
@@ -3543,6 +3614,234 @@ NNW
                 return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
             except Exception:
                 return sci_data.shape[1], sci_data.shape[0], float(sci_wcs.wcs.crval[0]), float(sci_wcs.wcs.crval[1])
+
+    def _scamp_reproject_reference_to_science(
+        self,
+        ref_image_copy: Path,
+        sci_image_path: str,
+        output_dir: str,
+        reproject_cfg: Optional[Dict] = None,
+    ) -> Optional[Path]:
+        """
+        Apply SCAMP .head WCS correction to reference, then reproject onto
+        the science image's exact WCS pixel grid.
+
+        This replaces SWarp for common_grid alignment.  Unlike SWarp which
+        creates a new TAN grid (different CRPIX, no rotation, scalar pixel
+        scale), reproject maps directly from the SCAMP-corrected reference
+        WCS to the science WCS — preserving rotation, CD matrix, non-square
+        pixels, and SIP distortion exactly.
+
+        Science image is never touched.  Only the reference is resampled.
+
+        Parameters
+        ----------
+        ref_image_copy : Path
+            Path to the reference image copy (with .head file next to it).
+        sci_image_path : str
+            Path to the science image (defines target WCS grid).
+        output_dir : str
+            Directory for the reprojected reference output.
+        reproject_cfg : dict, optional
+            Alignment config from input_yaml (reproject_method, interp_order, etc.).
+
+        Returns
+        -------
+        Optional[Path]
+            Path to reprojected reference, or None on failure.
+        """
+        if not HAS_REPROJECT:
+            self.logger.warning(
+                "reproject package not available; cannot use SCAMP+reproject path."
+            )
+            return None
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "reference_reprojected.fits"
+
+        try:
+            # --- Read science WCS (the target grid) ---
+            with fits.open(sci_image_path, memmap=False) as h_sci:
+                sci_header = h_sci[0].header
+                sci_data = h_sci[0].data
+                if sci_data is None or sci_data.size == 0:
+                    self.logger.error("Science image has no data for reproject target.")
+                    return None
+                sci_shape = sci_data.shape
+                sci_wcs = get_wcs(sci_header)
+                if sci_wcs is None:
+                    self.logger.error("Science image has no valid WCS for reproject target.")
+                    return None
+
+            # --- Read reference data and header ---
+            with fits.open(str(ref_image_copy), memmap=False) as h_ref:
+                ref_data = np.asarray(h_ref[0].data, dtype=float)
+                ref_header = h_ref[0].header.copy()
+
+            if ref_data is None or ref_data.size == 0:
+                self.logger.error("Reference image has no data for reproject.")
+                return None
+
+            # --- Apply SCAMP .head to reference header (in memory) ---
+            head_file = Path(ref_image_copy).with_suffix(".head")
+            if head_file.exists():
+                self.logger.info("Applying SCAMP .head WCS to reference for reproject")
+                try:
+                    from wcs import _normalize_projection_codes
+                    scamp_header = fits.Header.fromtextfile(str(head_file))
+                    scamp_header = _normalize_projection_codes(scamp_header, inplace=False)
+
+                    # Remove old WCS from reference header, then copy SCAMP WCS in
+                    ref_header = remove_wcs_from_header(ref_header)
+                    _wcs_prefixes = (
+                        "CRPIX", "CRVAL", "CTYPE", "CD", "PC", "CDELT",
+                        "CROTA", "PV", "LONPOLE", "LATPOLE", "EQUINOX",
+                        "WCSNAME", "CUNIT", "WCSAXES", "PROJP", "LTV",
+                        "LTM", "RADECSYS", "RADESYS", "RADYSYS",
+                        "LONGPOLE", "TNX", "SIP_",
+                    )
+                    _wcs_stems = ("A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_")
+                    for key in scamp_header:
+                        if key in ("NAXIS", "NAXIS1", "NAXIS2"):
+                            continue
+                        is_wcs = any(key.startswith(p) for p in _wcs_prefixes)
+                        if not is_wcs and "_" in key:
+                            stem = key.split("_")[0] + "_"
+                            is_wcs = stem in _wcs_stems and key.startswith(stem.rstrip("_"))
+                        if is_wcs:
+                            ref_header[key] = scamp_header[key]
+                except Exception as e:
+                    self.logger.warning(
+                        "Failed to apply SCAMP .head to reference header (%s). "
+                        "Reproject will use reference's original WCS.", e
+                    )
+            else:
+                self.logger.warning(
+                    "No SCAMP .head found at %s; reproject will use reference's original WCS.",
+                    head_file,
+                )
+
+            # Build WCS from the SCAMP-corrected reference header
+            ref_wcs_corrected = get_wcs(ref_header)
+            if ref_wcs_corrected is None:
+                self.logger.error("Could not build WCS from SCAMP-corrected reference header.")
+                return None
+
+            # --- Read reproject config ---
+            cfg = reproject_cfg or {}
+            req_method = str(cfg.get("reproject_method", "adaptive")).lower().strip()
+            interp_order = str(cfg.get("reproject_interp_order", "bicubic")).lower().strip()
+            use_parallel = bool(cfg.get("reproject_parallel", False))
+            roundtrip = bool(cfg.get("reproject_roundtrip_coords", True))
+            conserve_flux = bool(cfg.get("reproject_adaptive_conserve_flux", False))
+            center_jacobian = bool(cfg.get("reproject_adaptive_center_jacobian", False))
+
+            _interp_map = {
+                "nearest": "nearest-neighbor", "nearest-neighbor": "nearest-neighbor",
+                "nn": "nearest-neighbor",
+                "bilinear": "bilinear", "linear": "bilinear", "1": "bilinear",
+                "biquadratic": "biquadratic", "2": "biquadratic",
+                "bicubic": "bicubic", "cubic": "bicubic", "3": "bicubic",
+            }
+            interp_order_norm = _interp_map.get(interp_order, "bilinear")
+
+            # --- Run reproject: reference → science grid ---
+            all_methods = ("adaptive", "interp", "exact")
+            if req_method in all_methods:
+                fallbacks = [req_method] + [m for m in all_methods if m != req_method]
+            else:
+                fallbacks = ["adaptive", "interp", "exact"]
+
+            aligned_ref = None
+            footprint = None
+            used_method = None
+            last_exc = None
+
+            for m in fallbacks:
+                try:
+                    if m == "adaptive":
+                        if reproject_adaptive is None:
+                            continue
+                        aligned_ref, footprint = reproject_adaptive(
+                            (ref_data, ref_wcs_corrected),
+                            sci_wcs,
+                            shape_out=sci_shape,
+                            roundtrip_coords=roundtrip,
+                            parallel=use_parallel,
+                            conserve_flux=conserve_flux,
+                            center_jacobian=center_jacobian,
+                        )
+                    elif m == "interp":
+                        aligned_ref, footprint = reproject_interp(
+                            (ref_data, ref_wcs_corrected),
+                            sci_wcs,
+                            shape_out=sci_shape,
+                            order=interp_order_norm,
+                            roundtrip_coords=roundtrip,
+                        )
+                    else:  # exact
+                        try:
+                            from reproject import reproject_exact
+                        except ImportError:
+                            continue
+                        aligned_ref, footprint = reproject_exact(
+                            (ref_data, ref_wcs_corrected),
+                            sci_wcs,
+                            shape_out=sci_shape,
+                            parallel=use_parallel,
+                        )
+                    used_method = m
+                    break
+                except Exception as _e:
+                    last_exc = _e
+                    self.logger.debug("Reproject (%s) failed: %s", m, _e)
+
+            if used_method is None or aligned_ref is None or footprint is None:
+                self.logger.warning(
+                    "All reproject methods failed for reference: %s", last_exc
+                )
+                return None
+
+            # --- Post-process: mask non-footprint pixels, write output ---
+            aligned_ref = np.asarray(aligned_ref, dtype=float)
+            fp_mask = footprint.astype(bool)
+            n_footprint = int(np.sum(fp_mask))
+            n_total = int(fp_mask.size)
+            if n_footprint == 0:
+                self.logger.warning(
+                    "Reproject footprint has zero coverage — WCS mismatch."
+                )
+                return None
+            if n_footprint < n_total * 0.5:
+                self.logger.warning(
+                    "Reproject footprint coverage low: %d/%d pixels (%.1f%%).",
+                    n_footprint, n_total, 100.0 * n_footprint / n_total,
+                )
+            aligned_ref[~fp_mask] = np.nan
+
+            # Build output header: science WCS keywords copied into ref header
+            from functions import copy_wcs_from_header, safe_fits_write
+            out_header = ref_header.copy()
+            out_header = remove_wcs_from_header(out_header)
+            copy_wcs_from_header(sci_header, out_header)
+            out_header["NAXIS1"] = sci_shape[1]
+            out_header["NAXIS2"] = sci_shape[0]
+            out_header["REPROJ"] = (True, "Reprojected to science grid via SCAMP+reproject")
+
+            safe_fits_write(str(output_path), aligned_ref, out_header)
+
+            self.logger.info(
+                "SCAMP+reproject succeeded (method=%s, coverage=%.1f%%): %s",
+                used_method, 100.0 * n_footprint / n_total, output_path,
+            )
+            return output_path
+
+        except Exception as e:
+            self.logger.warning(
+                "SCAMP+reproject failed: %s", e
+            )
+            return None
 
     def _reproject_to_match(
         self, source_image: str, target_image: str, output_path: str

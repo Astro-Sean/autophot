@@ -146,8 +146,8 @@ default_input:
     perform_emcee_fitting_s2n: 0 # float --- If >0, run emcee PSF/MAG fitting when source S/N is below this value.
     check_inverted_image: False # bool --- If True, also fit target on image multiplied by -1 to detect negative PSF dips (fading sources in template subtraction).
     aperture_n_jobs: 1 # int --- Worker processes for aperture photometry loops (per-image). 1 = serial; >1 can speed up large source lists.
-    emcee_nwalkers: 20 # int --- Number of emcee walkers.
-    emcee_nsteps: 5000 # int --- Total emcee steps (per walker).
+    emcee_nwalkers: 32 # int --- Number of emcee walkers (minimum 2*ndim recommended; 32 balances quality and speed).
+    emcee_nsteps: null # int|null --- Total emcee steps (per walker). null enables adaptive convergence stopping (runs until autocorrelation time < 50*tau, capped at 50000 steps).
     emcee_delta: null # float|null --- Proposal scale / step size override (implementation-specific).
     emcee_burnin_frac: 0.3 # float --- Fraction of samples to discard as burn-in.
     emcee_thin: 10 # int --- Thinning factor for saved chain samples.
@@ -155,6 +155,8 @@ default_input:
     emcee_min_autocorr_N: 100 # int --- Minimum chain length (in steps) before autocorr is estimated.
     emcee_batch_steps: 100 # int --- Steps per batch when running emcee in batches.
     emcee_jitter_scale: 0.01 # float --- Small jitter applied to initial walker positions (relative scale).
+    emcee_threads: 1 # int --- Number of parallel threads for emcee (1=serial). Set to 2-4 for faster MCMC on multi-core machines.
+    emcee_store_samples: False # bool --- If True, store full MCMC chains in fit_info for corner-plot diagnostics (uses ~2MB per source).
     optimum_radius_min_keep_abs: 8 # int --- Minimum number of stars to retain in optimum-radius source selection (adaptive rescue if strict filters over-prune).
     optimum_radius_min_keep_frac: 0.25 # float --- Minimum retained fraction (of prefiltered stars) in optimum-radius selection.
     optimum_radius_use_moffat_cog: False # bool --- If True, derive per-source optimum radius from analytic Moffat encircled-energy inversion instead of empirical CoG interpolation.
@@ -412,7 +414,7 @@ default_input:
     gaia_cache_ttl_days: 30 # int --- Time-to-live for cached GAIA catalogs (days). GAIA-DR3 is static, so long TTLs are safe.
     preserve_scamp_logs: False # bool --- If True, keep SCAMP log files on failure for debugging. Useful when diagnosing astrometric alignment issues.
     method: sfft # str --- Subtraction backend (sfft default; hotpants or zogy optional where available).
-    kernel_order: 0 # int --- Polynomial order for the SFFT kernel flux scaling model.
+    kernel_order: null # int|null --- Polynomial order for the SFFT kernel flux scaling model. If null, auto-selects based on PSF FWHM difference and matched-source count (0=constant, 1=linear, 2=quadratic, 3=cubic). Set to 0 to force constant kernel.
     kernel_hw_fwhm_multiplier: 2.5 # float|null --- Multiplier applied to the FWHM of the convolution kernel when sizing the subtraction kernel half-width. If null, uses 2.0 (recommended). The kernel FWHM is computed as sqrt(FWHM_broad^2 - FWHM_narrow^2); kernel_hw = ceil(multiplier * FWHM_conv). Lower values (e.g. 1.5) give a tighter kernel; higher (e.g. 3.0) allow more fitting freedom at the cost of computation. For undersampled images (FWHM < 2 px), the multiplier is automatically boosted by 1.5x to capture extended PSF wings.
     kernel_hw_override: null # int|null --- If set, directly overrides the auto-computed kernel half-width in pixels. Use for debugging or when automatic sizing is wrong.
     download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).
@@ -464,8 +466,6 @@ default_input:
     sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
     sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
     sfft_min_prior_sources: 3 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT will perform its own source matching.
-    sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
-    sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
 
     inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).
     inpaint_method: biharmonic # str --- Inpainting algorithm name (e.g. biharmonic).
