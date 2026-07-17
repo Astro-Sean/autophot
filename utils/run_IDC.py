@@ -2819,16 +2819,26 @@ NNW
                                 ref_sources["ycentroid"].data,
                             ])
 
-                            tree = cKDTree(ref_xy)
-                            dists, idxs = tree.query(sci_xy, k=1)
+                            # Mutual nearest-neighbor matching: a sci source
+                            # matches a ref source only if each is the other's
+                            # closest neighbor.  This eliminates false matches
+                            # that artificially lower the measured offset.
+                            tree_ref = cKDTree(ref_xy)
+                            tree_sci = cKDTree(sci_xy)
 
-                            match_tol = 3.0 * _det_fwhm
-                            good = dists < match_tol
+                            d_sr, i_sr = tree_ref.query(sci_xy, k=1)
+                            d_rs, i_rs = tree_sci.query(ref_xy, k=1)
+
+                            idx_s = np.arange(len(sci_xy), dtype=int)
+                            mutual = (i_rs[i_sr] == idx_s) & np.isfinite(d_sr)
+
+                            match_tol = 2.0 * _det_fwhm
+                            good = mutual & (d_sr < match_tol)
                             n_matched_verify = int(good.sum())
 
                             if n_matched_verify >= 3:
-                                dx = sci_xy[good, 0] - ref_xy[idxs[good], 0]
-                                dy = sci_xy[good, 1] - ref_xy[idxs[good], 1]
+                                dx = sci_xy[good, 0] - ref_xy[i_sr[good], 0]
+                                dy = sci_xy[good, 1] - ref_xy[i_sr[good], 1]
 
                                 from astropy.stats import sigma_clip as _sc_verify
                                 dx_clipped = _sc_verify(dx, sigma=2.5, maxiters=3)
@@ -2880,30 +2890,36 @@ NNW
                 alignment_metadata = {}
 
             # Post-SWarp quality gate: reject alignment if systematic offset
-            # is too large.  An offset > 0.5*FWHM produces visible dipoles in
-            # the subtracted image.  Use 0.5*FWHM as the threshold with a
-            # minimum of 2.0 px so that even broad PSFs don't tolerate
-            # multi-pixel systematic offsets.
-            max_acceptable_offset = max(0.5 * fwhm_sci_pix, 2.0)
+            # or RMS is too large.  A small median offset with large RMS
+            # indicates widespread misalignment (e.g., bad SCAMP solution or
+            # WCS distortion mismatch) that the median hides.
+            max_acceptable_offset = max(0.5 * fwhm_sci_pix, 1.0)
+            max_acceptable_rms = max(1.0 * fwhm_sci_pix, 1.5)
             if alignment_metadata and "offset_x" in alignment_metadata:
                 _off = np.sqrt(
                     alignment_metadata["offset_x"] ** 2
                     + alignment_metadata["offset_y"] ** 2
                 )
+                _rms = np.sqrt(
+                    alignment_metadata.get("rms_x", 0) ** 2
+                    + alignment_metadata.get("rms_y", 0) ** 2
+                )
                 _n_match = alignment_metadata.get("n_matched", 0)
-                if _n_match >= 5 and _off > max_acceptable_offset:
+                if _n_match >= 5 and (_off > max_acceptable_offset or _rms > max_acceptable_rms):
                     self.logger.warning(
-                        "Post-SWarp alignment offset %.2f px > %.2f px threshold "
-                        "(%d matches). Falling back to reproject/AstroAlign.",
-                        _off, max_acceptable_offset, _n_match,
+                        "Post-SWarp alignment rejected: offset=%.2f px (> %.2f px) "
+                        "or RMS=%.2f px (> %.2f px) (%d matches). "
+                        "Falling back to reproject/AstroAlign.",
+                        _off, max_acceptable_offset, _rms, max_acceptable_rms, _n_match,
                     )
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
                 else:
                     self.logger.info(
-                        "Post-SWarp alignment accepted: offset=%.2f px (< %.2f px threshold, %d matches).",
-                        _off, max_acceptable_offset, _n_match,
+                        "Post-SWarp alignment accepted: offset=%.2f px (< %.2f px), "
+                        "RMS=%.2f px (< %.2f px) (%d matches).",
+                        _off, max_acceptable_offset, _rms, max_acceptable_rms, _n_match,
                     )
 
             # Log SWarp output WCS for both images so alignment can be verified.
@@ -3437,19 +3453,28 @@ NNW
                             _ref_src["xcentroid"].data,
                             _ref_src["ycentroid"].data,
                         ])
-                        _tree = cKDTree(_ref_xy)
-                        _dists, _idxs = _tree.query(_sci_xy, k=1)
-                        _good = _dists < 3.0 * _det_fwhm
+                        # Mutual nearest-neighbor matching for robust verification
+                        _tree_ref = cKDTree(_ref_xy)
+                        _tree_sci = cKDTree(_sci_xy)
+                        _d_sr, _i_sr = _tree_ref.query(_sci_xy, k=1)
+                        _d_rs, _i_rs = _tree_sci.query(_ref_xy, k=1)
+                        _idx_s = np.arange(len(_sci_xy), dtype=int)
+                        _mutual = (_i_rs[_i_sr] == _idx_s) & np.isfinite(_d_sr)
+                        _good = _mutual & (_d_sr < 2.0 * _det_fwhm)
                         if _good.sum() >= 3:
-                            _dx = _sci_xy[_good, 0] - _ref_xy[_idxs[_good], 0]
-                            _dy = _sci_xy[_good, 1] - _ref_xy[_idxs[_good], 1]
+                            _dx = _sci_xy[_good, 0] - _ref_xy[_i_sr[_good], 0]
+                            _dy = _sci_xy[_good, 1] - _ref_xy[_i_sr[_good], 1]
                             _med_dx = float(np.median(_dx))
                             _med_dy = float(np.median(_dy))
+                            _rms_dx = float(np.std(_dx))
+                            _rms_dy = float(np.std(_dy))
                             _total = float(np.sqrt(_med_dx**2 + _med_dy**2))
+                            _rms = float(np.sqrt(_rms_dx**2 + _rms_dy**2))
                             self.logger.info(
                                 "Post-reproject alignment: offset=(%.3f, %.3f) px, "
-                                "total=%.3f px (%d matches)",
-                                _med_dx, _med_dy, _total, int(_good.sum()),
+                                "RMS=(%.3f, %.3f) px, total=%.3f px, rms=%.3f px (%d matches)",
+                                _med_dx, _med_dy, _rms_dx, _rms_dy, _total, _rms,
+                                int(_good.sum()),
                             )
             except Exception as _ve:
                 self.logger.debug("Post-reproject verification failed (non-fatal): %s", _ve)
