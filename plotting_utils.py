@@ -50,15 +50,15 @@ RANSAC_PLOT_COLORS = {
 DIVERGENT_PALETTE = {
     'negative': '#313695',  # Dark blue for negative deviations
     'neutral': '#FFFFFF',  # White for neutral/center
-    'positive': '#B30000',  # Dark red for positive deviations
-    # Source-check marker colors (requested: red/green/blue)
-    'target': '#D62728',    # red
-    'psf': '#2CA02C',       # green
-    'reference': '#1F77B4', # blue
+    'positive': '#FF8C00',  # Orange for positive deviations
+    # Source-check marker colors — distinct primary colors for readability
+    'target': '#FF0000',    # Red
+    'psf': '#00AA00',       # Green
+    'reference': '#0000FF', # Blue
     'fwhm_low': '#313695',  # Dark blue for low FWHM
     'fwhm_mid': '#F7F7F7',  # Light gray for mid FWHM
     'fwhm_high': '#B30000',  # Dark red for high FWHM
-    'cross': '#CC79A7',  # Reddish purple for cross markers
+    'cross': '#000000',  # Black for cross markers (high contrast on grayscale)
 }
 
 # Consistent marker sizes

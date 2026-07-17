@@ -1028,7 +1028,7 @@ class Plot:
                         lower_left,
                         square_size,
                         square_size,
-                        edgecolor="red",
+                        edgecolor=get_divergent_color('reference') if get_divergent_color else '#0000FF',
                         facecolor="none",
                         label="Reference Sources",
                         zorder=1,
@@ -1046,8 +1046,8 @@ class Plot:
                     norm_fwhm = Normalize(
                         vmin=np.nanmin(fwhm_values), vmax=np.nanmax(fwhm_values)
                     )
-                    # Red colormap for FWHM scaling.
-                    cmap = plt.get_cmap("Reds")
+                    # Orange colormap for FWHM scaling (distinct from red target and blue catalog).
+                    cmap = plt.get_cmap("Oranges")
 
                     # Create a ScalarMappable for the colorbar
                     sm = ScalarMappable(norm=norm_fwhm, cmap=cmap)
