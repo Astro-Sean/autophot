@@ -3800,6 +3800,35 @@ NNW
             conserve_flux = bool(cfg.get("reproject_adaptive_conserve_flux", False))
             center_jacobian = bool(cfg.get("reproject_adaptive_center_jacobian", False))
 
+            # --- Auto-enable center_jacobian for large rotation differences ---
+            # The default Jacobian approximation (center_jacobian=False) is
+            # inaccurate when the rotation between input and output is large
+            # (>30 deg), causing sub-pixel misregistration that varies across
+            # the field.  This is especially problematic for ~180 deg flips.
+            try:
+                if not center_jacobian and rot_diff > 30.0:
+                    center_jacobian = True
+                    self.logger.info(
+                        "Large rotation (%.1f deg) — enabling center_jacobian for "
+                        "more accurate reproject_adaptive resampling.",
+                        rot_diff,
+                    )
+            except Exception:
+                pass
+
+            # --- Warn about TPV/SIP projection mismatch ---
+            try:
+                sci_ctype1 = str(sci_wcs.wcs.ctype[0]).upper()
+                ref_ctype1 = str(ref_wcs_corrected.wcs.ctype[0]).upper()
+                if "SIP" in sci_ctype1 and "TPV" in ref_ctype1:
+                    self.logger.warning(
+                        "Projection mismatch: science uses SIP distortion but SCAMP "
+                        "produced TPV for reference. Reproject will convert between "
+                        "models — residual distortion errors of ~0.5 px are possible."
+                    )
+            except Exception:
+                pass
+
             _interp_map = {
                 "nearest": "nearest-neighbor", "nearest-neighbor": "nearest-neighbor",
                 "nn": "nearest-neighbor",
@@ -4862,6 +4891,45 @@ NNW
             gaia_temp_dir = None
 
         distortion = self._parse_scamp_xml(xml_file)
+
+        # Fallback: parse SCAMP log for residual info if XML parsing failed
+        if distortion is None or (
+            distortion.get("astrometric_rms_arcsec") is None
+            and distortion.get("n_matched_stars") is None
+        ):
+            try:
+                import re
+                _log_rms = None
+                _log_nstars = None
+                for line in log_content.splitlines():
+                    if "Astrometric residual" in line and "RMS" in line:
+                        m = re.search(r'RMS[:\s]+([\d.]+)\s*(?:arcsec|")?', line, re.I)
+                        if m:
+                            _log_rms = float(m.group(1))
+                    if "matched" in line.lower() and "star" in line.lower():
+                        m = re.search(r'(\d+)\s+matched', line, re.I)
+                        if m:
+                            _log_nstars = int(m.group(1))
+                if _log_rms is not None or _log_nstars is not None:
+                    self.logger.info(
+                        "SCAMP log fallback: residual RMS=%.4f\", matched stars=%d",
+                        _log_rms if _log_rms is not None else -1,
+                        _log_nstars if _log_nstars is not None else -1,
+                    )
+                    if distortion is None:
+                        distortion = {
+                            "distortion_coeffs": {},
+                            "wcs_params": {},
+                            "astrometric_rms_arcsec": _log_rms,
+                            "n_matched_stars": _log_nstars,
+                        }
+                    else:
+                        if distortion.get("astrometric_rms_arcsec") is None:
+                            distortion["astrometric_rms_arcsec"] = _log_rms
+                        if distortion.get("n_matched_stars") is None:
+                            distortion["n_matched_stars"] = _log_nstars
+            except Exception:
+                pass
 
         # Map each input catalog stem to its output .head file.
         # SCAMP names .head files after the catalog stem (same as the FITS stem).
