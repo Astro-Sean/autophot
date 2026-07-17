@@ -379,16 +379,17 @@ default_input:
     report_all_limits: true # bool --- Include all S/N limits in output tables and CALIB files.
 
   alignment:
-    # reproject_method: "adaptive" uses local area resampling (better for varying distortion at edges) - most accurate
-    # reproject_method: "interp" uses global interpolation (faster)
-    reproject_method: adaptive # str --- Reprojection strategy: "adaptive" (edge-optimized) or "interp" (fast).
+    # reproject_method: "exact" uses exact pixel-area resampling (most geometrically accurate, handles all WCS distortions exactly)
+    # reproject_method: "adaptive" uses local area resampling with kernel (faster, good for large mosaics)
+    # reproject_method: "interp" uses global interpolation (fastest, least accurate)
+    reproject_method: exact # str --- Reprojection strategy: "exact" (most accurate), "adaptive" (fast), "interp" (fastest).
     reproject_roundtrip_coords: True # bool --- Coordinate round-trip check (matches reproject default; False can mis-register).
-    # bicubic preserves sharp edges better than bilinear; use "lanczos" for maximum sharpness if available
-    reproject_interp_order: bicubic # str|int --- Interpolation: bicubic (sharp edges), bilinear (smooth), nearest (fast).
-    reproject_parallel: False # bool --- Enable parallel reprojection where supported (faster on large mosaics if CPU-bound; set True when memory allows).
+    # bicubic preserves sharp edges better than bilinear; used by interp fallback only
+    reproject_interp_order: bicubic # str|int --- Interpolation order for interp fallback: bicubic (sharp), bilinear (smooth), nearest (fast).
+    reproject_parallel: True # bool --- Enable parallel reprojection (recommended for exact method on large images).
     # reproject_adaptive only: library default is False; True rescales pixels for flux conservation (can blur when scales match).
     reproject_adaptive_conserve_flux: False # bool --- Adaptive reprojection: conserve flux by rescaling pixels (can blur slightly when scales match).
-    reproject_adaptive_center_jacobian: False # bool --- More accurate Jacobian at grid points; slower (non-smooth WCS).
+    reproject_adaptive_center_jacobian: False # bool --- More accurate Jacobian at grid points; auto-enabled for large rotations (>30 deg).
     reproject_max_rms_pixels: 0.90 # float --- Maximum acceptable reproject alignment score (median mutual-pair residual, pixels) before fallback.
     plot_source_check_distortion_vectors: True # bool --- Overlay catalog->detected residual vectors on Sourcecheck plot.
     plot_source_check_distortion_grid_map: False # bool --- Overlay gridded distortion-magnitude heatmap (pixels) on Sourcecheck plot.
