@@ -3415,6 +3415,7 @@ NNW
             # Reproject trusts both WCS blindly — independently plate-solved
             # images can disagree by several pixels.  Log the residual so
             # downstream stages know the alignment quality.
+            reproject_metadata = {}
             try:
                 from photutils.detection import DAOStarFinder
                 from astropy.stats import sigma_clipped_stats as _scs
@@ -3470,12 +3471,44 @@ NNW
                             _rms_dy = float(np.std(_dy))
                             _total = float(np.sqrt(_med_dx**2 + _med_dy**2))
                             _rms = float(np.sqrt(_rms_dx**2 + _rms_dy**2))
+                            _n_match_reproj = int(_good.sum())
                             self.logger.info(
                                 "Post-reproject alignment: offset=(%.3f, %.3f) px, "
                                 "RMS=(%.3f, %.3f) px, total=%.3f px, rms=%.3f px (%d matches)",
                                 _med_dx, _med_dy, _rms_dx, _rms_dy, _total, _rms,
-                                int(_good.sum()),
+                                _n_match_reproj,
                             )
+
+                            # Quality gate: reject if offset or RMS too large.
+                            # This causes the cascade to fall through to AstroAlign.
+                            _fwhm_gate = max(
+                                float(self.input_yaml.get("fwhm", 3.0))
+                                if hasattr(self, "input_yaml") else 3.0,
+                                2.5,
+                            )
+                            _max_off = max(0.5 * _fwhm_gate, 1.0)
+                            _max_rms = max(1.0 * _fwhm_gate, 1.5)
+                            if _n_match_reproj >= 5 and (_total > _max_off or _rms > _max_rms):
+                                self.logger.warning(
+                                    "Reproject alignment rejected: offset=%.2f px (> %.2f px) "
+                                    "or RMS=%.2f px (> %.2f px) (%d matches). "
+                                    "Falling through to next alignment method.",
+                                    _total, _max_off, _rms, _max_rms, _n_match_reproj,
+                                )
+                                return None
+                            else:
+                                self.logger.info(
+                                    "Reproject alignment accepted: offset=%.2f px (< %.2f px), "
+                                    "RMS=%.2f px (< %.2f px) (%d matches).",
+                                    _total, _max_off, _rms, _max_rms, _n_match_reproj,
+                                )
+                                reproject_metadata = {
+                                    "offset_x": _med_dx,
+                                    "offset_y": _med_dy,
+                                    "rms_x": _rms_dx,
+                                    "rms_y": _rms_dy,
+                                    "n_matched": _n_match_reproj,
+                                }
             except Exception as _ve:
                 self.logger.debug("Post-reproject verification failed (non-fatal): %s", _ve)
 
@@ -3483,6 +3516,7 @@ NNW
                 "science_aligned": science_image,
                 "reference_aligned": str(aligned_reference_fpath),
                 "alignment_method": f"reproject/{used_method}",
+                **(reproject_metadata if reproject_metadata else {}),
             }
         except Exception as e:
             self.logger.info("Reproject alignment failed: %s", e)
