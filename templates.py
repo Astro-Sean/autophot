@@ -2521,6 +2521,28 @@ class Templates:
                 )
                 if result.template_path is None:
                     return None, None
+
+                # Quality gate: check reproject alignment against configured threshold.
+                # Reproject trusts both WCS blindly — independently plate-solved images
+                # can disagree by several pixels.  If the median offset exceeds the
+                # configured threshold, reject and fall through to the next method.
+                max_rms = float(
+                    self.input_yaml.get("alignment", {}).get(
+                        "reproject_max_rms_pixels", 0.90
+                    )
+                )
+                if (
+                    result.median_offset_px is not None
+                    and np.isfinite(result.median_offset_px)
+                    and result.median_offset_px > max_rms
+                ):
+                    logger.warning(
+                        "Reproject alignment offset %.3f px > %.3f px threshold; "
+                        "rejecting and falling back to next alignment method.",
+                        result.median_offset_px, max_rms,
+                    )
+                    return None, None
+
                 # Note: reproject only modifies the template, not the science image
                 # The science image WCS is unchanged, so target coordinates don't need updating
                 method_used = "reproject"
@@ -3362,14 +3384,13 @@ class Templates:
                             random_state=42,
                         )
                         ransac.fit(X_snr, y_snr)
-                        # Map inliers back to full array
-                        inliers_full = np.zeros(len(y), dtype=bool)
-                        inliers_full[snr_mask] = ransac.inlier_mask_
-                        inliers = inliers_full
-                        if inliers.any():
-                            slope = ransac.estimator_.slope_
-                            intercept = ransac.estimator_.intercept_
-                            method_used = "RANSAC (S/N > 5)"
+                        # Apply the fitted model to the FULL catalog to identify
+                        # all inliers, not just the high-S/N subset used for fitting.
+                        slope = ransac.estimator_.slope_
+                        intercept = ransac.estimator_.intercept_
+                        residuals_all = y - (slope * X.ravel() + intercept)
+                        inliers = np.abs(residuals_all) < thresh
+                        method_used = "RANSAC (S/N > 5 fit, all-source inliers)"
                     else:
                         # Fallback to all sources if not enough high S/N sources
                         ransac = RANSACRegressor(
@@ -4125,15 +4146,14 @@ class Templates:
                         fwhm_conv,
                     )
 
-                # Half-width must comfortably contain the kernel and floor at the broad PSF
+                # Half-width must comfortably contain the kernel and floor at the broad PSF.
+                # ker_hw_from_conv >= ceil(fwhm_conv) since _mult_effective >= 1.0, so no
+                # separate Nyquist floor is needed.
                 ker_hw_from_conv = int(np.ceil(_mult_effective * fwhm_conv))
                 ker_hw_floor = int(np.ceil(fwhm_broad))
-                
-                # Ensure at least Nyquist sampling for the kernel (2 pixels per FWHM)
-                nyquist_hw = int(np.ceil(fwhm_conv)) if fwhm_conv > 0 else KER_HW_MIN
-                
-                ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_from_conv, ker_hw_floor, nyquist_hw)))
-                
+
+                ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_from_conv, ker_hw_floor)))
+
                 logger.info(
                     "Kernel sizing:\n  FWHM_sci: %.2f px\n"
                     "  FWHM_ref: %.2f px\n"
@@ -4143,15 +4163,20 @@ class Templates:
                     "  Effective multiplier: %.2f\n"
                     "  hw_conv: %d px\n"
                     "  hw_floor: %d px\n"
-                    "  hw_nyquist: %d px\n"
                     "  kernel_hw: %d px (clamped to %d-%d)",
                     fwhm_sci, fwhm_ref, fwhm_broad, fwhm_conv,
                     _mult, _mult_effective,
-                    ker_hw_from_conv, ker_hw_floor, nyquist_hw,
+                    ker_hw_from_conv, ker_hw_floor,
                     ker_hw, KER_HW_MIN, KER_HW_MAX,
                 )
 
-            scale = max(ker_hw, 5)
+            # SFFT kernel half-width: always use the FWHM-based ker_hw.
+            # The caller's `scale` (pipeline source-detection cutout size, typically
+            # 5*FWHM) is NOT the kernel half-width — it is kept for the HOTPANTS
+            # path below, which uses it as the kernel half-width by convention.
+            sfft_kernel_hw = max(ker_hw, 5)
+            if scale is None or int(scale) <= 0:
+                scale = sfft_kernel_hw
             target_location = [
                 (self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"])
             ]
@@ -4460,7 +4485,7 @@ class Templates:
                     masked_centers,
                     matching_sources,
                     kernel_order,
-                    scale,
+                    sfft_kernel_hw,
                     method,
                     science_fwhm,
                     template_fwhm,
@@ -4873,8 +4898,9 @@ class Templates:
                 return f"[{coords}]"
 
             def _build_sfft_cmd(run_excluded, run_matching, template_fp, diff_fp):
-                # If fewer than 5 pipeline-matched sources, let SFFT perform matching.
-                min_sources_for_prior = 5
+                # If fewer than min_prior_sources pipeline-matched sources, let SFFT
+                # perform matching.  Must match run_sfft.py's MIN_PRIOR_SOURCES.
+                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 3) or 3)
                 if len(run_matching) < min_sources_for_prior:
                     logger.info(
                         "Fewer than %d pipeline-matched sources (%d); letting SFFT perform source matching.",

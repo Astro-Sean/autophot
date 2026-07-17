@@ -450,8 +450,9 @@ class MCMCFitter:
 
     Key implementation details
     --------------------------
-    * model.copy() in log_likelihood: each walker evaluation uses an isolated
-      model copy so concurrent parameter assignments don't cross-contaminate.
+    * Save/restore in log_likelihood: each walker evaluation saves the model
+      parameters, sets new ones, evaluates, then restores — avoiding a deep
+      model.copy() per likelihood call (the dominant MCMC cost).
     * Parameter-aware jitter in _jitter_within_bounds: position parameters
       (x_0, y_0) get an absolute pixel jitter ``scale``, while flux/shape
       parameters get a relative jitter ``scale * max(|p0|, 1)``.  This prevents
@@ -488,6 +489,8 @@ class MCMCFitter:
         gain: float = 1.0,
         readnoise: float = 0.0,
         background_rms=None,
+        threads: int = 1,
+        store_samples: bool = False,
     ):
         self.nwalkers = int(nwalkers)
         self.nsteps = int(nsteps) if nsteps is not None else None
@@ -498,6 +501,8 @@ class MCMCFitter:
         self.min_autocorr_N = min_autocorr_N
         self.batch_steps = int(batch_steps)
         self.jitter_scale = float(jitter_scale)
+        self.threads = int(threads)
+        self.store_samples = bool(store_samples)
         self.random_state = (
             np.random.RandomState(random_state)
             if random_state is not None
@@ -556,13 +561,16 @@ class MCMCFitter:
                 except Exception:
                     return -np.inf
 
-        # Use a local copy to avoid mutating the shared model instance across
-        # concurrent walker evaluations (emcee calls log_posterior with different
-        # params vectors and model.parameters= is an in-place mutation).
-        local_model = model.copy()
-        local_model.parameters = params
-        mu = local_model(x, y)
+        # Save/restore parameters on the shared model instead of deep-copying
+        # the entire model object per likelihood evaluation (called nwalkers *
+        # nsteps times).  This is safe because emcee evaluates log_posterior
+        # sequentially within each process (multiprocessing workers each get
+        # their own pickled model copy).
+        saved_params = model.parameters.copy()
+        model.parameters = params
+        mu = model(x, y)
         resid = data - mu
+        model.parameters = saved_params
 
         if weights is not None:
             var = var / np.clip(weights, 1e-12, None) ** 2
@@ -724,13 +732,25 @@ class MCMCFitter:
             (emcee.moves.StretchMove(a=2.0), 0.7),
             (emcee.moves.DEMove(), 0.3),
         ]
-        self.sampler = emcee.EnsembleSampler(
-            self.nwalkers,
-            ndim,
-            self.log_posterior,
+        sampler_kwargs = dict(
+            nwalkers=self.nwalkers,
+            ndim=ndim,
+            log_prob_fn=self.log_posterior,
             args=(model, x, y, data, weights, noise_variance),
             moves=_moves,
         )
+        # Enable multiprocessing pool when threads > 1
+        pool = None
+        if self.threads > 1:
+            try:
+                from multiprocessing import Pool
+                pool = Pool(processes=self.threads)
+                sampler_kwargs["pool"] = pool
+                log.debug("[MCMC] Using %d parallel threads", self.threads)
+            except Exception as exc:
+                log.warning("[MCMC] Could not create pool with %d threads: %s; falling back to serial", self.threads, exc)
+
+        self.sampler = emcee.EnsembleSampler(**sampler_kwargs)
 
         total_steps = 0
         max_steps = (
@@ -795,6 +815,14 @@ class MCMCFitter:
 
         if not 0.15 <= acc <= 0.7:
             log.warning("[MCMC] Suboptimal acceptance; consider tuning delta/nwalkers")
+
+        # Clean up multiprocessing pool if used
+        if pool is not None:
+            try:
+                pool.close()
+                pool.join()
+            except Exception:
+                pass
 
     # ---- __call__ ---------------------------------------------------------
 
@@ -952,8 +980,9 @@ class MCMCFitter:
             "p84": per84.copy(),
         }
         self.fit_info["per_source"].append(record)
-        self.fit_info["samples"][self.counter] = chain
-        self.fit_info["log_prob"] = logp
+        if self.store_samples:
+            self.fit_info["samples"][self.counter] = chain
+            self.fit_info["log_prob"] = logp
         # Release the raw chain and log-prob arrays now that summary stats are
         # extracted — the full chain can be ~8 MB per source (50 walkers × 5000
         # steps × 4 params) and accumulates across all sources in a batch.
@@ -1010,7 +1039,8 @@ class PoissonLikelihoodFitter:
         self.max_step_cuts = int(max_step_cuts)
         self.max_position_step = float(max_position_step)
         self.max_total_position_change = float(max_total_position_change)
-        self.fit_info = {"iterations": 0, "final_lnL": np.nan, "converged": False}
+        self.fit_info = {"iterations": 0, "final_lnL": np.nan, "converged": False, "per_source": []}
+        self.counter = 0
     
     def _log_likelihood(self, data, model):
         """
@@ -1046,7 +1076,8 @@ class PoissonLikelihoodFitter:
         d2lnL_dnbar2 = -1.0 / n_bar**2
         
         # Numerical derivatives of model w.r.t. parameters
-        epsilon = 1e-8
+        # Use relative epsilon for parameters with very different scales
+        # (e.g. x_0 ~ 500, flux ~ 10000)
         n_params = len(params)
         dmodel_dparams = []
 
@@ -1055,11 +1086,12 @@ class PoissonLikelihoodFitter:
 
         try:
             for i in range(n_params):
+                eps_i = max(1e-8, 1e-8 * abs(params[i]))
                 params_plus = params.copy()
-                params_plus[i] += epsilon
+                params_plus[i] += eps_i
                 model.parameters = params_plus
                 model_plus = model(x, y)
-                dmodel_dparams.append((model_plus - model_0) / epsilon)
+                dmodel_dparams.append((model_plus - model_0) / eps_i)
         finally:
             # Always restore original parameters, even if exception occurs
             model.parameters = params
@@ -1263,6 +1295,26 @@ class PoissonLikelihoodFitter:
                 log.warning(f"[PoissonFitter] Invalid covariance matrix, errors not set")
         except Exception as e:
             log.warning(f"[PoissonFitter] Failed to compute parameter errors: {e}")
+
+        # Store per-source record for consistent error propagation in fit()
+        param_errors = getattr(model, 'stds', None)
+        if param_errors is not None:
+            param_errors = np.asarray(param_errors, float)
+            p16 = params - param_errors
+            p84 = params + param_errors
+        else:
+            p16 = params.copy()
+            p84 = params.copy()
+        record = {
+            "src_index": self.counter,
+            "param_names": list(param_names),
+            "p16": p16.copy(),
+            "p50": params.copy(),
+            "p84": p84.copy(),
+        }
+        self.fit_info["per_source"].append(record)
+        self.fit_info["param_errs"] = param_errors if param_errors is not None else np.full_like(params, np.nan)
+        self.counter += 1
 
         return model
 
@@ -2404,7 +2456,7 @@ class PSF:
                 df = df.sort_values("SNR", ascending=False).reset_index(drop=True)
 
             ndimage = self.create_nddata_with_fitting_weights(
-                image=self.image.copy(),
+                image=self.image,
                 gain=float(gain),
                 read_noise=float(self.input_yaml.get("read_noise", 0.0)),
                 background_rms=background_rms,
@@ -3353,8 +3405,6 @@ class PSF:
                 f"{pixel_scale:.3f}" if has_pixel_scale else "unknown",
             )
 
-        epsf_model_copy = epsf_model.copy()
-
         # NDData creation already converts to float and allocates a new array in electrons,
         # so avoid an extra self.image.copy() here (saves memory for large frames).
         ndimage = self.create_nddata_with_fitting_weights(
@@ -3384,11 +3434,9 @@ class PSF:
                 ny, nx = image_data.shape
                 
                 # Get annulus parameters (same as used for PSF fitting)
-                phot_cfg = self.input_yaml.get("photometry", {})
                 crowded_field = bool(phot_cfg.get("crowded_field", False))
                 gap_fwhm = float(phot_cfg.get("annulus_gap_fwhm", 0.75 if not crowded_field else 0.5))
                 width_fwhm = float(phot_cfg.get("annulus_width_fwhm", 2.0 if not crowded_field else 1.5))
-                fwhm = float(self.input_yaml.get("fwhm", 3.0))
                 
                 try:
                     ap_size = float(phot_cfg.get("aperture_radius", aperture_radius))
@@ -3647,7 +3695,7 @@ class PSF:
         # We approximate C ~ 1/(pi * fwhm^2) for a normalized Gaussian-like PSF
         gain = float(resolve_gain_e_per_adu(None, self.input_yaml))
         read_noise = float(self.input_yaml.get("read_noise", 0.0))
-        fwhm = float(self.input_yaml.get("fwhm", 3.0))
+        # fwhm already read at top of fit(); reuse it here.
         # Approximate PSF normalization constant C ~ 1/(pi * fwhm^2)
         # Clamp to reasonable bounds to avoid numerical issues
         fwhm_clamped = max(1.0, min(fwhm, 50.0))  # Prevent extreme FWHM values
@@ -3734,7 +3782,7 @@ class PSF:
                 delta = float(emcee_delta) if emcee_delta is not None else xy_bounds
                 emcee_nsteps = phot_cfg.get("emcee_nsteps", 5000)
                 emcee_fitter = MCMCFitter(
-                    nwalkers=int(phot_cfg.get("emcee_nwalkers", 20)),
+                    nwalkers=int(phot_cfg.get("emcee_nwalkers", 32)),
                     nsteps=int(emcee_nsteps) if emcee_nsteps is not None else None,
                     delta=delta,
                     burnin_frac=float(phot_cfg.get("emcee_burnin_frac", 0.3)),
@@ -3749,6 +3797,8 @@ class PSF:
                     gain=float(resolve_gain_e_per_adu(None, self.input_yaml)),
                     readnoise=float(self.input_yaml.get("read_noise", 0.0)),
                     background_rms=bkgrmsval,
+                    threads=int(phot_cfg.get("emcee_threads", 1)),
+                    store_samples=bool(phot_cfg.get("emcee_store_samples", False)),
                 )
             except Exception as exc:
                 log_warning_from_exception(
@@ -3790,6 +3840,9 @@ class PSF:
         def _psf_fit(mask, inner_r, outer_r, fit_shape, fitter, use_emcee_this_tier, nd_override=None):
             if not np.any(mask):
                 return None, None
+            # Copy the ePSF model per call to prevent cross-tier/cross-retry
+            # parameter contamination if the fitter mutates the model in-place.
+            epsf_model_for_call = epsf_model.copy()
             # For the target (single source), keep the PSF local background estimator aligned with
             # aperture photometry (annulus median). MMM can behave differently on
             # structured difference-image residuals and produce large AP-vs-PSF flux offsets.
@@ -3845,7 +3898,7 @@ class PSF:
                 # Add SourceGrouper for consistent handling of overlapping sources
                 # Improves both accuracy and performance in crowded fields
                 psfphot = PSFPhotometry(
-                    psf_model=epsf_model_copy,
+                    psf_model=epsf_model_for_call,
                     fitter=fitter,
                     fitter_maxiters=1000,
                     fit_shape=fit_shape,
@@ -3864,7 +3917,7 @@ class PSF:
                     fwhm,
                 )
                 psfphot = IterativePSFPhotometry(
-                    psf_model=epsf_model_copy,
+                    psf_model=epsf_model_for_call,
                     fitter=fitter,
                     fitter_maxiters=100,
                     fit_shape=fit_shape,
@@ -3960,7 +4013,7 @@ class PSF:
                         )
                         try:
                             psfphot_retry = PSFPhotometry(
-                                psf_model=epsf_model_copy,
+                                psf_model=epsf_model_for_call,
                                 fitter=fitter,
                                 fitter_maxiters=1500,
                                 fit_shape=fit_shape_retry,
@@ -4046,7 +4099,6 @@ class PSF:
         psfphot_last = None
         # In crowded fields, push the background annulus further out from the core
         # and narrow its width so it samples background rather than neighbour PSF wings.
-        phot_cfg = self.input_yaml.get("photometry", {})
         crowded_field = bool(phot_cfg.get("crowded_field", False))
 
         # Use configurable annulus radii (same defaults as aperture.py)
@@ -4154,10 +4206,21 @@ class PSF:
             # _bootstrap_flux_e is indexed by idx_keep; map it to idx_out.
             bootstrap_negative = np.zeros(len(combined), dtype=bool)
             try:
-                for i, row_idx in enumerate(idx_out):
-                    pos = np.where(idx_keep == row_idx)[0]
-                    if len(pos) > 0 and np.isfinite(_bootstrap_flux_e[pos[0]]) and _bootstrap_flux_e[pos[0]] < 0:
-                        bootstrap_negative[i] = True
+                # Vectorized: use searchsorted to map idx_out -> idx_keep positions
+                sort_order = np.argsort(idx_keep)
+                sorted_keep = idx_keep[sort_order]
+                positions = np.searchsorted(sorted_keep, idx_out)
+                valid = positions < len(idx_keep)
+                matched = np.zeros(len(idx_out), dtype=bool)
+                matched[valid] = sorted_keep[positions[valid]] == idx_out[valid]
+                keep_positions = np.full(len(idx_out), -1, dtype=int)
+                keep_positions[matched] = sort_order[positions[matched]]
+                has_match = matched & (keep_positions >= 0)
+                if np.any(has_match):
+                    boot_vals = _bootstrap_flux_e[keep_positions[has_match]]
+                    bootstrap_negative[has_match] = (
+                        np.isfinite(boot_vals) & (boot_vals < 0)
+                    )
             except Exception as _exc:
                 log.debug("Bootstrap-flux inverted trigger failed: %s", _exc)
 

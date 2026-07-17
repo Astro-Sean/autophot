@@ -4487,13 +4487,33 @@ def run_photometry():
                         pass
 
                 ## Calculate the distance between the original pixel position and the centroid
-                distance = np.sqrt(
-                    (template_sources["x_pix"] - template_sources["x_centroid"]) ** 2
-                    + (template_sources["y_pix"] - template_sources["y_centroid"]) ** 2
-                )
+                dx = template_sources["x_pix"] - template_sources["x_centroid"]
+                dy = template_sources["y_pix"] - template_sources["y_centroid"]
+                distance = np.sqrt(dx ** 2 + dy ** 2)
 
-                # Filter sources where the centroid is well-aligned with the original pixel position
-                well_aligned_mask = distance < POSITION_TOLERANCE
+                # A systematic alignment offset (e.g. 3px uniform shift from WCS
+                # residual) affects ALL sources equally.  Filtering on absolute
+                # distance would remove every source even though they are valid —
+                # just uniformly shifted.  Instead, measure the median systematic
+                # offset and filter only on residual deviations from it.
+                if np.any(np.isfinite(distance)) and len(distance) >= 5:
+                    med_dx = float(np.nanmedian(dx))
+                    med_dy = float(np.nanmedian(dy))
+                    systematic_offset = np.sqrt(med_dx ** 2 + med_dy ** 2)
+                    # Residual distance after removing systematic component
+                    residual_dx = dx - med_dx
+                    residual_dy = dy - med_dy
+                    residual_distance = np.sqrt(residual_dx ** 2 + residual_dy ** 2)
+                else:
+                    med_dx = 0.0
+                    med_dy = 0.0
+                    systematic_offset = 0.0
+                    residual_distance = distance.copy()
+
+                # Filter sources where the residual deviation is within tolerance.
+                # This preserves sources that share a common systematic offset while
+                # removing sources with truly bad centroids (blends, cosmic rays, etc.)
+                well_aligned_mask = residual_distance < POSITION_TOLERANCE
 
                 # Log diagnostic statistics before filtering
                 if np.any(np.isfinite(distance)):
@@ -4501,8 +4521,12 @@ def run_photometry():
                     median_offset = float(np.nanmedian(distance))
                     std_offset = float(np.nanstd(distance))
                     logging.info(
-                        "Centroid alignment: mean=%.3f, median=%.3f, std=%.3f px (tolerance=%.1f px)",
-                        mean_offset, median_offset, std_offset, POSITION_TOLERANCE
+                        "Centroid alignment: mean=%.3f, median=%.3f, std=%.3f px, "
+                        "systematic offset=(%.3f, %.3f) px (%.3f total), "
+                        "residual mean=%.3f px (tolerance=%.1f px)",
+                        mean_offset, median_offset, std_offset,
+                        med_dx, med_dy, systematic_offset,
+                        float(np.nanmean(residual_distance)), POSITION_TOLERANCE
                     )
 
                 # If alignment is poor and we reject everything, adaptively relax
@@ -4511,7 +4535,7 @@ def run_photometry():
                 # when the WCS/distortion model is slightly mismatched.
                 if well_aligned_mask.sum() < 5 and np.any(np.isfinite(distance)):
                     relaxed = float(max(POSITION_TOLERANCE, 0.75 * float(ImageFWHM)))
-                    well_aligned_mask = distance < relaxed
+                    well_aligned_mask = residual_distance < relaxed
                     logging.info(
                         "Centroid alignment yielded <5 sources; relaxing centroid tolerance to %.2f px",
                         relaxed,
@@ -4542,11 +4566,12 @@ def run_photometry():
                 if n_removed > 0:
                     logging.info(
                         f"Removed {n_removed} sources due to centroid misalignment "
-                        f"(tolerance: {POSITION_TOLERANCE} pixels)"
+                        f"(residual tolerance: {POSITION_TOLERANCE} pixels, "
+                        f"systematic offset: {systematic_offset:.3f} px)"
                     )
                 else:
                     mean_offset = (
-                        np.nanmean(distance[well_aligned_mask])
+                        np.nanmean(residual_distance[well_aligned_mask])
                         if np.any(well_aligned_mask)
                         else 0.0
                     )
@@ -4895,9 +4920,9 @@ def run_photometry():
                 if os.path.exists(sfft_matched_sources):
                     os.remove(sfft_matched_sources)
 
-                # Compute combined scale for subtraction: max(science_scale, template_scale)
-                # ensures the kernel covers the broader PSF of both images, matching the
-                # approach used in run_IDC.py for alignment.
+                # Compute combined pipeline scale (source-detection cutout size, typically
+                # 5*FWHM).  This is passed to subtract() for HOTPANTS kernel sizing.
+                # SFFT computes its own kernel half-width from FWHM inside subtract().
                 from utils.run_sex import scale_multiplier_from_config, clamp_scale_from_config
                 sci_scale = input_yaml.get("scale")
                 template_fwhm = template_header.get("FWHM", 3.0)
@@ -4905,7 +4930,7 @@ def run_photometry():
                 template_scale = int(clamp_scale_from_config(input_yaml, scale_mult * template_fwhm))
                 combined_scale = max(sci_scale, template_scale) if sci_scale is not None else template_scale
                 logging.info(
-                    "Subtraction kernel scale: science=%d template=%d -> combined=%d px",
+                    "Subtraction pipeline scale (HOTPANTS): science=%d template=%d -> combined=%d px",
                     sci_scale if sci_scale is not None else -1,
                     template_scale,
                     combined_scale,
