@@ -2130,24 +2130,18 @@ class Catalog:
                     f"Missing required columns in catalog: {missing_columns}"
                 )
 
-            # Sigma-clip sky background
-            if "sky" in catalog.columns:
-                noise_mask = sigma_clip(
-                    np.abs(catalog["sky"].values), sigma=5, maxiters=10
-                )
-                if np.any(noise_mask.mask):
-                    logger.info(
-                        f"Masking {np.sum(noise_mask.mask)} sources with irregular backgrounds"
-                    )
-                    catalog = catalog[~noise_mask.mask]
-
-            # Threshold filtering
+            # NOTE: sky sigma-clipping and threshold filtering are already done
+            # by Zeropoint.clean() before this method is called.  Repeating them
+            # here with different parameters (threshold=5 vs 3.0) causes additional
+            # source loss.  Only apply a threshold cut if it wasn't already applied.
             if "threshold" in catalog.columns:
                 threshold_cut = catalog["threshold"] < threshold
-                logger.info(
-                    f"Removing {np.sum(threshold_cut)} sources with threshold < {threshold}"
-                )
-                catalog = catalog[~threshold_cut]
+                n_thresh = int(np.sum(threshold_cut))
+                if n_thresh > 0:
+                    logger.info(
+                        f"Removing {n_thresh} sources with threshold < {threshold}"
+                    )
+                    catalog = catalog[~threshold_cut]
 
             # Calculate instrumental magnitude
             flux = catalog["flux_AP"].values
@@ -2159,43 +2153,38 @@ class Catalog:
             catalog_mag = catalog[use_filter].values
             catalog_mag_err = catalog[f"{use_filter}_err"].values
 
-            # Filter out high-error points
-            error_mask = np.sqrt(catalog_mag_err**2 + inst_mag_err**2) < 0.32
+            # Filter out high-error points (0.5 mag matches _prepare_catalog threshold)
+            error_mask = np.sqrt(catalog_mag_err**2 + inst_mag_err**2) < 0.5
             clean_catalog = catalog[error_mask].copy()
 
             if len(clean_catalog) < 2:
                 logger.warning("Too few points left after error cut.")
                 return clean_catalog, fit_params, saturation_range
 
-            # Calculate S/N and select continuous high S/N subset
-            # This avoids scattered low S/N inliers that break the linearity fit
+            # Calculate S/N for high-S/N subset selection.
+            # The high-S/N subset is used ONLY to fit the RANSAC linear model;
+            # the model is then applied to the FULL catalog to identify all
+            # inliers (including fainter but valid sources).
             flux = clean_catalog["flux_AP"].values
             flux_err = clean_catalog["flux_AP_err"].values
             # Add protection for division by zero
             flux_err_safe = np.maximum(flux_err, 1e-10)
-            snr_values = np.abs(flux) / flux_err_safe  # Renamed to avoid shadowing imported snr function
+            snr_values = np.abs(flux) / flux_err_safe
 
-            # Find a high S/N threshold that gives a continuous bright subset
-            # Start with S/N > 50 for very high quality, then relax if needed
+            # Find a high S/N threshold that gives enough sources for RANSAC
             min_snr_thresholds = [100, 75, 50, 30, 20, 10]
             selected_indices = None
             for min_snr in min_snr_thresholds:
                 high_snr_mask = snr_values >= min_snr
                 n_high_snr = np.sum(high_snr_mask)
-                if n_high_snr >= 15:  # Need at least 15 sources for robust fit
+                if n_high_snr >= 10:  # Need at least 10 sources for RANSAC fit
                     selected_indices = high_snr_mask
                     logger.info(
                         f"Selected {n_high_snr} high S/N sources (SNR >= {min_snr}) for linearity fit"
                     )
                     break
 
-            if selected_indices is not None and np.sum(selected_indices) >= 10:
-                clean_catalog = clean_catalog[selected_indices].copy()
-                flux = clean_catalog["flux_AP"].values
-                flux_err = clean_catalog["flux_AP_err"].values
-                snr_values = snr_values[selected_indices]
-
-            # Add safety check for division by zero
+            # Compute instrumental magnitudes for the FULL clean catalog
             flux_safe = np.maximum(flux, 1e-10)
             inst_mag_linear = -2.5 * np.log10(flux_safe)
             inst_mag_err_linear = 2.5 / np.log(10) * (flux_err / flux_safe)
@@ -2207,59 +2196,76 @@ class Catalog:
             ConstrainedSlopeRegressor = PenalisedSlopeRegressor
 
             # Fit with RANSAC
-            if len(inst_mag_linear) > 1:
+            # Use high-S/N subset for fitting if available, then apply the
+            # fitted model to the FULL catalog to identify all inliers.
+            X_full = inst_mag_linear.reshape(-1, 1)
+            y_full = catalog_mag_linear
+
+            if selected_indices is not None and np.sum(selected_indices) >= 10:
+                X_fit = X_full[selected_indices]
+                y_fit = y_full[selected_indices]
+                logger.info(
+                    f"RANSAC fitting on {np.sum(selected_indices)} high-S/N sources, "
+                    f"then applying to {len(X_full)} full catalog sources"
+                )
+            else:
+                X_fit = X_full
+                y_fit = y_full
+
+            if len(X_fit) > 1:
                 base_estimator = ConstrainedSlopeRegressor(
                     slope_constraint=1.0, slope_tolerance=0  # Keep slope strictly fixed to 1
                 )
                 # Adaptive residual threshold based on data scatter
-                initial_mad = np.median(np.abs(catalog_mag_linear - np.median(catalog_mag_linear)))
-                ransac_residual_threshold = max(3.0 * initial_mad, 0.1)  # More lenient threshold for better fit
+                initial_mad = np.median(np.abs(y_fit - np.median(y_fit)))
+                ransac_residual_threshold = max(3.0 * initial_mad, 0.1)
                 ransac = RANSACRegressor(
                     estimator=base_estimator,
                     residual_threshold=ransac_residual_threshold,
-                    max_trials=2000,  # More trials for better convergence
-                    min_samples=0.25,  # Require slightly more samples for stability
+                    max_trials=2000,
+                    min_samples=0.25,
                 )
-                X = inst_mag_linear.reshape(-1, 1)
-                y = catalog_mag_linear
-                ransac.fit(X, y)
+                ransac.fit(X_fit, y_fit)
                 slope = ransac.estimator_.slope_
                 intercept = ransac.estimator_.intercept_
-                inlier_mask = ransac.inlier_mask_
 
-                # Post-RANSAC sigma clipping to remove remaining outliers
+                # Apply the fitted model to the FULL catalog to get inliers
+                residuals_full = y_full - (slope * X_full.flatten() + intercept)
+                inlier_mask = np.abs(residuals_full) < ransac_residual_threshold
+
+                # Post-RANSAC sigma clipping on the full-catalog inliers
+                # Use sigma=3.0 (was 2.5) for stability with small samples
                 if np.sum(inlier_mask) > 5:
-                    inlier_X = X[inlier_mask]
-                    inlier_y = y[inlier_mask]
-                    residuals = inlier_y - (slope * inlier_X.flatten() + intercept)
-                    # Apply sigma clipping on residuals
-                    clipped = sigma_clip(residuals, sigma=2.5, maxiters=5)
-                    # Keep only points within sigma-clipped range
+                    inlier_residuals = residuals_full[inlier_mask]
+                    clip_sigma = 3.0 if np.sum(inlier_mask) < 30 else 2.5
+                    clipped = sigma_clip(inlier_residuals, sigma=clip_sigma, maxiters=5)
                     residual_mask = np.asarray(~clipped.mask, dtype=bool).flatten()
-                    # Ensure shapes match before assignment
                     if residual_mask.shape[0] == np.sum(inlier_mask):
                         inlier_mask[inlier_mask] = residual_mask
                     else:
                         logger.warning(f"Shape mismatch in residual masking: {residual_mask.shape[0]} vs {np.sum(inlier_mask)}, skipping sigma clip update")
                     n_sigma_outliers = np.sum(~residual_mask)
                     if n_sigma_outliers > 0:
-                        logger.info(f"Post-RANSAC sigma clipping removed {n_sigma_outliers} additional outliers")
+                        logger.info(f"Post-RANSAC sigma clipping (sigma={clip_sigma}) removed {n_sigma_outliers} additional outliers")
 
-                # Recompute intercept on the final inlier set so the plotted fit line
-                # matches the points that survive post-RANSAC clipping.
+                # Recompute intercept on the final inlier set
                 if np.sum(inlier_mask) > 1 and np.isfinite(slope):
                     try:
                         intercept = float(
                             np.nanmedian(
-                                y[inlier_mask] - slope * X[inlier_mask].flatten()
+                                y_full[inlier_mask] - slope * X_full[inlier_mask].flatten()
                             )
                         )
                     except Exception:
                         pass
 
+                logger.info(
+                    f"RANSAC: {np.sum(inlier_mask)}/{len(X_full)} inliers "                    f"(fit on {len(X_fit)}, applied to {len(X_full)}), "                    f"ZP={intercept:.3f}"
+                )
+
                 # Calculate intercept error
-                inlier_X = X[inlier_mask]
-                inlier_y = y[inlier_mask]
+                inlier_X = X_full[inlier_mask]
+                inlier_y = y_full[inlier_mask]
                 residuals = inlier_y - (slope * inlier_X.flatten() + intercept)
                 residual_std = np.std(residuals, ddof=1)  # Use sample std (unbiased)
                 n_points = len(inlier_X)
