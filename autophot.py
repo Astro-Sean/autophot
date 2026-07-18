@@ -2002,6 +2002,26 @@ class AutomatedPhotometry:
                         _unique_cats = [str(_use_cat).strip()]
                     else:
                         _unique_cats = []
+
+                    _available_catalogs = [
+                        "gaia", "pan_starrs", "sdss", "apass",
+                        "2mass", "legacy", "refcat", "skymapper",
+                    ]
+
+                    if not _unique_cats:
+                        _log("")
+                        _log("=" * 70)
+                        _log("  No photometric catalog selected.")
+                        _log(f"  Target: RA={backup_yaml['target_ra']:.6f} deg, "
+                             f"Dec={backup_yaml['target_dec']:.6f} deg")
+                        _log("")
+                        _log("  A reference catalog is required for photometric calibration.")
+                        _log("  Set 'catalog.use_catalog' in your YAML to one of:")
+                        for _alt in _available_catalogs:
+                            _log(f"    - {_alt}")
+                        _log("=" * 70)
+                        _log("")
+                        sys.exit(0)
                     _target_coords = SkyCoord(
                         backup_yaml["target_ra"],
                         backup_yaml["target_dec"],
@@ -2044,6 +2064,32 @@ class AutomatedPhotometry:
                                         "catalog_custom_fpath", None
                                     ),
                                 )
+                        except RuntimeError as _ce:
+                            if "0 sources" in str(_ce):
+                                _alternatives = [
+                                    c for c in _available_catalogs
+                                    if c not in [n.lower() for n in _unique_cats]
+                                ]
+                                _log("")
+                                _log("=" * 70)
+                                _log(f"  Catalog '{_cat_name}' returned 0 sources in this field.")
+                                _log(f"  Target: RA={backup_yaml['target_ra']:.6f} deg, "
+                                     f"Dec={backup_yaml['target_dec']:.6f} deg")
+                                _log("")
+                                _log("  This usually means the catalog does not cover this")
+                                _log("  region of sky, or the query service is unavailable.")
+                                _log("")
+                                _log("  Try one of these alternative catalogs instead:")
+                                for _alt in _alternatives:
+                                    _log(f"    - {_alt}")
+                                _log("")
+                                _log("  Set 'catalog.use_catalog' in your YAML to one of the")
+                                _log("  alternatives above, then re-run.")
+                                _log("=" * 70)
+                                _log("")
+                                sys.exit(0)
+                            else:
+                                _log(f"  [WARNING] Pre-fetch of '{_cat_name}' failed: {_ce}")
                         except Exception as _ce:
                             _log(f"  [WARNING] Pre-fetch of '{_cat_name}' failed: {_ce}")
                 except Exception as _pe:
