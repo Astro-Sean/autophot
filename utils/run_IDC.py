@@ -2854,18 +2854,25 @@ NNW
                                     med_dy = float(np.median(dy[both_ok]))
                                     rms_dx = float(np.std(dx[both_ok]))
                                     rms_dy = float(np.std(dy[both_ok]))
+                                    _indiv_offsets = np.sqrt(dx[both_ok]**2 + dy[both_ok]**2)
+                                    _p95_offset = float(np.percentile(_indiv_offsets, 95))
+                                    _max_offset = float(np.max(_indiv_offsets))
                                 else:
                                     med_dx = float(np.median(dx))
                                     med_dy = float(np.median(dy))
                                     rms_dx = float(np.std(dx))
                                     rms_dy = float(np.std(dy))
+                                    _indiv_offsets = np.sqrt(dx**2 + dy**2)
+                                    _p95_offset = float(np.percentile(_indiv_offsets, 95))
+                                    _max_offset = float(np.max(_indiv_offsets))
 
                                 total_offset = np.sqrt(med_dx**2 + med_dy**2)
                                 self.logger.info(
                                     "Alignment verification: offset=(%.3f, %.3f) px, "
-                                    "RMS=(%.3f, %.3f) px, total=%.3f px (%d matches)",
+                                    "RMS=(%.3f, %.3f) px, total=%.3f px, "
+                                    "P95=%.3f px, max=%.3f px (%d matches)",
                                     med_dx, med_dy, rms_dx, rms_dy, total_offset,
-                                    n_matched_verify,
+                                    _p95_offset, _max_offset, n_matched_verify,
                                 )
 
                                 alignment_metadata = {
@@ -2874,6 +2881,8 @@ NNW
                                     "rms_x": rms_dx,
                                     "rms_y": rms_dy,
                                     "n_matched": n_matched_verify,
+                                    "p95_offset": _p95_offset,
+                                    "max_offset": _max_offset,
                                 }
 
                             else:
@@ -2897,8 +2906,12 @@ NNW
             # or RMS is too large.  A small median offset with large RMS
             # indicates widespread misalignment (e.g., bad SCAMP solution or
             # WCS distortion mismatch) that the median hides.
+            # P95 check catches spatially-varying distortion (e.g., SCAMP degree 1
+            # applied to reference with degree 4 distortion) where median is small
+            # but individual sources at field edges have large offsets.
             max_acceptable_offset = max(0.3 * fwhm_sci_pix, 0.5)
             max_acceptable_rms = max(0.5 * fwhm_sci_pix, 1.0)
+            max_acceptable_p95 = max(1.0 * fwhm_sci_pix, 2.0)
             if alignment_metadata and "offset_x" in alignment_metadata:
                 _off = np.sqrt(
                     alignment_metadata["offset_x"] ** 2
@@ -2908,13 +2921,19 @@ NNW
                     alignment_metadata.get("rms_x", 0) ** 2
                     + alignment_metadata.get("rms_y", 0) ** 2
                 )
+                _p95 = alignment_metadata.get("p95_offset", 0.0)
                 _n_match = alignment_metadata.get("n_matched", 0)
-                if _n_match >= 5 and (_off > max_acceptable_offset or _rms > max_acceptable_rms):
+                if _n_match >= 5 and (
+                    _off > max_acceptable_offset
+                    or _rms > max_acceptable_rms
+                    or _p95 > max_acceptable_p95
+                ):
                     self.logger.warning(
-                        "Post-SWarp alignment rejected: offset=%.2f px (> %.2f px) "
-                        "or RMS=%.2f px (> %.2f px) (%d matches). "
+                        "Post-SWarp alignment rejected: offset=%.2f px (> %.2f px), "
+                        "RMS=%.2f px (> %.2f px), P95=%.2f px (> %.2f px) (%d matches). "
                         "Falling back to reproject/AstroAlign.",
-                        _off, max_acceptable_offset, _rms, max_acceptable_rms, _n_match,
+                        _off, max_acceptable_offset, _rms, max_acceptable_rms,
+                        _p95, max_acceptable_p95, _n_match,
                     )
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
@@ -2922,8 +2941,9 @@ NNW
                 else:
                     self.logger.info(
                         "Post-SWarp alignment accepted: offset=%.2f px (< %.2f px), "
-                        "RMS=%.2f px (< %.2f px) (%d matches).",
-                        _off, max_acceptable_offset, _rms, max_acceptable_rms, _n_match,
+                        "RMS=%.2f px (< %.2f px), P95=%.2f px (< %.2f px) (%d matches).",
+                        _off, max_acceptable_offset, _rms, max_acceptable_rms,
+                        _p95, max_acceptable_p95, _n_match,
                     )
 
             # Log SWarp output WCS for both images so alignment can be verified.
@@ -3476,11 +3496,14 @@ NNW
                             _total = float(np.sqrt(_med_dx**2 + _med_dy**2))
                             _rms = float(np.sqrt(_rms_dx**2 + _rms_dy**2))
                             _n_match_reproj = int(_good.sum())
+                            _indiv = np.sqrt(_dx**2 + _dy**2)
+                            _p95_reproj = float(np.percentile(_indiv, 95))
                             self.logger.info(
                                 "Post-reproject alignment: offset=(%.3f, %.3f) px, "
-                                "RMS=(%.3f, %.3f) px, total=%.3f px, rms=%.3f px (%d matches)",
+                                "RMS=(%.3f, %.3f) px, total=%.3f px, rms=%.3f px, "
+                                "P95=%.3f px (%d matches)",
                                 _med_dx, _med_dy, _rms_dx, _rms_dy, _total, _rms,
-                                _n_match_reproj,
+                                _p95_reproj, _n_match_reproj,
                             )
 
                             # Quality gate: reject if offset or RMS too large.
@@ -3492,19 +3515,24 @@ NNW
                             )
                             _max_off = max(0.3 * _fwhm_gate, 0.5)
                             _max_rms = max(0.5 * _fwhm_gate, 1.0)
-                            if _n_match_reproj >= 5 and (_total > _max_off or _rms > _max_rms):
+                            _max_p95 = max(1.0 * _fwhm_gate, 2.0)
+                            if _n_match_reproj >= 5 and (
+                                _total > _max_off or _rms > _max_rms or _p95_reproj > _max_p95
+                            ):
                                 self.logger.warning(
-                                    "Reproject alignment rejected: offset=%.2f px (> %.2f px) "
-                                    "or RMS=%.2f px (> %.2f px) (%d matches). "
+                                    "Reproject alignment rejected: offset=%.2f px (> %.2f px), "
+                                    "RMS=%.2f px (> %.2f px), P95=%.2f px (> %.2f px) (%d matches). "
                                     "Falling through to next alignment method.",
-                                    _total, _max_off, _rms, _max_rms, _n_match_reproj,
+                                    _total, _max_off, _rms, _max_rms,
+                                    _p95_reproj, _max_p95, _n_match_reproj,
                                 )
                                 return None
                             else:
                                 self.logger.info(
                                     "Reproject alignment accepted: offset=%.2f px (< %.2f px), "
-                                    "RMS=%.2f px (< %.2f px) (%d matches).",
-                                    _total, _max_off, _rms, _max_rms, _n_match_reproj,
+                                    "RMS=%.2f px (< %.2f px), P95=%.2f px (< %.2f px) (%d matches).",
+                                    _total, _max_off, _rms, _max_rms,
+                                    _p95_reproj, _max_p95, _n_match_reproj,
                                 )
                                 reproject_metadata = {
                                     "offset_x": _med_dx,
@@ -3512,6 +3540,7 @@ NNW
                                     "rms_x": _rms_dx,
                                     "rms_y": _rms_dy,
                                     "n_matched": _n_match_reproj,
+                                    "p95_offset": _p95_reproj,
                                 }
             except Exception as _ve:
                 self.logger.debug("Post-reproject verification failed (non-fatal): %s", _ve)
@@ -4441,53 +4470,96 @@ NNW
 
     # -------------------------------- SCAMP + SWarp --------------------------------
     def _parse_scamp_xml(self, xml_file: str) -> Optional[Dict]:
-        """Extract WCS keys, astrometric residual, and matched star count from SCAMP XML."""
+        """Extract WCS keys, astrometric residual, and matched star count from SCAMP XML.
+
+        SCAMP outputs VOTable format with <TABLE>/<FIELD>/<TR>/<TD> structure,
+        not simple named XML elements.
+        """
         import xml.etree.ElementTree as ET
 
         try:
             tree = ET.parse(xml_file)
             root = tree.getroot()
-            wcs = {}
-            tags = {
-                "CD1_1",
-                "CD1_2",
-                "CD2_1",
-                "CD2_2",
-                "CRVAL1",
-                "CRVAL2",
-                "CRPIX1",
-                "CRPIX2",
-            }
-            for param in root.findall(".//Astrometry"):
-                for child in param:
-                    if child.tag in tags:
-                        wcs[child.tag] = float(child.text)
 
-            # Extract astrometric residual RMS (in arcsec) and matched star count
+            # Strip XML namespaces for easier searching
+            def _localname(tag):
+                return tag.split("}")[-1] if "}" in tag else tag
+
+            wcs = {}
+            # WCS keywords are stored as PARAM elements with name=CD1_1 etc.
+            for param in root.iter():
+                ln = _localname(param.tag)
+                if ln == "PARAM":
+                    name = param.get("name", "")
+                    if name in ("CD1_1", "CD1_2", "CD2_1", "CD2_2",
+                                "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2"):
+                        try:
+                            wcs[name] = float(param.get("value"))
+                        except (ValueError, TypeError):
+                            pass
+
             astrometric_rms = None
             n_matched_stars = None
-            for param in root.findall(".//AstrometricResidual"):
-                for child in param:
-                    if child.tag == "AstRefResidualRMS":
+
+            # Parse the Fields TABLE: FIELD definitions give column names,
+            # DATA/TABLEDATA/TR/TD gives the values.
+            for table in root.iter():
+                if _localname(table.tag) != "TABLE":
+                    continue
+                table_id = table.get("ID", "")
+                if table_id != "Fields":
+                    continue
+
+                # Collect FIELD names in order
+                field_names = []
+                for field in table:
+                    if _localname(field.tag) == "FIELD":
+                        field_names.append(field.get("name", ""))
+
+                # Find DATA/TABLEDATA/TR
+                for tr in table.iter():
+                    if _localname(tr.tag) != "TR":
+                        continue
+                    tds = [td for td in tr if _localname(td.tag) == "TD"]
+                    if len(tds) != len(field_names):
+                        continue
+
+                    col_map = dict(zip(field_names, [td.text or "" for td in tds]))
+
+                    # AstromSigma_Reference: arraysize=2, values in arcsec
+                    sigma_ref = col_map.get("AstromSigma_Reference", "")
+                    if sigma_ref:
+                        parts = sigma_ref.split()
+                        if len(parts) >= 2:
+                            try:
+                                rms1 = float(parts[0])
+                                rms2 = float(parts[1])
+                                astrometric_rms = float(np.sqrt(rms1**2 + rms2**2))
+                            except (ValueError, TypeError):
+                                pass
+
+                    # nstars from the external astrometric stats
+                    nstars_str = col_map.get("AstromNDets_Reference", "")
+                    if not nstars_str:
+                        # Fallback: scan columns for a small integer after Chi2_Reference
+                        chi2_idx = None
+                        for i, fn in enumerate(field_names):
+                            if fn == "Chi2_Reference":
+                                chi2_idx = i
+                                break
+                        if chi2_idx is not None and chi2_idx + 1 < len(tds):
+                            try:
+                                n_matched_stars = int(float(tds[chi2_idx + 1].text))
+                            except (ValueError, TypeError):
+                                pass
+                    else:
                         try:
-                            astrometric_rms = float(child.text)
-                        except (ValueError, TypeError):
-                            pass
-                    elif child.tag == "Nastrometric":
-                        try:
-                            n_matched_stars = int(child.text)
+                            n_matched_stars = int(float(nstars_str))
                         except (ValueError, TypeError):
                             pass
 
-            # Fallback: try Asterism block for star count
-            if n_matched_stars is None:
-                for param in root.findall(".//Asterism"):
-                    for child in param:
-                        if child.tag == "Nstars":
-                            try:
-                                n_matched_stars = int(child.text)
-                            except (ValueError, TypeError):
-                                pass
+                    break  # Only one row in Fields table
+                break  # Only one Fields table
 
             if astrometric_rms is not None:
                 self.logger.info(
@@ -5003,15 +5075,28 @@ NNW
                 import re
                 _log_rms = None
                 _log_nstars = None
+                _in_external_stats = False
                 for line in log_content.splitlines():
-                    if "Astrometric residual" in line and "RMS" in line:
-                        m = re.search(r'RMS[:\s]+([\d.]+)\s*(?:arcsec|")?', line, re.I)
-                        if m:
-                            _log_rms = float(m.group(1))
-                    if "matched" in line.lower() and "star" in line.lower():
-                        m = re.search(r'(\d+)\s+matched', line, re.I)
-                        if m:
-                            _log_nstars = int(m.group(1))
+                    if "Astrometric stats (external)" in line:
+                        _in_external_stats = True
+                        continue
+                    if _in_external_stats and line.strip().startswith("Group"):
+                        # Parse: Group  1:  0.291" 0.00752"   0.12       8 ...
+                        # Strip "Group" prefix and colon, then extract numbers
+                        line_clean = line.replace("Group", "").replace(":", "")
+                        parts = line_clean.split()
+                        vals = []
+                        for p in parts:
+                            p_clean = p.rstrip('"').strip()
+                            try:
+                                vals.append(float(p_clean))
+                            except ValueError:
+                                pass
+                        # Expect: [group_num, dAXIS1, dAXIS2, chi2, nstars, ...]
+                        if len(vals) >= 5:
+                            _log_rms = float(np.sqrt(vals[1]**2 + vals[2]**2))
+                            _log_nstars = int(vals[4])
+                        _in_external_stats = False
                 if _log_rms is not None or _log_nstars is not None:
                     self.logger.info(
                         "SCAMP log fallback: residual RMS=%.4f\", matched stars=%d",
