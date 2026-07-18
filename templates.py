@@ -4821,8 +4821,7 @@ class Templates:
             # solution is poorly constrained and the convolution-based scaling can
             # disagree with photometric scaling by 20-50%, causing dipoles.
             _n_matching = len(matching_sources) if matching_sources else 0
-            _user_set_cpr = "sfft_const_phot_ratio" in ts_sub
-            if not const_phot_ratio and not _user_set_cpr and _n_matching < 10:
+            if not const_phot_ratio and _n_matching < 10:
                 const_phot_ratio = True
                 logger.info(
                     "Auto-enabling sfft_const_phot_ratio=True for sparse field "
