@@ -1894,6 +1894,7 @@ class WCSSolver:
         cpulimit: int = None,
         background_std: str = None,
         skip_verify: bool = True,
+        n_detected_sources: int = None,
     ) -> fits.Header:
         """
         Run a WCS solver for this image.
@@ -2228,7 +2229,26 @@ class WCSSolver:
             
             # Sigma level for sources used by solve-field.
             # Lower values detect more sources (useful for sparse fields).
-            solve_nsigma = str(int(wcs_cfg.get("solve_field_nsigma", 5)))
+            solve_nsigma_val = int(wcs_cfg.get("solve_field_nsigma", 5))
+            # Proactive nsigma reduction for sparse fields: if we know the source
+            # count is low, lower nsigma to help solve-field detect more sources.
+            # This avoids the reactive nsigma=3 retry after zero-SIP failure.
+            if n_detected_sources is not None and n_detected_sources > 0:
+                if n_detected_sources < 20 and solve_nsigma_val > 3:
+                    logger.info(
+                        "Proactive nsigma reduction: %d detected sources → "
+                        "nsigma %d→3 (detect more sources for sparse field)",
+                        n_detected_sources, solve_nsigma_val,
+                    )
+                    solve_nsigma_val = 3
+                elif n_detected_sources < 50 and solve_nsigma_val > 4:
+                    logger.info(
+                        "Proactive nsigma reduction: %d detected sources → "
+                        "nsigma %d→4 (detect more sources for sparse field)",
+                        n_detected_sources, solve_nsigma_val,
+                    )
+                    solve_nsigma_val = 4
+            solve_nsigma = str(solve_nsigma_val)
             
             common_args.insert(-1, "--nsigma")
             common_args.insert(-1, solve_nsigma)
@@ -2245,6 +2265,13 @@ class WCSSolver:
             # Example YAML:
             #   solve_field_tweak_order: 5
             #   solve_field_tweak_orders: [5, 3, 2, 1, 0]
+            #
+            # When n_detected_sources is provided, proactively cap the initial
+            # tweak order to avoid wasted solve-field invocations. astrometry.net
+            # minimum correspondences: order 4→15, order 3→10, order 2→6, order 1→3.
+            # The detected source count is an upper bound on matched stars (not all
+            # detections match index stars), so we use a 2x safety margin.
+            _min_sources_for_order = {0: 0, 1: 6, 2: 12, 3: 20, 4: 30}
             tweak_orders = [0]
             try:
                 to_list = wcs_cfg.get("solve_field_tweak_orders", None)
@@ -2260,6 +2287,33 @@ class WCSSolver:
                 tweak_orders = [0]
             if len(tweak_orders) == 0:
                 tweak_orders = [0]
+
+            # Proactive cap: if we know the detected source count, skip tweak
+            # orders that astrometry.net can't satisfy. This avoids the reactive
+            # retry chain (up to 6 invocations) for sparse fields.
+            if n_detected_sources is not None and n_detected_sources > 0:
+                _max_feasible = 0
+                for _ord, _min_src in sorted(_min_sources_for_order.items(), reverse=True):
+                    if n_detected_sources >= _min_src:
+                        _max_feasible = _ord
+                        break
+                _capped = [o for o in tweak_orders if o <= _max_feasible]
+                if _capped:
+                    if _capped != tweak_orders:
+                        logger.info(
+                            "Proactive tweak order cap: %d detected sources → "
+                            "max feasible order %d → sequence %s (was %s)",
+                            n_detected_sources, _max_feasible, _capped, tweak_orders,
+                        )
+                    tweak_orders = _capped
+                else:
+                    logger.info(
+                        "Proactive tweak order cap: %d detected sources → "
+                        "using order 0 only (too few for SIP)",
+                        n_detected_sources,
+                    )
+                    tweak_orders = [0]
+
             logger.info("solve-field tweak order sequence: %s", tweak_orders)
 
             # --- Step 1: Optional verify existing WCS ---

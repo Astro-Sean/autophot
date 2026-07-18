@@ -2208,6 +2208,7 @@ def run_photometry():
             with SuppressStdout():
                 updated_header = imageWCS_obj.plate_solve(
                     solvefield_exe=input_yaml["wcs"].get("solve_field_exe_loc"),
+                    n_detected_sources=len(FWHMSources) if FWHMSources is not None else None,
                 )
             if updated_header is None or (
                 isinstance(updated_header, float) and np.isnan(updated_header)
