@@ -4339,7 +4339,14 @@ def run_photometry():
             template_image, template_header = get_image_and_header(templateFpath)
 
             # Build a KDTree for masked pixels for efficient nearest-neighbor search
-            masked_image = (defects_mask) | (image == 0) | (template_image == 0)
+            # Include NaN/Inf pixels explicitly since NaN == 0 is False
+            masked_image = (
+                (defects_mask)
+                | (image == 0)
+                | (template_image == 0)
+                | ~np.isfinite(image)
+                | ~np.isfinite(template_image)
+            )
             masked_pixels = np.argwhere(masked_image)
 
             if len(masked_pixels) == 0:
@@ -4357,10 +4364,14 @@ def run_photometry():
                 proximity_threshold = ImageFWHM * proximity_fwhm_mult
 
                 # Adaptive exclusion: if excluding sources near masked regions leaves
-                # too few sources for SFFT (< 3), progressively relax the threshold.
-                # This is critical for sparse fields where 30-40%+ of pixels may be masked
-                # (e.g. reference doesn't fully cover science FOV).
-                min_sources_needed = 3
+                # too few sources for SFFT (< 5), progressively relax the threshold.
+                # SFFT needs at least 5 sources for a reliable kernel; with only 3,
+                # flux scaling mismatch can exceed 20% causing dipoles.
+                min_sources_needed = int(
+                    (input_yaml.get("template_subtraction", {}) or {}).get(
+                        "sfft_min_prior_sources", 5
+                    )
+                )
                 while True:
                     min_distances, _ = tree.query(
                         source_coords, k=1, distance_upper_bound=proximity_threshold
