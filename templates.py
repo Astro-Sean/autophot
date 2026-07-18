@@ -4816,6 +4816,20 @@ class Templates:
             const_phot_ratio = _as_bool(
                 ts_sub.get("sfft_const_phot_ratio", False), False
             )
+            # Auto-enable ConstPhotRatio for sparse fields where convolution-based
+            # flux scaling is unreliable. With < 10 matching sources, the kernel
+            # solution is poorly constrained and the convolution-based scaling can
+            # disagree with photometric scaling by 20-50%, causing dipoles.
+            _n_matching = len(matching_sources) if matching_sources else 0
+            _user_set_cpr = "sfft_const_phot_ratio" in ts_sub
+            if not const_phot_ratio and not _user_set_cpr and _n_matching < 10:
+                const_phot_ratio = True
+                logger.info(
+                    "Auto-enabling sfft_const_phot_ratio=True for sparse field "
+                    "(%d matching sources < 10). Convolution-based flux scaling "
+                    "is unreliable with few sources.",
+                    _n_matching,
+                )
             # Allow user to control whether masked/excluded sources are passed to SFFT
             pass_masked_sources = _as_bool(
                 ts_sub.get("sfft_pass_masked_sources", False), False
