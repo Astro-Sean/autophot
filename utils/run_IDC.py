@@ -2249,7 +2249,7 @@ NNW
             # pixels across the field.
             #
             # Polynomial degree N has (N+1)(N+2)/2 parameters per axis.
-            # Require at least 2 matched sources per parameter (conservative).
+            # Require at least 1 matched source per parameter.
             #   Degree 1:  3 params/axis,  6 total, need >= 6  sources
             #   Degree 2:  6 params/axis, 12 total, need >= 12 sources
             #   Degree 3: 10 params/axis, 20 total, need >= 20 sources
@@ -2267,20 +2267,24 @@ NNW
                     break
 
             if feasible_degree < required_degree:
-                # Not enough sources to model the reference's distortion.
-                # SCAMP would produce a .head that degrades the WCS.
-                # Fall back to reproject, which handles SIP/PV natively via
-                # astropy WCS without needing source matching.
+                if _num_matched < _min_sources_for_degree[1]:
+                    self.logger.warning(
+                        "Only %d matched sources — too few for SCAMP even at "
+                        "degree 1 (need %d). Falling back to reproject/AstroAlign.",
+                        _num_matched, _min_sources_for_degree[1],
+                    )
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
                 self.logger.warning(
                     "Reference has distortion order %d but only %d matched sources "
-                    "(need %d for degree %d). SCAMP would degrade the WCS. "
-                    "Falling back to reproject (handles SIP/PV natively).",
+                    "(need %d for degree %d). Using SCAMP with reduced distortion "
+                    "degree %d — high-order SIP terms will be lost but linear "
+                    "alignment will be corrected (better than reproject with "
+                    "mismatched independent WCS).",
                     required_degree, _num_matched,
                     _min_sources_for_degree.get(required_degree, 999),
-                    required_degree,
-                )
-                return self._align_fallback_reproject_then_astroalign(
-                    science_image, reference_image, output_dir
+                    required_degree, feasible_degree,
                 )
 
             distort_degrees = feasible_degree
@@ -2893,8 +2897,8 @@ NNW
             # or RMS is too large.  A small median offset with large RMS
             # indicates widespread misalignment (e.g., bad SCAMP solution or
             # WCS distortion mismatch) that the median hides.
-            max_acceptable_offset = max(0.5 * fwhm_sci_pix, 1.0)
-            max_acceptable_rms = max(1.0 * fwhm_sci_pix, 1.5)
+            max_acceptable_offset = max(0.3 * fwhm_sci_pix, 0.5)
+            max_acceptable_rms = max(0.5 * fwhm_sci_pix, 1.0)
             if alignment_metadata and "offset_x" in alignment_metadata:
                 _off = np.sqrt(
                     alignment_metadata["offset_x"] ** 2
@@ -3486,8 +3490,8 @@ NNW
                                 if hasattr(self, "input_yaml") else 3.0,
                                 2.5,
                             )
-                            _max_off = max(0.5 * _fwhm_gate, 1.0)
-                            _max_rms = max(1.0 * _fwhm_gate, 1.5)
+                            _max_off = max(0.3 * _fwhm_gate, 0.5)
+                            _max_rms = max(0.5 * _fwhm_gate, 1.0)
                             if _n_match_reproj >= 5 and (_total > _max_off or _rms > _max_rms):
                                 self.logger.warning(
                                     "Reproject alignment rejected: offset=%.2f px (> %.2f px) "
