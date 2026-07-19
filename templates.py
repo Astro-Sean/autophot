@@ -241,6 +241,8 @@ class AlignmentResult(NamedTuple):
     template_path: Optional[str]
     method_used: str
     median_offset_px: Optional[float]
+    rms_px: Optional[float] = None
+    p90_px: Optional[float] = None
 
 
 # Supported PanSTARRS filter names
@@ -310,7 +312,7 @@ class SubtractionParams:
     """If True (default), use SFFT crowded-field (ECP). If False, use sparse (ESP). ECP is preferred; set False only to force ESP."""
 
     sfft_bg_order: int = 0
-    """SFFT background spatial polynomial order (0=constant). Input images are assumed background-subtracted."""
+    """SFFT background spatial polynomial order (0=constant). SFFT's BGPolyOrder handles the constant background difference between images; BACK_TYPE=MANUAL with BACK_VALUE=0.0 tells SExtractor not to subtract background."""
 
     zogy_template_psf_independent: bool = True
     """If True (default), select PSF stars for the reference image independently from the
@@ -460,14 +462,14 @@ def compute_alignment_rms(
     sci_data: np.ndarray,
     ref_data: np.ndarray,
     fwhm_pixels: float,
-) -> Optional[float]:
+) -> Optional[tuple]:
     """
     Compute robust alignment quality from pre-loaded arrays.
 
     Accepts arrays directly to avoid redundant FITS I/O. Uses mutual
     nearest-neighbour star matching for robustness in crowded fields.
 
-    Returns median offset in pixels or None if measurement fails.
+    Returns (median_offset, rms, p90) tuple in pixels, or None if measurement fails.
     """
     if DAOStarFinder is None:
         return None
@@ -523,15 +525,25 @@ def compute_alignment_rms(
         if len(d_mut) < 10:
             return None
 
-        median_offset = float(np.nanmedian(d_mut))
-        p90 = float(np.nanpercentile(d_mut, 90.0))
-        rms = float(np.sqrt(np.mean(d_mut**2)))
+        # Sigma-clip outliers before computing RMS/P90.
+        # A single bad match (e.g., blended source, edge effect) can inflate
+        # RMS significantly.  Median is robust but RMS is not.
+        from astropy.stats import sigma_clip as _sc_align
+        _clipped = _sc_align(d_mut, sigma=2.5, maxiters=3)
+        d_clipped = d_mut[~_clipped.mask] if hasattr(_clipped, 'mask') else d_mut
+        if len(d_clipped) < 5:
+            d_clipped = d_mut  # fallback: too few after clipping
+
+        median_offset = float(np.nanmedian(d_clipped))
+        p90 = float(np.nanpercentile(d_clipped, 90.0))
+        rms = float(np.sqrt(np.mean(d_clipped**2)))
 
         logger.info(
-            "Alignment RMS: med=%.3f px rms=%.3f px p90=%.3f px n=%d max=%.2f px",
-            median_offset, rms, p90, len(d_mut), max_sep,
+            "Alignment RMS: med=%.3f px rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped) max=%.2f px",
+            median_offset, rms, p90, len(d_clipped), len(d_mut),
+            len(d_mut) - len(d_clipped), max_sep,
         )
-        return median_offset
+        return median_offset, rms, p90
 
     except Exception:
         logger.debug("compute_alignment_rms failed", exc_info=True)
@@ -576,7 +588,7 @@ def _reproject_template(
     AlignmentResult
         science_path is None on failure.
     """
-    _FAIL = AlignmentResult(None, None, "reproject", None)
+    _FAIL = AlignmentResult(None, None, "reproject", None, None, None)
 
     shape_out = science_image.shape
 
@@ -613,6 +625,43 @@ def _reproject_template(
     # Build adaptive kwargs once from module-level cache
     adaptive_kwargs = _build_adaptive_kwargs(cfg)
 
+    # BUG 91: Auto-enable center_jacobian for large rotation differences.
+    # The default Jacobian approximation is inaccurate when rotation between
+    # input and output is large (>30 deg), causing sub-pixel misregistration.
+    try:
+        sci_rot = np.degrees(np.arctan2(
+            science_proj.wcs.cd[0, 1], science_proj.wcs.cd[0, 0]
+        ))
+        tpl_rot = np.degrees(np.arctan2(
+            template_proj.wcs.cd[0, 1], template_proj.wcs.cd[0, 0]
+        ))
+        rot_diff = abs(sci_rot - tpl_rot)
+        if rot_diff > 180:
+            rot_diff = 360 - rot_diff
+        if rot_diff > 30.0 and not adaptive_kwargs.get("center_jacobian"):
+            if _REPROJECT_ADAPTIVE_EXTRAS.get("_has_center_jacobian"):
+                adaptive_kwargs["center_jacobian"] = True
+                logger.info(
+                    "Large rotation (%.1f deg) — enabling center_jacobian for "
+                    "more accurate reproject_adaptive resampling.",
+                    rot_diff,
+                )
+    except Exception:
+        pass
+
+    # BUG 90: Auto-downgrade interpolation for undersampled images.
+    # Bicubic/biquadratic introduce ringing artifacts when PSF is undersampled
+    # (FWHM < 2.5 px). Bilinear is safer in that regime.
+    interp_order_eff = cfg.interp_order
+    if isinstance(fwhm_pixels, (int, float)) and fwhm_pixels > 0 and fwhm_pixels < 2.5:
+        if interp_order_eff in ("bicubic", "biquadratic"):
+            logger.info(
+                "Undersampled image (FWHM=%.2f px < 2.5) — downgrading %s to bilinear "
+                "to avoid ringing artifacts.",
+                fwhm_pixels, interp_order_eff,
+            )
+            interp_order_eff = "bilinear"
+
     # Determine fallback order from requested method
     all_methods = ("exact", "adaptive", "interp")
     if cfg.method in all_methods:
@@ -646,7 +695,7 @@ def _reproject_template(
                     science_proj,
                     shape_out=shape_out,
                     roundtrip_coords=True,
-                    order=cfg.interp_order,
+                    order=interp_order_eff,
                 )
             else:  # exact
                 aligned, footprint = reproject_exact(
@@ -683,6 +732,183 @@ def _reproject_template(
     aligned[~fp_mask] = np.nan
 
     # ------------------------------------------------------------------
+    # Post-reproject subpixel correction
+    # ------------------------------------------------------------------
+    # Even with good WCS, independent plate-solved images have residual
+    # astrometric offsets (~1-2px) from WCS fit residuals. These cause
+    # dipoles in SFFT subtraction. Here we measure the residual offset
+    # from matched stars and apply a subpixel correction to the
+    # reprojected template.
+    try:
+        from scipy.ndimage import map_coordinates as _map_coords
+        correction_applied = False
+        if DAOStarFinder is not None and fwhm_pixels > 0:
+            fwhm_corr = max(float(fwhm_pixels), 2.0)
+            from astropy.stats import sigma_clipped_stats as _scs_corr
+            _, med_s_corr, std_s_corr = _scs_corr(science_image, sigma=3.0)
+            _, med_t_corr, std_t_corr = _scs_corr(aligned, sigma=3.0)
+            if std_s_corr > 0 and std_t_corr > 0:
+                dao_s_corr = DAOStarFinder(fwhm=fwhm_corr, threshold=5.0 * std_s_corr)
+                dao_t_corr = DAOStarFinder(fwhm=fwhm_corr, threshold=5.0 * std_t_corr)
+                tbl_s_corr = dao_s_corr(science_image - med_s_corr)
+                tbl_t_corr = dao_t_corr(aligned - med_t_corr)
+                if tbl_s_corr is not None and tbl_t_corr is not None and len(tbl_s_corr) >= 5 and len(tbl_t_corr) >= 5:
+                    _xc = "x_centroid" if "x_centroid" in tbl_s_corr.colnames else "xcentroid"
+                    _yc = "y_centroid" if "y_centroid" in tbl_s_corr.colnames else "ycentroid"
+                    sci_xy_corr = np.column_stack((tbl_s_corr[_xc].data, tbl_s_corr[_yc].data))
+                    _xc_t = "x_centroid" if "x_centroid" in tbl_t_corr.colnames else "xcentroid"
+                    _yc_t = "y_centroid" if "y_centroid" in tbl_t_corr.colnames else "ycentroid"
+                    ref_xy_corr = np.column_stack((tbl_t_corr[_xc_t].data, tbl_t_corr[_yc_t].data))
+
+                    tree_ref_corr = cKDTree(ref_xy_corr)
+                    tree_sci_corr = cKDTree(sci_xy_corr)
+                    d_corr, i_corr = tree_ref_corr.query(sci_xy_corr, k=1)
+                    d_rs_corr, i_rs_corr = tree_sci_corr.query(ref_xy_corr, k=1)
+                    idx_s_corr = np.arange(len(sci_xy_corr), dtype=int)
+                    mutual_corr = (i_rs_corr[i_corr] == idx_s_corr) & np.isfinite(d_corr)
+                    match_tol_corr = float(max(2.5, 2.0 * fwhm_corr))
+                    mutual_corr &= d_corr < match_tol_corr
+
+                    if np.sum(mutual_corr) >= 5:
+                        dx_corr = sci_xy_corr[mutual_corr, 0] - ref_xy_corr[i_corr[mutual_corr], 0]
+                        dy_corr = sci_xy_corr[mutual_corr, 1] - ref_xy_corr[i_corr[mutual_corr], 1]
+
+                        # Sigma-clip outliers
+                        from astropy.stats import sigma_clip as _sc_corr
+                        dx_clipped = _sc_corr(dx_corr, sigma=2.5, maxiters=3)
+                        dy_clipped = _sc_corr(dy_corr, sigma=2.5, maxiters=3)
+                        both_ok = ~dx_clipped.mask & ~dy_clipped.mask
+                        if np.sum(both_ok) < 5:
+                            both_ok = np.ones(len(dx_corr), dtype=bool)
+
+                        dx_corr = dx_corr[both_ok]
+                        dy_corr = dy_corr[both_ok]
+                        x_corr = sci_xy_corr[mutual_corr, 0][both_ok]
+                        y_corr = sci_xy_corr[mutual_corr, 1][both_ok]
+
+                        med_dx_corr = float(np.median(dx_corr))
+                        med_dy_corr = float(np.median(dy_corr))
+                        n_corr = len(dx_corr)
+
+                        before_dist = float(np.median(np.sqrt(dx_corr**2 + dy_corr**2)))
+
+                        # Helper: leave-one-out cross-validation for a given design matrix
+                        def _loo_cv(A_mat, vals):
+                            n = len(vals)
+                            loo_pred = np.empty(n)
+                            for j in range(n):
+                                mask = np.ones(n, dtype=bool)
+                                mask[j] = False
+                                coef_j, _, _, _ = np.linalg.lstsq(
+                                    A_mat[mask], vals[mask], rcond=None
+                                )
+                                loo_pred[j] = A_mat[j] @ coef_j
+                            return loo_pred
+
+                        # Helper: apply a shift correction to the aligned image
+                        def _apply_shift(shift_x_arr, shift_y_arr):
+                            nan_mask = np.isnan(aligned)
+                            aligned_filled = np.where(nan_mask, 0.0, aligned)
+                            result = _map_coords(
+                                aligned_filled, [shift_y_arr, shift_x_arr],
+                                order=3, mode='nearest',
+                            )
+                            result[~fp_mask] = np.nan
+                            return result
+
+                        from scipy.ndimage import shift as _nd_shift
+
+                        # Evaluate constant shift via LOO-CV
+                        A_const = np.ones((n_corr, 1))
+                        loo_const_dx = _loo_cv(A_const, dx_corr)
+                        loo_const_dy = _loo_cv(A_const, dy_corr)
+                        loo_const_dist = np.median(np.sqrt(
+                            (dx_corr - loo_const_dx) ** 2 + (dy_corr - loo_const_dy) ** 2
+                        ))
+
+                        best_method = "none"
+                        best_loo = before_dist
+                        best_shift_x = None
+                        best_shift_y = None
+
+                        if loo_const_dist < best_loo:
+                            best_method = "constant"
+                            best_loo = loo_const_dist
+                            best_shift_x = -med_dx_corr
+                            best_shift_y = -med_dy_corr
+
+                        # Evaluate linear polynomial via LOO-CV (need >= 20 sources)
+                        if n_corr >= 20:
+                            x_norm = 2 * (x_corr - x_corr.mean()) / max(x_corr.max() - x_corr.min(), 1)
+                            y_norm = 2 * (y_corr - y_corr.mean()) / max(y_corr.max() - y_corr.min(), 1)
+                            A_lin = np.column_stack([np.ones(n_corr), x_norm, y_norm])
+                            loo_lin_dx = _loo_cv(A_lin, dx_corr)
+                            loo_lin_dy = _loo_cv(A_lin, dy_corr)
+                            loo_lin_dist = np.median(np.sqrt(
+                                (dx_corr - loo_lin_dx) ** 2 + (dy_corr - loo_lin_dy) ** 2
+                            ))
+                            if loo_lin_dist < best_loo:
+                                coef_dx, _, _, _ = np.linalg.lstsq(A_lin, dx_corr, rcond=None)
+                                coef_dy, _, _, _ = np.linalg.lstsq(A_lin, dy_corr, rcond=None)
+                                ny_img, nx_img = aligned.shape
+                                yy_img, xx_img = np.mgrid[0:ny_img, 0:nx_img]
+                                xx_norm = 2 * (xx_img - x_corr.mean()) / max(x_corr.max() - x_corr.min(), 1)
+                                yy_norm = 2 * (yy_img - y_corr.mean()) / max(y_corr.max() - y_corr.min(), 1)
+                                best_shift_x = -(coef_dx[0] + coef_dx[1] * xx_norm + coef_dx[2] * yy_norm)
+                                best_shift_y = -(coef_dy[0] + coef_dy[1] * xx_norm + coef_dy[2] * yy_norm)
+                                best_method = "linear"
+                                best_loo = loo_lin_dist
+
+                        if best_method == "linear":
+                            aligned = _apply_shift(xx_img + best_shift_x, yy_img + best_shift_y)
+                            correction_applied = True
+                            logger.info(
+                                "Post-reproject correction: linear polynomial "
+                                "(%d sources, LOO-CV): median offset %.2f→%.2f px, "
+                                "systematic=(%.2f, %.2f) px",
+                                n_corr, before_dist, best_loo,
+                                med_dx_corr, med_dy_corr,
+                            )
+                        elif best_method == "constant":
+                            nan_mask_shift = np.isnan(aligned)
+                            aligned_filled_shift = np.where(nan_mask_shift, 0.0, aligned)
+                            aligned = _nd_shift(
+                                aligned_filled_shift, (-med_dy_corr, -med_dx_corr),
+                                order=3, mode='nearest',
+                            )
+                            aligned[~fp_mask] = np.nan
+                            correction_applied = True
+                            logger.info(
+                                "Post-reproject correction: constant shift "
+                                "(%d sources, LOO-CV): median offset %.2f→%.2f px, "
+                                "systematic=(%.2f, %.2f) px",
+                                n_corr, before_dist, best_loo,
+                                med_dx_corr, med_dy_corr,
+                            )
+                        else:
+                            logger.info(
+                                "Post-reproject correction: no correction applied "
+                                "(%d sources, LOO-CV median %.2f >= original %.2f); "
+                                "skipping to avoid overfitting.",
+                                n_corr, best_loo, before_dist,
+                            )
+                    else:
+                        logger.info(
+                            "Post-reproject correction: only %d mutual matches (< 5); skipping.",
+                            int(np.sum(mutual_corr)),
+                        )
+                else:
+                    logger.info(
+                        "Post-reproject correction: insufficient sources for matching; skipping."
+                    )
+            else:
+                logger.info(
+                    "Post-reproject correction: invalid image stats; skipping."
+                )
+    except Exception as _corr_err:
+        logger.warning("Post-reproject correction failed (non-fatal): %s", _corr_err)
+
+    # ------------------------------------------------------------------
     # Write output
     # ------------------------------------------------------------------
     hdr = template_header.copy()
@@ -700,11 +926,15 @@ def _reproject_template(
     # re-reading the FITS (avoids a full redundant I/O on large mosaics).
     # ------------------------------------------------------------------
     try:
-        median_offset = compute_alignment_rms(
+        align_metrics = compute_alignment_rms(
             science_image, to_write, fwhm_pixels
         )
+        if align_metrics is not None:
+            median_offset, rms_offset, p90_offset = align_metrics
+        else:
+            median_offset, rms_offset, p90_offset = None, None, None
     except Exception:
-        median_offset = None
+        median_offset, rms_offset, p90_offset = None, None, None
 
     logger.info("Reproject alignment succeeded (method=%s).", used_method)
     return AlignmentResult(
@@ -712,6 +942,8 @@ def _reproject_template(
         template_path=output_path,
         method_used=f"reproject/{used_method}",
         median_offset_px=median_offset,
+        rms_px=rms_offset,
+        p90_px=p90_offset,
     )
 
 
@@ -2525,22 +2757,31 @@ class Templates:
 
                 # Quality gate: check reproject alignment against configured threshold.
                 # Reproject trusts both WCS blindly — independently plate-solved images
-                # can disagree by several pixels.  If the median offset exceeds the
-                # configured threshold, reject and fall through to the next method.
-                max_rms = float(
+                # can disagree by several pixels.  Check median offset, RMS, and P90
+                # to catch both systematic shifts and spatially-varying distortion.
+                max_offset = float(
                     self.input_yaml.get("alignment", {}).get(
                         "reproject_max_rms_pixels", 0.90
                     )
                 )
-                if (
-                    result.median_offset_px is not None
-                    and np.isfinite(result.median_offset_px)
-                    and result.median_offset_px > max_rms
-                ):
+                max_rms = 1.5
+                max_p90 = 3.0
+                _med = result.median_offset_px
+                _rms = result.rms_px
+                _p90 = result.p90_px
+                _reject = (
+                    (_med is not None and np.isfinite(_med) and _med > max_offset)
+                    or (_rms is not None and np.isfinite(_rms) and _rms > max_rms)
+                    or (_p90 is not None and np.isfinite(_p90) and _p90 > max_p90)
+                )
+                if _reject:
                     logger.warning(
-                        "Reproject alignment offset %.3f px > %.3f px threshold; "
-                        "rejecting and falling back to next alignment method.",
-                        result.median_offset_px, max_rms,
+                        "Reproject alignment rejected: offset=%.3f px (> %.2f px), "
+                        "RMS=%.3f px (> %.2f px), P90=%.3f px (> %.2f px). "
+                        "Falling back to next alignment method.",
+                        _med if _med is not None else float('nan'), max_offset,
+                        _rms if _rms is not None else float('nan'), max_rms,
+                        _p90 if _p90 is not None else float('nan'), max_p90,
                     )
                     return None, None
 
@@ -4146,11 +4387,12 @@ class Templates:
                         fwhm_conv,
                     )
 
-                # Half-width must comfortably contain the kernel and floor at the broad PSF.
-                # ker_hw_from_conv >= ceil(fwhm_conv) since _mult_effective >= 1.0, so no
-                # separate Nyquist floor is needed.
+                # Half-width must comfortably contain the kernel and floor at 2x the
+                # broad PSF to capture PSF wings for flux-conserving photometry.
+                # A floor of only 1x FWHM_broad truncates the PSF wings, causing the
+                # convolution-based flux scaling to disagree with photometric scaling.
                 ker_hw_from_conv = int(np.ceil(_mult_effective * fwhm_conv))
-                ker_hw_floor = int(np.ceil(fwhm_broad))
+                ker_hw_floor = int(np.ceil(2.0 * fwhm_broad))
 
                 ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_from_conv, ker_hw_floor)))
 
@@ -4387,15 +4629,22 @@ class Templates:
             user_kernel = ts_cfg.get("kernel_order", None)
             n_matched = len(matching_sources) if matching_sources else 0
 
+            # If SFFT will do its own matching (few pipeline sources), estimate
+            # the effective source count for kernel_order selection. SFFT's
+            # SExtractor typically finds 25-35 sources in these fields.
+            _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 3) or 3)
+            _sfft_self_match = n_matched < _min_prior
+            n_eff = 30 if _sfft_self_match else n_matched
+
             if user_kernel is not None and user_kernel >= 0:
                 # User override: respect it but warn if likely under-constrained
                 kernel_order = min(int(user_kernel), 3)
                 min_src_for_order = {0: 0, 1: 40, 2: 80, 3: 150}
                 needed = min_src_for_order.get(kernel_order, 0)
-                if n_matched < needed:
+                if n_eff < needed:
                     logger.warning(
                         "User kernel_order=%d may be under-constrained (only %d matched sources, recommend %d). Consider lowering kernel_order.",
-                        kernel_order, n_matched, needed,
+                        kernel_order, n_eff, needed,
                     )
             else:
                 # Auto-select: start from PSF difference, then downgrade by source count
@@ -4410,17 +4659,18 @@ class Templates:
                     order_from_psf = 3
 
                 # Downgrade if not enough sources to constrain
-                if n_matched < 150 and order_from_psf >= 3:
+                if n_eff < 150 and order_from_psf >= 3:
                     order_from_psf = 2
-                if n_matched < 80 and order_from_psf >= 2:
+                if n_eff < 80 and order_from_psf >= 2:
                     order_from_psf = 1
-                if n_matched < 40 and order_from_psf >= 1:
+                if n_eff < 40 and order_from_psf >= 1:
                     order_from_psf = 0
 
                 kernel_order = order_from_psf
                 logger.info(
-                    "Auto-selected kernel_order=%d (PSF rel_diff=%.2f, %d matched sources)",
+                    "Auto-selected kernel_order=%d (PSF rel_diff=%.2f, %d matched sources%s)",
                     kernel_order, rel_diff, n_matched,
+                    f", SFFT self-match ~{n_eff}" if _sfft_self_match else "",
                 )
 
             # Validate background polynomial order (bg_order)
@@ -4816,19 +5066,15 @@ class Templates:
             const_phot_ratio = _as_bool(
                 ts_sub.get("sfft_const_phot_ratio", False), False
             )
-            # Auto-enable ConstPhotRatio for sparse fields where convolution-based
-            # flux scaling is unreliable. With < 10 matching sources, the kernel
-            # solution is poorly constrained and the convolution-based scaling can
-            # disagree with photometric scaling by 20-50%, causing dipoles.
-            _n_matching = len(matching_sources) if matching_sources else 0
-            if not const_phot_ratio and _n_matching < 10:
-                const_phot_ratio = True
-                logger.info(
-                    "Auto-enabling sfft_const_phot_ratio=True for sparse field "
-                    "(%d matching sources < 10). Convolution-based flux scaling "
-                    "is unreliable with few sources.",
-                    _n_matching,
-                )
+            # NOTE: ConstPhotRatio=True was previously auto-enabled for sparse
+            # fields (< 10 matching sources), but this caused dipoles. SFFT's
+            # photometric scaling uses a weighted-median that is biased by bright
+            # outliers (e.g., reporting 1.214 when the true ratio is 1.029).
+            # With ConstPhotRatio=False, SFFT fits the flux scaling as part of
+            # the kernel solution (convolution-based), which is much closer to
+            # the true value. The convolution-based approach is more robust even
+            # for sparse fields because it uses all pixels in the kernel fit,
+            # not just source fluxes.
             # Allow user to control whether masked/excluded sources are passed to SFFT
             pass_masked_sources = _as_bool(
                 ts_sub.get("sfft_pass_masked_sources", False), False
@@ -4896,7 +5142,7 @@ class Templates:
                 else:
                     fwhm_conv_fb = fwhm_broad_fb
                 ker_hw_conv = int(np.ceil(2.0 * fwhm_conv_fb))
-                ker_hw_floor = int(np.ceil(fwhm_broad_fb))
+                ker_hw_floor = int(np.ceil(2.0 * fwhm_broad_fb))
                 kernel_half_width = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_conv, ker_hw_floor)))
                 logger.info(
                     "SFFT kernel half-width: %d px (fallback quadrature formula, FWHM_sci=%.1f FWHM_ref=%.1f FWHM_conv=%.1f)",
@@ -5014,7 +5260,7 @@ class Templates:
                     ]
 
                 # New SFFT v1.5.0+ features (enabled by default)
-                if ts_sub.get("sfft_use_bspline_kernel", True):
+                if ts_sub.get("sfft_use_bspline_kernel", False):
                     cmd_local += ["-use_bspline_kernel", "true"]
                 if ts_sub.get("sfft_decorrelate_noise", True):
                     cmd_local += ["-decorrelate_noise", "true"]
@@ -5028,7 +5274,7 @@ class Templates:
                 cmd_local += ["-kernel_hw_max", str(int(kernel_hw_max))]
 
                 # Prior source validation
-                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 3)
+                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 10)
                 cmd_local += ["-min_prior_sources", str(int(min_prior_sources))]
 
                 if sfft_crowded:
@@ -5154,8 +5400,14 @@ class Templates:
             # SFFT's MeLOn logs two independent flux scaling estimates:
             #   - Convolution-based: "The Flux Scaling through the Convolution ..."
             #   - Photometric:       "The approximated Flux Scaling from Photometry ..."
-            # A large discrepancy (>3%) indicates the kernel solution may not
-            # properly match the PSF across the field, leading to dipole residuals.
+            # A large discrepancy (>3%) indicates the kernel integral doesn't match
+            # the true flux ratio. This happens when PSFs are nearly identical (kernel
+            # is delta-like, integral ~1.0 regardless of true flux ratio).
+            # Note: pre-scaling the reference doesn't fix this — SFFT re-estimates
+            # both scalings from the pre-scaled input, preserving the relative mismatch.
+            # The discrepancy is a diagnostic indicator of kernel quality, not a
+            # correctable error. Dipoles from this are best addressed by increasing
+            # source count or improving astrometric alignment.
             try:
                 if log_path.exists():
                     _log_text = log_path.read_text(errors="ignore")
@@ -5173,9 +5425,10 @@ class Templates:
                         if _discrep_pct > 3.0:
                             logger.warning(
                                 "SFFT flux scaling discrepancy: convolution=%.4f vs photometric=%.4f "
-                                "(%.1f%% mismatch). Kernel may not properly match PSF across field — "
-                                "dipole residuals likely. Consider increasing source count or "
-                                "enabling sfft_const_phot_ratio=true for sparse fields.",
+                                "(%.1f%% mismatch). Kernel integral does not match true flux ratio — "
+                                "dipole residuals likely at source positions. "
+                                "This is expected for nearly-identical PSFs with few sources. "
+                                "Consider increasing source count or improving astrometric alignment.",
                                 _conv_scale, _phot_scale, _discrep_pct,
                             )
                         else:

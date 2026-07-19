@@ -2234,7 +2234,7 @@ class WCSSolver:
             # count is low, lower nsigma to help solve-field detect more sources.
             # This avoids the reactive nsigma=3 retry after zero-SIP failure.
             if n_detected_sources is not None and n_detected_sources > 0:
-                if n_detected_sources < 20 and solve_nsigma_val > 3:
+                if n_detected_sources < 30 and solve_nsigma_val > 3:
                     logger.info(
                         "Proactive nsigma reduction: %d detected sources → "
                         "nsigma %d→3 (detect more sources for sparse field)",
@@ -2269,9 +2269,10 @@ class WCSSolver:
             # When n_detected_sources is provided, proactively cap the initial
             # tweak order to avoid wasted solve-field invocations. astrometry.net
             # minimum correspondences: order 4→15, order 3→10, order 2→6, order 1→3.
-            # The detected source count is an upper bound on matched stars (not all
-            # detections match index stars), so we use a 2x safety margin.
-            _min_sources_for_order = {0: 0, 1: 6, 2: 12, 3: 20, 4: 30}
+            # We use a ~1.5x safety margin on detected sources (not all detections
+            # match index stars). A post-solve SIP magnitude check catches any
+            # overfitting (wild SIP at corners with too few constraint stars).
+            _min_sources_for_order = {0: 0, 1: 5, 2: 9, 3: 15, 4: 23}
             tweak_orders = [0]
             try:
                 to_list = wcs_cfg.get("solve_field_tweak_orders", None)
@@ -2306,6 +2307,13 @@ class WCSSolver:
                             n_detected_sources, _max_feasible, _capped, tweak_orders,
                         )
                     tweak_orders = _capped
+                elif _max_feasible > 0:
+                    logger.info(
+                        "Proactive tweak order cap: %d detected sources → "
+                        "requested order(s) %s exceed max feasible %d → using %d",
+                        n_detected_sources, tweak_orders, _max_feasible, _max_feasible,
+                    )
+                    tweak_orders = [_max_feasible]
                 else:
                     logger.info(
                         "Proactive tweak order cap: %d detected sources → "
@@ -2520,6 +2528,133 @@ class WCSSolver:
                                 logger.debug(
                                     "SIP zero-check failed (non-fatal): %s", _sip_err
                                 )
+
+                        # BUG 103c: SIP magnitude validation. Even with non-zero
+                        # SIP, under-determined fits produce wild distortion at image
+                        # corners where there are no constraint stars. Measure the
+                        # max SIP correction at the 4 corners and if it exceeds
+                        # 10px, retry with a lower tweak order.
+                        if tweak_order > 0 and os.path.isfile(wcs_file):
+                            try:
+                                from astropy.wcs import WCS as _WCS
+                                with fits.open(wcs_file) as _mh:
+                                    _mhdr = _mh[0].header
+                                if _mhdr.get("A_ORDER", 0) > 0 and _has_nonzero_sip(_mhdr):
+                                    _mw = _WCS(_mhdr)
+                                    _ny = _mhdr.get("NAXIS2", 2048)
+                                    _nx = _mhdr.get("NAXIS1", 2048)
+                                    _max_sip_px = 0.0
+                                    _pixscale = abs(_mhdr.get("CD1_1", 1e-4)) * 3600
+                                    _sip_thresh_px = 0.05 * max(_nx, _ny)
+                                    for _cx, _cy in [(0,0), (_nx-1,0), (0,_ny-1), (_nx-1,_ny-1)]:
+                                        _ra_s, _dec_s = _mw.all_pix2world(_cx, _cy, 0)
+                                        _ra_t, _dec_t = _mw.wcs_pix2world(_cx, _cy, 0)
+                                        _delta = np.sqrt((_ra_s-_ra_t)**2 + (_dec_s-_dec_t)**2) * 3600
+                                        _delta_px = _delta / max(_pixscale, 0.01)
+                                        _max_sip_px = max(_max_sip_px, _delta_px)
+                                    if _max_sip_px > _sip_thresh_px:
+                                        logger.warning(
+                                            "SIP overfitting detected: max corner "
+                                            "correction = %.1f px (> %.1f px = 5%% of "
+                                            "image) at tweak order %d. Retrying with "
+                                            "lower orders.",
+                                            _max_sip_px, _sip_thresh_px, tweak_order,
+                                        )
+                                        for _lower in range(tweak_order - 1, -1, -1):
+                                            if os.path.isfile(wcs_file):
+                                                os.remove(wcs_file)
+                                            _lower_args = (
+                                                common_args
+                                                + ["--tweak-order", str(_lower), "--no-verify"]
+                                                + scale_args_use
+                                            )
+                                            if use_sextractor and sextractor_cmd:
+                                                _lower_args += [
+                                                    "--use-source-extractor",
+                                                    "--source-extractor-path",
+                                                    sextractor_cmd,
+                                                    "--source-extractor-config",
+                                                    str(config_file),
+                                                    "--x-column", "XWIN_IMAGE",
+                                                    "--y-column", "YWIN_IMAGE",
+                                                    "--sort-column", "MAG_AUTO",
+                                                    "--sort-ascending",
+                                                ]
+                                            logger.info(
+                                                "Retrying solve with tweak order %d "
+                                                "(SIP overfitting check)",
+                                                _lower,
+                                            )
+                                            if self._run_solve_field(
+                                                _lower_args, wcs_file,
+                                                timeout_sec, astrometry_log_fpath
+                                            ):
+                                                try:
+                                                    with fits.open(wcs_file) as _lh:
+                                                        _lhdr = _lh[0].header
+                                                    if _lhdr.get("A_ORDER", 0) > 0 and _has_nonzero_sip(_lhdr):
+                                                        _lw = _WCS(_lhdr)
+                                                        _lmax = 0.0
+                                                        for _cx, _cy in [(0,0), (_nx-1,0), (0,_ny-1), (_nx-1,_ny-1)]:
+                                                            _ra_s, _dec_s = _lw.all_pix2world(_cx, _cy, 0)
+                                                            _ra_t, _dec_t = _lw.wcs_pix2world(_cx, _cy, 0)
+                                                            _delta = np.sqrt((_ra_s-_ra_t)**2 + (_dec_s-_dec_t)**2) * 3600
+                                                            _delta_px = _delta / max(_pixscale, 0.01)
+                                                            _lmax = max(_lmax, _delta_px)
+                                                        if _lmax <= _sip_thresh_px:
+                                                            logger.info(
+                                                                "SIP overfitting resolved at "
+                                                                "tweak order %d (max corner "
+                                                                "correction = %.1f px)",
+                                                                _lower, _lmax,
+                                                            )
+                                                            break
+                                                        else:
+                                                            logger.info(
+                                                                "Tweak order %d still has "
+                                                                "large SIP (%.1f px)",
+                                                                _lower, _lmax,
+                                                            )
+                                                    else:
+                                                        # Zero SIP or order 0 — acceptable
+                                                        logger.info(
+                                                            "Tweak order %d produced "
+                                                            "zero/none SIP — acceptable",
+                                                            _lower,
+                                                        )
+                                                        break
+                                                except Exception:
+                                                    pass
+                                            else:
+                                                logger.warning(
+                                                    "No solution with tweak order %d",
+                                                    _lower,
+                                                )
+                                        # If all lower orders failed, restore original
+                                        if not os.path.isfile(wcs_file):
+                                            logger.warning(
+                                                "Could not solve with lower tweak orders "
+                                                "after SIP overfitting; retrying original "
+                                                "order %d",
+                                                tweak_order,
+                                            )
+                                            self._run_solve_field(
+                                                args, wcs_file, timeout_sec,
+                                                astrometry_log_fpath
+                                            )
+                                    else:
+                                        logger.info(
+                                            "SIP magnitude OK: max corner correction "
+                                            "= %.1f px (threshold %.1f px) at tweak "
+                                            "order %d",
+                                            _max_sip_px, _sip_thresh_px, tweak_order,
+                                        )
+                            except Exception as _sip_mag_err:
+                                logger.debug(
+                                    "SIP magnitude check failed (non-fatal): %s",
+                                    _sip_mag_err,
+                                )
+
                         break
                     logger.warning(
                         "No solution (%s) with tweak order %s", label, tweak_order

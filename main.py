@@ -4365,14 +4365,12 @@ def run_photometry():
                 proximity_threshold = ImageFWHM * proximity_fwhm_mult
 
                 # Adaptive exclusion: if excluding sources near masked regions leaves
-                # too few sources for SFFT (< 5), progressively relax the threshold.
-                # SFFT needs at least 5 sources for a reliable kernel; with only 3,
-                # flux scaling mismatch can exceed 20% causing dipoles.
-                min_sources_needed = int(
-                    (input_yaml.get("template_subtraction", {}) or {}).get(
-                        "sfft_min_prior_sources", 5
-                    )
-                )
+                # too few sources, progressively relax the threshold.
+                # Use a fixed minimum of 5 (not sfft_min_prior_sources) because:
+                # (1) the NaN exclusion is about photometric reliability, not kernel fitting;
+                # (2) sfft_min_prior_sources may be set high (e.g. 10) to let SFFT do its
+                # own matching, but we still want to exclude sources with corrupted photometry.
+                min_sources_needed = 5
                 while True:
                     min_distances, _ = tree.query(
                         source_coords, k=1, distance_upper_bound=proximity_threshold
