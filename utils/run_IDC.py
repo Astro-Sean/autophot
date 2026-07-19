@@ -2254,34 +2254,40 @@ NNW
             #   Degree 2:  6 params/axis, 12 total, need >= 12 sources
             #   Degree 3: 10 params/axis, 20 total, need >= 20 sources
             #   Degree 4: 15 params/axis, 30 total, need >= 30 sources
-            _min_sources_for_degree = {1: 6, 2: 12, 3: 20, 4: 30}
+            _min_sources_for_degree = {0: 3, 1: 6, 2: 12, 3: 20, 4: 30}
 
             # Start with the reference's detected distortion order
             required_degree = ref_distort_order
 
             # Find the highest degree we can actually fit with available sources
-            feasible_degree = 1
-            for deg in range(required_degree, 0, -1):
+            feasible_degree = 0
+            for deg in range(required_degree, -1, -1):
                 if _num_matched >= _min_sources_for_degree.get(deg, 999):
                     feasible_degree = deg
                     break
 
+            # Track whether SCAMP's .head needs SIP preservation
+            preserve_sip_in_head = False
             if feasible_degree < required_degree:
-                if _num_matched < _min_sources_for_degree[1]:
+                if _num_matched < _min_sources_for_degree[0]:
                     self.logger.warning(
-                        "Only %d matched sources — too few for SCAMP even at "
-                        "degree 1 (need %d). Falling back to reproject/AstroAlign.",
-                        _num_matched, _min_sources_for_degree[1],
+                        "Only %d matched sources — too few for any WCS correction "
+                        "(need %d). Falling back to reproject/AstroAlign.",
+                        _num_matched, _min_sources_for_degree[0],
                     )
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
-                self.logger.warning(
+                # SCAMP will run at a lower degree than the reference's SIP order.
+                # SCAMP's degree-2 solution captures the dominant distortion and
+                # gives good alignment (0.35px centroid). Preserving the reference's
+                # original SIP on top of SCAMP's PV distortion creates a double
+                # correction, so we use SCAMP's solution as-is.
+                preserve_sip_in_head = False
+                self.logger.info(
                     "Reference has distortion order %d but only %d matched sources "
-                    "(need %d for degree %d). Using SCAMP with reduced distortion "
-                    "degree %d — high-order SIP terms will be lost but linear "
-                    "alignment will be corrected (better than reproject with "
-                    "mismatched independent WCS).",
+                    "(need %d for degree %d). Running SCAMP at degree %d "
+                    "(SCAMP PV distortion replaces reference SIP).",
                     required_degree, _num_matched,
                     _min_sources_for_degree.get(required_degree, 999),
                     required_degree, feasible_degree,
@@ -2302,14 +2308,19 @@ NNW
             scamp_config_ref = {
                 **scamp_config_base,
                 "FWHM_THRESHOLDS": f"{0.3*fwhm_ref_pix:.2f},{10*fwhm_ref_pix:.2f}",
+            }
+            if distort_degrees > 0:
                 # DISTORT_DEGREES matches the reference's SIP/PV distortion order
                 # so SCAMP's .head doesn't degrade the WCS by losing high-order terms.
-                "DISTORT_DEGREES": distort_degrees,
-            }
+                scamp_config_ref["DISTORT_DEGREES"] = distort_degrees
+            # else: degree 0 = linear WCS only (no distortion polynomial).
+            # SCAMP's DISTORT_DEGREES minimum is 1, so we omit it entirely.
+            # SCAMP still solves CD matrix + CRPIX + CRVAL (shift, scale, rotation).
             sparse_note = " (sparse)" if is_sparse_field else ""
+            distort_label = distort_degrees if distort_degrees > 0 else 0
             self.logger.info(
                 'SCAMP: crossid=%.1f" maxerr=%.1f" distort=%d%s (ref SIP/PV order=%d, %d matched)',
-                crossid_arcsec, position_maxerr_arcsec, distort_degrees, sparse_note,
+                crossid_arcsec, position_maxerr_arcsec, distort_label, sparse_note,
                 ref_distort_order, _num_matched,
             )
 
@@ -2504,6 +2515,15 @@ NNW
                         log_warning_from_exception(
                             self.logger, f"Could not copy .head for {label}", e
                         )
+                # SIP preservation experiment: disabled. SCAMP produces PV (TPV)
+                # distortion keywords, and adding the reference's SIP keywords on
+                # top creates a double distortion correction (both PV and SIP
+                # applied simultaneously). SCAMP at the feasible degree already
+                # captures the dominant distortion well (0.351px centroid residual).
+                # if preserve_sip_in_head:
+                #     self._preserve_reference_sip_in_head(
+                #         head_dst, ref_image_copy
+                #     )
             else:
                 self.logger.warning(
                     "No SCAMP .head found for %s image (searched stems: %s, available: %s)",
@@ -2667,8 +2687,11 @@ NNW
                 }
                 
                 # Reference image: native pixel scale, shape scaled to match sky coverage
+                # Use ref_resampling_method (not combined) since science is not resampled
+                # in native_scale mode — the reference should use its own optimal method.
                 swarp_config_ref = {
-                    **swarp_config_combined,
+                    **swarp_config,
+                    "RESAMPLING_TYPE": ref_resampling_method,
                     "COMBINE": "Y",
                     "COMBINE_TYPE": "MEDIAN",
                     "PIXEL_SCALE": ref_pix_scale,
@@ -2774,8 +2797,20 @@ NNW
             # Diagnostic: measure post-SWarp alignment residual via centroid
             # cross-match. Log-only — no pixel-level corrections are applied;
             # SCAMP+SWarp is trusted as the definitive alignment.
+            #
+            # BUG 97: Pixel-space centroid matching is only valid for common_grid
+            # mode where both images share the same pixel grid. For wcs_only and
+            # native_scale, images are on different pixel grids — pixel coordinates
+            # don't correspond, so matching produces meaningless offsets.
             alignment_metadata = {}
-            try:
+            if resample_mode in ("wcs_only", "native_scale"):
+                self.logger.info(
+                    "Skipping pixel-space alignment verification for resample_mode=%s "
+                    "(images on different pixel grids).",
+                    resample_mode,
+                )
+            else:
+              try:
                 self.logger.info("Verifying post-SWarp alignment via centroid cross-match...")
                 sci_data = fits.getdata(aligned_sci)
                 ref_data = fits.getdata(aligned_ref)
@@ -2898,7 +2933,7 @@ NNW
                     self.logger.info(
                         "Alignment verification: insufficient valid pixels for stats."
                     )
-            except Exception as e:
+              except Exception as e:
                 self.logger.warning("Alignment verification failed (non-fatal): %s", e)
                 alignment_metadata = {}
 
@@ -2909,9 +2944,16 @@ NNW
             # P95 check catches spatially-varying distortion (e.g., SCAMP degree 1
             # applied to reference with degree 4 distortion) where median is small
             # but individual sources at field edges have large offsets.
-            max_acceptable_offset = max(0.3 * fwhm_sci_pix, 0.5)
-            max_acceptable_rms = max(0.5 * fwhm_sci_pix, 1.0)
-            max_acceptable_p95 = max(1.0 * fwhm_sci_pix, 2.0)
+            #
+            # Cap FWHM at 4px for threshold calculation: the alignment SExtractor
+            # FWHM is often inflated to 8-15px by galaxy contamination, making
+            # thresholds 3-5x too lenient. Also enforce minimum absolute thresholds
+            # matching the reproject quality gate so the SCAMP gate is never more
+            # lenient than the reproject gate.
+            _gate_fwhm = min(fwhm_sci_pix, 4.0)
+            max_acceptable_offset = max(0.3 * _gate_fwhm, 0.9)
+            max_acceptable_rms = max(0.5 * _gate_fwhm, 1.5)
+            max_acceptable_p95 = max(1.0 * _gate_fwhm, 3.0)
             if alignment_metadata and "offset_x" in alignment_metadata:
                 _off = np.sqrt(
                     alignment_metadata["offset_x"] ** 2
@@ -2923,7 +2965,7 @@ NNW
                 )
                 _p95 = alignment_metadata.get("p95_offset", 0.0)
                 _n_match = alignment_metadata.get("n_matched", 0)
-                if _n_match >= 5 and (
+                if _n_match >= 3 and (
                     _off > max_acceptable_offset
                     or _rms > max_acceptable_rms
                     or _p95 > max_acceptable_p95
@@ -3324,6 +3366,29 @@ NNW
             interp_order = str(align_cfg.get("reproject_interp_order", "bicubic")).lower().strip()
             use_parallel = bool(align_cfg.get("reproject_parallel", False))
             roundtrip = bool(align_cfg.get("reproject_roundtrip_coords", True))
+            conserve_flux = bool(align_cfg.get("reproject_adaptive_conserve_flux", False))
+            center_jacobian = bool(align_cfg.get("reproject_adaptive_center_jacobian", False))
+
+            # Auto-enable center_jacobian for large rotation differences
+            try:
+                sci_rot = np.degrees(np.arctan2(
+                    sci_wcs.wcs.cd[0, 1], sci_wcs.wcs.cd[0, 0]
+                ))
+                ref_rot = np.degrees(np.arctan2(
+                    ref_wcs.wcs.cd[0, 1], ref_wcs.wcs.cd[0, 0]
+                ))
+                _rot_diff = abs(sci_rot - ref_rot)
+                if _rot_diff > 180:
+                    _rot_diff = 360 - _rot_diff
+                if not center_jacobian and _rot_diff > 30.0:
+                    center_jacobian = True
+                    self.logger.info(
+                        "Large rotation (%.1f deg) — enabling center_jacobian for "
+                        "more accurate reproject_adaptive resampling.",
+                        _rot_diff,
+                    )
+            except Exception:
+                pass
 
             # Normalise interp_order string for reproject_interp
             _interp_map = {
@@ -3368,6 +3433,8 @@ NNW
                             shape_out=sci_data.shape,
                             roundtrip_coords=roundtrip,
                             parallel=use_parallel,
+                            conserve_flux=conserve_flux,
+                            center_jacobian=center_jacobian,
                             **({"despike_jacobian": True} if "despike_jacobian" in _ADAPTIVE_PARAMS else {}),
                         )
                     elif m == "interp":
@@ -3508,15 +3575,20 @@ NNW
 
                             # Quality gate: reject if offset or RMS too large.
                             # This causes the cascade to fall through to AstroAlign.
-                            _fwhm_gate = max(
+                            # Cap FWHM at 4px (same as post-SWarp gate) to prevent
+                            # inflated FWHM from making thresholds too lenient.
+                            # Use minimum absolute thresholds (0.9/1.5/3.0) matching
+                            # the post-SWarp gate so the reproject gate is never
+                            # more lenient.
+                            _fwhm_gate = min(
                                 float(self.input_yaml.get("fwhm", 3.0))
                                 if hasattr(self, "input_yaml") else 3.0,
-                                2.5,
+                                4.0,
                             )
-                            _max_off = max(0.3 * _fwhm_gate, 0.5)
-                            _max_rms = max(0.5 * _fwhm_gate, 1.0)
-                            _max_p95 = max(1.0 * _fwhm_gate, 2.0)
-                            if _n_match_reproj >= 5 and (
+                            _max_off = max(0.3 * _fwhm_gate, 0.9)
+                            _max_rms = max(0.5 * _fwhm_gate, 1.5)
+                            _max_p95 = max(1.0 * _fwhm_gate, 3.0)
+                            if _n_match_reproj >= 3 and (
                                 _total > _max_off or _rms > _max_rms or _p95_reproj > _max_p95
                             ):
                                 self.logger.warning(
@@ -3730,6 +3802,339 @@ NNW
                 return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
             except Exception:
                 return sci_data.shape[1], sci_data.shape[0], float(sci_wcs.wcs.crval[0]), float(sci_wcs.wcs.crval[1])
+
+    def _compute_relative_wcs_correction(
+        self,
+        sci_image_path: str,
+        ref_image_path: str,
+        sci_cat_path: str,
+        ref_cat_path: str,
+        output_head_path: str,
+    ) -> Optional[dict]:
+        """
+        Compute a relative WCS correction from matched sources, preserving
+        the reference's SIP distortion.
+
+        Instead of SCAMP replacing the entire WCS (which loses high-order SIP
+        when insufficient sources are available), this computes a constant
+        CRVAL + CD matrix correction from matched source positions and writes
+        a .head file with the full corrected WCS (including original SIP
+        coefficients).
+
+        The correction is computed by:
+        1. Converting reference source pixels -> sky via reference WCS
+        2. Converting sky -> science pixels via science WCS
+        3. Measuring the residual (science_actual - science_predicted)
+        4. Fitting an affine model to the residual field (dx, dy vs rx, ry)
+        5. Converting the affine correction to WCS terms:
+           - Constant part -> CRVAL shift
+           - Linear part -> CD matrix adjustment
+        6. Applying both corrections to the reference's original WCS header,
+           preserving all SIP distortion coefficients.
+
+        This is equivalent to SCAMP degree 1 (shift + rotation + scale) but
+        preserves the reference's high-order SIP distortion, which SCAMP
+        would replace entirely.
+        """
+        try:
+            from wcs import get_wcs as _get_wcs
+
+            # Load matched catalogs
+            with fits.open(sci_cat_path) as hs, fits.open(ref_cat_path) as hr:
+                sci_tab = Table(hs[2].data)
+                ref_tab = Table(hr[2].data)
+
+            if (
+                len(sci_tab) == 0
+                or len(ref_tab) == 0
+                or len(sci_tab) != len(ref_tab)
+            ):
+                self.logger.warning(
+                    "Relative WCS correction: no matched sources available"
+                )
+                return None
+
+            # Extract pixel positions (SExtractor is 1-indexed, WCS is 0-indexed)
+            def _get_xy(tbl):
+                xcol = "XWIN_IMAGE" if "XWIN_IMAGE" in tbl.colnames else "X_IMAGE"
+                ycol = "YWIN_IMAGE" if "YWIN_IMAGE" in tbl.colnames else "Y_IMAGE"
+                return (
+                    np.asarray(tbl[xcol], float) - 1.0,
+                    np.asarray(tbl[ycol], float) - 1.0,
+                )
+
+            sx, sy = _get_xy(sci_tab)
+            rx, ry = _get_xy(ref_tab)
+
+            # Load WCS from both images
+            with fits.open(sci_image_path, memmap=False) as h_sci:
+                sci_wcs = _get_wcs(h_sci[0].header)
+            with fits.open(ref_image_path, memmap=False) as h_ref:
+                ref_wcs = _get_wcs(h_ref[0].header)
+                ref_header = h_ref[0].header.copy()
+
+            if sci_wcs is None or ref_wcs is None:
+                self.logger.warning(
+                    "Relative WCS correction: invalid WCS in science or reference"
+                )
+                return None
+
+            # Compute pixel-space residuals:
+            # ref pixel -> sky (via ref WCS) -> science pixel (via sci WCS)
+            ra, dec = ref_wcs.all_pix2world(rx, ry, 0)
+            x_pred, y_pred = sci_wcs.all_world2pix(ra, dec, 0)
+
+            dx = sx - x_pred
+            dy = sy - y_pred
+
+            # Robust statistics
+            median_dx = float(np.median(dx))
+            median_dy = float(np.median(dy))
+            rms_before = float(np.sqrt(np.median(dx**2 + dy**2)))
+            n_sources = len(dx)
+
+            self.logger.info(
+                "Relative WCS correction: %d sources, "
+                "median offset=(%.3f, %.3f) px, RMS=%.3f px",
+                n_sources, median_dx, median_dy, rms_before,
+            )
+
+            # Fit affine model: dx = a0 + a1*rx + a2*ry, dy = b0 + b1*rx + b2*ry
+            # This captures shift (a0, b0) + rotation/scale (a1, a2, b1, b2)
+            cd_sci = sci_wcs.wcs.cd
+            cd_ref = ref_wcs.wcs.cd
+            crpix_ref = ref_wcs.wcs.crpix
+
+            if n_sources >= 6:
+                # Enough sources for a full affine fit (6 parameters)
+                # Design matrix: [1, rx, ry] for each source
+                A_design = np.column_stack([np.ones(n_sources), rx, ry])
+                # Solve for dx coefficients
+                dx_coeffs, _, _, _ = np.linalg.lstsq(A_design, dx, rcond=None)
+                # Solve for dy coefficients
+                dy_coeffs, _, _, _ = np.linalg.lstsq(A_design, dy, rcond=None)
+
+                a0, a1, a2 = dx_coeffs
+                b0, b1, b2 = dy_coeffs
+
+                self.logger.info(
+                    "Affine fit: dx=%.4f + %.6f*rx + %.6f*ry, "
+                    "dy=%.4f + %.6f*rx + %.6f*ry",
+                    a0, a1, a2, b0, b1, b2,
+                )
+
+                # Convert affine correction to WCS terms:
+                # The residual in science pixel space is:
+                #   delta_pix = [a0 + a1*rx + a2*ry, b0 + b1*rx + b2*ry]
+                #
+                # We want the corrected reference WCS to produce sky positions
+                # that, when converted to science pixels, shift by delta_pix.
+                #
+                # sky_shift = CD_sci @ delta_pix  (in degrees)
+                #
+                # The sky shift has a constant part and a linear part:
+                #   sky_shift = CD_sci @ [a0, b0] + CD_sci @ M @ [rx, ry]
+                # where M = [[a1, a2], [b1, b2]]
+                #
+                # Constant part -> CRVAL shift
+                # Linear part -> CD matrix correction:
+                #   We want: CD_new @ x = CD_old @ x + CD_sci @ M @ x
+                #   (where x = pix - CRPIX, and rx = x + CRPIX_x)
+                #   But the linear part also has a constant contribution from
+                #   M @ CRPIX, which we absorb into CRVAL.
+                #
+                # So:
+                #   CD_new = CD_old + CD_sci @ M
+                #   delta_CRVAL = CD_sci @ [a0, b0] + CD_sci @ M @ CRPIX
+
+                M = np.array([[a1, a2], [b1, b2]])
+                constant_pix = np.array([a0, b0])
+                crpix_arr = np.array([crpix_ref[0], crpix_ref[1]])
+
+                delta_cd = cd_sci @ M
+                delta_crval = cd_sci @ constant_pix + cd_sci @ M @ crpix_arr
+
+                # Apply corrections to reference header
+                corrected_header = ref_header.copy()
+                corrected_header["CRVAL1"] = float(ref_header["CRVAL1"]) + float(delta_crval[0])
+                corrected_header["CRVAL2"] = float(ref_header["CRVAL2"]) + float(delta_crval[1])
+
+                # Adjust CD matrix
+                cd_old = np.array([
+                    [float(ref_header.get("CD1_1", cd_ref[0, 0])),
+                     float(ref_header.get("CD1_2", cd_ref[0, 1]))],
+                    [float(ref_header.get("CD2_1", cd_ref[1, 0])),
+                     float(ref_header.get("CD2_2", cd_ref[1, 1]))],
+                ])
+                cd_new = cd_old + delta_cd
+                corrected_header["CD1_1"] = float(cd_new[0, 0])
+                corrected_header["CD1_2"] = float(cd_new[0, 1])
+                corrected_header["CD2_1"] = float(cd_new[1, 0])
+                corrected_header["CD2_2"] = float(cd_new[1, 1])
+
+                self.logger.info(
+                    "Affine WCS correction: dCRVAL=(%.6f, %.6f) deg (%.3f\", %.3f\"), "
+                    "dCD=(%.2e, %.2e, %.2e, %.2e)",
+                    delta_crval[0], delta_crval[1],
+                    delta_crval[0] * 3600.0, delta_crval[1] * 3600.0,
+                    delta_cd[0, 0], delta_cd[0, 1],
+                    delta_cd[1, 0], delta_cd[1, 1],
+                )
+
+            else:
+                # Too few sources for affine fit — use constant CRVAL shift only
+                self.logger.info(
+                    "Only %d sources — using constant CRVAL shift (no affine)",
+                    n_sources,
+                )
+                delta_ra = float(cd_sci[0, 0] * median_dx + cd_sci[0, 1] * median_dy)
+                delta_dec = float(cd_sci[1, 0] * median_dx + cd_sci[1, 1] * median_dy)
+
+                corrected_header = ref_header.copy()
+                corrected_header["CRVAL1"] = float(ref_header["CRVAL1"]) + delta_ra
+                corrected_header["CRVAL2"] = float(ref_header["CRVAL2"]) + delta_dec
+
+                self.logger.info(
+                    "CRVAL correction: dRA=%.6f deg (%.3f\"), dDec=%.6f deg (%.3f\")",
+                    delta_ra, delta_ra * 3600.0,
+                    delta_dec, delta_dec * 3600.0,
+                )
+
+            # Verify correction: re-compute residuals with corrected WCS
+            corrected_wcs = _get_wcs(corrected_header)
+            if corrected_wcs is not None:
+                ra_c, dec_c = corrected_wcs.all_pix2world(rx, ry, 0)
+                x_pred_c, y_pred_c = sci_wcs.all_world2pix(ra_c, dec_c, 0)
+                dx_c = sx - x_pred_c
+                dy_c = sy - y_pred_c
+                rms_after = float(np.sqrt(np.median(dx_c**2 + dy_c**2)))
+                median_after = float(np.sqrt(np.median(dx_c)**2 + np.median(dy_c)**2))
+                self.logger.info(
+                    "Relative WCS correction verified: median %.3f -> %.3f px, "
+                    "RMS %.3f -> %.3f px",
+                    float(np.sqrt(median_dx**2 + median_dy**2)),
+                    median_after, rms_before, rms_after,
+                )
+                rms_before = rms_after  # Use post-correction RMS for quality gate
+
+            # Write corrected header as .head file (WCS keys only)
+            wcs_prefixes = (
+                "CRPIX", "CRVAL", "CTYPE", "CD", "PC", "CDELT",
+                "CROTA", "PV", "LONPOLE", "LATPOLE", "EQUINOX",
+                "WCSNAME", "CUNIT", "WCSAXES", "PROJP", "LTV",
+                "LTM", "RADECSYS", "RADESYS", "RADYSYS",
+                "LONGPOLE", "TNX", "SIP_",
+            )
+            wcs_stems = ("A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_")
+
+            head_header = fits.Header()
+            for key in corrected_header:
+                if key in ("NAXIS", "NAXIS1", "NAXIS2", "SIMPLE", "BITPIX", "EXTEND"):
+                    continue
+                is_wcs = any(key.startswith(p) for p in wcs_prefixes)
+                if not is_wcs and "_" in key:
+                    stem = key.split("_")[0] + "_"
+                    is_wcs = stem in wcs_stems and key.startswith(stem.rstrip("_"))
+                if is_wcs:
+                    head_header[key] = corrected_header[key]
+
+            head_header.totextfile(output_head_path)
+
+            return {
+                "method": "relative_wcs_correction",
+                "median_offset_px": (median_dx, median_dy),
+                "rms_px": rms_before,
+                "n_sources": n_sources,
+                "distortion": {
+                    "astrometric_rms_arcsec": rms_before * abs(cd_sci[0, 0]) * 3600.0,
+                    "n_matched_stars": n_sources,
+                },
+            }
+
+        except Exception as e:
+            self.logger.warning("Relative WCS correction failed: %s", e)
+            import traceback
+            self.logger.debug(traceback.format_exc())
+            return None
+
+    def _preserve_reference_sip_in_head(
+        self,
+        head_path: Path,
+        ref_image_path: Path,
+    ) -> None:
+        """
+        Modify a SCAMP .head file to preserve the reference image's original
+        SIP/PV distortion coefficients.
+
+        SCAMP's .head replaces the entire WCS with a lower-degree solution,
+        losing high-order distortion. This method:
+        1. Reads the SCAMP .head (linear WCS: CRVAL, CRPIX, CD, CTYPE)
+        2. Reads the reference image's original header (SIP/PV coefficients)
+        3. Restores SIP/PV keywords and CTYPE from the reference into the .head
+        4. Writes the modified .head back
+
+        The result: SCAMP's linear correction (shift/rotation/scale) is preserved,
+        but the reference's high-order SIP distortion is also applied.
+        """
+        try:
+            from wcs import _normalize_projection_codes
+
+            # Read SCAMP .head
+            scamp_header = fits.Header.fromtextfile(str(head_path))
+
+            # Read reference image header
+            with fits.open(str(ref_image_path), memmap=False) as h_ref:
+                ref_header = h_ref[0].header.copy()
+
+            # Identify SIP/PV distortion keywords in the reference header
+            # These are the high-order terms we want to preserve
+            sip_prefixes = ("A_", "B_", "AP_", "BP_")
+            pv_prefix = "PV"
+            sip_order_keys = ("A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER")
+
+            # Collect SIP/PV keywords from reference
+            sip_keys_restored = 0
+            for key in ref_header:
+                is_sip = (
+                    any(key.startswith(p) for p in sip_prefixes)
+                    or key in sip_order_keys
+                )
+                is_pv = key.startswith(pv_prefix) and key not in ("PV1_0", "PV1_1")  # Keep SCAMP's PV1_0/PV1_1 if present
+                # Also catch PV_ prefix
+                if not is_pv and key.startswith("PV_"):
+                    is_pv = True
+                if is_sip or is_pv:
+                    scamp_header[key] = ref_header[key]
+                    sip_keys_restored += 1
+
+            # Restore CTYPE to include -SIP suffix if reference had SIP
+            # SCAMP may have written CTYPE1='RA---TAN' (no -SIP)
+            ref_ctype1 = ref_header.get("CTYPE1", "")
+            ref_ctype2 = ref_header.get("CTYPE2", "")
+            if "-SIP" in ref_ctype1 or "-SIP" in ref_ctype2:
+                scamp_header["CTYPE1"] = ref_ctype1
+                scamp_header["CTYPE2"] = ref_ctype2
+
+            # Normalize projection codes to ensure consistency
+            scamp_header = _normalize_projection_codes(scamp_header, inplace=False)
+
+            # Write modified .head back
+            scamp_header.totextfile(str(head_path), overwrite=True)
+
+            self.logger.info(
+                "Preserved %d SIP/PV distortion keywords from reference in .head "
+                "(SCAMP linear WCS + reference high-order SIP)",
+                sip_keys_restored,
+            )
+
+        except Exception as e:
+            self.logger.warning(
+                "Failed to preserve reference SIP in .head (%s). "
+                "Using SCAMP .head as-is (may lose high-order distortion).",
+                e,
+            )
+            import traceback
+            self.logger.debug(traceback.format_exc())
 
     def _scamp_reproject_reference_to_science(
         self,
@@ -4434,9 +4839,48 @@ NNW
                     src_w = aa.matrix_transform(matched_src, tform.params)
                 resid = np.sqrt(np.sum((src_w - matched_dst) ** 2, axis=1))
                 rms_pix = float(np.sqrt(np.mean(resid**2))) if resid.size else np.nan
+                _med_resid = float(np.median(resid)) if resid.size else np.nan
+                _p95_resid = float(np.percentile(resid, 95)) if resid.size else np.nan
+                _n_aa = int(len(matched_dst))
                 self.logger.info(
-                    f"AstroAlign: {len(matched_dst)} matches, RMS={rms_pix:.3f} px"
+                    f"AstroAlign: {_n_aa} matches, med={_med_resid:.3f} px, "
+                    f"RMS={rms_pix:.3f} px, P95={_p95_resid:.3f} px"
                 )
+
+                # Quality gate: same thresholds as post-SWarp and reproject gates.
+                # AstroAlign is the last fallback, but a bad solution is worse than
+                # no solution — it produces dipoles in the subtraction.
+                _aa_fwhm = min(
+                    float(iy.get("fwhm", 3.0)) if isinstance(iy, dict) else 3.0,
+                    4.0,
+                )
+                _aa_max_off = max(0.3 * _aa_fwhm, 0.9)
+                _aa_max_rms = max(0.5 * _aa_fwhm, 1.5)
+                _aa_max_p95 = max(1.0 * _aa_fwhm, 3.0)
+                if _n_aa >= 3 and (
+                    (np.isfinite(_med_resid) and _med_resid > _aa_max_off)
+                    or (np.isfinite(rms_pix) and rms_pix > _aa_max_rms)
+                    or (np.isfinite(_p95_resid) and _p95_resid > _aa_max_p95)
+                ):
+                    self.logger.warning(
+                        "AstroAlign alignment rejected: med=%.2f px (> %.2f px), "
+                        "RMS=%.2f px (> %.2f px), P95=%.2f px (> %.2f px) (%d matches). "
+                        "No more alignment methods available.",
+                        _med_resid if np.isfinite(_med_resid) else float('nan'), _aa_max_off,
+                        rms_pix if np.isfinite(rms_pix) else float('nan'), _aa_max_rms,
+                        _p95_resid if np.isfinite(_p95_resid) else float('nan'), _aa_max_p95,
+                        _n_aa,
+                    )
+                    return None
+                else:
+                    self.logger.info(
+                        "AstroAlign alignment accepted: med=%.2f px (< %.2f px), "
+                        "RMS=%.2f px (< %.2f px), P95=%.2f px (< %.2f px) (%d matches).",
+                        _med_resid if np.isfinite(_med_resid) else float('nan'), _aa_max_off,
+                        rms_pix if np.isfinite(rms_pix) else float('nan'), _aa_max_rms,
+                        _p95_resid if np.isfinite(_p95_resid) else float('nan'), _aa_max_p95,
+                        _n_aa,
+                    )
             except Exception as e:
                 self.logger.info(f"Could not compute alignment metrics: {e}")
 

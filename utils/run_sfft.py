@@ -426,8 +426,8 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-use_bspline_kernel",
         type=str,
-        default="true",
-        help="Use B-Spline kernel matching (SFFT v1.5.0+). 'true' enables B-Spline kernel for complex PSF variations.",
+        default="false",
+        help="Use B-Spline kernel matching (SFFT v1.5.0+). Requires CUDA/Cupy backend. 'true' enables B-Spline kernel for complex PSF variations.",
     )
     parser.add_argument(
         "-decorrelate_noise",
@@ -1069,13 +1069,17 @@ def run_sfft() -> Optional[int]:
         except Exception as e:
             log_info(f"Warning: Could not load mask '{args.mask}': {e}")
 
-    # Both science and template are background-subtracted by the pipeline before
-    # reaching this script, so BACK_VALUE=0.0 is correct.  Estimating a non-zero
-    # offset here from the (already-zero-median) science image produced a
-    # double-subtraction inside SFFT's internal SExtractor step, biasing source
-    # photometry used for kernel fitting and corrupting the flux scale.
+    # Images are NOT background-subtracted before reaching SFFT (background
+    # subtraction is explicitly disabled in templates.py to preserve raw ADU).
+    # BACK_TYPE=MANUAL with BACK_VALUE=0.0 tells SFFT's internal SExtractor not
+    # to subtract any background. SFFT's background polynomial (BGPolyOrder=0)
+    # handles the constant background difference between images in the kernel fit.
+    # BACK_TYPE=AUTO was tried and rejected: SExtractor's spatially-varying
+    # background subtraction left residuals that BGPolyOrder=0 couldn't model,
+    # increasing difference image Std from 8.9 to 20.9.
+    BACK_TYPE = "MANUAL"
     BACK_VALUE = 0.0
-    log_info("SFFT BACK_VALUE=0.0 (inputs are pipeline-background-subtracted).")
+    log_info(f"SFFT BACK_TYPE={BACK_TYPE}, BACK_VALUE={BACK_VALUE}.")
 
     # --- Run SFFT ---
     t0_sfft = time.time()
@@ -1103,7 +1107,7 @@ def run_sfft() -> Optional[int]:
                 MaskSatContam=False,
                 GAIN_KEY=GAIN_KEY,
                 SATUR_KEY=SATUR_KEY,
-                BACK_TYPE="MANUAL",
+                BACK_TYPE=BACK_TYPE,
                 BACK_VALUE=BACK_VALUE,
                 BACK_SIZE=BACK_SIZE,
                 BACK_FILTERSIZE=BACK_FILTERSIZE,
@@ -1206,7 +1210,7 @@ def run_sfft() -> Optional[int]:
                     KerHWLimit=KerHWLimit,
                     KerPolyOrder=kernel_poly_order,
                     ForceConv=ForceConv,
-                    BACK_TYPE="MANUAL",
+                    BACK_TYPE=BACK_TYPE,
                     BACK_VALUE=BACK_VALUE,
                     BACK_SIZE=BACK_SIZE,
                     BACK_FILTERSIZE=BACK_FILTERSIZE,
@@ -1263,7 +1267,7 @@ def run_sfft() -> Optional[int]:
                     KerHWLimit=KerHWLimit,
                     KerPolyOrder=kernel_poly_order,
                     ForceConv=ForceConv,
-                    BACK_TYPE="MANUAL",
+                    BACK_TYPE=BACK_TYPE,
                     BACK_VALUE=BACK_VALUE,
                     BACK_SIZE=BACK_SIZE,
                     BACK_FILTERSIZE=BACK_FILTERSIZE,
@@ -1309,97 +1313,52 @@ def run_sfft() -> Optional[int]:
             if use_bspline_kernel and _HAS_BSPLINE:
                 try:
                     log_info("Applying B-Spline kernel refinement...")
-                    # Re-run subtraction with B-Spline kernel.
-                    # KerHWRatio was added in a later SFFT version; older builds
-                    # reject it with TypeError.  Retry without it if so.
+                    # SFFT 1.7.3 BSP() API is completely different from ESP():
+                    # - KerSpDegree replaces KerPolyOrder
+                    # - ScaSpDegree + SEPARATE_SCALING replaces ConstPhotRatio
+                    # - BkgSpDegree replaces BGPolyOrder
+                    # - No source detection/matching params (BSP operates on raw images)
+                    # - No background estimation params (BSP models background internally)
+                    # - FITS_mREF/FITS_mSCI are required mask file paths (not None)
+                    from astropy.io import fits as _fits_bsp
+                    _ref_data = _fits_bsp.getdata(FITS_REF)
+                    _bsp_mref = FITS_REF.replace(".fits", "_bsp_mask.fits")
+                    _bsp_msci = FITS_SCI.replace(".fits", "_bsp_mask.fits")
+                    _ones_mask = np.ones_like(_ref_data, dtype=np.float32)
+                    _fits_bsp.writeto(_bsp_mref, _ones_mask, overwrite=True)
+                    _sci_data = _fits_bsp.getdata(FITS_SCI)
+                    _ones_mask_sci = np.ones_like(_sci_data, dtype=np.float32)
+                    _fits_bsp.writeto(_bsp_msci, _ones_mask_sci, overwrite=True)
                     _bsp_kwargs = dict(
                         FITS_REF=FITS_REF,
                         FITS_SCI=FITS_SCI,
+                        FITS_mREF=_bsp_mref,
+                        FITS_mSCI=_bsp_msci,
                         FITS_DIFF=FITS_DIFF,
-                        GKerHW=int(kernel_half_width),
-                        KerHWRatio=KerHWRatio,
-                        KerHWLimit=KerHWLimit,
-                        KerPolyOrder=kernel_poly_order,
                         ForceConv=ForceConv,
-                        BACK_TYPE="MANUAL",
-                        BACK_VALUE=BACK_VALUE,
-                        BACK_SIZE=BACK_SIZE,
-                        BACK_FILTERSIZE=BACK_FILTERSIZE,
-                        BACKPHOTO_TYPE=BACKPHOTO_TYPE,
-                        BGPolyOrder=bg_poly_order,
-                        DETECT_THRESH=DETECT_THRESH,
-                        DETECT_MINAREA=detect_minarea,
-                        DETECT_MAXAREA=detect_maxarea,
-                        DEBLEND_MINCONT=DEBLEND_MINCON,
-                        MaskSatContam=False,
-                        ConstPhotRatio=constant_phot_ratio,
-                        GAIN_KEY=GAIN_KEY,
-                        SATUR_KEY=SATUR_KEY,
-                        XY_PriorSelect=matching_sources if matching_sources is not None else None,
-                        XY_PriorBan=masked_sources if masked_sources is not None else None,
-                        MatchTol=None,
-                        MatchTolFactor=1,
-                        Hough_MINFR=0.1,
-                        Hough_PeakClip=0.4,
-                        BeltHW=0.2,
-                        COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
-                        CVREJ_MAGD_THRESH=CVREJ_MAGD_THRESH,
-                        ELABO_VAR_REJECTION=ELABO_VAR_REJECTION,
-                        EVREJ_RATIO_THREH=EVREJ_RATIO_THREH,
-                        EVREJ_SAFE_MAGDEV=EVREJ_SAFE_MAGDEV,
-                        StarExt_iter=StarExt_iter,
-                        PostAnomalyCheck=True,
-                        PAC_RATIO_THRESH=PAC_RATIO_THRESH,
-                        BoundarySIZE=boundary,
-                        ONLY_FLAGS=ONLY_FLAGS,
+                        GKerHW=int(kernel_half_width),
+                        KerSpType="Polynomial",
+                        KerSpDegree=int(kernel_poly_order),
+                        SEPARATE_SCALING=not constant_phot_ratio,
+                        ScaSpType="Polynomial",
+                        ScaSpDegree=0,
+                        BkgSpType="Polynomial",
+                        BkgSpDegree=int(bg_poly_order),
                         BACKEND_4SUBTRACT=BACKEND_4SUBTRACT,
                         CUDA_DEVICE_4SUBTRACT=CUDA_DEVICE_4SUBTRACT,
                         NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
+                        VERBOSE_LEVEL=2,
                     )
-                    try:
-                        bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
-                    except TypeError as _te:
-                        _te_msg = str(_te)
-                        _retry_done = False
-                        if "KerHWRatio" in _te_msg:
-                            log_info(
-                                "B-Spline: installed SFFT does not accept KerHWRatio; "
-                                "retrying without it (GKerHW is passed explicitly)."
-                            )
-                            _bsp_kwargs.pop("KerHWRatio", None)
-                            _retry_done = True
-                        if "KerHWLimit" in _te_msg:
-                            log_info(
-                                "B-Spline: installed SFFT does not accept KerHWLimit; "
-                                "retrying without it (GKerHW is passed explicitly)."
-                            )
-                            _bsp_kwargs.pop("KerHWLimit", None)
-                            _retry_done = True
-                        if _retry_done:
-                            try:
-                                bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
-                            except TypeError as _te2:
-                                if "KerHWLimit" in str(_te2):
-                                    log_info(
-                                        "B-Spline: retrying without KerHWLimit after "
-                                        "KerHWRatio removal."
-                                    )
-                                    _bsp_kwargs.pop("KerHWLimit", None)
-                                    bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
-                                elif "KerHWRatio" in str(_te2):
-                                    log_info(
-                                        "B-Spline: retrying without KerHWRatio after "
-                                        "KerHWLimit removal."
-                                    )
-                                    _bsp_kwargs.pop("KerHWRatio", None)
-                                    bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
-                                else:
-                                    raise
-                        else:
-                            raise
+                    bspline_result = BSpline_Packet.BSP(**_bsp_kwargs)
                     if bspline_result and len(bspline_result) >= 2:
                         diff_image, prep_data = bspline_result[0], bspline_result[1]
                         log_info("B-Spline kernel refinement completed successfully")
+                    # Clean up mask files
+                    for _mf in [_bsp_mref, _bsp_msci]:
+                        try:
+                            Path(_mf).unlink()
+                        except Exception:
+                            pass
                 except Exception as e:
                     log_info(f"Warning: B-Spline kernel refinement failed: {e}. Using standard kernel result.")
 
