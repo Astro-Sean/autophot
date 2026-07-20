@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Created on Wed Sep 28 09:58:29 2022
+"""Shared utility functions for the AutoPHOT pipeline.
 
-@author: seanbrennan
+This module provides:
+
+* Logging formatters (``PlainFormatter``, ``ColoredLevelFormatter``) and
+  helpers (``log_step``, ``border_msg``, ``configure_console_logging``).
+* FITS I/O helpers (``get_header``, ``get_image``, ``get_image_and_header``,
+  ``save_to_fits``).
+* Photometric utilities (``beta_aperture``, ``beta_psf``, ``snr``,
+  ``snr_err``, ``mag``).
+* WCS header helpers (``remove_wcs_from_header``, ``copy_wcs_from_header``,
+  ``update_header_from_wcs``).
+* Filter-name normalisation (``normalize_photometric_filter_name``,
+  ``sanitize_photometric_filters``).
+* YAML configuration loader (``AutophotYaml``).
+* Miscellaneous helpers (``set_size``, ``pix_dist``, ``gauss_1d``,
+  ``moffat_2d``, ``quadrature_add``).
 """
 
 # Import all required modules at the top
@@ -620,7 +633,7 @@ def set_size(width, aspect=1, fraction=1):
 
 
 def convert_to_mjd_astropy(date_string):
-
+    """Parse a date string (ISOT or FITS format) and return MJD."""
     try:
         # Try parsing with 'T' separator
         t = Time(date_string, format="isot", scale="utc")
@@ -635,7 +648,7 @@ def convert_to_mjd_astropy(date_string):
 
 
 def get_image_stats(image, sigma=3, maxiters=None):
-
+    """Return sigma-clipped mean, median, and std for *image*."""
     # Perform sigma clipping and calculate mean, median, and MAD in one step
     mean_value, median_value, std_value = sigma_clipped_stats(
         image,
@@ -650,7 +663,7 @@ def get_image_stats(image, sigma=3, maxiters=None):
 
 
 def calculate_bins(x, percentiles=[25, 75]):
-
+    """Compute a Freedman-Diaconis-style bin width for *x*."""
     try:
 
         if not np.any(np.isfinite(x)):
@@ -688,6 +701,7 @@ def calculate_bins(x, percentiles=[25, 75]):
 
 
 def save_to_fits(data, output_filename):
+    """Write *data* to a FITS file as float32 (preserves NaNs)."""
     try:
         # Use float32 to preserve NaNs (chip gaps) - integer dtypes cannot represent NaN
         data_to_write = data.astype(np.float32) if data.dtype.kind != 'f' else data
@@ -724,7 +738,7 @@ def save_to_fits(data, output_filename):
 
 
 def get_distance_modulus(redshift, H0=70, omega=0.3):
-
+    """Return the distance modulus for *redshift* using a flat ΛCDM cosmology."""
     cosmo = FlatLambdaCDM(H0=H0, Om0=omega)
     d = cosmo.luminosity_distance(redshift).value * 1e6
     dm = 5 * np.log10(d / 10)
@@ -733,6 +747,7 @@ def get_distance_modulus(redshift, H0=70, omega=0.3):
 
 
 class SuppressStdout:
+    """Context manager that temporarily redirects stdout to /dev/null."""
 
     def __enter__(self):
         import sys, os
@@ -1419,15 +1434,16 @@ def compute_target_crowding(
 
 
 class AutophotYaml:
+    """Load and update YAML configuration files for AutoPHOT."""
 
     def __init__(self, filepath=None, dict_name=None, wdir=None):
-
+        """Store path, optional sub-key, and working directory for later load/update."""
         self.filepath = filepath
         self.dict_name = dict_name
         self.wdir = wdir
 
     def load(self):
-
+        """Load YAML from *filepath* and return the full dict or a named sub-key."""
         if self.wdir is not None:
             file_path = os.path.join(self.wdir, self.filepath)
         else:
@@ -1444,7 +1460,7 @@ class AutophotYaml:
         return data
 
     def update(self, tele, inst_key, inst, key, new_val):
-
+        """Update a nested key in the YAML file under ``tele[inst_key][inst]``."""
         doc = {key: new_val}
 
         with open(self.filepath, "r") as yamlfile:
@@ -1478,19 +1494,13 @@ class AutophotYaml:
 
 
 def get_header(fpath):
+    """Robustly read a FITS header, combining extensions if necessary.
+
+    Looks for the ``TELESCOP`` keyword across HDUs and returns the first
+    matching header, merging with the primary header if needed.
+    """
     from astropy.io.fits import getheader
     from astropy.io import fits
-
-    """
-    Robust function to get header from a FITS image for use in AutoPHOT. This function aims to find the correct
-    telescope header information based on the "Telescop" header key. FITS images may contain multiple headers, 
-    so the function combines them if necessary.
-
-    :param fpath: Path to the FITS file.
-    :type fpath: str
-    :return: Combined header information.
-    :rtype: Header object
-    """
     try:
         # Attempt to open FITS file with 'ignore_missing_end' to handle incomplete files
         with fits.open(fpath, ignore_missing_end=True) as hdul:
@@ -1660,20 +1670,13 @@ def get_image_and_header(fpath):
 
 
 def get_image(fpath):
+    """Load a 2-D image array from a FITS file.
 
+    Tries the ``sci`` extension first, then falls back to the primary HDU.
+    Raises if the data is not 2-D.
+    """
     import os
     from astropy.io import fits
-
-    """
-    Given a FITS file, this function attempts to retrieve the 2D image data using the "sci" extension. 
-    If the image is not 2D or if the file is a FITS cube, an error will be raised.
-
-    :param fpath: Path to the FITS file.
-    :type fpath: str
-    :return: 2D image data array.
-    :rtype: numpy.ndarray
-    :raises Exception: If the image is not 2D or an error occurs during reading.
-    """
     try:
         # Try to get 2D image from 'sci' extension
         image = fits.getdata(fpath, extname="sci")
@@ -1846,7 +1849,7 @@ def gauss_1d(x, A, x0, sigma):
 
 
 def snr(maxPixel, noiseBkg):
-
+    """Return the simple signal-to-noise ratio ``maxPixel / noiseBkg``."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         snr_value = maxPixel / noiseBkg
@@ -1883,6 +1886,7 @@ def snr_err(snr_value):
 
 
 def quadrature_add(values):
+    """Return the quadrature sum of *values* (sqrt of sum of squares)."""
     return np.sqrt(sum([i**2 for i in values]))
 
 

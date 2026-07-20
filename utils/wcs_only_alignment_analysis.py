@@ -13,18 +13,33 @@ import astropy.units as u
 
 logger = logging.getLogger(__name__)
 
+
 class AlignmentMethodAnalyzer:
-    """Analyze whether WCS-only alignment can replace resampling for specific use cases."""
-    
+    """Analyse whether WCS-only alignment can replace pixel resampling.
+
+    Compares science and reference image WCS, pixel scales, distortion
+    parameters, and use-case requirements (photometry, subtraction, etc.)
+    to recommend either a WCS-only or SCAMP+SWarp resampling workflow.
+    """
+
     def __init__(self):
         self.logger = logging.getLogger(__name__)
-        
+
     def analyze_alignment_requirements(self, sci_image_path: str, ref_image_path: str) -> dict:
-        """
-        Analyze whether images can be aligned without resampling.
-        
-        Returns:
-            Dictionary with alignment analysis and recommendations
+        """Analyse whether two images can be aligned without resampling.
+
+        Parameters
+        ----------
+        sci_image_path : str
+            Path to the science FITS image.
+        ref_image_path : str
+            Path to the reference FITS image.
+
+        Returns
+        -------
+        dict
+            Analysis results with ``wcs_only_possible``, ``resampling_required``,
+            reasons, recommendations, and per-use-case assessments.
         """
         
         analysis = {
@@ -68,7 +83,7 @@ class AlignmentMethodAnalyzer:
         return analysis
     
     def _analyze_fundamental_requirements(self, sci_wcs, ref_wcs, sci_header, ref_header, analysis):
-        """Analyze fundamental requirements for alignment."""
+        """Check celestial WCS validity and invertibility for both images."""
         
         # Check if both images have valid WCS
         if sci_wcs.is_celestial and ref_wcs.is_celestial:
@@ -114,7 +129,7 @@ class AlignmentMethodAnalyzer:
             analysis['resampling_required'] = True
     
     def _analyze_use_cases(self, sci_wcs, ref_wcs, sci_shape, ref_shape, analysis):
-        """Analyze specific astronomical use cases."""
+        """Evaluate WCS-only sufficiency for photometry, subtraction, detection, etc."""
         
         use_cases = {
             'photometry': {
@@ -179,7 +194,7 @@ class AlignmentMethodAnalyzer:
         analysis['use_case_analysis'] = use_cases
     
     def _analyze_distortion_requirements(self, sci_header, ref_header, analysis):
-        """Analyze distortion handling requirements."""
+        """Check for SIP/TPV distortion parameters in both headers."""
         
         # Check for SIP distortion
         sci_has_sip = any(key in sci_header for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"])
@@ -212,7 +227,7 @@ class AlignmentMethodAnalyzer:
             analysis['reasons'].append("PASS No significant distortion detected")
     
     def _analyze_pixel_grid_alignment(self, sci_wcs, ref_wcs, sci_shape, ref_shape, analysis):
-        """Analyze pixel grid alignment requirements."""
+        """Compare pixel scales, image shapes, and coordinate grid alignment."""
         
         sci_pixscale = self._get_pixel_scale(sci_wcs)
         ref_pixscale = self._get_pixel_scale(ref_wcs)
@@ -261,7 +276,7 @@ class AlignmentMethodAnalyzer:
             analysis['reasons'].append(f"WARNING Could not test coordinate alignment: {e}")
     
     def _get_pixel_scale(self, wcs):
-        """Get pixel scale from WCS in arcsec/pixel."""
+        """Return the pixel scale in arcsec/pixel from a WCS object."""
         try:
             from astropy.wcs.utils import proj_plane_pixel_scales
             scales = proj_plane_pixel_scales(wcs)
@@ -270,7 +285,7 @@ class AlignmentMethodAnalyzer:
             return None
     
     def _make_recommendation(self, analysis):
-        """Make final recommendation based on analysis - UPDATED for template subtraction."""
+        """Produce final WCS-only vs. resampling recommendation (template-subtraction aware)."""
         
         # Check if template subtraction is the primary use case
         template_subtraction_ok = analysis['use_case_analysis'].get('image_subtraction', {}).get('wcs_only_sufficient', False)
@@ -300,7 +315,7 @@ class AlignmentMethodAnalyzer:
             analysis['wcs_only_possible'] = not analysis['resampling_required']
     
     def generate_alignment_strategy(self, analysis: dict) -> dict:
-        """Generate alignment strategy based on analysis."""
+        """Build a workflow strategy dict from the analysis results."""
         
         strategy = {
             'primary_method': 'scamp_swarp' if analysis.get('resampling_required', False) else 'wcs_only',
@@ -365,16 +380,21 @@ class AlignmentMethodAnalyzer:
         
         return strategy
 
+
 def analyze_alignment_feasibility(sci_image_path: str, ref_image_path: str) -> dict:
-    """
-    Main function to analyze if WCS-only alignment is possible.
-    
-    Args:
-        sci_image_path: Path to science image
-        ref_image_path: Path to reference image
-        
-    Returns:
-        Complete analysis with recommendations
+    """Top-level convenience function: analyse alignment and return strategy.
+
+    Parameters
+    ----------
+    sci_image_path : str
+        Path to the science FITS image.
+    ref_image_path : str
+        Path to the reference FITS image.
+
+    Returns
+    -------
+    dict
+        ``{'analysis': ..., 'strategy': ...}``
     """
     
     analyzer = AlignmentMethodAnalyzer()
@@ -420,3 +440,4 @@ if __name__ == "__main__":
             print(f"  {dis}")
     else:
         print("Usage: python wcs_only_alignment_analysis.py <science_image> <reference_image>")
+

@@ -47,6 +47,7 @@ from typing import Optional, Tuple
 
 # Simple logging function for early use (before main logger setup)
 def _early_log(msg: str) -> None:
+    """Print *msg* before the main logger is configured."""
     print(msg)
 
 # NumPy 2.0 compatibility: handle removed functions
@@ -557,6 +558,7 @@ def run_sfft() -> Optional[int]:
     # Use float64 throughout: SFFT internals operate in float64 and mixing float32
     # would cause a silent precision downgrade when data is written back to FITS.
     def get_fits_info(fits_path: str) -> Tuple[fits.Header, np.ndarray]:
+        """Load header and float64 data from a FITS file."""
         with fits.open(fits_path, memmap=False) as hdul:
             header = hdul[0].header.copy()
             data = np.array(hdul[0].data, dtype=np.float64)
@@ -685,6 +687,7 @@ def run_sfft() -> Optional[int]:
     def _ensure_gain_saturate(
         fits_path: str, gain: Optional[float], saturate: Optional[float], label: str
     ) -> None:
+        """Write GAIN and SATURATE keywords into the FITS header if provided."""
         if gain is None and saturate is None:
             return
         try:
@@ -710,6 +713,7 @@ def run_sfft() -> Optional[int]:
             )
 
     def _float_or_default(input_value, default: float) -> float:
+        """Convert *input_value* to float, returning *default* on failure."""
         if input_value is None:
             return default
         try:
@@ -912,6 +916,7 @@ def run_sfft() -> Optional[int]:
     SATUR_KEY = "SATURATE"
 
     def _parse_bool_str(name: str, value: str) -> bool:
+        """Parse a true/false string, raising ValueError on invalid input."""
         text = str(value).strip().lower()
         if text in ("true", "1", "yes", "y", "on"):
             return True
@@ -983,6 +988,7 @@ def run_sfft() -> Optional[int]:
     )
 
     def parse_only_flags(s: str):
+        """Parse a comma-separated list of flag integers, or None for empty."""
         text = str(s or "").strip().lower()
         if text in ("", "none", "null", "false"):
             return None

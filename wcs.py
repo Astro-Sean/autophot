@@ -82,6 +82,7 @@ def _wcs_cfg_float(cfg: dict, key: str, default: float) -> float:
 
 
 def _wcs_cfg_int(cfg: dict, key: str, default: int) -> int:
+    """Read *key* from *cfg* as int, falling back to *default* on None."""
     v = cfg.get(key, default)
     if v is None:
         return int(default)
@@ -373,6 +374,7 @@ def _is_non_linear_key(key: str) -> bool:
 
 
 def _parse_floats_from_line(line: str) -> list[float]:
+    """Extract all float-like tokens from a whitespace-separated string."""
     floats: list[float] = []
     for tok in line.strip().split():
         try:

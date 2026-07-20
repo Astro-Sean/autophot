@@ -1,3 +1,18 @@
+"""Light-curve plotting and photometry table generation for AutoPHOT.
+
+Provides functions to:
+
+* Plot publication-ready light curves with detections and upper limits
+  (:func:`plot_lightcurve`).
+* Generate structured photometry tables with MJD, magnitudes, errors, and
+  optional colour terms (:func:`generate_photometry_table`).
+* Sort detection plots into detection/non-detection folders
+  (:func:`check_detection_plots`).
+
+Band colour mappings, effective wavelengths, and canonical band-label
+resolution helpers are also defined here.
+"""
+
 import logging
 import os
 import numpy as np

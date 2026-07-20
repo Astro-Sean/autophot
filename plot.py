@@ -40,6 +40,11 @@ except ImportError:
 
 
 class Plot:
+    """Diagnostic plotting utilities for AutoPHOT.
+
+    Provides methods for subtraction checks, source overlays, crowding
+    diagnostics, light-curve plotting, and WCS-vs-PSF offset visualisation.
+    """
 
     # =============================================================================
     #
@@ -1926,3 +1931,365 @@ class Plot:
 
         except Exception as e:
             logger.warning(f"WCS vs PSF offset plot failed: {e}")
+
+    def plot_alignment_offset(
+        self,
+        sci_fpath: str,
+        template_fpath: str,
+        match_radius_arcsec: float = 2.0,
+    ):
+        """Diagnostic plot: dx vs dy between matched sources in aligned images.
+
+        Runs SExtractor on both the aligned science and template images,
+        cross-matches detected sources by RA/Dec, and compares their pixel
+        positions.  In a perfectly aligned image pair every matched source
+        should have dx ≈ 0, dy ≈ 0.
+
+        Parameters
+        ----------
+        sci_fpath : str
+            Path to the aligned science FITS image.
+        template_fpath : str
+            Path to the aligned template FITS image.
+        match_radius_arcsec : float
+            Maximum sky separation for cross-matching (default 2 arcsec).
+        """
+        import matplotlib.pyplot as plt
+        from functions import set_size
+        import numpy as np
+        from astropy.io import fits
+        from astropy.wcs import WCS
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+
+        try:
+            dir_path = os.path.dirname(os.path.realpath(__file__))
+            plt.style.use(os.path.join(dir_path, "autophot.mplstyle"))
+
+            base = os.path.splitext(os.path.basename(self.input_yaml["fpath"]))[0]
+            write_dir = os.path.dirname(self.input_yaml["fpath"])
+            save_path = os.path.join(
+                write_dir, f"Alignment_Offset_{base}.png"
+            )
+
+            # --- Run SExtractor on both aligned images --------------------
+            from utils.run_sex import SExtractorWrapper
+
+            fwhm_pix = float(self.input_yaml.get("fwhm", 3.0))
+            sex = SExtractorWrapper(config=self.input_yaml)
+
+            sci_result = sex.run(
+                fits_path=sci_fpath,
+                use_FWHM=fwhm_pix,
+                return_raw=True,
+                use_for_matching=True,
+            )
+            ref_result = sex.run(
+                fits_path=template_fpath,
+                use_FWHM=fwhm_pix,
+                return_raw=True,
+                use_for_matching=True,
+            )
+
+            sci_sources = sci_result[1]
+            ref_sources = ref_result[1]
+
+            if sci_sources is None or ref_sources is None:
+                logger.warning(
+                    "Alignment offset plot: SExtractor returned no sources "
+                    "for one or both images."
+                )
+                return
+
+            if len(sci_sources) < 3 or len(ref_sources) < 3:
+                logger.warning(
+                    "Alignment offset plot: too few sources detected "
+                    "(sci=%d, ref=%d); need >= 3 each.",
+                    len(sci_sources), len(ref_sources),
+                )
+                return
+
+            # --- Read WCS from both headers -------------------------------
+            sci_header = fits.getheader(sci_fpath)
+            ref_header = fits.getheader(template_fpath)
+            sci_wcs = WCS(sci_header, naxis=2)
+            ref_wcs = WCS(ref_header, naxis=2)
+
+            # --- Extract pixel positions and position errors --------------
+            def _get_xy(table):
+                x_col = "XWIN_IMAGE" if "XWIN_IMAGE" in table.colnames else "X_IMAGE"
+                y_col = "YWIN_IMAGE" if "YWIN_IMAGE" in table.colnames else "Y_IMAGE"
+                x = np.asarray(table[x_col], float)
+                y = np.asarray(table[y_col], float)
+                return x, y
+
+            def _get_pos_errors(table):
+                """Decompose SExtractor error ellipse into x/y sigma.
+
+                Returns (errx, erry) arrays in pixels.  Falls back to
+                FWHM*0.1 if error columns are absent.
+                """
+                if "ERRAWIN_IMAGE" in table.colnames:
+                    erra = np.asarray(table["ERRAWIN_IMAGE"], float)
+                    errb = np.asarray(table["ERRBWIN_IMAGE"], float) if "ERRBWIN_IMAGE" in table.colnames else erra
+                    theta = np.asarray(table["ERRTHETAWIN_IMAGE"], float) if "ERRTHETAWIN_IMAGE" in table.colnames else 0.0
+                    theta_rad = np.deg2rad(theta)
+                    cos_t = np.cos(theta_rad)
+                    sin_t = np.sin(theta_rad)
+                    errx = np.sqrt((erra * cos_t) ** 2 + (errb * sin_t) ** 2)
+                    erry = np.sqrt((erra * sin_t) ** 2 + (errb * cos_t) ** 2)
+                    return errx, erry
+                # Fallback: rough estimate from FWHM
+                fwhm_val = np.asarray(table["FWHM_IMAGE"], float) if "FWHM_IMAGE" in table.colnames else 3.0
+                err = fwhm_val * 0.1
+                return err, err
+
+            sci_x, sci_y = _get_xy(sci_sources)
+            ref_x, ref_y = _get_xy(ref_sources)
+            sci_errx, sci_erry = _get_pos_errors(sci_sources)
+            ref_errx, ref_erry = _get_pos_errors(ref_sources)
+
+            # SExtractor uses 1-based FITS convention; astropy WCS expects 0-based
+            sci_sky = sci_wcs.pixel_to_world(sci_x - 1.0, sci_y - 1.0)
+            ref_sky = ref_wcs.pixel_to_world(ref_x - 1.0, ref_y - 1.0)
+
+            # --- Cross-match by RA/Dec ------------------------------------
+            sci_coords = SkyCoord(ra=sci_sky.ra, dec=sci_sky.dec)
+            ref_coords = SkyCoord(ra=ref_sky.ra, dec=ref_sky.dec)
+
+            idx_ref, sep2d, _ = sci_coords.match_to_catalog_sky(
+                ref_coords, nthneighbor=1
+            )
+            matched = sep2d.to(u.arcsec).value <= match_radius_arcsec
+
+            # Compute pixel-space offsets by projecting the reference source's
+            # sky position into the science image's pixel frame.  This accounts
+            # for any CRPIX/CD differences between the two WCS headers and gives
+            # the true astrometric offset in the science pixel frame.
+            ref_sky_matched = ref_sky[idx_ref[matched]]
+            ref_in_sci_px = sci_wcs.world_to_pixel(ref_sky_matched)
+            dx_all = sci_x[matched] - (ref_in_sci_px[0] + 1.0)
+            dy_all = sci_y[matched] - (ref_in_sci_px[1] + 1.0)
+            # Combine errors in quadrature: sigma(dx) = sqrt(sci_errx^2 + ref_errx^2)
+            dx_err_all = np.sqrt(sci_errx[matched] ** 2 + ref_errx[idx_ref[matched]] ** 2)
+            dy_err_all = np.sqrt(sci_erry[matched] ** 2 + ref_erry[idx_ref[matched]] ** 2)
+
+            # Exclude self-matches (same pixel position)
+            min_pix_sep = 0.1  # px
+            real_match = np.sqrt(dx_all**2 + dy_all**2) >= min_pix_sep
+            dx_all = dx_all[real_match]
+            dy_all = dy_all[real_match]
+            dx_err_all = dx_err_all[real_match]
+            dy_err_all = dy_err_all[real_match]
+
+            n_matched = len(dx_all)
+            if n_matched < 2:
+                logger.warning(
+                    "Alignment offset plot: only %d sources matched by RA/Dec "
+                    "within %.1f arcsec; skipping plot.",
+                    n_matched, match_radius_arcsec,
+                )
+                return
+
+            logger.info(
+                "Alignment offset plot: %d sources matched by RA/Dec "
+                "(match radius=%.1f arcsec)",
+                n_matched, match_radius_arcsec,
+            )
+
+            # --- Filter sources with large position errors ----------------
+            # Errors > FWHM indicate problematic detections (blends, edges)
+            # that should not dominate the plot.
+            fwhm = float(self.input_yaml.get("fwhm", 3.0))
+            reasonable_err = (dx_err_all <= fwhm) & (dy_err_all <= fwhm)
+            n_before = len(dx_all)
+            dx_all = dx_all[reasonable_err]
+            dy_all = dy_all[reasonable_err]
+            dx_err_all = dx_err_all[reasonable_err]
+            dy_err_all = dy_err_all[reasonable_err]
+            n_excluded = n_before - len(dx_all)
+            if n_excluded > 0:
+                logger.info(
+                    f"Alignment offset plot: excluded {n_excluded}/{n_before} sources "
+                    f"with position errors > FWHM ({fwhm:.1f} px)"
+                )
+
+            if len(dx_all) < 2:
+                logger.warning(
+                    "Alignment offset plot: no sources remain after error filtering."
+                )
+                return
+
+            # --- Sigma-clip outliers for statistics -----------------------
+            from astropy.stats import sigma_clip as _sc
+
+            n_matched = len(dx_all)
+            if n_matched >= 8:
+                dx_clipped = _sc(dx_all, sigma=2.5, maxiters=3)
+                dy_clipped = _sc(dy_all, sigma=2.5, maxiters=3)
+                both_ok = ~dx_clipped.mask & ~dy_clipped.mask
+                if np.sum(both_ok) >= 3:
+                    dx_plot = dx_all[both_ok]
+                    dy_plot = dy_all[both_ok]
+                    dx_err_plot = dx_err_all[both_ok]
+                    dy_err_plot = dy_err_all[both_ok]
+                else:
+                    dx_plot = dx_all
+                    dy_plot = dy_all
+                    dx_err_plot = dx_err_all
+                    dy_err_plot = dy_err_all
+            else:
+                dx_plot = dx_all
+                dy_plot = dy_all
+                dx_err_plot = dx_err_all
+                dy_err_plot = dy_err_all
+
+            med_dx = float(np.nanmedian(dx_plot))
+            med_dy = float(np.nanmedian(dy_plot))
+            rms_dx = float(np.sqrt(np.nanmean(dx_plot**2)))
+            rms_dy = float(np.sqrt(np.nanmean(dy_plot**2)))
+
+            # --- Create plot (same format as WCS_vs_PSF_Offset) -----------
+            width_pt = 5.5 * 72.27
+            aspect = 1.0
+            fig, ax = plt.subplots(figsize=set_size(width_pt, aspect=aspect))
+
+            # Check if we have finite errors for error bars
+            has_errors = np.all(np.isfinite(dx_err_plot)) and np.all(np.isfinite(dy_err_plot))
+
+            if has_errors:
+                ax.errorbar(
+                    dx_plot,
+                    dy_plot,
+                    xerr=dx_err_plot,
+                    yerr=dy_err_plot,
+                    fmt="o",
+                    markersize=3,
+                    capsize=1,
+                    markerfacecolor="dodgerblue",
+                    markeredgecolor="none",
+                    ecolor="gray",
+                    elinewidth=0.5,
+                    alpha=0.7,
+                    zorder=2,
+                )
+            else:
+                ax.scatter(
+                    dx_plot,
+                    dy_plot,
+                    s=9,
+                    marker="o",
+                    facecolor="dodgerblue",
+                    edgecolor="none",
+                    alpha=0.7,
+                    zorder=2,
+                )
+
+            # Symmetric square axes with (0,0) at centre
+            if has_errors:
+                _lim = max(
+                    np.nanmax(np.abs(dx_plot + dx_err_plot)),
+                    np.nanmax(np.abs(dy_plot + dy_err_plot)),
+                    1.0,
+                ) * 1.1
+            else:
+                _lim = max(
+                    np.nanmax(np.abs(dx_plot)),
+                    np.nanmax(np.abs(dy_plot)),
+                    1.0,
+                ) * 1.1
+            ax.set_xlim(-_lim, _lim)
+            ax.set_ylim(-_lim, _lim)
+            ax.axhline(0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=1)
+            ax.axvline(0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=1)
+
+            ax.set_xlabel(
+                r"$\Delta x = x_{\mathrm{sci}} - x_{\mathrm{ref}}$ [px]"
+            )
+            ax.set_ylabel(
+                r"$\Delta y = y_{\mathrm{sci}} - y_{\mathrm{ref}}$ [px]"
+            )
+
+            # Add upper and right axes for arcsecond offsets
+            pixel_scale = None
+            if "pixel_scale" in self.input_yaml:
+                pixel_scale = float(self.input_yaml["pixel_scale"])
+            else:
+                try:
+                    from astropy.wcs import utils as wcs_utils
+                    pixel_scale = (
+                        wcs_utils.proj_plane_pixel_scales(sci_wcs)[0] * 3600
+                    )
+                except Exception:
+                    pass
+
+            if pixel_scale is not None and pixel_scale > 0:
+                ax_top = ax.twiny()
+                ax_right = ax.twinx()
+
+                ax_top.set_xlim(ax.get_xlim())
+                ax_right.set_ylim(ax.get_ylim())
+
+                ax_top.set_xticks(ax.get_xticks())
+                ax_top.set_xticklabels(
+                    [f"{x*pixel_scale:.2f}" for x in ax.get_xticks()]
+                )
+                ax_top.set_xlabel(r"$\Delta$RA [arcsec]", fontsize="small")
+
+                ax_right.set_yticks(ax.get_yticks())
+                ax_right.set_yticklabels(
+                    [f"{y*pixel_scale:.2f}" for y in ax.get_yticks()]
+                )
+                ax_right.set_ylabel(r"$\Delta$Dec [arcsec]", fontsize="small")
+
+                ax_top.tick_params(
+                    axis="x", which="both", labeltop=True, labelbottom=False
+                )
+                ax_right.tick_params(
+                    axis="y", which="both", labelright=True, labelleft=False
+                )
+            else:
+                ax.set_aspect("equal", adjustable="box")
+
+            ax.grid(True, ls="-", alpha=0.25, zorder=0)
+
+            stats_text = (
+                f"Median: ({med_dx:.3f}, {med_dy:.3f}) px\n"
+                f"RMS: ({rms_dx:.3f}, {rms_dy:.3f}) px"
+            )
+            ax.text(
+                0.05,
+                0.95,
+                stats_text,
+                transform=ax.transAxes,
+                verticalalignment="top",
+                horizontalalignment="left",
+                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+                fontsize="small",
+            )
+
+            ax.text(
+                0.05,
+                0.05,
+                f"N = {len(dx_plot)}",
+                transform=ax.transAxes,
+                verticalalignment="bottom",
+                horizontalalignment="left",
+                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+                fontsize="small",
+            )
+
+            fig.tight_layout()
+            fig.savefig(save_path, dpi=150, facecolor="white")
+            plt.close(fig)
+
+            logger.info(f"Saved alignment offset plot: {save_path}")
+            logger.info(
+                f"Alignment offset statistics:\n"
+                f"  Median: ({med_dx:.3f}, {med_dy:.3f}) px\n"
+                f"  RMS: ({rms_dx:.3f}, {rms_dy:.3f}) px\n"
+                f"  N matched: {n_matched}"
+            )
+
+        except Exception as e:
+            logger.warning(f"Alignment offset plot failed: {e}")
