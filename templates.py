@@ -477,7 +477,7 @@ def compute_alignment_rms(
         return None
 
     try:
-        fwhm = max(float(fwhm_pixels), 2.0)
+        fwhm = min(max(float(fwhm_pixels), 2.0), 4.0)
         from astropy.stats import sigma_clipped_stats as _scs
 
         _, med_sci, std_sci = _scs(sci_data, sigma=3.0)
@@ -2755,35 +2755,44 @@ class Templates:
                 if result.template_path is None:
                     return None, None
 
-                # Quality gate: check reproject alignment against configured threshold.
-                # Reproject trusts both WCS blindly — independently plate-solved images
-                # can disagree by several pixels.  Check median offset, RMS, and P90
-                # to catch both systematic shifts and spatially-varying distortion.
-                max_offset = float(
-                    self.input_yaml.get("alignment", {}).get(
-                        "reproject_max_rms_pixels", 0.90
-                    )
-                )
-                max_rms = 1.5
-                max_p90 = 3.0
+                quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
+                max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
+                max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
+                max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
+                # FWHM-adaptive thresholds for fallback gates
+                _tpl_fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                _tpl_scale = max(0.5, min(3.0, _tpl_fwhm / 3.0))
+                max_offset *= _tpl_scale
+                max_rms *= _tpl_scale
+                max_p90 *= _tpl_scale
                 _med = result.median_offset_px
                 _rms = result.rms_px
                 _p90 = result.p90_px
-                _reject = (
-                    (_med is not None and np.isfinite(_med) and _med > max_offset)
-                    or (_rms is not None and np.isfinite(_rms) and _rms > max_rms)
-                    or (_p90 is not None and np.isfinite(_p90) and _p90 > max_p90)
-                )
-                if _reject:
+                if _med is None and _rms is None and _p90 is None:
                     logger.warning(
-                        "Reproject alignment rejected: offset=%.3f px (> %.2f px), "
-                        "RMS=%.3f px (> %.2f px), P90=%.3f px (> %.2f px). "
-                        "Falling back to next alignment method.",
-                        _med if _med is not None else float('nan'), max_offset,
-                        _rms if _rms is not None else float('nan'), max_rms,
-                        _p90 if _p90 is not None else float('nan'), max_p90,
+                        "Reproject alignment quality could not be verified "
+                        "(insufficient sources); accepting as best available fallback."
                     )
-                    return None, None
+                else:
+                    _reject = (
+                        (_med is not None and np.isfinite(_med) and _med > max_offset)
+                        or (_rms is not None and np.isfinite(_rms) and _rms > max_rms)
+                        or (_p90 is not None and np.isfinite(_p90) and _p90 > max_p90)
+                    )
+                    if _reject:
+                        _reasons = []
+                        if _med is not None and np.isfinite(_med) and _med > max_offset:
+                            _reasons.append("offset=%.3f px (> %.2f px)" % (_med, max_offset))
+                        if _rms is not None and np.isfinite(_rms) and _rms > max_rms:
+                            _reasons.append("RMS=%.3f px (> %.2f px)" % (_rms, max_rms))
+                        if _p90 is not None and np.isfinite(_p90) and _p90 > max_p90:
+                            _reasons.append("P90=%.3f px (> %.2f px)" % (_p90, max_p90))
+                        logger.warning(
+                            "Reproject alignment rejected: %s. "
+                            "Falling back to next alignment method.",
+                            "; ".join(_reasons) if _reasons else "unknown",
+                        )
+                        return None, None
 
                 # Note: reproject only modifies the template, not the science image
                 # The science image WCS is unchanged, so target coordinates don't need updating
@@ -2804,7 +2813,11 @@ class Templates:
                 out = _astroalign()
                 if out[0]:
                     return out
-                return None, None
+                logger.error(
+                    "All alignment methods failed (swarp→reproject→astroalign). "
+                    "Proceeding with original unaligned images; subtraction quality may be poor."
+                )
+                return scienceFpath, templateFpath
 
             if method == "astroalign":
                 out = _astroalign()
@@ -2816,35 +2829,52 @@ class Templates:
                 out = _swarp()
                 if out[0]:
                     return out
-                return None, None
+                logger.error(
+                    "All alignment methods failed (astroalign→reproject→swarp). "
+                    "Proceeding with original unaligned images; subtraction quality may be poor."
+                )
+                return scienceFpath, templateFpath
 
             if method == "reproject":
+                logger.warning(
+                    "alignment_method='reproject' selected. SCAMP+SWarp ('swarp') consistently "
+                    "produces better subpixel alignment. Consider switching to swarp."
+                )
                 out = _reproject()
-                if out[0]:
-                    return out
-                out = _astroalign()
                 if out[0]:
                     return out
                 out = _swarp()
                 if out[0]:
                     return out
-                return None, None
+                out = _astroalign()
+                if out[0]:
+                    return out
+                logger.error(
+                    "All alignment methods failed (reproject→swarp→astroalign). "
+                    "Proceeding with original unaligned images; subtraction quality may be poor."
+                )
+                return scienceFpath, templateFpath
 
-            # Unknown method: behave like reproject-first (safest default).
+            # Unknown method: prefer SCAMP+SWarp (consistently best alignment).
             logger.warning(
-                "Unknown alignment_method=%r; falling back to reproject -> astroalign -> swarp.",
+                "Unknown alignment_method=%r; defaulting to swarp -> reproject -> astroalign "
+                "(SCAMP+SWarp consistently produces the best subpixel alignment).",
                 method,
             )
+            out = _swarp()
+            if out[0]:
+                return out
             out = _reproject()
             if out[0]:
                 return out
             out = _astroalign()
             if out[0]:
                 return out
-            out = _swarp()
-            if out[0]:
-                return out
-            return None, None
+            logger.error(
+                "All alignment methods failed. "
+                "Proceeding with original unaligned images; subtraction quality may be poor."
+            )
+            return scienceFpath, templateFpath
 
         except Exception:
             logger.exception("Error during alignment")
@@ -4188,7 +4218,19 @@ class Templates:
             # Get FWHM values - these should be in pixels for the resampled images
             # Since images are resampled to a common pixel scale by SWarp, we need to
             # account for any pixel scale differences between original and resampled images
-            science_fwhm_orig = float(self.input_yaml.get("fwhm", _hdr_float(scienceHeader, ["FWHM", "fwhm"], 3.0)))
+            #
+            # Prefer the header FWHM over input_yaml["fwhm"] for the science image.
+            # The input_yaml FWHM comes from SExtractor and can be inflated by galaxy
+            # contamination (e.g., 7.85px vs true 3.99px). The header FWHM comes from
+            # the careful measure_image step (PSF fitting on point sources only).
+            # Using the inflated FWHM causes kernel_order=0 (constant kernel) when the
+            # true PSF difference is large (e.g., 70%), leading to flux scaling
+            # mismatches and dipoles in the subtraction.
+            _sci_hdr_fwhm = _hdr_float(scienceHeader, ["FWHM", "fwhm"], 0.0)
+            if _sci_hdr_fwhm and _sci_hdr_fwhm > 0:
+                science_fwhm_orig = _sci_hdr_fwhm
+            else:
+                science_fwhm_orig = float(self.input_yaml.get("fwhm", 3.0))
             template_fwhm_orig = float(_hdr_float(templateHeader, ["FWHM", "fwhm"], 3.0))
 
             # Get pixel scales from WCS to check if resampling changed the scale
@@ -4639,7 +4681,7 @@ class Templates:
             if user_kernel is not None and user_kernel >= 0:
                 # User override: respect it but warn if likely under-constrained
                 kernel_order = min(int(user_kernel), 3)
-                min_src_for_order = {0: 0, 1: 40, 2: 80, 3: 150}
+                min_src_for_order = {0: 0, 1: 10, 2: 20, 3: 35}
                 needed = min_src_for_order.get(kernel_order, 0)
                 if n_eff < needed:
                     logger.warning(
@@ -4658,12 +4700,19 @@ class Templates:
                 else:
                     order_from_psf = 3
 
-                # Downgrade if not enough sources to constrain
-                if n_eff < 150 and order_from_psf >= 3:
+                # Downgrade if not enough sources to constrain the spatial
+                # variation.  SFFT uses all pixels in the kernel fit (not just
+                # source positions like HOTPANTS), so it needs far fewer sources
+                # to constrain a given polynomial order.  The old thresholds
+                # (40/80/150) were HOTPANTS-appropriate and caused SFFT to
+                # downgrade to order 0 even for large PSF differences, producing
+                # constant kernels that cannot model the PSF variation — leading
+                # to flux scaling mismatches and dipoles.
+                if n_eff < 35 and order_from_psf >= 3:
                     order_from_psf = 2
-                if n_eff < 80 and order_from_psf >= 2:
+                if n_eff < 20 and order_from_psf >= 2:
                     order_from_psf = 1
-                if n_eff < 40 and order_from_psf >= 1:
+                if n_eff < 10 and order_from_psf >= 1:
                     order_from_psf = 0
 
                 kernel_order = order_from_psf
