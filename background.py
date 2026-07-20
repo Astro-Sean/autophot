@@ -391,6 +391,7 @@ class BackgroundSubtractor:
         dilate_factor: float = 3.0,
         n_iterations: int = 3,  # NEW: iterative masking
         dilate_iterations: int = 3,  # NEW: configurable dilation iterations
+        max_mask_fraction: float = 0.45,
     ) -> np.ndarray:
         """
         Iteratively detect and mask sources.
@@ -411,6 +412,13 @@ class BackgroundSubtractor:
         dilate_iterations : int
             Number of binary_dilation iterations to apply. Higher values extend
             masks further around sources for more complete masking.
+        max_mask_fraction : float
+            Upper bound on the total masked fraction.  When the dilated mask
+            would exceed this, the dilation radius is progressively shrunk
+            (fewer iterations, then smaller radius) so that all detected
+            sources are still masked (at least their cores) while preserving
+            enough background pixels for Background2D.  In dense fields this
+            prevents the dilation from consuming most of the image.
         """
         # Guard against pathological or unknown FWHM values so the kernel
         # construction never divides by zero or creates a degenerate kernel.
@@ -463,10 +471,6 @@ class BackgroundSubtractor:
             # NumPy <2.0 raises TypeError for copy= keyword; NumPy 2.0+ raises ValueError if copy cannot be avoided
             residual = np.asarray(image, dtype=np.float32)
 
-        # Safety: cap mask fraction so Background2D always has enough data to
-        # fit a gradient.  If the mask exceeds this, stop iterating.
-        max_mask_fraction = 0.45
-
         for iteration in range(n_iterations):
             try:
                 work = residual
@@ -503,23 +507,52 @@ class BackgroundSubtractor:
                     break
 
                 new_mask = segm.data.astype(bool)
-                # Dilate to cover source wings / PSF halos - use configurable iterations
-                # Higher iterations (3-4) provide more complete galaxy/source masking
-                new_mask = binary_dilation(new_mask, structure=selem, iterations=dilate_iterations)
+                # Adaptive dilation: try the requested dilation radius, but if
+                # it pushes the total mask fraction above the budget, progressively
+                # shrink the radius so all detected sources are still masked (at
+                # least their cores) while preserving background pixels for
+                # Background2D.  In dense fields this prevents the mask from
+                # consuming most of the image.
+                target_frac = max_mask_fraction
+                best_new_mask = None
+                cur_r = r_dilate
+                cur_iters = dilate_iterations
+                while cur_r >= 1:
+                    trial_selem = _disk_structuring_element(cur_r)
+                    trial_mask = binary_dilation(
+                        new_mask, structure=trial_selem, iterations=cur_iters
+                    )
+                    trial_combined = mask | trial_mask
+                    trial_frac = trial_combined.mean()
+                    if trial_frac <= target_frac:
+                        best_new_mask = trial_mask
+                        break
+                    # Reduce dilation: first try fewer iterations, then smaller radius
+                    if cur_iters > 1:
+                        cur_iters -= 1
+                    else:
+                        cur_r = cur_r // 2
+                        cur_iters = 1
 
+                if best_new_mask is None:
+                    # Even minimal dilation exceeds budget — use undilated cores
+                    best_new_mask = new_mask
+                    self.logger.info(
+                        "Source mask: even 1px dilation exceeds %.0f%% budget; "
+                        "using undilated source cores only.",
+                        target_frac * 100,
+                    )
+
+                new_mask = best_new_mask
                 combined = mask | new_mask
 
-                # Stop if we've hit the mask budget.
+                # Stop if we've hit the mask budget even with adaptive dilation.
                 frac = combined.mean()
                 if frac > max_mask_fraction:
                     self.logger.info(
-                        f"Source mask would reach {frac:.1%} (limit {max_mask_fraction:.0%}) "
+                        f"Source mask at {frac:.1%} (limit {max_mask_fraction:.0%}) "
                         f"- stopping at iteration {iteration + 1}"
                     )
-                    # Keep the *previous* mask that was within budget, unless
-                    # this is the first iteration (then accept what we have).
-                    if iteration > 0:
-                        break
                     mask = combined
                     break
 
@@ -1353,6 +1386,7 @@ class BackgroundSubtractor:
             )
 
         # ---- Iterative source mask ----
+        max_mask_frac = float(cfg_bkg.get("source_mask_max_fraction", 0.45))
         source_mask = self._make_source_mask(
             image,
             nsigma=nsigma_src,
@@ -1361,6 +1395,7 @@ class BackgroundSubtractor:
             dilate_factor=dilate_factor,
             n_iterations=n_iter_src,
             dilate_iterations=regime_params.get("dilate_iterations", 3),
+            max_mask_fraction=max_mask_frac,
         )
 
         # ---- SIMBAD galaxy mask (with expanded ellipses) ----
