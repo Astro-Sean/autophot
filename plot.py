@@ -148,7 +148,7 @@ class Plot:
                 finite_frac = np.sum(np.isfinite(img_data)) / img_data.size * 100
                 img_h, img_w = img_data.shape
                 image_dims[key] = (img_w, img_h)  # (width, height)
-                logger.info(
+                logger.debug(
                     f"subtraction_check: {key} shape={img_data.shape}, "
                     f"finite={finite_frac:.1f}%, "
                     f"range=[{np.nanmin(img_data):.2e}, {np.nanmax(img_data):.2e}]"
@@ -217,7 +217,7 @@ class Plot:
             ref_height = images["Image"].shape[0]
             # Log image shapes for debugging
             for title in image_titles:
-                logger.info(f"subtraction_check: {title} shape={images[title].shape}")
+                logger.debug(f"subtraction_check: {title} shape={images[title].shape}")
             for i, (ax, title) in enumerate(zip(axes, image_titles)):
                 img_data = images[title]
                 # Use grayscale for full images to improve contrast with colored markers
@@ -268,10 +268,10 @@ class Plot:
                     # Debug: Log coordinate and image info
                     x_vals = matching_sources[x_col].values
                     y_vals = matching_sources[y_col].values
-                    logger.info(
+                    logger.debug(
                         f"subtraction_check: Using columns ({x_col}, {y_col}) for {len(matching_sources)} sources"
                     )
-                    logger.info(
+                    logger.debug(
                         f"subtraction_check: Coordinate ranges: "
                         f"X=[{np.nanmin(x_vals):.1f}, {np.nanmax(x_vals):.1f}], "
                         f"Y=[{np.nanmin(y_vals):.1f}, {np.nanmax(y_vals):.1f}]"
@@ -317,14 +317,14 @@ class Plot:
                         skipped_markers_total += skipped_markers
                         
                         if skipped_markers > 0:
-                            logger.info(
+                            logger.debug(
                                 f"subtraction_check: {panel_name} panel - plotted {valid_markers} markers, "
                                 f"skipped {skipped_markers} ({non_finite} non-finite). "
                                 f"Panel dims: {panel_width}x{panel_height}"
                             )
                     
                     if skipped_markers_total > 0:
-                        logger.info(
+                        logger.debug(
                             f"subtraction_check: Total - plotted {valid_markers_total} markers, "
                             f"skipped {skipped_markers_total} across all panels"
                         )
@@ -439,7 +439,7 @@ class Plot:
                                 zorder=2,
                             )
                         masked_count += 1
-                logger.info(f"Plotted {masked_count} variable sources (masked from flux calibration) as red 'x' markers")
+                logger.debug(f"Plotted {masked_count} variable sources (masked from flux calibration) as red 'x' markers")
 
             # Add insets and other features
             for i, (title, img_data) in enumerate(images.items()):
@@ -888,11 +888,11 @@ class Plot:
                     
                     logger.info("Source check plot: using RA/Dec WCS axes")
                 else:
-                    logger.warning("Source check plot: WCS has no celestial component, using pixel axes")
+                    logger.debug("Source check plot: WCS has no celestial component, using pixel axes")
                     raise ValueError("WCS has no celestial component")
             except Exception as e:
                 # Fallback to regular axes with pixel coordinates only
-                logger.warning(f"Source check plot: WCS axes failed ({e}), using pixel coordinates only")
+                logger.debug(f"Source check plot: WCS axes failed ({e}), using pixel coordinates only")
                 # Clear the figure to remove any partially-created WCS axes
                 fig.clf()
                 ax1 = fig.add_subplot(111)
@@ -1765,7 +1765,7 @@ class Plot:
                 df_plot = df_plot[reasonable_err].copy()
                 n_excluded = n_before - len(df_plot)
                 if n_excluded > 0:
-                    logger.info(
+                    logger.debug(
                         f"WCS vs PSF offset plot: excluded {n_excluded}/{n_before} sources "
                         f"with position errors > FWHM ({fwhm:.1f} px)"
                     )
@@ -1922,11 +1922,10 @@ class Plot:
             fig.savefig(save_path, dpi=150, facecolor="white")
             plt.close(fig)
 
-            logger.info(f"Saved WCS vs PSF offset plot: {save_path}")
+            logger.debug(f"Saved WCS vs PSF offset plot: {save_path}")
             logger.info(
-                f"WCS vs PSF offset statistics:\n"
-                f"  Median: ({med_dx:.3f}, {med_dy:.3f}) px\n"
-                f"  RMS: ({rms_dx:.3f}, {rms_dy:.3f}) px"
+                f"WCS vs PSF offset:\tmedian=({med_dx:.3f}, {med_dy:.3f}) px, "
+                f"RMS=({rms_dx:.3f}, {rms_dy:.3f}) px"
             )
 
         except Exception as e:
@@ -2049,52 +2048,41 @@ class Plot:
             sci_errx, sci_erry = _get_pos_errors(sci_sources)
             ref_errx, ref_erry = _get_pos_errors(ref_sources)
 
-            # SExtractor uses 1-based FITS convention; astropy WCS expects 0-based
-            sci_sky = sci_wcs.pixel_to_world(sci_x - 1.0, sci_y - 1.0)
-            ref_sky = ref_wcs.pixel_to_world(ref_x - 1.0, ref_y - 1.0)
+            from scipy.spatial import cKDTree
 
-            # --- Cross-match by RA/Dec ------------------------------------
-            sci_coords = SkyCoord(ra=sci_sky.ra, dec=sci_sky.dec)
-            ref_coords = SkyCoord(ra=ref_sky.ra, dec=ref_sky.dec)
-
-            idx_ref, sep2d, _ = sci_coords.match_to_catalog_sky(
-                ref_coords, nthneighbor=1
+            sci_xy = np.column_stack((sci_x, sci_y))
+            ref_xy = np.column_stack((ref_x, ref_y))
+            tree_ref = cKDTree(ref_xy)
+            tree_sci = cKDTree(sci_xy)
+            distance, idx_ref = tree_ref.query(sci_xy, k=1)
+            _, idx_sci = tree_sci.query(ref_xy, k=1)
+            idx = np.arange(len(sci_xy), dtype=int)
+            fwhm = float(self.input_yaml.get("fwhm", 3.0))
+            max_pixel_separation = max(2.0 * fwhm, 1.0)
+            matched = (idx_sci[idx_ref] == idx) & np.isfinite(distance) & (
+                distance <= max_pixel_separation
             )
-            matched = sep2d.to(u.arcsec).value <= match_radius_arcsec
 
-            # Compute pixel-space offsets by projecting the reference source's
-            # sky position into the science image's pixel frame.  This accounts
-            # for any CRPIX/CD differences between the two WCS headers and gives
-            # the true astrometric offset in the science pixel frame.
-            ref_sky_matched = ref_sky[idx_ref[matched]]
-            ref_in_sci_px = sci_wcs.world_to_pixel(ref_sky_matched)
-            dx_all = sci_x[matched] - (ref_in_sci_px[0] + 1.0)
-            dy_all = sci_y[matched] - (ref_in_sci_px[1] + 1.0)
-            # Combine errors in quadrature: sigma(dx) = sqrt(sci_errx^2 + ref_errx^2)
-            dx_err_all = np.sqrt(sci_errx[matched] ** 2 + ref_errx[idx_ref[matched]] ** 2)
-            dy_err_all = np.sqrt(sci_erry[matched] ** 2 + ref_erry[idx_ref[matched]] ** 2)
-
-            # Exclude self-matches (same pixel position)
-            min_pix_sep = 0.1  # px
-            real_match = np.sqrt(dx_all**2 + dy_all**2) >= min_pix_sep
-            dx_all = dx_all[real_match]
-            dy_all = dy_all[real_match]
-            dx_err_all = dx_err_all[real_match]
-            dy_err_all = dy_err_all[real_match]
+            dx_all = sci_x[matched] - ref_x[idx_ref[matched]]
+            dy_all = sci_y[matched] - ref_y[idx_ref[matched]]
+            dx_err_all = np.sqrt(
+                sci_errx[matched] ** 2 + ref_errx[idx_ref[matched]] ** 2
+            )
+            dy_err_all = np.sqrt(
+                sci_erry[matched] ** 2 + ref_erry[idx_ref[matched]] ** 2
+            )
 
             n_matched = len(dx_all)
             if n_matched < 2:
                 logger.warning(
-                    "Alignment offset plot: only %d sources matched by RA/Dec "
-                    "within %.1f arcsec; skipping plot.",
-                    n_matched, match_radius_arcsec,
+                    "Alignment offset plot: only %d mutual pixel matches within %.1f px; skipping plot.",
+                    n_matched, max_pixel_separation,
                 )
                 return
 
-            logger.info(
-                "Alignment offset plot: %d sources matched by RA/Dec "
-                "(match radius=%.1f arcsec)",
-                n_matched, match_radius_arcsec,
+            logger.debug(
+                "Alignment offset plot: %d mutual pixel matches within %.1f px",
+                n_matched, max_pixel_separation,
             )
 
             # --- Filter sources with large position errors ----------------
@@ -2109,7 +2097,7 @@ class Plot:
             dy_err_all = dy_err_all[reasonable_err]
             n_excluded = n_before - len(dx_all)
             if n_excluded > 0:
-                logger.info(
+                logger.debug(
                     f"Alignment offset plot: excluded {n_excluded}/{n_before} sources "
                     f"with position errors > FWHM ({fwhm:.1f} px)"
                 )
@@ -2283,12 +2271,10 @@ class Plot:
             fig.savefig(save_path, dpi=150, facecolor="white")
             plt.close(fig)
 
-            logger.info(f"Saved alignment offset plot: {save_path}")
+            logger.debug(f"Saved alignment offset plot: {save_path}")
             logger.info(
-                f"Alignment offset statistics:\n"
-                f"  Median: ({med_dx:.3f}, {med_dy:.3f}) px\n"
-                f"  RMS: ({rms_dx:.3f}, {rms_dy:.3f}) px\n"
-                f"  N matched: {n_matched}"
+                f"Alignment offset:\tmedian=({med_dx:.3f}, {med_dy:.3f}) px, "
+                f"RMS=({rms_dx:.3f}, {rms_dy:.3f}) px, N={n_matched}"
             )
 
         except Exception as e:

@@ -552,7 +552,7 @@ def compute_alignment_rms(
         _med_dx = float(np.nanmedian(_dx_mut))
         _med_dy = float(np.nanmedian(_dy_mut))
         logger.info(
-            "Alignment RMS: med=%.3f px (dx=%.3f, dy=%.3f) rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped) max=%.2f px",
+            "Alignment RMS:\tmed=%.3f px (dx=%.3f, dy=%.3f) rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped) max=%.2f px",
             median_offset, _med_dx, _med_dy, rms, p90, len(d_clipped), len(d_mut),
             len(d_mut) - len(d_clipped), max_sep,
         )
@@ -1582,16 +1582,7 @@ def download_sdss_template(
         if not (0 <= xc < data.shape[1] and 0 <= yc < data.shape[0]):
             logger.warning("Target (%.4f, %.4f) outside SDSS frame", ra, dec)
             return None
-        cutout = Cutout2D(
-            data,
-            (xc, yc),
-            size=(2 * half_size_px, 2 * half_size_px),
-            wcs=template_wcs,
-            mode="partial",
-            fill_value=np.nan,
-        )
-        cutout_data = cutout.data
-        cutout_wcs = cutout.wcs
+        from functions import nan_crop
         new_header = fits.PrimaryHDU().header
         new_header.update(
             {
@@ -1603,9 +1594,13 @@ def download_sdss_template(
                 "EXPTIME": src_header.get("EXPTIME", 1.0),
             }
         )
-        if cutout_wcs is not None:
-            from functions import update_header_from_wcs
-            update_header_from_wcs(new_header, cutout_wcs)
+        # Copy WCS keywords from source header, then nan_crop will update CRPIX
+        from functions import copy_wcs_from_header
+        copy_wcs_from_header(new_header, src_header)
+        cutout_size = int(2 * half_size_px)
+        cutout_data, new_header = nan_crop(
+            data, new_header, xc, yc, cutout_size, cutout_size
+        )
         write_fits(str(template_fpath), cutout_data, new_header)
         logger.debug("SDSS template written: %s", template_fpath)
     except Exception:
@@ -2420,7 +2415,7 @@ class Templates:
             npixels_det_raw = float(np.pi * (float(fwhm) / 2.0) ** 2)
             npixels_det = int(npixels_det_raw)
             if npixels_det < 5:
-                logger.warning(
+                logger.debug(
                     "create_image_mask: computed npixels=%d from fwhm=%s (raw=%g); clamping to 5.",
                     int(npixels_det),
                     str(fwhm),
@@ -2570,7 +2565,7 @@ class Templates:
 
 
         candidate_dirs = [fits_root / d for d in dir_labels]
-        logger.info(
+        logger.debug(
             "Expected %s-band template folder(s): %s",
             use_filter,
             ", ".join(str(d) for d in candidate_dirs),
@@ -2601,18 +2596,15 @@ class Templates:
                 preferred_candidate = next((p for p in candidates if p.name == pref_name), None)
                 if preferred_candidate:
                     result = str(preferred_candidate)
-                    logger.info("Template filepath (preferred X_template.fits format): %s", result)
+                    logger.debug("Template filepath: %s", result)
                     return result
             
             # Fallback to first candidate
             result = str(candidates[0])
             if template_dir.name.endswith("_template"):
-                logger.info(
-                    "Template filepath (legacy folder): %s",
-                    result,
-                )
+                logger.debug("Template filepath (legacy folder): %s", result)
             else:
-                logger.info("Template filepath: %s", result)
+                logger.debug("Template filepath: %s", result)
             return result
 
         logger.info(
@@ -2967,8 +2959,8 @@ class Templates:
 
             # Log the coordinate change and WCS parameters
             logger.info(
-                "Target coordinates updated after %s alignment: (%.1f, %.1f) px -> (%.1f, %.1f) px. "
-                "WCS CRPIX=(%.1f, %.1f) px, CRVAL=(%.6f, %.6f) deg",
+                "Target coords updated after %s alignment:\t(%.1f, %.1f) -> (%.1f, %.1f) px | "
+                "WCS CRPIX=(%.1f, %.1f) CRVAL=(%.6f, %.6f)",
                 method_name, old_target_x, old_target_y, new_target_x, new_target_y,
                 aligned_header.get("CRPIX1", np.nan), aligned_header.get("CRPIX2", np.nan),
                 aligned_header.get("CRVAL1", np.nan), aligned_header.get("CRVAL2", np.nan)
@@ -3000,11 +2992,14 @@ class Templates:
         ----------
         coords : (min_row, min_col, max_row, max_col)
         """
-        wcs_obj = get_wcs(header)
-        center = ((coords[2] + coords[0]) // 2, (coords[3] + coords[1]) // 2)
-        size = (coords[2] - coords[0] + 1, coords[3] - coords[1] + 1)
-        cutout = Cutout2D(data, position=center, size=size, wcs=wcs_obj)
-        return cutout.data, cutout.wcs
+        from functions import nan_crop
+        center_x = (coords[3] + coords[1]) // 2
+        center_y = (coords[2] + coords[0]) // 2
+        ny = coords[2] - coords[0] + 1
+        nx = coords[3] - coords[1] + 1
+        new_header = header.copy()
+        cropped, new_header = nan_crop(data, new_header, center_x, center_y, ny, nx)
+        return cropped, get_wcs(new_header)
 
     @staticmethod
     def largest_histogram_rectangle(
@@ -3135,17 +3130,12 @@ class Templates:
                 raise ValueError(
                     f"Invalid crop center: cx={cx}, cy={cy} (must be finite)"
                 )
-            cutout = Cutout2D(
-                scienceImage,
-                position=(np.floor(cx), np.floor(cy)),
-                size=(height, width),
-                wcs=imageWCS,
-                mode="partial",
-                fill_value=np.nan,
+            from functions import nan_crop
+            scienceImage, scienceHeader = nan_crop(
+                scienceImage, scienceHeader,
+                np.floor(cx), np.floor(cy),
+                height, width,
             )
-            from functions import update_header_from_wcs
-            update_header_from_wcs(scienceHeader, cutout.wcs)
-            scienceImage = cutout.data
 
             # Try tighter crop to largest valid rectangle
             coords = self.find_largest_available_area(scienceImage)
@@ -3230,7 +3220,7 @@ class Templates:
                 if not (np.isfinite(test_ra[0]) and np.isfinite(test_dec[0])):
                     logger.error(
                         f"Invalid WCS transformation at crop center (cx={cx}, cy={cy}): RA={test_ra[0]}, Dec={test_dec[0]}. "
-                        f"This will cause Cutout2D to fail. Falling back to no crop."
+                        f"This will cause the crop to fail. Falling back to no crop."
                     )
                     # Return original images without cropping
                     return scienceFpath, templateFpath
@@ -3238,29 +3228,18 @@ class Templates:
                 logger.error(f"WCS validation failed: {e}. Falling back to no crop.")
                 return scienceFpath, templateFpath
             
-            # Initial cutout
-            scienceCutout = Cutout2D(
-                scienceImage,
-                position,
-                size,
-                wcs=imageWCS,
-                mode="trim",
-                fill_value=np.nan,
+            # Initial cutout using nan_crop to preserve WCS distortion keywords
+            from functions import nan_crop
+            scienceImage, scienceHeader = nan_crop(
+                scienceImage, scienceHeader,
+                position[0], position[1],
+                size[0], size[1],
             )
-            scienceImage = scienceCutout.data
-            from functions import update_header_from_wcs
-            update_header_from_wcs(scienceHeader, scienceCutout.wcs)
-
-            templateCutout = Cutout2D(
-                templateImage,
-                position,
-                size,
-                wcs=templateWCS,
-                mode="trim",
-                fill_value=np.nan,
+            templateImage, templateHeader = nan_crop(
+                templateImage, templateHeader,
+                position[0], position[1],
+                size[0], size[1],
             )
-            templateImage = templateCutout.data
-            update_header_from_wcs(templateHeader, templateCutout.wcs)
 
             # Mark shared invalid regions (NaNs from chip gaps or out-of-bounds)
             mask = np.isnan(templateImage) | np.isnan(scienceImage)
@@ -3840,10 +3819,10 @@ class Templates:
                 len(mag_img_r),
                 len(mag_img),
             )
-            # Warn if intercept indicates a systematic offset (>0.5 mag or ~1 pixel equivalent)
             if np.isfinite(intercept) and abs(intercept) > 0.5:
-                logger.warning(
-                    "RANSAC intercept=%.3f mag indicates systematic offset between images; check WCS alignment and centroid matching.",
+                logger.debug(
+                    "RANSAC intercept=%.3f mag indicates flux scaling between science and template "
+                    "(expected for different exposure times/zeropoints; handled by subtraction pipeline).",
                     intercept,
                 )
 
@@ -4466,17 +4445,9 @@ class Templates:
                 ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_from_conv, ker_hw_floor)))
 
                 logger.info(
-                    "Kernel sizing:\n  FWHM_sci: %.2f px\n"
-                    "  FWHM_ref: %.2f px\n"
-                    "  FWHM_broad: %.2f px\n"
-                    "  FWHM_conv: %.2f px\n"
-                    "  Base multiplier: %.2f\n"
-                    "  Effective multiplier: %.2f\n"
-                    "  hw_conv: %d px\n"
-                    "  hw_floor: %d px\n"
-                    "  kernel_hw: %d px (clamped to %d-%d)",
-                    fwhm_sci, fwhm_ref, fwhm_broad, fwhm_conv,
-                    _mult, _mult_effective,
+                    "Kernel sizing: FWHM_sci=%.2f FWHM_ref=%.2f FWHM_conv=%.2f px | "
+                    "hw_conv=%d hw_floor=%d -> kernel_hw=%d px (clamped %d-%d)",
+                    fwhm_sci, fwhm_ref, fwhm_conv,
                     ker_hw_from_conv, ker_hw_floor,
                     ker_hw, KER_HW_MIN, KER_HW_MAX,
                 )
@@ -4925,10 +4896,7 @@ class Templates:
                     diff_rms = np.sqrt(np.mean(valid_pixels ** 2))
 
                     logger.info(
-                        "Subtraction quality:\n  Median: %.3f\n"
-                        "  Std: %.3f\n"
-                        "  RMS: %.3f\n"
-                        "  Valid pixels: %d",
+                        "Subtraction quality: median=%.3f std=%.3f rms=%.3f | valid=%d px",
                         diff_median, diff_std, diff_rms, len(valid_pixels)
                     )
 
@@ -5141,10 +5109,15 @@ class Templates:
             ts_sub = self.input_yaml["template_subtraction"]
             phot_cfg = self.input_yaml.get("photometry", {})
 
-            # Always convolve the reference image (ForceConv=REF).
-            # DIFF = SCI - conv(REF): the transient keeps the science PSF.
+            # ForceConv=REF: always convolve the reference to match the science.
+            # The PSF is built on the science image, so the science PSF is the
+            # reference for subtraction.  Convolving the reference preserves the
+            # science PSF in the difference image, which is required for
+            # photometry and transient detection.
             forceconv = "REF"
-            logger.info("SFFT ForceConv=REF (reference always convolved).")
+            logger.info(
+                "SFFT ForceConv=REF (reference always convolved; PSF built on science)."
+            )
 
             # Background polynomial order: default to 0 unless the user explicitly overrides
             bg_order = ts_sub.get("sfft_bg_order", 0)
@@ -5289,6 +5262,8 @@ class Templates:
                     cmd_local.extend(["-masked_sources", excl_str])
                 
                 cmd_local.extend([
+                    "-forceconv",
+                    forceconv,
                     "-kernel_order",
                     str(kernel_order),
                     "-bg_order",
@@ -5303,8 +5278,6 @@ class Templates:
                     match_str,
                     "-kernel_half_width",
                     str(kernel_half_width),
-                    "-forceconv",
-                    forceconv,
                     "-gain_sci",
                     str(float(science_gain)),
                     "-gain_ref",
@@ -5367,14 +5340,28 @@ class Templates:
                 if ts_sub.get("sfft_save_decorrelated", True):
                     cmd_local += ["-save_decorrelated", "true"]
 
+                # Variable star rejection: enable flags must be passed alongside
+                # their thresholds, otherwise the thresholds are ignored and variable
+                # stars bias the kernel fit, leaving residuals at point source positions.
+                coarse_var_rej = _as_bool(ts_sub.get("sfft_coarse_var_rejection", True), True)
+                elab_var_rej = _as_bool(ts_sub.get("sfft_elabo_var_rejection", True), True)
+                cmd_local += ["-coarse_var_rejection", "true" if coarse_var_rej else "false"]
+                cmd_local += ["-elabo_var_rejection", "true" if elab_var_rej else "false"]
+
                 # Kernel half-width limits
                 kernel_hw_min = ts_sub.get("sfft_kernel_hw_min", 3)
                 kernel_hw_max = ts_sub.get("sfft_kernel_hw_max", 50)
                 cmd_local += ["-kernel_hw_min", str(int(kernel_hw_min))]
                 cmd_local += ["-kernel_hw_max", str(int(kernel_hw_max))]
 
+                # Forward the configured FWHM multiplier so run_sfft.py auto-sizing
+                # matches the pipeline's physics-based kernel sizing.
+                _ker_mult = ts_sub.get("kernel_hw_fwhm_multiplier", None)
+                if _ker_mult is not None:
+                    cmd_local += ["-kernel_hw_fwhm_multiplier", str(float(_ker_mult))]
+
                 # Prior source validation
-                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 10)
+                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 3)
                 cmd_local += ["-min_prior_sources", str(int(min_prior_sources))]
 
                 if sfft_crowded:

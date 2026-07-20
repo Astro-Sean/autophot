@@ -64,7 +64,9 @@ class PlainFormatter(logging.Formatter):
     
     Ensures log files contain clean, readable text without terminal
     formatting codes (bold, color, etc.) that are added by border_msg
-    and other formatting functions.
+    and other formatting functions.  Multi-line messages (e.g. border
+    banners) are indented so continuation lines align with the first
+    line's prefix.
     """
     ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     
@@ -72,7 +74,19 @@ class PlainFormatter(logging.Formatter):
         # Get base formatted message
         msg = super().format(record)
         # Strip all ANSI escape codes
-        return self.ANSI_ESCAPE.sub('', msg)
+        msg = self.ANSI_ESCAPE.sub('', msg)
+        # Indent continuation lines of multi-line messages so border
+        # banners and other multi-line output aligns under the first
+        # line's timestamp/level prefix in the log file.
+        if '\n' in msg:
+            lines = msg.split('\n')
+            dummy = copy.copy(record)
+            dummy.msg, dummy.args = '', ()
+            prefix = super().format(dummy)
+            prefix_len = len(prefix)
+            lines = [lines[0]] + [' ' * prefix_len + ln for ln in lines[1:]]
+            msg = '\n'.join(lines)
+        return msg
 
 
 class ColoredLevelFormatter(logging.Formatter):
@@ -119,7 +133,7 @@ class ColoredLevelFormatter(logging.Formatter):
             if self._msg_count == 1:
                 # First message ever: show timestamp (or just bordered message if bordered)
                 first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
-                if first_line.startswith("─"):
+                if first_line[:1] in ("─", "┌", "+"):
                     base = f"\n{msg_clean}"
                 else:
                     base = f"{time_str}  {msg_clean}"
@@ -127,7 +141,7 @@ class ColoredLevelFormatter(logging.Formatter):
                 # Same second as previous: no blank line, indent only
                 # For bordered messages: blank line before, no indent
                 first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
-                if first_line.startswith("─"):
+                if first_line[:1] in ("─", "┌", "+"):
                     base = f"\n{msg_clean}"
                 else:
                     base = f"  {msg_clean}"
@@ -135,7 +149,7 @@ class ColoredLevelFormatter(logging.Formatter):
                 # New timestamp: blank line before
                 # For bordered messages: blank line before, but no timestamp (they have their own header)
                 first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
-                if first_line.startswith("─"):
+                if first_line[:1] in ("─", "┌", "+"):
                     base = f"\n{msg_clean}"
                 else:
                     base = f"\n{time_str}  {msg_clean}"
@@ -904,12 +918,18 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
         corner = "+"
         left_corner = "+"
         right_corner = "+"
+        bottom_left = "+"
+        bottom_right = "+"
+        side = "|"
     else:
-        left_corner = corner
-        right_corner = "+" if corner == "+" else "+"
+        left_corner = "┌" if corner == "+" else corner
+        right_corner = "┐" if corner == "+" else corner
+        bottom_left = "└"
+        bottom_right = "┘"
+        side = "│"
 
-    # Truncate or pad title to fit (account for bold escape codes in width)
-    max_title = width - 4  # space for corners and padding
+    # Truncate or pad title to fit (account for corners and padding)
+    max_title = width - 2  # space for left and right corner chars
     # Visible text length (bold codes don't count toward display width)
     visible_text = text
     if len(visible_text) > max_title:
@@ -922,18 +942,19 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
     # Apply bold to the title text only (not the padding)
     centered = f"{' ' * left_pad}{BOLD}{visible_text}{RESET}{' ' * right_pad}"
 
-    # Build lines (no leading newline - formatter handles spacing)
-    border_line = body * width
-    title_line = f"{left_corner}{centered}{right_corner}"
+    # Build lines: top border with corners, title line, optional metadata, bottom border with corners
+    top_border = f"{left_corner}{body * (width - 2)}{right_corner}"
+    bottom_border = f"{bottom_left}{body * (width - 2)}{bottom_right}"
+    title_line = f"{side}{centered}{side}"
 
-    lines = [border_line, title_line]
+    lines = [top_border, title_line]
 
     if metadata:
-        meta_clean = str(metadata).strip()[:max_title]
+        meta_clean = str(metadata).strip()[:max_title - 2]
         meta_padded = f" {meta_clean}{' ' * (max_title - len(meta_clean) - 1)}"
-        lines.append(f"│{meta_padded}│")
+        lines.append(f"{side}{meta_padded}{side}")
 
-    lines.append(border_line)
+    lines.append(bottom_border)
     return "\n".join(lines)
 
 
@@ -1237,7 +1258,7 @@ def load_telescope_config(wdir):
 
     out = _deep_merge_into(out, _safe_load_yaml(user_path))
     if loaded_sources:
-        logger.info("telescope.yml loaded from: %s", " (merged) ".join(loaded_sources))
+        logger.debug("telescope.yml loaded from: %s", " (merged) ".join(loaded_sources))
     else:
         logger.info(
             "telescope.yml: using built-in defaults only (no file found at %r)",
@@ -2178,6 +2199,71 @@ def update_header_from_wcs(header, wcs_obj):
             for k in ['CDELT1', 'CDELT2']:
                 header.pop(k, None)
     return header
+
+
+def nan_crop(data, header, cx, cy, ny, nx):
+    """
+    Crop an image to (ny, nx) centred on (cx, cy), padding with NaN if the
+    region extends beyond the array.  Only CRPIX1/CRPIX2 are updated in the
+    header — all other WCS keywords (CD, SIP, PV, CTYPE, etc.) are left
+    untouched, avoiding the distortion-dropping problems that Cutout2D's
+    WCS round-trip can introduce.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        2-D image array.
+    header : fits.Header
+        FITS header (modified in place).
+    cx, cy : float
+        Desired centre in 0-based pixel coordinates.
+    ny, nx : int
+        Desired output shape (rows, cols).
+
+    Returns
+    -------
+    cropped : np.ndarray  shape (ny, nx)
+    header : fits.Header   (same object, CRPIX updated)
+    """
+    src_ny, src_nx = data.shape
+
+    # Output array, filled with NaN
+    out = np.full((ny, nx), np.nan, dtype=data.dtype)
+
+    # Source slice that maps into the output
+    src_y0 = int(np.floor(cy - ny / 2.0))
+    src_y1 = src_y0 + ny
+    src_x0 = int(np.floor(cx - nx / 2.0))
+    src_x1 = src_x0 + nx
+
+    # Clamp to source bounds
+    sy0 = max(0, src_y0)
+    sy1 = min(src_ny, src_y1)
+    sx0 = max(0, src_x0)
+    sx1 = min(src_nx, src_x1)
+
+    # Corresponding destination indices
+    dy0 = sy0 - src_y0
+    dy1 = dy0 + (sy1 - sy0)
+    dx0 = sx0 - src_x0
+    dx1 = dx0 + (sx1 - sx0)
+
+    if sy1 > sy0 and sx1 > sx0:
+        out[dy0:dy1, dx0:dx1] = data[sy0:sy1, sx0:sx1]
+
+    # Update only CRPIX — the pixel that was at (cx, cy) in the source
+    # should be at (nx/2, ny/2) in the output (0-based → FITS 1-based).
+    crpix1 = header.get("CRPIX1", None)
+    crpix2 = header.get("CRPIX2", None)
+    if crpix1 is not None:
+        header["CRPIX1"] = float(crpix1) - src_x0
+    if crpix2 is not None:
+        header["CRPIX2"] = float(crpix2) - src_y0
+
+    header["NAXIS1"] = nx
+    header["NAXIS2"] = ny
+
+    return out, header
 
 
 def convert_ra_dec_to_hms_dms(ra_deg, dec_deg):

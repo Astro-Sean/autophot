@@ -1197,7 +1197,9 @@ class Zeropoint:
                     continue
                     
                 try:
-                    tau_arr = sampler.get_autocorr_time(quiet=True)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        tau_arr = sampler.get_autocorr_time(quiet=True)
                     tau_est = float(np.nanmean(tau_arr))
                     
                     # Adaptive batch size: use ~10 * tau to ensure good mixing
@@ -1243,13 +1245,15 @@ class Zeropoint:
             acc = float(np.mean(sampler.acceptance_fraction))
             tau_arr = None
             try:
-                tau_arr = sampler.get_autocorr_time(quiet=True)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    tau_arr = sampler.get_autocorr_time(quiet=True)
                 tau_est = float(np.nanmean(tau_arr))
                 logger.info(f"[ZP MCMC] acc={acc:.3f}  tau~{tau_est:.1f}")
             except Exception:
                 logger.info(f"[ZP MCMC] acc={acc:.3f}")
 
-            if not 0.15 <= acc <= 0.7:
+            if not 0.15 <= acc <= 0.8:
                 logger.warning("[ZP MCMC] Suboptimal acceptance; consider tuning n_walkers")
 
             # Warn if max_steps reached without convergence (following PSF fitter)
@@ -1370,7 +1374,9 @@ class Zeropoint:
                 sampler.run_mcmc(None, batch_size, progress=False)
                 total_steps += batch_size
                 try:
-                    tau_arr = sampler.get_autocorr_time(quiet=True)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        tau_arr = sampler.get_autocorr_time(quiet=True)
                     tau_max = float(np.nanmax(tau_arr))
                     if np.all(tau_arr * tau_factor < total_steps):
                         # Add check for tau_max > 0 to prevent division by zero
@@ -1389,7 +1395,9 @@ class Zeropoint:
 
             # Thin by autocorrelation time when available
             try:
-                tau_arr = sampler.get_autocorr_time(quiet=True)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    tau_arr = sampler.get_autocorr_time(quiet=True)
                 tau_max = float(np.nanmax(tau_arr))
                 thin = max(1, int(np.ceil(tau_max / 2)))
             except Exception:
@@ -2711,7 +2719,7 @@ class Zeropoint:
         plot_file = os.path.join(write_dir, f"Color_Term_{base_name}_piecewise.png")
         ransac_savefig(fig, plot_file)
         plt.close(fig)
-        logger.info(f"fit_color_term: saved piecewise color term plot to {plot_file}")
+        logger.debug(f"fit_color_term: saved piecewise color term plot to {plot_file}")
 
     def _fit_piecewise_linear(self, x, y, x_err, y_err, n_segments, outlier_sigma=3.0):
         """

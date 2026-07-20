@@ -845,9 +845,7 @@ class Catalog:
                 selectedCatalog = pd.read_csv(catalog_custom_fpath)
 
             elif os.path.isfile(os.path.join(target_dir, f"{fname}.csv")):
-                logger.info(
-                    f'Existing {catalogName.upper()} catalog found for {target_name}\n{os.path.join(target_dir, f"{fname}.csv")}'
-                )
+                logger.info(f"Existing {catalogName.upper()} catalog found for {target_name}")
                 selectedCatalog = (
                     Table.read(os.path.join(target_dir, f"{fname}.csv"), format="csv")
                     .to_pandas()
@@ -2073,7 +2071,7 @@ class Catalog:
         
         # Final output catalog is ready
         output_catalog.to_csv(fpath, index=False, float_format="%.6f")
-        logger.info(f"Saved clean catalog to {fpath}")
+        logger.debug(f"Saved clean catalog to {fpath}")
         return output_catalog
 
     # =============================================================================

@@ -3895,7 +3895,7 @@ class Limits:
         fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
 
-        logger.info(f"Saved injection recovery plot to {save_path}")
+        logger.debug(f"Saved injection recovery plot to {save_path}")
 
     # -----------------------------------------------------------------------
     # Combined completeness plot for multi-S/N thresholds
@@ -4026,7 +4026,7 @@ class Limits:
         save_loc_png = os.path.join(write_dir, f"Completeness_{base}.png")
         fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
-        logger.info("Combined completeness plot saved: %s", save_loc_png)
+        logger.debug("Combined completeness plot saved: %s", save_loc_png)
 
     # -----------------------------------------------------------------------
     # Multi-S/N injection limiting magnitude
