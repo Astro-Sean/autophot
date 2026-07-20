@@ -1079,7 +1079,7 @@ class SExtractorWrapper:
                 if use_for_matching or crowded:
                     nmax = None
                     effective_snr_limit = self.config.get("photometry", {}).get(
-                        "sextractor_snr_min_matching", 2.0
+                        "sextractor_snr_min_matching", 1.5
                     )
                     relaxed_cuts = use_for_matching
                 else:
@@ -1239,7 +1239,7 @@ class SExtractorWrapper:
                 if use_for_matching or crowded:
                     nmax = None
                     effective_snr_limit = self.config.get("photometry", {}).get(
-                        "sextractor_snr_min_matching", 2.0
+                        "sextractor_snr_min_matching", 1.5
                     )
                     relaxed_cuts = use_for_matching
                 else:

@@ -2936,6 +2936,7 @@ def run_photometry():
                 )
             return fwhm, sources, scale
 
+        _pre_remeasure_fwhm = input_yaml.get("fwhm")  # save before overwrite
         try:
             sex_crowded = input_yaml.get("photometry", {}).get("crowded_field", False)
             ImageFWHM, FWHMSources, scale = _run_sextractor_two_pass(
@@ -2968,6 +2969,30 @@ def run_photometry():
         input_yaml["undersampled_mode"] = bool(
             np.isfinite(ImageFWHM) and float(ImageFWHM) <= undersampled_thr
         )
+
+        # Preserve the initial FWHM if the post-alignment re-measurement is
+        # inflated.  The initial "Source detection and FWHM" step (above)
+        # runs on the original image with ~28 point sources and produces a
+        # reliable FWHM (e.g., 3.99 px).  This post-alignment re-run on the
+        # aligned image often finds far fewer sources (9-12) due to resampling
+        # and masking changes, and galaxy contamination inflates the FWHM
+        # (e.g., 7.85 px).  Using the inflated value causes SFFT to select
+        # kernel_order=0 (constant kernel) when the true PSF difference is
+        # large, leading to flux scaling mismatches and dipoles.
+        if (
+            _pre_remeasure_fwhm is not None
+            and np.isfinite(_pre_remeasure_fwhm)
+            and np.isfinite(ImageFWHM)
+            and float(ImageFWHM) > 1.5 * float(_pre_remeasure_fwhm)
+        ):
+            logging.warning(
+                "Post-alignment FWHM %.2f px is inflated (> 1.5 x initial %.2f px); "
+                "preserving initial FWHM for subtraction kernel sizing.",
+                float(ImageFWHM), float(_pre_remeasure_fwhm),
+            )
+            ImageFWHM = float(_pre_remeasure_fwhm)
+            input_yaml["fwhm"] = ImageFWHM
+            input_yaml["science_fwhm"] = ImageFWHM
 
         # Only write FWHM to header if it's finite (FITS headers reject NaN)
         if np.isfinite(ImageFWHM):
