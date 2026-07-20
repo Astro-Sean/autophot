@@ -402,12 +402,18 @@ default_input:
 
   template_subtraction:
     do_subtraction: False # bool --- Enable template subtraction step.
-    alignment_method: swarp # str --- Science-template registration method (reproject, swarp, astroalign).
+    alignment_method: swarp # str --- Science-template registration method (swarp=SCAMP+SWarp [recommended, best subpixel], reproject=WCS-only, astroalign=source matching). SCAMP+SWarp consistently outperforms reproject.
     alignment_use_extended_sources: False # bool --- If True, allow large/extended sources (galaxies) in SCAMP matching catalogs.
     alignment_max_fwhm_pix: 50.0 # float --- Max FWHM (pixels) kept when alignment_use_extended_sources=False.
     alignment_min_matched_sources: 6 # int --- Minimum matched sources for a reliable SCAMP WCS solution. Below this, retry with larger radius or fall back to reproject/AstroAlign.
     alignment_max_match_radius_arcsec: 30.0 # float --- Maximum cross-match radius (arcsec) when retrying with fewer sources. Prevents false matches at extreme radii.
-    alignment_max_scamp_residual_arcsec: 2.0 # float --- Maximum SCAMP astrometric residual RMS (arcsec) before falling back to reproject/AstroAlign.
+    alignment_max_scamp_residual_arcsec: 2.0 # float --- SCAMP astrometric residual RMS (arcsec) above which a warning is logged. SCAMP+SWarp still proceeds; post-SWarp verification gate makes the final accept/reject decision.
+    alignment_max_offset_px: 0.5 # float --- Maximum allowed systematic post-SWarp centroid offset (pixels).
+    alignment_max_rms_px: 0.75 # float --- Maximum post-SWarp centroid RMS (pixels) when enough matches are available.
+    alignment_max_p95_px: 1.5 # float --- Maximum post-SWarp centroid 95th-percentile offset (pixels) when enough matches are available.
+    alignment_min_sources_for_field_gate: 20 # int --- Minimum post-SWarp source matches required before RMS and P95 gates are applied. P95 is unreliable with fewer than 20 samples.
+    alignment_require_post_swarp_verification: True # bool --- Reject common-grid SWarp output when subpixel centroid alignment cannot be measured.
+    alignment_sparse_field_retry_count: 15 # int --- If SExtractor detects fewer than this many sources in either image, re-run with maximum sensitivity (DETECT_THRESH=0.5, smaller BACK_SIZE, CLEAN=N). Set to 0 to disable sparse-field retry.
     skip_resampling: True # bool --- DEPRECATED: use resample_mode instead. If True, maps to resample_mode="wcs_only".
     resample_mode: common_grid # str --- SWarp resampling mode: "common_grid" (both to science grid), "native_scale" (each keeps own pixel scale), "wcs_only" (no resampling).
     science_first_astrometry: False # bool --- If True, distortion-correct the science image against GAIA-DR3 first via SCAMP+SWarp, then use corrected catalog as astrometric reference. If False (default), use science image's own WCS and detected sources as the astrometric anchor directly — no external catalog needed.
