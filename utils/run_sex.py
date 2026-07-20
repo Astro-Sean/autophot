@@ -34,6 +34,7 @@ from astropy.table import Table
 from scipy.spatial import cKDTree
 
 from functions import log_step, log_warning_from_exception
+from wcs import get_wcs
 
 logger = logging.getLogger(__name__)
 
@@ -954,6 +955,9 @@ class SExtractorWrapper:
                 "MU_MAX",
                 "ISOAREA_IMAGE",
                 "FLUX_RADIUS",
+                "ERRAWIN_IMAGE",
+                "ERRBWIN_IMAGE",
+                "ERRTHETAWIN_IMAGE",
             ]
             if vignet is not None:
                 params.append(f"VIGNET({vignet[0]},{vignet[1]})")
@@ -1113,20 +1117,24 @@ class SExtractorWrapper:
                         table = sources
                         # Add world coordinate columns if not present
                         if 'XWIN_WORLD' not in table.colnames and 'XWIN_IMAGE' in table.colnames:
-                            from astropy.wcs import WCS
                             try:
-                                wcs = WCS(fits.getheader(fits_path))
-                                # SExtractor uses 1-based pixel coordinates (FITS convention)
-                                # astropy WCS pixel_to_world expects 0-based numpy convention
-                                x_coords = np.asarray(table['XWIN_IMAGE'], float) - 1.0
-                                y_coords = np.asarray(table['YWIN_IMAGE'], float) - 1.0
-                                world_coords = wcs.pixel_to_world(x_coords, y_coords)
-                                table['XWIN_WORLD'] = world_coords.ra.deg
-                                table['YWIN_WORLD'] = world_coords.dec.deg
-                                table['X_WORLD'] = world_coords.ra.deg
-                                table['Y_WORLD'] = world_coords.dec.deg
-                                table['ALPHA_J2000'] = world_coords.ra.deg
-                                table['DELTA_J2000'] = world_coords.dec.deg
+                                # Use get_wcs so SIP/TPV projection codes are normalized
+                                # and distortion is applied consistently with the rest
+                                # of the pipeline (astropy.WCS alone can ignore SIP if
+                                # CTYPE is not TAN-SIP/TPV).
+                                wcs = get_wcs(fits.getheader(fits_path))
+                                if wcs is not None:
+                                    # SExtractor uses 1-based pixel coordinates (FITS convention)
+                                    # astropy WCS pixel_to_world expects 0-based numpy convention
+                                    x_coords = np.asarray(table['XWIN_IMAGE'], float) - 1.0
+                                    y_coords = np.asarray(table['YWIN_IMAGE'], float) - 1.0
+                                    world_coords = wcs.pixel_to_world(x_coords, y_coords)
+                                    table['XWIN_WORLD'] = world_coords.ra.deg
+                                    table['YWIN_WORLD'] = world_coords.dec.deg
+                                    table['X_WORLD'] = world_coords.ra.deg
+                                    table['Y_WORLD'] = world_coords.dec.deg
+                                    table['ALPHA_J2000'] = world_coords.ra.deg
+                                    table['DELTA_J2000'] = world_coords.dec.deg
                             except Exception as e:
                                 logger.warning(f"Could not compute world coordinates: {e}")
                         # Add MAG_AUTO and MAGERR_AUTO if not present
@@ -1228,6 +1236,9 @@ class SExtractorWrapper:
                 "mu_max",
                 "area",
                 "flux_radius",
+                "erra_win",
+                "errb_win",
+                "errtheta_win",
             ]
             sources = sources.to_pandas()
             

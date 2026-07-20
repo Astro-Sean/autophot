@@ -68,9 +68,13 @@ except ModuleNotFoundError:
     # Template download code should be usable even when scikit-learn isn't
     # installed; the regression/color-term sections will error at runtime.
     class _BaseEstimatorPlaceholder:
+        """Stub used when scikit-learn is unavailable."""
+
         pass
 
     class _RegressorMixinPlaceholder:
+        """Stub used when scikit-learn is unavailable."""
+
         pass
 
     BaseEstimator = _BaseEstimatorPlaceholder
@@ -521,16 +525,23 @@ def compute_alignment_rms(
             return None
 
         d_mut = d_sr[mutual]
-        d_mut = d_mut[np.isfinite(d_mut) & (d_mut <= max_sep)]
+        _mut_mask = np.isfinite(d_mut) & (d_mut <= max_sep)
+        d_mut = d_mut[_mut_mask]
+        _mut_idx = np.where(_mut_mask)[0]
         if len(d_mut) < 10:
             return None
+
+        # Per-axis offsets for matched sources (before sigma-clipping)
+        _dx_mut = sci_xy[mutual, 0][_mut_idx] - ref_xy[i_sr[mutual], 0][_mut_idx]
+        _dy_mut = sci_xy[mutual, 1][_mut_idx] - ref_xy[i_sr[mutual], 1][_mut_idx]
 
         # Sigma-clip outliers before computing RMS/P90.
         # A single bad match (e.g., blended source, edge effect) can inflate
         # RMS significantly.  Median is robust but RMS is not.
         from astropy.stats import sigma_clip as _sc_align
         _clipped = _sc_align(d_mut, sigma=2.5, maxiters=3)
-        d_clipped = d_mut[~_clipped.mask] if hasattr(_clipped, 'mask') else d_mut
+        _clip_mask = _clipped.mask if hasattr(_clipped, 'mask') else None
+        d_clipped = d_mut[~_clip_mask] if _clip_mask is not None else d_mut
         if len(d_clipped) < 5:
             d_clipped = d_mut  # fallback: too few after clipping
 
@@ -538,9 +549,11 @@ def compute_alignment_rms(
         p90 = float(np.nanpercentile(d_clipped, 90.0))
         rms = float(np.sqrt(np.mean(d_clipped**2)))
 
+        _med_dx = float(np.nanmedian(_dx_mut))
+        _med_dy = float(np.nanmedian(_dy_mut))
         logger.info(
-            "Alignment RMS: med=%.3f px rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped) max=%.2f px",
-            median_offset, rms, p90, len(d_clipped), len(d_mut),
+            "Alignment RMS: med=%.3f px (dx=%.3f, dy=%.3f) rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped) max=%.2f px",
+            median_offset, _med_dx, _med_dy, rms, p90, len(d_clipped), len(d_mut),
             len(d_mut) - len(d_clipped), max_sep,
         )
         return median_offset, rms, p90
@@ -4433,8 +4446,22 @@ class Templates:
                 # broad PSF to capture PSF wings for flux-conserving photometry.
                 # A floor of only 1x FWHM_broad truncates the PSF wings, causing the
                 # convolution-based flux scaling to disagree with photometric scaling.
+                #
+                # When ForceConv=REF but reference is broader (sharpening needed),
+                # the kernel has deconvolution structure (negative sidelobes) that
+                # requires broader support. Scale the floor multiplier by the
+                # sharpening ratio: mild mismatch needs ~3×, severe needs ~5×.
+                _sharpening_needed = fwhm_ref > fwhm_sci * 1.05
+                if _sharpening_needed:
+                    _sharp_ratio = fwhm_ref / max(fwhm_sci, 0.1)
+                    # Deconvolution kernel sidelobes extend 4-5× the broader
+                    # PSF FWHM. Scale floor from 3× at mild sharpening (ratio
+                    # 1.05) up to 5× at severe sharpening (ratio ≥ 1.5).
+                    _floor_mult = min(3.0 + (_sharp_ratio - 1.05) * (2.0 / 0.45), 5.0)
+                else:
+                    _floor_mult = 2.0
                 ker_hw_from_conv = int(np.ceil(_mult_effective * fwhm_conv))
-                ker_hw_floor = int(np.ceil(2.0 * fwhm_broad))
+                ker_hw_floor = int(np.ceil(_floor_mult * fwhm_broad))
 
                 ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_from_conv, ker_hw_floor)))
 
@@ -4692,7 +4719,7 @@ class Templates:
                 # Auto-select: start from PSF difference, then downgrade by source count
                 rel_diff = abs(science_fwhm - template_fwhm) / max((science_fwhm + template_fwhm) / 2, 0.1)
                 if rel_diff < 0.10:
-                    order_from_psf = 0
+                    order_from_psf = 1
                 elif rel_diff < 0.30:
                     order_from_psf = 1
                 elif rel_diff < 0.50:
@@ -4708,12 +4735,30 @@ class Templates:
                 # downgrade to order 0 even for large PSF differences, producing
                 # constant kernels that cannot model the PSF variation — leading
                 # to flux scaling mismatches and dipoles.
+                #
+                # MINIMUM ORDER 1: Even when PSFs are nearly identical, SWarp
+                # resampling leaves a sub-pixel registration residual (typically
+                # 0.1-0.5 px). A constant kernel (order 0) cannot model a
+                # positional offset — it only broadens symmetrically. Order 1
+                # gives SFFT the linear spatial terms needed to absorb this
+                # residual shift, eliminating dipole artefacts at source positions.
                 if n_eff < 35 and order_from_psf >= 3:
                     order_from_psf = 2
                 if n_eff < 20 and order_from_psf >= 2:
                     order_from_psf = 1
-                if n_eff < 10 and order_from_psf >= 1:
-                    order_from_psf = 0
+                # Floor at order 1: never use order 0 — sub-pixel registration
+                # residuals are always present after resampling.
+                if n_eff < 10:
+                    # Extremely sparse: order 1 still only needs ~6 SFFT sources
+                    # (3 kernel coefficients × 2 axes). Keep order 1 unless
+                    # truly degenerate (<5 sources).
+                    if n_eff < 5 and order_from_psf >= 1:
+                        order_from_psf = 0
+                        logger.warning(
+                            "Only %d matched sources — forced kernel_order=0 "
+                            "(cannot constrain spatial variation). Dipoles likely.",
+                            n_eff,
+                        )
 
                 kernel_order = order_from_psf
                 logger.info(
@@ -5191,7 +5236,13 @@ class Templates:
                 else:
                     fwhm_conv_fb = fwhm_broad_fb
                 ker_hw_conv = int(np.ceil(2.0 * fwhm_conv_fb))
-                ker_hw_floor = int(np.ceil(2.0 * fwhm_broad_fb))
+                _sharp_fb = fwhm_ref_fb > fwhm_sci_fb * 1.05
+                if _sharp_fb:
+                    _sr = fwhm_ref_fb / max(fwhm_sci_fb, 0.1)
+                    _fm = min(3.0 + (_sr - 1.05) * (2.0 / 0.45), 5.0)
+                else:
+                    _fm = 2.0
+                ker_hw_floor = int(np.ceil(_fm * fwhm_broad_fb))
                 kernel_half_width = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_conv, ker_hw_floor)))
                 logger.info(
                     "SFFT kernel half-width: %d px (fallback quadrature formula, FWHM_sci=%.1f FWHM_ref=%.1f FWHM_conv=%.1f)",

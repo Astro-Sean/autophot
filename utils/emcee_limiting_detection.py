@@ -45,6 +45,23 @@ logger = logging.getLogger(__name__)
 
 
 def _read_fits_2d(path: str) -> np.ndarray:
+    """Read a 2-D image array from a FITS file.
+
+    Parameters
+    ----------
+    path : str
+        Path to the FITS file.
+
+    Returns
+    -------
+    np.ndarray
+        2-D float array.
+
+    Raises
+    ------
+    ValueError
+        If the primary HDU is not 2-D.
+    """
     with fits.open(path, memmap=False) as hdul:
         data = hdul[0].data
     arr = np.asarray(data, dtype=float)
@@ -54,6 +71,23 @@ def _read_fits_2d(path: str) -> np.ndarray:
 
 
 def _extract_stamp(image: np.ndarray, x0: float, y0: float, half: int) -> tuple[np.ndarray, int, int]:
+    """Extract a ``(2*half+2)`` pixel stamp centred on ``(x0, y0)``.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        Full 2-D image.
+    x0, y0 : float
+        Centre pixel coordinates.
+    half : int
+        Half-width of the stamp.
+
+    Returns
+    -------
+    tuple of (np.ndarray, int, int)
+        ``(stamp, x_origin, y_origin)`` where the origins are the
+        top-left pixel indices of the stamp in the full image.
+    """
     ny, nx = image.shape
     xi = int(np.floor(float(x0)))
     yi = int(np.floor(float(y0)))
@@ -83,8 +117,17 @@ def _recover_psf_mcmc_snr(
     batch_steps: int,
     jitter_scale: float,
 ) -> tuple[float, float]:
-    """
-    Fit flux,x0,y0 with emcee and return (snr, flux_hat).
+    """Fit flux, x0, y0 with emcee and return ``(snr, flux_hat)``.
+
+    Uses :class:`psf.MCMCFitter` to sample the posterior of an ePSF
+    model placed on the stamp and derives the S/N from the flux
+    posterior.
+
+    Returns
+    -------
+    tuple of (float, float)
+        ``(snr, flux_hat)`` — signal-to-noise and median recovered flux.
+        Both are ``np.nan`` if the fit fails.
     """
     ny, nx = data2d.shape
     gx, gy = np.meshgrid(np.arange(nx), np.arange(ny))
@@ -137,6 +180,7 @@ def _recover_psf_mcmc_snr(
 
 
 def main() -> int:
+    """CLI entry point — run injection/recovery and print limiting magnitude."""
     ap = argparse.ArgumentParser(description="emcee injection/recovery limiting magnitude")
     ap.add_argument("--fits", required=True, help="Science image FITS path")
     ap.add_argument("--epsf-pickle", required=True, help="Pickled photutils/astropy ePSF model")

@@ -38,6 +38,20 @@ log = logging.getLogger("check_telescope_entries")
 
 
 def _find_files(d, rec):
+    """Return a sorted list of FITS files in directory *d*.
+
+    Parameters
+    ----------
+    d : str
+        Directory to search.
+    rec : bool
+        If ``True``, search recursively.
+
+    Returns
+    -------
+    list of str
+        Sorted file paths.
+    """
     out = []
     if rec:
         for root, _, names in os.walk(d):
@@ -52,6 +66,20 @@ def _find_files(d, rec):
 
 
 def _read_header(fpath):
+    """Read the first HDU header containing a ``TELESCOP`` key.
+
+    Falls back to the primary HDU if no such key is found.
+
+    Parameters
+    ----------
+    fpath : str
+        Path to a FITS file.
+
+    Returns
+    -------
+    astropy.io.fits.Header
+        Copy of the best-matching header.
+    """
     with _fits.open(fpath, ignore_missing_end=True, memmap=False) as hdul:
         hdul.verify("silentfix+ignore")
         for hdu in hdul:
@@ -61,6 +89,19 @@ def _read_header(fpath):
 
 
 def _pixel_scale(header):
+    """Extract the pixel scale in arcseconds from a WCS header.
+
+    Parameters
+    ----------
+    header : astropy.io.fits.Header
+        FITS header with WCS information.
+
+    Returns
+    -------
+    float or None
+        Pixel scale in arcseconds (rounded to 4 dp), or ``None`` if
+        the WCS is missing or the scale is outside 0–20 arcsec.
+    """
     try:
         from astropy.wcs import WCS, utils as wcsutils
         with np.errstate(all="ignore"):
@@ -76,6 +117,7 @@ def _pixel_scale(header):
 
 
 def _hval(header, key, default=None):
+    """Safely read *key* from *header*, returning *default* on failure."""
     try:
         if key and key in header:
             return header[key]
@@ -85,6 +127,19 @@ def _hval(header, key, default=None):
 
 
 def _read_filter(header, forced_key):
+    """Find the first non-trivial filter name in *header*.
+
+    Parameters
+    ----------
+    header : astropy.io.fits.Header
+    forced_key : str or None
+        Header key to try first (overrides the default candidate list).
+
+    Returns
+    -------
+    tuple of (str, str) or (None, None)
+        (filter_value, header_key) where the key was found.
+    """
     candidates = ([forced_key] + FILTER_CANDIDATES) if forced_key else FILTER_CANDIDATES
     for key in candidates:
         val = _hval(header, key)
@@ -94,6 +149,7 @@ def _read_filter(header, forced_key):
 
 
 def _load_yml(path):
+    """Load a YAML file, returning an empty dict if it doesn't exist."""
     if os.path.isfile(path):
         with open(path) as f:
             return yaml.safe_load(f) or {}
@@ -101,6 +157,7 @@ def _load_yml(path):
 
 
 def _deep_merge(base, override):
+    """Recursively merge *override* into *base* (in-place)."""
     for k, v in override.items():
         if k in base and isinstance(base[k], dict) and isinstance(v, dict):
             _deep_merge(base[k], v)
@@ -129,6 +186,19 @@ def check_directory(
     recursive: bool = False,
     verbose: bool = False,
 ):
+    """Scan *fits_dir* and report new telescope.yml entries not yet in *wdir*.
+
+    Parameters
+    ----------
+    fits_dir : str
+        Directory containing FITS images to scan.
+    wdir : str
+        Working directory containing (or to contain) ``telescope.yml``.
+    recursive : bool, optional
+        Also scan sub-directories (default ``False``).
+    verbose : bool, optional
+        Print per-file diagnostics (default ``False``).
+    """
     fits_dir = os.path.abspath(str(fits_dir))
     wdir_path = os.path.abspath(str(wdir))
     yml_path = os.path.join(wdir_path, "telescope.yml")
@@ -259,6 +329,7 @@ def check_directory(
 
 
 def _build_parser():
+    """Build the argparse parser for the CLI."""
     p = argparse.ArgumentParser(
         description="Check a directory for new telescope.yml entries.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -272,6 +343,7 @@ def _build_parser():
 
 
 def main(argv=None):
+    """CLI entry point — parse args and run :func:`check_directory`."""
     args = _build_parser().parse_args(argv)
 
     logging.basicConfig(

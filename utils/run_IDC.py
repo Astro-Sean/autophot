@@ -53,8 +53,40 @@ import astropy.units as u
 
 sys.path.append(str(Path(__file__).parent.parent))
 from functions import remove_wcs_from_header, log_warning_from_exception
-from wcs import get_wcs
+from wcs import get_wcs, _normalize_projection_codes
 from utils.run_sex import SExtractorWrapper
+
+
+def _normalize_head_file(head_path: Union[str, Path]) -> bool:
+    """Normalize SCAMP .head WCS so SWarp recognizes SIP/TPV distortion.
+
+    SCAMP writes PV/SIP distortion keywords but often leaves CTYPE as
+    plain RA---TAN/DEC--TAN.  SWarp (and astropy) may then treat the WCS
+    as linear and ignore the distortion during resampling, causing
+    subpixel misalignments across the field.  This helper rewrites the
+    .head with consistent TPV or TAN-SIP CTYPE codes.
+
+    Parameters
+    ----------
+    head_path : str or Path
+        Path to the .head file to normalize in place.
+
+    Returns
+    -------
+    bool
+        True if the file was normalized successfully, False otherwise.
+    """
+    try:
+        _hp = Path(head_path)
+        if not _hp.is_file():
+            return False
+        _hdr = fits.Header.fromtextfile(str(_hp))
+        _hdr_norm = _normalize_projection_codes(_hdr, inplace=False)
+        if _hdr_norm.tostring() != _hdr.tostring():
+            _hdr_norm.totextfile(str(_hp), overwrite=True)
+        return True
+    except Exception:
+        return False
 
 
 def _safe_world2pix(wcs_obj, ra, dec, origin=0):
@@ -1178,7 +1210,10 @@ NNW
         with fits.open(fits_path) as hdul:
             header = hdul[0].header
             wcs_obj = get_wcs(header)
-            pixel_scale = proj_plane_pixel_scales(wcs_obj)[0] * 3600.0
+            # Geometric mean of X and Y scales accounts for pixel aspect ratio
+            # and CD-matrix rotation, giving the isotropic pixel scale.
+            _scales = proj_plane_pixel_scales(wcs_obj)
+            pixel_scale = float(np.sqrt(_scales[0] * _scales[1])) * 3600.0
             return wcs_obj, pixel_scale, header
 
     # ------------------------ Align + resample via SCAMP/SWarp ------------------------
@@ -1282,7 +1317,11 @@ NNW
 
             # Pre-extract cutout from large reference images centered on science region
             # This ensures: (1) reference covers science region, (2) faster processing,
-            # (3) output shapes match science image exactly
+            # (3) output shapes match science image exactly.
+            # WARNING: do NOT cut references with SIP/TPV distortion.  Moving CRPIX
+            # to the cutout center shifts the origin of the distortion polynomial,
+            # so the same A/B or PV coefficients describe the wrong part of the
+            # focal plane and produce subpixel misalignments across the field.
             try:
                 with fits.open(sci_image_copy) as _sh, fits.open(ref_image_copy) as _rh:
                     _sci_h = _sh[0].header
@@ -1291,9 +1330,14 @@ NNW
                     _ref_w = get_wcs(_ref_h)
                     _sci_shape = (_sci_h.get("NAXIS2", 0), _sci_h.get("NAXIS1", 0))
                     _ref_shape = (_ref_h.get("NAXIS2", 0), _ref_h.get("NAXIS1", 0))
-                    
+
+                    _ref_has_sip = any(k in _ref_h for k in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"])
+                    _ref_has_pv = any(str(k).startswith("PV") for k in _ref_h)
+
                     # Only cut if reference is significantly larger (>1.5x in either dimension)
-                    if (_ref_shape[0] > _sci_shape[0] * 1.5 or _ref_shape[1] > _sci_shape[1] * 1.5):
+                    # AND has no non-linear distortion (SIP/TPV).
+                    if (_ref_shape[0] > _sci_shape[0] * 1.5 or _ref_shape[1] > _sci_shape[1] * 1.5) \
+                            and not (_ref_has_sip or _ref_has_pv):
                         from astropy.nddata.utils import Cutout2D
                         
                         # Get science center in world coords.
@@ -1335,6 +1379,12 @@ NNW
                                 "Pre-cut reference to %dx%d centered on science region (was %dx%d)",
                                 _cut_w, _cut_h, _ref_shape[1], _ref_shape[0]
                             )
+                    elif _ref_has_sip or _ref_has_pv:
+                        self.logger.info(
+                            "Reference pre-cutout skipped: reference has %s distortion "
+                            "and cutting would shift the distortion origin.",
+                            "SIP" if _ref_has_sip else "TPV/PV",
+                        )
             except Exception as _e:
                 self.logger.debug("Reference pre-cutout skipped: %s", _e)
 
@@ -1434,8 +1484,11 @@ NNW
                 ref_wcs = get_wcs(ref_head)
                 sci_shape = sci_data.shape
                 ref_shape = ref_data.shape
-                sci_pix_scale = proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
-                ref_pix_scale = proj_plane_pixel_scales(ref_wcs)[0] * 3600.0
+                # Isotropic pixel scale: geometric mean of X and Y scales.
+                _sci_scales = proj_plane_pixel_scales(sci_wcs)
+                _ref_scales = proj_plane_pixel_scales(ref_wcs)
+                sci_pix_scale = float(np.sqrt(_sci_scales[0] * _sci_scales[1])) * 3600.0
+                ref_pix_scale = float(np.sqrt(_ref_scales[0] * _ref_scales[1])) * 3600.0
                 # Use science image shape directly for output grid.
                 # Both images are resampled to match science dimensions and pixel scale.
                 output_width, output_height = sci_shape[1], sci_shape[0]
@@ -1465,8 +1518,12 @@ NNW
                 # Verify reference covers the science region (diagnostic only —
                 # never abort alignment if this check fails or WCS doesn't converge).
                 try:
-                    sci_corners = np.array([[0, 0], [sci_shape[1], 0],
-                                            [sci_shape[1], sci_shape[0]], [0, sci_shape[0]]])
+                    sci_corners = np.array(
+                        [[0, 0],
+                         [sci_shape[1] - 1, 0],
+                         [sci_shape[1] - 1, sci_shape[0] - 1],
+                         [0, sci_shape[0] - 1]]
+                    )
                     sci_world_corners = sci_wcs.all_pix2world(sci_corners, 0)
                     # _safe_world2pix returns NaN for non-converging points instead
                     # of raising NoConvergence (common with high-order SIP distortion).
@@ -1947,6 +2004,7 @@ NNW
                     sci_head_dst = Path(sci_image_copy).with_suffix(".head")
                     if Path(sci_head_src).resolve() != sci_head_dst.resolve():
                         shutil.copy2(sci_head_src, sci_head_dst)
+                    _normalize_head_file(sci_head_dst)
                     self.logger.info(
                         "Copied GAIA SCAMP .head to %s", sci_head_dst
                     )
@@ -2013,8 +2071,9 @@ NNW
                                     proj_plane_pixel_scales,
                                 )
 
+                                _scales = proj_plane_pixel_scales(sci_wcs)
                                 sci_pix_scale = (
-                                    proj_plane_pixel_scales(sci_wcs)[0] * 3600.0
+                                    float(np.sqrt(_scales[0] * _scales[1])) * 3600.0
                                 )
                                 output_width = sci_shape[1]
                                 output_height = sci_shape[0]
@@ -2319,18 +2378,23 @@ NNW
             # Use at least the cross-match radius that succeeded
             if crossid_radius > crossid_arcsec:
                 crossid_arcsec = crossid_radius
-            # POSITION_MAXERR: acceptable residual after SCAMP fit.
-            # Must be tight enough to reject bad fits (e.g. 1.0" = 6.3px at
-            # 0.158"/px is far too permissive — SCAMP would accept a 5px
-            # systematic offset).  CROSSID_RADIUS handles initial matching
-            # permissiveness; POSITION_MAXERR is the post-fit quality bar.
+            # POSITION_MAXERR: maximum positional uncertainty for sources
+            # accepted in the astrometric fit.  Too tight → SCAMP rejects
+            # sources with any WCS imprecision.  Too loose → contamination.
+            # Floor at 1.0" to handle typical plate-solve uncertainties.
             is_sparse_field = _num_matched < 50
             position_maxerr_arcsec = max(
-                1.5 * pix_scale,
-                0.3 * fwhm_ref_arcsec,
+                1.0,
+                2.0 * pix_scale,
+                0.5 * fwhm_ref_arcsec,
             )
-            # Adaptive SN threshold: lower minimum for sparse fields to include more sources
-            sn_thresholds = "3.0,100000.0" if is_sparse_field else "5.0,100000.0"
+            # Adaptive SN threshold: lower minimum for sparse fields to retain
+            # faint sources that passed our SNR_WIN pre-filter.  SCAMP's
+            # SN_THRESHOLDS uses FLUX_AUTO/FLUXERR_AUTO which can differ from
+            # SNR_WIN (windowed), so we set it below our pre-filter threshold
+            # to avoid double-filtering. SCAMP weights each source by its
+            # positional uncertainty (ERRAWIN/ERRBWIN) regardless.
+            sn_thresholds = "1.5,100000.0" if is_sparse_field else "3.0,100000.0"
             # Adaptive DISTORT_DEGREES: must be high enough to model the
             # reference image's existing distortion (SIP/PV), because SCAMP's
             # .head file REPLACES the reference WCS.  If DISTORT_DEGREES is
@@ -2404,9 +2468,10 @@ NNW
             }
             scamp_config_ref = {
                 **scamp_config_base,
-                # Upper FWHM threshold: 3x nominal rejects galaxies while
-                # allowing moderate extension.  10x was far too permissive.
-                "FWHM_THRESHOLDS": f"{0.3*fwhm_ref_pix:.2f},{3*fwhm_ref_pix:.2f}",
+                # Upper FWHM threshold: reject galaxies while allowing moderate
+                # extension.  Sparse fields need a wider window (5x vs 3x) since
+                # SExtractor FWHM can be inflated by blending/noise.
+                "FWHM_THRESHOLDS": f"{0.3*fwhm_ref_pix:.2f},{(5 if is_sparse_field else 3)*fwhm_ref_pix:.2f}",
             }
             # SCAMP does not accept DISTORT_DEGREES=0 ("keyword out of range").
             # Use 1 as the minimum — degree 1 is a linear WCS (shift/rotation/scale)
@@ -2514,11 +2579,6 @@ NNW
                         config=scamp_config_ref,
                     )
 
-                    try:
-                        ref_cat_tmp.unlink(missing_ok=True)
-                    except Exception as e:
-                        self.logger.debug("Could not remove temp catalog %s: %s", ref_cat_tmp, e)
-
                 except Exception as e:
                     self.logger.error("Failed to create temporary catalog for SCAMP: %s", e)
                     self.logger.info("Falling back to single-catalog SCAMP on reference...")
@@ -2536,8 +2596,8 @@ NNW
                     # sources exist for a linear WCS correction.
                     _retry_config = dict(scamp_config_ref)
                     _retry_config["DISTORT_DEGREES"] = 1
-                    _retry_config["CROSSID_RADIUS"] = str(max(float(crossid_arcsec), 5.0))
-                    _retry_config["POSITION_MAXERR"] = str(max(float(position_maxerr_arcsec), 2.0))
+                    _retry_config["CROSSID_RADIUS"] = max(float(crossid_arcsec), 5.0)
+                    _retry_config["POSITION_MAXERR"] = max(float(position_maxerr_arcsec), 2.0)
                     self.logger.warning(
                         "SCAMP failed. Retrying with DISTORT_DEGREES=1, "
                         "CROSSID_RADIUS=%.1f\", POSITION_MAXERR=%.1f\".",
@@ -2560,9 +2620,19 @@ NNW
                         "SCAMP failed (both initial and retry). "
                         "Falling back to reproject/AstroAlign."
                     )
+                    try:
+                        ref_cat_tmp.unlink(missing_ok=True)
+                    except Exception:
+                        pass
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
+
+                # Clean up temporary reference catalog now that SCAMP is done
+                try:
+                    ref_cat_tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
                 # Quality gate: check SCAMP astrometric residual
                 scamp_distortion = scamp_result.get("distortion") if isinstance(scamp_result, dict) else None
@@ -2632,6 +2702,9 @@ NNW
                         log_warning_from_exception(
                             self.logger, f"Could not copy .head for {label}", e
                         )
+                # Normalize CTYPE codes so SWarp recognizes PV/SIP distortion.
+                if _normalize_head_file(head_dst):
+                    self.logger.info("Normalized .head projection codes for %s SWarp", label)
                 # SIP preservation experiment: disabled. SCAMP produces PV (TPV)
                 # distortion keywords, and adding the reference's SIP keywords on
                 # top creates a double distortion correction (both PV and SIP
@@ -2953,7 +3026,15 @@ NNW
             # native_scale, images are on different pixel grids — pixel coordinates
             # don't correspond, so matching produces meaningless offsets.
             alignment_metadata = {}
-            if resample_mode in ("wcs_only", "native_scale"):
+            _post_swarp_verify = bool(
+                align_cfg.get("post_swarp_verify", False)
+            )
+            if not _post_swarp_verify:
+                self.logger.info(
+                    "Post-SWarp verification disabled (post_swarp_verify=False); "
+                    "skipping SExtractor cross-match."
+                )
+            elif resample_mode in ("wcs_only", "native_scale"):
                 self.logger.info(
                     "Skipping pixel-space alignment verification for resample_mode=%s "
                     "(images on different pixel grids).",
@@ -2964,6 +3045,19 @@ NNW
                 self.logger.info("Verifying post-SWarp alignment via SExtractor cross-match...")
                 _verify_dir = str(Path(output_dir) / "post_swarp_verify")
                 _det_fwhm = min(max(max(fwhm_sci_pix, fwhm_ref_pix), 2.5), 4.0)
+
+                # Sparse-field retry: if the first SExtractor pass detects
+                # very few sources, retry with an even lower detection
+                # threshold.  Sparse fields (e.g. high-Galactic-latitude) can
+                # have only 3-10 detectable sources; the standard alignment
+                # config (DETECT_THRESH=0.8) may still miss the faintest ones.
+                _SPARSE_RETRY_THRESH = 5
+                _SPARSE_SEX_OVERRIDE = {
+                    "DETECT_THRESH": 0.5,
+                    "ANALYSIS_THRESH": 0.3,
+                    "DETECT_MINAREA": 1,
+                    "BACK_SIZE": 16,
+                }
 
                 sci_sex_result = self.run_sextractor(
                     str(aligned_sci),
@@ -2980,98 +3074,148 @@ NNW
 
                 sci_cat_verify = sci_sex_result.get("catalog")
                 ref_cat_verify = ref_sex_result.get("catalog")
+                n_sci_det = len(sci_cat_verify) if sci_cat_verify is not None else 0
+                n_ref_det = len(ref_cat_verify) if ref_cat_verify is not None else 0
 
-                if sci_cat_verify is not None and ref_cat_verify is not None:
-                    n_sci_det = len(sci_cat_verify)
-                    n_ref_det = len(ref_cat_verify)
+                # Sparse-field retry with even lower threshold
+                if n_sci_det < _SPARSE_RETRY_THRESH or n_ref_det < _SPARSE_RETRY_THRESH:
                     self.logger.info(
-                        "Alignment verification: detected %d sci / %d ref sources",
+                        "Sparse field detected (%d sci / %d ref sources); "
+                        "retrying SExtractor with DETECT_THRESH=0.5",
                         n_sci_det, n_ref_det,
                     )
+                    if n_sci_det < _SPARSE_RETRY_THRESH:
+                        sci_sex_result = self.run_sextractor(
+                            str(aligned_sci),
+                            output_dir=str(Path(_verify_dir) / "sci_sparse"),
+                            for_alignment=True,
+                            fwhm_pixels=_det_fwhm,
+                            config=_SPARSE_SEX_OVERRIDE,
+                        )
+                        sci_cat_verify = sci_sex_result.get("catalog")
+                        n_sci_det = len(sci_cat_verify) if sci_cat_verify is not None else 0
+                    if n_ref_det < _SPARSE_RETRY_THRESH:
+                        ref_sex_result = self.run_sextractor(
+                            str(aligned_ref),
+                            output_dir=str(Path(_verify_dir) / "ref_sparse"),
+                            for_alignment=True,
+                            fwhm_pixels=_det_fwhm,
+                            config=_SPARSE_SEX_OVERRIDE,
+                        )
+                        ref_cat_verify = ref_sex_result.get("catalog")
+                        n_ref_det = len(ref_cat_verify) if ref_cat_verify is not None else 0
 
-                    if n_sci_det >= 3 and n_ref_det >= 3:
-                        from scipy.spatial import cKDTree
-                        _x_col = "XWIN_IMAGE" if "XWIN_IMAGE" in sci_cat_verify.colnames else "X_IMAGE"
-                        _y_col = "YWIN_IMAGE" if "YWIN_IMAGE" in sci_cat_verify.colnames else "Y_IMAGE"
-                        sci_xy = np.column_stack([
-                            np.asarray(sci_cat_verify[_x_col], float),
-                            np.asarray(sci_cat_verify[_y_col], float),
-                        ])
-                        ref_xy = np.column_stack([
-                            np.asarray(ref_cat_verify[_x_col], float),
-                            np.asarray(ref_cat_verify[_y_col], float),
-                        ])
+                self.logger.info(
+                    "Alignment verification: detected %d sci / %d ref sources",
+                    n_sci_det, n_ref_det,
+                )
 
-                        # Mutual nearest-neighbor matching: a sci source
-                        # matches a ref source only if each is the other's
-                        # closest neighbor.  This eliminates false matches
-                        # that artificially lower the measured offset.
-                        tree_ref = cKDTree(ref_xy)
-                        tree_sci = cKDTree(sci_xy)
+                # Sparse-field: allow verification with as few as 2 sources
+                # on each side.  With 2 mutual matches we still get a
+                # meaningful median offset.
+                _min_det_for_verify = 2 if min(n_sci_det, n_ref_det) < 5 else 3
 
-                        d_sr, i_sr = tree_ref.query(sci_xy, k=1)
-                        d_rs, i_rs = tree_sci.query(ref_xy, k=1)
+                if sci_cat_verify is not None and ref_cat_verify is not None and n_sci_det >= _min_det_for_verify and n_ref_det >= _min_det_for_verify:
+                    from scipy.spatial import cKDTree
+                    _x_col = "XWIN_IMAGE" if "XWIN_IMAGE" in sci_cat_verify.colnames else "X_IMAGE"
+                    _y_col = "YWIN_IMAGE" if "YWIN_IMAGE" in sci_cat_verify.colnames else "Y_IMAGE"
+                    sci_xy = np.column_stack([
+                        np.asarray(sci_cat_verify[_x_col], float),
+                        np.asarray(sci_cat_verify[_y_col], float),
+                    ])
+                    ref_xy = np.column_stack([
+                        np.asarray(ref_cat_verify[_x_col], float),
+                        np.asarray(ref_cat_verify[_y_col], float),
+                    ])
 
-                        idx_s = np.arange(len(sci_xy), dtype=int)
-                        mutual = (i_rs[i_sr] == idx_s) & np.isfinite(d_sr)
+                    # Mutual nearest-neighbor matching: a sci source
+                    # matches a ref source only if each is the other's
+                    # closest neighbor.  This eliminates false matches
+                    # that artificially lower the measured offset.
+                    tree_ref = cKDTree(ref_xy)
+                    tree_sci = cKDTree(sci_xy)
 
+                    d_sr, i_sr = tree_ref.query(sci_xy, k=1)
+                    d_rs, i_rs = tree_sci.query(ref_xy, k=1)
+
+                    idx_s = np.arange(len(sci_xy), dtype=int)
+                    mutual = (i_rs[i_sr] == idx_s) & np.isfinite(d_sr)
+
+                    # Adaptive match tolerance: in sparse fields the
+                    # SWarp resampling kernel can shift centroids by
+                    # up to ~1 px.  Use 2*FWHM normally, but widen to
+                    # 3*FWHM when very few sources are available.
+                    _n_total = len(sci_xy) + len(ref_xy)
+                    if _n_total < 10:
+                        match_tol = 3.0 * _det_fwhm
+                    else:
                         match_tol = 2.0 * _det_fwhm
-                        good = mutual & (d_sr < match_tol)
-                        n_matched_verify = int(good.sum())
+                    good = mutual & (d_sr < match_tol)
+                    n_matched_verify = int(good.sum())
 
-                        if n_matched_verify >= 3:
-                            dx = sci_xy[good, 0] - ref_xy[i_sr[good], 0]
-                            dy = sci_xy[good, 1] - ref_xy[i_sr[good], 1]
+                    # Sparse-field: accept 2 matches (median of 2 is
+                    # still a robust estimator for a constant offset).
+                    _min_matches = 2 if _n_total < 10 else 3
 
+                    if n_matched_verify >= _min_matches:
+                        dx = sci_xy[good, 0] - ref_xy[i_sr[good], 0]
+                        dy = sci_xy[good, 1] - ref_xy[i_sr[good], 1]
+
+                        # Skip sigma clipping for small samples —
+                        # MAD-based sigma estimates are unstable for
+                        # N < 8 and can discard valid matches.
+                        if n_matched_verify >= 8:
                             from astropy.stats import sigma_clip as _sc_verify
                             dx_clipped = _sc_verify(dx, sigma=2.5, maxiters=3)
                             dy_clipped = _sc_verify(dy, sigma=2.5, maxiters=3)
                             both_ok = ~dx_clipped.mask & ~dy_clipped.mask
-
-                            if np.sum(both_ok) >= 3:
-                                med_dx = float(np.median(dx[both_ok]))
-                                med_dy = float(np.median(dy[both_ok]))
-                                rms_dx = float(np.std(dx[both_ok]))
-                                rms_dy = float(np.std(dy[both_ok]))
-                                _indiv_offsets = np.sqrt(dx[both_ok]**2 + dy[both_ok]**2)
-                                _p95_offset = float(np.percentile(_indiv_offsets, 95))
-                                _max_offset = float(np.max(_indiv_offsets))
+                            if np.sum(both_ok) >= _min_matches:
+                                _dx_use = dx[both_ok]
+                                _dy_use = dy[both_ok]
                             else:
-                                med_dx = float(np.median(dx))
-                                med_dy = float(np.median(dy))
-                                rms_dx = float(np.std(dx))
-                                rms_dy = float(np.std(dy))
-                                _indiv_offsets = np.sqrt(dx**2 + dy**2)
-                                _p95_offset = float(np.percentile(_indiv_offsets, 95))
-                                _max_offset = float(np.max(_indiv_offsets))
-
-                            total_offset = np.sqrt(med_dx**2 + med_dy**2)
-                            self.logger.info(
-                                "Alignment verification: offset=(%.3f, %.3f) px, "
-                                "RMS=(%.3f, %.3f) px, total=%.3f px, "
-                                "P95=%.3f px, max=%.3f px (%d matches)",
-                                med_dx, med_dy, rms_dx, rms_dy, total_offset,
-                                _p95_offset, _max_offset, n_matched_verify,
-                            )
-
-                            alignment_metadata = {
-                                "offset_x": med_dx,
-                                "offset_y": med_dy,
-                                "rms_x": rms_dx,
-                                "rms_y": rms_dy,
-                                "n_matched": n_matched_verify,
-                                "p95_offset": _p95_offset,
-                                "max_offset": _max_offset,
-                            }
-
+                                _dx_use = dx
+                                _dy_use = dy
                         else:
-                            self.logger.info(
-                                "Alignment verification: only %d matches (< 3); skipping.",
-                                n_matched_verify,
-                            )
+                            _dx_use = dx
+                            _dy_use = dy
+
+                        med_dx = float(np.median(_dx_use))
+                        med_dy = float(np.median(_dy_use))
+                        rms_dx = float(np.std(_dx_use))
+                        rms_dy = float(np.std(_dy_use))
+                        _indiv_offsets = np.sqrt(_dx_use**2 + _dy_use**2)
+                        _p95_offset = float(np.percentile(_indiv_offsets, 95))
+                        _max_offset = float(np.max(_indiv_offsets))
+
+                        total_offset = np.sqrt(med_dx**2 + med_dy**2)
+                        self.logger.info(
+                            "Alignment verification: offset=(%.3f, %.3f) px, "
+                            "RMS=(%.3f, %.3f) px, total=%.3f px, "
+                            "P95=%.3f px, max=%.3f px (%d matches)",
+                            med_dx, med_dy, rms_dx, rms_dy, total_offset,
+                            _p95_offset, _max_offset, n_matched_verify,
+                        )
+
+                        alignment_metadata = {
+                            "offset_x": med_dx,
+                            "offset_y": med_dy,
+                            "rms_x": rms_dx,
+                            "rms_y": rms_dy,
+                            "n_matched": n_matched_verify,
+                            "p95_offset": _p95_offset,
+                            "max_offset": _max_offset,
+                        }
+
+                    else:
+                        self.logger.info(
+                            "Alignment verification: only %d matches (< %d); skipping.",
+                            n_matched_verify, _min_matches,
+                        )
                 else:
                     self.logger.info(
-                        "Alignment verification: SExtractor detected insufficient sources."
+                        "Alignment verification: SExtractor detected insufficient sources "
+                        "(%d sci / %d ref; need >= %d each).",
+                        n_sci_det, n_ref_det, _min_det_for_verify,
                     )
               except Exception as e:
                 self.logger.warning("Alignment verification failed (non-fatal): %s", e)
@@ -3114,7 +3258,11 @@ NNW
                 _p95 = alignment_metadata.get("p95_offset", 0.0)
                 _n_match = alignment_metadata.get("n_matched", 0)
 
-                _reject = _n_match >= 3 and _off > max_acceptable_offset
+                # Sparse-field: use adaptive minimum for offset gate.
+                # With 2 matches, only check offset (RMS/P95 are meaningless
+                # for N < _min_n_for_percentile anyway).
+                _gate_min_matches = 2 if _n_match < 8 else 3
+                _reject = _n_match >= _gate_min_matches and _off > max_acceptable_offset
                 if _n_match >= _min_n_for_percentile:
                     _reject = _reject or _rms > max_acceptable_rms or _p95 > max_acceptable_p95
 
@@ -3141,16 +3289,64 @@ NNW
                         "P95=%.2f px (%d matches, FWHM=%.1f px).",
                         _off, _rms, _p95, _n_match, _gate_fwhm,
                     )
-            elif resample_mode == "common_grid" and bool(
+            elif _post_swarp_verify and resample_mode == "common_grid" and bool(
                 align_cfg.get("alignment_require_post_swarp_verification", True)
             ):
-                self.logger.warning(
-                    "Post-SWarp alignment could not be measured; rejecting common-grid "
-                    "alignment rather than using it for subtraction."
+                # Sparse-field fallback: when post-SWarp verification cannot
+                # measure offsets (too few sources detected/matched), check
+                # whether SCAMP itself reported good astrometric residuals.
+                # If SCAMP succeeded with a reasonable RMS and matched enough
+                # stars, the SCAMP+SWarp alignment is trustworthy even without
+                # independent post-SWarp source matching.  Only fall back to
+                # reproject/AstroAlign if SCAMP residuals were also poor or
+                # unavailable.
+                _scamp_distortion = (
+                    scamp_result.get("distortion")
+                    if isinstance(scamp_result, dict)
+                    else None
                 )
-                return self._align_fallback_reproject_then_astroalign(
-                    science_image, reference_image, output_dir
+                _scamp_rms_val = None
+                _scamp_nstars_val = None
+                if isinstance(_scamp_distortion, dict):
+                    _scamp_rms_val = _scamp_distortion.get("astrometric_rms_arcsec")
+                    _scamp_nstars_val = _scamp_distortion.get("n_matched_stars")
+
+                _scamp_max_rms = float(
+                    align_cfg.get("alignment_max_scamp_residual_arcsec", 2.0)
                 )
+                # Convert SCAMP arcsec residual to pixels for comparison
+                _pixel_scale_arcsec = abs(
+                    float(fits.getheader(str(aligned_sci)).get("CDELT2", 0))
+                ) * 3600.0
+                if _pixel_scale_arcsec > 0 and _scamp_rms_val is not None:
+                    _scamp_rms_pix = _scamp_rms_val / _pixel_scale_arcsec
+                else:
+                    _scamp_rms_pix = None
+
+                _scamp_trustworthy = (
+                    _scamp_rms_val is not None
+                    and _scamp_rms_val <= _scamp_max_rms
+                    and _scamp_nstars_val is not None
+                    and _scamp_nstars_val >= 3
+                )
+
+                if _scamp_trustworthy:
+                    self.logger.info(
+                        "Post-SWarp verification could not measure offsets (sparse field), "
+                        "but SCAMP residuals are good (RMS=%.3f\" / %.2f px, %d stars). "
+                        "Accepting SCAMP+SWarp alignment.",
+                        _scamp_rms_val, _scamp_rms_pix or -1, _scamp_nstars_val,
+                    )
+                else:
+                    self.logger.warning(
+                        "Post-SWarp alignment could not be measured (sparse field) "
+                        "and SCAMP residuals are poor or unavailable "
+                        "(SCAMP RMS=%s, stars=%s). Falling back to reproject/AstroAlign.",
+                        _scamp_rms_val, _scamp_nstars_val,
+                    )
+                    return self._align_fallback_reproject_then_astroalign(
+                        science_image, reference_image, output_dir
+                    )
 
             # Log SWarp output WCS for both images so alignment can be verified.
             # Since CENTER = overlap sky midpoint and IMAGE_SIZE = overlap region size,
@@ -3338,7 +3534,8 @@ NNW
             try:
                 with fits.open(aligned_ref) as hdul:
                     ref_wcs = get_wcs(hdul[0].header)
-                    cx, cy = hdul[0].data.shape[1]/2, hdul[0].data.shape[0]/2
+                    nx, ny = hdul[0].data.shape[1], hdul[0].data.shape[0]
+                    cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
                     ref_ra, ref_dec = ref_wcs.all_pix2world([cx], [cy], 0)
                     if not (np.isfinite(ref_ra[0]) and np.isfinite(ref_dec[0])):
                         self.logger.error(
@@ -3368,7 +3565,8 @@ NNW
             try:
                 with fits.open(aligned_sci) as hdul:
                     sci_wcs = get_wcs(hdul[0].header)
-                    cx, cy = hdul[0].data.shape[1]/2, hdul[0].data.shape[0]/2
+                    nx, ny = hdul[0].data.shape[1], hdul[0].data.shape[0]
+                    cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
                     sci_ra, sci_dec = sci_wcs.all_pix2world([cx], [cy], 0)
                     if not (np.isfinite(sci_ra[0]) and np.isfinite(sci_dec[0])):
                         self.logger.error(
@@ -3694,7 +3892,45 @@ NNW
                 )
                 _sci_cat_v = _sci_sex.get("catalog")
                 _ref_cat_v = _ref_sex.get("catalog")
-                if _sci_cat_v is not None and _ref_cat_v is not None and len(_sci_cat_v) >= 3 and len(_ref_cat_v) >= 3:
+                _n_sci_reproj = len(_sci_cat_v) if _sci_cat_v is not None else 0
+                _n_ref_reproj = len(_ref_cat_v) if _ref_cat_v is not None else 0
+
+                # Sparse-field retry with lower threshold
+                if _n_sci_reproj < 5 or _n_ref_reproj < 5:
+                    self.logger.info(
+                        "Sparse field in reproject verify (%d sci / %d ref); "
+                        "retrying SExtractor with DETECT_THRESH=0.5",
+                        _n_sci_reproj, _n_ref_reproj,
+                    )
+                    _SPARSE_REPROJ_OVERRIDE = {
+                        "DETECT_THRESH": 0.5,
+                        "ANALYSIS_THRESH": 0.3,
+                        "DETECT_MINAREA": 1,
+                        "BACK_SIZE": 16,
+                    }
+                    if _n_sci_reproj < 5:
+                        _sci_sex = self.run_sextractor(
+                            science_image,
+                            output_dir=str(Path(_reproj_verify_dir) / "sci_sparse"),
+                            for_alignment=True,
+                            fwhm_pixels=_det_fwhm,
+                            config=_SPARSE_REPROJ_OVERRIDE,
+                        )
+                        _sci_cat_v = _sci_sex.get("catalog")
+                        _n_sci_reproj = len(_sci_cat_v) if _sci_cat_v is not None else 0
+                    if _n_ref_reproj < 5:
+                        _ref_sex = self.run_sextractor(
+                            str(aligned_reference_fpath),
+                            output_dir=str(Path(_reproj_verify_dir) / "ref_sparse"),
+                            for_alignment=True,
+                            fwhm_pixels=_det_fwhm,
+                            config=_SPARSE_REPROJ_OVERRIDE,
+                        )
+                        _ref_cat_v = _ref_sex.get("catalog")
+                        _n_ref_reproj = len(_ref_cat_v) if _ref_cat_v is not None else 0
+
+                _reproj_min_det = 2 if min(_n_sci_reproj, _n_ref_reproj) < 5 else 3
+                if _sci_cat_v is not None and _ref_cat_v is not None and _n_sci_reproj >= _reproj_min_det and _n_ref_reproj >= _reproj_min_det:
                     _x_col = "XWIN_IMAGE" if "XWIN_IMAGE" in _sci_cat_v.colnames else "X_IMAGE"
                     _y_col = "YWIN_IMAGE" if "YWIN_IMAGE" in _sci_cat_v.colnames else "Y_IMAGE"
                     _sci_xy = np.column_stack([
@@ -3713,8 +3949,13 @@ NNW
                     _d_rs, _i_rs = _tree_sci.query(_ref_xy, k=1)
                     _idx_s = np.arange(len(_sci_xy), dtype=int)
                     _mutual = (_i_rs[_i_sr] == _idx_s) & np.isfinite(_d_sr)
-                    _good = _mutual & (_d_sr < 2.0 * _det_fwhm)
-                    if _good.sum() >= 3:
+
+                    # Adaptive match tolerance for sparse fields
+                    _n_total_reproj = len(_sci_xy) + len(_ref_xy)
+                    _reproj_match_tol = (3.0 if _n_total_reproj < 10 else 2.0) * _det_fwhm
+                    _good = _mutual & (_d_sr < _reproj_match_tol)
+                    _reproj_min_matches = 2 if _n_total_reproj < 10 else 3
+                    if _good.sum() >= _reproj_min_matches:
                         _dx = _sci_xy[_good, 0] - _ref_xy[_i_sr[_good], 0]
                         _dy = _sci_xy[_good, 1] - _ref_xy[_i_sr[_good], 1]
                         _med_dx = float(np.median(_dx))
@@ -3752,7 +3993,7 @@ NNW
                         _max_off *= _reproj_scale
                         _max_rms *= _reproj_scale
                         _max_p95 *= _reproj_scale
-                        _reproj_reject = _n_match_reproj >= 3 and _total > _max_off
+                        _reproj_reject = _n_match_reproj >= _reproj_min_matches and _total > _max_off
                         if _n_match_reproj >= _reproj_min_n:
                             _reproj_reject = _reproj_reject or _rms > _max_rms or _p95_reproj > _max_p95
                         if _reproj_reject:
@@ -3857,15 +4098,23 @@ NNW
             
             if sci_bbox is None or ref_bbox is None:
                 # Fall back to science shape if no valid data found
-                _scx = sci_data.shape[1] // 2
-                _scy = sci_data.shape[0] // 2
+                _scx = (sci_data.shape[1] - 1) / 2.0
+                _scy = (sci_data.shape[0] - 1) / 2.0
                 _fb_ra, _fb_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
                 return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
             
-            # Convert bounding box corners to world coordinates
+            # Convert bounding box corners to world coordinates.
+            # _valid_bbox gives the first/last 0-based pixel indices that contain
+            # valid data.  The actual footprint extends half a pixel beyond those
+            # centers, so offset by +/-0.5 to get the outer corners.
             def _bbox_corners(bbox):
                 x1, y1, x2, y2 = bbox
-                return np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+                return np.array(
+                    [[x1 - 0.5, y1 - 0.5],
+                     [x2 + 0.5, y1 - 0.5],
+                     [x2 + 0.5, y2 + 0.5],
+                     [x1 - 0.5, y2 + 0.5]]
+                )
             
             sci_corners = _bbox_corners(sci_bbox)
             ref_corners = _bbox_corners(ref_bbox)
@@ -3885,8 +4134,8 @@ NNW
                 self.logger.warning(
                     "No overlap in valid regions; using science image shape."
                 )
-                _scx = sci_data.shape[1] // 2
-                _scy = sci_data.shape[0] // 2
+                _scx = (sci_data.shape[1] - 1) / 2.0
+                _scy = (sci_data.shape[0] - 1) / 2.0
                 _fb_ra, _fb_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
                 return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
             
@@ -3971,8 +4220,8 @@ NNW
             self.logger.warning(
                 "Could not compute optimal output shape: %s. Using science shape.", e
             )
-            _scx = sci_data.shape[1] // 2
-            _scy = sci_data.shape[0] // 2
+            _scx = (sci_data.shape[1] - 1) / 2.0
+            _scy = (sci_data.shape[0] - 1) / 2.0
             try:
                 _fb_ra, _fb_dec = sci_wcs.all_pix2world([_scx], [_scy], 0)
                 return sci_data.shape[1], sci_data.shape[0], float(_fb_ra[0]), float(_fb_dec[0])
@@ -5034,7 +5283,9 @@ NNW
                 _aa_max_off *= _aa_scale
                 _aa_max_rms *= _aa_scale
                 _aa_max_p95 *= _aa_scale
-                _aa_reject = _n_aa >= 3 and np.isfinite(_med_resid) and _med_resid > _aa_max_off
+                # Sparse-field: accept 2 matches for AstroAlign
+                _aa_min_matches = 2 if _n_aa < 8 else 3
+                _aa_reject = _n_aa >= _aa_min_matches and np.isfinite(_med_resid) and _med_resid > _aa_max_off
                 if _n_aa >= _aa_min_n:
                     _aa_reject = _aa_reject or (
                         np.isfinite(rms_pix) and rms_pix > _aa_max_rms
@@ -5833,6 +6084,7 @@ NNW
                 self.logger.info(
                     "Copied SCAMP .head to %s for SWarp to use.", image_head_dst
                 )
+            _normalize_head_file(image_head_dst)
         except Exception as _he:
             log_warning_from_exception(
                 self.logger, f"Could not copy SCAMP .head next to {image_path}", _he
@@ -6333,6 +6585,8 @@ NNW
                 hdul.flush()
 
         class ConstrainedSlopeRegressor(BaseEstimator, RegressorMixin):
+            """Linear regressor that penalises deviation from a target slope."""
+
             def __init__(
                 self, slope_constraint: float = 1.0, slope_tolerance: float = 0.0
             ):

@@ -1,10 +1,39 @@
 #!/usr/bin/env python3
+"""Debug utilities for source selection spatial sampling.
+
+Provides a debug version of the spatial source-selection algorithm used
+in the zeropoint/catalog pipeline, with print diagnostics and matplotlib
+visualisation of the selected sources overlaid on the full source list.
+
+Intended for interactive exploration — not imported by the main pipeline.
+"""
 
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 def select_sources_spatially_debug(catalog, max_sources, image_shape, selection_mode="uniform", random_seed=42):
-    """Debug version of source selection with visualization."""
+    """Debug version of spatial source selection with verbose diagnostics.
+
+    Parameters
+    ----------
+    catalog : astropy.table.Table
+        Source catalog with ``XWIN_IMAGE`` and ``YWIN_IMAGE`` columns.
+    max_sources : int
+        Maximum number of sources to select.
+    image_shape : tuple of (int, int)
+        ``(height, width)`` of the image in pixels.
+    selection_mode : str
+        One of ``'uniform'`` (grid sampling), ``'random'``, or ``'first'``.
+    random_seed : int, optional
+        Seed for reproducibility (default 42).
+
+    Returns
+    -------
+    tuple of (list, list)
+        (selected_sources, selected_positions) where each position is
+        a ``(x, y)`` tuple.
+    """
     
     # Set random seed for reproducibility
     if random_seed is not None:
@@ -109,7 +138,19 @@ def select_sources_spatially_debug(catalog, max_sources, image_shape, selection_
         return valid_sources[:max_sources], positions[:max_sources]
 
 def visualize_source_selection(all_positions, selected_positions, image_shape, selection_mode):
-    """Visualize source selection for debugging."""
+    """Save a side-by-side matplotlib plot of all vs. selected sources.
+
+    Parameters
+    ----------
+    all_positions : list of (float, float)
+        ``(x, y)`` positions of every source in the catalog.
+    selected_positions : list of (float, float)
+        ``(x, y)`` positions of the selected subset.
+    image_shape : tuple of (int, int)
+        ``(height, width)`` of the image in pixels.
+    selection_mode : str
+        Selection mode label for the plot title and output filename.
+    """
     
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
     
@@ -153,8 +194,9 @@ def visualize_source_selection(all_positions, selected_positions, image_shape, s
     plt.close()
     print(f"Saved debug plot: debug_source_selection_{selection_mode}.png")
 
-# Test with simulated data
+
 if __name__ == "__main__":
+    """Self-test: simulate a clustered catalog and visualise all three selection modes."""
     # Create a mock catalog with sources clustered in different regions
     from astropy.table import Table
     

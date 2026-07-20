@@ -83,29 +83,36 @@ ALPHA_VALUES = {
     'very_dark': 0.95,
 }
 
+
 def get_color(palette_name):
     """Get color from scientific palette."""
     return SCIENTIFIC_PALETTE.get(palette_name, '#000000')
+
 
 def get_ransac_color(plot_type):
     """Get the designated inlier color for a named RANSAC plot type."""
     return RANSAC_PLOT_COLORS.get(plot_type, SCIENTIFIC_PALETTE['inliers'])
 
+
 def get_okabe_color(color_name):
     """Get color from Okabe-Ito palette."""
     return OKABE_ITO.get(color_name, '#000000')
+
 
 def get_marker_size(size_name):
     """Get marker size from predefined sizes."""
     return MARKER_SIZES.get(size_name, 3)
 
+
 def get_line_width(width_name):
     """Get line width from predefined widths."""
     return LINE_WIDTHS.get(width_name, 0.5)
 
+
 def get_alpha(alpha_name):
     """Get alpha value from predefined values."""
     return ALPHA_VALUES.get(alpha_name, 0.75)
+
 
 def get_divergent_color(color_name):
     """Get color from divergent palette."""

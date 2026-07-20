@@ -127,6 +127,7 @@ def list_parameters(
     root = parsed.get("default_input", parsed)
 
     def _format_default(v) -> str:
+        """Format a YAML default value for human-readable display."""
         if v is None:
             return "null"
         if isinstance(v, str):
@@ -483,6 +484,7 @@ def list_parameters(
 
 # Backward/typo-friendly alias (requested): from autophot import list_paramters
 def list_paramters(**kwargs):  # noqa: N802
+    """Backward-compatible alias for :func:`list_parameters`."""
     return list_parameters(**kwargs)
 
 
@@ -806,6 +808,7 @@ def find_variable_sources(
 
     # Parse angular size (major axis in arcmin)
     def parse_size(dim):
+        """Extract the first numeric value from a dimension string (arcmin)."""
         if pd.isna(dim) or not dim:
             return np.nan
         try:
@@ -1051,6 +1054,7 @@ def inspect_telescope(
 
     # ---- helpers ----
     def _find_files(d, rec):
+        """Return sorted FITS file paths in directory *d* (optionally recursive)."""
         out = []
         if rec:
             for root, _, names in os.walk(d):
@@ -1064,6 +1068,7 @@ def inspect_telescope(
         return sorted(out)
 
     def _read_header(fpath):
+        """Read the first FITS header containing TELESCOP from *fpath*."""
         with _fits.open(fpath, ignore_missing_end=True, memmap=False) as hdul:
             hdul.verify("silentfix+ignore")
             for hdu in hdul:
@@ -1072,6 +1077,7 @@ def inspect_telescope(
             return hdul[0].header.copy()
 
     def _pixel_scale(header):
+        """Return pixel scale in arcsec/pixel from the WCS in *header*."""
         try:
             from astropy.wcs import WCS, utils as wcsutils
             with _np.errstate(all="ignore"):
@@ -1086,6 +1092,7 @@ def inspect_telescope(
         return None
 
     def _hval(header, key, default=None):
+        """Safely read *key* from *header*, returning *default* on failure."""
         try:
             if key and key in header:
                 return header[key]
@@ -1094,6 +1101,7 @@ def inspect_telescope(
         return default
 
     def _read_filter(header, forced_key):
+        """Find the filter value and keyword from *header* using candidate keys."""
         candidates = ([forced_key] + _FILTER_CANDIDATES) if forced_key else _FILTER_CANDIDATES
         for key in candidates:
             val = _hval(header, key)
@@ -1102,6 +1110,7 @@ def inspect_telescope(
         return None, None
 
     def _deep_merge(base, override):
+        """Recursively merge *override* into *base* (in-place)."""
         for k, v in override.items():
             if k in base and isinstance(base[k], dict) and isinstance(v, dict):
                 _deep_merge(base[k], v)
@@ -1110,12 +1119,14 @@ def inspect_telescope(
         return base
 
     def _load_yml(path):
+        """Load a YAML file, returning an empty dict if the file is missing."""
         if os.path.isfile(path):
             with open(path) as f:
                 return _yaml.safe_load(f) or {}
         return {}
 
     def _write_yml(path, data):
+        """Write *data* to a YAML file, creating parent directories as needed."""
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w") as f:
             _yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)

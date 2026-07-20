@@ -64,6 +64,7 @@ def validate_transmission_curve(curve_path: str, filter_name: str) -> Tuple[bool
     except Exception as e:
         return False, f"Error reading transmission curve for {filter_name}: {str(e)}"
 
+
 def discover_filters_from_transmission_curves(curve_map: Dict[str, str]) -> Dict[str, str]:
     """
     Discover filters from transmission curve map and validate them.
@@ -90,6 +91,7 @@ def discover_filters_from_transmission_curves(curve_map: Dict[str, str]) -> Dict
             logger.warning(f"Invalid transmission curve for filter {filter_name}: {error_msg}")
     
     return valid_filters
+
 
 def create_dynamic_filter_config(
     custom_catalog_path: str,
@@ -174,6 +176,7 @@ def create_dynamic_filter_config(
     
     return config
 
+
 def generate_example_transmission_curves(output_dir: str = "example_transmission_curves"):
     """
     Generate example transmission curve files for common non-standard filters.
@@ -210,8 +213,9 @@ def generate_example_transmission_curves(output_dir: str = "example_transmission
         df.to_csv(output_path, index=False, sep=' ', header=False)
         logger.info(f"Generated example transmission curve: {output_path}")
 
+
 if __name__ == "__main__":
-    # Example usage
+    """CLI entry point — generate example transmission curves for testing."""
     logging.basicConfig(level=logging.INFO)
     
     # Generate example transmission curves

@@ -181,6 +181,13 @@ def _skycoord_dedup_keep_one(catalog_df, sep_threshold_arcsec=0.1):
 # =============================================================================
 # =============================================================================
 class Catalog:
+    """Catalog query and cross-matching for photometric calibration.
+
+    Wraps online catalog services (Pan-STARRS, SDSS, Skymapper, Gaia, 2MASS,
+   WISE) and provides local catalog operations: source cross-matching,
+    saturation/linearity filtering, and zeropoint fitting preparation.
+    """
+
     def __init__(self, input_yaml):
         """
         Initialize the catalog class with the input YAML configuration.
