@@ -49,9 +49,16 @@ def get_secondary_header(hdul: fits.HDUList) -> fits.Header | None:
 
 
 def fix_panstarrs_header(h):
-    """
-    Patch a Pan-STARRS header in-place so it works smoothly with autophot.
-    Tries to reuse existing values; only fills or renames when missing.
+    """Patch a Pan-STARRS FITS header in-place for autophot compatibility.
+
+    Fills in ``TELESCOP``, ``INSTRUME``, ``FILTER``, ``EXPTIME``, ``GAIN``,
+    ``RDNOISE``, and ``OBSMJD`` by reusing existing alternate keywords.
+    Also copies HIERARCH WCS keywords to their standard flat names.
+
+    Parameters
+    ----------
+    h : astropy.io.fits.Header
+        Header to modify in-place.
     """
     # --- Telescope / instrument ---
     h.setdefault("TELESCOP", "Pan-STARRS1")
@@ -142,6 +149,15 @@ def fix_panstarrs_header(h):
 
 
 def main(root, recursive=False):
+    """Fix all Pan-STARRS FITS files under *root*.
+
+    Parameters
+    ----------
+    root : str or pathlib.Path
+        Directory containing FITS files to patch.
+    recursive : bool, optional
+        If ``True``, search sub-directories recursively (default ``False``).
+    """
     root = Path(root).expanduser().resolve()
     if recursive:
         files = sorted(root.rglob("*.fits"))

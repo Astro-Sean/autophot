@@ -15,27 +15,53 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
 class AlignmentVerifier:
-    """Comprehensive alignment verification for SCAMP/SWarp processed images."""
-    
+    """Comprehensive alignment verification for SCAMP/SWarp processed images.
+
+    Verifies WCS consistency, pixel-grid alignment, coordinate transformation
+    accuracy, and resampling quality between science and reference images
+    after astrometric alignment.
+    """
+
     def __init__(self, verbose_level: int = 1):
+        """Initialise the verifier.
+
+        Parameters
+        ----------
+        verbose_level : int
+            Logging verbosity (0 = quiet, 1 = info, 2 = debug).
+        """
         self.verbose_level = verbose_level
         self.logger = logging.getLogger(__name__)
-        
-    def verify_precise_alignment(self, sci_image_path: str, ref_image_path: str, 
-                                tolerance_pixels: float = 0.5, 
-                                output_dir: str = None) -> dict:
-        """
-        Perform comprehensive alignment verification between science and reference images.
-        
-        Args:
-            sci_image_path: Path to aligned science image
-            ref_image_path: Path to aligned reference image  
-            tolerance_pixels: Acceptable alignment tolerance in pixels
-            output_dir: Directory to save diagnostic plots
-            
-        Returns:
-            Dictionary with alignment verification results
+
+    def verify_precise_alignment(
+        self,
+        sci_image_path: str,
+        ref_image_path: str,
+        tolerance_pixels: float = 0.5,
+        output_dir: str = None,
+    ) -> dict:
+        """Perform comprehensive alignment verification between two images.
+
+        Parameters
+        ----------
+        sci_image_path : str
+            Path to the aligned science image.
+        ref_image_path : str
+            Path to the aligned reference image.
+        tolerance_pixels : float
+            Acceptable alignment tolerance in pixels (default 0.5).
+        output_dir : str, optional
+            Directory to save diagnostic plots.  If ``None``, no plots
+            are generated.
+
+        Returns
+        -------
+        dict
+            Alignment verification results with keys for WCS consistency,
+            pixel alignment, coordinate accuracy, resampling quality, and
+            an overall alignment score.
         """
         
         results = {
@@ -96,7 +122,7 @@ class AlignmentVerifier:
         return results
     
     def _verify_wcs_consistency(self, sci_wcs: WCS, ref_wcs: WCS, sci_header, ref_header) -> dict:
-        """Verify WCS parameters are consistent between aligned images."""
+        """Check that key WCS parameters match between science and reference."""
         
         results = {
             'consistent': True,
@@ -147,7 +173,7 @@ class AlignmentVerifier:
         return results
     
     def _verify_pixel_grid_alignment(self, sci_data, ref_data, sci_header, ref_header) -> dict:
-        """Verify pixel grids are identical."""
+        """Check that image shapes and NAXIS keywords match."""
         
         results = {
             'consistent': True,
@@ -172,7 +198,7 @@ class AlignmentVerifier:
         return results
     
     def _verify_coordinate_accuracy(self, sci_wcs: WCS, ref_wcs: WCS, image_shape) -> dict:
-        """Verify coordinate transformation accuracy across the image."""
+        """Measure round-trip pixel→world→pixel offsets across a 10×10 grid."""
         
         results = {
             'max_offset_pixels': 0,
@@ -229,7 +255,7 @@ class AlignmentVerifier:
         return results
     
     def _verify_resampling_quality(self, sci_data, ref_data) -> dict:
-        """Verify resampling quality by analyzing image statistics."""
+        """Assess resampling quality via NaN fraction and outlier statistics."""
         
         results = {
             'quality_score': 0,
@@ -273,7 +299,7 @@ class AlignmentVerifier:
         return results
     
     def _calculate_alignment_score(self, results: dict) -> float:
-        """Calculate overall alignment score from all verification results."""
+        """Compute a weighted alignment score (0–1) from all sub-checks."""
         
         score = 1.0
         
@@ -300,7 +326,7 @@ class AlignmentVerifier:
         return max(0, score)
     
     def _get_quality_label(self, score: float) -> str:
-        """Get quality label from alignment score."""
+        """Map a numeric score to a quality label string."""
         if score >= 0.9:
             return "excellent"
         elif score >= 0.8:
@@ -313,7 +339,7 @@ class AlignmentVerifier:
             return "failed"
     
     def _generate_diagnostics(self, sci_data, ref_data, sci_wcs, ref_wcs, results, output_dir):
-        """Generate diagnostic plots for alignment verification."""
+        """Save diagnostic plots (image trio + coordinate offset map) to *output_dir*."""
         
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -360,7 +386,7 @@ class AlignmentVerifier:
         self.logger.info(f"Alignment verification plots saved to {output_dir}")
     
     def _log_verification_results(self, results: dict):
-        """Log verification results."""
+        """Log a human-readable summary of all verification sub-checks."""
         
         self.logger.info(f"Alignment Verification Results:")
         self.logger.info(f"  Overall Quality: {results['alignment_quality']} (score: {results.get('alignment_score', 0):.3f})")

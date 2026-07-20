@@ -403,6 +403,13 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
 # Main Function: run_photometry
 # =============================================================================
 def run_photometry():
+    """Main entry point for the AutoPHOT photometry pipeline.
+
+    Checks for required Astromatic tools (SExtractor, SCAMP, SWarp), loads
+    configuration, and orchestrates the full reduction workflow: header
+    inspection, WCS solving, background subtraction, template handling,
+    source detection, photometry, and light-curve generation.
+    """
 
     # ---------------------------------------------------------------------
     # Check for optional Astromatic tools
@@ -2711,6 +2718,17 @@ def run_photometry():
                             ],
                         )
                         template_available = True
+
+                        # Diagnostic plot: source alignment after template alignment
+                        try:
+                            makePlots = Plot(input_yaml=input_yaml)
+                            makePlots.plot_alignment_offset(
+                                sci_fpath=fpath,
+                                template_fpath=templateFpath,
+                            )
+                        except Exception as exc:
+                            logging.warning(f"Alignment offset plot failed: {exc}")
+
                         try:
                             _wcs_apply = input_yaml.get("wcs", {}).get(
                                 "apply_solved_to_fits", True

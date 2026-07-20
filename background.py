@@ -1,30 +1,27 @@
-# =============================================================================
-# background_subtractor.py - Improved BackgroundSubtractor
-# =============================================================================
-# Key fixes for smooth backgrounds and effective source/galaxy masking:
-#
-#   1. MUCH LARGER BOX SIZES - mesh_scale raised from 2.5 to 10, with a hard
-#      minimum of 64px.  Small boxes track sources instead of sky.
-#   2. ITERATIVE SOURCE MASKING - 3-pass detect->mask->re-estimate cycle.
-#      Pass 1: bright sources on raw image.
-#      Pass 2: subtract preliminary background, detect fainter sources.
-#      Pass 3: refine with updated mask.
-#      This catches extended wings and faint field sources that single-pass misses.
-#   3. MUCH LARGER FILTER SIZE - smoothing filter now scales as box_size//2
-#      (not FWHM/2), ensuring the interpolated mesh is genuinely smooth.
-#   4. BkgZoomInterpolator - replaces the default piecewise interpolator with
-#      a spline-based zoom that produces a smooth continuous surface.
-#   5. AGGRESSIVE DILATION - dilate_factor raised to 3.0 and iterations to 3,
-#      ensuring source wings and PSF halos are fully excluded.
-#   6. SATURATION MASKING - pixels near/above saturation are masked before
-#      background estimation (bright stars leave extended ghosts otherwise).
-#   7. BiweightLocationBackground - more robust to outlier-contaminated boxes
-#      than MMMBackground when sources leak through the mask.
-#   8. Lower exclude_percentile (80%) - boxes with >20% masked pixels are
-#      interpolated over rather than estimated, preventing partial-source boxes
-#      from pulling the background up.
-# =============================================================================
+"""Sky-background estimation and subtraction for AutoPHOT.
 
+Provides :class:`BackgroundSubtractor`, which estimates and removes the sky
+background from astronomical FITS images using iterative source masking,
+large mesh boxes, and spline interpolation.
+
+Key design choices
+------------------
+1. **Large box sizes** -- mesh_scale ~10 with a hard minimum of 64 px so
+   individual sources don't dominate a box.
+2. **Iterative source masking** -- 3-pass detect → mask → re-estimate cycle
+   that catches extended wings and faint field sources.
+3. **Large smoothing filter** -- scales as ``box_size // 2`` for a genuinely
+   smooth mesh.
+4. **BkgZoomInterpolator** -- spline-based zoom replaces the default
+   piecewise interpolator for a continuous surface.
+5. **Aggressive dilation** -- ``dilate_factor=3``, 3 iterations to fully
+   exclude PSF halos.
+6. **Saturation masking** -- pixels near saturation are masked before
+   background estimation.
+7. **BiweightLocationBackground** -- robust to outlier-contaminated boxes.
+8. **Low exclude_percentile (80 %)** -- boxes with >20 % masked pixels are
+   interpolated over rather than estimated.
+"""
 
 # TODO: Mask out regions where the pixel shares the same value as it's nearest nighbout. Also dilute this to avoid aretifacts at the edges
 
@@ -118,6 +115,13 @@ class BackgroundSubtractor:
     """
 
     def __init__(self, config: dict):
+        """Initialise the subtractor with a pipeline configuration dict.
+
+        Parameters
+        ----------
+        config : dict
+            AutoPHOT configuration dictionary (``input_yaml``).
+        """
         self.config = config
 
         dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -167,6 +171,7 @@ class BackgroundSubtractor:
     # WCS helpers
     # -------------------------------------------------------------------------
     def get_rotation_angle(self, header) -> float:
+        """Return the image rotation angle in degrees from the WCS CD matrix."""
         wcs = get_wcs(header)
         try:
             if hasattr(wcs.wcs, "cd"):
@@ -874,6 +879,10 @@ class BackgroundSubtractor:
         min_frac: float = 0.15,
         min_box: int = 32,
     ) -> tuple:
+        """Shrink the Background2D box until enough unmasked pixels remain.
+
+        Returns an odd-valued ``(bx, bx)`` box size.
+        """
         valid = (~mask).astype(np.float32)
         bx = init_box[0]
 
@@ -1180,6 +1189,7 @@ class BackgroundSubtractor:
     # Saturation guard
     # -------------------------------------------------------------------------
     def _check_saturation(self, bkg_median: float, saturate: float) -> float:
+        """Disable saturation clipping if the background median is near saturation."""
         if bkg_median >= 0.95 * saturate:
             self.logger.warning(
                 f"Background median [{bkg_median:.3e}] near saturation "
@@ -1192,6 +1202,7 @@ class BackgroundSubtractor:
     # Figure saving helper
     # -------------------------------------------------------------------------
     def _save_figure(self, fig: plt.Figure, fpath: str, prefix: str) -> None:
+        """Save *fig* next to *fpath* with a titled prefix (e.g. ``Background_*.png``)."""
         outdir = os.path.dirname(fpath)
         if outdir and not os.path.exists(outdir):
             os.makedirs(outdir, exist_ok=True)
@@ -1916,6 +1927,7 @@ class BackgroundSubtractor:
         fpath,
         mask=None,
     ) -> None:
+        """Save a 4-panel diagnostic plot (image, background, noise RMS, residual)."""
         arrays = [image, background, rms, subtracted]
         titles = ["Science", "Background", "Noise RMS", "Subtracted"]
         interval = ZScaleInterval()
@@ -1980,6 +1992,7 @@ class BackgroundSubtractor:
         fpath,
         mask=None,
     ) -> None:
+        """Save a 3-panel local background diagnostic plot (cutout, background, subtracted)."""
         arrays = [cutout, background, subtracted]
         titles = ["Science", "Background", "Subtracted"]
         interval = ZScaleInterval()
@@ -2027,6 +2040,7 @@ class BackgroundSubtractor:
     # -------------------------------------------------------------------------
     @staticmethod
     def _safe_zlimits(data, interval):
+        """Return zscale limits for *data*, falling back to (0, 1) on error."""
         try:
             return interval.get_limits(data)
         except Exception:
@@ -2037,6 +2051,7 @@ class BackgroundSubtractor:
 
     @staticmethod
     def _attach_colorbar(fig, ax, im, label):
+        """Attach a horizontal colorbar above *ax* with the given *label*."""
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("top", size="5%", pad=0.05)
         cbar = fig.colorbar(im, cax=cax, orientation="horizontal")

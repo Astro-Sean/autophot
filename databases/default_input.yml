@@ -413,6 +413,7 @@ default_input:
     alignment_max_p95_px: 1.5 # float --- Maximum post-SWarp centroid 95th-percentile offset (pixels) when enough matches are available.
     alignment_min_sources_for_field_gate: 20 # int --- Minimum post-SWarp source matches required before RMS and P95 gates are applied. P95 is unreliable with fewer than 20 samples.
     alignment_require_post_swarp_verification: True # bool --- Reject common-grid SWarp output when subpixel centroid alignment cannot be measured.
+    post_swarp_verify: False # bool --- If True, run SExtractor cross-match on SWarp output images to measure post-alignment offsets. When False, SCAMP+SWarp is trusted without independent verification. Enable for diagnostics or when alignment quality is uncertain.
     alignment_sparse_field_retry_count: 15 # int --- If SExtractor detects fewer than this many sources in either image, re-run with maximum sensitivity (DETECT_THRESH=0.5, smaller BACK_SIZE, CLEAN=N). Set to 0 to disable sparse-field retry.
     skip_resampling: True # bool --- DEPRECATED: use resample_mode instead. If True, maps to resample_mode="wcs_only".
     resample_mode: common_grid # str --- SWarp resampling mode: "common_grid" (both to science grid), "native_scale" (each keeps own pixel scale), "wcs_only" (no resampling).
