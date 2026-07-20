@@ -1338,7 +1338,7 @@ NNW
                     # AND has no non-linear distortion (SIP/TPV).
                     if (_ref_shape[0] > _sci_shape[0] * 1.5 or _ref_shape[1] > _sci_shape[1] * 1.5) \
                             and not (_ref_has_sip or _ref_has_pv):
-                        from astropy.nddata.utils import Cutout2D
+                        from functions import nan_crop
                         
                         # Get science center in world coords.
                         # Use correct numpy 0-based center: (nx-1)/2, (ny-1)/2.
@@ -1355,24 +1355,15 @@ NNW
                         _cut_w = int(_sci_shape[1] * 1.2)
                         
                         if np.isfinite(_rcx) and np.isfinite(_rcy):
-                            _ref_cutout = Cutout2D(
-                                _rh[0].data,
-                                (_rcx, _rcy),
-                                (_cut_h, _cut_w),
-                                wcs=_ref_w,
-                                mode='partial',
-                                fill_value=np.nan,
-                            )
-                            # Update reference image with cutout
                             _ref_header_out = _ref_h.copy()
-                            from functions import update_header_from_wcs
-                            update_header_from_wcs(_ref_header_out, _ref_cutout.wcs)
-                            _ref_header_out['NAXIS1'] = _cut_w
-                            _ref_header_out['NAXIS2'] = _cut_h
+                            _ref_data_cropped, _ref_header_out = nan_crop(
+                                _rh[0].data, _ref_header_out,
+                                _rcx, _rcy, _cut_h, _cut_w,
+                            )
                             fits.writeto(
-                                ref_image_copy, 
-                                _ref_cutout.data.astype(_rh[0].data.dtype), 
-                                _ref_header_out, 
+                                ref_image_copy,
+                                _ref_data_cropped.astype(_rh[0].data.dtype),
+                                _ref_header_out,
                                 overwrite=True
                             )
                             self.logger.info(
@@ -1581,7 +1572,7 @@ NNW
             # Log science image statistics to debug detection issues
             with fits.open(sci_image_copy) as hdul:
                 sci_data = hdul[0].data
-                self.logger.info(
+                self.logger.debug(
                     "Science image stats: shape=%s, min=%.2f, max=%.2f, mean=%.2f, median=%.2f, std=%.2f",
                     sci_data.shape, np.nanmin(sci_data), np.nanmax(sci_data),
                     np.nanmean(sci_data), np.nanmedian(sci_data), np.nanstd(sci_data)
@@ -1595,7 +1586,7 @@ NNW
                     hdul[0].header.get("CRPIX2", "N/A")
                 )
                 # Check if this is a cropped image (from templates.py)
-                self.logger.info(
+                self.logger.debug(
                     "Science image path: %s (original: %s)",
                     sci_image_copy, science_image
                 )
@@ -2480,7 +2471,7 @@ NNW
             sparse_note = " (sparse)" if is_sparse_field else ""
             distort_label = max(1, distort_degrees)
             self.logger.info(
-                'SCAMP: crossid=%.1f" maxerr=%.1f" distort=%d%s (ref SIP/PV order=%d, %d matched)',
+                'SCAMP:\t\tcrossid=%.1f" maxerr=%.1f" distort=%d%s (ref SIP/PV order=%d, %d matched)',
                 crossid_arcsec, position_maxerr_arcsec, distort_label, sparse_note,
                 ref_distort_order, _num_matched,
             )
@@ -2520,12 +2511,12 @@ NNW
             }
 
             self.logger.info(
-                "SWarp: sci=%s ref=%s",
+                "SWarp:\t\tsci=%s ref=%s (per-image preference; common_grid uses combined method below)",
                 sci_resampling_method, ref_resampling_method,
             )
 
             self.logger.info(
-                "SWarp grid: center=(%.4f, %.4f) size=%dx%d scale=%.3f\"/px",
+                "SWarp grid:\tcenter=(%.4f, %.4f) size=%dx%d scale=%.3f\"/px",
                 center_ra, center_dec, output_width, output_height, pix_scale,
             )
 
@@ -2893,11 +2884,11 @@ NNW
                 }
                 
                 # Reference image: native pixel scale, shape scaled to match sky coverage
-                # Use ref_resampling_method (not combined) since science is not resampled
-                # in native_scale mode — the reference should use its own optimal method.
+                # Use combined_resampling_method for consistency — different kernels have
+                # different phase responses that introduce systematic sub-pixel centroid
+                # shifts between images even when the grid is identical.
                 swarp_config_ref = {
-                    **swarp_config,
-                    "RESAMPLING_TYPE": ref_resampling_method,
+                    **swarp_config_combined,
                     "COMBINE": "Y",
                     "COMBINE_TYPE": "MEDIAN",
                     "PIXEL_SCALE": ref_pix_scale,
@@ -3001,7 +2992,7 @@ NNW
                     _sci_nan_frac = float(np.count_nonzero(~np.isfinite(_sci_out))) / _sci_out.size
                     _ref_nan_frac = float(np.count_nonzero(~np.isfinite(_ref_out))) / _ref_out.size
                     self.logger.info(
-                        "SWarp output coverage: sci=%.1f%% ref=%.1f%%",
+                        "SWarp coverage:\tsci=%.1f%% ref=%.1f%%",
                         (1.0 - _sci_nan_frac) * 100,
                         (1.0 - _ref_nan_frac) * 100,
                     )
@@ -3348,6 +3339,80 @@ NNW
                         science_image, reference_image, output_dir
                     )
 
+            # Sub-pixel shift correction: when post-SWarp verification measures
+            # a systematic offset, shift the reference image data to correct it.
+            # This addresses residual WCS errors that SCAMP couldn't fully
+            # correct (e.g., SIP model divergence, independent plate-solve
+            # residuals).  Only applies to common_grid mode where both images
+            # share the same pixel grid.
+            _do_shift_correction = (
+                resample_mode == "common_grid"
+                and bool(align_cfg.get("alignment_subpixel_shift_correction", False))
+                and alignment_metadata
+                and "offset_x" in alignment_metadata
+            )
+            if _do_shift_correction:
+                _shift_dx = float(alignment_metadata["offset_x"])
+                _shift_dy = float(alignment_metadata["offset_y"])
+                _shift_total = np.sqrt(_shift_dx ** 2 + _shift_dy ** 2)
+                _shift_threshold = float(
+                    align_cfg.get("alignment_subpixel_shift_threshold", 0.05)
+                )
+                if _shift_total > _shift_threshold:
+                    self.logger.info(
+                        "Applying sub-pixel shift correction to reference: "
+                        "dx=%.4f px, dy=%.4f px (total=%.4f px > %.4f px threshold)",
+                        _shift_dx, _shift_dy, _shift_total, _shift_threshold,
+                    )
+                    try:
+                        from functions import copy_wcs_from_header
+                        from scipy.ndimage import shift as _nd_shift
+
+                        _sci_header = fits.getheader(aligned_sci)
+                        with fits.open(aligned_ref, mode="update", memmap=False) as _hdul:
+                            _ref_data = np.asarray(_hdul[0].data, dtype=np.float64)
+                            _valid = np.isfinite(_ref_data).astype(np.float64)
+                            _data = np.where(_valid > 0.0, _ref_data, 0.0)
+                            _shifted_data = _nd_shift(
+                                _data,
+                                shift=(_shift_dy, _shift_dx),
+                                order=3,
+                                mode="constant",
+                                cval=0.0,
+                            )
+                            _shifted_weight = _nd_shift(
+                                _valid,
+                                shift=(_shift_dy, _shift_dx),
+                                order=1,
+                                mode="constant",
+                                cval=0.0,
+                            )
+                            _shifted = np.full_like(_shifted_data, np.nan)
+                            _good_weight = _shifted_weight > 0.999
+                            _shifted[_good_weight] = (
+                                _shifted_data[_good_weight] / _shifted_weight[_good_weight]
+                            )
+                            _hdul[0].data = _shifted.astype(_hdul[0].data.dtype)
+                            _ref_header = remove_wcs_from_header(_hdul[0].header)
+                            copy_wcs_from_header(_sci_header, _ref_header)
+                        self.logger.info(
+                            "Sub-pixel shift correction applied to reference image."
+                        )
+                        # Update alignment metadata to reflect correction
+                        alignment_metadata["shift_correction_x"] = _shift_dx
+                        alignment_metadata["shift_correction_y"] = _shift_dy
+                        alignment_metadata["shift_correction_total"] = _shift_total
+                    except Exception as _shift_e:
+                        self.logger.warning(
+                            "Sub-pixel shift correction failed (non-fatal): %s",
+                            _shift_e,
+                        )
+                else:
+                    self.logger.debug(
+                        "Sub-pixel shift correction skipped: offset=%.4f px <= %.4f px threshold",
+                        _shift_total, _shift_threshold,
+                    )
+
             # Log SWarp output WCS for both images so alignment can be verified.
             # Since CENTER = overlap sky midpoint and IMAGE_SIZE = overlap region size,
             # both outputs should have identical shapes.
@@ -3373,7 +3438,7 @@ NNW
                     else:
                         ref_wcs_info = wcs_info
                     self.logger.info(
-                        "SWarp output [%s]: shape=%dx%d CRPIX=(%.1f,%.1f) CTYPE=%s/%s",
+                        "SWarp [%s]:\tshape=%dx%d CRPIX=(%.1f,%.1f) CTYPE=%s/%s",
                         _label, _ny, _nx,
                         wcs_info["crpix1"], wcs_info["crpix2"],
                         wcs_info["ctype1"], wcs_info["ctype2"],
@@ -3449,7 +3514,7 @@ NNW
                         # science and reference share the same celestial anchor point.
                         ny_target, nx_target = _sci_shape
 
-                        from astropy.nddata.utils import Cutout2D
+                        from functions import nan_crop
 
                         # Find the pixel position of the SWarp CENTER in the reference image
                         try:
@@ -3464,23 +3529,15 @@ NNW
                             self.logger.debug(
                                 "Could not project SWarp CENTER into reference WCS (%s); using pixel center instead.", _ce
                             )
-                            # Use correct numpy 0-based center for Cutout2D
+                            # Use correct numpy 0-based center
                             ref_cx = (_ref_shape[1] - 1) / 2.0
                             ref_cy = (_ref_shape[0] - 1) / 2.0
 
-                        ref_cutout = Cutout2D(
-                            _ref_data,
-                            (ref_cx, ref_cy),
-                            (ny_target, nx_target),  # Cutout2D expects (height, width)
-                            wcs=_ref_wcs,
-                            mode='partial',
-                        )
-                        _ref_data_adjusted = ref_cutout.data
-                        from functions import update_header_from_wcs
                         _ref_header = _ref_header.copy()
-                        update_header_from_wcs(_ref_header, ref_cutout.wcs)
-                        _ref_header['NAXIS1'] = nx_target
-                        _ref_header['NAXIS2'] = ny_target
+                        _ref_data_adjusted, _ref_header = nan_crop(
+                            _ref_data, _ref_header,
+                            ref_cx, ref_cy, ny_target, nx_target,
+                        )
 
                         # Synchronize CRPIX and CRVAL between science and reference so both
                         # images share the same celestial anchor at the image center.
@@ -3506,7 +3563,7 @@ NNW
                         )
                     else:
                         self.logger.info(
-                            "SWarp outputs match: both images shape=%s.", _sci_shape,
+                            "SWarp match:\tboth images shape=%s", _sci_shape,
                         )
                 except Exception as _e:
                     self.logger.error(
@@ -3545,7 +3602,7 @@ NNW
                         return self._align_fallback_reproject_then_astroalign(
                             science_image, reference_image, output_dir
                         )
-                    # Test world2pix (critical for Cutout2D)
+                    # Test world2pix (critical for nan_crop center calculation)
                     test_px, test_py = _safe_world2pix(ref_wcs, ref_ra[0], ref_dec[0], 0)
                     test_px, test_py = float(np.atleast_1d(test_px)[0]), float(np.atleast_1d(test_py)[0])
                     if not (np.isfinite(test_px) and np.isfinite(test_py)):
@@ -3576,7 +3633,7 @@ NNW
                         return self._align_fallback_reproject_then_astroalign(
                             science_image, reference_image, output_dir
                         )
-                    # Test world2pix (critical for Cutout2D)
+                    # Test world2pix (critical for nan_crop center calculation)
                     test_px, test_py = _safe_world2pix(sci_wcs, sci_ra[0], sci_dec[0], 0)
                     test_px, test_py = float(np.atleast_1d(test_px)[0]), float(np.atleast_1d(test_py)[0])
                     if not (np.isfinite(test_px) and np.isfinite(test_py)):
@@ -5821,7 +5878,7 @@ NNW
             if cached_gaia_path is not None:
                 gaia_cache_hit = True
                 reference_cat = str(cached_gaia_path)
-                self.logger.info(
+                self.logger.debug(
                     "GAIA cache hit: using cached catalog %s", cached_gaia_path
                 )
 
@@ -5842,7 +5899,7 @@ NNW
             gaia_temp_dir = Path(mkdtemp(prefix="scamp_gaia_"))
             final_config["SAVE_REFCATALOG"] = "Y"
             final_config["REFOUT_CATPATH"] = str(gaia_temp_dir)
-            self.logger.info(
+            self.logger.debug(
                 "GAIA cache miss: downloading and caching with key %s", gaia_cache_key
             )
 
@@ -5927,7 +5984,7 @@ NNW
             log_content = log_f.read()
 
         # Log SCAMP return code and key messages for debugging
-        self.logger.info(
+        self.logger.debug(
             f"SCAMP return code: {result.returncode}, log file: {log_file}"
         )
         if "Not enough matched detections" in log_content:
@@ -6525,9 +6582,9 @@ NNW
                                     if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames  
                                     and np.isfinite(row["XWIN_IMAGE"]) and np.isfinite(row["YWIN_IMAGE"])])
             
-            logging.info(f"Science: {len(sci_selected)} plotted + {sci_remaining} crosses = {total_sources_sci} total")
-            logging.info(f"Reference: {len(ref_selected)} plotted + {ref_remaining} crosses = {total_sources_ref} total")
-            logging.info(f"Plotted {len(sci_positions)} science and {len(ref_positions)} reference sources within image bounds")
+            logging.debug(f"Science: {len(sci_selected)} plotted + {sci_remaining} crosses = {total_sources_sci} total")
+            logging.debug(f"Reference: {len(ref_selected)} plotted + {ref_remaining} crosses = {total_sources_ref} total")
+            logging.debug(f"Plotted {len(sci_positions)} science and {len(ref_positions)} reference sources within image bounds")
             
             # `constrained_layout=True` keeps colorbars and labels from
             # overlapping, so no additional tight_layout is needed.

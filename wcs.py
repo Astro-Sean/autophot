@@ -2883,7 +2883,7 @@ class WCSSolver:
                             logger.debug("solved_wcs_for_compare is None, skipping comparison")
                             med_sv, p95_sv, sh_sv = np.nan, np.nan, 0.0
                         logger.info(
-                            "WCS compare on solve-field matches (n=%d): input med/p95=%.3f/%.3f arcsec (shift=%+.1f px) | solved med/p95=%.3f/%.3f arcsec (shift=%+.1f px)",
+                            "WCS compare:\tn=%d | input med/p95=%.3f/%.3f\" (shift=%+.1f px) | solved med/p95=%.3f/%.3f\" (shift=%+.1f px)",
                             int(len(x_d)),
                             float(med_in),
                             float(p95_in),
@@ -2966,17 +2966,11 @@ class WCSSolver:
                     dra_arcsec = (crval1_sv - crval1_in) * 3600.0
                     ddec_arcsec = (crval2_sv - crval2_in) * 3600.0
                     logger.info(
-                        "WCS header delta:\n\tCTYPE: (%s, %s) -> (%s, %s)\n"
-                        "\tdCRPIX=(%g, %g) px\n"
-                        "\tdCRVAL=(%g, %g) arcsec",
-                        ctype1_in,
-                        ctype2_in,
-                        ctype1_sv,
-                        ctype2_sv,
-                        float(crpix1_sv - crpix1_in),
-                        float(crpix2_sv - crpix2_in),
-                        float(dra_arcsec),
-                        float(ddec_arcsec),
+                        "WCS header delta: CTYPE (%s, %s) -> (%s, %s) | "
+                        "dCRPIX=(%g, %g) px | dCRVAL=(%g, %g) arcsec",
+                        ctype1_in, ctype2_in, ctype1_sv, ctype2_sv,
+                        float(crpix1_sv - crpix1_in), float(crpix2_sv - crpix2_in),
+                        float(dra_arcsec), float(ddec_arcsec),
                     )
                 except Exception as exc:
                     log_warning_from_exception(
@@ -3253,7 +3247,6 @@ class WCSSolver:
                                 pass
                 if os.path.isfile(wcs_file):
                     os.remove(wcs_file)
-                logger.info("WCS information updated in the FITS header")
                 return self.header
             except Exception as e:
                 for f in [

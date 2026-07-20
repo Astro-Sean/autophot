@@ -2041,19 +2041,31 @@ class AutomatedPhotometry:
                     # Auto-select GaiaXPy photometric systems based on required filters.
                     # SDSS_Std covers u,g,r,i,z; JKC_Std covers U,B,V,R,I.
                     # Only request the systems needed to avoid unnecessary archive queries.
-                    _sdss_bands = {"u", "g", "r", "i", "z"}
-                    _jkc_bands = {"U", "B", "V", "R", "I"}
-                    _req_upper = {str(f).strip().upper() for f in required_filters}
-                    _need_sdss = bool(_req_upper & _sdss_bands)
-                    _need_jkc = bool(_req_upper & _jkc_bands)
-                    _auto_phot_systems = []
-                    if _need_sdss:
-                        _auto_phot_systems.append("SDSS_Std")
-                    if _need_jkc:
-                        _auto_phot_systems.append("JKC_Std")
-                    if _auto_phot_systems:
-                        backup_yaml.setdefault("catalog", {})["gaia_xp_photometric_systems"] = _auto_phot_systems
-                        _log(f"  Auto-selected GaiaXPy systems: {_auto_phot_systems} (filters: {sorted(_req_upper)})")
+                    # Only run this when a Gaia-based catalog is selected — refcat, sdss,
+                    # pan_starrs, 2mass, legacy, skymapper don't use Gaia XP spectra.
+                    _gaia_catalogs = {"gaia", "apass"}
+                    _needs_gaia_xp = any(
+                        str(c).lower() in _gaia_catalogs for c in _unique_cats
+                    )
+                    if _needs_gaia_xp:
+                        # Case-sensitive matching: SDSS bands are lowercase, JKC are uppercase.
+                        _req_set = {str(f).strip() for f in required_filters}
+                        _sdss_bands = {"u", "g", "r", "i", "z"}
+                        _jkc_bands = {"U", "B", "V", "R", "I"}
+                        _need_sdss = bool(_req_set & _sdss_bands)
+                        _need_jkc = bool(_req_set & _jkc_bands)
+                        _auto_phot_systems = []
+                        if _need_sdss:
+                            _auto_phot_systems.append("SDSS_Std")
+                        if _need_jkc:
+                            _auto_phot_systems.append("JKC_Std")
+                        if _auto_phot_systems:
+                            backup_yaml.setdefault("catalog", {})["gaia_xp_photometric_systems"] = _auto_phot_systems
+                            _log(f"  Auto-selected GaiaXPy systems: {_auto_phot_systems} (filters: {sorted(_req_set)})")
+                    else:
+                        # Non-Gaia catalog: disable GaiaXPy to avoid unnecessary archive queries.
+                        backup_yaml.setdefault("catalog", {})["gaia_xp_photometric_systems"] = []
+                        _log(f"  Skipping GaiaXPy (catalog {_unique_cats} does not require Gaia XP spectra).")
 
                     for _cat_name in _unique_cats:
                         try:
