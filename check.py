@@ -54,7 +54,7 @@ OPTIONAL_KEYWORDS = {
     "Date": {"label": "date", "units": "Date of observations in ISO standard"},
     "EXPTIME": {"label": "exptime", "units": "seconds"},
 }
-AVOID_FILTERS = {"open", "clear", "open ", " clear"}
+AVOID_FILTERS = {"open", "clear"}
 
 # Logical keyword (same names as OPTIONAL_KEYWORDS / ask_for_keyword) -> list of
 # FITS key names in priority order. First key present in the header (case-insensitive)
@@ -342,14 +342,20 @@ class FitsInfo:
             try:
                 if isinstance(ans, str) and ans.lower() in ("true", "false"):
                     return ans.lower() == "true"
-                # For numeric answers, cast via float; for str, just return.
                 if expect_answer_type is str:
-                    return str(ans)
-                return expect_answer_type(float(ans))
-            except Exception:
-                if expect_answer_type == str:
+                    ans = str(ans)
+                    if options and ans not in options:
+                        print(f"  Invalid. Choose one of: {', '.join(options)}")
+                        continue
                     return ans
-                print("Invalid format. Enter one of the options.")
+                return expect_answer_type(float(ans))
+            except (ValueError, TypeError):
+                if expect_answer_type == str:
+                    if options and ans not in options:
+                        print(f"  Invalid. Choose one of: {', '.join(options)}")
+                        continue
+                    return ans
+                print("  Invalid format. Enter one of the options.")
 
     def find_similar_keywords(self, keywords, search_term, cutoff=0.6):
         """
@@ -426,210 +432,211 @@ class FitsInfo:
         return None
 
     def check(self):
-        """
-        Main analysis pipeline.
-
-        Three phases:
-        1. Validate TELESCOP/INSTRUME presence -->classify files
-        2. Setup telescope database entries interactively
-        3. Extract filter keywords from all valid files
-
-        Returns:
-            list: Filenames with complete headers
-        """
+        """Main pipeline: classify files, setup telescope DB, extract filters."""
         self.logger.info(log_step(f"File check: {len(self.flist)} FITS"))
 
-        # PHASE 1: CLASSIFY FILES BY HEADER COMPLETENESS
-        incorrect_files, correct_files = [], []
-        tele_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+        headers_cache = {f: h for f in self.flist if (h := get_header(f))}
 
-        self.logger.info(log_step("Headers (basic)"))
-        flist_iter = tqdm(self.flist) if len(self.flist) > 1 else self.flist
-        for fname in flist_iter:
-            header = get_header(fname)
-            if not header:
-                continue
+        correct_files, incorrect_files, tele_dict = self._classify_files(headers_cache)
 
-            # Check required keys using aliases
-            tele_key = next(
-                (k for k in KEYWORD_ALIASES["TELESCOP"] if k in header), None
-            )
-            inst_key = next(
-                (k for k in KEYWORD_ALIASES["INSTRUME"] if k in header), None
-            )
-
-            if tele_key and inst_key:
-                tele = header[tele_key].strip()
-                inst = header[inst_key].strip()
-                correct_files.append(fname)
-                # Always use 'INSTRUME' as the block key (not the raw header keyword like 'CAMERA')
-                tele_dict[tele]["INSTRUME"][inst] = {}
-            elif self.template_files:
-                # Template images (e.g. from archives) may lack TELESCOP/INSTRUME; keep for calibration
-                correct_files.append(fname)
-            else:
-                incorrect_files.append([fname, bool(tele_key), bool(inst_key)])
-
-        # Report/save problematic files (skip when template_files: we already kept them)
         if incorrect_files and not self.template_files:
             outfile = self.fits_dir / "IncorrectFiles.txt"
             with open(outfile, "w") as f:
                 for fname, has_t, has_i in incorrect_files:
-                    missing = []
-                    if not has_t:
-                        missing.append("TELESCOP")
-                    if not has_i:
-                        missing.append("INSTRUME")
+                    missing = [k for k, ok in [("TELESCOP", has_t), ("INSTRUME", has_i)] if not ok]
                     f.write(f"{fname}: missing {', '.join(missing)}\n")
-            self.logger.info(
-                "%d files with missing TELESCOP/INSTRUME headers -> %s",
-                len(incorrect_files),
-                outfile,
-            )
+            self.logger.info("%d files missing headers -> %s", len(incorrect_files), outfile)
 
-        # PHASE 2: BUILD TELESCOPE DATABASE (Telescope-blind)
-        db = self._load_db()
+        db = self._setup_telescope_entries(tele_dict, headers_cache, correct_files)
+        self._extract_filters(db, headers_cache, correct_files)
+        self._save_db(db)
+        self.logger.info("Header check complete: %d/%d files OK.", len(correct_files), len(self.flist))
+        return correct_files
 
-        self.logger.info(
-            "Telescopes discovered in headers: %s", ", ".join(tele_dict.keys())
-        )
-        tele_items = list(tele_dict.items())
-        tele_iter = tqdm(tele_items) if len(tele_items) > 1 else tele_items
-        for tele, inst_groups in tele_iter:
-            db.setdefault(tele, {})
-            
-            # Always use INSTRUME as the block key
-            if "INSTRUME" not in db[tele]:
-                db[tele]["INSTRUME"] = {}
-            
-            for inst_key, insts in inst_groups.items():
-                for inst_name in insts:
-                    entry = db[tele]["INSTRUME"].get(inst_name)
-                    if not entry:  # New instrument - auto-setup with defaults
-                        entry = {}
-                        db[tele]["INSTRUME"][inst_name] = entry
-
-                        # Auto-generate telescope/instrument label
-                        entry["Name"] = f"{tele}+{inst_name}"
-                        self.logger.info(f"Auto-created instrument entry: {entry['Name']}")
-
-                        # Try to derive pixel scale from WCS
-                        ps_default = 0.4
-                        sample_file = None
-                        for fname in correct_files:
-                            h = get_header(fname)
-                            tele_key_hdr = next(
-                                (k for k in KEYWORD_ALIASES["TELESCOP"] if k in h), None
-                            )
-                            inst_key_hdr = next(
-                                (k for k in KEYWORD_ALIASES["INSTRUME"] if k in h), None
-                            )
-                            if not tele_key_hdr or not inst_key_hdr:
-                                continue
-                            if (
-                                h[tele_key_hdr].strip() == tele
-                                and h[inst_key_hdr].strip() == inst_name
-                            ):
-                                sample_file = fname
-                                break
-
-                        if sample_file is not None:
-                            try:
-                                from functions import get_header as ap_get_header
-                                from wcs import get_wcs as ap_get_wcs
-                                import astropy.wcs as WCS_mod
-                                import numpy as np_mod
-
-                                hdr0 = ap_get_header(sample_file)
-                                wcs_obj = ap_get_wcs(hdr0)
-                                xy_scales = WCS_mod.utils.proj_plane_pixel_scales(wcs_obj)
-                                if xy_scales is not None and len(xy_scales) > 0:
-                                    cand = float(xy_scales[0]) * 3600.0
-                                    if np_mod.isfinite(cand) and 0 < cand <= 5:
-                                        ps_default = cand
-                                        self.logger.info(f"Auto-derived pixel scale from WCS: {ps_default:.3f} arcsec/pix")
-                            except Exception:
-                                ps_default = 0.4
-
-                        entry["pixel_scale"] = ps_default
-                        entry["filter_key_0"] = "FILTER"
-
-                        # Ask user to confirm auto-detected keywords
-                        hdr_for_confirm = get_header(sample_file) if sample_file is not None else {}
-                        self._confirm_instrument_keywords(
-                            entry, hdr_for_confirm, tele, inst_name
-                        )
-
-        # PHASE 3: FILTER KEYWORDS FOR ALL VALID FILES (skip files without TELESCOP/INSTRUME, e.g. templates)
-        self.logger.info(log_step(f"Filters: {len(correct_files)} files"))
-        correct_iter = tqdm(correct_files) if len(correct_files) > 1 else correct_files
-        for fname in correct_iter:
-            header = get_header(fname)
-            tele_key = next(
-                (k for k in KEYWORD_ALIASES["TELESCOP"] if k in header), None
-            )
-            inst_key = next(
-                (k for k in KEYWORD_ALIASES["INSTRUME"] if k in header), None
-            )
-            if not tele_key or not inst_key:
+    def _classify_files(self, headers_cache):
+        """Phase 1: Classify files by TELESCOP/INSTRUME presence."""
+        self.logger.info(log_step("Headers (basic)"))
+        incorrect, correct = [], []
+        tele_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+        for fname in tqdm(self.flist) if len(self.flist) > 1 else self.flist:
+            header = headers_cache.get(fname)
+            if not header:
                 continue
-            tele, inst = header[tele_key].strip(), header[inst_key].strip()
-            
-            # Telescope-blind: create or get entry for any telescope/instrument combination
-            # No telescope.yml entry required - works generically for any telescope
-            if tele not in db:
-                db[tele] = {}
-            if "INSTRUME" not in db[tele]:
-                db[tele]["INSTRUME"] = {}
+            tk = next((k for k in KEYWORD_ALIASES["TELESCOP"] if k in header), None)
+            ik = next((k for k in KEYWORD_ALIASES["INSTRUME"] if k in header), None)
+            if tk and ik:
+                correct.append(fname)
+                tele_dict[header[tk].strip()]["INSTRUME"][header[ik].strip()] = {}
+            elif self.template_files:
+                correct.append(fname)
+            else:
+                incorrect.append([fname, bool(tk), bool(ik)])
+        return correct, incorrect, tele_dict
+
+    def _setup_telescope_entries(self, tele_dict, headers_cache, correct_files):
+        """Phase 2: Auto-create telescope/instrument entries with WCS-derived pixel scale."""
+        db = self._load_db()
+        self.logger.info("Telescopes discovered: %s", ", ".join(tele_dict.keys()))
+        for tele, inst_groups in tele_dict.items():
+            db.setdefault(tele, {}).setdefault("INSTRUME", {})
+            for inst_name in inst_groups.get("INSTRUME", {}):
+                if db[tele]["INSTRUME"].get(inst_name):
+                    continue
+                entry = {}
+                db[tele]["INSTRUME"][inst_name] = entry
+                entry["Name"] = f"{tele}+{inst_name}"
+                self.logger.info(f"Auto-created instrument entry: {entry['Name']}")
+                sh = self._find_sample_header(headers_cache, correct_files, tele, inst_name)
+                entry["pixel_scale"] = self._derive_pixel_scale(sh)
+                entry["filter_key_0"] = "FILTER"
+                self._confirm_instrument_keywords(entry, sh or {}, tele, inst_name)
+        return db
+
+    def _find_sample_header(self, headers_cache, correct_files, tele, inst_name):
+        """Find first header matching telescope/instrument."""
+        for fname in correct_files:
+            h = headers_cache.get(fname)
+            if not h:
+                continue
+            tk = next((k for k in KEYWORD_ALIASES["TELESCOP"] if k in h), None)
+            ik = next((k for k in KEYWORD_ALIASES["INSTRUME"] if k in h), None)
+            if tk and ik and h[tk].strip() == tele and h[ik].strip() == inst_name:
+                return h
+        return None
+
+    @staticmethod
+    def _derive_pixel_scale(sample_header):
+        """Derive pixel scale (arcsec/pix) from WCS."""
+        if not sample_header:
+            return 0.4
+        try:
+            from wcs import get_wcs as ap_get_wcs
+            import astropy.wcs as WCS_mod
+            import numpy as np_mod
+            wcs_obj = ap_get_wcs(sample_header)
+            scales = WCS_mod.utils.proj_plane_pixel_scales(wcs_obj)
+            if scales is not None and len(scales) > 0:
+                cand = float(scales[0]) * 3600.0
+                if np_mod.isfinite(cand) and 0 < cand <= 5:
+                    return cand
+        except Exception:
+            pass
+        return 0.4
+
+    def _extract_filters(self, db, headers_cache, correct_files):
+        """Phase 3: Extract and map filter keywords from all valid files."""
+        self.logger.info(log_step(f"Filters: {len(correct_files)} files"))
+        for fname in tqdm(correct_files) if len(correct_files) > 1 else correct_files:
+            header = headers_cache.get(fname)
+            if not header:
+                continue
+            tk = next((k for k in KEYWORD_ALIASES["TELESCOP"] if k in header), None)
+            ik = next((k for k in KEYWORD_ALIASES["INSTRUME"] if k in header), None)
+            if not tk or not ik:
+                continue
+            tele, inst = header[tk].strip(), header[ik].strip()
+            db.setdefault(tele, {}).setdefault("INSTRUME", {})
             if inst not in db[tele]["INSTRUME"]:
-                # Auto-create entry with generic defaults
-                db[tele]["INSTRUME"][inst] = {
-                    "Name": f"{tele}+{inst}",
-                    "filter_key_0": "FILTER",
-                }
-                self.logger.info(
-                    f"Auto-created telescope entry for {tele}+{inst} with generic defaults."
-                )
-            
+                db[tele]["INSTRUME"][inst] = {"Name": f"{tele}+{inst}", "filter_key_0": "FILTER"}
+                self.logger.info(f"Auto-created entry for {tele}+{inst}.")
             entry = db[tele]["INSTRUME"][inst]
             fkey = self._find_filter_key(header, entry)
-            # Preserve original case for proper filter system distinction (e.g., r vs R)
             fval_raw = str(header[fkey]).strip().replace(" ", "")
-            fval = fval_raw.lower()  # For AVOID_FILTERS check
-            if fval and fval not in AVOID_FILTERS and fval_raw not in entry:
+            fval_lower = fval_raw.lower()
+            if fval_lower and fval_lower not in AVOID_FILTERS and fval_raw not in entry:
                 if fval_raw in self.available_filters:
                     entry[fval_raw] = fval_raw
                 else:
-                    # Non-interactive: use heuristic to map filter
-                    std_filter = self._resolve_standard_band(fval_raw)
-                    if std_filter is not None:
-                        entry[fval_raw] = std_filter
-                        self.logger.info(f"Auto-mapped filter {fval_raw} -> {std_filter}")
+                    std = self._resolve_standard_band(fval_raw)
+                    if std is not None:
+                        entry[fval_raw] = std
+                        self.logger.info(f"Auto-mapped filter {fval_raw} -> {std}")
                     else:
-                        # Fallback: use the raw value as-is
                         entry[fval_raw] = fval_raw
                         self.logger.warning(f"Could not auto-map filter {fval_raw}, using as-is")
 
-        # SAVE DATABASE
-        self._save_db(db)
-        self.logger.info(
-            "Header check complete: %d/%d files OK.",
-            len(correct_files),
-            len(self.flist),
-        )
-        return correct_files
 
+    def _try_mapping(self, db, header_value, source, mapping):
+        """
+        Try a cached/heuristic mapping. Accept silently if identical to
+        header_value; otherwise ask for confirmation.
+
+        Returns the mapping if accepted, or None if rejected/not provided.
+        """
+        if mapping is None:
+            return None
+        mapping = str(mapping).strip()
+        if mapping == header_value:
+            self.logger.info(
+                "Auto-mapped filter %r -> %r (%s; identical).",
+                header_value, mapping, source,
+            )
+            try:
+                self._remember_mapping(db, header_value, mapping)
+                self._save_db(db)
+            except Exception:
+                pass
+            return mapping
+
+        self.logger.info("%s suggests: %r -> %r", source.capitalize(), header_value, mapping)
+        confirm = self.ask_question(
+            f"Confirm mapping '{header_value}' -> '{mapping}'?",
+            default_answer="y",
+            expect_answer_type=str,
+            options=["y", "n"],
+        )
+        if confirm.lower() in ("y", "yes", ""):
+            self.logger.info("Confirmed: %r -> %r", header_value, mapping)
+            try:
+                self._remember_mapping(db, header_value, mapping)
+                self._save_db(db)
+            except Exception:
+                pass
+            return mapping
+
+        self.logger.info("Rejected %s mapping for %r", source, header_value)
+        return None
 
     def _ask_filter_mapping(self, header_value):
         """
-        Ask user to map a FITS header filter value to a standard band name.
-        Uses a clear, multi-line prompt and validates against catalog bands.
+        Map a FITS header filter value to a standard band name.
+
+        Resolution order: global cache (normalized) → global cache (simplified)
+        → heuristic → manual prompt.
         """
         opts = sorted(
             self.available_filters, key=lambda x: (x not in "ugriz", x.lower())
         )
         opts_str = ", ".join(opts)
         default = "no_filter"
+
+        try:
+            db = self._load_db()
+        except Exception:
+            db = {}
+        gm = self._get_global_filter_map(db)
+        hv_norm = self._norm_filter_token(header_value)
+
+        # 1. Global cache (normalized token)
+        result = self._try_mapping(db, header_value, "global cache", gm.get(hv_norm))
+        if result is not None:
+            return result
+
+        # 2. Global cache (simplified token)
+        simp = re.sub(r"[^a-z]", "", hv_norm)
+        result = self._try_mapping(
+            db, header_value, "global cache (simplified)", gm.get(simp)
+        )
+        if result is not None:
+            return result
+
+        # 3. Heuristic
+        guessed = self._resolve_standard_band(header_value)
+        result = self._try_mapping(db, header_value, "heuristic", guessed)
+        if result is not None:
+            return result
+
+        # 4. Manual prompt
         prompt = (
             "\n"
             "  Filter name mapping\n"
@@ -640,92 +647,6 @@ class FitsInfo:
             f"\n  Standard bands:  {opts_str}\n"
             f"\n  Map {header_value!r} to [{default}]: "
         )
-        # First, check global cache and heuristics to avoid repeated prompting.
-        try:
-            db = self._load_db()
-        except Exception:
-            db = {}
-        gm = self._get_global_filter_map(db)
-        hv_norm = self._norm_filter_token(header_value)
-        # Use case-sensitive lookup for exact match
-        if hv_norm in gm:
-            mapped = str(gm[hv_norm]).strip()
-            # If mapping is identical (case-sensitive), accept without confirmation
-            if mapped == header_value:
-                self.logger.info("Auto-mapped filter %r -> %r (global cache; identical).", header_value, mapped)
-                return mapped
-            # Different mapping - ask for confirmation
-            self.logger.info("Global cache suggests: %r -> %r", header_value, mapped)
-            confirm = self.ask_question(
-                f"Confirm cached mapping '{header_value}' -> '{mapped}'?",
-                default_answer="y",
-                expect_answer_type=str,
-                options=["y", "n"],
-            )
-            if confirm.lower() in ("y", "yes", ""):
-                self.logger.info("Confirmed cached: %r -> %r", header_value, mapped)
-                return mapped
-            else:
-                self.logger.info("Rejected cached mapping for %r", header_value)
-                # Continue to heuristic or manual prompt
-        simp = re.sub(r"[^a-z]", "", hv_norm)
-        if simp in gm:
-            mapped = str(gm[simp]).strip()
-            # If mapping is identical (case-sensitive), accept without confirmation
-            if mapped == header_value:
-                self.logger.info(
-                    "Auto-mapped filter %r -> %r (global cache; simplified token=%r; identical).",
-                    header_value,
-                    mapped,
-                    simp,
-                )
-                return mapped
-            # Different mapping - ask for confirmation
-            self.logger.info("Global cache suggests: %r -> %r (simplified)", header_value, mapped)
-            confirm = self.ask_question(
-                f"Confirm cached mapping '{header_value}' -> '{mapped}'?",
-                default_answer="y",
-                expect_answer_type=str,
-                options=["y", "n"],
-            )
-            if confirm.lower() in ("y", "yes", ""):
-                self.logger.info("Confirmed cached: %r -> %r", header_value, mapped)
-                return mapped
-            else:
-                self.logger.info("Rejected cached mapping for %r", header_value)
-                # Continue to heuristic or manual prompt
-        guessed = self._resolve_standard_band(header_value)
-        if guessed is not None:
-            # If mapping is identical (case-sensitive), accept without confirmation
-            if guessed == header_value:
-                self.logger.info("Auto-mapped filter %r -> %r (identical, no confirmation needed).", header_value, guessed)
-                try:
-                    self._remember_mapping(db, header_value, guessed)
-                    self._save_db(db)
-                except Exception:
-                    pass
-                return guessed
-            
-            # Mapping is different - ask for confirmation
-            self.logger.info("Heuristic suggests: %r -> %r", header_value, guessed)
-            confirm = self.ask_question(
-                f"Confirm mapping '{header_value}' -> '{guessed}'?",
-                default_answer="y",
-                expect_answer_type=str,
-                options=["y", "n"],
-            )
-            if confirm.lower() in ("y", "yes", ""):
-                self.logger.info("Confirmed: %r -> %r", header_value, guessed)
-                try:
-                    self._remember_mapping(db, header_value, guessed)
-                    self._save_db(db)
-                except Exception:
-                    pass
-                return guessed
-            else:
-                self.logger.info("Rejected heuristic mapping for %r", header_value)
-                # Fall through to manual prompt below
-
         while True:
             ans = input(prompt).strip().lower() or default
             print(f"  Selected: {ans}")
@@ -743,7 +664,6 @@ class FitsInfo:
                 except Exception:
                     pass
                 return ans
-            # Allow exact match ignoring case
             for b in self.available_filters:
                 if b.lower() == ans:
                     try:
@@ -754,21 +674,23 @@ class FitsInfo:
                     return b
             print(f"  Invalid. Choose one of {opts_str}, or '{default}'.")
 
+    @staticmethod
+    def _next_filter_key_num(entry):
+        """Return the next available filter_key_N index for entry."""
+        nums = [0]
+        for k in entry:
+            m = re.search(r"filter_key_(\d+)", k)
+            if m:
+                nums.append(int(m.group(1)))
+        return max(nums) + 1
+
     def _find_filter_key(self, header, entry):
         """
         Select best filter keyword from header.
 
-        Priority: FILTER -->existing filter_key_N -->auto-search
-        Skips 'open'/'clear' filters.
-        Dynamically adds new filter_key_{N+1} entries.
-        Non-interactive: auto-selects first reasonable filter key.
-
-        Args:
-            header (dict): FITS header
-            entry (dict): Instrument database entry
-
-        Returns:
-            str: Selected filter keyword name
+        Priority: existing filter_key_N → auto-search for 'filter' in key name
+        → fallback to any short non-empty value → 'FILTER' default.
+        Skips 'open'/'clear' filters. Dynamically registers new filter_key_N entries.
         """
         fkeys = ["FILTER"] + [k for k in entry if k.startswith("filter_key_")]
         for fk in fkeys:
@@ -777,52 +699,25 @@ class FitsInfo:
                 if fval not in AVOID_FILTERS:
                     return fk
 
-        # Auto-search for filter keyword (non-interactive)
-        # Look for keywords containing "filter" or "FPA.FILTER"
-        for key in header.keys():
-            key_lower = key.lower()
-            if "filter" in key_lower and key not in fkeys:
+        # Auto-search: look for keywords containing "filter"
+        for key in header:
+            if "filter" in key.lower() and key not in fkeys:
                 fval = str(header[key]).strip().lower().replace(" ", "")
                 if fval not in AVOID_FILTERS:
-                    # Register this new filter key
-                    next_n = (
-                        max(
-                            [
-                                int(re.search(r"filter_key_(\d+)", k).group(1))
-                                for k in entry
-                                if "filter_key_" in k
-                            ]
-                            + [0]
-                        )
-                        + 1
-                    )
-                    new_fk = f"filter_key_{next_n}"
+                    new_fk = f"filter_key_{self._next_filter_key_num(entry)}"
                     entry[new_fk] = key
                     self.logger.info(f"Auto-selected filter key: {key} -> {new_fk}")
                     return key
 
-        # Fallback: use first key that looks like a filter
-        for key in header.keys():
+        # Fallback: first short non-empty value
+        for key in header:
             fval = str(header[key]).strip().lower().replace(" ", "")
             if fval and fval not in AVOID_FILTERS and len(fval) <= 10:
-                # Register this new filter key
-                next_n = (
-                    max(
-                        [
-                            int(re.search(r"filter_key_(\d+)", k).group(1))
-                            for k in entry
-                            if "filter_key_" in k
-                        ]
-                        + [0]
-                    )
-                    + 1
-                )
-                new_fk = f"filter_key_{next_n}"
+                new_fk = f"filter_key_{self._next_filter_key_num(entry)}"
                 entry[new_fk] = key
                 self.logger.info(f"Fallback auto-selected filter key: {key} -> {new_fk}")
                 return key
 
-        # Last resort: use FILTER as default
         self.logger.warning("No suitable filter key found, using 'FILTER' as default")
         return "FILTER"
 
@@ -952,25 +847,6 @@ class FitsInfo:
         os.makedirs(self.telescope_file.parent, exist_ok=True)
         with open(self.telescope_file, "w") as f:
             yaml.safe_dump(db, f, default_flow_style=False, sort_keys=False)
-
-
-# -----------------------------------------------------------------------------
-# SUPPORT CLASSES
-# -----------------------------------------------------------------------------
-
-
-class AutophotYaml:
-    """Simple YAML loader for filters database."""
-
-    def __init__(self, path):
-        self.path = path
-
-    def load(self):
-        try:
-            with open(self.path) as f:
-                return yaml.safe_load(f) or {}
-        except FileNotFoundError:
-            return {"W_eff": {}}
 
 
 # -----------------------------------------------------------------------------

@@ -17,6 +17,7 @@ import os
 import time
 import traceback
 import copy
+import warnings
 from dataclasses import dataclass
 from math import ceil
 
@@ -660,8 +661,11 @@ class MCMCFitter:
     ):
         """
         Compute per-pixel sigma in electrons matching create_nddata_with_fitting_weights.
+
+        Note: ``data`` is the cutout from ndimage.data, which is already in
+        electrons (image * gain).  Do NOT multiply by gain again.
         """
-        image_e = np.asarray(data, float) * float(gain)
+        image_e = np.asarray(data, float)  # already in e- from NDData
         if background_rms is None:
             bkg_rms_e = np.zeros_like(image_e)
         else:
@@ -781,7 +785,9 @@ class MCMCFitter:
             # Start autocorrelation checks only after enough steps per walker.
             if total_steps >= self.min_autocorr_N:
                 try:
-                    tau = self.sampler.get_autocorr_time(quiet=True)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        tau = self.sampler.get_autocorr_time(quiet=True)
                     tau_est = np.nanmean(tau)
                     # Standard emcee recommendation: each walker must run for at
                     # least 50 * tau steps.  The old code multiplied
@@ -807,13 +813,15 @@ class MCMCFitter:
         acc = float(np.mean(self.sampler.acceptance_fraction))
         tau_arr = None
         try:
-            tau_arr = self.sampler.get_autocorr_time(quiet=True)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                tau_arr = self.sampler.get_autocorr_time(quiet=True)
             log.info(f"[MCMC] acc={acc:.3f}  tau~{np.nanmean(tau_arr):.1f}")
         except Exception:
             log.info(f"[MCMC] acc={acc:.3f}")
         self._last_tau = tau_arr  # for discard/thin in __call__
 
-        if not 0.15 <= acc <= 0.7:
+        if not 0.15 <= acc <= 0.8:
             log.warning("[MCMC] Suboptimal acceptance; consider tuning delta/nwalkers")
 
         # Clean up multiprocessing pool if used
@@ -1287,7 +1295,6 @@ class PoissonLikelihoodFitter:
                 if hasattr(model, 'stds'):
                     model.stds = param_errors
                 if hasattr(model, 'cov_matrix'):
-                    from astropy.stats import Covariance
                     model.cov_matrix = Covariance(cov_matrix)
 
                 log.info(f"[PoissonFitter] Parameter errors computed from Hessian")
@@ -2589,62 +2596,29 @@ class PSF:
                 maxiters=epsf_clip_maxiters,
             )
             log.info(
-                log_step("PSF: ePSF build details")
-                + "\n"
-                + (
-                    "  make_template_psf: {make_template_psf}\n"
-                    "  candidates: initial={n_before}, after_cuts={n_after}, used_after_uniform={n_uniform}\n"
-                    "  selection cuts: min_candidates={min_psf_candidates}, threshold_limit={threshold_limit}, "
-                    "SNR_limit=[{snr_lo}, {snr_hi}], min_keep_frac_after_cut={min_keep_frac_after_cut:.2f}, "
-                    "saturate_frac={saturate_frac:.2f}\n"
-                    "  geometry: fwhm_input={fwhm_input:.2f}px, fwhm_used={fwhm_used:.2f}px, "
-                    "fwhm_arcsec={fwhm_arcsec}, pixel_scale={pixel_scale}, "
-                    "build_sampling_boost={build_sampling_boost:.2f}, "
-                    "oversample=x{oversample}, recenter={recenter}, cen_box={cen_box}px, fit_box={fit_box}px, cutout={cutout}px\n"
-                    "  normalization: aperture_radius={aperture_radius:.2f}px (same as photometry)\n"
-                    "  epsf builder: sigma_clip={epsf_clip_sigma:.2f}, sigma_clip_maxiters={epsf_clip_maxiters}, "
-                    "maxiters=10, smoothing_kernel=quartic\n"
-                    "  fft rejection: enabled={fft_enabled}, n_sigma={fft_n_sigma:.2f}, "
-                    "min_frac_keep={fft_min_frac:.2f}, min_stars={fft_min_abs}"
-                ).format(
-                    make_template_psf=bool(make_template_psf),
-                    n_before=int(n_before),
-                    n_after=int(len(df)),
-                    n_uniform=int(len(df_uniform)),
-                    min_psf_candidates=int(min_psf_candidates),
-                    threshold_limit=(
-                        float(threshold_limit_eff)
-                        if threshold_limit_eff is not None
-                        else np.nan
-                    ),
-                    snr_lo=float(snr_min_eff),
-                    snr_hi=float(snr_max_eff),
-                    min_keep_frac_after_cut=float(min_keep_frac_after_cut),
-                    saturate_frac=float(saturate_frac),
-                    fwhm_input=float(fwhm_input),
-                    fwhm_used=float(fwhm),
-                    fwhm_arcsec=(
-                        f"{fwhm_arcsec:.2f}\"" if np.isfinite(fwhm_arcsec) else "unknown"
-                    ),
-                    pixel_scale=(
-                        f"{pixel_scale:.3f} arcsec/px"
-                        if has_pixel_scale
-                        else "unknown"
-                    ),
-                    build_sampling_boost=float(build_sampling_boost),
-                    oversample=int(oversample),
-                    recenter=str(recenter_func.__name__),
-                    cen_box=int(cen_box),
-                    fit_box=int(fit_boxsize),
-                    cutout=int(cutout_n),
-                    aperture_radius=float(aperture_radius),
-                    epsf_clip_sigma=float(epsf_clip_sigma),
-                    epsf_clip_maxiters=int(epsf_clip_maxiters),
-                    fft_enabled=bool(do_fft),
-                    fft_n_sigma=float(fft_n_sigma),
-                    fft_min_frac=float(fft_min_frac),
-                    fft_min_abs=int(fft_min_abs),
-                )
+                "ePSF build: candidates=%d->%d->%d | fwhm=%.2f->%.2f px (%s) | "
+                "oversample=x%d recenter=%s | cutout=%dpx fit_box=%dpx | "
+                "fft_reject=%s (n_sigma=%.2f)",
+                int(n_before), int(len(df)), int(len(df_uniform)),
+                float(fwhm_input), float(fwhm),
+                f"{fwhm_arcsec:.2f}\"" if np.isfinite(fwhm_arcsec) else "unknown",
+                int(oversample), str(recenter_func.__name__),
+                int(cutout_n), int(fit_boxsize),
+                str(bool(do_fft)), float(fft_n_sigma),
+            )
+            log.debug(
+                "ePSF build details: make_template_psf=%s | cuts: min_cand=%d "
+                "threshold=%s SNR=[%s,%s] keep_frac=%.2f saturate_frac=%.2f | "
+                "norm: aperture=%.2fpx | epsf: sigma_clip=%.2f maxiters=%d | "
+                "fft: min_frac_keep=%.2f min_stars=%d",
+                str(bool(make_template_psf)),
+                int(min_psf_candidates),
+                str(float(threshold_limit_eff) if threshold_limit_eff is not None else np.nan),
+                str(float(snr_min_eff)), str(float(snr_max_eff)),
+                float(min_keep_frac_after_cut), float(saturate_frac),
+                float(aperture_radius),
+                float(epsf_clip_sigma), int(epsf_clip_maxiters),
+                float(fft_min_frac), int(fft_min_abs),
             )
             log.info(
                 "PSF build windows: fit_box=%.2f*FWHM (base %.2f, min %.2f arcsec) -> %d px, "
@@ -3349,60 +3323,35 @@ class PSF:
             and np.isfinite(float(pix_scale_log))
             and float(pix_scale_log) > 0
         ):
-            log.info(
-                "PSF fit bounds config:\n"
-                "  fitting_xy_bounds: %.3g arcsec\n"
-                "  pixel_scale: %.3g arcsec/px\n"
-                "  base_xy_bounds: %.3g px\n"
-                "\teffective per tier (bright/faint/very-faint)=%.3g/%.3g/%.3g px",
-                float(cfg_xy_arcsec_log),
-                float(pix_scale_log),
-                float(xy_bounds),
-                float(xb_bright),
-                float(xb_faint),
-                float(xb_vfaint),
+            log.debug(
+                "PSF fit bounds: xy_bounds=%.3g px (%.3g arcsec at %.3g arcsec/px), "
+                "per-tier=%.3g/%.3g/%.3g px",
+                float(xy_bounds), float(cfg_xy_arcsec_log), float(pix_scale_log),
+                float(xb_bright), float(xb_faint), float(xb_vfaint),
             )
         else:
-            log.info(
-                "PSF fit bounds config:\n"
-                "  fitting_xy_bounds: %s arcsec\n"
-                "  pixel_scale: %s arcsec/px\n"
-                "  base_xy_bounds: %.3g px\n"
-                "\teffective per tier (bright/faint/very-faint)=%.3g/%.3g/%.3g px",
-                str(cfg_xy_arcsec_log),
-                str(pix_scale_log),
-                float(xy_bounds),
-                float(xb_bright),
-                float(xb_faint),
-                float(xb_vfaint),
+            log.debug(
+                "PSF fit bounds: xy_bounds=%.3g px (%s arcsec at %s arcsec/px), "
+                "per-tier=%.3g/%.3g/%.3g px",
+                float(xy_bounds), str(cfg_xy_arcsec_log), str(pix_scale_log),
+                float(xb_bright), float(xb_faint), float(xb_vfaint),
             )
 
-        log.info(
-            "Fit shapes:\n"
-            "  bright: %s\n"
-            "  faint: %s\n"
-            "  very-faint: %s\n"
-            "  xy_bounds: %.3g px\n"
-            "  undersampled: %s",
-            str(fit_shape_bright),
-            str(fit_shape_faint),
-            str(fit_shape_vfaint),
-            float(xy_bounds),
-            str(bool(undersampled)),
-        )
         if is_target_fit:
             log.info(
-                "Target-fit shape scaling:\n"
-                "  bright/faint/very-faint: %.3g/%.3g/%.3g * FWHM\n"
-                "  fit_sampling_boost: %.3g\n"
-                "  target_boost: %.3g\n"
-                "  pixel_scale: %s arcsec/px",
-                fs_bright_scale,
-                fs_faint_scale,
-                fs_vfaint_scale,
-                fit_sampling_boost,
-                target_shape_boost,
+                "Target-fit:\tshapes=%s/%s/%s (b/f/vf) | scale=%.2g/%.2g/%.2g FWHM | "
+                "boost=%.2g (target %.2g) | xy_bounds=%.3g px | undersampled=%s | pix_scale=%s\"/px",
+                str(fit_shape_bright[0]), str(fit_shape_faint[0]), str(fit_shape_vfaint[0]),
+                fs_bright_scale, fs_faint_scale, fs_vfaint_scale,
+                fit_sampling_boost, target_shape_boost,
+                float(xy_bounds), str(bool(undersampled)),
                 f"{pixel_scale:.3f}" if has_pixel_scale else "unknown",
+            )
+        else:
+            log.debug(
+                "Fit shapes: bright=%s faint=%s vfaint=%s | xy_bounds=%.3g px | undersampled=%s",
+                str(fit_shape_bright), str(fit_shape_faint), str(fit_shape_vfaint),
+                float(xy_bounds), str(bool(undersampled)),
             )
 
         # NDData creation already converts to float and allocates a new array in electrons,
@@ -3608,7 +3557,7 @@ class PSF:
                 log.warning("Target PSF: target flux still NaN after bootstrap; cannot force inclusion")
         # Debug: log target flux status after bootstrap
         if is_target_fit and len(sources) == 1:
-            log.info(
+            log.debug(
                 "Target PSF: after bootstrap - flux_all[0]=%.3g, x_all[0]=%.3g, y_all[0]=%.3g, valid=%s",
                 float(flux_all[0]) if len(flux_all) > 0 else float("nan"),
                 float(x_all[0]) if len(x_all) > 0 else float("nan"),
@@ -3661,20 +3610,25 @@ class PSF:
             log.info("No valid sources; returning unchanged.")
             return sources
 
-        bkgrmsval = float(
-            np.nanmedian(background_rms)
-            if background_rms is not None
-            else np.nanmedian(ndimage.uncertainty.array)
-        )
+        # background_rms is in ADU (from photutils Background2D on the raw image).
+        # ndimage.uncertainty.array is in electrons (from create_nddata_with_fitting_weights
+        # where image_e = image * gain).  Normalise to ADU so the S/N formula's
+        # (bkgrmsval * gain) conversion is correct in all paths.
+        _gain_for_bkg = float(resolve_gain_e_per_adu(None, self.input_yaml))
+        if background_rms is not None:
+            bkgrmsval = float(np.nanmedian(background_rms))  # ADU
+        else:
+            bkgrmsval = float(np.nanmedian(ndimage.uncertainty.array)) / _gain_for_bkg  # e- -> ADU
         # If bkgrmsval is NaN (e.g., background_rms has NaN pixels near chip gaps),
         # fall back to estimating from the data itself
         if not np.isfinite(bkgrmsval):
-            # Estimate background RMS from finite pixels in the data
+            # Estimate background RMS from finite pixels in the data.
+            # ndimage.data is in electrons (image * gain); convert back to ADU
+            # so the S/N formula's (bkgrmsval * gain) is correct.
             data_finite = ndimage.data[np.isfinite(ndimage.data)]
             if len(data_finite) > 0:
-                # Use MAD (median absolute deviation) as a robust RMS estimate
                 from scipy.stats import median_abs_deviation
-                bkgrmsval = float(median_abs_deviation(data_finite, scale="normal"))
+                bkgrmsval = float(median_abs_deviation(data_finite, scale="normal")) / _gain_for_bkg
                 log.warning(
                     "PSF fit: background_rms is NaN; estimated from data MAD = %.3g ADU",
                     bkgrmsval,
@@ -3686,39 +3640,38 @@ class PSF:
                     "PSF fit: no finite pixels in data; using default background RMS = %.3g ADU",
                     bkgrmsval,
                 )
-        # Statistical Fisher matrix formalism for PSF photometry SNR
-        # SNR = fs / sigma_fs where sigma_fs^2 = 1/F_11
-        # F_11 = sum(PSF_i^2 / sigma_i^2) where sigma_i^2 = (b/g) + (Nccd/g^2) + (fs * PSF_i/g)
-        # For a normalized PSF with sum(PSF_i^2) = C, this simplifies to:
-        # sigma_fs^2 = (b/g + Nccd/g^2) / C + fs / g
-        # where C is the sum of squared PSF values over the PSF footprint
-        # We approximate C ~ 1/(pi * fwhm^2) for a normalized Gaussian-like PSF
-        gain = float(resolve_gain_e_per_adu(None, self.input_yaml))
+        # Statistical Fisher matrix formalism for PSF photometry SNR.
+        # For a normalized PSF (sum(PSF_i) = 1), the Fisher information for the
+        # total flux fs is:
+        #   F_11 = sum(PSF_i^2 / sigma_i^2)
+        # where sigma_i^2 is the per-pixel variance.  If all pixels share the
+        # same background variance sigma_pix^2, this simplifies to:
+        #   F_11 = C / sigma_pix^2 + 1/fs   (background + Poisson terms)
+        #   sigma_fs^2 = 1/F_11 = sigma_pix^2 / C + fs
+        # where C = sum(PSF_i^2) ≈ 1/(4*pi*sigma^2) for a 2D Gaussian with
+        # sigma = fwhm * gaussian_fwhm_to_sigma.
+        # All quantities are in electrons to match the aperture photometry
+        # convention (image_e = image * gain).
+        gain = _gain_for_bkg  # reuse gain already resolved above
         read_noise = float(self.input_yaml.get("read_noise", 0.0))
-        # fwhm already read at top of fit(); reuse it here.
-        # Approximate PSF normalization constant C ~ 1/(pi * fwhm^2)
-        # Clamp to reasonable bounds to avoid numerical issues
-        fwhm_clamped = max(1.0, min(fwhm, 50.0))  # Prevent extreme FWHM values
-        psf_norm = 1.0 / (np.pi * fwhm_clamped**2)
-        psf_norm = max(1e-6, min(psf_norm, 1.0))  # Clamp to reasonable range
-        # Background noise term: (sigma_sky_e^2 + RN_e^2) / (g^2 * C)
-        # where sigma_sky_e = bkgrmsval * gain (ADU -> e-), RN_e = read_noise (e-).
-        # Variance in e-^2, divided by g^2 to produce ADU^2-equivalent variance,
-        # consistent with source_noise = flux_e_frame / gain (also ADU equivalent).
+        fwhm_clamped = max(1.0, min(fwhm, 50.0))
+        sigma_pix = fwhm_clamped * 0.8493218002882191  # gaussian_fwhm_to_sigma
+        C = 1.0 / (4.0 * np.pi * sigma_pix ** 2)
+        C = max(C, 1e-6)
+        # Per-pixel background variance in e-^2
         bkg_var_e2 = (bkgrmsval * gain) ** 2 + read_noise ** 2  # e-^2
-        background_noise = bkg_var_e2 / (gain ** 2 * psf_norm)
-        # Source photon noise term: fs / g (for normalized PSF)
-        # flux_e_frame is integrated e⁻ in the frame (same units as Aperture.counts_AP)
-        source_noise = flux_e_frame / gain
-        # Total variance (this gives a lower limit on SNR, as per CFHT document)
-        sigma_fs_sq = background_noise + source_noise
-        # Ensure sigma_fs_sq is finite and positive
+        # PSF photometry variance in e-^2 (background + Poisson)
+        sigma_fs_sq = bkg_var_e2 / C + np.abs(flux_e_frame)
         sigma_fs_sq = np.maximum(sigma_fs_sq, 1e-10)
-        snr = (
+        # PSF fitting S/N (dimensionless)
+        psf_snr = flux_e_frame / np.sqrt(sigma_fs_sq)
+        # aperture_snr is kept for tier classification (bright/faint/vfaint).
+        aperture_snr = (
             np.asarray(sources["SNR"], float)[valid]
             if "SNR" in sources.columns
-            else flux_e_frame / np.sqrt(sigma_fs_sq)
+            else psf_snr.copy()
         )
+        snr = aperture_snr  # used for tier masks below
         # If S/N is still NaN (e.g., flux_e_frame is NaN despite bootstrap), set a default
         if is_target_fit:
             nan_snr_count = np.sum(~np.isfinite(snr))
@@ -3752,11 +3705,16 @@ class PSF:
         use_emcee_for_all = False
         use_emcee_tiered = False
         if is_target_fit and emcee_s2n > 0 and len(init_params) == 1:
-            target_snr = float(snr[0])
+            # Use PSF S/N (not aperture S/N) for the MCMC trigger — the aperture
+            # SNR can be much higher than the PSF S/N for faint sources because
+            # it includes more sky noise, causing MCMC to be skipped when it's
+            # actually needed.
+            target_snr = float(psf_snr[0]) if np.isfinite(psf_snr[0]) else 0.0
             use_emcee_for_all = target_snr < emcee_s2n
-            log.info(
-                "Target S/N=%.2f; %s (low-S/N threshold=%.1f).",
+            log.debug(
+                "Target PSF S/N=%.2f (aperture S/N=%.2f); %s (low-S/N threshold=%.1f).",
                 target_snr,
+                float(snr[0]) if len(snr) > 0 else float("nan"),
                 "MCMC" if use_emcee_for_all else "LSQ",
                 emcee_s2n,
             )
@@ -3798,7 +3756,7 @@ class PSF:
                     readnoise=float(self.input_yaml.get("read_noise", 0.0)),
                     background_rms=bkgrmsval,
                     threads=int(phot_cfg.get("emcee_threads", 1)),
-                    store_samples=bool(phot_cfg.get("emcee_store_samples", False)),
+                    store_samples=bool(phot_cfg.get("emcee_store_samples", False)) or is_target_fit,
                 )
             except Exception as exc:
                 log_warning_from_exception(
@@ -4122,7 +4080,7 @@ class PSF:
             faint_outer = annulusOUT
             vf_inner = annulusIN
             vf_outer = annulusOUT
-            log.info(
+            log.debug(
                 "Target PSF: using aperture-matched local background annulus (r_in=%.2f px, r_out=%.2f px, estimator=median).",
                 float(annulusIN),
                 float(annulusOUT),
@@ -4155,7 +4113,7 @@ class PSF:
                     if use_emcee_this and emcee_fitter is not None
                     else lsq_fitter
                 )
-                log.info(
+                log.debug(
                     "Fitting %d %s sources (%s)",
                     int(mask.sum()),
                     label,
@@ -4262,7 +4220,7 @@ class PSF:
                         if use_emcee_this and emcee_fitter is not None
                         else lsq_fitter
                     )
-                    log.info("Fitting %d %s sources on inverted image (fallback)...", int(mask.sum()), label)
+                    log.debug("Fitting %d %s sources on inverted image (fallback)...", int(mask.sum()), label)
                     res_inv, psfphot_inv = _psf_fit(
                         mask, inner_r, outer_r, fshape, tier_fitter, use_emcee_this, nd_override=ndimage_inverted
                     )
@@ -4707,7 +4665,7 @@ class PSF:
             mag_en[ok_e] = (2.5 / np.log(10.0)) * (fe[ok_e] / absf[ok_e])
             updated[inst_normal_err] = mag_en
 
-        log.info(f"Fitted {len(updated)} sources in {time.perf_counter() - t0:.2f}s")
+        log.debug(f"Fitted {len(updated)} sources in {time.perf_counter() - t0:.2f}s")
 
         if plot or plotTarget:
             try:
@@ -5197,7 +5155,11 @@ class PSF:
 
         samples_dict = fitinfo.get("samples")
         if samples_dict is None or sourceidx not in samples_dict:
-            log.warning(f"No MCMC samples for source {sourceidx}.")
+            store_samples = getattr(fitter, "store_samples", False)
+            if store_samples:
+                log.warning(f"No MCMC samples for source {sourceidx} (store_samples=True but samples missing).")
+            else:
+                log.debug(f"No MCMC samples for source {sourceidx} (store_samples=False).")
             return None
 
         samples_all = np.asarray(samples_dict[sourceidx], float)

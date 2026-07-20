@@ -72,7 +72,7 @@ def get_sextractor_executable() -> Optional[str]:
                 timeout=15,
             )
             _SEXTRACTOR_EXE = path
-            logger.info("SExtractor executable detected: %s", path)
+            logger.debug("SExtractor executable detected: %s", path)
             return path
         except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             continue
@@ -1186,7 +1186,7 @@ class SExtractorWrapper:
                         hdul[2].data = table.as_array()
                     # Copy the modified FITS file to the destination
                     shutil.copy2(catalog_path, dest_path)
-                    logger.info(f"Copied FITS-LDAC catalog to {dest_path}")
+                    logger.debug("Copied FITS-LDAC catalog to %s", dest_path)
                 # Calculate FWHM from point-source-quality subset before returning.
                 # The full sources_df (SNR+FLAGS filtered) is returned for SCAMP,
                 # but FWHM must be estimated from point sources only to avoid

@@ -333,7 +333,9 @@ def run_sfft() -> Optional[int]:
         "-forceconv",
         type=str,
         default="REF",
-        help="Deprecated: always REF. Reference image is always convolved (DIFF = SCI - conv(REF)).",
+        help="Which image to convolve: REF (convolve reference, DIFF=SCI-conv(REF)), "
+             "SCI (convolve science, DIFF=conv(SCI)-REF), or AUTO (SFFT chooses by FWHM). "
+             "REF is correct when science PSF is broader; SCI when reference is broader.",
     )
 
     # Pass gain/saturate values so SFFT does not depend on headers (avoids KeyError when SATURATE missing).
@@ -903,15 +905,17 @@ def run_sfft() -> Optional[int]:
     # as a subprocess or on HPC (avoids "Thread creation failed" and semaphore leaks).
     NUM_CPU_THREADS_4SUBTRACT = 1
 
-    # Honour the -forceconv CLI argument.
-    # REF  => DIFF = SCI - conv(REF): transients keep the science PSF (default,
-    #         recommended when science has broader PSF than the template).
-    # SCI  => DIFF = conv(SCI) - REF: use when the template has broader PSF.
+    # ForceConv: which image to convolve.
+    # REF  => DIFF = SCI - conv(REF): transients keep the science PSF.
+    #         Always use REF because the PSF is built on the science image.
+    # SCI  => DIFF = conv(SCI) - REF: only if user explicitly overrides.
     # AUTO => SFFT chooses based on measured FWHMs.
-    # Always convolve the reference image (ForceConv=REF).
-    # DIFF = SCI - conv(REF): the transient keeps the science PSF.
-    ForceConv = "REF"
-    log_info("ForceConv=REF (reference always convolved). DIFF = SCI - conv(REF).")
+    _fc_arg = str(getattr(args, "forceconv", "REF")).upper().strip()
+    if _fc_arg in ("REF", "SCI", "AUTO"):
+        ForceConv = _fc_arg
+    else:
+        ForceConv = "REF"
+    log_info(f"ForceConv={ForceConv}.")
     GAIN_KEY = "GAIN"
     SATUR_KEY = "SATURATE"
 
@@ -936,6 +940,14 @@ def run_sfft() -> Optional[int]:
         # (non-sky-subtracted) cases this can destabilize scaling.
         bg_poly_order = 2
         log_info("Crowded SFFT: bg_order=0 overridden to 2 for stability.")
+    elif bg_poly_order == 0 and not args.crowded:
+        # Sparse field: images are not background-subtracted (BACK_TYPE=MANUAL),
+        # so BGPolyOrder=0 can only model a constant offset.  Spatially-varying
+        # background differences (sky gradients, host galaxy light, twilight)
+        # require at least order 1 to avoid leaving residual structure around
+        # sources that mimics point-source subtraction residuals.
+        bg_poly_order = 1
+        log_info("Sparse SFFT: bg_order=0 auto-increased to 1 for non-background-subtracted images.")
     log_info(f"Background polynomial order: {bg_poly_order}")
 
     # --- SExtractor parameters (both sparse and crowded) ---
@@ -944,16 +956,16 @@ def run_sfft() -> Optional[int]:
     is_crowded = args.crowded
 
     # SExtractor detection threshold for SFFT source selection.
-    # 1.5 sigma for sparse fields (background-subtracted images may have low flux)
-    # 3.0 sigma for crowded fields (avoids noise peaks)
-    # The previous fixed value of 3.0 caused source detection failures on
-    # SWarp-resampled, background-subtracted images with low flux levels.
+    # 2.0 sigma for sparse fields: images are NOT background-subtracted
+    # (BACK_TYPE=MANUAL), so 1.5 sigma included noise peaks that biased the
+    # kernel fit.  2.0 provides a safer margin while still detecting faint
+    # sources.  3.0 sigma for crowded fields (avoids noise peaks in dense regions).
     # User can override via -detect_thresh argument.
     if args.detect_thresh is not None and args.detect_thresh > 0:
         DETECT_THRESH = float(args.detect_thresh)
         log_info(f"Using user-specified DETECT_THRESH: {DETECT_THRESH:.1f}")
     else:
-        DETECT_THRESH = 1.5 if not is_crowded else 3.0
+        DETECT_THRESH = 2.0 if not is_crowded else 3.0
     DEBLEND_MINCON = 0.005
 
     constant_phot_ratio = _parse_bool_str(
@@ -1078,11 +1090,14 @@ def run_sfft() -> Optional[int]:
     # Images are NOT background-subtracted before reaching SFFT (background
     # subtraction is explicitly disabled in templates.py to preserve raw ADU).
     # BACK_TYPE=MANUAL with BACK_VALUE=0.0 tells SFFT's internal SExtractor not
-    # to subtract any background. SFFT's background polynomial (BGPolyOrder=0)
-    # handles the constant background difference between images in the kernel fit.
-    # BACK_TYPE=AUTO was tried and rejected: SExtractor's spatially-varying
-    # background subtraction left residuals that BGPolyOrder=0 couldn't model,
-    # increasing difference image Std from 8.9 to 20.9.
+    # to subtract any background. SFFT's background polynomial handles the
+    # background difference between images in the kernel fit.
+    #
+    # BGPolyOrder=0 can only model a constant offset.  For non-background-
+    # subtracted images, spatially-varying background differences (sky gradients,
+    # host galaxy light, twilight) require at least order 1 to avoid leaving
+    # residual structure around sources.  Auto-increase from 0 to 1 unless the
+    # user explicitly set 0 (checked below after the crowded override).
     BACK_TYPE = "MANUAL"
     BACK_VALUE = 0.0
     log_info(f"SFFT BACK_TYPE={BACK_TYPE}, BACK_VALUE={BACK_VALUE}.")
@@ -1235,9 +1250,10 @@ def run_sfft() -> Optional[int]:
                     MatchTol=None,
                     # Matching tolerance: overly tight tolerances can lock onto a bad solution.
                     MatchTolFactor=1.0,
-                    Hough_MINFR=0.1,
+                    Hough_MINFR=0.3,
                     Hough_PeakClip=0.4,
                     BeltHW=0.2,
+                    ANALYSIS_THRESH=DETECT_THRESH,
                     COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
                     CVREJ_MAGD_THRESH=CVREJ_MAGD_THRESH,
                     ELABO_VAR_REJECTION=ELABO_VAR_REJECTION,
@@ -1291,9 +1307,10 @@ def run_sfft() -> Optional[int]:
                     XY_PriorBan=None,
                     MatchTol=None,
                     MatchTolFactor=1,
-                    Hough_MINFR=0.1,
+                    Hough_MINFR=0.3,
                     Hough_PeakClip=0.4,
                     BeltHW=0.2,
+                    ANALYSIS_THRESH=DETECT_THRESH,
                     COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
                     CVREJ_MAGD_THRESH=CVREJ_MAGD_THRESH,
                     ELABO_VAR_REJECTION=ELABO_VAR_REJECTION,

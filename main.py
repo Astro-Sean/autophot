@@ -76,6 +76,7 @@ import time
 import uuid
 import warnings
 from collections import OrderedDict
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 # Set matplotlib to use non-interactive backend to prevent Wayland/Qt display issues
@@ -102,6 +103,11 @@ from scipy.cluster.hierarchy import fclusterdata
 # SATURATE handling constants - used consistently across the codebase
 SATURATE_INTERNAL_FALLBACK = np.inf  # Internal processing: no saturation limit
 SATURATE_FITS_FALLBACK = 1e30  # FITS storage: finite value for "no saturation"
+
+try:
+    AUTOPHOT_VERSION = _pkg_version("autophot")
+except Exception:
+    AUTOPHOT_VERSION = "unknown"
 
 # Local Modules
 from aperture import (
@@ -323,66 +329,18 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
     logging.info(f"NaN boundary trimming: final bounds x=[{x_min},{x_max}] px, y=[{y_min},{y_max}] px")
     logging.info(f"NaN boundary trimming: original shape {image_data.shape}, will trim to ({y_max - y_min + 1}, {x_max - x_min + 1}) px")
 
-    # Perform trim using Cutout2D for proper WCS handling
-
-    # Create WCS from header using get_wcs for consistency
-    try:
-        wcs = get_wcs(header, silent=True)
-        has_valid_wcs = wcs is not None and wcs.has_celestial
-    except Exception:
-        has_valid_wcs = False
-        wcs = None
-    
-    # Calculate cutout position (center of valid region)
+    # Perform trim using nan_crop to preserve WCS distortion keywords
+    # (CD matrix, SIP, PV) that WCS round-trip can drop.
     cutout_x = (x_min + x_max + 1) / 2.0
     cutout_y = (y_min + y_max + 1) / 2.0
-    cutout_size = (y_max - y_min + 1, x_max - x_min + 1)
-    
-    if has_valid_wcs and wcs is not None:
-        # Use Cutout2D for proper WCS handling
-        cutout = Cutout2D(
-            image_data,
-            position=(cutout_x, cutout_y),
-            size=cutout_size,
-            wcs=wcs,
-            mode='trim'
-        )
-        trimmed_data = cutout.data
-        trimmed_wcs = cutout.wcs
-        # Use update_header_from_wcs to preserve CD matrix and SIP distortion
-        from functions import update_header_from_wcs
-        trimmed_header = header.copy()
-        update_header_from_wcs(trimmed_header, trimmed_wcs)
-        # Copy non-WCS keywords from original header that weren't already set
-        for key in header:
-            if key not in trimmed_header and not key.startswith(('CRPIX', 'CRVAL', 'CDELT', 'CTYPE', 'CD1_', 'CD2_', 'PC1_', 'PC2_', 'NAXIS', 'A_', 'B_', 'AP_', 'BP_')):
-                try:
-                    value = header[key]
-                    if isinstance(value, str):
-                        # Sanitize string values
-                        sanitized_value = ''.join(char if ord(char) < 128 else '?' for char in str(value))
-                        trimmed_header[key] = sanitized_value
-                    else:
-                        trimmed_header[key] = value
-                except (UnicodeEncodeError, ValueError):
-                    # Skip problematic header cards
-                    continue
-    else:
-        # No valid WCS - just slice the data
-        trimmed_data = image_data[y_min:y_max+1, x_min:x_max+1]
-        # Sanitize header when copying
-        trimmed_header = fits.Header()
-        for key, value in header.items():
-            try:
-                if isinstance(value, str):
-                    sanitized_value = ''.join(char if ord(char) < 128 else '?' for char in str(value))
-                    trimmed_header[key] = sanitized_value
-                else:
-                    trimmed_header[key] = value
-            except (UnicodeEncodeError, ValueError):
-                continue
-        trimmed_header['NAXIS1'] = trimmed_data.shape[1]
-        trimmed_header['NAXIS2'] = trimmed_data.shape[0]
+    cutout_ny = y_max - y_min + 1
+    cutout_nx = x_max - x_min + 1
+
+    from functions import nan_crop
+    trimmed_header = header.copy()
+    trimmed_data, trimmed_header = nan_crop(
+        image_data, trimmed_header, cutout_x, cutout_y, cutout_ny, cutout_nx
+    )
     
     # Store trim info in history
     trimmed_header.add_history(f'Trimmed: removed NaN boundaries [{x_min}:{x_max+1},{y_min}:{y_max+1}]')
@@ -628,12 +586,6 @@ def run_photometry():
         )
         input_yaml["target_x_pix"] = target_x_pix
         input_yaml["target_y_pix"] = target_y_pix
-        
-        logging.info(
-            log_step(
-                f'{input_yaml["target_ra"]} {input_yaml["target_dec"]}'
-            )
-        )
         return target_x_pix, target_y_pix
 
     def _remove_catalog_duplicates(catalog_df, method='pandas', sep_threshold=0.1):
@@ -935,7 +887,8 @@ def run_photometry():
         base_filename = os.path.basename(fpath)
         write_dir = (cur_dir + "/").replace(" ", "_")
         input_yaml["write_dir"] = write_dir
-        logging.info(log_step(f"File: {base_filename}"))
+        logging.info("")
+        logging.info(f"Running AutoPhOT v{AUTOPHOT_VERSION} on {base_filename}")
         if was_shortened or replaced:
             logging.info("Using pre-processed file")
 
@@ -1254,7 +1207,7 @@ def run_photometry():
                 ) from exc
         header["exptime"] = float(exposure_time)
         logging.info(
-            "Exposure time: %.5g s (header keyword %s)",
+            "Exposure time:\t%.5g s (header keyword %s)",
             float(exposure_time),
             used_exptime_key,
         )
@@ -1448,7 +1401,7 @@ def run_photometry():
         # Accept WCS-derived value only if it looks sensible
         if np.isfinite(pixel_scale_candidate) and 0 < pixel_scale_candidate <= 5:
             pixel_scale = pixel_scale_candidate
-            logging.info("Pixel scale from WCS: %.3f arcsec/pixel", pixel_scale)
+            logging.info("Pixel scale:\t%.3f arcsec/pixel", pixel_scale)
         else:
             if not is_template:
                 # Fallback: use telescope.yml pixel_scale if defined
@@ -1459,7 +1412,7 @@ def run_photometry():
                     try:
                         pixel_scale = float(ps)
                         logging.info(
-                            "Pixel scale from telescope.yml: %.3f arcsec/pixel",
+                            "Pixel scale:\t%.3f arcsec/pixel (telescope.yml)",
                             pixel_scale,
                         )
                     except Exception:
@@ -1496,14 +1449,14 @@ def run_photometry():
             gain = float(primary_gain)
             gain_header_key = f"telescope.yml_gain_{primary_gain}"
             logging.info(
-                "Gain: %.5g e-/ADU (from telescope.yml)", gain
+                "Gain:\t\t%.5g e-/ADU (from telescope.yml)", gain
             )
         elif primary_gain == "not_given_by_user":
             # No gain specified in telescope.yml, use header lookup
             try:
                 gain, gain_header_key = gain_e_per_adu_from_header(header, [])
                 logging.info(
-                    "Gain: %.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
+                    "Gain:\t\t%.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
                 )
             except ValueError as exc:
                 img_type = "template" if is_template else "science"
@@ -1518,7 +1471,7 @@ def run_photometry():
                 gain = float(resolve_gain_e_per_adu(None, input_yaml))
                 gain_header_key = f"fallback_from_yaml_gain_{gain:.2f}"
                 logging.info(
-                    "Gain: %.5g e-/ADU (from input_yaml fallback)", float(gain)
+                    "Gain:\t\t%.5g e-/ADU (from input_yaml fallback)", float(gain)
                 )
         else:
             # telescope.yml gain is a header keyword string
@@ -1526,7 +1479,7 @@ def run_photometry():
             try:
                 gain, gain_header_key = gain_e_per_adu_from_header(header, pref_gain)
                 logging.info(
-                    "Gain: %.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
+                    "Gain:\t\t%.5g e-/ADU (header keyword %s)", float(gain), gain_header_key
                 )
             except ValueError as exc:
                 img_type = "template" if is_template else "science"
@@ -1541,7 +1494,7 @@ def run_photometry():
                 gain = float(resolve_gain_e_per_adu(None, input_yaml))
                 gain_header_key = f"fallback_from_yaml_gain_{gain:.2f}"
                 logging.info(
-                    "Gain: %.5g e-/ADU (from input_yaml fallback)", float(gain)
+                    "Gain:\t\t%.5g e-/ADU (from input_yaml fallback)", float(gain)
                 )
 
         #  Update WCS Pixel Scale
@@ -1675,28 +1628,24 @@ def run_photometry():
         except Exception:
             formatted_date = date_str  # Fallback to original format if parsing fails
         
-        logging.info(f"Observation: {formatted_date} at {formatted_time}")
-
-        logging.info(f"Telescope: {telescope}, Instrument: {instrument}, Filter: {imageFilter}")
+        logging.info(
+            "Observation:\t%s at %s | Telescope: %s, Instrument: %s, Filter: %s",
+            formatted_date, formatted_time, telescope, instrument, imageFilter,
+        )
 
         if pixel_scale:
-            logging.info("Pixel scale: %.3f arcsec/pixel", pixel_scale)
             input_yaml["pixel_scale"] = pixel_scale
 
-        # Log additional image parameters
-        logging.info(f"Gain: {gain:.3f} e-/ADU")
         if np.isfinite(saturate) and saturate != SATURATE_INTERNAL_FALLBACK:
-            logging.info(f"Saturation: {saturate:.1f} ADU")
+            logging.info(f"Saturation:\t{saturate:.1f} ADU")
         else:
-            logging.info("Saturation: not available (no limit)")
-        
+            logging.info("Saturation:\tnot available (no limit)")
+
         if readnoise > 0:
-            logging.info(f"Read noise: {readnoise:.3f} e-")
-        else:
-            logging.info("Read noise: not available")
-        
+            logging.info(f"Read noise:\t{readnoise:.3f} e-")
+
         if "airmass" in input_yaml and input_yaml["airmass"]:
-            logging.info(f"Airmass: {input_yaml['airmass']:.3f}")
+            logging.info(f"Airmass:\t{input_yaml['airmass']:.3f}")
 
         header["gain"] = gain
         # saturate already written to header at line 1130 (if finite)
@@ -1841,36 +1790,31 @@ def run_photometry():
                         pixel_scale = 1.0
                     trim_pixels = int((trim_image * 60) / pixel_scale)  # Convert arcmin to pixels
                     
-                    # Create pixel-based cutout
-                    cutout = Cutout2D(
-                        image.astype(float),
-                        position=(center_x, center_y),
-                        size=(trim_pixels, trim_pixels),
-                        mode="partial",
-                        fill_value=np.nan,
+                    # Create pixel-based cutout using nan_crop to preserve WCS
+                    from functions import nan_crop
+                    image, header = nan_crop(
+                        image.astype(float), header,
+                        center_x, center_y,
+                        trim_pixels, trim_pixels,
                     )
                 else:
-                    # Use WCS-based cutout
-                    cutout = Cutout2D(
-                        image.astype(float),
-                        target_coords,
-                        (trim_image * u.arcmin * 2),  # Convert to arcmin (box size)
-                        wcs=imageWCS,
-                        mode="partial",
-                        fill_value=np.nan,
+                    # Use WCS to find pixel center, then nan_crop
+                    target_x_px, target_y_px = imageWCS.all_world2pix(
+                        input_yaml["target_ra"], input_yaml["target_dec"], 0
                     )
-                
-                # Update image and header with cutout data
-                image = cutout.data
-                if cutout.wcs is not None:
-                    from functions import update_header_from_wcs
-                    update_header_from_wcs(header, cutout.wcs)
+                    trim_pixels = int((trim_image * 60) / pixel_scale)
+                    from functions import nan_crop
+                    image, header = nan_crop(
+                        image.astype(float), header,
+                        target_x_px, target_y_px,
+                        trim_pixels, trim_pixels,
+                    )
 
                 # Writes the modified image and header back to the FITS file.
                 safe_fits_write(fpath, image, header)
                 logging.info(f"New image shape after trimming: {image.shape}")
 
-                # Trim NaN boundaries created by Cutout2D (fill_value=np.nan)
+                # Trim NaN boundaries created by nan_crop (fill_value=np.nan)
                 # This must happen before background subtraction
                 # Calculate center of trimmed image for target preservation
                 # Correct numpy 0-based center is (nx-1)/2, (ny-1)/2.
@@ -1917,23 +1861,12 @@ def run_photometry():
                         f"Recrop: {base_filename} (remove uniform edge rows/cols)"
                     )
                 )
-                position = (center_x, center_y)  # Cutout2D expects (x, y) position
-                size = (height, width)
-
-                # Creates a cutout of the non-uniform region in the image.
-                imageCutout = Cutout2D(
-                    image,
-                    position,
-                    size,
-                    wcs=imageWCS,
-                    mode="partial",
-                    fill_value=np.nan,
+                position = (center_x, center_y)  # (x, y) position
+                # Use nan_crop to preserve WCS distortion keywords.
+                from functions import nan_crop
+                image, header = nan_crop(
+                    image, header, center_x, center_y, height, width
                 )
-
-                # Updates the image and WCS with the cutout values.
-                image = imageCutout.data
-                from functions import update_header_from_wcs
-                update_header_from_wcs(header, imageCutout.wcs)
 
                 # Writes the modified image and header back to the FITS file.
                 safe_fits_write(fpath, image, header)
@@ -2240,7 +2173,6 @@ def run_photometry():
                 if apply_solved_to_fits:
                     header = updated_header
                     safe_fits_write(fpath, image, header)
-                    logging.info("Updated header written to file after WCS update")
                     wcs_updated = True
                 else:
                     # Use solved WCS only to update pixel_scale in YAML; leave FITS header unchanged for better subtraction
@@ -2412,20 +2344,14 @@ def run_photometry():
         # =============================================================================
         # Checks the target position using TNS coordinates.
 
-        logging.info(
-            log_step(
-                f"TNS check: {input_yaml.get('target_name', 'Transient')}"
-            )
-        )
         # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
         target_x_expected, target_y_expected = imageWCS.all_world2pix(
             input_yaml["target_ra"], input_yaml["target_dec"], 0
         )
         logging.info(
-            f"TNS RA/Dec: {input_yaml['target_ra']:.6f}, {input_yaml['target_dec']:.6f}"
-        )
-        logging.info(
-            f"Expected pixel position: ({target_x_expected:.2f}, {target_y_expected:.2f})"
+            f"TNS check:\t{input_yaml.get('target_name', 'Transient')} | "
+            f"RA/Dec: {input_yaml['target_ra']:.6f}, {input_yaml['target_dec']:.6f} | "
+            f"Pixel: ({target_x_expected:.2f}, {target_y_expected:.2f})"
         )
 
         # =============================================================================
@@ -2602,24 +2528,11 @@ def run_photometry():
         dy_center = float(y - y_center)
         border_margin_px = float(min(x, y, (nx - 1) - x, (ny - 1) - y))
         logging.info(
-            "Target summary:\n"
-            "  Name: %s\n"
-            "  Image size: %d x %d px\n"
-            "  Sky: RA %.6f deg, Dec %.6f deg\n"
-            "  Pixel: (%.2f, %.2f)\n"
-            "  Offset from image center: dx=%+.2f px, dy=%+.2f px\n"
-            "  Bounds: %s (min edge margin %.2f px)",
-            target_label,
-            nx,
-            ny,
-            ra,
-            dec,
-            x,
-            y,
-            dx_center,
-            dy_center,
-            "within bounds" if in_bounds else "OUTSIDE bounds",
-            border_margin_px,
+            "Target:\t\t%s | Sky: RA %.6f, Dec %.6f | Pixel: (%.2f, %.2f) | "
+            "Image: %dx%d px | Offset: dx=%+.2f, dy=%+.2f px | "
+            "Bounds: %s (margin %.2f px)",
+            target_label, ra, dec, x, y, nx, ny, dx_center, dy_center,
+            "within bounds" if in_bounds else "OUTSIDE bounds", border_margin_px,
         )
 
         # =============================================================================
@@ -4079,23 +3992,19 @@ def run_photometry():
                         input_yaml, science_wcs, wcs_origin
                     )
                     # Creates a cutout for the science image.
-                    # Use pixel coordinates directly to avoid WCS round-trip NaN failures
-                    # when the WCS does not correctly map the image center.
-                    science_cutout = Cutout2D(
-                        data=science_image,
-                        position=science_center_pix,
-                        size=(ny, nx),
-                        wcs=science_wcs,
-                        mode="partial",
-                        fill_value=np.nan,
+                    # Use nan_crop to avoid WCS round-trip issues
+                    # (CD matrix / SIP distortion dropping).
+                    from functions import nan_crop
+                    science_image, science_header = nan_crop(
+                        science_image, science_header,
+                        science_center_pix[0], science_center_pix[1],
+                        ny, nx,
                     )
-                    from functions import update_header_from_wcs
-                    update_header_from_wcs(science_header, science_cutout.wcs)
                     # Loads the template image.
                     template_image, template_header = get_image_and_header(templateFpath)
                     template_wcs = get_wcs(template_header)
                     
-                    # Validate template WCS before attempting Cutout2D
+                    # Validate template WCS before attempting crop
                     try:
                         # Test if template WCS can convert the center coordinate to pixel coordinates
                         test_tx, test_ty = template_wcs.all_world2pix(
@@ -4122,28 +4031,23 @@ def run_photometry():
                         )
                     
                     # Creates a cutout for the template image.
-                    # Use pixel coordinates directly to avoid WCS round-trip NaN failures.
+                    # Use nan_crop to preserve WCS distortion keywords.
                     tny, tnx = template_image.shape
                     template_center_pix = (tnx / 2, tny / 2)
-                    template_cutout = Cutout2D(
-                        data=template_image,
-                        position=template_center_pix,
-                        size=(ny, nx),
-                        wcs=template_wcs,
-                        mode="partial",
-                        fill_value=np.nan,
+                    template_image, template_header = nan_crop(
+                        template_image, template_header,
+                        template_center_pix[0], template_center_pix[1],
+                        ny, nx,
                     )
-                    from functions import update_header_from_wcs
-                    update_header_from_wcs(template_header, template_cutout.wcs)
                     # Saves the results.
-                    safe_fits_write(fpath, science_cutout.data, science_header)
-                    safe_fits_write(templateFpath, template_cutout.data, template_header)
+                    safe_fits_write(fpath, science_image, science_header)
+                    safe_fits_write(templateFpath, template_image, template_header)
                     # Logs the cutout information.
                     logging.info(
                         f"Cutout aligned using sky center: RA={center_coord.ra.deg:.3f}, Dec={center_coord.dec.deg:.3f}"
                     )
-                    logging.info(f"Science cutout shape: {science_cutout.data.shape}")
-                    logging.info(f"Template cutout shape: {template_cutout.data.shape}")
+                    logging.info(f"Science cutout shape: {science_image.shape}")
+                    logging.info(f"Template cutout shape: {template_image.shape}")
                     logging.info(
                         f"Target pixel coordinates (science): x={target_x_pix:.2f} px, y={target_y_pix:.2f} px"
                     )
@@ -5676,18 +5580,18 @@ def run_photometry():
         if "reduced_chi2" in TargetPosition:
             reduced_chi2_value = TargetPosition["reduced_chi2"].iloc[0]
             if np.isfinite(reduced_chi2_value):
-                logging.info(f"Target reduced chi2{inverted_tag}: {reduced_chi2_value:.1e}")
+                logging.info(f"Target reduced chi2{inverted_tag}:\t{reduced_chi2_value:.1e}")
 
         if "cfit" in TargetPosition:
             cfit_value = TargetPosition["cfit"].iloc[0]
             if np.isfinite(cfit_value):
-                logging.info(f"Target cfit{inverted_tag}: {cfit_value:.1e}")
+                logging.info(f"Target cfit{inverted_tag}:\t\t{cfit_value:.1e}")
 
         if "qfit" in TargetPosition:
             qfit_value = TargetPosition["qfit"].iloc[0]
             if np.isfinite(qfit_value):
                 logging.info(
-                    f"Target qfit{inverted_tag}: {qfit_value:.1e} (qfit of zero indicates a good fit)"
+                    f"Target qfit{inverted_tag}:\t\t{qfit_value:.1e} (qfit of zero indicates a good fit)"
                 )
 
         # =============================================================================
@@ -5709,7 +5613,7 @@ def run_photometry():
             get_LimitingMagnitude = True
         else:
             logging.info(
-                f"Transient fitted position{inverted_tag}: x = {TargetPosition['x_fit'].iloc[0]:.3f} +/- {TargetPosition['x_fit_err'].iloc[0]:.3f}, "
+                f"Transient fitted position{inverted_tag}:\tx = {TargetPosition['x_fit'].iloc[0]:.3f} +/- {TargetPosition['x_fit_err'].iloc[0]:.3f}, "
                 f"y = {TargetPosition['y_fit'].iloc[0]:.3f} +/- {TargetPosition['y_fit_err'].iloc[0]:.3f}"
             )
 
@@ -5836,7 +5740,7 @@ def run_photometry():
                     else:
                         logger.info(f"Main difference image not found at {diff_path}")
                 else:
-                    logger.info("No decorrelated difference image found (checked both naming conventions)")
+                    logger.debug("No decorrelated difference image found (checked both naming conventions)")
             except Exception as e:
                 logger.warning(f"Could not load decorrelated difference image: {e}")
             
@@ -5989,7 +5893,7 @@ def run_photometry():
 
         # Logs the measured SNR and target detectability (aperture and PSF when available).
         snr_ap = float(TargetPosition["SNR"].iloc[0])
-        logging.info(f"Target SNR (aperture): {snr_ap:.1f}")
+        logging.info(f"Target SNR (aperture):\t{snr_ap:.1f}")
         
         # If inverted fit was used, also log the inverted SNR for aperture
         if "_inverted_fit" in TargetPosition.columns and TargetPosition["_inverted_fit"].iloc[0]:
@@ -5999,7 +5903,7 @@ def run_photometry():
                 ap_err = float(TargetPosition["flux_AP_err"].iloc[0])
                 if ap_err > 0 and np.isfinite(ap_err):
                     snr_ap_inverted = np.abs(ap_flux) / ap_err
-                    logging.info(f"Target SNR (aperture) [inverted]: {snr_ap_inverted:.1f}")
+                    logging.info(f"Target SNR (aperture) [inverted]:\t{snr_ap_inverted:.1f}")
         
         if (
             not do_aperture_ONLY
@@ -6014,7 +5918,7 @@ def run_photometry():
                 else np.nan
             )
             if np.isfinite(snr_psf):
-                logging.info(f"Target SNR (PSF){inverted_tag}: {snr_psf:.1f}")
+                logging.info(f"Target SNR (PSF){inverted_tag}:\t{snr_psf:.1f}")
             # Difference-image PSF before inverted replacement (negative flux = oversubtraction dip)
             if (
                 "_inverted_fit" in TargetPosition.columns
@@ -6036,25 +5940,23 @@ def run_photometry():
                         fn,
                     )
         logging.info(
-            f"Target threshold: {TargetPosition['threshold'].iloc[0]:.1f} x background standard deviation"
+            f"Target threshold:\t{TargetPosition['threshold'].iloc[0]:.1f} x background standard deviation"
         )
-        logging.info(f"Target detectability: {target_beta * 100:.1f} %")
-        logging.info(f"Target location measured with FWHM: {target_fwhm:.1f} px")
+        logging.info(f"Target detectability:\t{target_beta * 100:.1f} %")
+        logging.info(f"Target FWHM:\t\t{target_fwhm:.1f} px")
 
         # Calculates pixel offsets.
         dx_pix = TargetPosition["x_fit"].iloc[0] - input_yaml["target_x_pix"]
         dy_pix = TargetPosition["y_fit"].iloc[0] - input_yaml["target_y_pix"]
         offset_pix = np.sqrt(dx_pix**2 + dy_pix**2)
 
-        logging.info("POSITION OFFSET ANALYSIS:")
         logging.info(
-            f"  Expected pixel position: ({input_yaml['target_x_pix']:.3f}, {input_yaml['target_y_pix']:.3f}) px"
+            "Position offset:\texpected (%.3f, %.3f) -> fitted (%.3f, %.3f) px | "
+            "dx=%+.3f, dy=%+.3f | total=%.3f px",
+            input_yaml['target_x_pix'], input_yaml['target_y_pix'],
+            TargetPosition['x_fit'].iloc[0], TargetPosition['y_fit'].iloc[0],
+            dx_pix, dy_pix, offset_pix,
         )
-        logging.info(
-            f"  Fitted pixel position:   ({TargetPosition['x_fit'].iloc[0]:.3f}, {TargetPosition['y_fit'].iloc[0]:.3f}) px"
-        )
-        logging.info(f"  Pixel offset: dx = {dx_pix:+.3f} px, dy = {dy_pix:+.3f} px")
-        logging.info(f"  Total pixel offset: {offset_pix:.3f} px")
 
         # Calculates RA/Dec error in arcseconds from pixel errors.
         if not np.isnan(TargetPosition["x_fit_err"].iloc[0]) and not np.isnan(
@@ -6082,13 +5984,14 @@ def run_photometry():
             dec_err = sky_center.separation(sky_dy).arcsecond
             fitting_error_arcsec = np.sqrt(ra_err**2 + dec_err**2)
             logging.info(
-                f"  Fitting uncertainty: {TargetPosition['x_fit_err'].iloc[0]:.3f}, {TargetPosition['y_fit_err'].iloc[0]:.3f} px"
+                "Fitting uncertainty: %.3f, %.3f px",
+                TargetPosition['x_fit_err'].iloc[0], TargetPosition['y_fit_err'].iloc[0],
             )
         else:
             ra_err = np.nan
             dec_err = np.nan
             fitting_error_arcsec = 0
-            logging.info("  Fitting uncertainty: N/A (fit did not converge)")
+            logging.info("Fitting uncertainty: N/A (fit did not converge)")
 
         # Calculates the offset in arcseconds (including direction).
         # pixel_to_world uses 0-based indexing by default (matching numpy arrays)
@@ -6107,10 +6010,8 @@ def run_photometry():
         )
         ddec_arcsec = (fitted_sky.dec.degree - expected_sky.dec.degree) * 3600
         logging.info(
-            f"  Sky offset: dRA = {dra_arcsec:+.3f}\", dDec = {ddec_arcsec:+.3f}\""
-        )
-        logging.info(
-            f"  Total separation: {separation:.3f} +/- {fitting_error_arcsec:.3f} arcsec"
+            "Sky offset: dRA=%+.3f\", dDec=%+.3f\" | total separation: %.3f +/- %.3f arcsec",
+            dra_arcsec, ddec_arcsec, separation, fitting_error_arcsec,
         )
 
         # Store fitted RA/Dec for output
@@ -6297,14 +6198,9 @@ def run_photometry():
                     except Exception:
                         beta_sigma_str = "unknown"
                     logging.info(
-                        "Limiting magnitude config:\n"
-                        "  beta_limit: %g (~%s sigma; n=3 beta formalism)\n"
-                        "  detection_limit: %r\n"
-                        "  completeness_target: %.2f\n"
-                        "\trecovery_method=%s",
-                        float(beta_limit),
-                        beta_sigma_str,
-                        lim_cfg.get("detection_limit", None),
+                        "Limiting mag config:\tbeta_limit=%g (~%s sigma), "
+                        "completeness_target=%.2f, recovery_method=%s",
+                        float(beta_limit), beta_sigma_str,
                         float(lim_cfg.get("completeness_target", 0.5)),
                         str(lim_cfg.get("recovery_method", "auto")),
                     )
@@ -7145,6 +7041,7 @@ def run_photometry():
         # Logs the completion of photometric measurements.
         end = time.time() - start
         logging.info(log_step(f"Photometry finished [{end:.1f}s]"))
+        logging.info("")
 
     except Exception as e:
         log_exception(e)
