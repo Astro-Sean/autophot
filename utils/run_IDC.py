@@ -143,7 +143,8 @@ class ImageDistortionCorrector:
         "ANALYSIS_THRESH": 0.5,  # Lower analysis threshold
         "DETECT_MINAREA": 1,  # Smaller minimum area for compact sources
         "BACK_SIZE": 32,  # Smaller background mesh for better local estimate in sparse fields
-        "DEBLEND_NTHRESH": 16,  # Fewer deblending thresholds to avoid splitting faint sources
+        "DEBLEND_NTHRESH": 32,  # More deblending thresholds to split overlapping extended sources
+        "DEBLEND_MINCONT": 0.005,  # Moderate contrast to deblend blended galaxies
         "BACK_FILTERSIZE": 3,
         "MEMORY_PIXSTACK": 300000,  # Increase pixel stack to avoid overflow warnings
         "CLEAN": "N",  # Disable cleaning to avoid removing faint sources
@@ -1216,6 +1217,78 @@ NNW
             pixel_scale = float(np.sqrt(_scales[0] * _scales[1])) * 3600.0
             return wcs_obj, pixel_scale, header
 
+    def _filter_pointlike_sources(
+        self,
+        catalog: Optional[Table],
+        fwhm_ref_pix: float,
+        max_fwhm_mult: float = 2.0,
+        compact_fwhm_mult: float = 1.3,
+        max_ellipticity: float = 0.6,
+        max_flags: int = 2,
+        min_class_star: float = 0.3,
+    ) -> Optional[Table]:
+        """Return a subset of ``catalog`` containing only compact, point-like sources.
+
+        Extended galaxies and blended sources have centroids that vary between
+        filters and exposures, so they must be excluded from alignment
+        *verification* samples even when ``alignment_use_extended_sources`` is
+        True for alignment itself.  Bright, isolated stars (or compact round
+        sources) give a reliable measure of the true astrometric residual.
+        """
+        if catalog is None or len(catalog) == 0:
+            return catalog
+
+        n_before = len(catalog)
+        good = np.ones(n_before, dtype=bool)
+
+        if "FLAGS" in catalog.colnames:
+            try:
+                good &= np.asarray(catalog["FLAGS"], int) <= max_flags
+            except Exception:
+                pass
+        if "ELLIPTICITY" in catalog.colnames:
+            try:
+                good &= np.asarray(catalog["ELLIPTICITY"], float) <= max_ellipticity
+            except Exception:
+                pass
+
+        _fwhm_ref = max(float(fwhm_ref_pix), 2.5)
+        _fwhm_max = max_fwhm_mult * _fwhm_ref
+        _fwhm_compact = compact_fwhm_mult * _fwhm_ref
+
+        compact = np.zeros(n_before, dtype=bool)
+        starlike = np.zeros(n_before, dtype=bool)
+        if "FWHM_IMAGE" in catalog.colnames:
+            try:
+                fwhm = np.asarray(catalog["FWHM_IMAGE"], float)
+                compact = fwhm <= _fwhm_compact
+                good &= fwhm <= _fwhm_max  # reject obvious galaxies
+            except Exception:
+                pass
+        if "CLASS_STAR" in catalog.colnames:
+            try:
+                starlike = np.asarray(catalog["CLASS_STAR"], float) >= min_class_star
+            except Exception:
+                pass
+
+        # Keep sources that are either compact/round or morphologically star-like.
+        # Starlike sources with noisy FWHM measurements are kept if they pass the
+        # loose FWHM cut; compact galaxies with low CLASS_STAR are kept if they are
+        # small and round.
+        # If neither FWHM_IMAGE nor CLASS_STAR is available, skip this filter
+        # (keep all sources) rather than discarding everything.
+        if compact.any() or starlike.any():
+            good &= compact | starlike
+
+        n_after = int(good.sum())
+        if n_after < n_before:
+            self.logger.info(
+                "Verification: filtered to %d/%d point-like sources "
+                "(FWHM<=%.1f px, ELLIP<=%.2f, FLAGS<=%d)",
+                n_after, n_before, _fwhm_max, max_ellipticity, max_flags,
+            )
+        return catalog[good]
+
     # ------------------------ Align + resample via SCAMP/SWarp ------------------------
     def align_and_resample_both_images(
         self,
@@ -1638,6 +1711,9 @@ NNW
                 analysis_thresh=0.8,
                 detect_minarea=1,
                 back_size=64,
+                clean="N",
+                deblend_nthresh=32,
+                deblend_mincont=0.005,
             )
             
             ref_fwhm, ref_catalog_raw, ref_scale = self.sextractor.run(
@@ -1654,6 +1730,9 @@ NNW
                 analysis_thresh=0.8,
                 detect_minarea=1,
                 back_size=64,
+                clean="N",
+                deblend_nthresh=32,
+                deblend_mincont=0.005,
             )
             
             # SExtractorWrapper with return_raw=True copies the FITS-LDAC catalog to the mdir
@@ -1679,9 +1758,23 @@ NNW
             # extended sources or galaxies that inflate the FWHM.
             # If the alignment SExtractor returns a value > 1.5× the header FWHM,
             # it's almost certainly contaminated by non-point sources.
+            #
+            # BUG 108: Only cap when the header FWHM was actually measured.  Pre-built
+            # templates (e.g., gp_template.fits) often have FWHM=3.0 (the YAML config
+            # default) in their header, not a measured value.  Capping a legitimate
+            # SExtractor measurement (e.g., 7.4px) to the stale default (3.0) produces
+            # wrong alignment gate thresholds and wrong SCAMP CROSSID_RADIUS.
             FWHM_INFLATION_FACTOR = 1.5
+            _config_fwhm_default = float(self.input_yaml.get("fwhm", 3.0))
             if sci_hdr_fwhm and np.isfinite(sci_hdr_fwhm) and sci_hdr_fwhm > 0:
-                if fwhm_sci_pix > FWHM_INFLATION_FACTOR * sci_hdr_fwhm:
+                _sci_hdr_is_stale = abs(sci_hdr_fwhm - _config_fwhm_default) < 0.01
+                if _sci_hdr_is_stale:
+                    self.logger.info(
+                        "Science header FWHM %.1f px matches config default; "
+                        "trusting SExtractor measurement %.1f px instead.",
+                        sci_hdr_fwhm, fwhm_sci_pix,
+                    )
+                elif fwhm_sci_pix > FWHM_INFLATION_FACTOR * sci_hdr_fwhm:
                     self.logger.warning(
                         "Alignment science FWHM %.1f px is inflated (> %.1f x header FWHM %.1f px); "
                         "capping at header FWHM.",
@@ -1689,7 +1782,14 @@ NNW
                     )
                     fwhm_sci_pix = sci_hdr_fwhm
             if ref_hdr_fwhm and np.isfinite(ref_hdr_fwhm) and ref_hdr_fwhm > 0:
-                if fwhm_ref_pix > FWHM_INFLATION_FACTOR * ref_hdr_fwhm:
+                _ref_hdr_is_stale = abs(ref_hdr_fwhm - _config_fwhm_default) < 0.01
+                if _ref_hdr_is_stale:
+                    self.logger.info(
+                        "Reference header FWHM %.1f px matches config default; "
+                        "trusting SExtractor measurement %.1f px instead.",
+                        ref_hdr_fwhm, fwhm_ref_pix,
+                    )
+                elif fwhm_ref_pix > FWHM_INFLATION_FACTOR * ref_hdr_fwhm:
                     self.logger.warning(
                         "Alignment reference FWHM %.1f px is inflated (> %.1f x header FWHM %.1f px); "
                         "capping at header FWHM.",
@@ -1738,6 +1838,9 @@ NNW
                 analysis_thresh=0.8,
                 detect_minarea=1,
                 back_size=64,
+                clean="N",
+                deblend_nthresh=32,
+                deblend_mincont=0.005,
             )
             
             ref_fwhm2, ref_catalog2_raw, ref_scale2 = self.sextractor.run(
@@ -1754,6 +1857,9 @@ NNW
                 analysis_thresh=0.8,
                 detect_minarea=1,
                 back_size=64,
+                clean="N",
+                deblend_nthresh=32,
+                deblend_mincont=0.005,
             )
             
             # SExtractorWrapper with return_raw=True copies the FITS-LDAC catalog to the mdir
@@ -1936,7 +2042,7 @@ NNW
                     # Same logic as reference SCAMP: ensure enough sources for the
                     # polynomial degree.  Using n_sci_for_gaia as a proxy — SCAMP's
                     # internal GAIA matching typically matches 50-80% of sources.
-                    _sci_min_sources_for_degree = {1: 12, 2: 24, 3: 40, 4: 60}
+                    _sci_min_sources_for_degree = {1: 12, 2: 100, 3: 180, 4: 300}
                     _sci_feasible_degree = 1
                     for _deg in range(sci_distort_order, 0, -1):
                         if n_sci_for_gaia >= _sci_min_sources_for_degree.get(_deg, 999):
@@ -2101,6 +2207,13 @@ NNW
                                 use_for_matching=True,
                                 mdir=str(science_aligned_dir),
                                 return_raw=True,
+                                detect_thresh=0.8,
+                                analysis_thresh=0.5,
+                                detect_minarea=1,
+                                back_size=64,
+                                clean="N",
+                                deblend_nthresh=32,
+                                deblend_mincont=0.005,
                             )
 
                             # Predictable catalog path based on known stem
@@ -2146,15 +2259,18 @@ NNW
             # Pass-2 values are used for SCAMP CROSSID_RADIUS, so inflation here
             # directly causes SCAMP to use a too-large search radius, accepting
             # poor WCS solutions with ~1 px systematic offset.
+            # BUG 108: Skip capping when header FWHM is the stale config default.
             if sci_hdr_fwhm and np.isfinite(sci_hdr_fwhm) and sci_hdr_fwhm > 0:
-                if fwhm_sci_pix > FWHM_INFLATION_FACTOR * sci_hdr_fwhm:
+                _sci_hdr_is_stale_p2 = abs(sci_hdr_fwhm - _config_fwhm_default) < 0.01
+                if not _sci_hdr_is_stale_p2 and fwhm_sci_pix > FWHM_INFLATION_FACTOR * sci_hdr_fwhm:
                     self.logger.warning(
                         "Pass-2 science FWHM %.1f px inflated (> %.1f x header %.1f px); capping.",
                         fwhm_sci_pix, FWHM_INFLATION_FACTOR, sci_hdr_fwhm,
                     )
                     fwhm_sci_pix = sci_hdr_fwhm
             if ref_hdr_fwhm and np.isfinite(ref_hdr_fwhm) and ref_hdr_fwhm > 0:
-                if fwhm_ref_pix > FWHM_INFLATION_FACTOR * ref_hdr_fwhm:
+                _ref_hdr_is_stale_p2 = abs(ref_hdr_fwhm - _config_fwhm_default) < 0.01
+                if not _ref_hdr_is_stale_p2 and fwhm_ref_pix > FWHM_INFLATION_FACTOR * ref_hdr_fwhm:
                     self.logger.warning(
                         "Pass-2 reference FWHM %.1f px inflated (> %.1f x header %.1f px); capping.",
                         fwhm_ref_pix, FWHM_INFLATION_FACTOR, ref_hdr_fwhm,
@@ -2339,23 +2455,6 @@ NNW
                 )
 
 
-            try:
-                self.plot_matched_sources_side_by_side(
-                    sci_image_path=str(sci_image_copy),
-                    ref_image_path=str(ref_image_copy),
-                    sci_cat_path=sci_sex["catalog_path"],
-                    ref_cat_path=ref_sex["catalog_path"],
-                    output_plot_path=output_dir / f"matched_sources_{Path(sci_image_copy).stem}.png",
-                    label_color="#FF0000",
-                    label_fontsize=7,
-                    circle_radius_sci=fwhm_sci_pix,
-                    circle_radius_ref=fwhm_ref_pix,
-                    matched_circle_color="#FF0000",
-                    unmatched_circle_color="blue",
-                )
-            except Exception as e:
-                self.logger.debug("Matched-sources plot failed (non-fatal): %s", e)
-
             self.logger.info(
                 "SCAMP+SWarp alignment: %d matched sources (sci=%d ref=%d)",
                 _num_matched, n_sci, n_ref,
@@ -2374,6 +2473,10 @@ NNW
             # sources with any WCS imprecision.  Too loose → contamination.
             # Floor at 1.0" to handle typical plate-solve uncertainties.
             is_sparse_field = _num_matched < 50
+            # Check if extended sources are enabled for alignment
+            _iy_align = getattr(self, "input_yaml", None) or {}
+            _ts_align = _iy_align.get("template_subtraction", {}) if isinstance(_iy_align, dict) else {}
+            _use_extended = bool(isinstance(_ts_align, dict) and _ts_align.get("alignment_use_extended_sources", False))
             position_maxerr_arcsec = max(
                 1.0,
                 2.0 * pix_scale,
@@ -2385,7 +2488,11 @@ NNW
             # SNR_WIN (windowed), so we set it below our pre-filter threshold
             # to avoid double-filtering. SCAMP weights each source by its
             # positional uncertainty (ERRAWIN/ERRBWIN) regardless.
-            sn_thresholds = "1.5,100000.0" if is_sparse_field else "3.0,100000.0"
+            # Use a permissive SN threshold so SCAMP sees as many real
+            # detections as possible. SExtractor already filtered by detection
+            # significance; SCAMP's astrometric cross-match and robust fitting
+            # reject spurious/noisy sources better than a hard SNR cut.
+            sn_thresholds = "1.5,100000.0"
             # Adaptive DISTORT_DEGREES: must be high enough to model the
             # reference image's existing distortion (SIP/PV), because SCAMP's
             # .head file REPLACES the reference WCS.  If DISTORT_DEGREES is
@@ -2405,7 +2512,11 @@ NNW
             # Minimum matched sources for each polynomial degree.
             # Degree 1 (linear WCS: shift/rotation/scale) needs only ~5 sources
             # to be stable for sparse fields.  SCAMP does not accept degree 0.
-            _min_sources_for_degree = {0: 3, 1: 5, 2: 12, 3: 20, 4: 30}
+            # BUG 119: Increased thresholds to require ~2x params to prevent
+            # overfitting.  With 36 stars at degree 4 (30 params), the old
+            # threshold of 30 allowed 1.2 stars/param → SCAMP residual 0.68px
+            # but post-SWarp RMS 2.94px (4.4x overfitting ratio).
+            _min_sources_for_degree = {0: 3, 1: 5, 2: 24, 3: 40, 4: 60}
 
             # Start with the reference's detected distortion order
             required_degree = ref_distort_order
@@ -2429,22 +2540,27 @@ NNW
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
-                # SCAMP will run at a lower degree than the reference's SIP order.
-                # SCAMP's degree-2 solution captures the dominant distortion and
-                # gives good alignment (0.35px centroid). Preserving the reference's
-                # original SIP on top of SCAMP's PV distortion creates a double
-                # correction, so we use SCAMP's solution as-is.
-                preserve_sip_in_head = False
                 self.logger.info(
                     "Reference has distortion order %d but only %d matched sources "
-                    "(need %d for degree %d). Running SCAMP at degree %d "
-                    "(SCAMP PV distortion replaces reference SIP).",
+                    "(need %d for degree %d). Running SCAMP at degree %d — "
+                    "post-SWarp verification will reject if residuals are too large.",
                     required_degree, _num_matched,
                     _min_sources_for_degree.get(required_degree, 999),
                     required_degree, feasible_degree,
                 )
 
             distort_degrees = feasible_degree
+            # Relax ellipticity cut for sparse fields to include more sources.
+            # When extended sources are enabled, allow highly elliptical galaxies
+            # (up to 0.95) since they provide valuable alignment anchors.
+            if _use_extended:
+                _ellip_max = 0.95
+            elif is_sparse_field:
+                _ellip_max = 0.7
+            else:
+                _ellip_max = 0.5
+            # Widen FWHM window when extended sources are enabled
+            _fwhm_upper_mult = 10 if _use_extended else (5 if is_sparse_field else 3)
             scamp_config_base = {
                 "CROSSID_RADIUS": crossid_arcsec,
                 "POSITION_MAXERR": position_maxerr_arcsec,
@@ -2453,26 +2569,25 @@ NNW
                 "ASTREF_WEIGHT": "1",  # Weight by magnitude (prioritize bright, well-measured)
                 "VERBOSE_TYPE": "FULL" if self.verbose_level >= 2 else "NORMAL",
                 "WRITE_XML": "Y",
-                # Relax ellipticity cut for sparse fields to include more sources,
-                # but not so permissive that galaxies with poor centroids enter.
-                "ELLIPTICITY_MAX": 0.7 if is_sparse_field else 0.5,
+                "ELLIPTICITY_MAX": _ellip_max,
             }
             scamp_config_ref = {
                 **scamp_config_base,
                 # Upper FWHM threshold: reject galaxies while allowing moderate
-                # extension.  Sparse fields need a wider window (5x vs 3x) since
+                # extension.  Extended sources need a wider window (10x) since
                 # SExtractor FWHM can be inflated by blending/noise.
-                "FWHM_THRESHOLDS": f"{0.3*fwhm_ref_pix:.2f},{(5 if is_sparse_field else 3)*fwhm_ref_pix:.2f}",
+                "FWHM_THRESHOLDS": f"{0.3*fwhm_ref_pix:.2f},{_fwhm_upper_mult*fwhm_ref_pix:.2f}",
             }
             # SCAMP does not accept DISTORT_DEGREES=0 ("keyword out of range").
             # Use 1 as the minimum — degree 1 is a linear WCS (shift/rotation/scale)
             # which is always valid and far better than falling back to reproject.
             scamp_config_ref["DISTORT_DEGREES"] = max(1, distort_degrees)
             sparse_note = " (sparse)" if is_sparse_field else ""
+            ext_note = " (extended)" if _use_extended else ""
             distort_label = max(1, distort_degrees)
             self.logger.info(
-                'SCAMP:\t\tcrossid=%.1f" maxerr=%.1f" distort=%d%s (ref SIP/PV order=%d, %d matched)',
-                crossid_arcsec, position_maxerr_arcsec, distort_label, sparse_note,
+                'SCAMP:\t\tcrossid=%.1f" maxerr=%.1f" distort=%d%s%s (ref SIP/PV order=%d, %d matched)',
+                crossid_arcsec, position_maxerr_arcsec, distort_label, sparse_note, ext_note,
                 ref_distort_order, _num_matched,
             )
 
@@ -2710,6 +2825,35 @@ NNW
                     "No SCAMP .head found for %s image (searched stems: %s, available: %s)",
                     label, [cat_tmp_stem, Path(orig_cat_path).stem], list(head_by_stem.keys()),
                 )
+
+            # Plot matched sources side-by-side with SCAMP-matched sources overlaid.
+            # This runs after SCAMP so we can extract which sources SCAMP actually used
+            # from the corrected WCS in the .head file.
+            _scamp_sources = None
+            if head_src and Path(head_src).exists():
+                _scamp_sources = self._get_scamp_matched_sources(
+                    head_path=str(head_src),
+                    ref_cat_path=ref_catalog_scamp_backup,
+                    sci_cat_path=sci_catalog_scamp_backup,
+                    match_radius_arcsec=max(float(crossid_arcsec), 2.0),
+                )
+            try:
+                self.plot_matched_sources_side_by_side(
+                    sci_image_path=str(sci_image_copy),
+                    ref_image_path=str(ref_image_copy),
+                    sci_cat_path=sci_sex["catalog_path"],
+                    ref_cat_path=ref_sex["catalog_path"],
+                    output_plot_path=output_dir / f"matched_sources_{Path(sci_image_copy).stem}.png",
+                    label_color="#FF0000",
+                    label_fontsize=7,
+                    circle_radius_sci=fwhm_sci_pix,
+                    circle_radius_ref=fwhm_ref_pix,
+                    matched_circle_color="#FF0000",
+                    unmatched_circle_color="blue",
+                    scamp_matched_sources=_scamp_sources,
+                )
+            except Exception as e:
+                self.logger.debug("Matched-sources plot failed (non-fatal): %s", e)
 
             resample_dir = science_aligned_dir / "resampled_output"
             resample_dir.mkdir(parents=True, exist_ok=True)
@@ -3035,7 +3179,12 @@ NNW
               try:
                 self.logger.info("Verifying post-SWarp alignment via SExtractor cross-match...")
                 _verify_dir = str(Path(output_dir) / "post_swarp_verify")
-                _det_fwhm = min(max(max(fwhm_sci_pix, fwhm_ref_pix), 2.5), 4.0)
+                # Use the actual PSF FWHM for detection so windowed centroids are
+                # measured with a matched filter.  Keep the match-tolerance FWHM
+                # capped at 4 px so the nearest-neighbor search stays tight and
+                # false matches are rejected.
+                _verify_fwhm = max(max(fwhm_sci_pix, fwhm_ref_pix), 2.5)
+                _match_tol_fwhm = min(_verify_fwhm, 4.0)
 
                 # Sparse-field retry: if the first SExtractor pass detects
                 # very few sources, retry with an even lower detection
@@ -3054,17 +3203,32 @@ NNW
                     str(aligned_sci),
                     output_dir=str(Path(_verify_dir) / "sci"),
                     for_alignment=True,
-                    fwhm_pixels=_det_fwhm,
+                    fwhm_pixels=_verify_fwhm,
                 )
                 ref_sex_result = self.run_sextractor(
                     str(aligned_ref),
                     output_dir=str(Path(_verify_dir) / "ref"),
                     for_alignment=True,
-                    fwhm_pixels=_det_fwhm,
+                    fwhm_pixels=_verify_fwhm,
                 )
 
                 sci_cat_verify = sci_sex_result.get("catalog")
                 ref_cat_verify = ref_sex_result.get("catalog")
+
+                # Filter verification catalogs to point-like sources only.
+                # Extended galaxies have centroids that differ between filters and
+                # exposures, which inflates the measured RMS/P95 and causes false
+                # rejection of good SCAMP+SWarp alignments.  Alignment itself still
+                # uses extended sources when enabled; verification must measure
+                # astrometric residuals on a clean stellar sample.
+                _verify_fwhm_ref = max(fwhm_sci_pix, fwhm_ref_pix)
+                sci_cat_verify = self._filter_pointlike_sources(
+                    sci_cat_verify, _verify_fwhm_ref
+                )
+                ref_cat_verify = self._filter_pointlike_sources(
+                    ref_cat_verify, _verify_fwhm_ref
+                )
+
                 n_sci_det = len(sci_cat_verify) if sci_cat_verify is not None else 0
                 n_ref_det = len(ref_cat_verify) if ref_cat_verify is not None else 0
 
@@ -3080,20 +3244,24 @@ NNW
                             str(aligned_sci),
                             output_dir=str(Path(_verify_dir) / "sci_sparse"),
                             for_alignment=True,
-                            fwhm_pixels=_det_fwhm,
+                            fwhm_pixels=_verify_fwhm,
                             config=_SPARSE_SEX_OVERRIDE,
                         )
-                        sci_cat_verify = sci_sex_result.get("catalog")
+                        sci_cat_verify = self._filter_pointlike_sources(
+                            sci_sex_result.get("catalog"), _verify_fwhm_ref
+                        )
                         n_sci_det = len(sci_cat_verify) if sci_cat_verify is not None else 0
                     if n_ref_det < _SPARSE_RETRY_THRESH:
                         ref_sex_result = self.run_sextractor(
                             str(aligned_ref),
                             output_dir=str(Path(_verify_dir) / "ref_sparse"),
                             for_alignment=True,
-                            fwhm_pixels=_det_fwhm,
+                            fwhm_pixels=_verify_fwhm,
                             config=_SPARSE_SEX_OVERRIDE,
                         )
-                        ref_cat_verify = ref_sex_result.get("catalog")
+                        ref_cat_verify = self._filter_pointlike_sources(
+                            ref_sex_result.get("catalog"), _verify_fwhm_ref
+                        )
                         n_ref_det = len(ref_cat_verify) if ref_cat_verify is not None else 0
 
                 self.logger.info(
@@ -3138,9 +3306,9 @@ NNW
                     # 3*FWHM when very few sources are available.
                     _n_total = len(sci_xy) + len(ref_xy)
                     if _n_total < 10:
-                        match_tol = 3.0 * _det_fwhm
+                        match_tol = 3.0 * _match_tol_fwhm
                     else:
-                        match_tol = 2.0 * _det_fwhm
+                        match_tol = 2.0 * _match_tol_fwhm
                     good = mutual & (d_sr < match_tol)
                     n_matched_verify = int(good.sum())
 
@@ -3266,14 +3434,187 @@ NNW
                             _reasons.append("RMS=%.2f px (> %.2f px)" % (_rms, max_acceptable_rms))
                         if _p95 > max_acceptable_p95:
                             _reasons.append("P95=%.2f px (> %.2f px)" % (_p95, max_acceptable_p95))
-                    self.logger.warning(
-                        "Post-SWarp alignment rejected: %s (%d matches, FWHM=%.1f px). "
-                        "Falling back to reproject/AstroAlign.",
-                        "; ".join(_reasons) if _reasons else "unknown", _n_match, _gate_fwhm,
+                    # BUG 116: Galaxy-contaminated verification override.
+                    # When the median offset passes the gate but RMS/P95 fail,
+                    # check whether SCAMP's own residual (measured on filtered
+                    # stars) is good.  Post-SWarp verification uses all SExtractor
+                    # detections including galaxies with poor centroids, which
+                    # inflate RMS/P95 without indicating actual misalignment.
+                    _scamp_distort_info = (
+                        scamp_result.get("distortion")
+                        if isinstance(scamp_result, dict)
+                        else None
                     )
-                    return self._align_fallback_reproject_then_astroalign(
-                        science_image, reference_image, output_dir
+                    _scamp_rms_pix_check = None
+                    _scamp_nstars_check = None
+                    if isinstance(_scamp_distort_info, dict):
+                        _scamp_rms_arcsec = _scamp_distort_info.get("astrometric_rms_arcsec")
+                        _scamp_nstars_check = _scamp_distort_info.get("n_matched_stars")
+                        if _scamp_rms_arcsec is not None and sci_pix_scale > 0:
+                            _scamp_rms_pix_check = _scamp_rms_arcsec / sci_pix_scale
+                    _scamp_rms_threshold = max(1.0, min(5.0, 0.5 * _gate_fwhm))
+                    _scamp_min_stars = 8 if _n_match < 20 else 15
+                    _scamp_trustworthy_override = (
+                        _off <= max_acceptable_offset
+                        and _scamp_rms_pix_check is not None
+                        and _scamp_rms_pix_check < _scamp_rms_threshold
+                        and _scamp_nstars_check is not None
+                        and _scamp_nstars_check >= _scamp_min_stars
                     )
+                    if _scamp_trustworthy_override:
+                        self.logger.info(
+                            "Post-SWarp gate rejected on RMS/P95 (%s; %d matches) "
+                            "but median offset=%.2f px is good and SCAMP residual=%.3f px "
+                            "(%d stars). Galaxy contamination in verification likely. "
+                            "Accepting SCAMP+SWarp alignment.",
+                            "; ".join(_reasons), _n_match, _off,
+                            _scamp_rms_pix_check, _scamp_nstars_check,
+                        )
+                    else:
+                        self.logger.warning(
+                            "Post-SWarp alignment rejected: %s (%d matches, FWHM=%.1f px). "
+                            "Falling back to reproject/AstroAlign.",
+                            "; ".join(_reasons) if _reasons else "unknown", _n_match, _gate_fwhm,
+                        )
+                        # BUG 109: Save SWarp result as last-resort fallback.
+                        # If reproject and astroalign also fail, the SWarp result
+                        # (even with 2px offset) is far better than no alignment.
+                        # BUG 112: Copy resampled files to persistent paths before
+                        # calling fallback — reproject/AstroAlign delete the
+                        # aligned_sci_* working directory, destroying the originals.
+                        # BUG 113: Track all rejected results and pick the best by
+                        # RMS instead of always returning SWarp. AstroAlign often
+                        # has better RMS than SWarp but is still gate-rejected.
+                        # BUG 115: Backup original reference_image before calling
+                        # fallbacks — reproject/AstroAlign write to output_dir/{base}
+                        # which is the same path as reference_image when it's already
+                        # in the output dir.  Without backup, the second fallback
+                        # reads the first fallback's output, not the original template.
+                        _last_resort_sci = output_dir / f"swarp_last_resort_{Path(science_image).name}"
+                        _last_resort_ref = output_dir / f"swarp_last_resort_{Path(reference_image).name}"
+                        shutil.copy2(str(aligned_sci), str(_last_resort_sci))
+                        shutil.copy2(str(aligned_ref), str(_last_resort_ref))
+                        _ref_backup = output_dir / f"._ref_backup_{Path(reference_image).name}"
+                        _sci_backup = output_dir / f"._sci_backup_{Path(science_image).name}"
+                        shutil.copy2(reference_image, str(_ref_backup))
+                        shutil.copy2(science_image, str(_sci_backup))
+                        _swarp_last_resort = {
+                            "science_aligned": str(_last_resort_sci),
+                            "reference_aligned": str(_last_resort_ref),
+                            "alignment_method": "scamp_swarp_last_resort",
+                            "rejected": True,
+                            "reject_rms": _rms,
+                            "reject_p95": _p95,
+                            "reject_offset": _off,
+                            "reject_n_matched": _n_match,
+                        }
+                        # Try reproject directly (not through combined method) so
+                        # we can capture rejected results with metrics.
+                        _reproj_result = self.align_with_reproject(
+                            str(_sci_backup), str(_ref_backup), output_dir=output_dir
+                        )
+                        if _reproj_result and not _reproj_result.get("rejected") and _reproj_result.get("science_aligned"):
+                            return _reproj_result
+                        # Save reproject rejected result to persistent path
+                        _reproj_rejected = None
+                        if _reproj_result and _reproj_result.get("rejected"):
+                            _reproj_ref_src = _reproj_result.get("reference_aligned")
+                            if _reproj_ref_src and os.path.isfile(_reproj_ref_src):
+                                _reproj_ref_persist = output_dir / f"reproject_last_resort_{Path(reference_image).name}"
+                                shutil.copy2(_reproj_ref_src, str(_reproj_ref_persist))
+                                _reproj_rejected = {
+                                    "science_aligned": science_image,
+                                    "reference_aligned": str(_reproj_ref_persist),
+                                    "alignment_method": "reproject_last_resort",
+                                    "rejected": True,
+                                    "reject_rms": _reproj_result.get("reject_rms", float('inf')),
+                                    "reject_p95": _reproj_result.get("reject_p95", float('inf')),
+                                    "reject_offset": _reproj_result.get("reject_offset", float('inf')),
+                                    "reject_n_matched": _reproj_result.get("reject_n_matched", 0),
+                                }
+                        self.logger.info("Reproject failed. Falling back to AstroAlign.")
+                        _aa_result = self.align_with_astroalign(
+                            str(_sci_backup), str(_ref_backup), output_dir
+                        )
+                        if _aa_result and not _aa_result.get("rejected") and _aa_result.get("science_aligned"):
+                            return _aa_result
+                        # Save AstroAlign rejected result to persistent path
+                        _aa_rejected = None
+                        if _aa_result and _aa_result.get("rejected"):
+                            _aa_ref_src = _aa_result.get("reference_aligned")
+                            if _aa_ref_src and os.path.isfile(_aa_ref_src):
+                                _aa_ref_persist = output_dir / f"astroalign_last_resort_{Path(reference_image).name}"
+                                shutil.copy2(_aa_ref_src, str(_aa_ref_persist))
+                                _aa_rejected = {
+                                    "science_aligned": science_image,
+                                    "reference_aligned": str(_aa_ref_persist),
+                                    "alignment_method": "astroalign_last_resort",
+                                    "rejected": True,
+                                    "reject_rms": _aa_result.get("reject_rms", float('inf')),
+                                    "reject_p95": _aa_result.get("reject_p95", float('inf')),
+                                    "reject_offset": _aa_result.get("reject_offset", float('inf')),
+                                    "reject_n_matched": _aa_result.get("reject_n_matched", 0),
+                                }
+                        # BUG 113: All methods rejected — pick the best by RMS.
+                        # BUG 115: Exclude candidates whose aligned output is all-NaN
+                        # (can happen when AstroAlign's affine_transform maps the
+                        # entire reference outside the science grid).
+                        _candidates = [_swarp_last_resort]
+                        if _reproj_rejected:
+                            _candidates.append(_reproj_rejected)
+                        if _aa_rejected:
+                            _candidates.append(_aa_rejected)
+                        _valid_candidates = []
+                        for _c in _candidates:
+                            _ref_path = _c.get("reference_aligned")
+                            if not _ref_path or not os.path.isfile(_ref_path):
+                                continue
+                            try:
+                                with fits.open(_ref_path) as _h:
+                                    _data = _h[0].data
+                                if _data is not None and np.isfinite(_data).sum() > 0:
+                                    _valid_candidates.append(_c)
+                                else:
+                                    self.logger.warning(
+                                        "Excluding %s from last-resort: output is all-NaN/Inf.",
+                                        _c.get("alignment_method", "unknown"),
+                                    )
+                            except Exception:
+                                self.logger.warning(
+                                    "Excluding %s from last-resort: cannot read output.",
+                                    _c.get("alignment_method", "unknown"),
+                                )
+                        if not _valid_candidates:
+                            self.logger.error(
+                                "All alignment methods produced invalid (all-NaN) output. "
+                                "No usable alignment available."
+                            )
+                            for _tmp in [_ref_backup, _sci_backup]:
+                                try:
+                                    if _tmp and os.path.exists(_tmp):
+                                        os.remove(_tmp)
+                                except OSError:
+                                    pass
+                            return None
+                        _best = min(_valid_candidates, key=lambda c: c.get("reject_rms", float('inf')))
+                        # Clean up backup files
+                        for _tmp in [_ref_backup, _sci_backup]:
+                            try:
+                                if _tmp and os.path.exists(_tmp):
+                                    os.remove(_tmp)
+                            except OSError:
+                                pass
+                        self.logger.warning(
+                            "All alignment methods rejected; accepting best result: "
+                            "%s (offset=%.2f px, RMS=%.2f px, P95=%.2f px, %d matches). "
+                            "Subtraction quality may be degraded.",
+                            _best.get("alignment_method", "unknown"),
+                            _best.get("reject_offset", 0),
+                            _best.get("reject_rms", 0),
+                            _best.get("reject_p95", 0),
+                            _best.get("reject_n_matched", 0),
+                        )
+                        return _best
                 else:
                     self.logger.info(
                         "Post-SWarp alignment accepted: offset=%.2f px, RMS=%.2f px, "
@@ -3339,79 +3680,11 @@ NNW
                         science_image, reference_image, output_dir
                     )
 
-            # Sub-pixel shift correction: when post-SWarp verification measures
-            # a systematic offset, shift the reference image data to correct it.
-            # This addresses residual WCS errors that SCAMP couldn't fully
-            # correct (e.g., SIP model divergence, independent plate-solve
-            # residuals).  Only applies to common_grid mode where both images
-            # share the same pixel grid.
-            _do_shift_correction = (
-                resample_mode == "common_grid"
-                and bool(align_cfg.get("alignment_subpixel_shift_correction", False))
-                and alignment_metadata
-                and "offset_x" in alignment_metadata
-            )
-            if _do_shift_correction:
-                _shift_dx = float(alignment_metadata["offset_x"])
-                _shift_dy = float(alignment_metadata["offset_y"])
-                _shift_total = np.sqrt(_shift_dx ** 2 + _shift_dy ** 2)
-                _shift_threshold = float(
-                    align_cfg.get("alignment_subpixel_shift_threshold", 0.05)
-                )
-                if _shift_total > _shift_threshold:
-                    self.logger.info(
-                        "Applying sub-pixel shift correction to reference: "
-                        "dx=%.4f px, dy=%.4f px (total=%.4f px > %.4f px threshold)",
-                        _shift_dx, _shift_dy, _shift_total, _shift_threshold,
-                    )
-                    try:
-                        from functions import copy_wcs_from_header
-                        from scipy.ndimage import shift as _nd_shift
-
-                        _sci_header = fits.getheader(aligned_sci)
-                        with fits.open(aligned_ref, mode="update", memmap=False) as _hdul:
-                            _ref_data = np.asarray(_hdul[0].data, dtype=np.float64)
-                            _valid = np.isfinite(_ref_data).astype(np.float64)
-                            _data = np.where(_valid > 0.0, _ref_data, 0.0)
-                            _shifted_data = _nd_shift(
-                                _data,
-                                shift=(_shift_dy, _shift_dx),
-                                order=3,
-                                mode="constant",
-                                cval=0.0,
-                            )
-                            _shifted_weight = _nd_shift(
-                                _valid,
-                                shift=(_shift_dy, _shift_dx),
-                                order=1,
-                                mode="constant",
-                                cval=0.0,
-                            )
-                            _shifted = np.full_like(_shifted_data, np.nan)
-                            _good_weight = _shifted_weight > 0.999
-                            _shifted[_good_weight] = (
-                                _shifted_data[_good_weight] / _shifted_weight[_good_weight]
-                            )
-                            _hdul[0].data = _shifted.astype(_hdul[0].data.dtype)
-                            _ref_header = remove_wcs_from_header(_hdul[0].header)
-                            copy_wcs_from_header(_sci_header, _ref_header)
-                        self.logger.info(
-                            "Sub-pixel shift correction applied to reference image."
-                        )
-                        # Update alignment metadata to reflect correction
-                        alignment_metadata["shift_correction_x"] = _shift_dx
-                        alignment_metadata["shift_correction_y"] = _shift_dy
-                        alignment_metadata["shift_correction_total"] = _shift_total
-                    except Exception as _shift_e:
-                        self.logger.warning(
-                            "Sub-pixel shift correction failed (non-fatal): %s",
-                            _shift_e,
-                        )
-                else:
-                    self.logger.debug(
-                        "Sub-pixel shift correction skipped: offset=%.4f px <= %.4f px threshold",
-                        _shift_total, _shift_threshold,
-                    )
+            # Sub-pixel shift correction after SWarp has been removed. The
+            # alignment must be correct from the astrometric solution (SCAMP
+            # distortion correction + SWarp resampling). Empirical subpixel
+            # shifts generally make dipoles worse, especially when faint
+            # extended sources contaminate the offset measurement.
 
             # Log SWarp output WCS for both images so alignment can be verified.
             # Since CENTER = overlap sky midpoint and IMAGE_SIZE = overlap region size,
@@ -3930,25 +4203,44 @@ NNW
             try:
                 from scipy.spatial import cKDTree
 
-                _det_fwhm = min(max(
-                    float(self.input_yaml.get("fwhm", 3.0)), 2.5
-                ), 4.0) if hasattr(self, "input_yaml") else 3.0
+                _reproj_fwhm_est = max(
+                    float(self.input_yaml.get("fwhm", 3.0)) if hasattr(self, "input_yaml") else 3.0,
+                    2.5,
+                )
+                # Use the actual PSF FWHM for detection; keep the tolerance FWHM
+                # capped at 4 px so the nearest-neighbor search stays tight.
+                _verify_fwhm = _reproj_fwhm_est
+                _match_tol_fwhm = min(_verify_fwhm, 4.0)
 
                 _reproj_verify_dir = str(Path(output_dir) / "reproject_verify")
                 _sci_sex = self.run_sextractor(
                     science_image,
                     output_dir=str(Path(_reproj_verify_dir) / "sci"),
                     for_alignment=True,
-                    fwhm_pixels=_det_fwhm,
+                    fwhm_pixels=_verify_fwhm,
                 )
                 _ref_sex = self.run_sextractor(
                     str(aligned_reference_fpath),
                     output_dir=str(Path(_reproj_verify_dir) / "ref"),
                     for_alignment=True,
-                    fwhm_pixels=_det_fwhm,
+                    fwhm_pixels=_verify_fwhm,
                 )
                 _sci_cat_v = _sci_sex.get("catalog")
                 _ref_cat_v = _ref_sex.get("catalog")
+
+                # Filter verification catalogs to point-like sources only so galaxy
+                # centroid scatter does not inflate the measured RMS/P95.
+                _reproj_fwhm_ref = max(
+                    float(_sci_sex.get("fwhm", _reproj_fwhm_est)),
+                    float(_ref_sex.get("fwhm", _reproj_fwhm_est)),
+                    2.5,
+                )
+                _sci_cat_v = self._filter_pointlike_sources(
+                    _sci_cat_v, _reproj_fwhm_ref
+                )
+                _ref_cat_v = self._filter_pointlike_sources(
+                    _ref_cat_v, _reproj_fwhm_ref
+                )
                 _n_sci_reproj = len(_sci_cat_v) if _sci_cat_v is not None else 0
                 _n_ref_reproj = len(_ref_cat_v) if _ref_cat_v is not None else 0
 
@@ -3970,20 +4262,24 @@ NNW
                             science_image,
                             output_dir=str(Path(_reproj_verify_dir) / "sci_sparse"),
                             for_alignment=True,
-                            fwhm_pixels=_det_fwhm,
+                            fwhm_pixels=_verify_fwhm,
                             config=_SPARSE_REPROJ_OVERRIDE,
                         )
-                        _sci_cat_v = _sci_sex.get("catalog")
+                        _sci_cat_v = self._filter_pointlike_sources(
+                            _sci_sex.get("catalog"), _reproj_fwhm_ref
+                        )
                         _n_sci_reproj = len(_sci_cat_v) if _sci_cat_v is not None else 0
                     if _n_ref_reproj < 5:
                         _ref_sex = self.run_sextractor(
                             str(aligned_reference_fpath),
                             output_dir=str(Path(_reproj_verify_dir) / "ref_sparse"),
                             for_alignment=True,
-                            fwhm_pixels=_det_fwhm,
+                            fwhm_pixels=_verify_fwhm,
                             config=_SPARSE_REPROJ_OVERRIDE,
                         )
-                        _ref_cat_v = _ref_sex.get("catalog")
+                        _ref_cat_v = self._filter_pointlike_sources(
+                            _ref_sex.get("catalog"), _reproj_fwhm_ref
+                        )
                         _n_ref_reproj = len(_ref_cat_v) if _ref_cat_v is not None else 0
 
                 _reproj_min_det = 2 if min(_n_sci_reproj, _n_ref_reproj) < 5 else 3
@@ -4009,7 +4305,7 @@ NNW
 
                     # Adaptive match tolerance for sparse fields
                     _n_total_reproj = len(_sci_xy) + len(_ref_xy)
-                    _reproj_match_tol = (3.0 if _n_total_reproj < 10 else 2.0) * _det_fwhm
+                    _reproj_match_tol = (3.0 if _n_total_reproj < 10 else 2.0) * _match_tol_fwhm
                     _good = _mutual & (_d_sr < _reproj_match_tol)
                     _reproj_min_matches = 2 if _n_total_reproj < 10 else 3
                     if _good.sum() >= _reproj_min_matches:
@@ -4067,7 +4363,16 @@ NNW
                                 "Falling through to next alignment method.",
                                 "; ".join(_reasons) if _reasons else "unknown", _n_match_reproj,
                             )
-                            return None
+                            return {
+                                "science_aligned": science_image,
+                                "reference_aligned": str(aligned_reference_fpath),
+                                "alignment_method": f"reproject/{used_method}",
+                                "rejected": True,
+                                "reject_rms": _rms,
+                                "reject_p95": _p95_reproj,
+                                "reject_offset": _total,
+                                "reject_n_matched": _n_match_reproj,
+                            }
                         else:
                             self.logger.info(
                                 "Reproject alignment accepted: offset=%.2f px, "
@@ -5051,15 +5356,60 @@ NNW
         output_dir,
     ) -> Dict:
         """Try reproject first; if it fails or is unavailable, fall back to AstroAlign."""
-        result = self.align_with_reproject(
-            science_image, reference_image, output_dir=output_dir
-        )
-        if result is not None and result.get("reference_aligned"):
+        # BUG 115: Backup reference_image before calling reproject — reproject
+        # writes to output_dir/{base_ref}.{ext} which can be the same path as
+        # reference_image.  Without backup, AstroAlign reads reproject's output.
+        _output_dir = Path(output_dir) if output_dir is not None else Path(science_image).parent
+        _ref_backup = _output_dir / f"._ref_backup_{Path(reference_image).name}"
+        _sci_backup = _output_dir / f"._sci_backup_{Path(science_image).name}"
+        try:
+            shutil.copy2(reference_image, str(_ref_backup))
+            shutil.copy2(science_image, str(_sci_backup))
+        except Exception:
+            _ref_backup = None
+            _sci_backup = None
+        try:
+            result = self.align_with_reproject(
+                str(_sci_backup) if _sci_backup else science_image,
+                str(_ref_backup) if _ref_backup else reference_image,
+                output_dir=output_dir,
+            )
+        finally:
+            # Restore originals so AstroAlign gets the original template
+            if _ref_backup and os.path.exists(_ref_backup):
+                try:
+                    shutil.copy2(str(_ref_backup), reference_image)
+                except Exception:
+                    pass
+            if _sci_backup and os.path.exists(_sci_backup):
+                try:
+                    shutil.copy2(str(_sci_backup), science_image)
+                except Exception:
+                    pass
+        if result is not None and not result.get("rejected") and result.get("reference_aligned"):
+            for _tmp in [_ref_backup, _sci_backup]:
+                try:
+                    if _tmp and os.path.exists(_tmp):
+                        os.remove(_tmp)
+                except OSError:
+                    pass
             return result
         self.logger.info("Reproject failed. Falling back to AstroAlign.")
-        return self.align_with_astroalign(
-            science_image, reference_image, output_dir
+        # Use backups for AstroAlign so it reads the original template
+        aa_result = self.align_with_astroalign(
+            str(_sci_backup) if _sci_backup else science_image,
+            str(_ref_backup) if _ref_backup else reference_image,
+            output_dir,
         )
+        for _tmp in [_ref_backup, _sci_backup]:
+            try:
+                if _tmp and os.path.exists(_tmp):
+                    os.remove(_tmp)
+            except OSError:
+                pass
+        if aa_result is not None and not aa_result.get("rejected") and aa_result.get("science_aligned"):
+            return aa_result
+        return None
 
     # ------------------------------ AstroAlign path ------------------------------
 
@@ -5228,9 +5578,13 @@ NNW
 
             def _load_and_clean_image(fits_path):
                 with fits.open(fits_path) as hdul:
-                    # Keep float32 to avoid doubling memory on full frames.
                     img = np.asarray(hdul[0].data, dtype=np.float32)
-                img = np.nan_to_num(img, nan=np.nan, posinf=np.nan, neginf=np.nan)
+                finite = np.isfinite(img)
+                if not finite.any():
+                    raise ValueError(f"No finite image pixels in {fits_path}")
+                if not finite.all():
+                    img = img.copy()
+                    img[~finite] = np.nanmedian(img[finite])
                 return img
 
             ref_img = _load_and_clean_image(ref_image_copy)
@@ -5270,15 +5624,30 @@ NNW
 
                     matrix = tform.params if hasattr(tform, "params") else tform._matrix
                     inv_matrix = np.linalg.inv(matrix)
+                    # BUG 117: ndimage.affine_transform uses (row, col) = (y, x)
+                    # convention, but skimage/aafitrans transforms use (x, y).
+                    # Swap matrix rows/columns and offset components to convert.
+                    _M = inv_matrix[:2, :2]
+                    _nd_matrix = np.array([[_M[1, 1], _M[1, 0]],
+                                           [_M[0, 1], _M[0, 0]]])
+                    _nd_offset = np.array([inv_matrix[1, 2], inv_matrix[0, 2]])
                     aligned_ref_img = ndimage.affine_transform(
                         ref_img,
-                        inv_matrix[:2, :2],
-                        offset=inv_matrix[:2, 2],
+                        _nd_matrix,
+                        offset=_nd_offset,
                         output_shape=sci_img.shape,
                         order=3,
                         cval=np.nan,
                     )
                     footprint = np.isfinite(aligned_ref_img)
+                    # BUG 117: If affine_transform produced all-NaN (convention
+                    # issue or extreme transform), fall back to astroalign.
+                    if not footprint.any():
+                        self.logger.warning(
+                            "aafitrans affine_transform produced all-NaN output; "
+                            "falling back to astroalign apply_transform."
+                        )
+                        raise RuntimeError("all-NaN affine_transform output")
                 except Exception as e:
                     self.logger.info(
                         f"aafitrans apply failed: {e}, falling back to astroalign"
@@ -5296,6 +5665,32 @@ NNW
                 aligned_ref_img, nan=np.nan, posinf=np.nan, neginf=np.nan
             )
             aligned_ref_img[~footprint.astype(bool)] = np.nan
+
+            # Coverage check: if the aligned output is entirely NaN/Inf, the
+            # transform mapped the entire reference outside the science grid
+            # or NaN input pixels propagated through interpolation.  This is
+            # a hard failure — return None so the caller falls through.
+            _finite_frac = float(np.isfinite(aligned_ref_img).sum()) / aligned_ref_img.size
+            if _finite_frac < 0.01:
+                self.logger.warning(
+                    "AstroAlign: aligned output is %.1f%% finite (< 1%%); "
+                    "transform likely maps reference outside science grid. "
+                    "ref_shape=%s sci_shape=%s, rejecting.",
+                    _finite_frac * 100, ref_img.shape, sci_img.shape,
+                )
+                return {
+                    "science_aligned": None,
+                    "reference_aligned": None,
+                    "alignment_method": "astroalign",
+                    "rejected": True,
+                    "reject_rms": float('inf'),
+                    "reject_p95": float('inf'),
+                    "reject_offset": float('inf'),
+                    "reject_n_matched": 0,
+                }
+            self.logger.info(
+                "AstroAlign: aligned output coverage=%.1f%%", _finite_frac * 100
+            )
 
             def _save_aligned_image(data, header, output_path):
                 from functions import safe_fits_write
@@ -5334,8 +5729,9 @@ NNW
                 _aa_max_rms = float(ts.get("alignment_max_rms_px", 0.75))
                 _aa_max_p95 = float(ts.get("alignment_max_p95_px", 1.5))
                 _aa_min_n = int(ts.get("alignment_min_sources_for_field_gate", 20))
-                # FWHM-adaptive thresholds for fallback gates
-                _aa_fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                # FWHM-adaptive thresholds: use actual image FWHM (already
+                # computed at line ~5512) instead of a generic config default.
+                _aa_fwhm = max(fwhm_sci_pix, fwhm_ref_pix, 2.5)
                 _aa_scale = max(0.5, min(3.0, _aa_fwhm / 3.0))
                 _aa_max_off *= _aa_scale
                 _aa_max_rms *= _aa_scale
@@ -5363,7 +5759,16 @@ NNW
                         "No more alignment methods available.",
                         "; ".join(_reasons) if _reasons else "unknown", _n_aa,
                     )
-                    return None
+                    return {
+                        "science_aligned": aligned_science_fpath,
+                        "reference_aligned": aligned_reference_fpath,
+                        "alignment_method": "astroalign",
+                        "rejected": True,
+                        "reject_rms": rms_pix if np.isfinite(rms_pix) else float('inf'),
+                        "reject_p95": _p95_resid if np.isfinite(_p95_resid) else float('inf'),
+                        "reject_offset": _med_resid if np.isfinite(_med_resid) else float('inf'),
+                        "reject_n_matched": _n_aa,
+                    }
                 else:
                     self.logger.info(
                         "AstroAlign alignment accepted: med=%.2f px, "
@@ -5417,6 +5822,109 @@ NNW
             }
 
     # -------------------------------- SCAMP + SWarp --------------------------------
+    def _get_scamp_matched_sources(
+        self,
+        head_path: str,
+        ref_cat_path: str,
+        sci_cat_path: str,
+        match_radius_arcsec: float = 2.0,
+    ) -> Optional[dict]:
+        """Extract sources matched by SCAMP using the corrected WCS from .head file.
+
+        Applies the SCAMP-corrected WCS to reference catalog pixel positions,
+        cross-matches against science catalog world coordinates, and returns
+        the pixel positions of matched sources in both images.
+
+        Returns dict with keys:
+            'sci_x', 'sci_y' -- 0-based pixel positions in science image
+            'ref_x', 'ref_y' -- 0-based pixel positions in reference image
+        or None on failure.
+        """
+        try:
+            from astropy.wcs import WCS
+            from astropy.coordinates import SkyCoord
+            import astropy.units as u
+            from astropy.io import fits as _fits
+            from astropy.table import Table
+
+            if not Path(head_path).exists():
+                self.logger.debug("SCAMP .head file not found: %s", head_path)
+                return None
+
+            # Read .head file as WCS header
+            head_hdr = _fits.Header.fromtextfile(head_path)
+            wcs_corrected = WCS(head_hdr, fix=True, relax=True)
+            if not getattr(wcs_corrected, "has_celestial", False):
+                self.logger.debug("SCAMP .head WCS has no celestial component")
+                return None
+            wcs_corrected = wcs_corrected.celestial
+
+            # Read reference catalog
+            with _fits.open(ref_cat_path, memmap=False) as hdul:
+                ref_cat = Table(hdul[2].data)
+            # Read science catalog
+            with _fits.open(sci_cat_path, memmap=False) as hdul:
+                sci_cat = Table(hdul[2].data)
+
+            if len(ref_cat) == 0 or len(sci_cat) == 0:
+                return None
+
+            # Transform reference pixel positions through corrected WCS
+            ref_x_pix = np.asarray(ref_cat["XWIN_IMAGE"], float) - 1.0
+            ref_y_pix = np.asarray(ref_cat["YWIN_IMAGE"], float) - 1.0
+            ref_world = wcs_corrected.pixel_to_world(ref_x_pix, ref_y_pix)
+
+            # Science catalog world coordinates
+            sci_ra = np.asarray(sci_cat["XWIN_WORLD"], float)
+            sci_dec = np.asarray(sci_cat["YWIN_WORLD"], float)
+            finite_sci = np.isfinite(sci_ra) & np.isfinite(sci_dec)
+            finite_ref = np.isfinite(ref_world.ra.deg) & np.isfinite(ref_world.dec.deg)
+
+            if np.count_nonzero(finite_sci) < 3 or np.count_nonzero(finite_ref) < 3:
+                self.logger.debug("Too few finite coordinates for SCAMP source matching")
+                return None
+
+            ref_coords = SkyCoord(
+                ra=ref_world.ra.deg[finite_ref],
+                dec=ref_world.dec.deg[finite_ref],
+                unit=u.deg,
+            )
+            sci_coords = SkyCoord(
+                ra=sci_ra[finite_sci],
+                dec=sci_dec[finite_sci],
+                unit=u.deg,
+            )
+
+            # Cross-match: for each science source, find nearest corrected reference source
+            idx, d2d, _ = sci_coords.match_to_catalog_sky(ref_coords)
+            match_mask = d2d < match_radius_arcsec * u.arcsec
+
+            # Extract matched source positions (0-based pixels)
+            sci_matched_idx = np.where(finite_sci)[0][match_mask]
+            ref_matched_idx = np.where(finite_ref)[0][idx[match_mask]]
+
+            sci_x = (np.asarray(sci_cat["XWIN_IMAGE"], float) - 1.0)[sci_matched_idx]
+            sci_y = (np.asarray(sci_cat["YWIN_IMAGE"], float) - 1.0)[sci_matched_idx]
+            ref_x = (np.asarray(ref_cat["XWIN_IMAGE"], float) - 1.0)[ref_matched_idx]
+            ref_y = (np.asarray(ref_cat["YWIN_IMAGE"], float) - 1.0)[ref_matched_idx]
+
+            n_matched = int(len(sci_x))
+            self.logger.info(
+                "SCAMP matched sources (from .head WCS): %d (radius=%.1f\")",
+                n_matched, match_radius_arcsec,
+            )
+
+            return {
+                "sci_x": sci_x,
+                "sci_y": sci_y,
+                "ref_x": ref_x,
+                "ref_y": ref_y,
+                "n_matched": n_matched,
+            }
+        except Exception as e:
+            self.logger.debug("Could not extract SCAMP matched sources: %s", e)
+            return None
+
     def _parse_scamp_xml(self, xml_file: str) -> Optional[Dict]:
         """Extract WCS keys, astrometric residual, and matched star count from SCAMP XML.
 
@@ -6245,6 +6753,7 @@ NNW
         max_sources: int = 100,
         selection_mode: str = "uniform",  # "uniform", "random", or "first"
         random_seed: Optional[int] = 42,  # Seed for reproducible random selection
+        scamp_matched_sources: Optional[dict] = None,  # dict with sci_x/sci_y/ref_x/ref_y
         **imshow_kwargs,
     ):
         try:
@@ -6567,6 +7076,45 @@ NNW
                 
                 return remaining_sources
             
+            # Plot SCAMP-matched sources as green squares on both panels
+            if scamp_matched_sources is not None:
+                from matplotlib.patches import Rectangle as MplRect
+                _sq_size = max(circle_radius_sci, circle_radius_ref) * rebin_scale
+                _sq_half = _sq_size / 2.0
+                for sx, sy in zip(
+                    scamp_matched_sources.get("sci_x", []),
+                    scamp_matched_sources.get("sci_y", []),
+                ):
+                    if np.isfinite(sx) and np.isfinite(sy):
+                        ax1.add_patch(MplRect(
+                            (sx * rebin_scale - _sq_half, sy * rebin_scale - _sq_half),
+                            _sq_size, _sq_size,
+                            edgecolor="lime", facecolor="none",
+                            linewidth=1.0, linestyle="-", zorder=6,
+                        ))
+                for rx, ry in zip(
+                    scamp_matched_sources.get("ref_x", []),
+                    scamp_matched_sources.get("ref_y", []),
+                ):
+                    if np.isfinite(rx) and np.isfinite(ry):
+                        ax2.add_patch(MplRect(
+                            (rx * rebin_scale - _sq_half, ry * rebin_scale - _sq_half),
+                            _sq_size, _sq_size,
+                            edgecolor="lime", facecolor="none",
+                            linewidth=1.0, linestyle="-", zorder=6,
+                        ))
+                from matplotlib.lines import Line2D as _L2
+                _scamp_handle = _L2([0], [0], marker="s", color="lime",
+                                   markerfacecolor="none", markersize=6,
+                                   linestyle="None", label="SCAMP matched")
+                # Add to legend
+                handles, labels = ax1.get_legend_handles_labels()
+                handles.append(_scamp_handle)
+                labels.append("SCAMP matched")
+                ax1.legend(handles, labels, loc="lower center",
+                          bbox_to_anchor=(0.5, 1.0), frameon=False,
+                          handlelength=1.5, handletextpad=0.5, ncol=3)
+
             # Plot remaining sources for science image
             sci_remaining = plot_remaining_sources(ax1, sci_cat, (sci_h, sci_w), rebin_scale, 
                                                   max_sources, len(sci_selected), "science sources")

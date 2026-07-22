@@ -1994,6 +1994,15 @@ def run_photometry():
 
         logging.info(f"Preliminary FWHM: {ImageFWHM:.1f} pixels")
 
+        # Save the initially measured FWHM for the post-alignment inflation
+        # check.  input_yaml["fwhm"] may still hold the config default (e.g.,
+        # 3.0) at this point, so we must use the measured value directly.
+        _initial_measured_fwhm = float(ImageFWHM) if np.isfinite(ImageFWHM) else None
+        # BUG 118: Store pre-alignment source count for post-alignment FWHM
+        # inflation check.  When pre-alignment had significantly more sources,
+        # require more post-alignment sources to trust an inflated FWHM.
+        _pre_align_fwhm_n_sources = len(FWHMSources) if FWHMSources is not None else 0
+
         # Global undersampled-mode flag for consistent behavior across modules.
         phot_cfg = input_yaml.get("photometry", {}) or {}
         undersampled_thr = float(phot_cfg.get("undersampled_fwhm_threshold", 2.5))
@@ -2666,6 +2675,50 @@ def run_photometry():
                         except Exception as e:
                             logging.warning(f"Template alignment check failed: {e}")
 
+                        # BUG 107: Measure template FWHM if header value is stale.
+                        # Pre-built templates (e.g., gp_template.fits) often have
+                        # FWHM=3.0 (the config default) in their header, not the
+                        # actual measured value.  This causes SFFT kernel sizing
+                        # to use the wrong FWHM, producing kernels that are too
+                        # small for the actual PSF.  After alignment (which may
+                        # resample the template), measure the FWHM if the header
+                        # value matches the config default.
+                        try:
+                            _tmpl_hdr = fits.getheader(templateFpath)
+                            _tmpl_fwhm_hdr = float(
+                                _tmpl_hdr.get("FWHM", _tmpl_hdr.get("fwhm", 0.0))
+                            )
+                            _config_fwhm_default = float(
+                                input_yaml.get("fwhm", 3.0)
+                            )
+                            _fwhm_stale = (
+                                abs(_tmpl_fwhm_hdr - _config_fwhm_default) < 0.01
+                            )
+                            if _fwhm_stale:
+                                _tmpl_img = get_image(templateFpath)
+                                _tmpl_fwhm_measured, _, _ = Find_FWHM(
+                                    input_yaml=input_yaml
+                                ).measure_image(image=_tmpl_img)
+                                if (
+                                    np.isfinite(_tmpl_fwhm_measured)
+                                    and _tmpl_fwhm_measured > 0
+                                ):
+                                    _tmpl_hdr["FWHM"] = float(_tmpl_fwhm_measured)
+                                    safe_fits_write(
+                                        templateFpath, _tmpl_img, _tmpl_hdr
+                                    )
+                                    logging.info(
+                                        "Template FWHM measured after alignment: "
+                                        "%.2f px (header had stale default %.1f px).",
+                                        float(_tmpl_fwhm_measured),
+                                        _tmpl_fwhm_hdr,
+                                    )
+                                    del _tmpl_img
+                        except Exception as e:
+                            logging.debug(
+                                "Template FWHM re-measurement failed: %s", e
+                            )
+
                 except Exception as e:
                     log_exception(e, "Template alignment failed")
                     template_available = False
@@ -2867,7 +2920,7 @@ def run_photometry():
                 )
             return fwhm, sources, scale
 
-        _pre_remeasure_fwhm = input_yaml.get("fwhm")  # save before overwrite
+        _pre_remeasure_fwhm = _initial_measured_fwhm  # use measured FWHM, not config default
         try:
             sex_crowded = input_yaml.get("photometry", {}).get("crowded_field", False)
             ImageFWHM, FWHMSources, scale = _run_sextractor_two_pass(
@@ -2903,27 +2956,50 @@ def run_photometry():
 
         # Preserve the initial FWHM if the post-alignment re-measurement is
         # inflated.  The initial "Source detection and FWHM" step (above)
-        # runs on the original image with ~28 point sources and produces a
-        # reliable FWHM (e.g., 3.99 px).  This post-alignment re-run on the
+        # runs on the original image with ~20-30 point sources and produces a
+        # reliable FWHM (e.g., 7.35 px).  This post-alignment re-run on the
         # aligned image often finds far fewer sources (9-12) due to resampling
-        # and masking changes, and galaxy contamination inflates the FWHM
-        # (e.g., 7.85 px).  Using the inflated value causes SFFT to select
-        # kernel_order=0 (constant kernel) when the true PSF difference is
-        # large, leading to flux scaling mismatches and dipoles.
+        # and masking changes, and galaxy contamination can inflate the FWHM.
+        # Using the inflated value causes SFFT to select the wrong kernel size.
+        #
+        # However, the initial measurement can also be biased low when many
+        # faint sources have truncated profiles (SExtractor underestimates
+        # FWHM_IMAGE at low S/N).  When the post-alignment measurement has
+        # sufficient sources (≥20), it is more reliable because the image has
+        # been resampled and the source detection is more stable.  In that
+        # case, use the larger FWHM — an overestimate is safe (slightly larger
+        # kernel), but an underestimate is dangerous (wrong sharpening/
+        # broadening direction, flux scaling mismatch, dipoles).
+        _post_align_n_sources = len(FWHMSources) if FWHMSources is not None else 0
         if (
             _pre_remeasure_fwhm is not None
             and np.isfinite(_pre_remeasure_fwhm)
             and np.isfinite(ImageFWHM)
             and float(ImageFWHM) > 1.5 * float(_pre_remeasure_fwhm)
         ):
-            logging.warning(
-                "Post-alignment FWHM %.2f px is inflated (> 1.5 x initial %.2f px); "
-                "preserving initial FWHM for subtraction kernel sizing.",
-                float(ImageFWHM), float(_pre_remeasure_fwhm),
-            )
-            ImageFWHM = float(_pre_remeasure_fwhm)
-            input_yaml["fwhm"] = ImageFWHM
-            input_yaml["science_fwhm"] = ImageFWHM
+            # BUG 118: When pre-alignment had significantly more sources (>=2x),
+            # require more post-alignment sources to trust the inflated FWHM.
+            # Galaxy contamination in sparse fields can inflate FWHM by 60%+
+            # with as few as 20-25 sources.
+            _pre_align_n_sources = _pre_align_fwhm_n_sources
+            _override_threshold = 30 if _pre_align_n_sources >= 2 * _post_align_n_sources else 20
+            if _post_align_n_sources >= _override_threshold:
+                logging.info(
+                    "Post-alignment FWHM %.2f px > 1.5 x initial %.2f px, but "
+                    "post-alignment has %d sources (>= %d) — using larger FWHM "
+                    "to avoid kernel direction error.",
+                    float(ImageFWHM), float(_pre_remeasure_fwhm),
+                    _post_align_n_sources, _override_threshold,
+                )
+            else:
+                logging.warning(
+                    "Post-alignment FWHM %.2f px is inflated (> 1.5 x initial %.2f px); "
+                    "preserving initial FWHM for subtraction kernel sizing.",
+                    float(ImageFWHM), float(_pre_remeasure_fwhm),
+                )
+                ImageFWHM = float(_pre_remeasure_fwhm)
+                input_yaml["fwhm"] = ImageFWHM
+                input_yaml["science_fwhm"] = ImageFWHM
 
         # Only write FWHM to header if it's finite (FITS headers reject NaN)
         if np.isfinite(ImageFWHM):
@@ -4083,6 +4159,39 @@ def run_photometry():
                     f"Using {len(detected_sources)} high-quality isolated sources from PSF pool for subtraction matching "
                     f"(avoiding detection on resampled image for better PSF quality)"
                 )
+                # Supplement with fresh detections when the pool is too small for
+                # robust subtraction matching.  The centroid alignment and
+                # masked-region proximity filters downstream can remove 50-70%
+                # of sources, so a pool of 8 can easily collapse to 2.
+                if len(detected_sources) < 15:
+                    logging.info(
+                        f"PSF pool has only {len(detected_sources)} sources; "
+                        f"supplementing with SExtractor detections on aligned image."
+                    )
+                    try:
+                        _, extra_sources, _ = SExtractorWrapper(config=input_yaml).run(
+                            fpath,
+                            pixel_scale=pixel_scale,
+                            masked_sources=variable_sources,
+                            weight_path=weight_fpath,
+                            use_FWHM=ImageFWHM,
+                            crowded=input_yaml.get("photometry", {}).get("crowded_field", False),
+                            use_for_matching=True,
+                        )
+                        if extra_sources is not None and len(extra_sources) > 0:
+                            import pandas as _pd
+                            detected_sources = _pd.concat(
+                                [detected_sources, extra_sources],
+                                ignore_index=True,
+                            )
+                            logging.info(
+                                f"Supplemented PSF pool with {len(extra_sources)} "
+                                f"SExtractor detections -> {len(detected_sources)} total sources."
+                            )
+                    except Exception as _e:
+                        logging.warning(
+                            f"SExtractor supplement failed (non-fatal): {_e}"
+                        )
             else:
                 # Fallback: detect sources on resampled image if psf_source_pool not available
                 _, detected_sources, _ = SExtractorWrapper(config=input_yaml).run(
@@ -4263,9 +4372,12 @@ def run_photometry():
                 )
 
             # Recalculates pixel coordinates from RA/DEC returned by the aggregation if present.
+            # Only do this when centroiding did NOT update positions — otherwise the
+            # WCS round-trip overwrites the centroid-refined x_pix/y_pix with a
+            # cruder WCS-based estimate and can introduce NaN/Inf for edge sources.
             ra_vals = merged_sources.get("RA")
             dec_vals = merged_sources.get("DEC")
-            if (ra_vals is not None) and (dec_vals is not None):
+            if centroid_adjusted == 0 and (ra_vals is not None) and (dec_vals is not None):
                 x_pix, y_pix = imageWCS.all_world2pix(
                     ra_vals.values, dec_vals.values, wcs_origin
                 )
@@ -4278,6 +4390,17 @@ def run_photometry():
                 merged_sources["y_pix"] = merged_sources.get(
                     "y_pix", merged_sources.get("y_coord")
                 )
+
+            # Filter out sources with NaN/Inf coordinates — these can arise from
+            # WCS round-trip failures (edge sources) or centroiding failures.
+            _finite_mask = np.isfinite(merged_sources["x_pix"]) & np.isfinite(merged_sources["y_pix"])
+            if not _finite_mask.all():
+                _n_bad = int((~_finite_mask).sum())
+                logging.warning(
+                    f"Removing {_n_bad} source(s) with non-finite coordinates "
+                    f"(NaN/Inf in x_pix/y_pix)."
+                )
+                merged_sources = merged_sources[_finite_mask].reset_index(drop=True)
 
             # If not enough sources, bails out early.
             matched_df = merged_sources.copy()

@@ -459,7 +459,7 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-min_prior_sources",
         type=int,
-        default=3,
+        default=10,
         help="Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT will perform its own source matching.",
     )
     parser.add_argument(
@@ -665,7 +665,7 @@ def run_sfft() -> Optional[int]:
         )
     
     # Improve prior source validation: require minimum sources for reliable kernel fitting
-    MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 3) or 3)
+    MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 10) or 10)
     if matching_sources is not None and len(matching_sources) < MIN_PRIOR_SOURCES:
         log_info(
             f"Warning: Only {len(matching_sources)} prior sources provided "
@@ -907,9 +907,11 @@ def run_sfft() -> Optional[int]:
 
     # ForceConv: which image to convolve.
     # REF  => DIFF = SCI - conv(REF): transients keep the science PSF.
-    #         Always use REF because the PSF is built on the science image.
-    # SCI  => DIFF = conv(SCI) - REF: only if user explicitly overrides.
+    # SCI  => DIFF = conv(SCI) - REF: difference has reference PSF.
     # AUTO => SFFT chooses based on measured FWHMs.
+    # Per Hu et al. 2022 Section 6, convolving to match better seeing causes
+    # deconvolution noise amplification.  templates.py now defaults to "auto"
+    # which selects REF when science FWHM >= ref FWHM, SCI otherwise.
     _fc_arg = str(getattr(args, "forceconv", "REF")).upper().strip()
     if _fc_arg in ("REF", "SCI", "AUTO"):
         ForceConv = _fc_arg
@@ -1268,17 +1270,18 @@ def run_sfft() -> Optional[int]:
                     CUDA_DEVICE_4SUBTRACT=CUDA_DEVICE_4SUBTRACT,
                     NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
                 )
-            except np.linalg.LinAlgError as e:
-                # Degenerate kernel design matrix (e.g. too few / collinear sources
-                # after applying XY_PriorSelect / XY_PriorBan). Retry once letting
-                # SFFT perform its own source matching with no priors.
+            except (np.linalg.LinAlgError, AssertionError, ValueError, RuntimeError) as e:
+                # Degenerate kernel design matrix or assertion failure (e.g. too
+                # few / collinear sources after applying XY_PriorSelect /
+                # XY_PriorBan). Retry once letting SFFT perform its own source
+                # matching with no priors.
                 log_info(
-                    f"SFFT ESP failed with singular matrix when using priors ({e}). "
+                    f"SFFT ESP failed with {type(e).__name__} when using priors ({e}). "
                     "This typically occurs when:"
                     "  1. Too few prior sources for reliable kernel fitting (default minimum: 3)"
                     "  2. Prior sources are collinear or poorly distributed"
                     "  3. Prior sources have large positional errors"
-                    "Retrying without prior-selected / prior-banned sources."
+                    "Retrying without prior-selected sources (keeping prior-ban list)."
                 )
                 result = Easy_SparsePacket.ESP(
                     FITS_REF=FITS_REF,
@@ -1304,7 +1307,7 @@ def run_sfft() -> Optional[int]:
                     GAIN_KEY=GAIN_KEY,
                     SATUR_KEY=SATUR_KEY,
                     XY_PriorSelect=None,
-                    XY_PriorBan=None,
+                    XY_PriorBan=masked_sources,
                     MatchTol=None,
                     MatchTolFactor=1,
                     Hough_MINFR=0.3,
@@ -1404,6 +1407,18 @@ def run_sfft() -> Optional[int]:
                     f"WARNING: Only {_n_matched} sources used for SFFT kernel fitting. "
                     f"Kernel solution may be unreliable — dipole residuals likely. "
                     f"Consider providing more pipeline-matched sources or relaxing source filtering."
+                )
+
+            # BUG 110: Hard abort when too few sources for a constrained kernel.
+            # With < 3 matched sources, the kernel solution is mathematically
+            # unconstrained (2 points cannot determine a 2D kernel + flux scaling).
+            # SFFT will produce a wildly wrong kernel (e.g., flux scaling = -24
+            # vs true ~2.5).  Abort so templates.py can fall back to HOTPANTS.
+            if _n_matched < 3:
+                raise RuntimeError(
+                    f"SFFT kernel fitting failed: only {_n_matched} matched sources "
+                    f"(minimum 3 required for a constrained kernel solution). "
+                    f"Field is too sparse for reliable SFFT subtraction."
                 )
 
             # main.py expects columns X_IMAGE_REF_SCI_MEAN, Y_IMAGE_REF_SCI_MEAN

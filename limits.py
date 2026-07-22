@@ -714,6 +714,8 @@ class Limits:
             # =================================================================
             if epsf_model is None:
                 logger.info("No PSF model - skipping limiting magnitude")
+                if _return_details:
+                    return {"inject_lmag": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": 0.5, "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
                 return np.nan
 
             if initialGuess is None or not np.isfinite(float(initialGuess)):
@@ -787,6 +789,8 @@ class Limits:
 
             if cutout_img is None or not np.isfinite(cutout_cx) or not np.isfinite(cutout_cy):
                 logger.warning("getCutout returned None or invalid centre; aborting")
+                if _return_details:
+                    return {"inject_lmag": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": 0.5, "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
                 return np.nan
 
             cutout = cutout_img
@@ -1469,6 +1473,8 @@ class Limits:
                     f"PSF sum={np.sum(psf_unit):.4e}, shape={psf_unit.shape}, oversampling={oversampling}, "
                     f"gain={_gain_canon:.4g} e/ADU"
                 )
+                if _return_details:
+                    return {"inject_lmag": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": locals().get('completeness_target', 0.5), "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
                 return np.nan
 
             # Memoised so repeated calls at the same magnitude are free.
@@ -1600,6 +1606,8 @@ class Limits:
                 logger.warning(
                     "No valid candidate sites after NaN/edge/exclusion filtering; cannot run injected limiting magnitude."
                 )
+                if _return_details:
+                    return {"inject_lmag": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": locals().get('completeness_target', 0.5), "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
                 return np.nan
 
             if use_quiet_sites:
@@ -1666,6 +1674,8 @@ class Limits:
                     logger.warning(
                         "All candidate sites have non-finite scores; cannot find injection sites."
                     )
+                    if _return_details:
+                        return {"inject_lmag": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": locals().get('completeness_target', 0.5), "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
                     return np.nan
 
                 # Select the n_quiet candidates with best combined score (quiet + similar to target)
@@ -1796,6 +1806,8 @@ class Limits:
             n_sites = len(x_pix_arr)
             if n_sites == 0:
                 logger.warning("No valid injection sites after bounds filtering; aborting.")
+                if _return_details:
+                    return {"inject_lmag": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": locals().get('completeness_target', 0.5), "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
                 return np.nan
 
             # injection_df already contains jittered positions from quiet-site selection,
