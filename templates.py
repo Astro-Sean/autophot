@@ -745,183 +745,6 @@ def _reproject_template(
     aligned[~fp_mask] = np.nan
 
     # ------------------------------------------------------------------
-    # Post-reproject subpixel correction
-    # ------------------------------------------------------------------
-    # Even with good WCS, independent plate-solved images have residual
-    # astrometric offsets (~1-2px) from WCS fit residuals. These cause
-    # dipoles in SFFT subtraction. Here we measure the residual offset
-    # from matched stars and apply a subpixel correction to the
-    # reprojected template.
-    try:
-        from scipy.ndimage import map_coordinates as _map_coords
-        correction_applied = False
-        if DAOStarFinder is not None and fwhm_pixels > 0:
-            fwhm_corr = max(float(fwhm_pixels), 2.0)
-            from astropy.stats import sigma_clipped_stats as _scs_corr
-            _, med_s_corr, std_s_corr = _scs_corr(science_image, sigma=3.0)
-            _, med_t_corr, std_t_corr = _scs_corr(aligned, sigma=3.0)
-            if std_s_corr > 0 and std_t_corr > 0:
-                dao_s_corr = DAOStarFinder(fwhm=fwhm_corr, threshold=5.0 * std_s_corr)
-                dao_t_corr = DAOStarFinder(fwhm=fwhm_corr, threshold=5.0 * std_t_corr)
-                tbl_s_corr = dao_s_corr(science_image - med_s_corr)
-                tbl_t_corr = dao_t_corr(aligned - med_t_corr)
-                if tbl_s_corr is not None and tbl_t_corr is not None and len(tbl_s_corr) >= 5 and len(tbl_t_corr) >= 5:
-                    _xc = "x_centroid" if "x_centroid" in tbl_s_corr.colnames else "xcentroid"
-                    _yc = "y_centroid" if "y_centroid" in tbl_s_corr.colnames else "ycentroid"
-                    sci_xy_corr = np.column_stack((tbl_s_corr[_xc].data, tbl_s_corr[_yc].data))
-                    _xc_t = "x_centroid" if "x_centroid" in tbl_t_corr.colnames else "xcentroid"
-                    _yc_t = "y_centroid" if "y_centroid" in tbl_t_corr.colnames else "ycentroid"
-                    ref_xy_corr = np.column_stack((tbl_t_corr[_xc_t].data, tbl_t_corr[_yc_t].data))
-
-                    tree_ref_corr = cKDTree(ref_xy_corr)
-                    tree_sci_corr = cKDTree(sci_xy_corr)
-                    d_corr, i_corr = tree_ref_corr.query(sci_xy_corr, k=1)
-                    d_rs_corr, i_rs_corr = tree_sci_corr.query(ref_xy_corr, k=1)
-                    idx_s_corr = np.arange(len(sci_xy_corr), dtype=int)
-                    mutual_corr = (i_rs_corr[i_corr] == idx_s_corr) & np.isfinite(d_corr)
-                    match_tol_corr = float(max(2.5, 2.0 * fwhm_corr))
-                    mutual_corr &= d_corr < match_tol_corr
-
-                    if np.sum(mutual_corr) >= 5:
-                        dx_corr = sci_xy_corr[mutual_corr, 0] - ref_xy_corr[i_corr[mutual_corr], 0]
-                        dy_corr = sci_xy_corr[mutual_corr, 1] - ref_xy_corr[i_corr[mutual_corr], 1]
-
-                        # Sigma-clip outliers
-                        from astropy.stats import sigma_clip as _sc_corr
-                        dx_clipped = _sc_corr(dx_corr, sigma=2.5, maxiters=3)
-                        dy_clipped = _sc_corr(dy_corr, sigma=2.5, maxiters=3)
-                        both_ok = ~dx_clipped.mask & ~dy_clipped.mask
-                        if np.sum(both_ok) < 5:
-                            both_ok = np.ones(len(dx_corr), dtype=bool)
-
-                        dx_corr = dx_corr[both_ok]
-                        dy_corr = dy_corr[both_ok]
-                        x_corr = sci_xy_corr[mutual_corr, 0][both_ok]
-                        y_corr = sci_xy_corr[mutual_corr, 1][both_ok]
-
-                        med_dx_corr = float(np.median(dx_corr))
-                        med_dy_corr = float(np.median(dy_corr))
-                        n_corr = len(dx_corr)
-
-                        before_dist = float(np.median(np.sqrt(dx_corr**2 + dy_corr**2)))
-
-                        # Helper: leave-one-out cross-validation for a given design matrix
-                        def _loo_cv(A_mat, vals):
-                            n = len(vals)
-                            loo_pred = np.empty(n)
-                            for j in range(n):
-                                mask = np.ones(n, dtype=bool)
-                                mask[j] = False
-                                coef_j, _, _, _ = np.linalg.lstsq(
-                                    A_mat[mask], vals[mask], rcond=None
-                                )
-                                loo_pred[j] = A_mat[j] @ coef_j
-                            return loo_pred
-
-                        # Helper: apply a shift correction to the aligned image
-                        def _apply_shift(shift_x_arr, shift_y_arr):
-                            nan_mask = np.isnan(aligned)
-                            aligned_filled = np.where(nan_mask, 0.0, aligned)
-                            result = _map_coords(
-                                aligned_filled, [shift_y_arr, shift_x_arr],
-                                order=3, mode='nearest',
-                            )
-                            result[~fp_mask] = np.nan
-                            return result
-
-                        from scipy.ndimage import shift as _nd_shift
-
-                        # Evaluate constant shift via LOO-CV
-                        A_const = np.ones((n_corr, 1))
-                        loo_const_dx = _loo_cv(A_const, dx_corr)
-                        loo_const_dy = _loo_cv(A_const, dy_corr)
-                        loo_const_dist = np.median(np.sqrt(
-                            (dx_corr - loo_const_dx) ** 2 + (dy_corr - loo_const_dy) ** 2
-                        ))
-
-                        best_method = "none"
-                        best_loo = before_dist
-                        best_shift_x = None
-                        best_shift_y = None
-
-                        if loo_const_dist < best_loo:
-                            best_method = "constant"
-                            best_loo = loo_const_dist
-                            best_shift_x = -med_dx_corr
-                            best_shift_y = -med_dy_corr
-
-                        # Evaluate linear polynomial via LOO-CV (need >= 20 sources)
-                        if n_corr >= 20:
-                            x_norm = 2 * (x_corr - x_corr.mean()) / max(x_corr.max() - x_corr.min(), 1)
-                            y_norm = 2 * (y_corr - y_corr.mean()) / max(y_corr.max() - y_corr.min(), 1)
-                            A_lin = np.column_stack([np.ones(n_corr), x_norm, y_norm])
-                            loo_lin_dx = _loo_cv(A_lin, dx_corr)
-                            loo_lin_dy = _loo_cv(A_lin, dy_corr)
-                            loo_lin_dist = np.median(np.sqrt(
-                                (dx_corr - loo_lin_dx) ** 2 + (dy_corr - loo_lin_dy) ** 2
-                            ))
-                            if loo_lin_dist < best_loo:
-                                coef_dx, _, _, _ = np.linalg.lstsq(A_lin, dx_corr, rcond=None)
-                                coef_dy, _, _, _ = np.linalg.lstsq(A_lin, dy_corr, rcond=None)
-                                ny_img, nx_img = aligned.shape
-                                yy_img, xx_img = np.mgrid[0:ny_img, 0:nx_img]
-                                xx_norm = 2 * (xx_img - x_corr.mean()) / max(x_corr.max() - x_corr.min(), 1)
-                                yy_norm = 2 * (yy_img - y_corr.mean()) / max(y_corr.max() - y_corr.min(), 1)
-                                best_shift_x = -(coef_dx[0] + coef_dx[1] * xx_norm + coef_dx[2] * yy_norm)
-                                best_shift_y = -(coef_dy[0] + coef_dy[1] * xx_norm + coef_dy[2] * yy_norm)
-                                best_method = "linear"
-                                best_loo = loo_lin_dist
-
-                        if best_method == "linear":
-                            aligned = _apply_shift(xx_img + best_shift_x, yy_img + best_shift_y)
-                            correction_applied = True
-                            logger.info(
-                                "Post-reproject correction: linear polynomial "
-                                "(%d sources, LOO-CV): median offset %.2f→%.2f px, "
-                                "systematic=(%.2f, %.2f) px",
-                                n_corr, before_dist, best_loo,
-                                med_dx_corr, med_dy_corr,
-                            )
-                        elif best_method == "constant":
-                            nan_mask_shift = np.isnan(aligned)
-                            aligned_filled_shift = np.where(nan_mask_shift, 0.0, aligned)
-                            aligned = _nd_shift(
-                                aligned_filled_shift, (-med_dy_corr, -med_dx_corr),
-                                order=3, mode='nearest',
-                            )
-                            aligned[~fp_mask] = np.nan
-                            correction_applied = True
-                            logger.info(
-                                "Post-reproject correction: constant shift "
-                                "(%d sources, LOO-CV): median offset %.2f→%.2f px, "
-                                "systematic=(%.2f, %.2f) px",
-                                n_corr, before_dist, best_loo,
-                                med_dx_corr, med_dy_corr,
-                            )
-                        else:
-                            logger.info(
-                                "Post-reproject correction: no correction applied "
-                                "(%d sources, LOO-CV median %.2f >= original %.2f); "
-                                "skipping to avoid overfitting.",
-                                n_corr, best_loo, before_dist,
-                            )
-                    else:
-                        logger.info(
-                            "Post-reproject correction: only %d mutual matches (< 5); skipping.",
-                            int(np.sum(mutual_corr)),
-                        )
-                else:
-                    logger.info(
-                        "Post-reproject correction: insufficient sources for matching; skipping."
-                    )
-            else:
-                logger.info(
-                    "Post-reproject correction: invalid image stats; skipping."
-                )
-    except Exception as _corr_err:
-        logger.warning("Post-reproject correction failed (non-fatal): %s", _corr_err)
-
-    # ------------------------------------------------------------------
     # Write output
     # ------------------------------------------------------------------
     hdr = template_header.copy()
@@ -2730,7 +2553,7 @@ class Templates:
                 logger.info("Attempting AstroAlign.")
                 idc = run_IDC.ImageDistortionCorrector(input_yaml=self.input_yaml)
                 res = idc.align_with_astroalign(scienceFpath, templateFpath)
-                if not res or not res.get("science_aligned"):
+                if not res or res.get("rejected") or not res.get("science_aligned"):
                     logger.info("AstroAlign did not produce aligned outputs.")
                     return None, None
                 sci_al = res["science_aligned"]
@@ -3341,26 +3164,29 @@ class Templates:
     def determine_kernel_order(
         sci_fwhm: float,
         ref_fwhm: float,
+        n_sources: int = 0,
     ) -> Tuple[int, str]:
         """
         Choose an appropriate spatial-kernel polynomial order based on
-        how different the science and reference PSFs are.
+        the number of matched sources available to constrain the spatial
+        variation of the kernel across the field of view.
+
+        The DFT kernel handles the PSF shape difference; the polynomial
+        order only controls how the kernel varies spatially.  Order 0
+        (constant) works well for small fields with good alignment.
+
+        Auto-selection is capped at order 1 to avoid excessive RAM usage.
+        Order 2+ scales as (n_terms × kernel_pixels)^2 and can require
+        >7 GB for typical kernel sizes.  Users can override via YAML.
 
         Returns
         -------
         (order, explanation) : (int, str)
         """
-        avg = (sci_fwhm + ref_fwhm) / 2.0
-        rel_diff = abs(sci_fwhm - ref_fwhm) / avg if avg > 0 else 0
-
-        if rel_diff < 0.1:
-            return 0, "PSFs very similar (<10% difference). Constant kernel."
-        elif rel_diff < 0.3:
-            return 1, "Moderate PSF difference (10-30%). Linear kernel."
-        elif rel_diff < 0.5:
-            return 2, "Significant PSF difference (30-50%). Quadratic kernel."
+        if n_sources < 20:
+            return 0, "Few sources (<20). Constant kernel — sufficient for small fields."
         else:
-            return 3, "Large PSF difference (>50%). Cubic kernel."
+            return 1, "Sufficient sources (>=20). Linear spatial variation."
 
     # -----------------------------------------------------------------
     # Robust outlier detection
@@ -4142,6 +3968,7 @@ class Templates:
         template_work_fpath: str = str(templateFpath)
         _sci_clean_path: Optional[str] = None
         _ref_clean_path: Optional[str] = None
+        _sci_prepared_path: Optional[str] = None
         kernel_half_width: Optional[int] = None
 
         try:
@@ -4171,24 +3998,72 @@ class Templates:
                     )
                 return template_work_fpath
 
-            # Background subtraction disabled to preserve original flux values.
-            # SFFT handles flux scaling internally and expects raw ADU values.
-            # Background subtraction alters the DC offset which can interfere with
-            # SFFT's internal photometric scaling.
-            # template_invalid = ~np.isfinite(templateImage) | (
-            #     np.abs(templateImage) < 1.1e-20
-            # )
-            # template_bg_median = 0.0
-            # if not template_invalid.all():
-            #     _, template_bg_median, _ = sigma_clipped_stats(
-            #         templateImage, mask=template_invalid, sigma=3, maxiters=5
-            #     )
-            #     templateImage = templateImage - template_bg_median
-            #     write_fits(_ensure_prepared_template_path(), templateImage, templateHeader)
-            #     logger.info(
-            #         "Reference image background subtracted (median %.4g).",
-            #         float(template_bg_median),
-            #     )
+            # Sky subtraction for SFFT sparse flavor.
+            #
+            # Hu et al. 2022 (Section 3.2): "the input image-pair of sparse-flavor
+            # SFFT is required to be sky subtracted. This requirement is to
+            # simplify the image-masking process so that all the pixels enclosed
+            # in masked regions can be replaced by a constant of zero."
+            #
+            # SFFT's sparse-flavor masking sets non-source regions to zero.  If
+            # images have a non-zero sky background (~1000s of ADU), the zero-masked
+            # regions create artificial step functions at mask boundaries that
+            # corrupt the FFT-based kernel solution.  With sky-subtracted images,
+            # both masked and source regions are near zero, so the step function
+            # is minimal.
+            #
+            # We subtract a sigma-clipped MEDIAN (constant) from each image.  This
+            # is different from BACK_TYPE=AUTO (which uses SExtractor's spatially-
+            # varying background model and was previously tested and rejected due
+            # to residual spatial variations).  A constant median subtraction
+            # removes the DC offset without introducing spatial structure.
+            # BGPolyOrder >= 1 still models any residual spatial background
+            # difference between the two images.
+            #
+            # SFFT's internal photometric scaling (ConstPhotRatio or polynomial)
+            # is unaffected by a constant offset subtraction: the kernel integral
+            # and flux ratio are unchanged when both images are shifted by
+            # constants, because the differential background term absorbs the
+            # difference.
+            ts_cfg_sky = self.input_yaml.get("template_subtraction", {})
+            _sky_subtract = _as_bool(ts_cfg_sky.get("sfft_sky_subtract", True), True)
+            if _sky_subtract:
+                from astropy.stats import sigma_clipped_stats as _scs
+                for _img_label, _img_data, _img_hdr, _is_sci in [
+                    ("science", scienceImage, scienceHeader, True),
+                    ("template", templateImage, templateHeader, False),
+                ]:
+                    _invalid = ~np.isfinite(_img_data) | (np.abs(_img_data) < 1.1e-20)
+                    if _invalid.all():
+                        logger.debug("Sky subtraction skipped for %s: all pixels invalid.", _img_label)
+                        continue
+                    _, _sky_median, _ = _scs(_img_data, mask=_invalid, sigma=3, maxiters=5)
+                    if np.isfinite(_sky_median) and abs(_sky_median) > 1e-10:
+                        _img_data = _img_data - _sky_median
+                        if _is_sci:
+                            scienceImage = _img_data
+                            # Write sky-subtracted science to a temp file so SFFT
+                            # reads the sky-subtracted version, not the original.
+                            fd, _sci_tmp = tempfile.mkstemp(
+                                prefix="science_skysub_",
+                                suffix=".fits",
+                                dir=str(scienceDir),
+                            )
+                            os.close(fd)
+                            write_fits(_sci_tmp, scienceImage, scienceHeader)
+                            _sci_prepared_path = _sci_tmp
+                            scienceFpath = _sci_tmp
+                            logger.info(
+                                "Science image sky-subtracted (median %.4g ADU removed).",
+                                float(_sky_median),
+                            )
+                        else:
+                            templateImage = _img_data
+                            write_fits(_ensure_prepared_template_path(), templateImage, templateHeader)
+                            logger.info(
+                                "Template image sky-subtracted (median %.4g ADU removed).",
+                                float(_sky_median),
+                            )
 
             # Keep interpolation to the WCS reproject stage only.
 
@@ -4372,6 +4247,16 @@ class Templates:
             fwhm_broad = max(fwhm_ref, fwhm_sci)
             fwhm_narrow = min(fwhm_ref, fwhm_sci)
 
+            # BUG 120: Estimate effective source count early for kernel floor
+            # adaptation.  SFFT self-matches when pipeline provides too few
+            # sources.  SFFT's SExtractor typically finds 25-35 sources, but
+            # after cross-matching and quality filtering only ~15-20 survive
+            # for kernel fitting.  Use 20 as a conservative estimate.
+            _n_matched_early = len(matching_sources) if matching_sources else 0
+            _min_prior_early = int(ts_cfg_ker.get("sfft_min_prior_sources", 10) or 10)
+            _sfft_self_match_early = _n_matched_early < _min_prior_early
+            n_eff = 20 if _sfft_self_match_early else _n_matched_early
+
             # Override: user directly specifies kernel half-width in pixels
             _ker_hw_override = ts_cfg_ker.get("kernel_hw_override", None)
             if _ker_hw_override is not None:
@@ -4439,6 +4324,15 @@ class Templates:
                     _floor_mult = min(3.0 + (_sharp_ratio - 1.05) * (2.0 / 0.45), 5.0)
                 else:
                     _floor_mult = 2.0
+                # BUG 120: In sparse fields (<25 matched sources), a large kernel
+                # floor creates an under-constrained fit.  A 32px half-width with
+                # order 1 gives 12675 unknowns vs ~17 sources → flux scaling
+                # discrepancy and dipoles.  Cap the floor multiplier based on
+                # source count so the kernel stays well-constrained.
+                if n_eff < 15:
+                    _floor_mult = min(_floor_mult, 2.0)
+                elif n_eff < 25:
+                    _floor_mult = min(_floor_mult, 2.5)
                 ker_hw_from_conv = int(np.ceil(_mult_effective * fwhm_conv))
                 ker_hw_floor = int(np.ceil(_floor_mult * fwhm_broad))
 
@@ -4657,81 +4551,92 @@ class Templates:
                 ts_cfg["sfft_crowded_method"] = (
                     False  # default to ESP (sparse) for better performance on typical fields
                 )
-            # Kernel polynomial order: auto-select based on PSF difference and
-            # matched-source count.  Higher orders need more sources to constrain
-            # the additional polynomial coefficients and avoid overfitting.
+            # Kernel polynomial order: auto-select based on source count
+            # when set to "auto" or null.  Integer values (0-3) are user
+            # overrides.
             #
-            # Minimum sources per order (empirical; ~20 DOF per term):
-            #   order 0 (constant)  : 1  term  -> ~20 sources
-            #   order 1 (linear)    : 3  terms -> ~40 sources
-            #   order 2 (quadratic) : 6  terms -> ~80 sources
-            #   order 3 (cubic)     : 10 terms -> ~150 sources
-            user_kernel = ts_cfg.get("kernel_order", None)
+            # RAM scaling (SFFT linear system):
+            #   order 0:  1 term  →  manageable
+            #   order 1:  3 terms →  moderate
+            #   order 2:  6 terms →  ~7 GB (auto caps at 1)
+            #   order 3: 10 terms →  ~20 GB (auto caps at 1)
+            _raw_kernel = ts_cfg.get("kernel_order", 0)
+            _is_auto = isinstance(_raw_kernel, str) and _raw_kernel.strip().lower() == "auto"
+            user_kernel = _raw_kernel if (not _is_auto and _raw_kernel is not None) else None
             n_matched = len(matching_sources) if matching_sources else 0
 
-            # If SFFT will do its own matching (few pipeline sources), estimate
-            # the effective source count for kernel_order selection. SFFT's
-            # SExtractor typically finds 25-35 sources in these fields.
-            _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 3) or 3)
+            # n_eff was computed earlier for kernel floor adaptation (BUG 120).
+            # Recompute _sfft_self_match for logging purposes.
+            _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 10) or 10)
             _sfft_self_match = n_matched < _min_prior
-            n_eff = 30 if _sfft_self_match else n_matched
+
+            # Use the conservative n_eff (20 for self-match) for kernel_order
+            # selection as well, consistent with BUG 120 kernel floor fix.
 
             if user_kernel is not None and user_kernel >= 0:
                 # User override: respect it but warn if likely under-constrained
                 kernel_order = min(int(user_kernel), 3)
-                min_src_for_order = {0: 0, 1: 10, 2: 20, 3: 35}
+                min_src_for_order = {0: 5, 1: 20, 2: 50, 3: 80}
                 needed = min_src_for_order.get(kernel_order, 0)
                 if n_eff < needed:
                     logger.warning(
                         "User kernel_order=%d may be under-constrained (only %d matched sources, recommend %d). Consider lowering kernel_order.",
                         kernel_order, n_eff, needed,
                     )
+                if kernel_order >= 2:
+                    logger.warning(
+                        "User kernel_order=%d: orders >=2 use significant RAM "
+                        "(~7 GB for order 2, ~20 GB for order 3 with typical "
+                        "kernel sizes). Ensure sufficient memory is available.",
+                        kernel_order,
+                    )
             else:
-                # Auto-select: start from PSF difference, then downgrade by source count
-                rel_diff = abs(science_fwhm - template_fwhm) / max((science_fwhm + template_fwhm) / 2, 0.1)
-                if rel_diff < 0.10:
-                    order_from_psf = 1
-                elif rel_diff < 0.30:
-                    order_from_psf = 1
-                elif rel_diff < 0.50:
-                    order_from_psf = 2
-                else:
-                    order_from_psf = 3
-
-                # Downgrade if not enough sources to constrain the spatial
-                # variation.  SFFT uses all pixels in the kernel fit (not just
-                # source positions like HOTPANTS), so it needs far fewer sources
-                # to constrain a given polynomial order.  The old thresholds
-                # (40/80/150) were HOTPANTS-appropriate and caused SFFT to
-                # downgrade to order 0 even for large PSF differences, producing
-                # constant kernels that cannot model the PSF variation — leading
-                # to flux scaling mismatches and dipoles.
+                # Auto-select kernel polynomial order based on source count.
                 #
-                # MINIMUM ORDER 1: Even when PSFs are nearly identical, SWarp
-                # resampling leaves a sub-pixel registration residual (typically
-                # 0.1-0.5 px). A constant kernel (order 0) cannot model a
-                # positional offset — it only broadens symmetrically. Order 1
-                # gives SFFT the linear spatial terms needed to absorb this
-                # residual shift, eliminating dipole artefacts at source positions.
-                if n_eff < 35 and order_from_psf >= 3:
-                    order_from_psf = 2
-                if n_eff < 20 and order_from_psf >= 2:
-                    order_from_psf = 1
-                # Floor at order 1: never use order 0 — sub-pixel registration
-                # residuals are always present after resampling.
-                if n_eff < 10:
-                    # Extremely sparse: order 1 still only needs ~6 SFFT sources
-                    # (3 kernel coefficients × 2 axes). Keep order 1 unless
-                    # truly degenerate (<5 sources).
-                    if n_eff < 5 and order_from_psf >= 1:
-                        order_from_psf = 0
-                        logger.warning(
-                            "Only %d matched sources — forced kernel_order=0 "
-                            "(cannot constrain spatial variation). Dipoles likely.",
-                            n_eff,
-                        )
+                # The polynomial order controls how the kernel varies SPATIALLY
+                # across the field of view — NOT how the PSF difference is
+                # modelled.  The DFT kernel itself handles the PSF shape
+                # difference at each position.  The polynomial just determines
+                # how many independent spatial terms are used.
+                #
+                # Order 0 (constant kernel) works well for small fields where
+                # the kernel is uniform across the image.  Order 1 (linear)
+                # allows the kernel to vary linearly across the field.
+                #
+                # RAM CONSTRAINT: SFFT's linear system scales as
+                #   (n_poly_terms × kernel_pixels)^2
+                # With KerHW=35 (kernel 71×71 = 5041 px):
+                #   order 0:  1 term  →  ~5K unknowns  →  manageable
+                #   order 1:  3 terms →  ~15K unknowns →  moderate
+                #   order 2:  6 terms →  ~30K unknowns →  ~7 GB matrix
+                #   order 3: 10 terms →  ~50K unknowns →  ~20 GB matrix
+                # Order 3+ can exhaust RAM on typical machines.  Auto-selection
+                # is capped at order 2 for small kernels (KerHW <= 25), order 1
+                # otherwise.  Users can override with kernel_order in YAML.
+                rel_diff = abs(science_fwhm - template_fwhm) / max((science_fwhm + template_fwhm) / 2, 0.1)
 
-                kernel_order = order_from_psf
+                # BUG 121: With KerHW=20, order 2 needs only ~812 MB
+                # (6×1681=10086 unknowns).  Allow order 2 for small kernels
+                # to model spatially-varying astrometric residuals.
+                _max_auto_order = 2 if ker_hw <= 25 else 1
+
+                if n_eff < 15:
+                    kernel_order = 0
+                elif n_eff < 20:
+                    kernel_order = 1
+                else:
+                    kernel_order = min(2, _max_auto_order)
+
+                # Last-resort alignment may have spatially-varying residuals
+                # that benefit from a linear kernel.  Only boost from 0→1.
+                _is_last_resort = "last_resort" in Path(scienceFpath).name.lower()
+                if _is_last_resort and kernel_order == 0:
+                    kernel_order = 1
+                    logger.info(
+                        "Boosting kernel_order to 1 (last-resort alignment — "
+                        "spatially-varying residuals need linear terms).",
+                    )
+
                 logger.info(
                     "Auto-selected kernel_order=%d (PSF rel_diff=%.2f, %d matched sources%s)",
                     kernel_order, rel_diff, n_matched,
@@ -4992,7 +4897,7 @@ class Templates:
             # Clean up temporary cleaned_ files created by clean_fits_nans.
             # Use the dedicated path variables (not `method`) so cleanup is
             # unconditional even when _subtract_sfft mutates `method` on fallback.
-            for _tmp in (_sci_clean_path, _ref_clean_path):
+            for _tmp in (_sci_clean_path, _ref_clean_path, _sci_prepared_path):
                 try:
                     if _tmp and os.path.exists(_tmp):
                         os.remove(_tmp)
@@ -5102,22 +5007,37 @@ class Templates:
         try:
             script = Path(__file__).parent / "utils" / "run_sfft.py"
             # Only pass masked_sources (variable sources), not masked_centers (segmentation)
-            excluded = masked_sources
+            excluded = list(masked_sources)
+            # Always ban the transient position from SFFT's kernel fit.
+            # The transient is a new source not present in the template; its
+            # pixels bias the DFT-based kernel solution, causing flux scaling
+            # mismatch and dipole residuals at the transient/host position.
+            # XY_PriorBan expects 1-based SExtractor coordinates.
+            _tx = float(self.input_yaml.get("target_x_pix", 0) or 0)
+            _ty = float(self.input_yaml.get("target_y_pix", 0) or 0)
+            if _tx > 0 and _ty > 0:
+                excluded.append((_tx + 1.0, _ty + 1.0))
             current_excluded = list(excluded)
             current_matching_sources = list(matching_sources)
 
             ts_sub = self.input_yaml["template_subtraction"]
             phot_cfg = self.input_yaml.get("photometry", {})
 
-            # ForceConv=REF: always convolve the reference to match the science.
-            # The PSF is built on the science image, so the science PSF is the
-            # reference for subtraction.  Convolving the reference preserves the
-            # science PSF in the difference image, which is required for
-            # photometry and transient detection.
-            forceconv = "REF"
-            logger.info(
-                "SFFT ForceConv=REF (reference always convolved; PSF built on science)."
-            )
+            # ForceConv: which image to convolve to match the other's PSF.
+            # Default: REF (always convolve reference to match science PSF).
+            # This preserves the science PSF in the difference image, which is
+            # required for photometry and transient detection.
+            #
+            # Hu et al. 2022 (Section 6) notes that convolving to match better
+            # seeing causes deconvolution noise amplification.  Users who want
+            # to avoid this can set sfft_forceconv: SCI or sfft_forceconv: auto
+            # in the YAML config.
+            _fc_cfg = str(ts_sub.get("sfft_forceconv", "REF")).strip().upper()
+            if _fc_cfg in ("REF", "SCI", "AUTO"):
+                forceconv = _fc_cfg
+            else:
+                forceconv = "REF"
+            logger.info("SFFT ForceConv=%s.", forceconv)
 
             # Background polynomial order: default to 0 unless the user explicitly overrides
             bg_order = ts_sub.get("sfft_bg_order", 0)
@@ -5232,7 +5152,7 @@ class Templates:
             def _build_sfft_cmd(run_excluded, run_matching, template_fp, diff_fp):
                 # If fewer than min_prior_sources pipeline-matched sources, let SFFT
                 # perform matching.  Must match run_sfft.py's MIN_PRIOR_SOURCES.
-                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 3) or 3)
+                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 10) or 10)
                 if len(run_matching) < min_sources_for_prior:
                     logger.info(
                         "Fewer than %d pipeline-matched sources (%d); letting SFFT perform source matching.",
@@ -5257,8 +5177,10 @@ class Templates:
                     str(mask_loc),
                 ]
                 
-                # Conditionally add -masked_sources argument based on config
-                if pass_masked_sources:
+                # Always pass -masked_sources when we have excluded coordinates.
+                # sfft_pass_masked_sources controls whether *variable sources* are
+                # passed, but the transient must ALWAYS be banned from the kernel fit.
+                if pass_masked_sources or len(run_excluded) > 0:
                     cmd_local.extend(["-masked_sources", excl_str])
                 
                 cmd_local.extend([
@@ -5343,8 +5265,8 @@ class Templates:
                 # Variable star rejection: enable flags must be passed alongside
                 # their thresholds, otherwise the thresholds are ignored and variable
                 # stars bias the kernel fit, leaving residuals at point source positions.
-                coarse_var_rej = _as_bool(ts_sub.get("sfft_coarse_var_rejection", True), True)
-                elab_var_rej = _as_bool(ts_sub.get("sfft_elabo_var_rejection", True), True)
+                coarse_var_rej = _as_bool(ts_sub.get("sfft_coarse_var_rejection", False), False)
+                elab_var_rej = _as_bool(ts_sub.get("sfft_elabo_var_rejection", False), False)
                 cmd_local += ["-coarse_var_rejection", "true" if coarse_var_rej else "false"]
                 cmd_local += ["-elabo_var_rejection", "true" if elab_var_rej else "false"]
 
@@ -5361,7 +5283,7 @@ class Templates:
                     cmd_local += ["-kernel_hw_fwhm_multiplier", str(float(_ker_mult))]
 
                 # Prior source validation
-                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 3)
+                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 10)
                 cmd_local += ["-min_prior_sources", str(int(min_prior_sources))]
 
                 if sfft_crowded:
@@ -5489,7 +5411,8 @@ class Templates:
             #   - Photometric:       "The approximated Flux Scaling from Photometry ..."
             # A large discrepancy (>3%) indicates the kernel integral doesn't match
             # the true flux ratio. This happens when PSFs are nearly identical (kernel
-            # is delta-like, integral ~1.0 regardless of true flux ratio).
+            # is delta-like, integral ~1.0 regardless of true flux ratio) or when too
+            # few sources were used for kernel fitting (unconstrained solution).
             # Note: pre-scaling the reference doesn't fix this — SFFT re-estimates
             # both scalings from the pre-scaled input, preserving the relative mismatch.
             # The discrepancy is a diagnostic indicator of kernel quality, not a
@@ -5499,17 +5422,36 @@ class Templates:
                 if log_path.exists():
                     _log_text = log_path.read_text(errors="ignore")
                     import re as _re
+                    # BUG 110: Include optional minus sign in the capture group
+                    # so negative flux scaling values (e.g., -24.02) are detected.
                     _conv_match = _re.search(
-                        r"Flux Scaling through the Convolution.*?\[([\d.]+)", _log_text
+                        r"Flux Scaling through the Convolution.*?\[(-?[\d.]+)", _log_text
                     )
                     _phot_match = _re.search(
-                        r"Flux Scaling from Photometry.*?\[([\d.]+)", _log_text
+                        r"Flux Scaling from Photometry.*?\[(-?[\d.]+)", _log_text
                     )
                     if _conv_match and _phot_match:
                         _conv_scale = float(_conv_match.group(1))
                         _phot_scale = float(_phot_match.group(1))
-                        _discrep_pct = abs(_conv_scale - _phot_scale) / max(_conv_scale, 1e-10) * 100.0
-                        if _discrep_pct > 3.0:
+                        _discrep_pct = abs(_conv_scale - _phot_scale) / max(abs(_conv_scale), abs(_phot_scale), 1e-10) * 100.0
+                        # BUG 110: Hard rejection for wildly wrong kernels.
+                        # A negative convolution flux scaling or >50% mismatch
+                        # indicates the kernel solution is completely unconstrained
+                        # (typically from < 3 matched sources).  Fall back to
+                        # HOTPANTS rather than producing a garbage subtraction.
+                        _hard_reject = (
+                            _conv_scale < 0
+                            or _discrep_pct > 50.0
+                        )
+                        if _hard_reject:
+                            logger.error(
+                                "SFFT kernel solution is unreliable: convolution flux scaling=%.4f "
+                                "vs photometric=%.4f (%.1f%% mismatch). Kernel is unconstrained "
+                                "(likely too few matched sources). Falling back to HOTPANTS.",
+                                _conv_scale, _phot_scale, _discrep_pct,
+                            )
+                            return "hotpants"
+                        elif _discrep_pct > 3.0:
                             logger.warning(
                                 "SFFT flux scaling discrepancy: convolution=%.4f vs photometric=%.4f "
                                 "(%.1f%% mismatch). Kernel integral does not match true flux ratio — "

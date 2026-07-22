@@ -423,6 +423,9 @@ class Find_FWHM:
             n_pts = len(df)
             # Increased min_samples to avoid focusing on clustered points
             min_samples = min(15, max(5, int(0.5 * n_pts)))
+            # RANSAC requires min_samples <= n_samples. For very small catalogs
+            # (e.g. 4 sources), clamp to avoid ValueError.
+            min_samples = min(min_samples, n_pts)
             if n_pts < 2:
                 logger.warning("Too few points for linearity RANSAC (need at least 2).")
                 return catalog, fit_params, saturation_range
@@ -442,7 +445,7 @@ class Find_FWHM:
                     estimator=ConstantOffsetRegressor(),
                     residual_threshold=residual_threshold,
                     max_trials=max_trials,
-                    min_samples=min(15, max(5, int(0.5 * len(y_snr)))),
+                    min_samples=min(min(15, max(5, int(0.5 * len(y_snr)))), len(y_snr)),
                     random_state=42,
                 )
                 ransac.fit(X_snr, y_snr)
