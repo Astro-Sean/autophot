@@ -1289,6 +1289,49 @@ class WCSSolver:
             f.write(clean_content)
         return output_file
 
+    def _resolve_astrometry_data_dir(self, solvefield_exe: str) -> str | None:
+        """
+        Find the astrometry.net index-file directory for the given solve-field
+        executable.  Linuxbrew/Homebrew installations keep indexes in a Cellar
+        data directory that the binary does not discover on its own.
+        """
+        if not solvefield_exe:
+            return None
+
+        # If ASTROMETRY_DATA is already set and points to a valid directory, use it.
+        _existing = os.environ.get("ASTROMETRY_DATA")
+        if _existing and os.path.isdir(_existing):
+            return _existing
+
+        # Derive from binary location: <prefix>/bin/solve-field -> <prefix>/data
+        _exe = Path(solvefield_exe).resolve()
+        _candidate = _exe.parent.parent / "data"
+        if _candidate.is_dir() and any(_candidate.glob("index-*.fits")):
+            return str(_candidate)
+
+        # Common system-wide installation paths.
+        _system_paths = [
+            "/usr/share/astrometry",
+            "/usr/share/astrometry/data",
+            "/usr/local/share/astrometry",
+            "/usr/local/share/astrometry/data",
+            "/opt/astrometry/data",
+            "/opt/local/share/astrometry",
+            "/opt/local/share/astrometry/data",
+        ]
+        for _sp in _system_paths:
+            if os.path.isdir(_sp) and any(glob.glob(os.path.join(_sp, "index-*.fits"))):
+                return _sp
+
+        # Search up the resolved binary tree for a data directory (handles nested
+        # Linuxbrew/ Homebrew layouts).
+        for _parent in _exe.parents:
+            _data_dir = _parent / "data"
+            if _data_dir.is_dir() and any(_data_dir.glob("index-*.fits")):
+                return str(_data_dir)
+
+        return None
+
     def _run_solve_field(
         self,
         args: list,
@@ -1303,6 +1346,19 @@ class WCSSolver:
             kwargs = dict(shell=False, stdout=logf, stderr=subprocess.STDOUT)
             if os.name != "nt":
                 kwargs["preexec_fn"] = os.setsid
+
+            # Ensure solve-field can find its index files.  Linuxbrew/Homebrew
+            # installs place indexes in a Cellar data dir not on the binary's
+            # default search path.
+            _env = os.environ.copy()
+            _data_dir = self._resolve_astrometry_data_dir(
+                getattr(self, "_solvefield_exe", "")
+            )
+            if _data_dir:
+                _env["ASTROMETRY_DATA"] = _data_dir
+                logf.write(f"# ASTROMETRY_DATA={_data_dir}\n\n")
+            kwargs["env"] = _env
+
             pro = subprocess.Popen(args, **kwargs)
             timed_out = False
             try:
@@ -1951,13 +2007,50 @@ class WCSSolver:
                 f"WCS: Astrometry.net — {os.path.basename(self.fpath)}"
             )
         )
-        if not solvefield_exe:
+        # Resolve solve-field executable: honour explicit config, then PATH,
+        # then common installation locations outside the active conda env.
+        if solvefield_exe:
+            _candidate = str(solvefield_exe)
+            if os.path.isfile(_candidate) and os.access(_candidate, os.X_OK):
+                solvefield_exe = _candidate
+            else:
+                solvefield_exe = shutil.which(_candidate)
+        else:
+            solvefield_exe = shutil.which("solve-field")
+
+        if not solvefield_exe or not os.path.isfile(solvefield_exe):
+            _common_paths = [
+                "/home/linuxbrew/.linuxbrew/bin/solve-field",
+                "/opt/homebrew/bin/solve-field",
+                "/usr/local/bin/solve-field",
+                "/usr/bin/solve-field",
+                "/opt/astrometry/bin/solve-field",
+                os.path.expanduser("~/.linuxbrew/bin/solve-field"),
+                os.path.expanduser("~/homebrew/bin/solve-field"),
+            ]
+            # Also search Linuxbrew/ Homebrew Cellar versions
+            _cellar_paths = sorted(
+                glob.glob("/home/linuxbrew/.linuxbrew/Cellar/astrometry-net/*/bin/solve-field")
+                + glob.glob("/opt/homebrew/Cellar/astrometry-net/*/bin/solve-field")
+                + glob.glob(os.path.expanduser("~/.linuxbrew/Cellar/astrometry-net/*/bin/solve-field"))
+                + glob.glob(os.path.expanduser("~/homebrew/Cellar/astrometry-net/*/bin/solve-field")),
+                reverse=True,
+            )
+            for _p in _common_paths + _cellar_paths:
+                if os.path.isfile(_p) and os.access(_p, os.X_OK):
+                    solvefield_exe = _p
+                    break
+
+        if not solvefield_exe or not os.path.isfile(str(solvefield_exe)):
             logger.warning(
                 "Astrometry.net 'solve-field' executable not found; skipping solve-field WCS step. To install with conda:\n"
                 "  conda install -c conda-forge astrometry\n"
                 "Then ensure 'solve-field' is on PATH or set wcs.solve_field_exe_loc in your YAML."
             )
             return np.nan
+        else:
+            logger.info("Using solve-field executable: %s", solvefield_exe)
+            self._solvefield_exe = solvefield_exe
         if not os.path.isfile(self.fpath):
             logger.error("Image file not found: %s", self.fpath)
             return np.nan
@@ -2389,18 +2482,21 @@ class WCSSolver:
                         logger.info(
                             "WCS solved (%s) with tweak order %s", label, tweak_order
                         )
-                        # Check if solve-field produced zero SIP coefficients
-                        # despite A_ORDER > 0. This happens when too few stars
-                        # were matched for the requested polynomial order.
-                        # Retry with lower tweak orders to get real SIP.
+                        # Check if solve-field produced no usable SIP despite being
+                        # asked for one. This happens when too few stars were matched
+                        # for the requested polynomial order. astrometry.net may
+                        # either write A_ORDER>0 with all-zero coefficients, or fall
+                        # back to a plain TAN (linear) WCS with no SIP keywords.
+                        # Retry with lower tweak orders (down to 0) to find a stable
+                        # distortion model.
                         if tweak_order > 0:
                             try:
                                 with fits.open(wcs_file) as _wh:
                                     _whdr = _wh[0].header
-                                if _whdr.get("A_ORDER", 0) > 0 and not _has_nonzero_sip(_whdr):
+                                if not _has_nonzero_sip(_whdr):
                                     logger.warning(
-                                        "solve-field produced zero SIP coefficients "
-                                        "with tweak order %d (too few matched stars). "
+                                        "solve-field produced no usable SIP with "
+                                        "tweak order %d (too few matched stars). "
                                         "Retrying with lower tweak orders.",
                                         tweak_order,
                                     )
@@ -2445,6 +2541,13 @@ class WCSSolver:
                                                         "WCS solved with non-zero SIP "
                                                         "at tweak order %d",
                                                         _lower,
+                                                    )
+                                                    break
+                                                elif _lower == 0:
+                                                    logger.info(
+                                                        "WCS solved with linear TAN "
+                                                        "at tweak order 0 (no SIP "
+                                                        "could be fit)",
                                                     )
                                                     break
                                                 else:
@@ -2932,8 +3035,6 @@ class WCSSolver:
                                 "keep_input_wcs_if_solved_not_better", True
                             )
                         )
-                        if redo_requested:
-                            keep_if_not_better = False
                         solved_not_better = bool(
                             np.isfinite(med_in)
                             and np.isfinite(med_sv)
@@ -2977,7 +3078,7 @@ class WCSSolver:
                         logger, "WCS input-vs-solved comparison skipped", exc
                     )
 
-                if keep_input_wcs_full and not redo_requested:
+                if keep_input_wcs_full:
                     try:
                         self.header["NAXIS1"] = self.image.shape[1]
                         self.header["NAXIS2"] = self.image.shape[0]

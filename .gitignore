@@ -73,3 +73,9 @@ scripts/
 opencode.json
 
 temp_autophot/
+
+# Documentation
+docs/
+
+# Agent session notes
+agent.smd

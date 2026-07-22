@@ -178,9 +178,10 @@ default_input:
     redo_wcs: True # bool --- If True, solve/refresh WCS even if a WCS exists in the header.
     projection_type: SIP # str --- WCS projection/distortion mode: TPV (solve-field seed + SCAMP refinement) or SIP (solve-field only).
     allow_fallback_to_existing_on_solve_fail: False # bool --- If False, require a fresh solve when redo_wcs=True (no silent fallback to original header WCS).
-    apply_solved_to_fits: True # bool --- If True, write solved WCS back into the FITS header on disk.
+    apply_solved_to_fits: False # bool --- If True, write solved WCS back into the FITS header on disk. Default False to avoid overwriting the telescope WCS with a poor solve-field solution on sparse fields.
     solve_field_exe_loc: solve-field # str --- `solve-field` executable name/path (defaults to `solve-field` on PATH).
-    solve_field_tweak_order: 4 # int --- solve-field SIP tweak order to use (single-value mode).
+    solve_field_tweak_order: 4 # int --- solve-field SIP tweak order to use (single-value mode; ignored if solve_field_tweak_orders is set).
+    solve_field_tweak_orders: [4, 2, 1, 0] # list[int] --- Fallback sequence: try order 4 SIP, then order 2, order 1, and finally order 0 (linear TAN) if too few stars are matched.
     solve_field_nsigma: 5 # int --- Sigma threshold for source detection in solve-field. Lower (e.g. 3) for sparse fields.
     prefer_scamp_tpv_after_solve: True # bool --- After solve-field succeeds, prefer SCAMP WCS (TPV/PV distortion) when available.
     # If True, preserve input non-linear distortion keywords (PV/SIP) when
@@ -403,7 +404,7 @@ default_input:
   template_subtraction:
     do_subtraction: False # bool --- Enable template subtraction step.
     alignment_method: swarp # str --- Science-template registration method (swarp=SCAMP+SWarp [recommended, best subpixel], reproject=WCS-only, astroalign=source matching). SCAMP+SWarp consistently outperforms reproject.
-    alignment_use_extended_sources: False # bool --- If True, allow large/extended sources (galaxies) in SCAMP matching catalogs.
+    alignment_use_extended_sources: True # bool --- If True, allow large/extended sources (galaxies) in SCAMP matching catalogs. Extended sources provide valuable alignment anchors in sparse fields.
     alignment_max_fwhm_pix: 50.0 # float --- Max FWHM (pixels) kept when alignment_use_extended_sources=False.
     alignment_min_matched_sources: 6 # int --- Minimum matched sources for a reliable SCAMP WCS solution. Below this, retry with larger radius or fall back to reproject/AstroAlign.
     alignment_max_match_radius_arcsec: 30.0 # float --- Maximum cross-match radius (arcsec) when retrying with fewer sources. Prevents false matches at extreme radii.
@@ -414,17 +415,17 @@ default_input:
     alignment_min_sources_for_field_gate: 20 # int --- Minimum post-SWarp source matches required before RMS and P95 gates are applied. P95 is unreliable with fewer than 20 samples.
     alignment_require_post_swarp_verification: True # bool --- Reject common-grid SWarp output when subpixel centroid alignment cannot be measured.
     post_swarp_verify: True # bool --- If True, run SExtractor cross-match on SWarp output images to measure post-alignment offsets. When False, SCAMP+SWarp is trusted without independent verification. Enable for diagnostics or when alignment quality is uncertain.
-    alignment_subpixel_shift_correction: False # bool --- If True, apply a sub-pixel shift to the reference image to correct any residual systematic offset measured by post-SWarp verification. Only applies to common_grid mode.
-    alignment_subpixel_shift_threshold: 0.05 # float --- Minimum measured systematic offset (pixels) required before applying sub-pixel shift correction. Below this, the offset is considered negligible.
+    alignment_subpixel_shift_correction: False # bool --- DEPRECATED/NO-OP. Post-SWarp sub-pixel shift correction has been removed because empirical shifts generally make dipoles worse.
+    alignment_subpixel_shift_threshold: 0.05 # float --- DEPRECATED/NO-OP. Kept for config compatibility only.
     alignment_sparse_field_retry_count: 15 # int --- If SExtractor detects fewer than this many sources in either image, re-run with maximum sensitivity (DETECT_THRESH=0.5, smaller BACK_SIZE, CLEAN=N). Set to 0 to disable sparse-field retry.
     skip_resampling: True # bool --- DEPRECATED: use resample_mode instead. If True, maps to resample_mode="wcs_only".
     resample_mode: common_grid # str --- SWarp resampling mode: "common_grid" (both to science grid), "native_scale" (each keeps own pixel scale), "wcs_only" (no resampling).
-    science_first_astrometry: False # bool --- If True, distortion-correct the science image against GAIA-DR3 first via SCAMP+SWarp, then use corrected catalog as astrometric reference. If False (default), use science image's own WCS and detected sources as the astrometric anchor directly — no external catalog needed.
+    science_first_astrometry: False # bool --- If True, distortion-correct the science image against GAIA-DR3 first via SCAMP+SWarp, then use the corrected catalog as astrometric reference for the reference image. Disabled: science-first astrometry adds an extra SCAMP+SWarp step that can introduce overfitting on sparse fields. Direct reference-to-science alignment is more reliable.
     gaia_cache_dir: null # str|null --- Directory to cache downloaded GAIA-DR3 reference catalogs for SCAMP. If null, uses ~/.autophot/scamp_gaia_cache. Caching avoids repeated Vizier downloads for the same field.
     gaia_cache_ttl_days: 30 # int --- Time-to-live for cached GAIA catalogs (days). GAIA-DR3 is static, so long TTLs are safe.
     preserve_scamp_logs: False # bool --- If True, keep SCAMP log files on failure for debugging. Useful when diagnosing astrometric alignment issues.
     method: sfft # str --- Subtraction backend (sfft default; hotpants or zogy optional where available).
-    kernel_order: null # int|null --- Polynomial order for the SFFT kernel flux scaling model. If null, auto-selects based on PSF FWHM difference and matched-source count (0=constant, 1=linear, 2=quadratic, 3=cubic). Set to 0 to force constant kernel.
+    kernel_order: null # int|null|"auto" --- Spatial polynomial order for the SFFT kernel. 0=constant (low RAM), 1=linear, 2=quadratic, 3=cubic. null="auto" auto-selects based on matched source count and alignment quality. Orders >=2 can require >7 GB RAM.
     kernel_hw_fwhm_multiplier: 2.5 # float|null --- Multiplier applied to the FWHM of the convolution kernel when sizing the subtraction kernel half-width. If null, uses 2.0 (recommended). The kernel FWHM is computed as sqrt(FWHM_broad^2 - FWHM_narrow^2); kernel_hw = ceil(multiplier * FWHM_conv). Lower values (e.g. 1.5) give a tighter kernel; higher (e.g. 3.0) allow more fitting freedom at the cost of computation. For undersampled images (FWHM < 2 px), the multiplier is automatically boosted by 1.5x to capture extended PSF wings.
     kernel_hw_override: null # int|null --- If set, directly overrides the auto-computed kernel half-width in pixels. Use for debugging or when automatic sizing is wrong.
     download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).
@@ -459,9 +460,9 @@ default_input:
     sfft_only_flags: [0, 1, 2] # list[int]|null --- SExtractor FLAGS values kept by SFFT source selection (null disables flag filtering).
     sfft_allow_crowded_bg_order_override: False # bool --- If True, crowded SFFT may override bg_order=0 to 2 for stability.
     sfft_cvrej_magd_thresh: 0.12 # float --- Coarse variable-rejection magnitude-difference threshold (lower is stricter).
-    sfft_coarse_var_rejection: True # bool --- Enable SFFT coarse variable-star rejection. When True, sources with magnitude differences exceeding sfft_cvrej_magd_thresh are excluded from the kernel fit, preventing variable stars from biasing the convolution kernel and leaving residuals at point source positions.
+    sfft_coarse_var_rejection: False # bool --- Enable SFFT coarse variable-star rejection. When True, sources with magnitude differences exceeding sfft_cvrej_magd_thresh are excluded from the kernel fit. Disabled by default — in sparse fields with PSF differences, this rejects most sources (e.g. 14/15 killed with 0.12 mag threshold) because aperture mag differences are caused by PSF mismatch, not variability.
     sfft_evrej_ratio_thresh: 6.0 # float --- Elaborate variable-rejection ratio threshold (lower is stricter).
-    sfft_elabo_var_rejection: True # bool --- Enable SFFT elaborate variable-star rejection. When True, SFFT performs a second-pass ratio-based rejection using sfft_evrej_ratio_thresh and sfft_evrej_safe_magdev to further filter variable sources from the kernel fit.
+    sfft_elabo_var_rejection: False # bool --- Enable SFFT elaborate variable-star rejection. When True, SFFT performs a second-pass ratio-based rejection using sfft_evrej_ratio_thresh and sfft_evrej_safe_magdev to further filter variable sources from the kernel fit. Disabled by default — same problem as coarse variable rejection: in sparse fields with PSF differences, the 0.04 mag threshold rejects 60% of matched sources (9/15) because aperture mag differences are caused by PSF mismatch, not variability. With only 6 sources left, the kernel is poorly constrained → flux scaling mismatch → dipoles.
     sfft_evrej_safe_magdev: 0.04 # float --- Safe magnitude-deviation threshold for elaborate rejection.
     sfft_pac_ratio_thresh: 4.0 # float --- Post-anomaly-check ratio threshold for SFFT source filtering.
     sfft_use_post_anomaly_feedback: True # bool --- If True, run one extra SFFT pass using MeLOn post-anomaly sources as additional banned priors.
@@ -477,7 +478,9 @@ default_input:
     sfft_save_decorrelated: True # bool --- Save decorrelated difference image separately as *_decorr.fits. Main diff.fits is non-decorrelated for photometry.
     sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
     sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
-    sfft_min_prior_sources: 3 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT will perform its own source matching. Set to 3 so pipeline-matched sources guide SFFT's SemiAutoMask even for sparse fields.
+    sfft_min_prior_sources: 2 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT will perform its own matching. Set to 2 so pipeline-matched sources are used even for sparse fields.
+    sfft_forceconv: REF # str --- SFFT ForceConv direction: "REF" (default, always convolve reference to preserve science PSF in difference image), "SCI" (convolve science to match reference PSF), "auto" (choose based on FWHM to avoid deconvolution). Per Hu et al. 2022 Section 6, convolving to match better seeing causes deconvolution noise amplification; use "auto" or "SCI" if reference has sharper PSF than science.
+    sfft_sky_subtract: True # bool --- Subtract sigma-clipped median sky from both images before SFFT. Per Hu et al. 2022 Section 3.2, sparse-flavor SFFT requires sky-subtracted input so that masking (setting non-source regions to zero) doesn't create artificial step functions at mask boundaries. Uses constant median subtraction (not SExtractor's spatially-varying BACK_TYPE=AUTO which was previously tested and rejected).
 
     inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).
     inpaint_method: biharmonic # str --- Inpainting algorithm name (e.g. biharmonic).

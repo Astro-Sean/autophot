@@ -382,7 +382,7 @@ class SExtractorWrapper:
             except (TypeError, ValueError):
                 n_iterations = 15
         n_iterations = max(1, int(n_iterations))
-        clipped = sigma_clip(fwhm_values, sigma=5.0, maxiters=n_iterations)
+        clipped = sigma_clip(fwhm_values, sigma=3.0, maxiters=n_iterations)
         fwhm_value = float(np.ma.median(clipped))
         # Guard against pathological estimates (all zeros, NaNs, etc.).
         if not np.isfinite(fwhm_value) or fwhm_value <= 0.0:
@@ -521,10 +521,20 @@ class SExtractorWrapper:
 
         # --- Step 4: Estimate FWHM if needed ---
         if fwhm_est is None and len(sources) > 0:
-            fwhm_est = self.calculate_robust_fwhm(sources["fwhm"].values)
-            fwhm_std = np.nanstd(sources["fwhm"].values)
+            # Use only high-S/N sources for FWHM estimation to avoid bias
+            # from faint sources where SExtractor underestimates FWHM_IMAGE
+            # (truncated profiles at low S/N produce artificially small FWHM).
+            fwhm_snr_min = 10.0
+            if "snr" in sources.columns:
+                high_snr = sources[sources["snr"] >= fwhm_snr_min]
+            else:
+                high_snr = sources
+            fwhm_sources = high_snr if len(high_snr) >= 5 else sources
+            fwhm_est = self.calculate_robust_fwhm(fwhm_sources["fwhm"].values)
+            fwhm_std = np.nanstd(fwhm_sources["fwhm"].values)
             logger.info(
-                f"Estimated FWHM: {fwhm_est:.2f} pixels (sigma = {fwhm_std:.2f} pixels)"
+                f"Estimated FWHM: {fwhm_est:.2f} pixels (sigma = {fwhm_std:.2f} pixels, "
+                f"from {len(fwhm_sources)} sources, SNR >= {fwhm_snr_min if len(high_snr) >= 5 else 3.0})"
             )
 
         # --- Step 5: Drop sources near masked positions ---
@@ -1091,13 +1101,14 @@ class SExtractorWrapper:
                     effective_snr_limit = 3.0
                     relaxed_cuts = False
                 
-                # Apply SNR filter
-                if "SNR_WIN" in sources_df.columns:
-                    sources_df = sources_df[sources_df["SNR_WIN"] >= effective_snr_limit]
-                
-                # Apply FLAGS filter
-                if "FLAGS" in sources_df.columns:
-                    sources_df = sources_df[sources_df["FLAGS"] <= flags]
+                # For matching/alignment catalogs, skip SNR and FLAGS filtering.
+                # SCAMP has its own SN_THRESHOLDS and quality checks; passing
+                # all detections maximizes alignment anchors (especially extended sources).
+                if not use_for_matching:
+                    if "SNR_WIN" in sources_df.columns:
+                        sources_df = sources_df[sources_df["SNR_WIN"] >= effective_snr_limit]
+                    if "FLAGS" in sources_df.columns:
+                        sources_df = sources_df[sources_df["FLAGS"] <= flags]
                 
                 # Apply nmax limit
                 if nmax is not None and len(sources_df) > nmax:
@@ -1209,6 +1220,12 @@ class SExtractorWrapper:
                         fwhm_subset = fwhm_subset[
                             (sharp_vals > sharp_lo) & (sharp_vals < sharp_hi)
                         ]
+                    # Use high-S/N sources for FWHM to avoid bias from faint sources
+                    snr_col = "SNR_WIN" if "SNR_WIN" in fwhm_subset.columns else ("SNR" if "SNR" in fwhm_subset.columns else None)
+                    if snr_col is not None:
+                        high_snr = fwhm_subset[pd.to_numeric(fwhm_subset[snr_col], errors="coerce") >= 10.0]
+                        if len(high_snr) >= 5:
+                            fwhm_subset = high_snr
                     # Use point-source subset for FWHM; fall back to full sample if empty
                     if len(fwhm_subset) > 0:
                         fwhm_est = self.calculate_robust_fwhm(fwhm_subset["FWHM_IMAGE"].values)
@@ -1258,13 +1275,13 @@ class SExtractorWrapper:
                     effective_snr_limit = 3.0
                     relaxed_cuts = False
                 
-                # Apply SNR filter
-                if "SNR_WIN" in sources.columns:
-                    sources = sources[sources["SNR_WIN"] >= effective_snr_limit]
-                
-                # Apply FLAGS filter
-                if "FLAGS" in sources.columns:
-                    sources = sources[sources["FLAGS"] <= flags]
+                # For matching/alignment catalogs, skip SNR and FLAGS filtering.
+                # SCAMP has its own SN_THRESHOLDS and quality checks.
+                if not use_for_matching:
+                    if "SNR_WIN" in sources.columns:
+                        sources = sources[sources["SNR_WIN"] >= effective_snr_limit]
+                    if "FLAGS" in sources.columns:
+                        sources = sources[sources["FLAGS"] <= flags]
                 
                 # Apply nmax limit
                 if nmax is not None and len(sources) > nmax:
@@ -1292,6 +1309,12 @@ class SExtractorWrapper:
                         fwhm_subset = fwhm_subset[
                             (sharp_vals > sharp_lo) & (sharp_vals < sharp_hi)
                         ]
+                    # Use high-S/N sources for FWHM to avoid bias from faint sources
+                    snr_col = "SNR_WIN" if "SNR_WIN" in fwhm_subset.columns else ("SNR" if "SNR" in fwhm_subset.columns else None)
+                    if snr_col is not None:
+                        high_snr = fwhm_subset[pd.to_numeric(fwhm_subset[snr_col], errors="coerce") >= 10.0]
+                        if len(high_snr) >= 5:
+                            fwhm_subset = high_snr
                     if len(fwhm_subset) > 0:
                         fwhm_est = self.calculate_robust_fwhm(fwhm_subset["FWHM_IMAGE"].values)
                     else:
