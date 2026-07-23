@@ -4466,16 +4466,21 @@ def run_photometry():
                 # (1) the NaN exclusion is about photometric reliability, not kernel fitting;
                 # (2) sfft_min_prior_sources may be set high (e.g. 10) to let SFFT do its
                 # own matching, but we still want to exclude sources with corrupted photometry.
+                # Do NOT relax below the annulus outer radius floor — sources within that
+                # radius will fail aperture photometry anyway (bkg_invalid / swarp_padding),
+                # so relaxing would give a false sense of having more sources while actually
+                # losing them all to photometric failures.
+                _proximity_floor = _annulus_outer
                 min_sources_needed = 5
                 while True:
                     min_distances, _ = tree.query(
                         source_coords, k=1, distance_upper_bound=proximity_threshold
                     )
                     n_kept = int((min_distances > proximity_threshold).sum())
-                    if n_kept >= min_sources_needed or proximity_fwhm_mult <= 0.1:
+                    if n_kept >= min_sources_needed or proximity_threshold <= _proximity_floor:
                         break
                     proximity_fwhm_mult /= 2.0
-                    proximity_threshold = ImageFWHM * proximity_fwhm_mult
+                    proximity_threshold = max(ImageFWHM * proximity_fwhm_mult, _proximity_floor)
                     logging.info(
                         f"Relaxing masked-region proximity threshold to FWHM x {proximity_fwhm_mult:.2f} "
                         f"({proximity_threshold:.1f} px) — only {n_kept} sources survived at previous threshold."
