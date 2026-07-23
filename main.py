@@ -4465,7 +4465,8 @@ def run_photometry():
             else:
                 from scipy.spatial import cKDTree
                 tree = cKDTree(masked_pixels)
-                source_coords = matched_df[["x_pix", "y_pix"]].values
+                # argwhere returns (row, col) = (y, x); match that order
+                source_coords = matched_df[["y_pix", "x_pix"]].values
                 # Configurable proximity threshold for masked regions (default: FWHM * 1.5 instead of 3.0)
                 # Can be configured via photometry.masked_region_proximity_fwhm_mult in input_yaml
                 proximity_fwhm_mult = float(
