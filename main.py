@@ -4853,15 +4853,10 @@ def run_photometry():
                                 else:
                                     cs_threshold = 0.3
                                 cs_pass = cs >= cs_threshold
-                                # If the standard threshold leaves too few
-                                # sources (< 5), try lowering it before
-                                # applying.  More sources with a higher
-                                # kernel order is better than fewer sources
-                                # with a constant kernel (dipoles).
-                                if cs_pass.sum() < 5 and n_cs > 5:
-                                    cs_threshold = 0.1
-                                    cs_pass = cs >= cs_threshold
-                                # Only apply if it won't leave too few sources
+                                # Only apply if it won't leave too few
+                                # sources for kernel fitting.  Extended
+                                # sources bias the kernel, but having zero
+                                # sources is worse.  Skip if < 5 would remain.
                                 if cs_pass.sum() >= 5 or n_before_refine <= 5:
                                     n_cs_rejected = int((cs_finite & ~cs_pass).sum())
                                     if n_cs_rejected > 0:
