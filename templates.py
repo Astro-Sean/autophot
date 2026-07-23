@@ -4615,7 +4615,7 @@ class Templates:
                 # to model spatially-varying astrometric residuals.
                 _max_auto_order = 2 if ker_hw <= 25 else 1
 
-                if n_eff < 5:
+                if n_eff < 3:
                     kernel_order = 0
                 elif n_eff < 10:
                     kernel_order = 1
