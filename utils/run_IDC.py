@@ -6284,7 +6284,7 @@ NNW
                         w = np.asarray(hdul_w[0].data, dtype=float)
                     if w.shape != img.shape:
                         return
-                    bad = (~np.isfinite(w)) | (w <= 0)
+                    bad = (~np.isfinite(w)) | (w <= 0) | (img == 0)
                     if not np.any(bad):
                         return
                     n_before = int(np.count_nonzero(~np.isfinite(img)))
