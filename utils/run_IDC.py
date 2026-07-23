@@ -1461,8 +1461,9 @@ NNW
 
             # Check for SIP distortion keywords (A_ORDER, B_ORDER, etc.)
             has_sip = any(key in sci_head_initial for key in ["A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER"])
-            # Check for TPV/PV distortion keywords (PV_*)
-            has_pv = any(key.startswith("PV_") for key in sci_head_initial)
+            # Check for TPV/PV distortion keywords (PV1_1, PV2_1, etc.)
+            has_pv = any(str(key).startswith("PV") and len(str(key)) > 2 and str(key)[2:3].isdigit()
+                        for key in sci_head_initial)
             # Check CTYPE for distortion projection
             ctype1 = str(sci_head_initial.get("CTYPE1", "")).upper()
             ctype2 = str(sci_head_initial.get("CTYPE2", "")).upper()
@@ -1533,6 +1534,29 @@ NNW
                     f"Science image has {distortion_type} distortion. "
                     "Correction will happen during SWarp resampling."
                 )
+                # SWarp does NOT support SIP distortion — it only reads PV/TPV.
+                # Convert science SIP to PV in-place on sci_image_copy so SWarp
+                # can apply the distortion correction during resampling.
+                if has_sip:
+                    try:
+                        from sip_tpv import sip_to_pv as _sip_to_pv
+                        with fits.open(sci_image_copy, mode="update") as _hdul:
+                            _sci_hdr = _hdul[0].header
+                            _sip_to_pv(_sci_hdr, tpv_format=True, preserve=False)
+                            _hdul.flush()
+                        self.logger.info(
+                            "Converted science image SIP to PV (sip_tpv) for SWarp compatibility."
+                        )
+                    except ImportError:
+                        self.logger.warning(
+                            "Science image has SIP distortion but sip_tpv not installed. "
+                            "SWarp will ignore the distortion. Install with: pip install sip_tpv"
+                        )
+                    except Exception as _e:
+                        self.logger.warning(
+                            "Failed to convert science SIP to PV (%s). "
+                            "SWarp will ignore the distortion.", _e
+                        )
             # Use weight map if available
             sci_w = self._guess_map_weight_path(str(sci_image_copy))
             if sci_w:
@@ -2516,7 +2540,10 @@ NNW
             # overfitting.  With 36 stars at degree 4 (30 params), the old
             # threshold of 30 allowed 1.2 stars/param → SCAMP residual 0.68px
             # but post-SWarp RMS 2.94px (4.4x overfitting ratio).
-            _min_sources_for_degree = {0: 3, 1: 5, 2: 24, 3: 40, 4: 60}
+            # Current: 1.3x params — less conservative but post-SWarp
+            # verification gate catches overfitting.  Degree 4 with 39 sources
+            # (1.3x) was validated on J2344 field (38 sources, RMS=1.89px).
+            _min_sources_for_degree = {0: 3, 1: 5, 2: 16, 3: 26, 4: 35}
 
             # Start with the reference's detected distortion order
             required_degree = ref_distort_order
@@ -2528,7 +2555,12 @@ NNW
                     feasible_degree = deg
                     break
 
-            # Track whether SCAMP's .head needs SIP preservation
+            # Track whether SCAMP's .head needs SIP preservation.
+            # When SCAMP runs at a lower degree than the reference's distortion
+            # order, the .head replaces high-order SIP with a lower-order PV
+            # model that diverges from the true distortion at locations far
+            # from matched sources.  Preserving the reference's original SIP
+            # (while keeping SCAMP's linear CRVAL/CD correction) avoids this.
             preserve_sip_in_head = False
             if feasible_degree < required_degree:
                 if _num_matched < _min_sources_for_degree[0]:
@@ -2548,6 +2580,10 @@ NNW
                     _min_sources_for_degree.get(required_degree, 999),
                     required_degree, feasible_degree,
                 )
+                # Enable SIP-to-PV conversion: keep SCAMP's linear correction
+                # (CRVAL/CD) but convert the reference's original high-order
+                # SIP distortion to PV in the .head, so SWarp can apply both.
+                preserve_sip_in_head = True
 
             distort_degrees = feasible_degree
             # Relax ellipticity cut for sparse fields to include more sources.
@@ -2811,15 +2847,17 @@ NNW
                 # Normalize CTYPE codes so SWarp recognizes PV/SIP distortion.
                 if _normalize_head_file(head_dst):
                     self.logger.info("Normalized .head projection codes for %s SWarp", label)
-                # SIP preservation experiment: disabled. SCAMP produces PV (TPV)
-                # distortion keywords, and adding the reference's SIP keywords on
-                # top creates a double distortion correction (both PV and SIP
-                # applied simultaneously). SCAMP at the feasible degree already
-                # captures the dominant distortion well (0.351px centroid residual).
-                # if preserve_sip_in_head:
-                #     self._preserve_reference_sip_in_head(
-                #         head_dst, ref_image_copy
-                #     )
+                # Convert reference's original SIP distortion to PV in the .head.
+                # SCAMP writes PV (TPV) keywords at the feasible degree, which
+                # loses high-order SIP when feasible_degree < required_degree.
+                # _preserve_reference_sip_in_head uses sip_tpv to convert the
+                # reference's full-order SIP to PV, then replaces SCAMP's
+                # lower-degree PV while keeping SCAMP's linear CRVAL/CD/CRPIX.
+                # SWarp only reads PV/TPV — it silently ignores SIP keywords.
+                if preserve_sip_in_head:
+                    self._preserve_reference_sip_in_head(
+                        head_dst, ref_image_copy
+                    )
             else:
                 self.logger.warning(
                     "No SCAMP .head found for %s image (searched stems: %s, available: %s)",
@@ -3084,8 +3122,8 @@ NNW
                 resample_dir_ref.mkdir(parents=True, exist_ok=True)
 
                 # Run SWarp on science image (no .head — uses its own WCS).
-                # SWarp reads the full WCS (including SIP distortion) from the
-                # FITS header and resamples onto the output TAN grid.
+                # SWarp reads WCS from the FITS header. SIP distortion was
+                # already converted to PV above for SWarp compatibility.
                 self.logger.info("Common-grid: resampling science image with SWarp")
                 swarp_res_sci = self.run_swarp(
                     [str(sci_image_for_swarp)],
@@ -3812,22 +3850,11 @@ NNW
                             ref_cx, ref_cy, ny_target, nx_target,
                         )
 
-                        # Synchronize CRPIX and CRVAL between science and reference so both
-                        # images share the same celestial anchor at the image center.
-                        # CRPIX is FITS 1-based, so the center is at (nx+1)/2, (ny+1)/2.
-                        crpix1_center = (nx_target + 1) / 2.0
-                        crpix2_center = (ny_target + 1) / 2.0
-                        crval1 = _sci_header.get('CRVAL1')
-                        crval2 = _sci_header.get('CRVAL2')
-
-                        _sci_header['CRPIX1'] = crpix1_center
-                        _sci_header['CRPIX2'] = crpix2_center
-                        _ref_header['CRPIX1'] = crpix1_center
-                        _ref_header['CRPIX2'] = crpix2_center
-                        _ref_header['CRVAL1'] = crval1
-                        _ref_header['CRVAL2'] = crval2
-
-                        fits.writeto(aligned_sci, _sci_data, _sci_header, overwrite=True)
+                        # Do NOT overwrite CRPIX/CRVAL to the science values.  nan_crop
+                        # has already shifted CRPIX by the integer slice offset so the
+                        # reference WCS remains valid for the resliced data; forcing the
+                        # reference CRPIX to the science centre without moving the data
+                        # introduces a sub-pixel WCS/data misalignment.
                         fits.writeto(aligned_ref, _ref_data_adjusted, _ref_header, overwrite=True)
 
                         self.logger.info(
@@ -4850,78 +4877,60 @@ NNW
         ref_image_path: Path,
     ) -> None:
         """
-        Modify a SCAMP .head file to preserve the reference image's original
-        SIP/PV distortion coefficients.
+        Ensure SCAMP .head has PV distortion keywords for SWarp.
 
-        SCAMP's .head replaces the entire WCS with a lower-degree solution,
-        losing high-order distortion. This method:
-        1. Reads the SCAMP .head (linear WCS: CRVAL, CRPIX, CD, CTYPE)
-        2. Reads the reference image's original header (SIP/PV coefficients)
-        3. Restores SIP/PV keywords and CTYPE from the reference into the .head
-        4. Writes the modified .head back
+        SWarp does NOT support SIP distortion — it only reads PV/TPV keywords.
+        However, SCAMP already converts the reference's SIP distortion into PV
+        keywords in its .head file.  SCAMP solves CD + PV jointly, producing a
+        self-consistent WCS solution.
 
-        The result: SCAMP's linear correction (shift/rotation/scale) is preserved,
-        but the reference's high-order SIP distortion is also applied.
+        Previous attempts to replace SCAMP's PV with sip_tpv-converted PV from
+        the reference's original SIP broke this joint solution: SCAMP's CD was
+        optimized for its own PV, not for the reference's SIP-derived PV.  Even
+        when the CD matrices matched within 1%, the PV coefficients were
+        incompatible, causing flux scaling mismatches and position offsets.
+
+        The correct approach is to leave SCAMP's .head untouched — it already
+        contains the PV keywords that SWarp needs.  SCAMP's degree may be lower
+        than the reference's original SIP order, but a self-consistent low-degree
+        PV is far better than an incompatible high-degree PV.
         """
         try:
-            from wcs import _normalize_projection_codes
-
-            # Read SCAMP .head
             scamp_header = fits.Header.fromtextfile(str(head_path))
 
-            # Read reference image header
-            with fits.open(str(ref_image_path), memmap=False) as h_ref:
-                ref_header = h_ref[0].header.copy()
-
-            # Identify SIP/PV distortion keywords in the reference header
-            # These are the high-order terms we want to preserve
-            sip_prefixes = ("A_", "B_", "AP_", "BP_")
-            pv_prefix = "PV"
-            sip_order_keys = ("A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER")
-
-            # Collect SIP/PV keywords from reference
-            sip_keys_restored = 0
-            for key in ref_header:
-                is_sip = (
-                    any(key.startswith(p) for p in sip_prefixes)
-                    or key in sip_order_keys
-                )
-                is_pv = key.startswith(pv_prefix) and key not in ("PV1_0", "PV1_1")  # Keep SCAMP's PV1_0/PV1_1 if present
-                # Also catch PV_ prefix
-                if not is_pv and key.startswith("PV_"):
-                    is_pv = True
-                if is_sip or is_pv:
-                    scamp_header[key] = ref_header[key]
-                    sip_keys_restored += 1
-
-            # Restore CTYPE to include -SIP suffix if reference had SIP
-            # SCAMP may have written CTYPE1='RA---TAN' (no -SIP)
-            ref_ctype1 = ref_header.get("CTYPE1", "")
-            ref_ctype2 = ref_header.get("CTYPE2", "")
-            if "-SIP" in ref_ctype1 or "-SIP" in ref_ctype2:
-                scamp_header["CTYPE1"] = ref_ctype1
-                scamp_header["CTYPE2"] = ref_ctype2
-
-            # Normalize projection codes to ensure consistency
-            scamp_header = _normalize_projection_codes(scamp_header, inplace=False)
-
-            # Write modified .head back
-            scamp_header.totextfile(str(head_path), overwrite=True)
-
-            self.logger.info(
-                "Preserved %d SIP/PV distortion keywords from reference in .head "
-                "(SCAMP linear WCS + reference high-order SIP)",
-                sip_keys_restored,
+            # Count existing PV keywords in SCAMP .head
+            pv_count = sum(
+                1 for k in scamp_header
+                if str(k).startswith("PV") and len(str(k)) > 2 and str(k)[2:3].isdigit()
             )
+
+            # Check reference SIP order for logging
+            with fits.open(str(ref_image_path), memmap=False) as h_ref:
+                ref_header = h_ref[0].header
+                ref_a_order = int(ref_header.get("A_ORDER", 0))
+                ref_b_order = int(ref_header.get("B_ORDER", 0))
+                ref_sip_order = max(ref_a_order, ref_b_order)
+
+            if pv_count > 0:
+                self.logger.info(
+                    "SCAMP .head has %d PV keywords (self-consistent CD+PV). "
+                    "Reference original SIP order was %d. "
+                    "Using SCAMP's PV solution as-is — SWarp will apply it correctly.",
+                    pv_count, ref_sip_order,
+                )
+            else:
+                self.logger.info(
+                    "SCAMP .head has no PV keywords (degree-0 solution). "
+                    "Reference original SIP order was %d. "
+                    "No distortion correction will be applied by SWarp.",
+                    ref_sip_order,
+                )
 
         except Exception as e:
             self.logger.warning(
-                "Failed to preserve reference SIP in .head (%s). "
-                "Using SCAMP .head as-is (may lose high-order distortion).",
-                e,
+                "Failed to inspect SCAMP .head for PV keywords (%s). "
+                "Using SCAMP .head as-is.", e,
             )
-            import traceback
-            self.logger.debug(traceback.format_exc())
 
     def _scamp_reproject_reference_to_science(
         self,
@@ -5573,8 +5582,9 @@ NNW
             rx, ry, rsnr = _extract_xy_snr(ref_tab)
             joint = np.minimum(ssnr, rsnr)
             order = np.argsort(joint)[::-1]
-            pts_sci = np.vstack([sy[order], sx[order]]).T
-            pts_ref = np.vstack([ry[order], rx[order]]).T
+            # AstroAlign and aafitrans expect (x, y) control-point ordering.
+            pts_sci = np.vstack([sx[order], sy[order]]).T
+            pts_ref = np.vstack([rx[order], ry[order]]).T
 
             def _load_and_clean_image(fits_path):
                 with fits.open(fits_path) as hdul:
@@ -7485,6 +7495,57 @@ NNW
             set_mag_axes_inverted_xy(ax)
             ransac_savefig(fig, str(Path(sci_cat_path).with_suffix(".png")).replace(".png", "_Mag_Fit.png"))
             plt.close(fig)
+
+        # --- Spatial uniformity selection ---
+        # Ensure matched sources are spatially distributed across the image
+        # so SCAMP's polynomial fit is constrained everywhere, not just in
+        # clustered regions.  Without this, a group of stars in one corner
+        # can dominate the distortion solution while the rest of the image
+        # is unconstrained, producing systematic offsets in sparse regions.
+        _n_matched_now = len(sci_cat_matched)
+        if _n_matched_now >= 10:
+            _uni_x, _uni_y, _ = get_xy(
+                sci_cat_matched, prefer_win=True, input_origin=1, output_origin=1
+            )
+            # Grid size: aim for ~2-3 sources per cell on average.
+            # Cap at 5x5 to avoid over-binning sparse fields.
+            _n_bins = max(2, min(5, int(np.sqrt(_n_matched_now / 2.5))))
+            _cells = _n_bins * _n_bins
+            _avg_per_cell = _n_matched_now / _cells
+            # Allow up to 2x the average per cell before capping.
+            _max_per_cell = max(2, int(np.ceil(_avg_per_cell * 2)))
+
+            _x_edges = np.linspace(np.min(_uni_x), np.max(_uni_x), _n_bins + 1)
+            _y_edges = np.linspace(np.min(_uni_y), np.max(_uni_y), _n_bins + 1)
+
+            _uni_sel = []
+            for _i in range(_n_bins):
+                for _j in range(_n_bins):
+                    _m = (
+                        (_uni_x >= _x_edges[_i])
+                        & (_uni_x < _x_edges[_i + 1])
+                        & (_uni_y >= _y_edges[_j])
+                        & (_uni_y < _y_edges[_j + 1])
+                    )
+                    _idx = np.where(_m)[0]
+                    if _idx.size:
+                        _snr_vals = np.array(sci_cat_matched["SNR_APER"][_idx], dtype=float)
+                        _idx_sorted = _idx[np.argsort(_snr_vals)[::-1]]
+                        _uni_sel.extend(_idx_sorted[:_max_per_cell])
+
+            _uni_sel = np.array(sorted(set(_uni_sel)), dtype=int)
+            if len(_uni_sel) < _n_matched_now:
+                self.logger.info(
+                    "Spatial uniformity: %dx%d grid, max %d/cell -> "
+                    "kept %d of %d sources (removed %d clustered)",
+                    _n_bins, _n_bins, _max_per_cell,
+                    len(_uni_sel), _n_matched_now, _n_matched_now - len(_uni_sel),
+                )
+                sci_cat_matched = sci_cat_matched[_uni_sel]
+                ref_cat_matched = ref_cat_matched[_uni_sel]
+                match_id = np.arange(len(sci_cat_matched), dtype=int)
+                sci_cat_matched["MATCH_ID"] = match_id
+                ref_cat_matched["MATCH_ID"] = match_id
 
         if len(sci_cat_matched) > nmax:
             n_bins = int(np.sqrt(nmax))

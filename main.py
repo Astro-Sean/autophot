@@ -245,7 +245,7 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
     header : fits.Header
         FITS header to update with new WCS after trimming
     target_x, target_y : float, optional
-        Target position in pixels (1-indexed, typical FITS convention)
+        Target position in pixels (0-indexed, numpy convention)
     buffer_pixels : int
         Minimum buffer around valid data region
 
@@ -289,8 +289,8 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
     # Check if target is included (if provided)
     expanded = False
     if target_x is not None and target_y is not None:
-        # Convert to 0-indexed for array checking
-        tx_0idx, ty_0idx = target_x - 1, target_y - 1
+        # Coordinates are already 0-based (from all_world2pix with origin=0)
+        tx_0idx, ty_0idx = target_x, target_y
 
         # Expand bounds to include target if needed
         if tx_0idx < x_min:
@@ -331,8 +331,8 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
 
     # Perform trim using nan_crop to preserve WCS distortion keywords
     # (CD matrix, SIP, PV) that WCS round-trip can drop.
-    cutout_x = (x_min + x_max + 1) / 2.0
-    cutout_y = (y_min + y_max + 1) / 2.0
+    cutout_x = (x_min + x_max) / 2.0
+    cutout_y = (y_min + y_max) / 2.0
     cutout_ny = y_max - y_min + 1
     cutout_nx = x_max - x_min + 1
 
@@ -1851,8 +1851,9 @@ def run_photometry():
             ).find_non_uniform_center(image)
 
             # Calculates the height and width of the cropped image.
-            height = bottom_row - top_row
-            width = right_col - left_col
+            # find_non_uniform_center returns inclusive bounds, so add 1.
+            height = bottom_row - top_row + 1
+            width = right_col - left_col + 1
 
             # Checks if cropping is actually needed.
             if (height < image.shape[0] - 1) or (width < image.shape[1] - 1):
@@ -4108,11 +4109,19 @@ def run_photometry():
                     
                     # Creates a cutout for the template image.
                     # Use nan_crop to preserve WCS distortion keywords.
+                    # Centre on the SAME sky position as the science cutout
+                    # (projected through the template WCS), not the template's
+                    # geometric centre (tnx/2).  After SWarp both images share
+                    # the same WCS, so this gives identical pixel coordinates.
+                    # Using tnx/2 instead of (tnx-1)/2 introduces a 0.5px
+                    # differential offset for even-sized images.
                     tny, tnx = template_image.shape
-                    template_center_pix = (tnx / 2, tny / 2)
+                    template_center_pix = template_wcs.all_world2pix(
+                        science_center_world[0], science_center_world[1], 0
+                    )
                     template_image, template_header = nan_crop(
                         template_image, template_header,
-                        template_center_pix[0], template_center_pix[1],
+                        float(template_center_pix[0]), float(template_center_pix[1]),
                         ny, nx,
                     )
                     # Saves the results.
@@ -4696,12 +4705,59 @@ def run_photometry():
 
                     # ------------------------------------------------------------------
                     # Refine SFFT / HOTPANTS priors: keep only isolated, PSF-like stars
-                    # (remove extended objects / galaxies via size outliers and reject
-                    # crowded stars with close neighbours in either image).
+                    # (remove extended objects / galaxies via CLASS_STAR, ellipticity,
+                    # size outliers, and reject crowded stars with close neighbours
+                    # in either image).
                     # ------------------------------------------------------------------
                     ms = MatchingSources.copy()
                     n_before_refine = len(ms)
                     try:
+                        # --- Point-source selection via CLASS_STAR ---
+                        # SExtractor's CLASS_STAR ranges from 0 (extended) to 1
+                        # (point-like).  Extended sources bias the SFFT kernel fit
+                        # because their profiles differ from the PSF.  Use an
+                        # adaptive threshold: stricter when we have enough sources,
+                        # more permissive for sparse fields.
+                        if "class_star" in ms.columns:
+                            cs = pd.to_numeric(ms["class_star"], errors="coerce")
+                            cs_finite = cs.notna()
+                            if cs_finite.any():
+                                n_cs = int(cs_finite.sum())
+                                if n_cs >= 10:
+                                    cs_threshold = 0.5
+                                else:
+                                    cs_threshold = 0.3
+                                cs_pass = cs >= cs_threshold
+                                # Only apply if it won't leave too few sources
+                                if cs_pass.sum() >= 3 or n_before_refine <= 3:
+                                    n_cs_rejected = int((cs_finite & ~cs_pass).sum())
+                                    if n_cs_rejected > 0:
+                                        logging.info(
+                                            f"CLASS_STAR filter: removed {n_cs_rejected} extended sources "
+                                            f"(CLASS_STAR < {cs_threshold}, {n_cs - n_cs_rejected}/{n_cs} kept)"
+                                        )
+                                    ms = ms[cs_pass | ~cs_finite]
+
+                        # --- Ellipticity filter (backup for point-source selection) ---
+                        # Point sources should be nearly circular.  The column
+                        # "roundness" is SExtractor's ELLIPTICITY (0 = circular,
+                        # 1 = highly elongated).  Galaxies often have high
+                        # ellipticity.  This catches extended sources that
+                        # CLASS_STAR may miss (e.g. compact galaxies).
+                        if "roundness" in ms.columns and len(ms) > 3:
+                            ell = pd.to_numeric(ms["roundness"], errors="coerce")
+                            ell_finite = ell.notna()
+                            if ell_finite.any():
+                                ell_pass = ell <= 0.5
+                                if ell_pass.sum() >= 3 or len(ms) <= 3:
+                                    n_ell_rejected = int((ell_finite & ~ell_pass).sum())
+                                    if n_ell_rejected > 0:
+                                        logging.info(
+                                            f"Ellipticity filter: removed {n_ell_rejected} elongated sources "
+                                            f"(ellipticity > 0.5)"
+                                        )
+                                    ms = ms[ell_pass | ~ell_finite]
+
                         # Size-based outlier rejection (robust sigma-clipping on FWHM)
                         size_col = None
                         for c in ("fwhm", "fwhm_psf", "fwhm_model"):
@@ -5115,6 +5171,40 @@ def run_photometry():
                         "VSCALE=%.4f applied to background_rms for consistent error model on difference image.",
                         _vscale_header,
                     )
+
+        # -----------------------------------------------------------------------
+        # ForceConv PSF consistency check
+        #
+        # When SFFT uses ForceConv=SCI, the difference image has the REFERENCE
+        # PSF (broader), not the science PSF. The PSF model (epsd_model) was
+        # built from the science image. For target photometry on the difference
+        # image, the PSF model should match the difference image's PSF.
+        #
+        # We log a warning and adjust the FWHM in input_yaml so the PSF fitting
+        # bound and target FWHM reporting use the correct (reference) FWHM.
+        # The epsf_model itself is not rebuilt — the PSF fit on the target will
+        # adapt its fit_box to the new FWHM, and the amplitude/flux is the
+        # primary measurement (relatively insensitive to PSF shape for point
+        # sources).
+        # -----------------------------------------------------------------------
+        _forceconv_diff = None
+        if PreformSubtraction:
+            _forceconv_diff = str(header.get("FORCECON", "")).strip().upper()
+            if _forceconv_diff == "SCI":
+                _ref_fwhm_hdr = float(header.get("FWHM_REF", 0))
+                _sci_fwhm_hdr = float(header.get("FWHM_SCI", 0))
+                if _ref_fwhm_hdr > 0 and _sci_fwhm_hdr > 0:
+                    logging.info(
+                        "SFFT ForceConv=SCI: difference image has reference PSF "
+                        "(FWHM=%.2f px) instead of science PSF (FWHM=%.2f px). "
+                        "Adjusting FWHM for target photometry.",
+                        _ref_fwhm_hdr, _sci_fwhm_hdr,
+                    )
+                    input_yaml["fwhm"] = _ref_fwhm_hdr
+            elif _forceconv_diff == "REF":
+                logging.debug(
+                    "SFFT ForceConv=REF: difference image has science PSF (consistent with PSF model)."
+                )
 
         # Gets the WCS information from the header.
         imageWCS = get_wcs(header)
