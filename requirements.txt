@@ -16,6 +16,7 @@ scikit-image>=0.24
 scikit-learn>=1.9
 scipy>=1.17
 sfft==1.7.3
+sip_tpv==1.1
 tqdm>=4.68
 ccdproc>=2.5
 # SFFT dependencies

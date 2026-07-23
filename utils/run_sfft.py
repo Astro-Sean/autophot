@@ -1854,6 +1854,19 @@ def run_sfft() -> Optional[int]:
         except Exception as e:
             log_info(f"Warning: failed to reapply invalid mask to diff: {e}")
 
+        # Write ForceConv to difference image header so downstream photometry
+        # knows which PSF the difference image has.
+        # ForceConv=REF => DIFF has science PSF; ForceConv=SCI => DIFF has ref PSF.
+        # SFFT already writes FWHM_SCI and FWHM_REF to the header.
+        try:
+            if FITS_DIFF and os.path.isfile(FITS_DIFF):
+                with fits.open(FITS_DIFF, mode="update", memmap=False) as hdul:
+                    hdr = hdul[0].header
+                    hdr["FORCECON"] = (ForceConv, "SFFT convolution direction (REF or SCI)")
+                    hdul.flush()
+        except Exception as e:
+            log_info(f"Warning: failed to write ForceConv header: {e}")
+
         t1_sfft = time.time()
         log_info(f"SFFT core elapsed: {t1_sfft - t0_sfft:.3f} s")
 
