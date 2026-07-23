@@ -4442,6 +4442,23 @@ def run_photometry():
                     (input_yaml.get("photometry", {}) or {}).get("masked_region_proximity_fwhm_mult", 1.5)
                 )
                 proximity_threshold = ImageFWHM * proximity_fwhm_mult
+                # The aperture annulus extends well beyond 1.5*FWHM from the source
+                # centre (aperture + gap*FWHM + width*FWHM ≈ 5.3*FWHM for default
+                # non-crowded settings).  Sources within the annulus outer radius of
+                # a NaN/zero region will have contaminated background estimates
+                # (bkg_invalid from zero-variance SWarp-padded pixels).  Use the
+                # annulus outer radius as a floor for the proximity threshold.
+                _ap_r = float(aperture_radius)
+                _gap = float((input_yaml.get("photometry", {}) or {}).get("annulus_gap_fwhm", 0.75))
+                _width = float((input_yaml.get("photometry", {}) or {}).get("annulus_width_fwhm", 2.0))
+                _annulus_outer = _ap_r + (_gap + _width) * ImageFWHM
+                if _annulus_outer > proximity_threshold:
+                    logging.info(
+                        f"Adjusting proximity threshold from FWHM*{proximity_fwhm_mult:.1f}="
+                        f"{proximity_threshold:.1f}px to annulus outer radius={_annulus_outer:.1f}px "
+                        f"(aperture={_ap_r:.0f} + gap+width={(_gap+_width)*ImageFWHM:.1f}px)"
+                    )
+                    proximity_threshold = _annulus_outer
 
                 # Adaptive exclusion: if excluding sources near masked regions leaves
                 # too few sources, progressively relax the threshold.
