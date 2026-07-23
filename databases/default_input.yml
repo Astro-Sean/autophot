@@ -478,7 +478,7 @@ default_input:
     sfft_save_decorrelated: True # bool --- Save decorrelated difference image separately as *_decorr.fits. Main diff.fits is non-decorrelated for photometry.
     sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
     sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
-    sfft_min_prior_sources: 2 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT will perform its own matching. Set to 2 so pipeline-matched sources are used even for sparse fields.
+    sfft_min_prior_sources: 8 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT performs its own matching; this avoids under-constrained sparse prior lists.
     sfft_forceconv: REF # str --- SFFT ForceConv direction: "REF" (always convolve reference — difference keeps science PSF — RECOMMENDED), "SCI" (convolve science), "AUTO" (SFFT auto-selects based on FWHMs). REF is best because reference is pre-scaled to match science flux, preventing kernel error amplification.
     sfft_sky_subtract: True # bool --- Subtract sigma-clipped median sky from both images before SFFT. Per Hu et al. 2022 Section 3.2, sparse-flavor SFFT requires sky-subtracted input so that masking (setting non-source regions to zero) doesn't create artificial step functions at mask boundaries. Uses constant median subtraction (not SExtractor's spatially-varying BACK_TYPE=AUTO which was previously tested and rejected).
 
