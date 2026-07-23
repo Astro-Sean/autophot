@@ -3627,7 +3627,8 @@ def run_photometry():
         if (
             (not do_aperture_ONLY or prepare_template)
             and epsf_model is None
-            and len(IsolatedSources) >= min_sources_for_psf
+            and psf_source_pool is not None
+            and len(psf_source_pool) >= min_sources_for_psf
         ):
             if build_from_aligned:
                 logging.info(
