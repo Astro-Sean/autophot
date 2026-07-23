@@ -2806,8 +2806,8 @@ class Limits:
         owns_figure = fig is None
         if owns_figure:
             # Create figure with main completeness plot on top, injection examples below
-            fig = plt.figure(figsize=set_size(540, 1.5))
-            gs = GridSpec(3, 4, figure=fig, height_ratios=[1.5, 1, 1])
+            fig = plt.figure(figsize=set_size(540, 2.0))
+            gs = GridSpec(2, 4, figure=fig, height_ratios=[1.5, 1], wspace=0.35, hspace=0.45)
         else:
             # Use provided figure and gridspec
             if gs is None:
@@ -3559,7 +3559,7 @@ class Limits:
                     )
 
         if owns_figure:
-            fig.tight_layout()
+            fig.tight_layout(pad=0.8, h_pad=0.6, w_pad=0.6)
             save_loc_png = os.path.join(write_dir, f"Completeness_{base}.png")
             fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor="white")
             plt.close(fig)
