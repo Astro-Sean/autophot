@@ -58,7 +58,7 @@ DIVERGENT_PALETTE = {
     'fwhm_low': '#313695',  # Dark blue for low FWHM
     'fwhm_mid': '#F7F7F7',  # Light gray for mid FWHM
     'fwhm_high': '#B30000',  # Dark red for high FWHM
-    'cross': '#000000',  # Black for cross markers (high contrast on grayscale)
+    'cross': '#D55E00',  # Okabe vermilion for cross markers and labels (avoid black)
 }
 
 # Consistent marker sizes
