@@ -4494,7 +4494,7 @@ def run_photometry():
                     image=image,
                 )
                 image_sources = aperture_photometry.measure(
-                    sources=image_sources[["x_pix", "y_pix"]],
+                    sources=image_sources,
                     exposure_time=exposure_time,
                     ap_size=science_aperture,
                 )
@@ -4538,7 +4538,7 @@ def run_photometry():
                     input_yaml=input_yaml, image=template_image
                 )
                 template_sources = template_aperture.measure(
-                    sources=template_sources[["x_pix", "y_pix"]],
+                    sources=template_sources,
                     exposure_time=float(template_exposure),
                     ap_size=template_aperture_size,
                     gain=float(template_gain),
@@ -4711,6 +4711,14 @@ def run_photometry():
                     # ------------------------------------------------------------------
                     ms = MatchingSources.copy()
                     n_before_refine = len(ms)
+                    _has_class_star = "class_star" in ms.columns
+                    _has_roundness = "roundness" in ms.columns
+                    _has_fwhm = any(c in ms.columns for c in ("fwhm", "fwhm_psf", "fwhm_model"))
+                    logging.info(
+                        f"Source refinement input: {n_before_refine} sources, "
+                        f"columns present: class_star={_has_class_star}, "
+                        f"roundness={_has_roundness}, fwhm={_has_fwhm}"
+                    )
                     try:
                         # --- Point-source selection via CLASS_STAR ---
                         # SExtractor's CLASS_STAR ranges from 0 (extended) to 1
