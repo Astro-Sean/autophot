@@ -4527,6 +4527,22 @@ def run_photometry():
                         f"(threshold: {proximity_threshold:.2f} pixels = FWHM x {proximity_fwhm_mult:.1f})."
                     )
 
+                # If the proximity filter excluded ALL sources (common with very
+                # high NaN coverage, e.g. 60% from SWarp padding), bypass it and
+                # pass all sources through.  The aperture photometry code is the
+                # final arbiter — it will reject sources that actually have NaN
+                # in their aperture (aperture_has_nan) or too many NaN in their
+                # annulus (annulus_too_many_nans).  This is better than having
+                # zero sources for subtraction.
+                if len(matched_df) == 0 and len(excluded_sources) > 0:
+                    logging.warning(
+                        f"Proximity filter excluded all {len(excluded_sources)} sources "
+                        f"(NaN coverage too high). Bypassing filter — aperture photometry "
+                        f"will reject sources with NaN in measurement regions."
+                    )
+                    matched_df = excluded_sources.copy()
+                    excluded_sources = excluded_sources.iloc[[]]
+
             df_zogy_science = None
             df_zogy_template = None
             if len(matched_df) >= 3:
