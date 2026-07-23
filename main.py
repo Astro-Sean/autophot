@@ -4473,23 +4473,22 @@ def run_photometry():
                     (input_yaml.get("photometry", {}) or {}).get("masked_region_proximity_fwhm_mult", 1.5)
                 )
                 proximity_threshold = ImageFWHM * proximity_fwhm_mult
-                # The aperture annulus extends well beyond 1.5*FWHM from the source
-                # centre (aperture + gap*FWHM + width*FWHM ≈ 5.3*FWHM for default
-                # non-crowded settings).  Sources within the annulus outer radius of
-                # a NaN/zero region will have contaminated background estimates
-                # (bkg_invalid from zero-variance SWarp-padded pixels).  Use the
-                # annulus outer radius as a floor for the proximity threshold.
+                # The proximity threshold should at least cover the aperture
+                # radius — sources whose aperture overlaps NaN will fail with
+                # aperture_has_nan.  The annulus can tolerate partial NaN
+                # coverage (aperture.py checks for >= 50% valid annulus pixels),
+                # so we don't need to exclude based on the full annulus outer
+                # radius.  This is especially important when the template has
+                # large NaN regions (e.g. 60% coverage from SWarp padding):
+                # using the annulus outer radius would exclude all sources.
                 _ap_r = float(aperture_radius)
-                _gap = float((input_yaml.get("photometry", {}) or {}).get("annulus_gap_fwhm", 0.75))
-                _width = float((input_yaml.get("photometry", {}) or {}).get("annulus_width_fwhm", 2.0))
-                _annulus_outer = _ap_r + (_gap + _width) * ImageFWHM
-                if _annulus_outer > proximity_threshold:
+                _proximity_floor = _ap_r
+                if _ap_r > proximity_threshold:
                     logging.info(
                         f"Adjusting proximity threshold from FWHM*{proximity_fwhm_mult:.1f}="
-                        f"{proximity_threshold:.1f}px to annulus outer radius={_annulus_outer:.1f}px "
-                        f"(aperture={_ap_r:.0f} + gap+width={(_gap+_width)*ImageFWHM:.1f}px)"
+                        f"{proximity_threshold:.1f}px to aperture radius={_ap_r:.1f}px"
                     )
-                    proximity_threshold = _annulus_outer
+                    proximity_threshold = _ap_r
 
                 # Adaptive exclusion: if excluding sources near masked regions leaves
                 # too few sources, progressively relax the threshold.
@@ -4497,11 +4496,13 @@ def run_photometry():
                 # (1) the NaN exclusion is about photometric reliability, not kernel fitting;
                 # (2) sfft_min_prior_sources may be set high (e.g. 10) to let SFFT do its
                 # own matching, but we still want to exclude sources with corrupted photometry.
-                # Do NOT relax below the annulus outer radius floor — sources within that
-                # radius will fail aperture photometry anyway (bkg_invalid / swarp_padding),
-                # so relaxing would give a false sense of having more sources while actually
-                # losing them all to photometric failures.
-                _proximity_floor = _annulus_outer
+                # Allow relaxation down to the aperture radius floor.
+                # Sources within the aperture radius of NaN will fail aperture
+                # photometry (aperture_has_nan), but sources between aperture
+                # radius and annulus outer radius may still have valid photometry
+                # (annulus tolerates partial NaN).  The aperture photometry code
+                # is the final arbiter — it will reject sources that actually
+                # have NaN in their aperture.
                 min_sources_needed = 5
                 while True:
                     min_distances, _ = tree.query(
