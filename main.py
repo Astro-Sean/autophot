@@ -4381,7 +4381,7 @@ def run_photometry():
                         [center_x],
                         [center_y],
                         box_size=box,
-                        centroid_func=centroid_func,
+                        centroid_func=centroid_com,
                     )
                     if np.isfinite(x_c[0]) and np.isfinite(y_c[0]):
                         merged_sources.at[label, "x_pix"] = float(x_c[0])
@@ -4622,14 +4622,19 @@ def run_photometry():
                     (input_yaml.get("photometry", {}) or {}).get("centroid_tolerance", 5.0)
                 )
 
-                # Centroid each source in the template image
+                # Centroid each source in both science and template images.
+                # Measuring centroid-to-centroid offsets removes SExtractor
+                # windowed-centroid noise from the alignment measurement.
                 template_sources["x_centroid"] = np.nan
                 template_sources["y_centroid"] = np.nan
+                image_sources["x_centroid"] = np.nan
+                image_sources["y_centroid"] = np.nan
                 for idx, row in image_sources.iterrows():
                     center_x, center_y = row["x_pix"], row["y_pix"]
                     box = max(
                         int(np.ceil(ImageFWHM)) * 2 + 1, 7
                     )  # Ensure box size is odd and large enough
+                    # Centroid on template
                     try:
                         x_c, y_c = centroid_sources(
                             template_image,
@@ -4641,12 +4646,54 @@ def run_photometry():
                         if np.isfinite(x_c[0]) and np.isfinite(y_c[0]):
                             template_sources.at[idx, "x_centroid"] = float(x_c[0])
                             template_sources.at[idx, "y_centroid"] = float(y_c[0])
+                        else:
+                            raise ValueError("non-finite centroid")
                     except Exception:
-                        pass
+                        try:
+                            x_c, y_c = centroid_sources(
+                                template_image,
+                                [center_x],
+                                [center_y],
+                                box_size=box,
+                                centroid_func=centroid_com,
+                            )
+                            if np.isfinite(x_c[0]) and np.isfinite(y_c[0]):
+                                template_sources.at[idx, "x_centroid"] = float(x_c[0])
+                                template_sources.at[idx, "y_centroid"] = float(y_c[0])
+                        except Exception:
+                            pass
+                    # Centroid on science
+                    try:
+                        x_c, y_c = centroid_sources(
+                            image,
+                            [center_x],
+                            [center_y],
+                            box_size=box,
+                            centroid_func=centroid_2dg,
+                        )
+                        if np.isfinite(x_c[0]) and np.isfinite(y_c[0]):
+                            image_sources.at[idx, "x_centroid"] = float(x_c[0])
+                            image_sources.at[idx, "y_centroid"] = float(y_c[0])
+                        else:
+                            raise ValueError("non-finite centroid")
+                    except Exception:
+                        try:
+                            x_c, y_c = centroid_sources(
+                                image,
+                                [center_x],
+                                [center_y],
+                                box_size=box,
+                                centroid_func=centroid_com,
+                            )
+                            if np.isfinite(x_c[0]) and np.isfinite(y_c[0]):
+                                image_sources.at[idx, "x_centroid"] = float(x_c[0])
+                                image_sources.at[idx, "y_centroid"] = float(y_c[0])
+                        except Exception:
+                            pass
 
-                ## Calculate the distance between the original pixel position and the centroid
-                dx = template_sources["x_pix"] - template_sources["x_centroid"]
-                dy = template_sources["y_pix"] - template_sources["y_centroid"]
+                ## Calculate centroid-to-centroid distance (science vs template)
+                dx = image_sources["x_centroid"] - template_sources["x_centroid"]
+                dy = image_sources["y_centroid"] - template_sources["y_centroid"]
                 distance = np.sqrt(dx ** 2 + dy ** 2)
 
                 # A systematic alignment offset (e.g. 3px uniform shift from WCS
@@ -4855,12 +4902,21 @@ def run_photometry():
                                     np.abs(size - med) <= n_sigma * mad
                                 )
                                 n_size_rejected = len(ms) - good_size.sum()
-                                if n_size_rejected > 0:
+                                # With small samples, MAD is unstable and can
+                                # reject the majority of sources (e.g. 6/9).
+                                # Skip rejection if it would leave < 5 sources.
+                                if n_size_rejected > 0 and good_size.sum() >= 5:
                                     logging.info(
                                         f"Size-based rejection: removed {n_size_rejected} sources "
                                         f"(FWHM sigma-clipping, n_sigma={n_sigma})"
                                     )
-                                ms = ms[good_size]
+                                    ms = ms[good_size]
+                                elif n_size_rejected > 0:
+                                    logging.info(
+                                        f"Size-based rejection skipped: would remove {n_size_rejected} "
+                                        f"sources leaving only {good_size.sum()} (< 5). "
+                                        f"Keeping all {len(ms)} sources."
+                                    )
 
                         # Crowding rejection: require each prior star to be relatively isolated
                         # in both the science and template images within a radius ~2.5*FWHM.

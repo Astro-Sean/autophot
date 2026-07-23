@@ -481,7 +481,7 @@ def compute_alignment_rms(
         return None
 
     try:
-        fwhm = min(max(float(fwhm_pixels), 2.0), 4.0)
+        fwhm = min(max(float(fwhm_pixels), 2.0), 8.0)
         from astropy.stats import sigma_clipped_stats as _scs
 
         _, med_sci, std_sci = _scs(sci_data, sigma=3.0)
@@ -4615,9 +4615,9 @@ class Templates:
                 # to model spatially-varying astrometric residuals.
                 _max_auto_order = 2 if ker_hw <= 25 else 1
 
-                if n_eff < 15:
+                if n_eff < 5:
                     kernel_order = 0
-                elif n_eff < 20:
+                elif n_eff < 10:
                     kernel_order = 1
                 else:
                     kernel_order = min(2, _max_auto_order)
