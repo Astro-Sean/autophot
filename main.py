@@ -4853,8 +4853,16 @@ def run_photometry():
                                 else:
                                     cs_threshold = 0.3
                                 cs_pass = cs >= cs_threshold
+                                # If the standard threshold leaves too few
+                                # sources (< 5), try lowering it before
+                                # applying.  More sources with a higher
+                                # kernel order is better than fewer sources
+                                # with a constant kernel (dipoles).
+                                if cs_pass.sum() < 5 and n_cs > 5:
+                                    cs_threshold = 0.1
+                                    cs_pass = cs >= cs_threshold
                                 # Only apply if it won't leave too few sources
-                                if cs_pass.sum() >= 3 or n_before_refine <= 3:
+                                if cs_pass.sum() >= 5 or n_before_refine <= 5:
                                     n_cs_rejected = int((cs_finite & ~cs_pass).sum())
                                     if n_cs_rejected > 0:
                                         logging.info(
@@ -4862,6 +4870,11 @@ def run_photometry():
                                             f"(CLASS_STAR < {cs_threshold}, {n_cs - n_cs_rejected}/{n_cs} kept)"
                                         )
                                     ms = ms[cs_pass | ~cs_finite]
+                                elif (cs_finite & ~cs_pass).sum() > 0:
+                                    logging.info(
+                                        f"CLASS_STAR filter skipped: would leave only "
+                                        f"{cs_pass.sum()} sources (< 5). Keeping all {len(ms)} sources."
+                                    )
 
                         # --- Ellipticity filter (backup for point-source selection) ---
                         # Point sources should be nearly circular.  The column
@@ -4869,12 +4882,12 @@ def run_photometry():
                         # 1 = highly elongated).  Galaxies often have high
                         # ellipticity.  This catches extended sources that
                         # CLASS_STAR may miss (e.g. compact galaxies).
-                        if "roundness" in ms.columns and len(ms) > 3:
+                        if "roundness" in ms.columns and len(ms) > 5:
                             ell = pd.to_numeric(ms["roundness"], errors="coerce")
                             ell_finite = ell.notna()
                             if ell_finite.any():
                                 ell_pass = ell <= 0.5
-                                if ell_pass.sum() >= 3 or len(ms) <= 3:
+                                if ell_pass.sum() >= 5 or len(ms) <= 5:
                                     n_ell_rejected = int((ell_finite & ~ell_pass).sum())
                                     if n_ell_rejected > 0:
                                         logging.info(
