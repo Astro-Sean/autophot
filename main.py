@@ -4451,6 +4451,7 @@ def run_photometry():
                     f"Converted {_n_template_zeros} zero-padded pixels in aligned "
                     f"template to NaN ({_n_template_zeros / template_image.size * 100:.1f}%)"
                 )
+                safe_fits_write(templateFpath, template_image, template_header)
 
             # Build a KDTree for masked pixels for efficient nearest-neighbor search
             masked_image = (
