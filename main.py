@@ -4418,12 +4418,25 @@ def run_photometry():
 
             template_image, template_header = get_image_and_header(templateFpath)
 
+            # Convert SWarp-padded zeros to NaN.
+            # SWarp pads uncovered regions with 0.0 even when FILL_VALUE=NAN is
+            # configured (some builds). The aligned template is a sky-background
+            # image (values ~100+ ADU), so exact zeros are always SWarp padding,
+            # never legitimate data. Converting them to NaN makes all downstream
+            # NaN checks, proximity filters, and aperture photometry work correctly
+            # without needing special zero-filtering.
+            _n_template_zeros = int(np.count_nonzero(template_image == 0))
+            if _n_template_zeros > 0:
+                template_image = template_image.astype(np.float32, copy=True)
+                template_image[template_image == 0] = np.nan
+                logging.info(
+                    f"Converted {_n_template_zeros} zero-padded pixels in aligned "
+                    f"template to NaN ({_n_template_zeros / template_image.size * 100:.1f}%)"
+                )
+
             # Build a KDTree for masked pixels for efficient nearest-neighbor search
-            # Include NaN/Inf pixels explicitly since NaN == 0 is False
             masked_image = (
                 (defects_mask)
-                | (image == 0)
-                | (template_image == 0)
                 | ~np.isfinite(image)
                 | ~np.isfinite(template_image)
             )
