@@ -4734,7 +4734,7 @@ class Templates:
                     scale,
                 )
                 if not success:
-                    return None, None, None
+                    return None, None, None, None
 
             # =============================================================
             # 6. Validate output
@@ -4743,7 +4743,7 @@ class Templates:
                 os.path.isfile(differenceFpath) and os.path.getsize(differenceFpath) > 0
             ):
                 logger.error("Difference file missing or empty")
-                return None, None, None
+                return None, None, None, None
 
             diff_data, diff_header = read_fits(differenceFpath)
             # ------------------------------------------------------------------
@@ -4768,7 +4768,7 @@ class Templates:
                     "Difference image is invalid (all NaN or near-zero variance). Subtraction backend may have written a bad file; treat as failure and use "
                     "original science image."
                 )
-                return None, None, None
+                return None, None, None, None
 
             # =============================================================
             # 6a. Subtraction quality validation
