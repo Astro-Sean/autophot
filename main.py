@@ -4853,11 +4853,11 @@ def run_photometry():
                                 else:
                                     cs_threshold = 0.3
                                 cs_pass = cs >= cs_threshold
-                                # Only apply if it won't leave too few
-                                # sources for kernel fitting.  Extended
-                                # sources bias the kernel, but having zero
-                                # sources is worse.  Skip if < 5 would remain.
-                                if cs_pass.sum() >= 5 or n_before_refine <= 5:
+                                # Only apply if at least 3 point sources
+                                # remain.  Extended sources bias the kernel
+                                # fit — 4 clean sources with kernel_order=1
+                                # is better than 9 contaminated sources.
+                                if cs_pass.sum() >= 3 or n_before_refine <= 3:
                                     n_cs_rejected = int((cs_finite & ~cs_pass).sum())
                                     if n_cs_rejected > 0:
                                         logging.info(
@@ -4868,7 +4868,7 @@ def run_photometry():
                                 elif (cs_finite & ~cs_pass).sum() > 0:
                                     logging.info(
                                         f"CLASS_STAR filter skipped: would leave only "
-                                        f"{cs_pass.sum()} sources (< 5). Keeping all {len(ms)} sources."
+                                        f"{cs_pass.sum()} sources (< 3). Keeping all {len(ms)} sources."
                                     )
 
                         # --- Ellipticity filter (backup for point-source selection) ---
@@ -4877,12 +4877,12 @@ def run_photometry():
                         # 1 = highly elongated).  Galaxies often have high
                         # ellipticity.  This catches extended sources that
                         # CLASS_STAR may miss (e.g. compact galaxies).
-                        if "roundness" in ms.columns and len(ms) > 5:
+                        if "roundness" in ms.columns and len(ms) > 3:
                             ell = pd.to_numeric(ms["roundness"], errors="coerce")
                             ell_finite = ell.notna()
                             if ell_finite.any():
                                 ell_pass = ell <= 0.5
-                                if ell_pass.sum() >= 5 or len(ms) <= 5:
+                                if ell_pass.sum() >= 3 or len(ms) <= 3:
                                     n_ell_rejected = int((ell_finite & ~ell_pass).sum())
                                     if n_ell_rejected > 0:
                                         logging.info(
