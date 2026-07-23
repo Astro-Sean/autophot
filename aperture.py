@@ -1970,6 +1970,14 @@ class Aperture:
             ax1.set_ylim(-0.05, 1.05)
             ax1.set_xlim(-0.05, max_radius + 0.05)
 
+            n_selected = int(np.count_nonzero(np.isfinite(per_source)))
+            n_rejected = int(np.count_nonzero(np.isfinite(other)))
+            fig.suptitle(
+                f"Optimum Aperture Radius — Selected (N={n_selected}), Rejected (N={n_rejected})",
+                fontsize=9,
+                y=0.99,
+            )
+
             fig.savefig(save_loc, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
 
