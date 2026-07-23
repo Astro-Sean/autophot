@@ -2737,6 +2737,23 @@ def run_photometry():
         
         # Reload in case template alignment overwrote fpath (single open for both).
         image, header = get_image_and_header(fpath)
+
+        # Convert SWarp-padded zeros to NaN in the science image.
+        # In common_grid mode, both science and template are SWarp-resampled
+        # and can have zero-padded uncovered regions. Converting before
+        # background subtraction ensures the background estimator and all
+        # downstream code handle them correctly.
+        if fpath != science_path_original:
+            _n_sci_zeros = int(np.count_nonzero(image == 0))
+            if _n_sci_zeros > 0:
+                image = image.astype(np.float32, copy=True)
+                image[image == 0] = np.nan
+                logging.info(
+                    f"Converted {_n_sci_zeros} zero-padded pixels in aligned "
+                    f"science image to NaN ({_n_sci_zeros / image.size * 100:.1f}%)"
+                )
+                safe_fits_write(fpath, image, header)
+
         imageWCS = get_wcs(header)
         
 
