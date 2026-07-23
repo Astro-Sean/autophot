@@ -2816,8 +2816,9 @@ class Templates:
         coords : (min_row, min_col, max_row, max_col)
         """
         from functions import nan_crop
-        center_x = (coords[3] + coords[1]) // 2
-        center_y = (coords[2] + coords[0]) // 2
+        # Use exact float centre; nan_crop handles the rounding.
+        center_x = (coords[3] + coords[1]) / 2.0
+        center_y = (coords[2] + coords[0]) / 2.0
         ny = coords[2] - coords[0] + 1
         nx = coords[3] - coords[1] + 1
         new_header = header.copy()
@@ -2929,8 +2930,9 @@ class Templates:
         original_aper = scienceHeader.get("APER")
 
         cy, cx, top, bot, left, right = self.find_non_uniform_center(scienceImage)
-        height = bot - top
-        width = right - left
+        # find_non_uniform_center returns inclusive bounds, so add 1.
+        height = bot - top + 1
+        width = right - left + 1
 
         # Ensure even dimensions (needed for FFT-based subtraction later)
         height -= height % 2
@@ -3005,8 +3007,9 @@ class Templates:
         cy_t, cx_t, top_t, bot_t, left_t, right_t = self.find_non_uniform_center(
             templateImage
         )
-        height_t = bot_t - top_t
-        width_t = right_t - left_t
+        # find_non_uniform_center returns inclusive bounds, so add 1.
+        height_t = bot_t - top_t + 1
+        width_t = right_t - left_t + 1
 
         # Use the smaller dimension from either image
         if height_t < height:
@@ -3015,7 +3018,8 @@ class Templates:
             width, cx = width_t, cx_t
 
         size = (height - height % 2, width - width % 2)
-        position = (np.floor(cx), np.floor(cy))
+        # Pass the exact fractional centre; nan_crop rounds deterministically.
+        position = (cx, cy)
         
         # Validate crop center coordinates
         if not (np.isfinite(cx) and np.isfinite(cy)):
@@ -4311,19 +4315,10 @@ class Templates:
                 # A floor of only 1x FWHM_broad truncates the PSF wings, causing the
                 # convolution-based flux scaling to disagree with photometric scaling.
                 #
-                # When ForceConv=REF but reference is broader (sharpening needed),
-                # the kernel has deconvolution structure (negative sidelobes) that
-                # requires broader support. Scale the floor multiplier by the
-                # sharpening ratio: mild mismatch needs ~3×, severe needs ~5×.
-                _sharpening_needed = fwhm_ref > fwhm_sci * 1.05
-                if _sharpening_needed:
-                    _sharp_ratio = fwhm_ref / max(fwhm_sci, 0.1)
-                    # Deconvolution kernel sidelobes extend 4-5× the broader
-                    # PSF FWHM. Scale floor from 3× at mild sharpening (ratio
-                    # 1.05) up to 5× at severe sharpening (ratio ≥ 1.5).
-                    _floor_mult = min(3.0 + (_sharp_ratio - 1.05) * (2.0 / 0.45), 5.0)
-                else:
-                    _floor_mult = 2.0
+                # With auto ForceConv, we always convolve the sharper image to match
+                # the broader one (never deconvolve), so a standard 2x FWHM_broad
+                # floor is sufficient.
+                _floor_mult = 2.0
                 # BUG 120: In sparse fields (<25 matched sources), a large kernel
                 # floor creates an under-constrained fit.  A 32px half-width with
                 # order 1 gives 12675 unknowns vs ~17 sources → flux scaling
@@ -5024,20 +5019,29 @@ class Templates:
             phot_cfg = self.input_yaml.get("photometry", {})
 
             # ForceConv: which image to convolve to match the other's PSF.
-            # Default: REF (always convolve reference to match science PSF).
-            # This preserves the science PSF in the difference image, which is
-            # required for photometry and transient detection.
+            # REF => DIFF = SCI - conv(REF): transients keep the science PSF.
+            # SCI => DIFF = conv(SCI) - REF: difference has reference PSF.
             #
-            # Hu et al. 2022 (Section 6) notes that convolving to match better
-            # seeing causes deconvolution noise amplification.  Users who want
-            # to avoid this can set sfft_forceconv: SCI or sfft_forceconv: auto
-            # in the YAML config.
+            # We always convolve the reference (ForceConv=REF) so transients
+            # keep the science PSF.  When the reference is much fainter than
+            # the science, the kernel's flux scaling is large (SCI/REF), which
+            # amplifies the relative kernel error into a larger absolute error.
+            # This is accepted as a trade-off for preserving the science PSF.
+            #
+            # Users can override with sfft_forceconv in YAML.
             _fc_cfg = str(ts_sub.get("sfft_forceconv", "REF")).strip().upper()
             if _fc_cfg in ("REF", "SCI", "AUTO"):
                 forceconv = _fc_cfg
+                logger.info(
+                    "SFFT ForceConv=%s (header FWHM: sci=%.2f ref=%.2f).",
+                    forceconv, science_fwhm, template_fwhm,
+                )
             else:
                 forceconv = "REF"
-            logger.info("SFFT ForceConv=%s.", forceconv)
+                logger.warning(
+                    "Unknown sfft_forceconv=%r; defaulting to REF.",
+                    _fc_cfg,
+                )
 
             # Background polynomial order: default to 0 unless the user explicitly overrides
             bg_order = ts_sub.get("sfft_bg_order", 0)
@@ -5129,12 +5133,7 @@ class Templates:
                 else:
                     fwhm_conv_fb = fwhm_broad_fb
                 ker_hw_conv = int(np.ceil(2.0 * fwhm_conv_fb))
-                _sharp_fb = fwhm_ref_fb > fwhm_sci_fb * 1.05
-                if _sharp_fb:
-                    _sr = fwhm_ref_fb / max(fwhm_sci_fb, 0.1)
-                    _fm = min(3.0 + (_sr - 1.05) * (2.0 / 0.45), 5.0)
-                else:
-                    _fm = 2.0
+                _fm = 2.0
                 ker_hw_floor = int(np.ceil(_fm * fwhm_broad_fb))
                 kernel_half_width = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_conv, ker_hw_floor)))
                 logger.info(
@@ -5152,7 +5151,7 @@ class Templates:
             def _build_sfft_cmd(run_excluded, run_matching, template_fp, diff_fp):
                 # If fewer than min_prior_sources pipeline-matched sources, let SFFT
                 # perform matching.  Must match run_sfft.py's MIN_PRIOR_SOURCES.
-                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 10) or 10)
+                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 2) or 2)
                 if len(run_matching) < min_sources_for_prior:
                     logger.info(
                         "Fewer than %d pipeline-matched sources (%d); letting SFFT perform source matching.",
@@ -5452,13 +5451,33 @@ class Templates:
                             )
                             return "hotpants"
                         elif _discrep_pct > 3.0:
+                            _fc_msg = ""
+                            # Read actual ForceConv from diff image header
+                            # (SFFT writes FORCECON keyword).  When AUTO is
+                            # used, the direction is decided inside SFFT based
+                            # on measured post-resampling FWHMs.
+                            _actual_fc = forceconv
+                            try:
+                                if outputFpath and os.path.isfile(outputFpath):
+                                    with fits.open(outputFpath, memmap=True) as _hdul:
+                                        _actual_fc = str(
+                                            _hdul[0].header.get("FORCECON", forceconv)
+                                        ).strip().upper()
+                            except Exception:
+                                pass
+                            if _actual_fc == "SCI":
+                                _fc_msg = (
+                                    " ForceConv=SCI (SFFT measured science as sharper). "
+                                    "Discrepancy may be from nearly-identical post-SWarp "
+                                    "PSFs or too few sources for kernel fitting."
+                                )
                             logger.warning(
                                 "SFFT flux scaling discrepancy: convolution=%.4f vs photometric=%.4f "
                                 "(%.1f%% mismatch). Kernel integral does not match true flux ratio — "
                                 "dipole residuals likely at source positions. "
-                                "This is expected for nearly-identical PSFs with few sources. "
-                                "Consider increasing source count or improving astrometric alignment.",
-                                _conv_scale, _phot_scale, _discrep_pct,
+                                "This can be caused by nearly-identical PSFs with few sources, "
+                                "poor astrometric alignment, or deconvolution from wrong ForceConv.%s",
+                                _conv_scale, _phot_scale, _discrep_pct, _fc_msg,
                             )
                         else:
                             logger.info(

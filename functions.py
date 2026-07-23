@@ -2230,10 +2230,15 @@ def nan_crop(data, header, cx, cy, ny, nx):
     # Output array, filled with NaN
     out = np.full((ny, nx), np.nan, dtype=data.dtype)
 
-    # Source slice that maps into the output
-    src_y0 = int(np.floor(cy - ny / 2.0))
+    # Source slice that maps into the output.
+    # Use (nx-1)/2 (0-based pixel centre) not nx/2 (geometric centre between
+    # pixels for even nx).  floor(x + 0.5) gives deterministic half-up
+    # rounding; np.round uses round-half-to-even, which can choose different
+    # integer slice origins for half-integer offsets depending on parity and
+    # introduce ~0.5px shifts between science/template cutouts.
+    src_y0 = int(np.floor(cy - (ny - 1) / 2.0 + 0.5))
     src_y1 = src_y0 + ny
-    src_x0 = int(np.floor(cx - nx / 2.0))
+    src_x0 = int(np.floor(cx - (nx - 1) / 2.0 + 0.5))
     src_x1 = src_x0 + nx
 
     # Clamp to source bounds
