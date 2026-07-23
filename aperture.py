@@ -352,16 +352,27 @@ def _measure_worker(args):
 
         # Remove NaNs/infs. Do NOT discard exact zeros here: difference images
         # and locally background-subtracted stamps can legitimately contain 0-valued
-        # pixels, and `Aperture.measure()` already maps 0.0 -> NaN upstream when
-        # zeros are used as an explicit bad-pixel flag in the input image.
+        # pixels. However, if the aperture is dominated by exact zeros, it's likely
+        # SWarp padding rather than real data.
 
         # STRICT CHECK: Aperture must have NO NaNs (measurement region must be clean)
         ap_has_nan = not np.all(np.isfinite(ap_pix))
         if ap_has_nan:
             return {"idx": i, "fail_reason": "aperture_has_nan"}
 
+        # Check for SWarp-padded zero regions in the aperture
+        ap_zero_frac = float(np.mean(ap_pix == 0.0))
+        if ap_zero_frac > 0.5:
+            return {"idx": i, "fail_reason": "aperture_swarp_padding"}
+
         # TOLERANT CHECK: Annulus can have some NaNs, but needs minimum valid pixels
+        # Also filter exact-zero pixels: SWarp pads uncovered regions with 0.0
+        # (not NaN), and these produce zero-variance backgrounds (bkg_invalid).
+        # On science images with real sky background, exact 0.0 ADU is unphysical;
+        # on difference images the sky is already subtracted to ~0 but has noise,
+        # so zero-variance zeros are still SWarp padding, not real pixels.
         bkg_pix = bkg_pix[np.isfinite(bkg_pix)]
+        bkg_pix = bkg_pix[bkg_pix != 0.0]
         # Require at least 50% of annulus pixels to be valid for background estimation
         annulus_valid_fraction = 0.5
         if bkg_pix.size < (len(ap_pix) * annulus_valid_fraction):
