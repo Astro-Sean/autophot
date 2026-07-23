@@ -4763,8 +4763,12 @@ def run_photometry():
                         )
 
                 # Apply the mask to both image_sources and template_sources
-                image_sources = image_sources[well_aligned_mask]
-                template_sources = template_sources[well_aligned_mask]
+                image_sources = image_sources[well_aligned_mask].copy()
+                template_sources = template_sources[well_aligned_mask].copy()
+                image_sources.loc[:, "x_pix"] = image_sources["x_centroid"].to_numpy()
+                image_sources.loc[:, "y_pix"] = image_sources["y_centroid"].to_numpy()
+                template_sources.loc[:, "x_pix"] = template_sources["x_centroid"].to_numpy()
+                template_sources.loc[:, "y_pix"] = template_sources["y_centroid"].to_numpy()
 
                 # Log the number of sources removed or the mean offset
                 n_removed = len(well_aligned_mask) - sum(well_aligned_mask)

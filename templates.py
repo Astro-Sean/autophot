@@ -4257,9 +4257,9 @@ class Templates:
             # after cross-matching and quality filtering only ~15-20 survive
             # for kernel fitting.  Use 20 as a conservative estimate.
             _n_matched_early = len(matching_sources) if matching_sources else 0
-            _min_prior_early = int(ts_cfg_ker.get("sfft_min_prior_sources", 10) or 10)
+            _min_prior_early = int(ts_cfg_ker.get("sfft_min_prior_sources", 8) or 8)
             _sfft_self_match_early = _n_matched_early < _min_prior_early
-            n_eff = 20 if _sfft_self_match_early else _n_matched_early
+            n_eff = 10 if _sfft_self_match_early else _n_matched_early
 
             # Override: user directly specifies kernel half-width in pixels
             _ker_hw_override = ts_cfg_ker.get("kernel_hw_override", None)
@@ -4562,7 +4562,7 @@ class Templates:
 
             # n_eff was computed earlier for kernel floor adaptation (BUG 120).
             # Recompute _sfft_self_match for logging purposes.
-            _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 10) or 10)
+            _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 8) or 8)
             _sfft_self_match = n_matched < _min_prior
 
             # Use the conservative n_eff (20 for self-match) for kernel_order
@@ -5151,7 +5151,7 @@ class Templates:
             def _build_sfft_cmd(run_excluded, run_matching, template_fp, diff_fp):
                 # If fewer than min_prior_sources pipeline-matched sources, let SFFT
                 # perform matching.  Must match run_sfft.py's MIN_PRIOR_SOURCES.
-                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 2) or 2)
+                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 8) or 8)
                 if len(run_matching) < min_sources_for_prior:
                     logger.info(
                         "Fewer than %d pipeline-matched sources (%d); letting SFFT perform source matching.",
@@ -5282,7 +5282,7 @@ class Templates:
                     cmd_local += ["-kernel_hw_fwhm_multiplier", str(float(_ker_mult))]
 
                 # Prior source validation
-                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 10)
+                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 8)
                 cmd_local += ["-min_prior_sources", str(int(min_prior_sources))]
 
                 if sfft_crowded:
