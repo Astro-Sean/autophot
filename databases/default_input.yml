@@ -425,7 +425,7 @@ default_input:
     gaia_cache_ttl_days: 30 # int --- Time-to-live for cached GAIA catalogs (days). GAIA-DR3 is static, so long TTLs are safe.
     preserve_scamp_logs: False # bool --- If True, keep SCAMP log files on failure for debugging. Useful when diagnosing astrometric alignment issues.
     method: sfft # str --- Subtraction backend (sfft default; hotpants or zogy optional where available).
-    kernel_order: null # int|null|"auto" --- Spatial polynomial order for the SFFT kernel. 0=constant (low RAM), 1=linear, 2=quadratic, 3=cubic. null="auto" auto-selects based on matched source count and alignment quality. Orders >=2 can require >7 GB RAM.
+    kernel_order: 0 # int|"auto" --- Spatial polynomial order for the SFFT kernel. 0=constant (low RAM, default), 1=linear, 2=quadratic, 3=cubic. "auto" auto-selects based on matched source count and PSF difference (capped at 2). Orders >=2 can require >7 GB RAM.
     kernel_hw_fwhm_multiplier: 2.5 # float|null --- Multiplier applied to the FWHM of the convolution kernel when sizing the subtraction kernel half-width. If null, uses 2.0 (recommended). The kernel FWHM is computed as sqrt(FWHM_broad^2 - FWHM_narrow^2); kernel_hw = ceil(multiplier * FWHM_conv). Lower values (e.g. 1.5) give a tighter kernel; higher (e.g. 3.0) allow more fitting freedom at the cost of computation. For undersampled images (FWHM < 2 px), the multiplier is automatically boosted by 1.5x to capture extended PSF wings.
     kernel_hw_override: null # int|null --- If set, directly overrides the auto-computed kernel half-width in pixels. Use for debugging or when automatic sizing is wrong.
     download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).
@@ -478,8 +478,8 @@ default_input:
     sfft_save_decorrelated: True # bool --- Save decorrelated difference image separately as *_decorr.fits. Main diff.fits is non-decorrelated for photometry.
     sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
     sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
-    sfft_min_prior_sources: 8 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT performs its own matching; this avoids under-constrained sparse prior lists.
-    sfft_forceconv: REF # str --- SFFT ForceConv direction: "REF" (always convolve reference — difference keeps science PSF — RECOMMENDED), "SCI" (convolve science), "AUTO" (SFFT auto-selects based on FWHMs). REF is best because reference is pre-scaled to match science flux, preventing kernel error amplification.
+    sfft_min_prior_sources: 3 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT performs its own matching; this avoids under-constrained sparse prior lists.
+    sfft_forceconv: AUTO # str --- SFFT ForceConv direction: "REF" (always convolve reference — difference keeps science PSF), "SCI" (convolve science), "AUTO" (SFFT auto-selects based on FWHMs — RECOMMENDED). AUTO lets SFFT convolve the sharper image to match the broader one, avoiding deconvolution.
     sfft_sky_subtract: True # bool --- Subtract sigma-clipped median sky from both images before SFFT. Per Hu et al. 2022 Section 3.2, sparse-flavor SFFT requires sky-subtracted input so that masking (setting non-source regions to zero) doesn't create artificial step functions at mask boundaries. Uses constant median subtraction (not SExtractor's spatially-varying BACK_TYPE=AUTO which was previously tested and rejected).
 
     inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).

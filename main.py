@@ -102,7 +102,7 @@ from scipy.cluster.hierarchy import fclusterdata
 
 # SATURATE handling constants - used consistently across the codebase
 SATURATE_INTERNAL_FALLBACK = np.inf  # Internal processing: no saturation limit
-SATURATE_FITS_FALLBACK = 1e30  # FITS storage: finite value for "no saturation"
+SATURATE_FITS_FALLBACK = 1e10  # FITS storage: finite value for "no saturation"
 
 try:
     AUTOPHOT_VERSION = _pkg_version("autophot")
@@ -889,6 +889,9 @@ def run_photometry():
         input_yaml["write_dir"] = write_dir
         logging.info("")
         logging.info(f"Running AutoPhOT v{AUTOPHOT_VERSION} on {base_filename}")
+        logging.info(
+            "Report any issues at: https://github.com/Astro-Sean/autophot/issues"
+        )
         if was_shortened or replaced:
             logging.info("Using pre-processed file")
 
@@ -4720,7 +4723,11 @@ def run_photometry():
                 # Filter sources where the residual deviation is within tolerance.
                 # This preserves sources that share a common systematic offset while
                 # removing sources with truly bad centroids (blends, cosmic rays, etc.)
-                well_aligned_mask = residual_distance < POSITION_TOLERANCE
+                # Sources with NaN centroids (centroiding failed on one or both
+                # images) are KEPT — we can't verify their alignment but their
+                # SExtractor positions are typically good to ~1px, which is
+                # sufficient for SFFT priors.
+                well_aligned_mask = (residual_distance < POSITION_TOLERANCE) | ~np.isfinite(residual_distance)
 
                 # Log diagnostic statistics before filtering
                 if np.any(np.isfinite(distance)):
@@ -4767,10 +4774,22 @@ def run_photometry():
                 # Apply the mask to both image_sources and template_sources
                 image_sources = image_sources[well_aligned_mask].copy()
                 template_sources = template_sources[well_aligned_mask].copy()
-                image_sources.loc[:, "x_pix"] = image_sources["x_centroid"].to_numpy()
-                image_sources.loc[:, "y_pix"] = image_sources["y_centroid"].to_numpy()
-                template_sources.loc[:, "x_pix"] = template_sources["x_centroid"].to_numpy()
-                template_sources.loc[:, "y_pix"] = template_sources["y_centroid"].to_numpy()
+                # Use centroid positions where available, fall back to original
+                # SExtractor positions where centroiding failed (NaN centroid).
+                # This preserves sources with valid positions even when centroiding
+                # failed on one or both images.
+                image_sources.loc[:, "x_pix"] = image_sources["x_centroid"].fillna(
+                    image_sources["x_pix"]
+                ).to_numpy()
+                image_sources.loc[:, "y_pix"] = image_sources["y_centroid"].fillna(
+                    image_sources["y_pix"]
+                ).to_numpy()
+                template_sources.loc[:, "x_pix"] = template_sources["x_centroid"].fillna(
+                    template_sources["x_pix"]
+                ).to_numpy()
+                template_sources.loc[:, "y_pix"] = template_sources["y_centroid"].fillna(
+                    template_sources["y_pix"]
+                ).to_numpy()
 
                 # Log the number of sources removed or the mean offset
                 n_removed = len(well_aligned_mask) - sum(well_aligned_mask)
@@ -4803,6 +4822,44 @@ def run_photometry():
                         template_sources,
                     )
                     logging.info(f"Flux-consistent matching: output {len(MatchingSources)} sources")
+                    # Fallback: if flux consistency removed too many sources,
+                    # use all well-aligned sources. The RANSAC + bin-wise filter
+                    # can remove 50%+ in sparse fields, which is worse than
+                    # passing all well-aligned sources to SFFT.
+                    if len(MatchingSources) < 5 and len(image_sources) >= 5:
+                        logging.info(
+                            f"Flux consistency returned only {len(MatchingSources)} sources "
+                            f"(from {len(image_sources)} input). Using all well-aligned sources "
+                            f"as fallback for SFFT priors."
+                        )
+                        MatchingSources = image_sources.copy()
+                    # Add back sources with NaN flux (failed aperture photometry).
+                    # SFFT only needs (x,y) positions as priors — it does its own
+                    # PSF fitting and photometric ratio estimation.  Sources with
+                    # valid positions but NaN flux (aperture hit a NaN pixel,
+                    # SWarp padding, edge effects) are usable as SFFT priors.
+                    if "flux_AP" in image_sources.columns and not MatchingSources.empty:
+                        _nan_flux_mask = ~np.isfinite(
+                            image_sources["flux_AP"].values
+                        ) | ~np.isfinite(
+                            template_sources["flux_AP"].values
+                        )
+                        if _nan_flux_mask.any():
+                            _nan_flux_sources = image_sources[_nan_flux_mask]
+                            _existing_idx = set(MatchingSources.index)
+                            _new_sources = _nan_flux_sources[
+                                ~_nan_flux_sources.index.isin(_existing_idx)
+                            ]
+                            if not _new_sources.empty:
+                                MatchingSources = pd.concat(
+                                    [MatchingSources, _new_sources],
+                                    ignore_index=True,
+                                )
+                                logging.info(
+                                    f"Added {len(_new_sources)} position-only sources "
+                                    f"(NaN flux from aperture failure) for SFFT priors. "
+                                    f"Total: {len(MatchingSources)} sources."
+                                )
                 else:
                     MatchingSources = image_sources
 
@@ -4854,28 +4911,50 @@ def run_photometry():
                             cs_finite = cs.notna()
                             if cs_finite.any():
                                 n_cs = int(cs_finite.sum())
-                                if n_cs >= 10:
-                                    cs_threshold = 0.5
-                                else:
-                                    cs_threshold = 0.3
-                                cs_pass = cs >= cs_threshold
-                                # Only apply if at least 3 point sources
-                                # remain.  Extended sources bias the kernel
-                                # fit — 4 clean sources with kernel_order=1
-                                # is better than 9 contaminated sources.
-                                if cs_pass.sum() >= 3 or n_before_refine <= 3:
-                                    n_cs_rejected = int((cs_finite & ~cs_pass).sum())
-                                    if n_cs_rejected > 0:
-                                        logging.info(
-                                            f"CLASS_STAR filter: removed {n_cs_rejected} extended sources "
-                                            f"(CLASS_STAR < {cs_threshold}, {n_cs - n_cs_rejected}/{n_cs} kept)"
-                                        )
-                                    ms = ms[cs_pass | ~cs_finite]
-                                elif (cs_finite & ~cs_pass).sum() > 0:
+                                # CLASS_STAR is unreliable for undersampled
+                                # images (FWHM < 3px) because the PSF spans
+                                # very few pixels, causing real point sources
+                                # to get low scores.  Lower the threshold
+                                # adaptively, and skip entirely for severely
+                                # undersampled (FWHM < 2px) fields where
+                                # CLASS_STAR is essentially noise.
+                                _fwhm_for_cs = float(
+                                    input_yaml.get("science_fwhm", ImageFWHM)
+                                )
+                                if _fwhm_for_cs < 2.0:
+                                    cs_threshold = 0.0
                                     logging.info(
-                                        f"CLASS_STAR filter skipped: would leave only "
-                                        f"{cs_pass.sum()} sources (< 3). Keeping all {len(ms)} sources."
+                                        f"CLASS_STAR filter skipped: FWHM={_fwhm_for_cs:.1f}px "
+                                        f"(severely undersampled, CLASS_STAR unreliable). "
+                                        f"Keeping all {len(ms)} sources."
                                     )
+                                elif _fwhm_for_cs < 3.0:
+                                    cs_threshold = 0.2 if n_cs >= 10 else 0.1
+                                    logging.info(
+                                        f"CLASS_STAR threshold lowered to {cs_threshold} "
+                                        f"for undersampled image (FWHM={_fwhm_for_cs:.1f}px)"
+                                    )
+                                else:
+                                    cs_threshold = 0.5 if n_cs >= 10 else 0.3
+                                if cs_threshold > 0:
+                                    cs_pass = cs >= cs_threshold
+                                    # Only apply if at least 3 point sources
+                                    # remain.  Extended sources bias the kernel
+                                    # fit — 4 clean sources with kernel_order=1
+                                    # is better than 9 contaminated sources.
+                                    if cs_pass.sum() >= 3 or n_before_refine <= 3:
+                                        n_cs_rejected = int((cs_finite & ~cs_pass).sum())
+                                        if n_cs_rejected > 0:
+                                            logging.info(
+                                                f"CLASS_STAR filter: removed {n_cs_rejected} extended sources "
+                                                f"(CLASS_STAR < {cs_threshold}, {n_cs - n_cs_rejected}/{n_cs} kept)"
+                                            )
+                                        ms = ms[cs_pass | ~cs_finite]
+                                    elif (cs_finite & ~cs_pass).sum() > 0:
+                                        logging.info(
+                                            f"CLASS_STAR filter skipped: would leave only "
+                                            f"{cs_pass.sum()} sources (< 3). Keeping all {len(ms)} sources."
+                                        )
 
                         # --- Ellipticity filter (backup for point-source selection) ---
                         # Point sources should be nearly circular.  The column
@@ -4932,52 +5011,41 @@ def run_photometry():
                                         f"Keeping all {len(ms)} sources."
                                     )
 
-                        # Crowding rejection: require each prior star to be relatively isolated
-                        # in both the science and template images within a radius ~2.5*FWHM.
-                        if (
-                            len(ms) > 0
-                            and {"x_pix", "y_pix"}.issubset(image_sources.columns)
-                            and {"x_pix", "y_pix"}.issubset(template_sources.columns)
-                        ):
+                        # Crowding rejection: require each prior star to be relatively
+                        # isolated from OTHER prior stars within a radius ~2.5*FWHM.
+                        # Self-query ms only — a source should not be rejected because
+                        # of a neighbour that was already filtered out by CLASS_STAR or
+                        # flux consistency.
+                        if len(ms) > 3 and {"x_pix", "y_pix"}.issubset(ms.columns):
                             from scipy.spatial import cKDTree
-
-                            sci_xy_all = np.vstack(
-                                [
-                                    image_sources["x_pix"].values,
-                                    image_sources["y_pix"].values,
-                                ]
-                            ).T
-                            ref_xy_all = np.vstack(
-                                [
-                                    template_sources["x_pix"].values,
-                                    template_sources["y_pix"].values,
-                                ]
-                            ).T
-                            sci_tree = cKDTree(sci_xy_all)
-                            ref_tree = cKDTree(ref_xy_all)
 
                             ms_xy = np.vstack(
                                 [ms["x_pix"].values, ms["y_pix"].values]
                             ).T
+                            ms_tree = cKDTree(ms_xy)
                             fwhm_pix = float(input_yaml.get("science_fwhm", ImageFWHM))
                             crowd_r = 2.5 * max(fwhm_pix, 1.0)
-                            max_nei = 1
-                            # query_ball_point accepts the full array at once —
-                            # avoids a Python loop over every matched source.
-                            sci_counts = np.array(
-                                [len(nb) - 1 for nb in sci_tree.query_ball_point(ms_xy, crowd_r)]
+                            # Adaptive: allow up to 2 neighbours for sparse fields
+                            # (< 10 sources), 1 for moderate fields.
+                            max_nei = 2 if len(ms) < 10 else 1
+                            counts = np.array(
+                                [len(nb) - 1 for nb in ms_tree.query_ball_point(ms_xy, crowd_r)]
                             )
-                            ref_counts = np.array(
-                                [len(nb) - 1 for nb in ref_tree.query_ball_point(ms_xy, crowd_r)]
-                            )
-                            isolated = (sci_counts <= max_nei) & (ref_counts <= max_nei)
+                            isolated = counts <= max_nei
                             n_crowd_rejected = len(ms) - isolated.sum()
-                            if n_crowd_rejected > 0:
+                            # Skip if it would leave < 5 sources
+                            if n_crowd_rejected > 0 and isolated.sum() >= 5:
                                 logging.info(
                                     f"Crowding rejection: removed {n_crowd_rejected} sources "
                                     f"(radius={crowd_r:.1f}px, max_nei={max_nei})"
                                 )
-                            ms = ms[isolated]
+                                ms = ms[isolated]
+                            elif n_crowd_rejected > 0:
+                                logging.info(
+                                    f"Crowding rejection skipped: would remove {n_crowd_rejected} "
+                                    f"sources leaving only {isolated.sum()} (< 5). "
+                                    f"Keeping all {len(ms)} sources."
+                                )
 
                         n_after_refine = len(ms)
                         if n_after_refine < n_before_refine:
@@ -5324,31 +5392,260 @@ def run_photometry():
         # ForceConv PSF consistency check
         #
         # When SFFT uses ForceConv=SCI, the difference image has the REFERENCE
-        # PSF (broader), not the science PSF. The PSF model (epsd_model) was
+        # PSF (broader), not the science PSF. The PSF model (epsf_model) was
         # built from the science image. For target photometry on the difference
         # image, the PSF model should match the difference image's PSF.
         #
-        # We log a warning and adjust the FWHM in input_yaml so the PSF fitting
-        # bound and target FWHM reporting use the correct (reference) FWHM.
-        # The epsf_model itself is not rebuilt — the PSF fit on the target will
-        # adapt its fit_box to the new FWHM, and the amplitude/flux is the
-        # primary measurement (relatively insensitive to PSF shape for point
-        # sources).
+        # We retrieve the SFFT kernel from the solution FITS file, realize it at
+        # the target position, and convolve the science ePSF with this kernel to
+        # produce a diff-image-matched PSF model. We also adjust the FWHM in
+        # input_yaml so the PSF fitting bound and target FWHM reporting use the
+        # correct (reference) FWHM.
         # -----------------------------------------------------------------------
         _forceconv_diff = None
+        _epsf_original = None
         if PreformSubtraction:
-            _forceconv_diff = str(header.get("FORCECON", "")).strip().upper()
+            _forceconv_hdr = str(header.get("FORCECON", "")).strip().upper()
+            # SFFT writes "AUTO" to the header when ForceConv=AUTO, but internally
+            # decides the direction: it convolves the sharper image (smaller FWHM)
+            # to match the broader one. We need to determine the actual direction
+            # so the ePSF consistency block triggers correctly.
+            if _forceconv_hdr == "AUTO":
+                # SFFT writes "AUTO" to FORCECON but records the actual direction
+                # in the CONVD keyword. Use that if available; otherwise infer
+                # from FWHM comparison (SFFT convolves the sharper image).
+                _convd = str(header.get("CONVD", "")).strip().upper()
+                if _convd in ("SCI", "REF"):
+                    _forceconv_diff = _convd
+                    logging.info(
+                        "SFFT ForceConv=AUTO resolved to %s (from CONVD keyword): "
+                        "difference image has %s PSF.",
+                        _convd, "reference" if _convd == "SCI" else "science",
+                    )
+                else:
+                    _auto_sci_fwhm = float(header.get("FWHM_SCI", 0))
+                    _auto_ref_fwhm = float(header.get("FWHM_REF", 0))
+                    if _auto_sci_fwhm > 0 and _auto_ref_fwhm > 0:
+                        if _auto_sci_fwhm <= _auto_ref_fwhm:
+                            _forceconv_diff = "SCI"
+                            logging.info(
+                                "SFFT ForceConv=AUTO resolved to SCI (science FWHM=%.2f <= ref FWHM=%.2f): "
+                                "difference image has reference PSF.",
+                                _auto_sci_fwhm, _auto_ref_fwhm,
+                            )
+                        else:
+                            _forceconv_diff = "REF"
+                            logging.info(
+                                "SFFT ForceConv=AUTO resolved to REF (science FWHM=%.2f > ref FWHM=%.2f): "
+                                "difference image has science PSF.",
+                                _auto_sci_fwhm, _auto_ref_fwhm,
+                            )
+                    else:
+                        _forceconv_diff = ""
+            else:
+                _forceconv_diff = _forceconv_hdr
             if _forceconv_diff == "SCI":
                 _ref_fwhm_hdr = float(header.get("FWHM_REF", 0))
                 _sci_fwhm_hdr = float(header.get("FWHM_SCI", 0))
+                # Save original science ePSF for potential re-realization at target position
+                _epsf_original = epsf_model
                 if _ref_fwhm_hdr > 0 and _sci_fwhm_hdr > 0:
                     logging.info(
                         "SFFT ForceConv=SCI: difference image has reference PSF "
                         "(FWHM=%.2f px) instead of science PSF (FWHM=%.2f px). "
-                        "Adjusting FWHM for target photometry.",
+                        "Adjusting FWHM for target photometry and convolving ePSF with SFFT kernel.",
                         _ref_fwhm_hdr, _sci_fwhm_hdr,
                     )
                     input_yaml["fwhm"] = _ref_fwhm_hdr
+
+                    # --- Update gain from diff header for correct flux calibration ---
+                    # SFFT writes GAIN_DIFF = GAIN_SCI / FSCAL to the diff header
+                    # when ForceConv=SCI.  Using the science gain would make
+                    # flux_PSF = F_sci * FSCAL * gain_sci (wrong by factor FSCAL).
+                    # Using GAIN_DIFF gives flux_PSF = F_sci * FSCAL * gain_sci/FSCAL
+                    # = F_sci * gain_sci (correct, magnitude conserved).
+                    _diff_gain = float(header.get("GAIN", 0))
+                    if _diff_gain > 0 and np.isfinite(_diff_gain):
+                        _sci_gain = float(input_yaml.get("gain", 0))
+                        if _sci_gain > 0 and abs(_diff_gain - _sci_gain) > 0.001:
+                            logging.info(
+                                "Updating gain for diff-image photometry: %.5g -> %.5g e-/ADU "
+                                "(SFFT FSCAL=%.4f).",
+                                _sci_gain, _diff_gain, _sci_gain / _diff_gain,
+                            )
+                        input_yaml["gain"] = _diff_gain
+
+                    # --- Convolve ePSF with SFFT kernel to match diff-image PSF ---
+                    _solpath = str(header.get("SOLPATH", "")).strip()
+                    if epsf_model is not None and _solpath and os.path.isfile(_solpath):
+                        try:
+                            from sfft.utils.SFFTSolutionReader import Realize_MatchingKernel
+                            from scipy.signal import fftconvolve
+
+                            _kerhw = int(header.get("KERHW", 0))
+                            _kerorder = int(header.get("KERORDER", header.get("KERPOLY", 0)))
+                            _L = 2 * _kerhw + 1
+
+                            # Image shape from the difference image
+                            _ny, _nx = image.shape
+                            # SFFT uses Fortran coordinates: X = column, Y = row
+                            # Target position will be set after WCS conversion below;
+                            # for a constant kernel (order 0) position doesn't matter.
+                            # Use image centre as default (correct for order 0, approximate for >0).
+                            _cx = float(_nx) / 2.0
+                            _cy = float(_ny) / 2.0
+                            _XY_q = np.array([[_cx, _cy]])
+
+                            _ker_stack = Realize_MatchingKernel(_XY_q).FromFITS(_solpath)
+                            _ker_2d = np.asarray(_ker_stack[0]).squeeze()
+
+                            if _ker_2d.ndim == 2 and _ker_2d.shape[0] == _L:
+                                # Get the ePSF data (oversampled PSF image)
+                                _epsf_data = np.asarray(epsf_model.data, dtype=float)
+                                _epsf_oversamp = getattr(epsf_model, "oversampling", 1)
+                                if _epsf_oversamp is None:
+                                    _epsf_oversamp = 1
+                                # oversampling can be a scalar or array (e.g. [4, 4])
+                                try:
+                                    _epsf_oversamp = int(np.atleast_1d(_epsf_oversamp)[0])
+                                except (TypeError, ValueError, IndexError):
+                                    _epsf_oversamp = 1
+                                if _epsf_oversamp < 1:
+                                    _epsf_oversamp = 1
+
+                                # The SFFT kernel operates in native (un-oversampled)
+                                # pixel space. The ePSF is oversampled by
+                                # _epsf_oversamp. We need to convolve the ePSF
+                                # with the kernel, but they're on different grids.
+                                # Approach: downsample ePSF to native resolution,
+                                # convolve with kernel, then upsample back.
+                                from scipy.ndimage import zoom
+
+                                # Downsample ePSF to native pixels
+                                _epsf_native = zoom(
+                                    _epsf_data, 1.0 / _epsf_oversamp, order=1, mode="reflect"
+                                )
+                                # Convolve with SFFT kernel
+                                _epsf_conv_native = fftconvolve(
+                                    _epsf_native, _ker_2d, mode="same"
+                                )
+                                # Renormalize so total flux = 1
+                                _total = np.nansum(_epsf_conv_native)
+                                if _total > 0:
+                                    _epsf_conv_native /= _total
+                                # Upsample back to oversampled grid
+                                _epsf_conv = zoom(
+                                    _epsf_conv_native, _epsf_oversamp, order=1, mode="reflect"
+                                )
+                                # Match shape to original ePSF data
+                                if _epsf_conv.shape != _epsf_data.shape:
+                                    _ts = _epsf_data.shape
+                                    _cy_off = _epsf_conv.shape[0] // 2
+                                    _cx_off = _epsf_conv.shape[1] // 2
+                                    _ty_off = _ts[0] // 2
+                                    _tx_off = _ts[1] // 2
+                                    _y0 = _cy_off - _ty_off
+                                    _x0 = _cx_off - _tx_off
+                                    _y1 = _y0 + _ts[0]
+                                    _x1 = _x0 + _ts[1]
+                                    if _y0 < 0 or _x0 < 0 or _y1 > _epsf_conv.shape[0] or _x1 > _epsf_conv.shape[1]:
+                                        _epsf_conv = np.pad(
+                                            _epsf_conv,
+                                            (
+                                                (max(0, -_y0), max(0, _y1 - _epsf_conv.shape[0])),
+                                                (max(0, -_x0), max(0, _x1 - _epsf_conv.shape[1])),
+                                            ),
+                                            mode="constant",
+                                        )
+                                        _y0 = max(0, _y0)
+                                        _x0 = max(0, _x0)
+                                        _y1 = _y0 + _ts[0]
+                                        _x1 = _x0 + _ts[1]
+                                    _epsf_conv = _epsf_conv[_y0:_y1, _x0:_x1]
+                                    if _epsf_conv.shape != _ts:
+                                        _epsf_conv = _epsf_conv[:_ts[0], :_ts[1]]
+
+                                # Create a new ImagePSF from the convolved data
+                                from photutils.psf import ImagePSF
+                                _epsf_conv_model = ImagePSF(
+                                    data=_epsf_conv,
+                                    flux=epsf_model.flux.value,
+                                    x_0=epsf_model.x_0.value,
+                                    y_0=epsf_model.y_0.value,
+                                    origin=epsf_model.origin,
+                                    oversampling=_epsf_oversamp,
+                                )
+                                epsf_model = _epsf_conv_model
+                                logging.info(
+                                    "ePSF convolved with SFFT kernel (KerHW=%d px, order=%d): "
+                                    "PSF model now matches difference-image PSF (FWHM=%.2f px).",
+                                    _kerhw, _kerorder, _ref_fwhm_hdr,
+                                )
+
+                                # --- Diagnostic plot: original ePSF / kernel / convolved ePSF ---
+                                try:
+                                    import matplotlib
+                                    matplotlib.use("Agg", force=True)
+                                    import matplotlib.pyplot as plt
+
+                                    from astropy.visualization import ZScaleInterval
+                                    _zs = ZScaleInterval()
+
+                                    _fig, _axes = plt.subplots(1, 3, figsize=(15, 5))
+                                    _fig.suptitle(
+                                        f"PSF Convolution (ForceConv=SCI, KerHW={_kerhw}, order={_kerorder})\n"
+                                        f"{base_filename}",
+                                        fontsize=11,
+                                    )
+                                    # Original ePSF (native resolution for fair comparison)
+                                    _v0 = _zs.get_limits(_epsf_native)
+                                    _im0 = _axes[0].imshow(_epsf_native, origin="lower", cmap="viridis", vmin=_v0[0], vmax=_v0[1])
+                                    _axes[0].set_title("Original Science ePSF\n(native pixels)")
+                                    _axes[0].set_xlabel("X (px)")
+                                    _axes[0].set_ylabel("Y (px)")
+                                    _fig.colorbar(_im0, ax=_axes[0], fraction=0.046, pad=0.04)
+                                    # SFFT kernel
+                                    _v1 = _zs.get_limits(_ker_2d)
+                                    _im1 = _axes[1].imshow(_ker_2d, origin="lower", cmap="magma", vmin=_v1[0], vmax=_v1[1])
+                                    _axes[1].set_title(f"SFFT Matching Kernel\n({_ker_2d.shape[0]}x{_ker_2d.shape[1]} px)")
+                                    _axes[1].set_xlabel("X (px)")
+                                    _axes[1].set_ylabel("Y (px)")
+                                    _fig.colorbar(_im1, ax=_axes[1], fraction=0.046, pad=0.04)
+                                    # Convolved ePSF (native resolution)
+                                    _v2 = _zs.get_limits(_epsf_conv_native)
+                                    _im2 = _axes[2].imshow(_epsf_conv_native, origin="lower", cmap="viridis", vmin=_v2[0], vmax=_v2[1])
+                                    _axes[2].set_title("Convolved ePSF\n(diff-image PSF, native px)")
+                                    _axes[2].set_xlabel("X (px)")
+                                    _axes[2].set_ylabel("Y (px)")
+                                    _fig.colorbar(_im2, ax=_axes[2], fraction=0.046, pad=0.04)
+                                    _fig.tight_layout(rect=[0, 0, 1, 0.92])
+                                    _plot_path = os.path.join(
+                                        os.path.dirname(fpath),
+                                        f"PSF_convolution_{os.path.splitext(base_filename)[0]}.png",
+                                    )
+                                    _fig.savefig(_plot_path, dpi=150, bbox_inches="tight")
+                                    plt.close(_fig)
+                                    logging.info("Saved PSF convolution diagnostic plot: %s", _plot_path)
+                                except Exception as _pe:
+                                    logging.debug("PSF convolution plot failed: %s", _pe)
+                            else:
+                                logging.warning(
+                                    "SFFT kernel realization failed (shape %s, expected %dx%d); "
+                                    "using unconvolved science ePSF for diff photometry.",
+                                    str(_ker_2d.shape), _L, _L,
+                                )
+                        except Exception as _e:
+                            logging.warning(
+                                "Failed to convolve ePSF with SFFT kernel: %s. "
+                                "Using unconvolved science ePSF (shape mismatch may bias flux).",
+                                _e,
+                            )
+                    elif epsf_model is not None:
+                        logging.info(
+                            "No SFFT solution file available (SOLPATH=%s); "
+                            "using unconvolved science ePSF for diff photometry.",
+                            _solpath or "missing",
+                        )
             elif _forceconv_diff == "REF":
                 logging.debug(
                     "SFFT ForceConv=REF: difference image has science PSF (consistent with PSF model)."
@@ -5399,6 +5696,150 @@ def run_photometry():
         input_yaml["target_dec"] = target_coords.dec.degree
         input_yaml["target_x_pix"] = target_x_pix
         input_yaml["target_y_pix"] = target_y_pix
+
+        # --- Re-realize SFFT kernel at target position for spatially-varying kernels ---
+        # When KerPolyOrder > 0, the SFFT kernel changes across the field.
+        # The initial realization used the image centre; now that we know the
+        # target position, re-realize and re-convolve the ePSF for accuracy.
+        if (
+            _forceconv_diff == "SCI"
+            and epsf_model is not None
+            and _epsf_original is not None
+            and PreformSubtraction
+            and np.isfinite(target_x_pix)
+            and np.isfinite(target_y_pix)
+        ):
+            _solpath = str(header.get("SOLPATH", "")).strip()
+            _kerorder_re = int(header.get("KERORDER", header.get("KERPOLY", 0)))
+            if _kerorder_re > 0 and _solpath and os.path.isfile(_solpath):
+                try:
+                    from sfft.utils.SFFTSolutionReader import Realize_MatchingKernel
+                    from scipy.signal import fftconvolve
+                    from scipy.ndimage import zoom
+                    from photutils.psf import ImagePSF
+
+                    _kerhw_re = int(header.get("KERHW", 0))
+                    _L_re = 2 * _kerhw_re + 1
+                    # SFFT Fortran coordinates: X = column, Y = row
+                    _XY_q_re = np.array([[float(target_x_pix), float(target_y_pix)]])
+
+                    _ker_stack_re = Realize_MatchingKernel(_XY_q_re).FromFITS(_solpath)
+                    _ker_2d_re = np.asarray(_ker_stack_re[0]).squeeze()
+
+                    if _ker_2d_re.ndim == 2 and _ker_2d_re.shape[0] == _L_re:
+                        _epsf_data_re = np.asarray(_epsf_original.data, dtype=float)
+                        _epsf_oversamp_re = getattr(_epsf_original, "oversampling", 1)
+                        if _epsf_oversamp_re is None:
+                            _epsf_oversamp_re = 1
+                        try:
+                            _epsf_oversamp_re = int(np.atleast_1d(_epsf_oversamp_re)[0])
+                        except (TypeError, ValueError, IndexError):
+                            _epsf_oversamp_re = 1
+                        if _epsf_oversamp_re < 1:
+                            _epsf_oversamp_re = 1
+
+                        _epsf_native_re = zoom(
+                            _epsf_data_re, 1.0 / _epsf_oversamp_re, order=1, mode="reflect"
+                        )
+                        _epsf_conv_native_re = fftconvolve(
+                            _epsf_native_re, _ker_2d_re, mode="same"
+                        )
+                        _total_re = np.nansum(_epsf_conv_native_re)
+                        if _total_re > 0:
+                            _epsf_conv_native_re /= _total_re
+                        _epsf_conv_re = zoom(
+                            _epsf_conv_native_re, _epsf_oversamp_re, order=1, mode="reflect"
+                        )
+                        if _epsf_conv_re.shape != _epsf_data_re.shape:
+                            _ts = _epsf_data_re.shape
+                            _cy_off = _epsf_conv_re.shape[0] // 2
+                            _cx_off = _epsf_conv_re.shape[1] // 2
+                            _ty_off = _ts[0] // 2
+                            _tx_off = _ts[1] // 2
+                            _y0 = _cy_off - _ty_off
+                            _x0 = _cx_off - _tx_off
+                            _y1 = _y0 + _ts[0]
+                            _x1 = _x0 + _ts[1]
+                            if _y0 < 0 or _x0 < 0 or _y1 > _epsf_conv_re.shape[0] or _x1 > _epsf_conv_re.shape[1]:
+                                _epsf_conv_re = np.pad(
+                                    _epsf_conv_re,
+                                    (
+                                        (max(0, -_y0), max(0, _y1 - _epsf_conv_re.shape[0])),
+                                        (max(0, -_x0), max(0, _x1 - _epsf_conv_re.shape[1])),
+                                    ),
+                                    mode="constant",
+                                )
+                                _y0 = max(0, _y0)
+                                _x0 = max(0, _x0)
+                                _y1 = _y0 + _ts[0]
+                                _x1 = _x0 + _ts[1]
+                            _epsf_conv_re = _epsf_conv_re[_y0:_y1, _x0:_x1]
+                            if _epsf_conv_re.shape != _ts:
+                                _epsf_conv_re = _epsf_conv_re[:_ts[0], :_ts[1]]
+
+                        epsf_model = ImagePSF(
+                            data=_epsf_conv_re,
+                            flux=_epsf_original.flux.value,
+                            x_0=_epsf_original.x_0.value,
+                            y_0=_epsf_original.y_0.value,
+                            origin=_epsf_original.origin,
+                            oversampling=_epsf_oversamp_re,
+                        )
+                        logging.info(
+                            "ePSF re-convolved with SFFT kernel at target position "
+                            "(%.1f, %.1f) for spatially-varying kernel (order=%d).",
+                            float(target_x_pix), float(target_y_pix), _kerorder_re,
+                        )
+
+                        # --- Diagnostic plot: original ePSF / target kernel / re-convolved ePSF ---
+                        try:
+                            import matplotlib
+                            matplotlib.use("Agg", force=True)
+                            import matplotlib.pyplot as plt
+
+                            from astropy.visualization import ZScaleInterval
+                            _zs_r = ZScaleInterval()
+
+                            _fig_r, _axes_r = plt.subplots(1, 3, figsize=(15, 5))
+                            _fig_r.suptitle(
+                                f"PSF Re-convolution at target ({target_x_pix:.1f}, {target_y_pix:.1f})\n"
+                                f"ForceConv=SCI, KerHW={_kerhw_re}, order={_kerorder_re} | {base_filename}",
+                                fontsize=11,
+                            )
+                            _v0r = _zs_r.get_limits(_epsf_native_re)
+                            _im0r = _axes_r[0].imshow(_epsf_native_re, origin="lower", cmap="viridis", vmin=_v0r[0], vmax=_v0r[1])
+                            _axes_r[0].set_title("Original Science ePSF\n(native pixels)")
+                            _axes_r[0].set_xlabel("X (px)")
+                            _axes_r[0].set_ylabel("Y (px)")
+                            _fig_r.colorbar(_im0r, ax=_axes_r[0], fraction=0.046, pad=0.04)
+                            _v1r = _zs_r.get_limits(_ker_2d_re)
+                            _im1r = _axes_r[1].imshow(_ker_2d_re, origin="lower", cmap="magma", vmin=_v1r[0], vmax=_v1r[1])
+                            _axes_r[1].set_title(f"Kernel at target pos\n({_ker_2d_re.shape[0]}x{_ker_2d_re.shape[1]} px)")
+                            _axes_r[1].set_xlabel("X (px)")
+                            _axes_r[1].set_ylabel("Y (px)")
+                            _fig_r.colorbar(_im1r, ax=_axes_r[1], fraction=0.046, pad=0.04)
+                            _v2r = _zs_r.get_limits(_epsf_conv_native_re)
+                            _im2r = _axes_r[2].imshow(_epsf_conv_native_re, origin="lower", cmap="viridis", vmin=_v2r[0], vmax=_v2r[1])
+                            _axes_r[2].set_title("Re-convolved ePSF\n(target kernel, native px)")
+                            _axes_r[2].set_xlabel("X (px)")
+                            _axes_r[2].set_ylabel("Y (px)")
+                            _fig_r.colorbar(_im2r, ax=_axes_r[2], fraction=0.046, pad=0.04)
+                            _fig_r.tight_layout(rect=[0, 0, 1, 0.92])
+                            _plot_path_re = os.path.join(
+                                os.path.dirname(fpath),
+                                f"PSF_reconvolution_target_{os.path.splitext(base_filename)[0]}.png",
+                            )
+                            _fig_r.savefig(_plot_path_re, dpi=150, bbox_inches="tight")
+                            plt.close(_fig_r)
+                            logging.info("Saved PSF re-convolution diagnostic plot: %s", _plot_path_re)
+                        except Exception as _pe_re:
+                            logging.debug("PSF re-convolution plot failed: %s", _pe_re)
+                except Exception as _e:
+                    logging.debug(
+                        "Re-realization of SFFT kernel at target position failed: %s "
+                        "(using image-centre kernel realization).",
+                        _e,
+                    )
 
         # For subtraction diagnostics: keep a copy of the pre-local-background
         # image so the difference panel reflects the raw subtraction output.

@@ -1581,7 +1581,7 @@ class PSF:
                     f"[robust_extract_stars] Rejected {n_rejected} cutouts with NaN/masked pixels "
                     f"in central region ({n_rejected}/{len(epsfstars)})"
                 )
-                epsfstars = EPSFStars([epsfstars[i] for i in valid_indices])
+                epsfstars = EPSFStars([epsfstars._data[i] for i in valid_indices])
                 stars_tbl = stars_tbl[valid_indices]
             
             if len(epsfstars) == 0:

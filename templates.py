@@ -346,8 +346,8 @@ class FluxMatchParams:
     max_trials: int = 2000
     """RANSAC maximum iteration count (increased for better sampling)."""
 
-    min_absolute_samples: int = 5
-    """Hard floor on the number of RANSAC samples (increased to avoid clustering)."""
+    min_absolute_samples: int = 3
+    """Hard floor on the number of RANSAC samples (lowered to support sparse fields)."""
 
     use_percentile_cut: bool = False
     """Whether to apply a brightness percentile trim after RANSAC."""
@@ -3417,7 +3417,13 @@ class Templates:
             idx_r = indices[robust_mask]
 
             # --- Optional spatial thinning to avoid over-clustered regions ---
-            if params.use_spatial_thinning and {"x", "y"}.issubset(catalog_img.columns):
+            # Skip for sparse fields — thinning can remove valid sources when
+            # we already have too few for reliable kernel fitting.
+            if (
+                params.use_spatial_thinning
+                and len(mag_img_r) >= 15
+                and {"x", "y"}.issubset(catalog_img.columns)
+            ):
                 x_pos = catalog_img.loc[idx_r, "x"].to_numpy(dtype=float)
                 y_pos = catalog_img.loc[idx_r, "y"].to_numpy(dtype=float)
                 spatial_mask = self._spatially_uniform_mask(
@@ -3576,8 +3582,10 @@ class Templates:
             # "lucky" inliers in noisy regimes). No continuity constraint: allow
             # inliers across the full magnitude range so the flux comparison is not
             # over-restricted. Use a modest majority threshold to avoid over-masking.
+            # Skip for sparse fields — bins with 1-2 sources make the inlier fraction
+            # meaningless and can remove valid sources.
             bin_majority_frac = 0.25  # reject bin only if inlier fraction below this
-            if final_inliers.sum() >= params.min_absolute_samples:
+            if final_inliers.sum() >= params.min_absolute_samples and len(mag_img_r) >= 15:
                 try:
                     bin_width = 0.5  # mag
                     mag_min = float(np.nanmin(mag_img_r))
@@ -4257,7 +4265,7 @@ class Templates:
             # after cross-matching and quality filtering only ~15-20 survive
             # for kernel fitting.  Use 20 as a conservative estimate.
             _n_matched_early = len(matching_sources) if matching_sources else 0
-            _min_prior_early = int(ts_cfg_ker.get("sfft_min_prior_sources", 8) or 8)
+            _min_prior_early = int(ts_cfg_ker.get("sfft_min_prior_sources", 3) or 3)
             _sfft_self_match_early = _n_matched_early < _min_prior_early
             n_eff = 10 if _sfft_self_match_early else _n_matched_early
 
@@ -4318,16 +4326,15 @@ class Templates:
                 # With auto ForceConv, we always convolve the sharper image to match
                 # the broader one (never deconvolve), so a standard 2x FWHM_broad
                 # floor is sufficient.
-                _floor_mult = 2.0
-                # BUG 120: In sparse fields (<25 matched sources), a large kernel
-                # floor creates an under-constrained fit.  A 32px half-width with
-                # order 1 gives 12675 unknowns vs ~17 sources → flux scaling
-                # discrepancy and dipoles.  Cap the floor multiplier based on
-                # source count so the kernel stays well-constrained.
+                # Base floor: 2.5×FWHM_broad for good PSF wing coverage.
+                # Cap down for sparse fields where a smaller kernel is more
+                # constrained (BUG 120: 32px half-width with order 1 gives
+                # 12675 unknowns vs ~17 sources → flux scaling discrepancy).
+                _floor_mult = 2.5
                 if n_eff < 15:
-                    _floor_mult = min(_floor_mult, 2.0)
+                    _floor_mult = 2.0
                 elif n_eff < 25:
-                    _floor_mult = min(_floor_mult, 2.5)
+                    _floor_mult = 2.0
                 ker_hw_from_conv = int(np.ceil(_mult_effective * fwhm_conv))
                 ker_hw_floor = int(np.ceil(_floor_mult * fwhm_broad))
 
@@ -4547,22 +4554,25 @@ class Templates:
                     False  # default to ESP (sparse) for better performance on typical fields
                 )
             # Kernel polynomial order: auto-select based on source count
-            # when set to "auto" or null.  Integer values (0-3) are user
-            # overrides.
+            # when set to "auto".  Integer values (0-3) are user overrides.
+            # null/None defaults to 0 (constant kernel, minimal RAM).
             #
             # RAM scaling (SFFT linear system):
             #   order 0:  1 term  →  manageable
             #   order 1:  3 terms →  moderate
-            #   order 2:  6 terms →  ~7 GB (auto caps at 1)
-            #   order 3: 10 terms →  ~20 GB (auto caps at 1)
+            #   order 2:  6 terms →  ~7 GB (auto caps at 2)
+            #   order 3: 10 terms →  ~20 GB (user must set explicitly)
+            # Default is 0 (constant kernel, minimal RAM).  Set "auto" in
+            # YAML to enable auto-selection (capped at order 2).
             _raw_kernel = ts_cfg.get("kernel_order", 0)
             _is_auto = isinstance(_raw_kernel, str) and _raw_kernel.strip().lower() == "auto"
-            user_kernel = _raw_kernel if (not _is_auto and _raw_kernel is not None) else None
+            # null/None → 0 (constant).  Only "auto" string triggers auto-select.
+            user_kernel = _raw_kernel if (not _is_auto and _raw_kernel is not None and not isinstance(_raw_kernel, str)) else None
             n_matched = len(matching_sources) if matching_sources else 0
 
             # n_eff was computed earlier for kernel floor adaptation (BUG 120).
             # Recompute _sfft_self_match for logging purposes.
-            _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 8) or 8)
+            _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 3) or 3)
             _sfft_self_match = n_matched < _min_prior
 
             # Use the conservative n_eff (20 for self-match) for kernel_order
@@ -5151,7 +5161,7 @@ class Templates:
             def _build_sfft_cmd(run_excluded, run_matching, template_fp, diff_fp):
                 # If fewer than min_prior_sources pipeline-matched sources, let SFFT
                 # perform matching.  Must match run_sfft.py's MIN_PRIOR_SOURCES.
-                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 8) or 8)
+                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 3) or 3)
                 if len(run_matching) < min_sources_for_prior:
                     logger.info(
                         "Fewer than %d pipeline-matched sources (%d); letting SFFT perform source matching.",
@@ -5282,7 +5292,7 @@ class Templates:
                     cmd_local += ["-kernel_hw_fwhm_multiplier", str(float(_ker_mult))]
 
                 # Prior source validation
-                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 8)
+                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 3)
                 cmd_local += ["-min_prior_sources", str(int(min_prior_sources))]
 
                 if sfft_crowded:
