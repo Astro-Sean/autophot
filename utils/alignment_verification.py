@@ -116,7 +116,7 @@ class AlignmentVerifier:
                 self._log_verification_results(results)
                 
         except Exception as e:
-            self.logger.error(f"Alignment verification failed: {e}")
+            self.logger.error("Alignment verification failed: %s", e)
             results['error'] = str(e)
             
         return results
@@ -240,7 +240,7 @@ class AlignmentVerifier:
                 })
                 
             except Exception as e:
-                self.logger.warning(f"Coordinate test failed at ({x},{y}): {e}")
+                self.logger.warning("Coordinate test failed at (%s,%s): %s", x, y, e)
                 results['consistent'] = False
         
         if offsets:
@@ -383,36 +383,36 @@ class AlignmentVerifier:
         plt.savefig(output_dir / 'alignment_verification.png', dpi=150, bbox_inches='tight')
         plt.close()
         
-        self.logger.info(f"Alignment verification plots saved to {output_dir}")
+        self.logger.info("Alignment verification plots saved to %s", output_dir)
     
     def _log_verification_results(self, results: dict):
         """Log a human-readable summary of all verification sub-checks."""
         
-        self.logger.info(f"Alignment Verification Results:")
-        self.logger.info(f"  Overall Quality: {results['alignment_quality']} (score: {results.get('alignment_score', 0):.3f})")
-        self.logger.info(f"  Precise Alignment: {results['precise_alignment']}")
+        self.logger.info("Alignment Verification Results:")
+        self.logger.info("  Overall Quality: %s (score: %.3f)", results['alignment_quality'], results.get('alignment_score', 0))
+        self.logger.info("  Precise Alignment: %s", results['precise_alignment'])
         
         if 'wcs_consistency' in results:
             wcs = results['wcs_consistency']
-            self.logger.info(f"  WCS Consistency: {'PASS' if wcs['consistent'] else 'FAIL'}")
+            self.logger.info("  WCS Consistency: %s", 'PASS' if wcs['consistent'] else 'FAIL')
             if wcs['issues']:
                 for issue in wcs['issues']:
-                    self.logger.warning(f"    {issue}")
+                    self.logger.warning("    %s", issue)
         
         if 'pixel_alignment' in results:
             pix = results['pixel_alignment']
-            self.logger.info(f"  Pixel Grid: {'PASS' if pix['consistent'] else 'FAIL'}")
+            self.logger.info("  Pixel Grid: %s", 'PASS' if pix['consistent'] else 'FAIL')
             if not pix['consistent']:
                 for issue in pix['issues']:
-                    self.logger.warning(f"    {issue}")
+                    self.logger.warning("    %s", issue)
         
         if 'coordinate_accuracy' in results:
             coord = results['coordinate_accuracy']
-            self.logger.info(f"  Coordinate Accuracy: max offset = {coord.get('max_offset_pixels', 0):.3f} px")
+            self.logger.info("  Coordinate Accuracy: max offset = %.3f px", coord.get('max_offset_pixels', 0))
         
         if 'resampling_quality' in results:
             resamp = results['resampling_quality']
-            self.logger.info(f"  Resampling Quality: {resamp.get('quality_score', 0):.3f}")
+            self.logger.info("  Resampling Quality: %.3f", resamp.get('quality_score', 0))
             if resamp['issues']:
                 for issue in resamp['issues']:
-                    self.logger.warning(f"    {issue}")
+                    self.logger.warning("    %s", issue)

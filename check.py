@@ -142,7 +142,7 @@ def get_header(filename):
         except ImportError:
             raise ImportError("No FITS reader. Install astropy.")
     except Exception as e:
-        logging.error(f"Cannot read {filename}: {e}")
+        logging.error("Cannot read %s: %s", filename, e)
         return {}
 
 
@@ -210,7 +210,7 @@ class FitsInfo:
                 ", ".join(sorted(set(dropped_filters))),
             )
 
-        self.logger.info(f"Initialized: {len(self.flist)} files")
+        self.logger.info("Initialized: %s files", len(self.flist))
         # Global (cross-instrument) filter mapping cache. This prevents repetitive
         # prompts when scanning large heterogeneous datasets.
         self._global_filter_map: dict[str, str] = {}
@@ -408,7 +408,7 @@ class FitsInfo:
         aliases = KEYWORD_ALIASES.get(keyword, [])
         exact = list(dict.fromkeys([k for k in aliases if k in keys]))
         if len(exact) == 1:
-            self.logger.info(f"Auto-selected exact match for {keyword}: {exact[0]}")
+            self.logger.info("Auto-selected exact match for %s: %s", keyword, exact[0])
             return exact[0]
 
         # Step 2: Fuzzy matching
@@ -418,17 +418,17 @@ class FitsInfo:
         if candidates:
             # Auto-select first candidate
             selected = candidates[0]
-            self.logger.info(f"Auto-selected keyword for {keyword}: {selected}")
+            self.logger.info("Auto-selected keyword for %s: %s", keyword, selected)
             return selected
 
         # Fallback: search for keyword containing the target name
         for key in keys:
             if keyword.lower() in key.lower():
-                self.logger.info(f"Fallback auto-selected keyword for {keyword}: {key}")
+                self.logger.info("Fallback auto-selected keyword for %s: %s", keyword, key)
                 return key
 
         # Last resort: return None
-        self.logger.warning(f"Could not find suitable keyword for {keyword}")
+        self.logger.warning("Could not find suitable keyword for %s", keyword)
         return None
 
     def check(self):
@@ -485,7 +485,7 @@ class FitsInfo:
                 entry = {}
                 db[tele]["INSTRUME"][inst_name] = entry
                 entry["Name"] = f"{tele}+{inst_name}"
-                self.logger.info(f"Auto-created instrument entry: {entry['Name']}")
+                self.logger.info("Auto-created instrument entry: %s", entry['Name'])
                 sh = self._find_sample_header(headers_cache, correct_files, tele, inst_name)
                 entry["pixel_scale"] = self._derive_pixel_scale(sh)
                 entry["filter_key_0"] = "FILTER"
@@ -538,7 +538,7 @@ class FitsInfo:
             db.setdefault(tele, {}).setdefault("INSTRUME", {})
             if inst not in db[tele]["INSTRUME"]:
                 db[tele]["INSTRUME"][inst] = {"Name": f"{tele}+{inst}", "filter_key_0": "FILTER"}
-                self.logger.info(f"Auto-created entry for {tele}+{inst}.")
+                self.logger.info("Auto-created entry for %s+%s.", tele, inst)
             entry = db[tele]["INSTRUME"][inst]
             fkey = self._find_filter_key(header, entry)
             fval_raw = str(header[fkey]).strip().replace(" ", "")
@@ -550,10 +550,10 @@ class FitsInfo:
                     std = self._resolve_standard_band(fval_raw)
                     if std is not None:
                         entry[fval_raw] = std
-                        self.logger.info(f"Auto-mapped filter {fval_raw} -> {std}")
+                        self.logger.info("Auto-mapped filter %s -> %s", fval_raw, std)
                     else:
                         entry[fval_raw] = fval_raw
-                        self.logger.warning(f"Could not auto-map filter {fval_raw}, using as-is")
+                        self.logger.warning("Could not auto-map filter %s, using as-is", fval_raw)
 
 
     def _try_mapping(self, db, header_value, source, mapping):
@@ -706,7 +706,7 @@ class FitsInfo:
                 if fval not in AVOID_FILTERS:
                     new_fk = f"filter_key_{self._next_filter_key_num(entry)}"
                     entry[new_fk] = key
-                    self.logger.info(f"Auto-selected filter key: {key} -> {new_fk}")
+                    self.logger.info("Auto-selected filter key: %s -> %s", key, new_fk)
                     return key
 
         # Fallback: first short non-empty value
@@ -715,7 +715,7 @@ class FitsInfo:
             if fval and fval not in AVOID_FILTERS and len(fval) <= 10:
                 new_fk = f"filter_key_{self._next_filter_key_num(entry)}"
                 entry[new_fk] = key
-                self.logger.info(f"Fallback auto-selected filter key: {key} -> {new_fk}")
+                self.logger.info("Fallback auto-selected filter key: %s -> %s", key, new_fk)
                 return key
 
         self.logger.warning("No suitable filter key found, using 'FILTER' as default")

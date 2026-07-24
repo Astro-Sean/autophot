@@ -261,7 +261,7 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
     nan_count = np.sum(np.isnan(image_data))
     total_pixels = image_data.size
     nan_pct = 100 * nan_count / total_pixels
-    logging.info(f"NaN boundary trimming: {nan_count}/{total_pixels} pixels are NaN ({nan_pct:.1f}%)")
+    logging.info("NaN boundary trimming: %s/%s pixels are NaN (%.1f%)", nan_count, total_pixels, nan_pct)
 
     # Find valid (non-NaN) pixels
     valid_mask = ~np.isnan(image_data)
@@ -322,12 +322,12 @@ def _trim_nan_boundaries(image_data, header, target_x=None, target_y=None, buffe
             y_min = max(0, y_min)
             y_max = min(image_data.shape[0] - 1, y_max)
             expanded = True
-            logging.warning(f"NaN boundary trimming: forced bounds to include target: x=[{x_min},{x_max}], y=[{y_min},{y_max}]")
+            logging.warning("NaN boundary trimming: forced bounds to include target: x=[%s,%s], y=[%s,%s]", x_min, x_max, y_min, y_max)
         elif expanded:
-            logging.info(f"NaN boundary trimming: successfully expanded bounds to include target")
+            logging.info("NaN boundary trimming: successfully expanded bounds to include target")
 
-    logging.info(f"NaN boundary trimming: final bounds x=[{x_min},{x_max}] px, y=[{y_min},{y_max}] px")
-    logging.info(f"NaN boundary trimming: original shape {image_data.shape}, will trim to ({y_max - y_min + 1}, {x_max - x_min + 1}) px")
+    logging.info("NaN boundary trimming: final bounds x=[%s,%s] px, y=[%s,%s] px", x_min, x_max, y_min, y_max)
+    logging.info("NaN boundary trimming: original shape %s, will trim to (%s, %s) px", image_data.shape, y_max - y_min + 1, x_max - x_min + 1)
 
     # Perform trim using nan_crop to preserve WCS distortion keywords
     # (CD matrix, SIP, PV) that WCS round-trip can drop.
@@ -888,7 +888,7 @@ def run_photometry():
         write_dir = (cur_dir + "/").replace(" ", "_")
         input_yaml["write_dir"] = write_dir
         logging.info("")
-        logging.info(f"Running AutoPhOT v{AUTOPHOT_VERSION} on {base_filename}")
+        logging.info("Running AutoPhOT v%s on %s", AUTOPHOT_VERSION, base_filename)
         logging.info(
             "Report any issues at: https://github.com/Astro-Sean/autophot/issues"
         )
@@ -1030,7 +1030,7 @@ def run_photometry():
                 
                 safe_fits_write(fpath, image, header)
             except Exception as e:
-                logging.warning(f"Header write failed: {e}, using minimal header")
+                logging.warning("Header write failed: %s, using minimal header", e)
                 # Create minimal header with just essential info
                 minimal_header = fits.Header()
                 minimal_header['NAXIS'] = 2
@@ -1095,7 +1095,7 @@ def run_photometry():
                     date_iso = header[date_key]
                     date_mjd = convert_to_mjd_astropy(date_iso)
             except Exception as e:
-                logging.warning(f"Failed to convert date from header key {date_key}: {e}")
+                logging.warning("Failed to convert date from header key %s: %s", date_key, e)
         if telescope == "MPI-2.2" and "TDP-MID" in header:
             date_mjd = header["TDP-MID"]
             logging.info("MPI-2.2MM detected (TDP-MID); MJD: %.3f", date_mjd)
@@ -1283,7 +1283,7 @@ def run_photometry():
                     if m is not None:
                         imageFilter = m
             except Exception as e:
-                logging.warning(f"Failed to apply telescope.yml filter mapping for template: {e}")
+                logging.warning("Failed to apply telescope.yml filter mapping for template: %s", e)
         else:
             # Science image filter detection
             # Use telescope.yml filter key mappings
@@ -1386,8 +1386,8 @@ def run_photometry():
                 if imageWCS is None:
                     # Debug: show what WCS keywords are present
                     wcs_keys = [k for k in header.keys() if k.startswith(('CRPIX', 'CRVAL', 'CDELT', 'CTYPE', 'CD1_', 'CD2_', 'PC1_', 'PC2_', 'PV'))]
-                    logging.debug(f"WCS keywords in header: {wcs_keys}")
-                    logging.debug(f"CTYPE1/CTYPE2: {header.get('CTYPE1', 'N/A')}, {header.get('CTYPE2', 'N/A')}")
+                    logging.debug("WCS keywords in header: %s", wcs_keys)
+                    logging.debug("CTYPE1/CTYPE2: %s, %s", header.get('CTYPE1', 'N/A'), header.get('CTYPE2', 'N/A'))
                     pixel_scale_candidate = np.nan
                 else:
                     xy_pixel_scales = proj_plane_pixel_scales(imageWCS)
@@ -1640,15 +1640,15 @@ def run_photometry():
             input_yaml["pixel_scale"] = pixel_scale
 
         if np.isfinite(saturate) and saturate != SATURATE_INTERNAL_FALLBACK:
-            logging.info(f"Saturation:\t{saturate:.1f} ADU")
+            logging.info("Saturation:\t%.1f ADU", saturate)
         else:
             logging.info("Saturation:\tnot available (no limit)")
 
         if readnoise > 0:
-            logging.info(f"Read noise:\t{readnoise:.3f} e-")
+            logging.info("Read noise:\t%.3f e-", readnoise)
 
         if "airmass" in input_yaml and input_yaml["airmass"]:
-            logging.info(f"Airmass:\t{input_yaml['airmass']:.3f}")
+            logging.info("Airmass:\t%.3f", input_yaml['airmass'])
 
         header["gain"] = gain
         # saturate already written to header at line 1130 (if finite)
@@ -1815,7 +1815,7 @@ def run_photometry():
 
                 # Writes the modified image and header back to the FITS file.
                 safe_fits_write(fpath, image, header)
-                logging.info(f"New image shape after trimming: {image.shape}")
+                logging.info("New image shape after trimming: %s", image.shape)
 
                 # Trim NaN boundaries created by nan_crop (fill_value=np.nan)
                 # This must happen before background subtraction
@@ -1823,12 +1823,12 @@ def run_photometry():
                 # Correct numpy 0-based center is (nx-1)/2, (ny-1)/2.
                 center_x = (image.shape[1] - 1) / 2.0
                 center_y = (image.shape[0] - 1) / 2.0
-                logging.info(f"Attempting NaN boundary trimming after 5 arcmin cutout: center=({center_x:.1f}, {center_y:.1f})")
+                logging.info("Attempting NaN boundary trimming after 5 arcmin cutout: center=(%.1f, %.1f)", center_x, center_y)
                 buffer = input_yaml["preprocessing"].get("nan_trim_buffer", 10)
                 image, header, trim_info = _trim_nan_boundaries(
                     image, header, target_x=center_x, target_y=center_y, buffer_pixels=buffer
                 )
-                logging.info(f"NaN boundary trimming result: trimmed={trim_info['trimmed']}, trim_info={trim_info}")
+                logging.info("NaN boundary trimming result: trimmed=%s, trim_info=%s", trim_info['trimmed'], trim_info)
                 if trim_info["trimmed"]:
                     logging.info(
                         f"Trimmed NaN boundaries after 5 arcmin cutout: {trim_info['original_shape']} -> {trim_info['trimmed_shape']}"
@@ -1837,7 +1837,7 @@ def run_photometry():
                 else:
                     logging.warning("NaN boundary trimming returned trimmed=False - no NaNs removed")
             except Exception as e:
-                logging.warning(f"Could not trim image: {e}; ignoring the operation.")
+                logging.warning("Could not trim image: %s; ignoring the operation.", e)
 
         # =============================================================================
         # Image Recropping (if needed)
@@ -1874,7 +1874,7 @@ def run_photometry():
 
                 # Writes the modified image and header back to the FITS file.
                 safe_fits_write(fpath, image, header)
-                logging.info(f"New image shape after recropping: {image.shape}")
+                logging.info("New image shape after recropping: %s", image.shape)
 
             # Use the in-memory image/header (already updated) to refresh YAML
             # dimensions instead of re-opening the FITS file.
@@ -1902,7 +1902,7 @@ def run_photometry():
                         f"({target_x_pix:.1f}, {target_y_pix:.1f}) px"
                     )
         except Exception as wcs_refresh_exc:
-            logging.warning(f"Could not refresh target coordinates after trimming: {wcs_refresh_exc}")
+            logging.warning("Could not refresh target coordinates after trimming: %s", wcs_refresh_exc)
 
         # =============================================================================
         #   Check if target is in NaN region (chip gap)
@@ -1930,7 +1930,7 @@ def run_photometry():
                     )
                     return
             except Exception as check_exc:
-                logging.warning(f"Could not check target pixel value: {check_exc}")
+                logging.warning("Could not check target pixel value: %s", check_exc)
 
         # =============================================================================
         #   Run SExtractor
@@ -1996,7 +1996,7 @@ def run_photometry():
         # dict keeps all of them alive until a new `result =` assignment.
         del result
 
-        logging.info(f"Preliminary FWHM: {ImageFWHM:.1f} pixels")
+        logging.info("Preliminary FWHM: %.1f pixels", ImageFWHM)
 
         # Save the initially measured FWHM for the post-alignment inflation
         # check.  input_yaml["fwhm"] may still hold the config default (e.g.,
@@ -2057,7 +2057,7 @@ def run_photometry():
                         if np.isfinite(med_rms) and med_rms >= float(bg_rms_min):
                             is_crowded = True
                     except Exception as e:
-                        logging.debug(f"Failed to check crowded field condition: {e}")
+                        logging.debug("Failed to check crowded field condition: %s", e)
                 if is_crowded:
                     input_yaml.setdefault("wcs", {})["profile"] = "crowded"
                     logging.info(
@@ -2197,7 +2197,7 @@ def run_photometry():
                             "apply_solved_to_fits=False: keeping original WCS in FITS; updated pixel_scale in config only"
                         )
                     except Exception as e:
-                        logging.warning(f"Failed to update pixel_scale from solved WCS: {e}")
+                        logging.warning("Failed to update pixel_scale from solved WCS: %s", e)
                 break  # Exits after one successful attempt.
         # Use current header (solved or original) for rest of pipeline
         imageWCS = get_wcs(header)
@@ -2653,7 +2653,7 @@ def run_photometry():
                                 template_fpath=templateFpath,
                             )
                         except Exception as exc:
-                            logging.warning(f"Alignment offset plot failed: {exc}")
+                            logging.warning("Alignment offset plot failed: %s", exc)
 
                         try:
                             _wcs_apply = input_yaml.get("wcs", {}).get(
@@ -2677,7 +2677,7 @@ def run_photometry():
                                     "'astroalign' / 'swarp'."
                                 )
                         except Exception as e:
-                            logging.warning(f"Template alignment check failed: {e}")
+                            logging.warning("Template alignment check failed: %s", e)
 
                         # BUG 107: Measure template FWHM if header value is stale.
                         # Pre-built templates (e.g., gp_template.fits) often have
@@ -2853,7 +2853,7 @@ def run_photometry():
                 unCatalogSources["y_pix"] = np.asarray(y_pix, dtype=float).ravel()
                 logging.info("Recalculated catalog pixel coordinates using post-alignment WCS")
             except Exception as e:
-                logging.warning(f"Failed to recatalog pixel coordinates: {e}")
+                logging.warning("Failed to recatalog pixel coordinates: %s", e)
 
         CatalogSources = Calibrate_Catalog.clean(
             selectedCatalog=unCatalogSources,
@@ -2868,7 +2868,7 @@ def run_photometry():
             CatalogSources = _remove_catalog_duplicates(CatalogSources, method='astropy', sep_threshold=0.1)
             n_post = len(CatalogSources)
             if n_post < n_pre:
-                logging.info(f"Removed {n_pre - n_post} duplicates from cleaned catalog")
+                logging.info("Removed %s duplicates from cleaned catalog", n_pre - n_post)
         if CatalogSources is None or len(CatalogSources) == 0:
             logging.warning(
                 "No catalog sources available after cleaning; skipping catalog-based calibration for this image."
@@ -3300,7 +3300,7 @@ def run_photometry():
             & (np.isfinite(IsolatedSources["y_pix"]))
         )
         IsolatedSources = IsolatedSources[mask]
-        logging.info(f"Number of sources: {len(IsolatedSources)}")
+        logging.info("Number of sources: %s", len(IsolatedSources))
         # Keep a broader pre-optimum pool for PSF building. Optimum-radius
         # selection is tuned for aperture stability and can become too strict
         # for robust ePSF construction in sparse/crowded epochs.
@@ -3441,7 +3441,7 @@ def run_photometry():
         width = image.shape[1]
         height = image.shape[0]
         if CatalogSources is not None and len(CatalogSources) > 0:
-            logging.info(f"Found {len(CatalogSources)} sources in field")
+            logging.info("Found %s sources in field", len(CatalogSources))
             CatalogSources = Calibrate_Catalog.recenter(
                 CatalogSources, image, boxsize=scale / 2
             )
@@ -3496,7 +3496,7 @@ def run_photometry():
                             f"Matched {n_matched}/{len(CatalogSources)} catalog sources to SExtractor FWHM"
                         )
                 except Exception as e:
-                    logging.warning(f"Could not match catalog sources to SExtractor FWHM: {e}")
+                    logging.warning("Could not match catalog sources to SExtractor FWHM: %s", e)
                     CatalogSources["fwhm"] = np.nan
                     if "peak_flux" not in CatalogSources.columns:
                         CatalogSources["peak_flux"] = np.nan
@@ -3702,7 +3702,7 @@ def run_photometry():
                         makePlots = Plot(input_yaml=input_yaml)
                         makePlots.plot_wcs_vs_psf_offset(CatalogSources, imageWCS=imageWCS)
                     except Exception as exc:
-                        logging.warning(f"WCS vs PSF offset plot failed: {exc}")
+                        logging.warning("WCS vs PSF offset plot failed: %s", exc)
 
         # =============================================================================
         # Zeropoint Calculation
@@ -3767,7 +3767,7 @@ def run_photometry():
                     f"ZP={intercept_str} +/- {intercept_err_str}"
                 )
             except Exception as linearity_exc:
-                logging.warning(f"Catalog linearity check failed: {linearity_exc}, proceeding with all sources")
+                logging.warning("Catalog linearity check failed: %s, proceeding with all sources", linearity_exc)
 
         # When using a Gaia custom catalog built from user transmission curves
         # (catalog.transmission_curve_map / custom throughputs), the catalog photometric system
@@ -3924,7 +3924,7 @@ def run_photometry():
                     variable_sources = variable_sources.iloc[valid_indices].copy()
                     variable_sources["x_pix"] = xpix_list
                     variable_sources["y_pix"] = ypix_list
-                    logging.info(f"Retained {len(valid_indices)}/{len(variable_sources)} variable sources after WCS conversion")
+                    logging.info("Retained %s/%s variable sources after WCS conversion", len(valid_indices), len(variable_sources))
                 else:
                     logging.warning("All variable sources failed WCS conversion, using empty list")
                     variable_sources = pd.DataFrame(columns=variable_sources.columns)
@@ -3992,7 +3992,7 @@ def run_photometry():
 
             # Writes the modified image and header to the new FITS file.
             safe_fits_write(os.path.join(cur_dir, newBasename), image, header)
-            logging.info(f"\n\nEnd of {imageFilter} template calibration\n\n")
+            logging.info("\n\nEnd of %s template calibration\n\n", imageFilter)
             return 1
 
         # =============================================================================
@@ -4152,8 +4152,8 @@ def run_photometry():
                     logging.info(
                         f"Cutout aligned using sky center: RA={center_coord.ra.deg:.3f}, Dec={center_coord.dec.deg:.3f}"
                     )
-                    logging.info(f"Science cutout shape: {science_image.shape}")
-                    logging.info(f"Template cutout shape: {template_image.shape}")
+                    logging.info("Science cutout shape: %s", science_image.shape)
+                    logging.info("Template cutout shape: %s", template_image.shape)
                     logging.info(
                         f"Target pixel coordinates (science): x={target_x_pix:.2f} px, y={target_y_pix:.2f} px"
                     )
@@ -4256,7 +4256,7 @@ def run_photometry():
                         f"Matching: {len(MatchingSources)} sources (catalog available but not concatenated to avoid duplication)"
                     )
                 else:
-                    logging.info(f"Matching: {len(MatchingSources)} sources")
+                    logging.info("Matching: %s sources", len(MatchingSources))
             elif use_catalog and has_catalog:
                 # Detection failed or returned no sources; use catalog only.
                 MatchingSources = CatalogSources[["x_pix", "y_pix"]].copy()
@@ -4551,7 +4551,7 @@ def run_photometry():
             df_zogy_science = None
             df_zogy_template = None
             if len(matched_df) >= 3:
-                logging.info(f"Sufficient sources for processing: {len(matched_df)}")
+                logging.info("Sufficient sources for processing: %s", len(matched_df))
                 # Prepares source tables for image and template photometry.
                 image_sources = matched_df.copy()
                 template_sources = matched_df.copy()
@@ -4816,12 +4816,12 @@ def run_photometry():
                 # Cross-match science and template sources for subtraction
                 if len(image_sources) > 5:
                     template_obj = Templates(input_yaml=input_yaml)
-                    logging.info(f"Flux-consistent matching: input {len(image_sources)} sources")
+                    logging.info("Flux-consistent matching: input %s sources", len(image_sources))
                     MatchingSources, _ = template_obj.find_flux_consistent_sources(
                         image_sources,
                         template_sources,
                     )
-                    logging.info(f"Flux-consistent matching: output {len(MatchingSources)} sources")
+                    logging.info("Flux-consistent matching: output %s sources", len(MatchingSources))
                     # Fallback: if flux consistency removed too many sources,
                     # use all well-aligned sources. The RANSAC + bin-wise filter
                     # can remove 50%+ in sparse fields, which is worse than
@@ -5114,7 +5114,7 @@ def run_photometry():
                     ConsistentSources = []
                     MatchingSources = pd.DataFrame(columns=["x_pix", "y_pix"])
 
-                logging.info(f"{len(ConsistentSources)} consistent sources found.")
+                logging.info("%s consistent sources found.", len(ConsistentSources))
             else:
                 ConsistentSources = []
                 MatchingSources = pd.DataFrame(columns=["x_pix", "y_pix"])
@@ -6166,7 +6166,7 @@ def run_photometry():
                 cutout_target_x = float(cutout_cx)
                 cutout_target_y = float(cutout_cy)
         except Exception as e:
-            logging.warning(f"get_cutout failed for target cutout: {e}, falling back to direct slicing")
+            logging.warning("get_cutout failed for target cutout: %s, falling back to direct slicing", e)
             target_cutout = None
             target_cutout_rms = None
 
@@ -6334,10 +6334,10 @@ def run_photometry():
                 # This is more accurate than global median for the target region
                 if "local_bkg_raw" in TargetPosition.columns and np.isfinite(TargetPosition["local_bkg_raw"].iloc[0]):
                     bkg_median = float(TargetPosition["local_bkg_raw"].iloc[0])
-                    logging.info(f"Using aperture annulus background for inversion: {bkg_median:.3f}")
+                    logging.info("Using aperture annulus background for inversion: %.3f", bkg_median)
                 elif "local_bkg_used" in TargetPosition.columns and np.isfinite(TargetPosition["local_bkg_used"].iloc[0]):
                     bkg_median = float(TargetPosition["local_bkg_used"].iloc[0])
-                    logging.info(f"Using aperture annulus background (used) for inversion: {bkg_median:.3f}")
+                    logging.info("Using aperture annulus background (used) for inversion: %.3f", bkg_median)
                 else:
                     # Fallback to global median if local background not available
                     if target_cutout is not None:
@@ -6345,7 +6345,7 @@ def run_photometry():
                     else:
                         image_data = np.array(image, dtype=float, copy=True)
                     bkg_median = float(np.nanmedian(image_data))
-                    logging.info(f"Using global median background for inversion: {bkg_median:.3f}")
+                    logging.info("Using global median background for inversion: %.3f", bkg_median)
                 
                 # Get image data for inversion - convert to electrons like psf.py does
                 gain = resolve_gain_e_per_adu(None, input_yaml)
@@ -6364,7 +6364,7 @@ def run_photometry():
                 inverted_image = inv_data
                 logging.info("Created inverted image for negative PSF detection (-(data - 2*bkg), no clip).")
             except Exception as exc:
-                logging.warning(f"Failed to create inverted image: {exc}")
+                logging.warning("Failed to create inverted image: %s", exc)
                 inverted_image = None
 
         # Performs PSF fitting on the target position if aperture photometry is not required.
@@ -6397,7 +6397,7 @@ def run_photometry():
                             new_val = old_val + float(cutout_y0)
                             TargetPosition.loc[TargetPosition.index[0], col] = new_val
             except Exception as e:
-                logging.warning(f"Failed to convert cutout coordinates: {e}")
+                logging.warning("Failed to convert cutout coordinates: %s", e)
 
             if "flags" in TargetPosition:
                 from photutils.psf import decode_psf_flags
@@ -6405,7 +6405,7 @@ def run_photometry():
                 if np.isfinite(TargetPosition["flags"].iloc[0]):
                     target_flags = int(TargetPosition["flags"].iloc[0])
 
-                    # logging.info(f"Target Flags: {target_flags}")
+                    # logging.info("Target Flags: %s", target_flags)
                     issues = decode_psf_flags(target_flags)
 
                     # Check for fitting issues and log warnings
@@ -6421,7 +6421,7 @@ def run_photometry():
                                     )
                         else:
                             # Single source (list of str)
-                            logging.info(f"Target fitting issues: {issues}")
+                            logging.info("Target fitting issues: %s", issues)
 
         # logging.info(TargetPosition.columns)
         # Check if inverted PSF fit was used
@@ -6466,19 +6466,19 @@ def run_photometry():
                         TargetPosition["noiseSky_inverted"] = TargetPositionInverted["noiseSky"]
                     logging.info("Aperture photometry on inverted image completed.")
                 except Exception as exc:
-                    logging.warning(f"Aperture photometry on inverted image failed: {exc}")
+                    logging.warning("Aperture photometry on inverted image failed: %s", exc)
 
         # When MCMC is used, LSQ quality metrics (reduced_chi2, cfit, qfit) may be NaN.
         # Only log them when they are present and finite.
         if "reduced_chi2" in TargetPosition:
             reduced_chi2_value = TargetPosition["reduced_chi2"].iloc[0]
             if np.isfinite(reduced_chi2_value):
-                logging.info(f"Target reduced chi2{inverted_tag}:\t{reduced_chi2_value:.1e}")
+                logging.info("Target reduced chi2%s:\t%.1e", inverted_tag, reduced_chi2_value)
 
         if "cfit" in TargetPosition:
             cfit_value = TargetPosition["cfit"].iloc[0]
             if np.isfinite(cfit_value):
-                logging.info(f"Target cfit{inverted_tag}:\t\t{cfit_value:.1e}")
+                logging.info("Target cfit%s:\t\t%.1e", inverted_tag, cfit_value)
 
         if "qfit" in TargetPosition:
             qfit_value = TargetPosition["qfit"].iloc[0]
@@ -6570,7 +6570,7 @@ def run_photometry():
                 if ref_weight_path is None:
                     pass  # Weight maps are optional, no warning needed
             except Exception as e:
-                logging.warning(f"Could not load weight maps for subtraction check: {e}")
+                logging.warning("Could not load weight maps for subtraction check: %s", e)
             
             # Get WCS information for marking target location
             wcs_sci = None
@@ -6582,7 +6582,7 @@ def run_photometry():
                 with fits.open(templateFpath) as hdul:
                     wcs_ref = WCS(hdul[0].header)
             except Exception as e:
-                logging.warning(f"Could not load WCS for subtraction check: {e}")
+                logging.warning("Could not load WCS for subtraction check: %s", e)
             
             # Get target coordinates from input_yaml
             target_ra = input_yaml.get("target_ra")
@@ -6607,7 +6607,7 @@ def run_photometry():
                     with fits.open(decorr_diff_path_new) as hdul:
                         diff_header_check = hdul[0].header
                         decorr_status = diff_header_check.get("DECORR", (False, ""))
-                        logger.info(f"Decorrelated difference image (new naming) DECORR header: {decorr_status}")
+                        logger.info("Decorrelated difference image (new naming) DECORR header: %s", decorr_status)
                         
                         if decorr_status[0]:
                             diff_decorrelated = hdul[0].data
@@ -6623,7 +6623,7 @@ def run_photometry():
                         with fits.open(diff_path) as hdul:
                             diff_header_check = hdul[0].header
                             decorr_status = diff_header_check.get("DECORR", (False, ""))
-                            logger.info(f"Main difference image (old naming) DECORR header: {decorr_status}")
+                            logger.info("Main difference image (old naming) DECORR header: %s", decorr_status)
                             
                             if decorr_status[0]:
                                 diff_decorrelated = hdul[0].data
@@ -6631,11 +6631,11 @@ def run_photometry():
                             else:
                                 logger.info("Main difference image (old naming) has DECORR=False, skipping additional panel")
                     else:
-                        logger.info(f"Main difference image not found at {diff_path}")
+                        logger.info("Main difference image not found at %s", diff_path)
                 else:
                     logger.debug("No decorrelated difference image found (checked both naming conventions)")
             except Exception as e:
-                logger.warning(f"Could not load decorrelated difference image: {e}")
+                logger.warning("Could not load decorrelated difference image: %s", e)
             
             # Plots the template subtraction check.
             makePlots.subtraction_check(
@@ -6786,7 +6786,7 @@ def run_photometry():
 
         # Logs the measured SNR and target detectability (aperture and PSF when available).
         snr_ap = float(TargetPosition["SNR"].iloc[0])
-        logging.info(f"Target SNR (aperture):\t{snr_ap:.1f}")
+        logging.info("Target SNR (aperture):\t%.1f", snr_ap)
         
         # If inverted fit was used, also log the inverted SNR for aperture
         if "_inverted_fit" in TargetPosition.columns and TargetPosition["_inverted_fit"].iloc[0]:
@@ -6796,7 +6796,7 @@ def run_photometry():
                 ap_err = float(TargetPosition["flux_AP_err"].iloc[0])
                 if ap_err > 0 and np.isfinite(ap_err):
                     snr_ap_inverted = np.abs(ap_flux) / ap_err
-                    logging.info(f"Target SNR (aperture) [inverted]:\t{snr_ap_inverted:.1f}")
+                    logging.info("Target SNR (aperture) [inverted]:\t%.1f", snr_ap_inverted)
         
         if (
             not do_aperture_ONLY
@@ -6811,7 +6811,7 @@ def run_photometry():
                 else np.nan
             )
             if np.isfinite(snr_psf):
-                logging.info(f"Target SNR (PSF){inverted_tag}:\t{snr_psf:.1f}")
+                logging.info("Target SNR (PSF)%s:\t%.1f", inverted_tag, snr_psf)
             # Difference-image PSF before inverted replacement (negative flux = oversubtraction dip)
             if (
                 "_inverted_fit" in TargetPosition.columns
@@ -6835,8 +6835,8 @@ def run_photometry():
         logging.info(
             f"Target threshold:\t{TargetPosition['threshold'].iloc[0]:.1f} x background standard deviation"
         )
-        logging.info(f"Target detectability:\t{target_beta * 100:.1f} %")
-        logging.info(f"Target FWHM:\t\t{target_fwhm:.1f} px")
+        logging.info("Target detectability:\t%.1f %", target_beta * 100)
+        logging.info("Target FWHM:\t\t%.1f px", target_fwhm)
 
         # Calculates pixel offsets.
         dx_pix = TargetPosition["x_fit"].iloc[0] - input_yaml["target_x_pix"]
@@ -6922,7 +6922,7 @@ def run_photometry():
 
         for method in ["AP", "PSF"]:
             if method not in image_zeropoint or "zeropoint" not in image_zeropoint[method]:
-                logging.info(f"{method} zeropoint not available - skipping")
+                logging.info("%s zeropoint not available - skipping", method)
                 continue
             idx = 0
             inst_col = f"inst_{input_yaml['imageFilter']}_{method}"
@@ -7827,7 +7827,7 @@ def run_photometry():
                 _calib_df.isna().all() | (_calib_df.astype(str) == "").all()
             ].tolist()
             if _all_nan:
-                logging.debug(f"Dropping {len(_all_nan)} all-NaN columns from CALIB: {_all_nan}")
+                logging.debug("Dropping %s all-NaN columns from CALIB: %s", len(_all_nan), _all_nan)
                 _calib_df = _calib_df.drop(columns=_all_nan)
 
             # Safety check: ensure catalog still has rows and columns after cleanup
@@ -7841,7 +7841,7 @@ def run_photometry():
                     sep_threshold=0.1,
                 )
                 if _calib_df_dedup is not None and not _calib_df_dedup.empty:
-                    logging.info(f"Writing {len(_calib_df_dedup)} catalog sources to CALIB file")
+                    logging.info("Writing %s catalog sources to CALIB file", len(_calib_df_dedup))
                     with open(calibration_file, "a", newline='') as file:
                         file.write("\n# Sequence star catalog used for calibration\n")
                         _calib_df_dedup.to_csv(file, index=False, float_format="%.6f")

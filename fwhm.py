@@ -653,12 +653,12 @@ class Find_FWHM:
                     ransac_savefig(fig, png_out)
                 plt.close(fig)
             except Exception as _pe:
-                logger.debug(f"Plotting skipped: {_pe}")
+                logger.debug("Plotting skipped: %s", _pe)
 
             return df_lin.reset_index(drop=True), fit_params, saturation_range
 
         except Exception as e:
-            logger.error(f"Linearity check failed: {e}")
+            logger.error("Linearity check failed: %s", e)
             return catalog, fit_params, saturation_range
 
     def fit_gaussian(
@@ -805,7 +805,7 @@ class Find_FWHM:
         self.logger.info(
             f"Removed {num_outliers} outliers out of {len(source)} sources"
         )
-        self.logger.info(f"Remaining sources: {len(source) - num_outliers}")
+        self.logger.info("Remaining sources: %s", len(source) - num_outliers)
         return source.loc[~combined_mask].reset_index(drop=True)
 
     # =============================================================================
@@ -953,8 +953,8 @@ class Find_FWHM:
                 self.logger.info(
                     f"Detected {len(df)} sources, FWHM ~ {fwhm_global:.3f} px"
                 )
-                self.logger.info(f"Cutout scale = {scale_out:.1f} px")
-                self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
+                self.logger.info("Cutout scale = %.1f px", scale_out)
+                self.logger.info("Elapsed: %.3f s", time.time() - t0)
                 return float(fwhm_global), df.reset_index(drop=True), scale_out
 
             # --- Automatic detection and FWHM estimation ---
@@ -976,7 +976,7 @@ class Find_FWHM:
             tbl = finder(smooth, mask=mask)
             if tbl is None or len(tbl) == 0:
                 self.logger.warning("No sources in first pass")
-                self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
+                self.logger.info("Elapsed: %.3f s", time.time() - t0)
                 return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
             df = tbl.to_pandas()
@@ -985,7 +985,7 @@ class Find_FWHM:
             df = df[df["peak"] < 0.98 * saturate]
             if len(df) == 0:
                 self.logger.warning("All detections saturated")
-                self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
+                self.logger.info("Elapsed: %.3f s", time.time() - t0)
                 return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
             edge = int(np.ceil(3 * fwhm_fp))
@@ -1037,7 +1037,7 @@ class Find_FWHM:
 
             if len(df) == 0:
                 self.logger.warning("All detections rejected by cleaning")
-                self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
+                self.logger.info("Elapsed: %.3f s", time.time() - t0)
                 return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
             # --- Per-source FWHM ---
@@ -1065,14 +1065,14 @@ class Find_FWHM:
                 df = df[np.isfinite(df["fwhm"])]
                 if len(df) == 0:
                     self.logger.warning("No finite FWHM fits")
-                    self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
+                    self.logger.info("Elapsed: %.3f s", time.time() - t0)
                     return np.nan, pd.DataFrame(), float(max(scale, default_scale))
                 df = self._clip_column(df, "fwhm", sigma=5.0, maxiters=8)
                 df = df[df["s2n"] >= 3.0]
 
             if len(df) == 0:
                 self.logger.warning("No sources after final quality cuts")
-                self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
+                self.logger.info("Elapsed: %.3f s", time.time() - t0)
                 return np.nan, pd.DataFrame(), float(max(scale, default_scale))
 
             # --- Global FWHM and final cutout scale ---
@@ -1081,15 +1081,15 @@ class Find_FWHM:
                 max(default_scale, np.ceil(scale_multiplier * fwhm_global))
             )
 
-            self.logger.info(f"Accepted sources: {len(df)}")
-            self.logger.info(f"Image FWHM ~ {fwhm_global:.3f} px")
-            self.logger.info(f"Cutout scale = {scale_out:.1f} px")
-            self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
+            self.logger.info("Accepted sources: %s", len(df))
+            self.logger.info("Image FWHM ~ %.3f px", fwhm_global)
+            self.logger.info("Cutout scale = %.1f px", scale_out)
+            self.logger.info("Elapsed: %.3f s", time.time() - t0)
             return fwhm_global, df.reset_index(drop=True), scale_out
 
         except Exception as e:
-            self.logger.error(f"Error in measure_image: {e!r}")
-            self.logger.info(f"Elapsed: {time.time() - t0:.3f} s")
+            self.logger.error("Error in measure_image: %s", e)
+            self.logger.info("Elapsed: %.3f s", time.time() - t0)
             return float("nan"), pd.DataFrame(), float("nan")
 
     # =============================================================================
@@ -1196,7 +1196,7 @@ class Find_FWHM:
                 mask[rr, cc] = True
                 streak_count += 1
 
-            self.logger.info(f"Number of robust streaks detected: {streak_count}")
+            self.logger.info("Number of robust streaks detected: %s", streak_count)
             selem = morphology.disk(radius=dilation_radius)
             mask_broadened = morphology.binary_dilation(mask, selem)
             return mask_broadened, bkg, sigma
@@ -1209,7 +1209,7 @@ class Find_FWHM:
                 else "unknown"
             )
             lineno = exc_tb.tb_lineno if exc_tb else -1
-            logger.exception(f"Exception {exc_type} in {fname} at line {lineno}: {e}")
+            logger.exception("Exception %s in %s at line %s: %s", exc_type, fname, lineno, e)
             return np.zeros_like(data, dtype=bool), np.nan, np.nan
 
     def remove_sources_near_spikes(
@@ -1240,7 +1240,7 @@ class Find_FWHM:
         self.logger.info(
             log_step(f"Exclude sources near streaks: {radius} px")
         )
-        self.logger.info(f"Total sources before filtering: {len(sources)}")
+        self.logger.info("Total sources before filtering: %s", len(sources))
 
         yy, xx = sources[y_col], sources[x_col]
         y_idx = np.round(yy).astype(int)
@@ -1254,8 +1254,8 @@ class Find_FWHM:
         keep_mask = ~dilated_mask[y_idx, x_idx]
         sources_clean = sources[keep_mask]
         sources_rejected = sources[~keep_mask]
-        self.logger.info(f"Sources kept: {len(sources_clean)}")
-        self.logger.info(f"Sources rejected: {len(sources_rejected)}")
+        self.logger.info("Sources kept: %s", len(sources_clean))
+        self.logger.info("Sources rejected: %s", len(sources_rejected))
         return sources_clean, sources_rejected
 
     # =============================================================================

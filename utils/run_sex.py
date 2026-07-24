@@ -449,7 +449,7 @@ class SExtractorWrapper:
             return sources
 
         n0 = len(sources)
-        logger.info(f"Initial source count: {n0}")
+        logger.info("Initial source count: %s", n0)
         # Expose the raw detection count back through the config so that callers
         # (e.g. crowded-field heuristics in main.py) can distinguish between the
         # total detections and the filtered/downsampled subset used for FWHM.
@@ -507,7 +507,7 @@ class SExtractorWrapper:
         n_after_snr = int((~snr_ok).sum())
         sources = sources.loc[snr_ok].copy()
         if n_after_snr > 0:
-            logger.info(f"Rejected {n_after_snr} low-SNR sources (SNR < {snr_limit:.1f})")
+            logger.info("Rejected %s low-SNR sources (SNR < %.1f)", n_after_snr, snr_limit)
 
         # --- Step 3b: FLAGS cut (before FWHM estimation) ---
         # Apply FLAGS early so flagged/blended sources don't inflate the FWHM.
@@ -1147,7 +1147,7 @@ class SExtractorWrapper:
                                     table['ALPHA_J2000'] = world_coords.ra.deg
                                     table['DELTA_J2000'] = world_coords.dec.deg
                             except Exception as e:
-                                logger.warning(f"Could not compute world coordinates: {e}")
+                                logger.warning("Could not compute world coordinates: %s", e)
                         # Add MAG_AUTO and MAGERR_AUTO if not present
                         if 'MAG_AUTO' not in table.colnames:
                             if 'MAG_APER' in table.colnames:
@@ -1380,7 +1380,7 @@ class SExtractorWrapper:
 
             # Final count and validation
             final_count = len(sources)
-            logger.info(f"Filtered from {initial_count} to {final_count} point sources")
+            logger.info("Filtered from %s to %s point sources", initial_count, final_count)
             if final_count == 0:
                 logger.warning("[ERROR] All sources filtered out")
                 return 0.0, None, default_scale

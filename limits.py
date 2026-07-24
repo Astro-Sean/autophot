@@ -636,7 +636,7 @@ class Limits:
             return data, true_cx, true_cy
 
         except Exception as exc:
-            logger.debug(f"getCutout failed: {exc}")
+            logger.debug("getCutout failed: %s", exc)
             return None, np.nan, np.nan
 
     # -----------------------------------------------------------------------
@@ -1276,7 +1276,7 @@ class Limits:
                     else:
                         pass  # Insufficient sources for optimum radius, using configured
                 except Exception as e:
-                    logger.warning(f"Failed to calculate optimum aperture radius: {e}, using configured")
+                    logger.warning("Failed to calculate optimum aperture radius: %s, using configured", e)
             
             # Get final aperture radius from local_input_yaml
             phot_cfg_local = local_input_yaml.get("photometry", {})
@@ -1458,7 +1458,7 @@ class Limits:
             # F_ref = counts_ref (e⁻) / exposure_time → e⁻/s, same units as flux_AP
             exposure_time = float(local_input_yaml["exposure_time"])
             if exposure_time <= 0 or not np.isfinite(exposure_time):
-                logger.warning(f"Invalid exposure_time ({exposure_time}) in limits calculation")
+                logger.warning("Invalid exposure_time (%s) in limits calculation", exposure_time)
                 F_ref = np.nan
             else:
                 F_ref = counts_ref / exposure_time
@@ -1600,7 +1600,7 @@ class Limits:
             )
             n5 = int(len(cand_df))
 
-            logger.info(f"Found {n5} valid candidate sites for injection")
+            logger.info("Found %s valid candidate sites for injection", n5)
 
             if len(cand_df) == 0:
                 logger.warning(
@@ -2625,7 +2625,7 @@ class Limits:
                     "mag_max": float(np.max(bin_sources["apparent_mag"])),
                 }
         
-        logger.info(f"S/N vs magnitude analysis: {len(results)} bins with data")
+        logger.info("S/N vs magnitude analysis: %s bins with data", len(results))
         for bin_name, stats in results.items():
             logger.info(
                 f"  S/N {bin_name}: n={stats['count']}, "
@@ -2710,7 +2710,7 @@ class Limits:
         fig.savefig(save_loc, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
         
-        logger.info(f"S/N vs magnitude plot saved to {save_loc}")
+        logger.info("S/N vs magnitude plot saved to %s", save_loc)
 
     # -----------------------------------------------------------------------
     # Diagnostic plot
@@ -2999,11 +2999,11 @@ class Limits:
             if cutout_cx is not None and cutout_cy is not None:
                 target_x = float(cutout_cx)
                 target_y = float(cutout_cy)
-                logger.info(f"Using true target center: ({target_x:.2f}, {target_y:.2f})")
+                logger.info("Using true target center: (%.2f, %.2f)", target_x, target_y)
             else:
                 target_x   = (nx_c - 1) / 2.0
                 target_y   = (ny_c - 1) / 2.0
-                logger.info(f"Using geometric center: ({target_x:.2f}, {target_y:.2f})")
+                logger.info("Using geometric center: (%.2f, %.2f)", target_x, target_y)
 
             # aperture_radius and fwhm for subpanel use
             fwhm            = float(self.input_yaml.get("fwhm", 3.0))
@@ -3170,7 +3170,7 @@ class Limits:
                     # Create a cutout-sized grid
                     ny, nx = cutout.shape
                     y_grid, x_grid = np.mgrid[0:ny, 0:nx]
-                    logger.debug(f"Subpanel: cutout shape=({ny},{nx}), grid shape={y_grid.shape}, {x_grid.shape}")
+                    logger.debug("Subpanel: cutout shape=(%s,%s), grid shape=%s, %s", ny, nx, y_grid.shape, x_grid.shape)
                     
                     # Target center: use true center from get_cutout if available
                     if cutout_cx is not None and cutout_cy is not None:
@@ -3452,8 +3452,8 @@ class Limits:
                 except Exception as e:
                     # If injection fails, just show the original cutout
                     import traceback
-                    logger.warning(f"Subpanel injection failed for mag={mag_target:.2f}: {e}")
-                    logger.debug(f"Subpanel injection traceback:\n{traceback.format_exc()}")
+                    logger.warning("Subpanel injection failed for mag=%.2f: %s", mag_target, e)
+                    logger.debug("Subpanel injection traceback:\n%s", traceback.format_exc())
                     ny, nx = cutout.shape
                     from astropy.visualization import simple_norm
                     norm = simple_norm(cutout, 'sqrt', percent=99.5)
@@ -3677,7 +3677,7 @@ class Limits:
                     recovered_inst = -2.5 * np.log10(recovered_fluxes_safe)
                     recovered_inst_err = np.full_like(recovered_inst, np.nan)
         
-        logger.info(f"Debug: recovered_inst sample: {recovered_inst[:3]}")
+        logger.info("Debug: recovered_inst sample: %s", recovered_inst[:3])
         recovered_apparent = recovered_inst + selected_zeropoint
         # Add magnitude error propagation to apparent magnitude
         if recovered_inst_err is not None:
@@ -3907,7 +3907,7 @@ class Limits:
         fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
 
-        logger.debug(f"Saved injection recovery plot to {save_path}")
+        logger.debug("Saved injection recovery plot to %s", save_path)
 
     # -----------------------------------------------------------------------
     # Combined completeness plot for multi-S/N thresholds
@@ -4095,7 +4095,7 @@ class Limits:
             logger.warning("Invalid snr_thresholds, using default [3.0]")
             snr_thresholds = [3.0]
         
-        logger.info(f"Calculating injection limits for S/N thresholds: {snr_thresholds}")
+        logger.info("Calculating injection limits for S/N thresholds: %s", snr_thresholds)
         
         results = {}
         # Collect per-threshold details for the combined completeness plot
@@ -4105,7 +4105,7 @@ class Limits:
         # Suppress individual plots; we'll draw one combined plot at the end.
         for snr in snr_thresholds:
             try:
-                logger.info(f"Calculating limiting magnitude for S/N >= {snr}")
+                logger.info("Calculating limiting magnitude for S/N >= %s", snr)
                 detail = self.get_injected_limit(
                     full_image=full_image,
                     position=position,
@@ -4128,9 +4128,9 @@ class Limits:
                     'snr_threshold': snr,
                     'valid': np.isfinite(limit)
                 }
-                logger.info(f"S/N {snr} limiting magnitude: {limit:.3f}")
+                logger.info("S/N %s limiting magnitude: %.3f", snr, limit)
             except Exception as e:
-                logger.error(f"Failed to calculate S/N {snr} limiting magnitude: {e}")
+                logger.error("Failed to calculate S/N %s limiting magnitude: %s", snr, e)
                 results[f'snr_{snr}'] = {
                     'limiting_mag': np.nan,
                     'snr_threshold': snr,
@@ -4162,14 +4162,14 @@ class Limits:
                     }
             
             results['comparisons'] = comparisons
-            logger.info(f"Generated {len(comparisons)} S/N threshold comparisons")
+            logger.info("Generated %s S/N threshold comparisons", len(comparisons))
         
         # Adaptive threshold recommendation
         lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
         if lim_cfg.get("adaptive_snr_selection", False):
             adaptive_threshold = 5.0 if 5.0 in snr_thresholds else max(snr_thresholds)
             results['adaptive_threshold'] = adaptive_threshold
-            logger.info(f"Adaptive S/N threshold recommendation: {adaptive_threshold}")
+            logger.info("Adaptive S/N threshold recommendation: %s", adaptive_threshold)
         
         # Generate a single combined completeness plot with all S/N thresholds
         if plot and all_details:

@@ -627,7 +627,7 @@ def _reproject_template(
             ref_corners[1::2].min(), ref_corners[1::2].max(),
         )
     except Exception as wcs_exc:
-        logger.debug(f"Could not compute WCS footprint: {wcs_exc}")
+        logger.debug("Could not compute WCS footprint: %s", wcs_exc)
 
     logger.info(
         "Reproject distortion: template[%s] -> science[%s]",
@@ -739,7 +739,7 @@ def _reproject_template(
         )
         return _FAIL
 
-    logger.info(f"Reproject footprint coverage: {n_footprint}/{n_total} pixels ({100*n_footprint/n_total:.1f}%)")
+    logger.info("Reproject footprint coverage: %s/%s pixels (%.1f%)", n_footprint, n_total, 100*n_footprint/n_total)
 
     # Mask non-footprint pixels with NaN (preserves chip gaps)
     aligned[~fp_mask] = np.nan
@@ -2184,14 +2184,14 @@ class Templates:
             # Validate and sanitize parameters
             fwhm = int(fwhm)
             if fwhm <= 0:
-                logger.warning(f"create_image_mask: invalid FWHM {fwhm}; setting to default 5.")
+                logger.warning("create_image_mask: invalid FWHM %s; setting to default 5.", fwhm)
                 fwhm = 5
             if sat_lvl <= 0:
-                logger.warning(f"create_image_mask: invalid sat_lvl {sat_lvl}; setting to 2^16.")
+                logger.warning("create_image_mask: invalid sat_lvl %s; setting to 2^16.", sat_lvl)
                 sat_lvl = 2**16
             padding = int(padding)
             if padding < 0:
-                logger.warning(f"create_image_mask: invalid padding {padding}; setting to 0.")
+                logger.warning("create_image_mask: invalid padding %s; setting to 0.", padding)
                 padding = 0
 
             # Handle NaN values in input data
@@ -2256,7 +2256,7 @@ class Templates:
                 logger.warning("create_image_mask: threshold is NaN; using percentile-based threshold.")
                 threshold = np.percentile(finite_data, 95)
             if threshold <= image_median:
-                logger.warning(f"create_image_mask: threshold {threshold} <= median {image_median}; using 2*std.")
+                logger.warning("create_image_mask: threshold %s <= median %s; using 2*std.", threshold, image_median)
                 threshold = 2.0 * image_std + image_median
 
             # --- Source detection via segmentation ---
@@ -3052,7 +3052,7 @@ class Templates:
                     # Return original images without cropping
                     return scienceFpath, templateFpath
             except Exception as e:
-                logger.error(f"WCS validation failed: {e}. Falling back to no crop.")
+                logger.error("WCS validation failed: %s. Falling back to no crop.", e)
                 return scienceFpath, templateFpath
             
             # Initial cutout using nan_crop to preserve WCS distortion keywords
@@ -5720,12 +5720,12 @@ class Templates:
             try:
                 if scienceFpath != original_sci_path and os.path.exists(scienceFpath):
                     os.remove(scienceFpath)
-                    logger.debug(f"Cleaned up HOTPANTS temp file: {scienceFpath}")
+                    logger.debug("Cleaned up HOTPANTS temp file: %s", scienceFpath)
             except (OSError, NameError) as e:
-                logger.warning(f"Failed to clean up HOTPANTS science temp file: {e}")
+                logger.warning("Failed to clean up HOTPANTS science temp file: %s", e)
             try:
                 if templateFpath != original_ref_path and os.path.exists(templateFpath):
                     os.remove(templateFpath)
-                    logger.debug(f"Cleaned up HOTPANTS temp file: {templateFpath}")
+                    logger.debug("Cleaned up HOTPANTS temp file: %s", templateFpath)
             except (OSError, NameError) as e:
-                logger.warning(f"Failed to clean up HOTPANTS template temp file: {e}")
+                logger.warning("Failed to clean up HOTPANTS template temp file: %s", e)

@@ -582,7 +582,7 @@ NNW
         if output_dir is None:
             output_dir = mkdtemp(prefix=prefix)
             self._temp_dirs.add(output_dir)
-            self.logger.info(f"Created temporary directory: {output_dir}")
+            self.logger.info("Created temporary directory: %s", output_dir)
         else:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
         return output_dir
@@ -682,7 +682,7 @@ NNW
             plt.close()
 
         except Exception as e:
-            self.logger.error(f"Error plotting sources: {e}")
+            self.logger.error("Error plotting sources: %s", e)
             raise
 
     def _check_executable(self, name: str) -> str:
@@ -1085,7 +1085,7 @@ NNW
                             cleaned['ALPHA_J2000'] = world_coords.ra.deg
                             cleaned['DELTA_J2000'] = world_coords.dec.deg
                     except Exception as e:
-                        self.logger.warning(f"Could not compute world coordinates: {e}")
+                        self.logger.warning("Could not compute world coordinates: %s", e)
                     # Add MAG_AUTO and MAGERR_AUTO if not present
                     if 'MAG_AUTO' not in cleaned.colnames:
                         if 'MAG_APER' in cleaned.colnames:
@@ -1133,7 +1133,7 @@ NNW
                 else:
                     cleaned = catalog
 
-            self.logger.info(f"Sextractor found {len(cleaned)} sources")
+            self.logger.info("Sextractor found %s sources", len(cleaned))
             if len(cleaned) == 0 or "FWHM_IMAGE" not in cleaned.colnames:
                 fwhm = (
                     float(fwhm_pixels)
@@ -3031,7 +3031,7 @@ NNW
                         head_file,
                     )
 
-                self.logger.info(f"WCS-only alignment complete: sci={aligned_sci}, ref={aligned_ref}")
+                self.logger.info("WCS-only alignment complete: sci=%s, ref=%s", aligned_sci, aligned_ref)
                 
             elif resample_mode == "native_scale":
                 # Each image resampled independently keeping its native pixel scale,
@@ -3094,7 +3094,7 @@ NNW
                 )
 
                 if swarp_res_ref is None:
-                    self.logger.info("SWarp failed. Falling back to AstroAlign.")
+                    self.logger.warning("SWarp failed. Falling back to AstroAlign.")
                     return self._align_fallback_reproject_then_astroalign(
                         science_image, reference_image, output_dir
                     )
@@ -3593,7 +3593,7 @@ NNW
                                     "reject_max": _reproj_result.get("reject_max", float("inf")),
                                     "reject_n_matched": _reproj_result.get("reject_n_matched", 0),
                                 }
-                        self.logger.info("Reproject failed. Falling back to AstroAlign.")
+                        self.logger.warning("Reproject failed. Falling back to AstroAlign.")
                         _aa_result = self.align_with_astroalign(
                             str(_sci_backup), str(_ref_backup), output_dir
                         )
@@ -3949,7 +3949,7 @@ NNW
                             science_image, reference_image, output_dir
                         )
             except Exception as e:
-                self.logger.error(f"Failed to validate WCS of SWarp-aligned reference: {e}")
+                self.logger.error("Failed to validate WCS of SWarp-aligned reference: %s", e)
                 return self._align_fallback_reproject_then_astroalign(
                     science_image, reference_image, output_dir
                 )
@@ -3980,7 +3980,7 @@ NNW
                             science_image, reference_image, output_dir
                         )
             except Exception as e:
-                self.logger.error(f"Failed to validate WCS of SWarp-aligned science: {e}")
+                self.logger.error("Failed to validate WCS of SWarp-aligned science: %s", e)
                 return self._align_fallback_reproject_then_astroalign(
                     science_image, reference_image, output_dir
                 )
@@ -4218,7 +4218,7 @@ NNW
                     self.logger.debug("Reproject (%s) failed: %s", m, _e)
 
             if used_method is None or aligned_ref is None or footprint is None:
-                self.logger.info("Reproject alignment failed (all methods): %s", last_exc)
+                self.logger.warning("Reproject alignment failed (all methods): %s", last_exc)
                 return None
 
             # Footprint coverage check — zero overlap means WCS mismatch
@@ -4467,7 +4467,7 @@ NNW
                 **(reproject_metadata if reproject_metadata else {}),
             }
         except Exception as e:
-            self.logger.info("Reproject alignment failed: %s", e)
+            self.logger.warning("Reproject alignment failed: %s", e)
             return None
 
     def _compute_optimal_output_shape(
@@ -5392,7 +5392,7 @@ NNW
             output_path, overwrite=True
         )
 
-        self.logger.debug(f"Reprojected {source_image} -> {output_path}")
+        self.logger.debug("Reprojected %s -> %s", source_image, output_path)
         return Path(output_path)
 
     def _align_fallback_reproject_then_astroalign(
@@ -5440,7 +5440,7 @@ NNW
                 except OSError:
                     pass
             return result
-        self.logger.info("Reproject failed. Falling back to AstroAlign.")
+        self.logger.warning("Reproject failed. Falling back to AstroAlign.")
         # Use backups for AstroAlign so it reads the original template
         aa_result = self.align_with_astroalign(
             str(_sci_backup) if _sci_backup else science_image,
@@ -5834,7 +5834,7 @@ NNW
                         and np.isfinite(_p95_resid)
                     )
             except Exception as e:
-                self.logger.info(f"Could not compute alignment metrics: {e}")
+                self.logger.info("Could not compute alignment metrics: %s", e)
 
             if not alignment_verified:
                 self.logger.warning(
@@ -6079,7 +6079,7 @@ NNW
                 "n_matched_stars": n_matched_stars,
             }
         except Exception as e:
-            self.logger.info(f"Could not parse SCAMP XML: {e}")
+            self.logger.info("Could not parse SCAMP XML: %s", e)
             return None
 
     def run_swarp(
@@ -6280,7 +6280,7 @@ NNW
             if resamp_files:
                 output_image = str(resamp_files[0])
                 if self.verbose_level >= 2:
-                    self.logger.info(f"Using resampled file: {output_image}")
+                    self.logger.info("Using resampled file: %s", output_image)
 
         # --- Check for errors ---
         if result.returncode != 0:
@@ -6494,7 +6494,7 @@ NNW
         if self.verbose_level >= 2:
             import shlex
 
-            self.logger.info(f"Running SCAMP: {shlex.join(cmd)}")
+            self.logger.info("Running SCAMP: %s", shlex.join(cmd))
 
         def _clean_scamp_outputs():
             if output_path:
@@ -6547,7 +6547,7 @@ NNW
         if "Not enough matched detections" in log_content:
             self.logger.warning("SCAMP: Not enough matched detections in catalog")
         if "FATAL ERROR" in log_content:
-            self.logger.warning(f"SCAMP: FATAL ERROR in log: {log_content[:500]}")
+            self.logger.warning("SCAMP: FATAL ERROR in log: %s", log_content[:500])
 
         if result.returncode != 0 or "Not enough matched detections" in log_content:
             self.logger.warning(
@@ -6679,12 +6679,12 @@ NNW
             config=scamp_config,
         )
         if scamp_res is None:
-            self.logger.info("SCAMP failed. Check logs for details.")
+            self.logger.warning("SCAMP failed. Check logs for details.")
             return None
         head_file = Path(scamp_res.get("head_file", ""))
 
         if not head_file.exists() or head_file.stat().st_size == 0:
-            self.logger.info(f"SCAMP did not produce a valid .head file at {head_file}")
+            self.logger.info("SCAMP did not produce a valid .head file at %s", head_file)
             return None
 
         self.logger.debug("SCAMP produced .head file: %s", head_file)
@@ -6712,7 +6712,7 @@ NNW
             config=swarp_config,
         )
         if swarp_res is None:
-            self.logger.info("SWarp failed. Check logs for details.")
+            self.logger.warning("SWarp failed. Check logs for details.")
             return None
         aligned_image = swarp_res["corrected_image"]
         self.clean_image(Path(aligned_image))
@@ -6837,7 +6837,7 @@ NNW
                 sci_data = block_reduce(sci_data, block_size=(4, 4), func=np.mean)
                 ref_data = block_reduce(ref_data, block_size=(4, 4), func=np.mean)
                 rebin_scale = 0.25  # Coordinates must be scaled by 1/4
-                logging.info(f"Rebinned images by 4x for display, coordinates will be scaled by {rebin_scale}")
+                logging.info("Rebinned images by 4x for display, coordinates will be scaled by %s", rebin_scale)
             
             fig, (ax1, ax2) = plt.subplots(
                 1, 2, figsize=figsize, constrained_layout=True
@@ -6994,7 +6994,7 @@ NNW
             sci_h, sci_w = sci_data.shape
             
             # Select science sources using specified selection mode
-            logging.info(f"Selecting {max_sources} science sources using '{selection_mode}' mode")
+            logging.info("Selecting %s science sources using '%s' mode", max_sources, selection_mode)
             sci_selected = select_sources_spatially(sci_cat, max_sources, (sci_h, sci_w), selection_mode, random_seed)
             for i, row in enumerate(sci_selected):
                 if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames:
@@ -7006,7 +7006,7 @@ NNW
                     
                     # Validate coordinates are within image bounds
                     if not (0 <= x_0based < sci_w and 0 <= y_0based < sci_h):
-                        logging.debug(f"Science source {i} out of bounds: ({x_0based:.1f}, {y_0based:.1f}) vs image ({sci_w}, {sci_h})")
+                        logging.debug("Science source %s out of bounds: (%.1f, %.1f) vs image (%s, %s)", i, x_0based, y_0based, sci_w, sci_h)
                         continue
                     
                     sci_positions.append((x_0based, y_0based))
@@ -7038,7 +7038,7 @@ NNW
             ref_h, ref_w = ref_data.shape
             
             # Select reference sources using specified selection mode
-            logging.info(f"Selecting {max_sources} reference sources using '{selection_mode}' mode")
+            logging.info("Selecting %s reference sources using '%s' mode", max_sources, selection_mode)
             ref_selected = select_sources_spatially(ref_cat, max_sources, (ref_h, ref_w), selection_mode, random_seed)
             for i, row in enumerate(ref_selected):
                 if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames:
@@ -7050,7 +7050,7 @@ NNW
                     
                     # Validate coordinates are within image bounds
                     if not (0 <= x_0based < ref_w and 0 <= y_0based < ref_h):
-                        logging.debug(f"Reference source {i} out of bounds: ({x_0based:.1f}, {y_0based:.1f}) vs image ({ref_w}, {ref_h})")
+                        logging.debug("Reference source %s out of bounds: (%.1f, %.1f) vs image (%s, %s)", i, x_0based, y_0based, ref_w, ref_h)
                         continue
                     
                     ref_positions.append((x_0based, y_0based))
@@ -7179,9 +7179,9 @@ NNW
                                     if "XWIN_IMAGE" in row.colnames and "YWIN_IMAGE" in row.colnames  
                                     and np.isfinite(row["XWIN_IMAGE"]) and np.isfinite(row["YWIN_IMAGE"])])
             
-            logging.debug(f"Science: {len(sci_selected)} plotted + {sci_remaining} crosses = {total_sources_sci} total")
-            logging.debug(f"Reference: {len(ref_selected)} plotted + {ref_remaining} crosses = {total_sources_ref} total")
-            logging.debug(f"Plotted {len(sci_positions)} science and {len(ref_positions)} reference sources within image bounds")
+            logging.debug("Science: %s plotted + %s crosses = %s total", len(sci_selected), sci_remaining, total_sources_sci)
+            logging.debug("Reference: %s plotted + %s crosses = %s total", len(ref_selected), ref_remaining, total_sources_ref)
+            logging.debug("Plotted %s science and %s reference sources within image bounds", len(sci_positions), len(ref_positions))
             
             # `constrained_layout=True` keeps colorbars and labels from
             # overlapping, so no additional tight_layout is needed.
@@ -7457,7 +7457,7 @@ NNW
                             f"RANSAC mag filter kept {len(sci_cat_matched)} sources, zp={intercept:.3f} mag"
                         )
                 except Exception as exc:
-                    self.logger.warning(f"RANSAC regression failed: {exc}")
+                    self.logger.warning("RANSAC regression failed: %s", exc)
                     # Fall back to simple median filtering with more permissive threshold
                     median_diff = np.median(sci_mag_clean - ref_mag_clean)
                     intercept = median_diff
