@@ -1588,7 +1588,7 @@ def get_image_and_header(fpath):
                     if image.dtype.kind != 'f':
                         image = image.astype(np.float32)
                     best_hdu_idx = hdul.index_of("sci")
-                    print(f"Using 'sci' extension (HDU {best_hdu_idx}) with shape {image.shape}")
+                    logger.info("Using 'sci' extension (HDU %s) with shape %s", best_hdu_idx, image.shape)
             except (KeyError, TypeError):
                 pass
             
@@ -1620,7 +1620,7 @@ def get_image_and_header(fpath):
                     if image.dtype.kind != 'f':
                         image = image.astype(np.float32)
                     best_hdu_idx = best_idx
-                    logger.debug(f"Selected HDU {best_idx} (score={best_score:.1f}) with shape {image.shape}")
+                    logger.debug("Selected HDU %s (score=%.1f) with shape %s", best_idx, best_score, image.shape)
             
             # Strategy 3: Last resort - try primary HDU
             if image is None and len(hdul) > 0:
@@ -1629,33 +1629,33 @@ def get_image_and_header(fpath):
                     try:
                         test_image = np.asarray(primary_data)
                         if hasattr(test_image, 'shape'):
-                            logger.debug(f"Using primary HDU as fallback with shape {getattr(test_image, 'shape', 'no shape')}")
+                            logger.debug("Using primary HDU as fallback with shape %s", getattr(test_image, 'shape', 'no shape'))
                             image = test_image.copy()
                             # Convert integer dtypes to float32 to preserve NaNs (chip gaps)
                             if image.dtype.kind != 'f':
                                 image = image.astype(np.float32)
                             best_hdu_idx = 0
                     except Exception as e:
-                        logger.debug(f"Error with primary HDU: {e}")
+                        logger.debug("Error with primary HDU: %s", e)
             
             # Final validation and error handling
             if image is None:
                 # Print detailed HDU information for debugging
-                print("HDU structure analysis:")
+                logger.debug("HDU structure analysis:")
                 for i, hdu in enumerate(hdul):
                     data_info = f"shape={getattr(hdu.data, 'shape', 'None')}" if hdu.data is not None else "None"
-                    print(f"  HDU {i}: {hdu.__class__.__name__}, name='{hdu.name}', data={data_info}")
+                    logger.debug("  HDU %s: %s, name='%s', data=%s", i, hdu.__class__.__name__, hdu.name, data_info)
                 raise Exception(f"No valid 2D+ image data found in FITS file: {os.path.basename(fpath)}")
             
             # Handle multi-dimensional data by taking first 2D slice
             if hasattr(image, 'shape') and len(image.shape) > 2:
                 base = os.path.basename(fpath)
-                print(f"Warning: {base} has {len(image.shape)}D data, taking first 2D slice")
+                logger.warning("%s has %sD data, taking first 2D slice", base, len(image.shape))
                 original_shape = image.shape
                 while len(image.shape) > 2:
                     image = image[0]
                 image = image.copy()
-                print(f"  Reshaped from {original_shape} to {image.shape}")
+                logger.info("  Reshaped from %s to %s", original_shape, image.shape)
             elif not hasattr(image, 'shape') or len(image.shape) < 2:
                 base = os.path.basename(fpath)
                 raise Exception(f"Warning: {base} is not a 2D array (found {getattr(image, 'shape', 'no shape')} data).")

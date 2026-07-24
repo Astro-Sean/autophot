@@ -216,7 +216,7 @@ class BackgroundSubtractor:
             return np.zeros_like(image, dtype=bool)
         pix_scale_arcsec = xy_pixel_scales[0] * 3600.0
         if pix_scale_arcsec <= 0 or not np.isfinite(pix_scale_arcsec):
-            self.logger.warning(f"Invalid pixel scale ({pix_scale_arcsec}), skipping galaxy masking")
+            self.logger.warning("Invalid pixel scale (%s), skipping galaxy masking", pix_scale_arcsec)
             return np.zeros_like(image, dtype=bool)
 
         valid = galaxies["galdim_majaxis"].apply(
@@ -226,7 +226,7 @@ class BackgroundSubtractor:
         )
         filtered_galaxies = galaxies[valid]
         if len(filtered_galaxies) > 0:
-            self.logger.info(f"Masking {len(filtered_galaxies)} galaxies from SIMBAD")
+            self.logger.info("Masking %s galaxies from SIMBAD", len(filtered_galaxies))
 
         mask = np.zeros(image.shape, dtype=bool)
         y_grid, x_grid = np.mgrid[0 : image.shape[0], 0 : image.shape[1]]
@@ -1421,7 +1421,7 @@ class BackgroundSubtractor:
         )
 
         masked_frac = mask.mean()
-        self.logger.info(f"Masked fraction (total): {masked_frac:.2%}")
+        self.logger.info("Masked fraction (total): %s", masked_frac)
 
         # If essentially the entire image is saturated or masked, this frame is
         # not usable for reliable background / photometry. Bail out early with
@@ -1442,10 +1442,10 @@ class BackgroundSubtractor:
         if masked_frac > 0.30:
             new_box = self._adaptive_box_for_mask(mask, box_size)
             if new_box != box_size:
-                self.logger.info(f"Adjusted box_size {box_size} -> {new_box}")
+                self.logger.info("Adjusted box_size %s -> %s", box_size, new_box)
                 box_size = new_box
 
-        self.logger.info(f"box_size={box_size}  filter_size={filter_size}")
+        self.logger.info("box_size=%s  filter_size=%s", box_size, filter_size)
 
         # ---- Global fallback statistics ----
         stats_maxiters = 3 if fast_mode else 5
@@ -1743,7 +1743,7 @@ class BackgroundSubtractor:
             if masked_frac > 0.30:
                 new_box = self._adaptive_box_for_mask(source_mask, box_size, min_box=16)
                 if new_box != box_size:
-                    self.logger.info(f"Adjusted local box_size {box_size} -> {new_box}")
+                    self.logger.info("Adjusted local box_size %s -> %s", box_size, new_box)
                     box_size = new_box
 
         # ---- Fit background on cutout ----

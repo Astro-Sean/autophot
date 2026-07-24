@@ -579,7 +579,7 @@ def _compute_detection_mask(
             snr_source = "mag_err"
         # Log the SNR source and values for debugging
         if len(snr) > 0 and not np.all(np.isnan(snr)):
-            logging.debug(f"_compute_detection_mask: method={method}, snr_source={snr_source}, snr_mean={np.nanmean(snr):.3f}, snr_max={np.nanmax(snr):.3f}")
+            logging.debug("_compute_detection_mask: method=%s, snr_source=%s, snr_mean=%.3f, snr_max=%.3f", method, snr_source, np.nanmean(snr), np.nanmax(snr))
     else:
         # Still compute SNR for completeness, but detection uses lmag branch below.
         snr = _snr_from_magerr(err)
@@ -593,7 +593,7 @@ def _compute_detection_mask(
         )
         # Debug logging for detection decision
         if len(snr) > 0 and len(detected) > 0:
-            logging.info(f"_compute_detection_mask: method={method}, snr_source={snr_source}, snr={snr[0]:.3f}, limit={snr_limit}, detected={detected[0]}")
+            logging.info("_compute_detection_mask: method=%s, snr_source=%s, snr=%.3f, limit=%s, detected=%s", method, snr_source, snr[0], snr_limit, detected[0])
     else:
         # Use magnitude comparison with limiting magnitude if available and reasonable
         # Otherwise fall back to SNR-based detection using magnitude errors
@@ -924,7 +924,7 @@ def plot_lightcurve(
             use_SNR_limit=bool(use_SNR_limit),
         )
         detected_s = pd.Series(detected, index=df.index, dtype=bool)
-        logging.info(f"plot_lightcurve: detected={detected_s.iloc[0] if len(detected_s) > 0 else 'N/A'}")
+        logging.info("plot_lightcurve: detected=%s", detected_s.iloc[0] if len(detected_s) > 0 else 'N/A')
 
         # Check for inverted-only detections using _inverted_fit flag or inst_inverted column
         has_inverted = False
@@ -1635,7 +1635,7 @@ def generate_photometry_table(
         # Debug logging to track which bands are being processed
         import logging
         logger = logging.getLogger(__name__)
-        logger.info(f"Processing band: {band}, band_label: {band_label}, data rows: {len(data)}")
+        logger.info("Processing band: %s, band_label: %s, data rows: %s", band, band_label, len(data))
         # Robust numeric coercion: CSV concatenation can yield strings like "nan".
         if "beta" in data.columns:
             data["beta"] = pd.to_numeric(data["beta"], errors="coerce")

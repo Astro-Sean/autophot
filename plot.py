@@ -161,7 +161,7 @@ class Plot:
                 # First apply percentile cleaning to remove extreme values
                 valid_data = img_data[np.isfinite(img_data)]
                 if len(valid_data) == 0:
-                    logger.warning(f"subtraction_check: {key} has no valid data, using fallback vmin/vmax")
+                    logger.warning("subtraction_check: %s has no valid data, using fallback vmin/vmax", key)
                     vmins[key] = np.nanmin(img_data)
                     vmaxs[key] = np.nanmax(img_data)
                     continue
@@ -173,7 +173,7 @@ class Plot:
                     vmins[key] = vmin
                     vmaxs[key] = vmax
                 except Exception as e:
-                    logger.warning(f"subtraction_check: zscale failed for {key}, using min/max: {e}")
+                    logger.warning("subtraction_check: zscale failed for %s, using min/max: %s", key, e)
                     vmins[key] = np.nanmin(img_data)
                     vmaxs[key] = np.nanmax(img_data)
 
@@ -217,7 +217,7 @@ class Plot:
             ref_height = images["Image"].shape[0]
             # Log image shapes for debugging
             for title in image_titles:
-                logger.debug(f"subtraction_check: {title} shape={images[title].shape}")
+                logger.debug("subtraction_check: %s shape=%s", title, images[title].shape)
             for i, (ax, title) in enumerate(zip(axes, image_titles)):
                 img_data = images[title]
                 # Use grayscale for full images to improve contrast with colored markers
@@ -337,7 +337,7 @@ class Plot:
                 required_cols = ["x_pix", "y_pix", "OTYPE_opt", "MAIN_ID"]
                 missing_cols = [col for col in required_cols if col not in masked_sources.columns]
                 if missing_cols:
-                    logger.warning(f"subtraction_check: masked_sources missing columns {missing_cols}")
+                    logger.warning("subtraction_check: masked_sources missing columns %s", missing_cols)
                 else:
                     for x, y, otype, name in zip(
                         masked_sources["x_pix"],
@@ -439,7 +439,7 @@ class Plot:
                                 zorder=2,
                             )
                         masked_count += 1
-                logger.debug(f"Plotted {masked_count} variable sources (masked from flux calibration) as red 'x' markers")
+                logger.debug("Plotted %s variable sources (masked from flux calibration) as red 'x' markers", masked_count)
 
             # Add insets and other features
             for i, (title, img_data) in enumerate(images.items()):
@@ -451,7 +451,7 @@ class Plot:
                         x = max(inset_size, min(x, img_width - inset_size))
                         y = max(inset_size, min(y, img_height - inset_size))
                     except (ValueError, TypeError) as e:
-                        logger.warning(f"subtraction_check: invalid expected_location format: {e}")
+                        logger.warning("subtraction_check: invalid expected_location format: %s", e)
                         continue
 
                     x_side, con_x_main, con_x_inset = get_inset_side(
@@ -892,7 +892,7 @@ class Plot:
                     raise ValueError("WCS has no celestial component")
             except Exception as e:
                 # Fallback to regular axes with pixel coordinates only
-                logger.debug(f"Source check plot: WCS axes failed ({e}), using pixel coordinates only")
+                logger.debug("Source check plot: WCS axes failed (%s), using pixel coordinates only", e)
                 # Clear the figure to remove any partially-created WCS axes
                 fig.clf()
                 ax1 = fig.add_subplot(111)
@@ -1399,14 +1399,14 @@ class Plot:
                         adaptive_limit_col = f'Limit_{higher_threshold:.1f}S2N'.replace('.', 'p')
                         if adaptive_limit_col not in data.columns:
                             adaptive_limit_col = "Limit_5p0S2N"  # Fallback
-                        logger.info(f"Adaptive S/N selection: median S/N={median_snr:.2f} < 3, using {higher_threshold}σ limiting magnitude")
+                        logger.info("Adaptive S/N selection: median S/N=%.2f < 3, using %sσ limiting magnitude", median_snr, higher_threshold)
                     else:
                         # Use the first (lower) threshold
                         lower_threshold = sorted(snr_thresholds)[0]
                         adaptive_limit_col = f'Limit_{lower_threshold:.1f}S2N'.replace('.', 'p')
                         if adaptive_limit_col not in data.columns:
                             adaptive_limit_col = "Limit_3p0S2N"  # Fallback
-                        logger.info(f"Adaptive S/N selection: median S/N={median_snr:.2f} >= 3, using {lower_threshold}σ limiting magnitude")
+                        logger.info("Adaptive S/N selection: median S/N=%.2f >= 3, using %sσ limiting magnitude", median_snr, lower_threshold)
         if data.columns.duplicated().any():
             data = data.loc[:, ~data.columns.duplicated()].copy()
 
@@ -1922,14 +1922,14 @@ class Plot:
             fig.savefig(save_path, dpi=150, facecolor="white")
             plt.close(fig)
 
-            logger.debug(f"Saved WCS vs PSF offset plot: {save_path}")
+            logger.debug("Saved WCS vs PSF offset plot: %s", save_path)
             logger.info(
                 f"WCS vs PSF offset:\tmedian=({med_dx:.3f}, {med_dy:.3f}) px, "
                 f"RMS=({rms_dx:.3f}, {rms_dy:.3f}) px"
             )
 
         except Exception as e:
-            logger.warning(f"WCS vs PSF offset plot failed: {e}")
+            logger.warning("WCS vs PSF offset plot failed: %s", e)
 
     def plot_alignment_offset(
         self,
@@ -2271,11 +2271,11 @@ class Plot:
             fig.savefig(save_path, dpi=150, facecolor="white")
             plt.close(fig)
 
-            logger.debug(f"Saved alignment offset plot: {save_path}")
+            logger.debug("Saved alignment offset plot: %s", save_path)
             logger.info(
                 f"Alignment offset:\tmedian=({med_dx:.3f}, {med_dy:.3f}) px, "
                 f"RMS=({rms_dx:.3f}, {rms_dy:.3f}) px, N={n_matched}"
             )
 
         except Exception as e:
-            logger.warning(f"Alignment offset plot failed: {e}")
+            logger.warning("Alignment offset plot failed: %s", e)

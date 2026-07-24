@@ -294,7 +294,7 @@ class RemoveCosmicRays:
         psf_size = int(np.ceil(3 * psf_fwhm))
         if psf_size % 2 == 0:
             psf_size += 1  # Ensure it's odd
-        self.logger.info(f"Using PSF size: {psf_size} (FWHM: {psf_fwhm:.1f} pixels)")
+        self.logger.info("Using PSF size: %s (FWHM: %.1f pixels)", psf_size, psf_fwhm)
 
         # --- Run cosmic ray removal ---
         try:
@@ -399,7 +399,6 @@ class RemoveCosmicRays:
 
         # --- Error Handling ---
         except Exception as e:
-            self.logger.error("Cosmic ray removal failed. Returning original image.")
-            self.logger.exception(e)
+            self.logger.error("Cosmic ray removal failed: %s", e)
             self.header["CRSTATUS"] = ("failed", "Cosmic ray removal failed")
             return self.image, np.zeros_like(self.image, dtype=bool)

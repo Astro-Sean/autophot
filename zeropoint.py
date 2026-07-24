@@ -476,7 +476,7 @@ class Zeropoint:
             & (catmag_err > 0)
         )
         if vmask.sum() < 2:
-            logger.warning(f"{flux_type}: only {vmask.sum()} valid sources; skipping.")
+            logger.warning("%s: only %s valid sources; skipping.", flux_type, vmask.sum())
             return None
 
         return (
@@ -580,7 +580,7 @@ class Zeropoint:
             valid_mags = sources[filter_col].notna()
             n_missing = (~valid_mags).sum()
             if n_missing > 0:
-                logger.info(f"Removing {n_missing} sources with missing {filter_col}")
+                logger.info("Removing %s sources with missing %s", n_missing, filter_col)
 
             too_bright = sources[filter_col] < upperMaglimit
             too_faint = sources[filter_col] > lowerMaglimit
@@ -692,7 +692,7 @@ class Zeropoint:
             return cleaned
 
         except Exception as exc:
-            logger.error(f"Error in clean(): {exc}\n{traceback.format_exc()}")
+            logger.error("Error in clean(): %s\n%s", exc, traceback.format_exc())
             return None
 
     # -----------------------------------------------------------------------
@@ -733,7 +733,7 @@ class Zeropoint:
                     if "flags" in src.columns:
                         before = len(src)
                         src = src[src["flags"] <= 0]
-                        logger.info(f"Removed {before - len(src)} flagged sources")
+                        logger.info("Removed %s flagged sources", before - len(src))
 
                     if "qfit" in src.columns:
                         before = len(src)
@@ -747,7 +747,7 @@ class Zeropoint:
                             stdfunc=mad_std,
                         )
                         src = src[~qfit_clip.mask]
-                        logger.info(f"Removed {before - len(src)} qfit outliers")
+                        logger.info("Removed %s qfit outliers", before - len(src))
 
                 inst_mag = src[f"inst_{image_filter}_{method}"]
                 snr = src["SNR"]
@@ -868,7 +868,7 @@ class Zeropoint:
         # Finite mask
         finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(x_err) & np.isfinite(y_err)
         if finite.sum() < min_points:
-            logger.warning(f"ODR: insufficient points ({finite.sum()} < {min_points})")
+            logger.warning("ODR: insufficient points (%s < %s)", finite.sum(), min_points)
             return np.nan, np.nan, np.zeros(len(x), dtype=bool)
         
         x, y = x[finite], y[finite]
@@ -920,11 +920,11 @@ class Zeropoint:
             
             # Check for convergence
             if n_after == n_before:
-                logger.debug(f"ODR converged at iteration {iteration + 1}")
+                logger.debug("ODR converged at iteration %s", iteration + 1)
                 break
             
             if n_after < min_points:
-                logger.warning(f"ODR: too few inliers after clipping ({n_after}), reverting to iteration {iteration}")
+                logger.warning("ODR: too few inliers after clipping (%s), reverting to iteration %s", n_after, iteration)
                 # Revert to previous iteration
                 inlier_mask_local = np.abs(residuals) < (3.0 * mad_res)
                 break
@@ -933,7 +933,7 @@ class Zeropoint:
         
         # Final fit on converged inliers
         if inlier_mask_local.sum() < min_points:
-            logger.warning(f"ODR: insufficient inliers ({inlier_mask_local.sum()}), using all points")
+            logger.warning("ODR: insufficient inliers (%s), using all points", inlier_mask_local.sum())
             inlier_mask_local = np.ones(len(delta), dtype=bool)
         
         delta_in = delta[inlier_mask_local]
@@ -969,7 +969,7 @@ class Zeropoint:
         if dof > 0 and chi2 / dof > 1.0:
             scale = np.sqrt(chi2 / dof)
             zp_err *= scale
-            logger.debug(f"ODR DEBUG: scaled zp_err by {scale:.2f} → {zp_err:.4f}")
+            logger.debug("ODR DEBUG: scaled zp_err by %.2f → %.4f", scale, zp_err)
         
         # Map back to full array
         full_mask = np.zeros(len(x), dtype=bool)
@@ -983,7 +983,7 @@ class Zeropoint:
                 f"x_err median={np.nanmedian(x_err):.3f}, y_err median={np.nanmedian(y_err):.3f}"
             )
         
-        logger.info(f"ODR: ZP={zp:.4f} ± {zp_err:.4f} ({inlier_mask_local.sum()}/{len(delta)} inliers, χ²/dof={chi2/max(dof,1):.2f})")
+        logger.info("ODR: ZP=%.4f ± %.4f (%s/%s inliers, χ²/dof=%.2f)", zp, zp_err, inlier_mask_local.sum(), len(delta), chi2/max(dof,1))
         
         return zp, zp_err, full_mask
 
@@ -1090,7 +1090,7 @@ class Zeropoint:
         # Finite mask
         finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(x_err) & np.isfinite(y_err)
         if finite.sum() < min_points:
-            logger.warning(f"MCMC: insufficient points ({finite.sum()} < {min_points})")
+            logger.warning("MCMC: insufficient points (%s < %s)", finite.sum(), min_points)
             return np.nan, np.nan, np.zeros(len(x), dtype=bool)
         
         x, y = x[finite], y[finite]
@@ -1207,7 +1207,7 @@ class Zeropoint:
                         new_batch_size = int(min(10 * tau_est, 2000))
                         if new_batch_size > batch_size and new_batch_size < max_steps - total_steps:
                             batch_size = new_batch_size
-                            logger.debug(f"Adaptive batch size increased to {batch_size} (tau={tau_est:.1f})")
+                            logger.debug("Adaptive batch size increased to %s (tau=%.1f)", batch_size, tau_est)
                     
                     # Convergence criterion: total_steps > tau_factor * tau (following PSF fitter)
                     if np.isfinite(tau_est) and total_steps > tau_factor * tau_est:
@@ -1238,7 +1238,7 @@ class Zeropoint:
                 except Exception as exc:
                     # Autocorrelation time unreliable on short chains; keep running
                     n_consecutive_stable = 0
-                    logger.debug(f"[ZP MCMC] tau estimation failed: {exc}")
+                    logger.debug("[ZP MCMC] tau estimation failed: %s", exc)
                     pass
 
             # Log acceptance fraction and final tau (following PSF fitter)
@@ -1249,9 +1249,9 @@ class Zeropoint:
                     warnings.simplefilter("ignore")
                     tau_arr = sampler.get_autocorr_time(quiet=True)
                 tau_est = float(np.nanmean(tau_arr))
-                logger.info(f"[ZP MCMC] acc={acc:.3f}  tau~{tau_est:.1f}")
+                logger.info("[ZP MCMC] acc=%.3f  tau~%.1f", acc, tau_est)
             except Exception:
-                logger.info(f"[ZP MCMC] acc={acc:.3f}")
+                logger.info("[ZP MCMC] acc=%.3f", acc)
 
             if not 0.15 <= acc <= 0.8:
                 logger.warning("[ZP MCMC] Suboptimal acceptance; consider tuning n_walkers")
@@ -1500,7 +1500,7 @@ class Zeropoint:
         )
         x, y, w0, x_err = x[finite], y[finite], w0[finite], x_err[finite]
         keep_idx = np.where(finite)[0]
-        logger.info(f"Filtered {len(x)}/{orig_size} points.")
+        logger.info("Filtered %s/%s points.", len(x), orig_size)
 
         # Trivial fallback for very sparse data (robust median and SE from MAD).
         if len(x) < 3:
@@ -1540,7 +1540,7 @@ class Zeropoint:
         full_mask = np.zeros(orig_size, dtype=bool)
         full_mask[keep_idx] = inlier_mask
         
-        logger.info(f"ODR: {inlier_mask.sum()}/{len(x)} inliers, ZP={ZP:.4f} ± {zp_std:.4f}")
+        logger.info("ODR: %s/%s inliers, ZP=%.4f ± %.4f", inlier_mask.sum(), len(x), ZP, zp_std)
         
         # If ODR fails or rejects too many points, fall back to simple median
         if not np.isfinite(ZP) or inlier_mask.sum() < 2:
@@ -1558,13 +1558,13 @@ class Zeropoint:
         
         # If ODR rejects >50% of points, warn but keep the result
         if inlier_mask.sum() < 0.5 * len(x) and len(x) > 10:
-            logger.warning(f"ODR rejected >50% of points ({inlier_mask.sum()}/{len(x)}); consider checking data quality")
+            logger.warning("ODR rejected >50% of points (%s/%s); consider checking data quality", inlier_mask.sum(), len(x))
 
         # ODR already computed ZP and error - use those results directly
         # zp_std already includes X-error propagation from ODR
         cov = np.diag([zp_std**2, slope_err**2])
         
-        logger.info(f"ZP = {ZP:.4f} +/- {zp_std:.4f} (ODR fit with X,Y errors)")
+        logger.info("ZP = %.4f +/- %.4f (ODR fit with X,Y errors)", ZP, zp_std)
         return ZP, slope, full_mask, cov
 
     # -----------------------------------------------------------------------
@@ -1884,7 +1884,7 @@ class Zeropoint:
                     "fit_zeropoint: no inliers from any flux type; returning unfiltered clean_catalog."
                 )
 
-            logger.info(f"[fit_zeropoint] Done in {time.time() - t0:.3f}s")
+            logger.info("[fit_zeropoint] Done in %.3fs", time.time() - t0)
             return clean_catalog, fit_params
 
         except Exception as exc:
@@ -2719,7 +2719,7 @@ class Zeropoint:
         plot_file = os.path.join(write_dir, f"Color_Term_{base_name}_piecewise.png")
         ransac_savefig(fig, plot_file)
         plt.close(fig)
-        logger.debug(f"fit_color_term: saved piecewise color term plot to {plot_file}")
+        logger.debug("fit_color_term: saved piecewise color term plot to %s", plot_file)
 
     def _fit_piecewise_linear(self, x, y, x_err, y_err, n_segments, outlier_sigma=3.0):
         """
@@ -2824,7 +2824,7 @@ class Zeropoint:
         if n_segments == 2:
             # Check minimum data requirements
             if len(x) < 8:
-                logger.warning(f"fit_color_term: insufficient data ({len(x)} points) for piecewise fitting, falling back to linear")
+                logger.warning("fit_color_term: insufficient data (%s points) for piecewise fitting, falling back to linear", len(x))
                 slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(x, y, y_err)
                 return ((), (slope,), intercept), ((), (slope_err,), intercept_err), np.ones(len(x), dtype=bool), "WLS"
 
@@ -2873,9 +2873,9 @@ class Zeropoint:
                         best_bp = bp
 
                 optimal_bp = best_bp
-                logger.info(f"fit_color_term: grid search found optimal breakpoint at {optimal_bp:.3f}")
+                logger.info("fit_color_term: grid search found optimal breakpoint at %.3f", optimal_bp)
             except Exception as exc:
-                logger.warning(f"fit_color_term: breakpoint optimization failed ({exc}), falling back to linear")
+                logger.warning("fit_color_term: breakpoint optimization failed (%s), falling back to linear", exc)
                 slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(x, y, y_err)
                 return ((), (slope,), intercept), ((), (slope_err,), intercept_err), np.ones(len(x), dtype=bool), "WLS"
 
@@ -2891,7 +2891,7 @@ class Zeropoint:
                 x1[inlier_mask1], y1[inlier_mask1], ye1[inlier_mask1]
             )
             method1 = "WLS"
-            logger.info(f"fit_color_term: segment 1 WLS: {np.sum(inlier_mask1)}/{len(x1)} inliers")
+            logger.info("fit_color_term: segment 1 WLS: %s/%s inliers", np.sum(inlier_mask1), len(x1))
 
             # Segment 2
             x2, y2 = x_sorted[mask2], y_sorted[mask2]
@@ -2901,11 +2901,11 @@ class Zeropoint:
                 x2[inlier_mask2], y2[inlier_mask2], ye2[inlier_mask2]
             )
             method2 = "WLS"
-            logger.info(f"fit_color_term: segment 2 WLS: {np.sum(inlier_mask2)}/{len(x2)} inliers")
+            logger.info("fit_color_term: segment 2 WLS: %s/%s inliers", np.sum(inlier_mask2), len(x2))
 
             # Check if we have enough inliers
             if inlier_mask1.sum() < 2 or inlier_mask2.sum() < 2:
-                logger.warning(f"fit_color_term: insufficient inliers (seg1: {inlier_mask1.sum()}, seg2: {inlier_mask2.sum()}), falling back to linear")
+                logger.warning("fit_color_term: insufficient inliers (seg1: %s, seg2: %s), falling back to linear", inlier_mask1.sum(), inlier_mask2.sum())
                 slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(x, y, y_err)
                 return ((), (slope,), intercept), ((), (slope_err,), intercept_err), np.ones(len(x), dtype=bool), "WLS"
 
@@ -2936,7 +2936,7 @@ class Zeropoint:
             return coefficients, coefficient_errors, inlier_mask, overall_method
         else:
             # For n > 2, fall back to linear
-            logger.warning(f"fit_color_term: n_segments={n_segments} not yet implemented, falling back to linear")
+            logger.warning("fit_color_term: n_segments=%s not yet implemented, falling back to linear", n_segments)
             slope, intercept, slope_err, intercept_err, cov = weighted_linear_fit(x, y, y_err)
             return ((), (slope,), intercept), ((), (slope_err,), intercept_err), np.ones(len(x), dtype=bool), "WLS"
 
@@ -2974,13 +2974,13 @@ class Zeropoint:
 
             # n_segments > 1 overrides poly_order
             if n_segments > 1:
-                logger.info(f"fit_color_term: using piecewise linear with {n_segments} segments")
+                logger.info("fit_color_term: using piecewise linear with %s segments", n_segments)
                 fit_mode = "piecewise"
             else:
                 if poly_order not in [1, 2]:
-                    logger.warning(f"fit_color_term: invalid poly_order {poly_order}, using 1 (linear)")
+                    logger.warning("fit_color_term: invalid poly_order %s, using 1 (linear)", poly_order)
                     poly_order = 1
-                logger.info(f"fit_color_term: using polynomial order {poly_order} ({'linear' if poly_order == 1 else 'quadratic'})")
+                logger.info("fit_color_term: using polynomial order %s (%s)", poly_order, 'linear' if poly_order == 1 else 'quadratic')
                 fit_mode = "polynomial"
 
             zp_cfg = self.input_yaml.get("zeropoint", {}) or {}
@@ -3043,7 +3043,7 @@ class Zeropoint:
             flux_ap, flux_err = flux_ap[snr_mask], flux_err[snr_mask]
             n_after_snr = len(x)
             if n_before_snr - n_after_snr > 0:
-                logger.info(f"fit_color_term: removed {n_before_snr - n_after_snr} sources with S/N < 5")
+                logger.info("fit_color_term: removed %s sources with S/N < 5", n_before_snr - n_after_snr)
 
             # Log color distribution for diagnostics
             logger.info(
@@ -3102,7 +3102,7 @@ class Zeropoint:
                                     y_err[~color_clipped.mask],
                                 )
                     except Exception as exc:
-                        logger.warning(f"fit_color_term: extreme color filtering failed: {exc}")
+                        logger.warning("fit_color_term: extreme color filtering failed: %s", exc)
 
             # 1. Pre-fit sigma clipping to remove extreme outliers
             try:
@@ -3112,10 +3112,10 @@ class Zeropoint:
                 pre_clip = sigma_clip(ols_resid_pre, sigma=5, maxiters=3, masked=True)
                 n_pre_outliers = np.sum(pre_clip.mask)
                 if n_pre_outliers > 0:
-                    logger.info(f"fit_color_term: pre-fit clipping removed {n_pre_outliers} extreme outliers")
+                    logger.info("fit_color_term: pre-fit clipping removed %s extreme outliers", n_pre_outliers)
                     x, y, x_err, y_err = x[~pre_clip.mask], y[~pre_clip.mask], x_err[~pre_clip.mask], y_err[~pre_clip.mask]
             except Exception as exc:
-                logger.debug(f"fit_color_term: pre-fit clipping skipped: {exc}")
+                logger.debug("fit_color_term: pre-fit clipping skipped: %s", exc)
 
             _min_sources_cfg = int(zp_cfg.get("min_source_no", 5))
             min_sources = max(3, _min_sources_cfg)  # Hard floor of 3 for statistical validity
@@ -3154,7 +3154,7 @@ class Zeropoint:
                         "Results may be unreliable."
                     )
             except Exception as exc:
-                logger.debug(f"fit_color_term: stratified sampling check skipped: {exc}")
+                logger.debug("fit_color_term: stratified sampling check skipped: %s", exc)
 
             # 6. Robust weighted least squares with sigma-clip outlier rejection
             # For polynomial fitting, use polynomial features
@@ -3194,9 +3194,9 @@ class Zeropoint:
                         x_orig, y_orig, x_err_orig, y_err_orig = x.copy(), y.copy(), x_err.copy(), y_err.copy()
                         x, y, x_err, y_err = x_orig[downsample_indices], y_orig[downsample_indices], x_err_orig[downsample_indices], y_err_orig[downsample_indices]
                         X_poly = np.column_stack([x**2, x]) if poly_order == 2 else x[:, None]
-                        logger.info(f"fit_color_term: downsampled {len(dense_indices)} dense points to {len(keep_dense)} to avoid cluster bias")
+                        logger.info("fit_color_term: downsampled %s dense points to %s to avoid cluster bias", len(dense_indices), len(keep_dense))
             except Exception as exc:
-                logger.debug(f"fit_color_term: density downsampling skipped: {exc}")
+                logger.debug("fit_color_term: density downsampling skipped: %s", exc)
 
             # Single seed for speed (was 5 seeds)
             ransac = RANSACRegressor(
@@ -3219,13 +3219,13 @@ class Zeropoint:
                 inlier_mask = np.ones(len(x), dtype=bool)
                 n_inliers = len(x)
 
-            logger.info(f"fit_color_term: robust fit found {n_inliers} inliers")
+            logger.info("fit_color_term: robust fit found %s inliers", n_inliers)
 
             min_inlier_frac = 0.25
             min_inliers = max(5, int(len(x) * min_inlier_frac))
 
             if n_inliers < min_inliers:
-                logger.warning(f"fit_color_term: inliers {n_inliers} < {min_inliers} ({int(100*min_inlier_frac)}%), using sigma-clip fallback")
+                logger.warning("fit_color_term: inliers %s < %s (%s%), using sigma-clip fallback", n_inliers, min_inliers, int(100*min_inlier_frac))
                 # Sigma-clip fallback
                 r0 = y - np.nanmedian(y)
                 clipped = sigma_clip(

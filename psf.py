@@ -816,9 +816,9 @@ class MCMCFitter:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 tau_arr = self.sampler.get_autocorr_time(quiet=True)
-            log.info(f"[MCMC] acc={acc:.3f}  tau~{np.nanmean(tau_arr):.1f}")
+            log.info("[MCMC] acc=%.3f  tau~%.1f", acc, np.nanmean(tau_arr))
         except Exception:
-            log.info(f"[MCMC] acc={acc:.3f}")
+            log.info("[MCMC] acc=%.3f", acc)
         self._last_tau = tau_arr  # for discard/thin in __call__
 
         if not 0.15 <= acc <= 0.8:
@@ -916,7 +916,7 @@ class MCMCFitter:
             self.fit_info["per_source"] = []
             self.fit_info["samples"] = {}
 
-        log.info(f"[MCMC] Fitting source {self.counter + 1} (adaptive)")
+        log.info("[MCMC] Fitting source %s (adaptive)", self.counter + 1)
         self.run_mcmc(
             fitted_model,
             x,
@@ -1011,7 +1011,7 @@ class MCMCFitter:
         self.sampler = None
 
         self.counter += 1
-        log.info(f"[MCMC] elapsed={time.time() - t0:.3f}s")
+        log.info("[MCMC] elapsed=%.3fs", time.time() - t0)
         return fitted_model
 
 # ===========================================================================
@@ -1202,7 +1202,7 @@ class PoissonLikelihoodFitter:
             # Check convergence
             if iteration > 0 and abs(lnL - prev_lnL) < self.lnL_tolerance:
                 converged = True
-                log.info(f"[PoissonFitter] Converged at iteration {iteration}")
+                log.info("[PoissonFitter] Converged at iteration %s", iteration)
                 break
             
             prev_lnL = lnL
@@ -1256,14 +1256,14 @@ class PoissonLikelihoodFitter:
                     n_cuts += 1
             
             if n_cuts >= self.max_step_cuts:
-                log.warning(f"[PoissonFitter] Max step cuts reached at iteration {iteration}")
+                log.warning("[PoissonFitter] Max step cuts reached at iteration %s", iteration)
         
         # Check total position change
         if original_position is not None:
             final_position = np.array([params[x_idx], params[y_idx]])
             total_position_change = np.linalg.norm(final_position - original_position)
             if total_position_change > self.max_total_position_change:
-                log.warning(f"[PoissonFitter] Total position change {total_position_change:.2f} exceeds limit {self.max_total_position_change}")
+                log.warning("[PoissonFitter] Total position change %.2f exceeds limit %s", total_position_change, self.max_total_position_change)
         
         # Update model with final parameters
         model.parameters = params
@@ -1273,9 +1273,9 @@ class PoissonLikelihoodFitter:
         self.fit_info["converged"] = converged
 
         if not converged:
-            log.warning(f"[PoissonFitter] Did not converge in {self.maxiters} iterations")
+            log.warning("[PoissonFitter] Did not converge in %s iterations", self.maxiters)
 
-        log.info(f"[PoissonFitter] Final lnL: {lnL:.3f}, iterations: {iteration + 1}")
+        log.info("[PoissonFitter] Final lnL: %.3f, iterations: %s", lnL, iteration + 1)
 
         # Compute parameter errors from Hessian (inverse of Hessian = covariance matrix)
         try:
@@ -1297,11 +1297,11 @@ class PoissonLikelihoodFitter:
                 if hasattr(model, 'cov_matrix'):
                     model.cov_matrix = Covariance(cov_matrix)
 
-                log.info(f"[PoissonFitter] Parameter errors computed from Hessian")
+                log.info("[PoissonFitter] Parameter errors computed from Hessian")
             else:
-                log.warning(f"[PoissonFitter] Invalid covariance matrix, errors not set")
+                log.warning("[PoissonFitter] Invalid covariance matrix, errors not set")
         except Exception as e:
-            log.warning(f"[PoissonFitter] Failed to compute parameter errors: {e}")
+            log.warning("[PoissonFitter] Failed to compute parameter errors: %s", e)
 
         # Store per-source record for consistent error propagation in fit()
         param_errors = getattr(model, 'stds', None)
@@ -1495,7 +1495,7 @@ class PSF:
 
             dropped = int((~keep).sum())
             if dropped:
-                log.info(f"[robust_extract_stars] Dropped {dropped} near-edge sources")
+                log.info("[robust_extract_stars] Dropped %s near-edge sources", dropped)
 
             x, y = x[keep], y[keep]
             if x.size == 0:
@@ -1534,7 +1534,7 @@ class PSF:
             good = np.isfinite(x_cen) & np.isfinite(y_cen)
             n_bad = int((~good).sum())
             if n_bad:
-                log.info(f"[robust_extract_stars] Dropped {n_bad} non-finite centroids")
+                log.info("[robust_extract_stars] Dropped %s non-finite centroids", n_bad)
             x_cen, y_cen = x_cen[good], y_cen[good]
 
             if x_cen.size == 0:
@@ -1543,7 +1543,7 @@ class PSF:
 
             stars_tbl = Table({"x": x_cen, "y": y_cen})
             epsfstars = extract_stars(ndimage, stars_tbl, size=cutout_shape)
-            log.info(f"[robust_extract_stars] Extracted {len(epsfstars)} cutouts")
+            log.info("[robust_extract_stars] Extracted %s cutouts", len(epsfstars))
 
             # Filter out stars with NaN or masked pixels in the *central* region.
             # Edge NaNs (common near image boundaries) are acceptable; only reject
@@ -1622,7 +1622,7 @@ class PSF:
             return epsfstars, stars_tbl
 
         except Exception:
-            log.error("[robust_extract_stars] Fatal:\n" + traceback.format_exc())
+            log.error("[robust_extract_stars] Fatal:\n%s", traceback.format_exc())
             return EPSFStars([]), Table()
 
     # -----------------------------------------------------------------------
@@ -1862,7 +1862,7 @@ class PSF:
                 if isinstance(usePSFlist, str)
                 else psfSources.copy()
             )
-            log.info(f"Building ePSF from {len(df)} sources")
+            log.info("Building ePSF from %s sources", len(df))
 
             # Exclude saturated and streaky/elongated sources from PSF building.
             # For small candidate pools, apply these cuts adaptively so we do not
@@ -2367,7 +2367,7 @@ class PSF:
             if fit_boxsize >= cutout_n - 2:
                 fit_boxsize = _odd(cutout_n - 3)
 
-            log.info(f"Initial sources: {len(df)}")
+            log.info("Initial sources: %s", len(df))
             if threshold_limit_eff is not None and "threshold" in df.columns:
                 mask_thr = df["threshold"] > threshold_limit_eff
                 n_keep_thr = int(np.sum(mask_thr))
@@ -2401,7 +2401,7 @@ class PSF:
                         n_keep_snr,
                         min_keep_snr,
                     )
-            log.info(f"Sources after cuts: {len(df)}")
+            log.info("Sources after cuts: %s", len(df))
 
             if len(df) == 0:
                 log.error("No PSF candidates after filtering.")
@@ -2777,7 +2777,7 @@ class PSF:
             return epsf, df
 
         except Exception as exc:
-            log.error(f"[build] Fatal: {exc}\n{traceback.format_exc()}")
+            log.error("[build] Fatal: %s\n%s", exc, traceback.format_exc())
             return None, None
 
     # -----------------------------------------------------------------------
@@ -2917,7 +2917,7 @@ class PSF:
             return fig
 
         except Exception as exc:
-            log.error(f"PSF plot failed: {exc}")
+            log.error("PSF plot failed: %s", exc)
             return None
 
     # -----------------------------------------------------------------------
@@ -4008,7 +4008,7 @@ class PSF:
                                     [res.loc[keep], res_retry], ignore_index=True
                                 )
                         except Exception as exc:
-                            log.info("LSQ retry skipped (non-fatal): %s", exc)
+                            log.warning("LSQ retry skipped (non-fatal): %s", exc)
 
             # Propagate MCMC per-source errors.
             if use_emcee_this_tier and isinstance(
@@ -4405,9 +4405,9 @@ class PSF:
                 new_path = os.path.join(write_dir, f"PSF_Target_{base}_inverted.png")
                 if os.path.exists(old_path):
                     os.rename(old_path, new_path)
-                    # log.info(f"Saved inverted PSF fit plot: {new_path}")
+                    # log.info("Saved inverted PSF fit plot: %s", new_path)
             except Exception as exc:
-                log.info(f"Inverted fit plotting failed: {exc}")
+                log.warning("Inverted fit plotting failed: %s", exc)
 
         # Now process the final results (potentially with inverted replacements)
         # Extract values from combined (which may have been modified with _inverted_fit flags)
@@ -4508,7 +4508,7 @@ class PSF:
         # flux_fit_e is total flux in electrons from the PSF fit; divide by exposure_time for e/s.
         # Validate exposure_time before division
         if not np.isfinite(exposure_time) or exposure_time <= 0:
-            log.warning(f"Invalid exposure_time ({exposure_time}), setting flux and errors to NaN")
+            log.warning("Invalid exposure_time (%s), setting flux and errors to NaN", exposure_time)
             updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF"])] = np.nan
             updated.iloc[row_pos, updated.columns.get_indexer(["flux_PSF_err"])] = np.nan
         else:
@@ -4568,7 +4568,7 @@ class PSF:
             valid_idx_mask = np.isin(idx_out_inv, updated.index)
             if not np.all(valid_idx_mask):
                 invalid_count = len(idx_out_inv) - np.sum(valid_idx_mask)
-                log.warning(f"Skipping {invalid_count} inverted fit results with invalid indices")
+                log.warning("Skipping %s inverted fit results with invalid indices", invalid_count)
                 idx_out_inv = idx_out_inv[valid_idx_mask]
             flux_fit_inv = self._first_present(combined_inv, ["flux_fit", "flux"], unit=u.electron)
             flux_err_inv = self._first_present(
@@ -4665,7 +4665,7 @@ class PSF:
             mag_en[ok_e] = (2.5 / np.log(10.0)) * (fe[ok_e] / absf[ok_e])
             updated[inst_normal_err] = mag_en
 
-        log.debug(f"Fitted {len(updated)} sources in {time.perf_counter() - t0:.2f}s")
+        log.debug("Fitted %s sources in %.2fs", len(updated), time.perf_counter() - t0)
 
         if plot or plotTarget:
             try:
@@ -4678,7 +4678,7 @@ class PSF:
                     aperture_radius=aperture_radius,
                 )
             except Exception as exc:
-                log.info(f"Plotting failed: {exc}")
+                log.warning("Plotting failed: %s", exc)
 
         if plotTarget and any_emcee_used:
             try:
@@ -5124,7 +5124,7 @@ class PSF:
             plt.close(fig)
 
         except Exception as exc:
-            log.error(f"plot() failed: {exc}", exc_info=True)
+            log.error("plot() failed: %s", exc, exc_info=True)
 
     # -----------------------------------------------------------------------
     # MCMC corner plot
@@ -5157,9 +5157,9 @@ class PSF:
         if samples_dict is None or sourceidx not in samples_dict:
             store_samples = getattr(fitter, "store_samples", False)
             if store_samples:
-                log.warning(f"No MCMC samples for source {sourceidx} (store_samples=True but samples missing).")
+                log.warning("No MCMC samples for source %s (store_samples=True but samples missing).", sourceidx)
             else:
-                log.debug(f"No MCMC samples for source {sourceidx} (store_samples=False).")
+                log.debug("No MCMC samples for source %s (store_samples=False).", sourceidx)
             return None
 
         samples_all = np.asarray(samples_dict[sourceidx], float)
@@ -5168,7 +5168,7 @@ class PSF:
             or samples_all.shape[0] < 10
             or not np.isfinite(samples_all).all()
         ):
-            log.warning(f"Invalid samples for source {sourceidx}.")
+            log.warning("Invalid samples for source %s.", sourceidx)
             return None
 
         npar_all = samples_all.shape[1]
