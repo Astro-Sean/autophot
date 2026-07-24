@@ -5563,6 +5563,30 @@ class Templates:
             scienceFpath = clean_fits_nans(scienceFpath, str(scienceDir))
             templateFpath = clean_fits_nans(templateFpath, str(scienceDir))
 
+            # Adaptive convolution direction: convolve the sharper image to
+            # match the broader one (same logic as SFFT ForceConv=AUTO).
+            # HOTPANTS -c t = convolve template, -c i = convolve science image.
+            # When science is sharper (FWHM_sci <= FWHM_ref), convolve science
+            # so the diff image has the reference (broader) PSF.  This matches
+            # SFFT ForceConv=SCI behaviour and avoids deconvolution.
+            _hp_forceconv = "t"  # default: convolve template
+            _hp_forceconv_kw = "REF"
+            if science_fwhm is not None and template_fwhm is not None:
+                if float(science_fwhm) <= float(template_fwhm):
+                    _hp_forceconv = "i"
+                    _hp_forceconv_kw = "SCI"
+                    logger.info(
+                        "HOTPANTS adaptive convolution: science FWHM=%.2f <= ref FWHM=%.2f, "
+                        "convolving science image (diff will have reference PSF).",
+                        float(science_fwhm), float(template_fwhm),
+                    )
+                else:
+                    logger.info(
+                        "HOTPANTS adaptive convolution: science FWHM=%.2f > ref FWHM=%.2f, "
+                        "convolving template (diff will have science PSF).",
+                        float(science_fwhm), float(template_fwhm),
+                    )
+
             # Kernel sizing: prefer scale (pipeline source-cutout half-size),
             # fall back to FWHM-based sizing if scale not provided.
             # scale is already half the cutout box size, so it directly gives the kernel half-width.
@@ -5635,7 +5659,7 @@ class Templates:
                 "-n",
                 "i",
                 "-c",
-                "t",
+                _hp_forceconv,
                 "-v",
                 "2",
                 "-r",
@@ -5665,6 +5689,25 @@ class Templates:
                 )
 
             logger.info("HOTPANTS subtraction succeeded")
+
+            # Write FORCECON / CONVD / FWHM keywords to the diff header so the
+            # main.py ePSF consistency block can detect the convolution direction
+            # and convolve the science ePSF to match the diff-image PSF.
+            try:
+                with fits.open(differenceFpath, mode="update") as _hdul:
+                    _hdr = _hdul[0].header
+                    _hdr["FORCECON"] = _hp_forceconv_kw
+                    _hdr["CONVD"] = _hp_forceconv_kw
+                    _hdr["FWHM_SCI"] = float(science_fwhm)
+                    _hdr["FWHM_REF"] = float(template_fwhm)
+                    logger.info(
+                        "HOTPANTS diff header: FORCECON=%s, CONVD=%s, FWHM_SCI=%.2f, FWHM_REF=%.2f",
+                        _hp_forceconv_kw, _hp_forceconv_kw,
+                        float(science_fwhm), float(template_fwhm),
+                    )
+            except Exception as _he:
+                logger.warning("Failed to write FORCECON keywords to HOTPANTS diff header: %s", _he)
+
             return True
 
         except Exception as exc:
