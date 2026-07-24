@@ -5451,9 +5451,9 @@ def run_photometry():
                 _epsf_original = epsf_model
                 if _ref_fwhm_hdr > 0 and _sci_fwhm_hdr > 0:
                     logging.info(
-                        "SFFT ForceConv=SCI: difference image has reference PSF "
+                        "ForceConv=SCI: difference image has reference PSF "
                         "(FWHM=%.2f px) instead of science PSF (FWHM=%.2f px). "
-                        "Adjusting FWHM for target photometry and convolving ePSF with SFFT kernel.",
+                        "Adjusting FWHM for target photometry and convolving ePSF to match.",
                         _ref_fwhm_hdr, _sci_fwhm_hdr,
                     )
                     input_yaml["fwhm"] = _ref_fwhm_hdr
@@ -5641,11 +5641,92 @@ def run_photometry():
                                 _e,
                             )
                     elif epsf_model is not None:
-                        logging.info(
-                            "No SFFT solution file available (SOLPATH=%s); "
-                            "using unconvolved science ePSF for diff photometry.",
-                            _solpath or "missing",
-                        )
+                        # No SFFT solution file (e.g. HOTPANTS fallback).
+                        # Convolve ePSF with a Gaussian kernel sized to match
+                        # the FWHM difference so the PSF model approximates the
+                        # broader reference PSF in the diff image.
+                        try:
+                            from astropy.convolution import Gaussian2DKernel
+                            from scipy.signal import fftconvolve
+                            from scipy.ndimage import zoom
+
+                            _fwhm_diff = np.sqrt(
+                                max(_ref_fwhm_hdr, 0) ** 2
+                                - max(_sci_fwhm_hdr, 0) ** 2
+                            )
+                            if _fwhm_diff > 0.1:
+                                _epsf_data = np.asarray(epsf_model.data, dtype=float)
+                                _epsf_oversamp = getattr(epsf_model, "oversampling", 1)
+                                if _epsf_oversamp is None:
+                                    _epsf_oversamp = 1
+                                try:
+                                    _epsf_oversamp = int(np.atleast_1d(_epsf_oversamp)[0])
+                                except (TypeError, ValueError, IndexError):
+                                    _epsf_oversamp = 1
+                                if _epsf_oversamp < 1:
+                                    _epsf_oversamp = 1
+
+                                _epsf_native = zoom(
+                                    _epsf_data, 1.0 / _epsf_oversamp, order=1, mode="reflect"
+                                )
+                                _gauss_sigma = _fwhm_diff / 2.3548
+                                _gauss_kernel = Gaussian2DKernel(
+                                    _gauss_sigma, x_size=int(2 * int(np.ceil(_gauss_sigma * 3)) + 1),
+                                    y_size=int(2 * int(np.ceil(_gauss_sigma * 3)) + 1),
+                                )
+                                _epsf_conv_native = fftconvolve(
+                                    _epsf_native, _gauss_kernel.array, mode="same"
+                                )
+                                _total = np.nansum(_epsf_conv_native)
+                                if _total > 0:
+                                    _epsf_conv_native /= _total
+                                _epsf_conv = zoom(
+                                    _epsf_conv_native, _epsf_oversamp, order=1, mode="reflect"
+                                )
+                                if _epsf_conv.shape != _epsf_data.shape:
+                                    _ts = _epsf_data.shape
+                                    _cy_off = _epsf_conv.shape[0] // 2
+                                    _cx_off = _epsf_conv.shape[1] // 2
+                                    _ty_off = _ts[0] // 2
+                                    _tx_off = _ts[1] // 2
+                                    _y0 = _cy_off - _ty_off
+                                    _x0 = _cx_off - _tx_off
+                                    _y1 = _y0 + _ts[0]
+                                    _x1 = _x0 + _ts[1]
+                                    _y0 = max(0, _y0)
+                                    _x0 = max(0, _x0)
+                                    _y1 = _y0 + _ts[0]
+                                    _x1 = _x0 + _ts[1]
+                                    _epsf_conv = _epsf_conv[_y0:_y1, _x0:_x1]
+                                    if _epsf_conv.shape != _ts:
+                                        _epsf_conv = _epsf_conv[:_ts[0], :_ts[1]]
+
+                                _epsf_conv_model = ImagePSF(
+                                    data=_epsf_conv,
+                                    flux=epsf_model.flux.value,
+                                    x_0=epsf_model.x_0.value,
+                                    y_0=epsf_model.y_0.value,
+                                    origin=epsf_model.origin,
+                                    oversampling=_epsf_oversamp,
+                                )
+                                epsf_model = _epsf_conv_model
+                                logging.info(
+                                    "ePSF convolved with Gaussian kernel (sigma=%.2f px, "
+                                    "FWHM_diff=%.2f px) to approximate reference PSF "
+                                    "(no SFFT kernel available, e.g. HOTPANTS).",
+                                    _gauss_sigma, _fwhm_diff,
+                                )
+                            else:
+                                logging.info(
+                                    "FWHM difference too small (%.2f px); using unconvolved ePSF.",
+                                    _fwhm_diff,
+                                )
+                        except Exception as _e:
+                            logging.warning(
+                                "Gaussian ePSF convolution failed: %s. "
+                                "Using unconvolved science ePSF for diff photometry.",
+                                _e,
+                            )
             elif _forceconv_diff == "REF":
                 logging.debug(
                     "SFFT ForceConv=REF: difference image has science PSF (consistent with PSF model)."
