@@ -3459,7 +3459,20 @@ NNW
                 # With 2 matches, only check offset (RMS/P95 are meaningless
                 # for N < _min_n_for_percentile anyway).
                 _gate_min_matches = 2 if _n_match < 8 else 3
-                _reject = _n_match >= _gate_min_matches and _off > max_acceptable_offset
+                # Worst-case displacement: a small median offset can hide one
+                # badly placed source caused by SCAMP distortion divergence at
+                # the field edges. Keep the threshold tight but FWHM-scaled.
+                _max_off = alignment_metadata.get("max_offset", float("inf"))
+                # Worst-case offset: keep it sub-PSF but allow a small amount of
+                # field-edge flex for large, undersampled PSFs.
+                _max_off_threshold = max(2.0, min(5.0, 0.4 * _gate_fwhm))
+                _reject = (
+                    _n_match >= _gate_min_matches
+                    and _off > max_acceptable_offset
+                ) or (
+                    _n_match >= _gate_min_matches
+                    and _max_off > _max_off_threshold
+                )
                 if _n_match >= _min_n_for_percentile:
                     _reject = _reject or _rms > max_acceptable_rms or _p95 > max_acceptable_p95
 
@@ -3467,6 +3480,8 @@ NNW
                     _reasons = []
                     if _off > max_acceptable_offset:
                         _reasons.append("offset=%.2f px (> %.2f px)" % (_off, max_acceptable_offset))
+                    if _max_off > _max_off_threshold:
+                        _reasons.append("max_offset=%.2f px (> %.2f px)" % (_max_off, _max_off_threshold))
                     if _n_match >= _min_n_for_percentile:
                         if _rms > max_acceptable_rms:
                             _reasons.append("RMS=%.2f px (> %.2f px)" % (_rms, max_acceptable_rms))
@@ -3490,10 +3505,16 @@ NNW
                         _scamp_nstars_check = _scamp_distort_info.get("n_matched_stars")
                         if _scamp_rms_arcsec is not None and sci_pix_scale > 0:
                             _scamp_rms_pix_check = _scamp_rms_arcsec / sci_pix_scale
-                    _scamp_rms_threshold = max(1.0, min(5.0, 0.5 * _gate_fwhm))
+                    _scamp_rms_threshold = max(1.0, min(3.0, 0.3 * _gate_fwhm))
                     _scamp_min_stars = 8 if _n_match < 20 else 15
+                    # A trustworthy SCAMP solution must also have no single
+                    # matched source displaced by more than the P95 tolerance;
+                    # otherwise the distortion model is diverging away from the
+                    # matched stars and the median offset is hiding real misalignment.
+                    _max_off = alignment_metadata.get("max_offset", float("inf"))
                     _scamp_trustworthy_override = (
                         _off <= max_acceptable_offset
+                        and _max_off <= _max_off_threshold
                         and _scamp_rms_pix_check is not None
                         and _scamp_rms_pix_check < _scamp_rms_threshold
                         and _scamp_nstars_check is not None
@@ -3544,6 +3565,7 @@ NNW
                             "reject_rms": _rms,
                             "reject_p95": _p95,
                             "reject_offset": _off,
+                            "reject_max": alignment_metadata.get("max_offset", float("inf")),
                             "reject_n_matched": _n_match,
                         }
                         # Try reproject directly (not through combined method) so
@@ -3568,6 +3590,7 @@ NNW
                                     "reject_rms": _reproj_result.get("reject_rms", float('inf')),
                                     "reject_p95": _reproj_result.get("reject_p95", float('inf')),
                                     "reject_offset": _reproj_result.get("reject_offset", float('inf')),
+                                    "reject_max": _reproj_result.get("reject_max", float("inf")),
                                     "reject_n_matched": _reproj_result.get("reject_n_matched", 0),
                                 }
                         self.logger.info("Reproject failed. Falling back to AstroAlign.")
@@ -3591,6 +3614,7 @@ NNW
                                     "reject_rms": _aa_result.get("reject_rms", float('inf')),
                                     "reject_p95": _aa_result.get("reject_p95", float('inf')),
                                     "reject_offset": _aa_result.get("reject_offset", float('inf')),
+                                    "reject_max": _aa_result.get("reject_max", float("inf")),
                                     "reject_n_matched": _aa_result.get("reject_n_matched", 0),
                                 }
                         # BUG 113: All methods rejected — pick the best by RMS.
@@ -3634,7 +3658,18 @@ NNW
                                 except OSError:
                                     pass
                             return None
-                        _best = min(_valid_candidates, key=lambda c: c.get("reject_rms", float('inf')))
+                        # Prefer the candidate with the smallest worst-case offset
+                        # (reject_max); if tied, use RMS and then P95. A single star
+                        # displaced by many pixels is the dominant cause of dipoles,
+                        # so it should outweigh a slightly lower RMS.
+                        _best = min(
+                            _valid_candidates,
+                            key=lambda c: (
+                                c.get("reject_max", float('inf')),
+                                c.get("reject_rms", float('inf')),
+                                c.get("reject_p95", float('inf')),
+                            ),
+                        )
                         # Clean up backup files
                         for _tmp in [_ref_backup, _sci_backup]:
                             try:
@@ -4346,6 +4381,7 @@ NNW
                         _rms = float(np.sqrt(_rms_dx**2 + _rms_dy**2))
                         _n_match_reproj = int(_good.sum())
                         _indiv = np.sqrt(_dx**2 + _dy**2)
+                        _max_reproj = float(np.max(_indiv))
                         _p95_reproj = float(np.percentile(_indiv, 95))
                         self.logger.info(
                             "Post-reproject alignment: offset=(%.3f, %.3f) px, "
@@ -4398,6 +4434,7 @@ NNW
                                 "reject_rms": _rms,
                                 "reject_p95": _p95_reproj,
                                 "reject_offset": _total,
+                                "reject_max": _max_reproj,
                                 "reject_n_matched": _n_match_reproj,
                             }
                         else:
@@ -5748,6 +5785,7 @@ NNW
                 _aa_max_p95 *= _aa_scale
                 # Sparse-field: accept 2 matches for AstroAlign
                 _aa_min_matches = 2 if _n_aa < 8 else 3
+                _max_resid = float(np.max(resid)) if resid.size else float('inf')
                 _aa_reject = _n_aa >= _aa_min_matches and np.isfinite(_med_resid) and _med_resid > _aa_max_off
                 if _n_aa >= _aa_min_n:
                     _aa_reject = _aa_reject or (
@@ -5777,6 +5815,7 @@ NNW
                         "reject_rms": rms_pix if np.isfinite(rms_pix) else float('inf'),
                         "reject_p95": _p95_resid if np.isfinite(_p95_resid) else float('inf'),
                         "reject_offset": _med_resid if np.isfinite(_med_resid) else float('inf'),
+                        "reject_max": _max_resid if np.isfinite(_max_resid) else float('inf'),
                         "reject_n_matched": _n_aa,
                     }
                 else:
