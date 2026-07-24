@@ -174,7 +174,7 @@ def update_wcs_center(
             )
             return header
     except Exception as e:
-        logger.exception(f"Failed to update WCS header: {e}")
+        logger.exception("Failed to update WCS header: %s", e)
         return None
 
 
@@ -240,7 +240,7 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
         required = ['CRPIX1', 'CRPIX2', 'CRVAL1', 'CRVAL2']
         missing = [k for k in required if k not in header]
         if missing:
-            logger.warning(f"get_wcs: missing keywords {missing}")
+            logger.warning("get_wcs: missing keywords %s", missing)
             return None
 
         # Suppress FITSFixedWarning for the entire WCS build + test:
@@ -274,13 +274,13 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
                         logger.warning("get_wcs: WCS transformation test failed - returned None")
                         return None
                 except Exception as e:
-                    logger.warning(f"get_wcs: WCS transformation test failed with exception: {e}")
+                    logger.warning("get_wcs: WCS transformation test failed with exception: %s", e)
                     return None
 
         return wcs
 
     except Exception as e:
-        logger.warning(f"get_wcs: WCS creation failed with exception: {e}")
+        logger.warning("get_wcs: WCS creation failed with exception: %s", e)
         return None
 
 
@@ -1263,7 +1263,7 @@ class WCSSolver:
                         new_key = f"_{key[1:]}" if len(key) > 1 else f"_{key}"
                         self.header.rename_keyword(key, new_key)
             except Exception as e:
-                logger.exception(f"Error handling key '{key}': {e}")
+                logger.exception("Error handling key '%s': %s", key, e)
         return self.header
 
     # --- Clean Log ---
@@ -1941,7 +1941,7 @@ class WCSSolver:
                 best_trial_header, prefix="SCAMP solved WCS"
             )
             return best_trial_header
-        logger.info("SCAMP unavailable/failed after solve-field; keeping solve-field WCS.")
+        logger.warning("SCAMP unavailable/failed after solve-field; keeping solve-field WCS.")
         return np.nan
 
     # --- Plate Solve ---

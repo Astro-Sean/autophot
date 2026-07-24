@@ -732,7 +732,7 @@ class Aperture:
                     return std_value, name
             except Exception as exc:
                 if verbose:
-                    logger.debug(f"{name} failed: {exc}")
+                    logger.debug("%s failed: %s", name, exc)
 
         return np.nan, "None"
 
@@ -765,7 +765,7 @@ class Aperture:
                     if 0.5 < ratio < 5.0:
                         return bkg_lvl, emp_std, "Biweight"
                     if verbose:
-                        logger.debug(f"Biweight ratio outside range: {ratio:.2f}")
+                        logger.debug("Biweight ratio outside range: %.2f", ratio)
         except Exception:
             pass
 
@@ -1062,7 +1062,7 @@ class Aperture:
                         error=error,
                     )
                 except Exception as exc:
-                    logger.exception(f"Plot failed for source {i}: {exc}")
+                    logger.exception("Plot failed for source %s: %s", i, exc)
 
         return sources
 
@@ -2026,7 +2026,7 @@ class Aperture:
         base_name = self.input_yaml["base"]
 
         if len(sources) < 5:
-            logger.warning(f"Too few sources [{len(sources)}] for aperture correction.")
+            logger.warning("Too few sources [%s] for aperture correction.", len(sources))
             return np.nan, np.nan
 
         if fwhm is None or ap_size is None:
@@ -2078,7 +2078,7 @@ class Aperture:
         corrections = corrections[~clipped.mask]
         correction = float(np.nanmedian(corrections))
         correction_err = float(np.nanstd(corrections))
-        logger.info(f"Aperture correction: {correction:.3f} +/- {correction_err:.3f}")
+        logger.info("Aperture correction: %.3f +/- %.3f", correction, correction_err)
 
         if plot:
             plt.ioff()

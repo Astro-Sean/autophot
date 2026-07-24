@@ -122,8 +122,8 @@ def cross_match_sources(given_catalog, variable_catalog, match_radius_pix=5):
         )
 
     filtered_catalog = given_catalog[keep_mask].reset_index(drop=True)
-    logger.info(f"Number of sources removed due to matching: {len(removed_indices)}")
-    logger.info(f"Number of sources remaining after filtering: {len(filtered_catalog)}")
+    logger.info("Number of sources removed due to matching: %s", len(removed_indices))
+    logger.info("Number of sources remaining after filtering: %s", len(filtered_catalog))
 
     return filtered_catalog
 
@@ -622,7 +622,7 @@ class Catalog:
             return table
 
         except Exception as e:
-            logger.info(f"Error during query: {e}")
+            logger.warning("Error during query: %s", e)
             return None
 
     # =============================================================================
@@ -693,7 +693,7 @@ class Catalog:
                     sr=sr,
                 )
 
-                logger.debug(f"SQL Query: {q}")
+                logger.debug("SQL Query: %s", q)
 
                 # Create a job to execute the SQL query
                 job = MastCasJobs(context="HLSP_ATLAS_REFCAT2", **credentials)
@@ -722,7 +722,7 @@ class Catalog:
                 try:
                     job.drop_table_if_exists(name)
                 except Exception as drop_err:
-                    logger.debug(f"Post-query drop_table failed (non-fatal): {drop_err}")
+                    logger.debug("Post-query drop_table failed (non-fatal): %s", drop_err)
 
                 # Convert the result table to a pandas DataFrame
                 tab = tab.to_pandas()
@@ -740,7 +740,7 @@ class Catalog:
                 )
                 if attempt < max_retries:
                     delay = retry_delay * (2 ** (attempt - 1))
-                    logger.info(f"Retrying in {delay:.0f}s...")
+                    logger.info("Retrying in %.0fs...", delay)
                     time.sleep(delay)
 
         logger.error("\n> Catalog retrieval failed after %d attempts! \n", max_retries)
@@ -845,7 +845,7 @@ class Catalog:
                 selectedCatalog = pd.read_csv(catalog_custom_fpath)
 
             elif os.path.isfile(os.path.join(target_dir, f"{fname}.csv")):
-                logger.info(f"Existing {catalogName.upper()} catalog found for {target_name}")
+                logger.info("Existing %s catalog found for %s", catalogName.upper(), target_name)
                 selectedCatalog = (
                     Table.read(os.path.join(target_dir, f"{fname}.csv"), format="csv")
                     .to_pandas()
@@ -1145,10 +1145,10 @@ class Catalog:
                                     except Exception:
                                         pass
                             
-                        logger.info(f"Retrieved {len(selectedCatalog)} Pan-STARRS sources")
+                        logger.info("Retrieved %s Pan-STARRS sources", len(selectedCatalog))
                         
                     except Exception as api_exc:
-                        logger.warning(f"Direct Pan-STARRS API failed ({api_exc}), using empty catalog")
+                        logger.warning("Direct Pan-STARRS API failed (%s), using empty catalog", api_exc)
                         selectedCatalog = pd.DataFrame()
                     
                     # Replace all common null representations
@@ -1206,7 +1206,7 @@ class Catalog:
         except Exception as e:
             exc_type, exc_obj, exc_tb = sys.exc_info()
             fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-            logger.info("%s %s %d %s", exc_type, fname, exc_tb.tb_lineno, e)
+            logger.warning("%s %s %d %s", exc_type, fname, exc_tb.tb_lineno, e)
             # Propagate catalog failures as hard stops: downstream calibration
             # should not proceed without a valid catalog.
             raise
@@ -1214,7 +1214,8 @@ class Catalog:
         # Limit catalog size if max_sources is specified
         if max_sources is not None and selectedCatalog is not None and len(selectedCatalog) > max_sources:
             logger.info(
-                f"Limiting catalog from {len(selectedCatalog)} to {max_sources} sources"
+                "Limiting catalog from %s to %s sources",
+                len(selectedCatalog), max_sources,
             )
             # Sort by distance to target if RA and DEC columns are available
             if "RA" in selectedCatalog.columns and "DEC" in selectedCatalog.columns:
@@ -1232,7 +1233,7 @@ class Catalog:
             else:
                 # If RA/DEC not available, just take the first max_sources rows
                 selectedCatalog = selectedCatalog.head(max_sources)
-            logger.info(f"Catalog limited to {len(selectedCatalog)} sources")
+            logger.info("Catalog limited to %s sources", len(selectedCatalog))
 
         return selectedCatalog
 
@@ -1296,7 +1297,7 @@ class Catalog:
         logger = logging.getLogger(__name__)
 
         if full_clean:
-            logger.info(f"Cleaning {len(selectedCatalog)} sources")
+            logger.info("Cleaning %s sources", len(selectedCatalog))
 
         try:
             # Early exit if catalog is None or empty (e.g. Gaia service failure)
@@ -1446,7 +1447,7 @@ class Catalog:
 
             # Populate photometric band columns for the current filter.
             image_filter = self.input_yaml["imageFilter"]
-            logger.debug(f"Populating filter columns for {image_filter}; input catalog columns: {list(selectedCatalog.columns)}")
+            logger.debug("Populating filter columns for %s; input catalog columns: %s", image_filter, list(selectedCatalog.columns))
 
             # For custom catalogs, auto-detect all filter columns (pattern: <filter> and <filter>_err)
             # This handles arbitrary filter names without requiring catalog.yml entries
@@ -1460,30 +1461,30 @@ class Catalog:
                     err_col = f"{col}_err"
                     if err_col in selectedCatalog.columns:
                         filter_cols.append(col)
-                        logger.debug(f"Auto-detected filter column pair: {col} / {err_col}")
+                        logger.debug("Auto-detected filter column pair: %s / %s", col, err_col)
 
                 # Copy all detected filter columns to output
                 for col in filter_cols:
                     err_col = f"{col}_err"
                     outputCatalog[col] = selectedCatalog[col].values
                     outputCatalog[err_col] = selectedCatalog[err_col].values
-                    logger.debug(f"Auto-copied custom filter {col} from catalog")
+                    logger.debug("Auto-copied custom filter %s from catalog", col)
 
             # Always ensure the current image filter is populated (primary logic)
             for col in [image_filter, f"{image_filter}_err"]:
                 if col in outputCatalog.columns:
-                    logger.debug(f"Column {col} already present in output catalog")
+                    logger.debug("Column %s already present in output catalog", col)
                     continue
                 # First try catalog.yml mapping
                 if col in catalog_keywords and catalog_keywords[col] in selectedCatalog:
                     outputCatalog[col] = selectedCatalog[catalog_keywords[col]].values
-                    logger.debug(f"Mapped {col} from catalog_keywords")
+                    logger.debug("Mapped %s from catalog_keywords", col)
                 # Fallback: copy directly if column exists with exact name match
                 elif col in selectedCatalog.columns:
                     outputCatalog[col] = selectedCatalog[col].values
-                    logger.debug(f"Copied {col} directly from catalog")
+                    logger.debug("Copied %s directly from catalog", col)
                 else:
-                    logger.warning(f"Could not find column {col} in catalog; available columns: {list(selectedCatalog.columns)}")
+                    logger.warning("Could not find column %s in catalog; available columns: %s", col, list(selectedCatalog.columns))
 
             # --- Retrieve all available filters ---
             baseDatabase = os.path.join(
@@ -1560,16 +1561,16 @@ class Catalog:
                 outputCatalog = _skycoord_dedup_keep_one(outputCatalog, sep_threshold_arcsec=0.1)
                 n_dups = n_before - len(outputCatalog)
                 if n_dups > 0:
-                    logger.info(f"Removed {n_dups} duplicates during catalog cleaning")
+                    logger.info("Removed %s duplicates during catalog cleaning", n_dups)
 
-            logger.info(f"{len(outputCatalog)} sources in output catalog")
-            logger.debug(f"Output catalog columns: {list(outputCatalog.columns)}")
+            logger.info("%s sources in output catalog", len(outputCatalog))
+            logger.debug("Output catalog columns: %s", list(outputCatalog.columns))
             return outputCatalog
 
         except Exception as e:
             import traceback
 
-            logger.error(f"Error in catalog cleaning: {e}")
+            logger.error("Error in catalog cleaning: %s", e)
             logger.error(traceback.format_exc())
             return None
 
@@ -1631,7 +1632,7 @@ class Catalog:
             width_fwhm = float(_width if _width is not None else 2.0)
             annulus_outer = ap_radius + (gap_fwhm + width_fwhm) * fwhm
             border = max(boxsize, int(np.ceil(annulus_outer)))
-            logger.info(f"Boxsize: {boxsize} px, Border: {border} px (annulus outer={annulus_outer:.1f}, undersampled={undersampled})")
+            logger.info("Boxsize: %s px, Border: %s px (annulus outer=%.1f, undersampled=%s)", boxsize, border, annulus_outer, undersampled)
 
             # Filter sources near image borders
             height, width = image.shape
@@ -1644,7 +1645,7 @@ class Catalog:
             mask = mask_x & mask_y
 
             if num_sources > 1:
-                logger.info(f"Recentering {sum(mask)} sources within border")
+                logger.info("Recentering %s sources within border", sum(mask))
                 selectedCatalog = selectedCatalog.loc[mask].copy()
 
             # Extract initial coordinates
@@ -1660,7 +1661,7 @@ class Catalog:
                 logger.warning("No sources have valid cutouts - skipping recentering")
                 return selectedCatalog.loc[valid_sources]
 
-            logger.info(f"{valid_sources.sum()} sources have valid cutouts")
+            logger.info("%s sources have valid cutouts", valid_sources.sum())
 
             old_x_valid = old_x[valid_sources]
             old_y_valid = old_y[valid_sources]
@@ -1723,7 +1724,7 @@ class Catalog:
             mask = mask_x & mask_y
 
             if sum(~mask) > 0:
-                logger.info(f"Failed to recenter {sum(~mask)} sources - ignoring")
+                logger.warning("Failed to recenter %s sources - ignoring", sum(~mask))
                 selectedCatalog = selectedCatalog.loc[mask].copy()
 
             # Compute median offset
@@ -1737,7 +1738,7 @@ class Catalog:
                 average_offset = np.nanmedian(
                     pix_dist(x[valid], old_x[valid], y[valid], old_y[valid])
                 )
-                logger.info(f"Median pixel correction: {average_offset:.1f} px")
+                logger.info("Median pixel correction: %.1f px", average_offset)
             else:
                 logger.warning("No valid sources to compute median offset.")
 
@@ -1957,7 +1958,7 @@ class Catalog:
         
         # Check if output catalog already exists and load it (with deduplication)
         if os.path.isfile(fpath):
-            logger.info(f"Loading existing custom catalog from {fpath}")
+            logger.info("Loading existing custom catalog from %s", fpath)
             existing_catalog = pd.read_csv(fpath)
             if not existing_catalog.empty and {"RA", "DEC"}.issubset(existing_catalog.columns):
                 # Deduplicate: keep one member of every close pair
@@ -1979,7 +1980,7 @@ class Catalog:
         output_catalog = pd.DataFrame(columns=cols)
 
         for catalogName in catalog_list:
-            logger.info(f"Getting {catalogName} catalog")
+            logger.info("Getting %s catalog", catalogName)
             catalog_i = self.download(
                 target_coords=target_coords,
                 catalogName=catalogName,
@@ -2071,7 +2072,7 @@ class Catalog:
         
         # Final output catalog is ready
         output_catalog.to_csv(fpath, index=False, float_format="%.6f")
-        logger.debug(f"Saved clean catalog to {fpath}")
+        logger.debug("Saved clean catalog to %s", fpath)
         return output_catalog
 
     # =============================================================================
@@ -2248,10 +2249,10 @@ class Catalog:
                     if residual_mask.shape[0] == np.sum(inlier_mask):
                         inlier_mask[inlier_mask] = residual_mask
                     else:
-                        logger.warning(f"Shape mismatch in residual masking: {residual_mask.shape[0]} vs {np.sum(inlier_mask)}, skipping sigma clip update")
+                        logger.warning("Shape mismatch in residual masking: %s vs %s, skipping sigma clip update", residual_mask.shape[0], np.sum(inlier_mask))
                     n_sigma_outliers = np.sum(~residual_mask)
                     if n_sigma_outliers > 0:
-                        logger.info(f"Post-RANSAC sigma clipping (sigma={clip_sigma}) removed {n_sigma_outliers} additional outliers")
+                        logger.info("Post-RANSAC sigma clipping (sigma=%s) removed %s additional outliers", clip_sigma, n_sigma_outliers)
 
                 # Recompute intercept on the final inlier set
                 if np.sum(inlier_mask) > 1 and np.isfinite(slope):
@@ -2585,9 +2586,9 @@ class Catalog:
                                 central_end = min(len(inlier_sorted_flux), 2 * len(inlier_sorted_flux) // 3)
                                 central_flux_mask = (inlier_flux >= inlier_sorted_flux[central_end]) & (inlier_flux <= inlier_sorted_flux[central_start])
                                 if np.sum(central_flux_mask) > 0:
-                                    logger.warning(f"No sources passed tight criteria, using central {np.sum(central_flux_mask)} sources")
+                                    logger.warning("No sources passed tight criteria, using central %s sources", np.sum(central_flux_mask))
                                 else:
-                                    logger.warning(f"No sources passed tight criteria, using all {len(inlier_catalog)} inliers")
+                                    logger.warning("No sources passed tight criteria, using all %s inliers", len(inlier_catalog))
                         else:
                             # Invalid range, use central region
                             # Use inlier_catalog to avoid array length mismatch
@@ -2603,15 +2604,15 @@ class Catalog:
                         tight_residual_mask = np.abs(residuals) < residual_threshold
                         n_tight_outliers = (~tight_residual_mask).sum()
                         if n_tight_outliers > 0:
-                            logger.info(f"Tight residual filter would remove {n_tight_outliers} sources (keeping all inliers)")
+                            logger.info("Tight residual filter would remove %s sources (keeping all inliers)", n_tight_outliers)
                 else:
                     # Too few sources for robust selection
-                    logger.warning(f"Only {len(inlier_catalog)} inliers, skipping robust selection")
+                    logger.warning("Only %s inliers, skipping robust selection", len(inlier_catalog))
 
                 # Now reassign clean_catalog to inlier_catalog after all mask computations
                 clean_catalog = inlier_catalog
 
-            logger.info(f"Returning {len(clean_catalog)} sources for zeropoint fitting")
+            logger.info("Returning %s sources for zeropoint fitting", len(clean_catalog))
             return clean_catalog, fit_params, saturation_range
 
         except Exception as e:
@@ -2686,8 +2687,8 @@ class Catalog:
         # Create spatial bins
         x_bins = np.linspace(df[x_col].min(), df[x_col].max(), n_bins + 1)
         y_bins = np.linspace(df[y_col].min(), df[y_col].max(), n_bins + 1)
-        logger.debug(f"X bins range: {x_bins[0]:.2f} to {x_bins[-1]:.2f}")
-        logger.debug(f"Y bins range: {y_bins[0]:.2f} to {y_bins[-1]:.2f}")
+        logger.debug("X bins range: %.2f to %.2f", x_bins[0], x_bins[-1])
+        logger.debug("Y bins range: %.2f to %.2f", y_bins[0], y_bins[-1])
 
         selected_indices = []
         bin_stats = []  # Track bin statistics for logging
@@ -2712,7 +2713,7 @@ class Catalog:
                             f"Bin ({i},{j}): {len(bin_indices)} sources, sorted by {snr_col}"
                         )
                     else:
-                        logger.debug(f"Bin ({i},{j}): {len(bin_indices)} sources")
+                        logger.debug("Bin (%s,%s): %s sources", i, j, len(bin_indices))
 
                     # Take top sources from this bin
                     selected_indices.extend(bin_indices[:sources_per_bin])
@@ -2722,7 +2723,7 @@ class Catalog:
             f"Bin statistics: min={min(bin_stats)}, max={max(bin_stats)}, "
             f"avg={np.mean(bin_stats):.1f} sources per bin"
         )
-        logger.info(f"Selected {len(selected_indices)} sources from spatial bins")
+        logger.info("Selected %s sources from spatial bins", len(selected_indices))
 
         # If we didn't get enough sources, fill with highest SNR remaining sources
         if len(selected_indices) < nmax:
@@ -2752,9 +2753,9 @@ class Catalog:
         # Final validation
         final_count = len(selected_indices)
         if final_count > nmax:
-            logger.warning(f"Selected {final_count} sources (exceeds target {nmax})")
+            logger.warning("Selected %s sources (exceeds target %s)", final_count, nmax)
         else:
-            logger.info(f"Final selection: {final_count} sources")
+            logger.info("Final selection: %s sources", final_count)
 
         # Return the downsampled dataframe
         logger.info("Downsampling complete")
@@ -2913,7 +2914,7 @@ class Catalog:
                     radial_profiles.append(norm(radial_profile(normalized_cutout)))
                     valid_indices.append(i)
                 else:
-                    logger.info(f"Star {i} rejected: zero or negative flux.")
+                    logger.info("Star %s rejected: zero or negative flux.", i)
 
             except Exception as e:
                 logger.warning(
@@ -3084,7 +3085,7 @@ class Catalog:
             fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close()
 
-        logger.info(f"Returning {len(cleaned_catalog)} well-behaved sources")
+        logger.info("Returning %s well-behaved sources", len(cleaned_catalog))
         return cleaned_catalog
 
     # =============================================================================
