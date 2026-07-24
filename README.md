@@ -44,6 +44,13 @@ conda activate autophot
 conda install -c astro-sean autophot
 ```
 
+> [!NOTE]
+> `sfft` and `sip_tpv` are not available on conda channels. After installing
+> AutoPhOT via conda, also run:
+> ```bash
+> pip install sfft==1.7.3 sip_tpv==1.1
+> ```
+
 If conda struggles to resolve the environment, prefer `mamba`:
 
 ```bash

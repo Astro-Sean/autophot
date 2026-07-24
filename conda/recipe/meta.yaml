@@ -9,15 +9,15 @@ source:
   path: ../..
 
 # IMPORTANT: This package requires conda-forge channel
-# Install with: conda install -c conda-forge -c astro-juanlu autophot
+# Install with: conda install -c conda-forge -c astro-sean autophot
 # Or add conda-forge to your channels: conda config --add channels conda-forge
 #
-# SFFT and its dependencies are now included in the recipe.
+# SFFT and sip_tpv are pip-only (not on conda-forge); installed via pip in build.sh.
 
 build:
   noarch: python
   # Increment when re-publishing the same package version to Anaconda (avoids 409 conflict).
-  number: 2
+  number: 3
 
 requirements:
   host:
@@ -50,6 +50,8 @@ requirements:
     - numba >=0.53
     - pyfftw >=0.12
     - sep >=1.0
+    # pip-only packages (not available on conda-forge)
+    - pip
   run:
     - python >=3.11
     - astroalign >=2.6.2
@@ -74,12 +76,17 @@ requirements:
     - scikit-learn >=1.9
     - scipy >=1.17
     - tqdm >=4.68
-    # SFFT dependencies
+    # SFFT dependencies (available on conda-forge)
     - fastremap >=1.20
     - llvmlite >=0.36
     - numba >=0.53
     - pyfftw >=0.12
     - sep >=1.0
+    # sfft==1.7.3 and sip_tpv==1.1 are pip-only (not on conda-forge).
+    # They are installed via pip during build (build.sh runs pip install .).
+    # Users installing from conda channel should also run:
+    #   pip install sfft==1.7.3 sip_tpv==1.1
+    - pip
 
 test:
   imports:

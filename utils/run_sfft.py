@@ -459,7 +459,7 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-min_prior_sources",
         type=int,
-        default=10,
+        default=3,
         help="Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT will perform its own source matching.",
     )
     parser.add_argument(
@@ -665,7 +665,7 @@ def run_sfft() -> Optional[int]:
         )
     
     # Improve prior source validation: require minimum sources for reliable kernel fitting
-    MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 10) or 10)
+    MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 3) or 3)
     if matching_sources is not None and len(matching_sources) < MIN_PRIOR_SOURCES:
         log_info(
             f"Warning: Only {len(matching_sources)} prior sources provided "
@@ -1108,12 +1108,12 @@ def run_sfft() -> Optional[int]:
     t0_sfft = time.time()
     try:
         matched_sources = pd.DataFrame()
+        fits_solution = (
+            os.path.join(out_dir, "sfft_solution.fits") if FITS_DIFF else None
+        )
         if args.crowded:
             # Crowded-field subtraction (ECP): no prior source list; uses SExtractor + masking.
             log_info("Running crowded-field subtraction (ECP).")
-            fits_solution = (
-                os.path.join(out_dir, "sfft_solution.fits") if FITS_DIFF else None
-            )
             # GAIN and SATURATE have been written to both FITS headers above.
             result = Easy_CrowdedPacket.ECP(
                 FITS_REF=FITS_REF,
@@ -1227,6 +1227,7 @@ def run_sfft() -> Optional[int]:
                     FITS_REF=FITS_REF,
                     FITS_SCI=FITS_SCI,
                     FITS_DIFF=FITS_DIFF,
+                    FITS_Solution=fits_solution,
                     GKerHW=int(kernel_half_width),
                     KerHWRatio=KerHWRatio,
                     # UPDATED: tighter kernel HW limits
@@ -1287,6 +1288,7 @@ def run_sfft() -> Optional[int]:
                     FITS_REF=FITS_REF,
                     FITS_SCI=FITS_SCI,
                     FITS_DIFF=FITS_DIFF,
+                    FITS_Solution=fits_solution,
                     GKerHW=int(kernel_half_width),
                     KerHWRatio=KerHWRatio,
                     KerHWLimit=KerHWLimit,
@@ -1854,18 +1856,21 @@ def run_sfft() -> Optional[int]:
         except Exception as e:
             log_info(f"Warning: failed to reapply invalid mask to diff: {e}")
 
-        # Write ForceConv to difference image header so downstream photometry
-        # knows which PSF the difference image has.
+        # Write ForceConv and solution path to difference image header so
+        # downstream photometry knows which PSF the difference image has and
+        # can retrieve the SFFT kernel to convolve the science ePSF.
         # ForceConv=REF => DIFF has science PSF; ForceConv=SCI => DIFF has ref PSF.
-        # SFFT already writes FWHM_SCI and FWHM_REF to the header.
+        # SFFT already writes FWHM_SCI, FWHM_REF, KERHW, KERORDER, BGORDER to header.
         try:
             if FITS_DIFF and os.path.isfile(FITS_DIFF):
                 with fits.open(FITS_DIFF, mode="update", memmap=False) as hdul:
                     hdr = hdul[0].header
                     hdr["FORCECON"] = (ForceConv, "SFFT convolution direction (REF or SCI)")
+                    if fits_solution and os.path.isfile(fits_solution):
+                        hdr["SOLPATH"] = (fits_solution, "Path to SFFT solution FITS (kernel)")
                     hdul.flush()
         except Exception as e:
-            log_info(f"Warning: failed to write ForceConv header: {e}")
+            log_info(f"Warning: failed to write ForceConv/solution header: {e}")
 
         t1_sfft = time.time()
         log_info(f"SFFT core elapsed: {t1_sfft - t0_sfft:.3f} s")

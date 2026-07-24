@@ -1790,6 +1790,7 @@ class AutomatedPhotometry:
 
         if do_photometry:
             _log(border_msg("AutoPhOT Photometry Run") if border_msg else log_step("AutoPhOT photometry run"))
+            _log("Report any issues at: https://github.com/Astro-Sean/autophot/issues")
 
             # List of available filters (excluding error columns)
             filt_list = [
