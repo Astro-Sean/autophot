@@ -5464,16 +5464,25 @@ def run_photometry():
                     # flux_PSF = F_sci * FSCAL * gain_sci (wrong by factor FSCAL).
                     # Using GAIN_DIFF gives flux_PSF = F_sci * FSCAL * gain_sci/FSCAL
                     # = F_sci * gain_sci (correct, magnitude conserved).
-                    _diff_gain = float(header.get("GAIN", 0))
-                    if _diff_gain > 0 and np.isfinite(_diff_gain):
-                        _sci_gain = float(input_yaml.get("gain", 0))
-                        if _sci_gain > 0 and abs(_diff_gain - _sci_gain) > 0.001:
-                            logging.info(
-                                "Updating gain for diff-image photometry: %.5g -> %.5g e-/ADU "
-                                "(SFFT FSCAL=%.4f).",
-                                _sci_gain, _diff_gain, _sci_gain / _diff_gain,
-                            )
-                        input_yaml["gain"] = _diff_gain
+                    # HOTPANTS normalizes to the science image (-n i) so no gain
+                    # correction is needed — skip this block for non-SFFT diffs.
+                    _has_fscal = "FSCAL" in header or "SOLPATH" in header
+                    if _has_fscal:
+                        _diff_gain = float(header.get("GAIN", 0))
+                        if _diff_gain > 0 and np.isfinite(_diff_gain):
+                            _sci_gain = float(input_yaml.get("gain", 0))
+                            if _sci_gain > 0 and abs(_diff_gain - _sci_gain) > 0.001:
+                                logging.info(
+                                    "Updating gain for diff-image photometry: %.5g -> %.5g e-/ADU "
+                                    "(SFFT FSCAL=%.4f).",
+                                    _sci_gain, _diff_gain, _sci_gain / _diff_gain,
+                                )
+                            input_yaml["gain"] = _diff_gain
+                    else:
+                        logging.debug(
+                            "Gain update skipped (no FSCAL/SOLPATH in header — "
+                            "not an SFFT diff, science gain is correct)."
+                        )
 
                     # --- Convolve ePSF with SFFT kernel to match diff-image PSF ---
                     _solpath = str(header.get("SOLPATH", "")).strip()
@@ -5649,6 +5658,7 @@ def run_photometry():
                             from astropy.convolution import Gaussian2DKernel
                             from scipy.signal import fftconvolve
                             from scipy.ndimage import zoom
+                            from photutils.psf import ImagePSF
 
                             _fwhm_diff = np.sqrt(
                                 max(_ref_fwhm_hdr, 0) ** 2
@@ -5729,7 +5739,7 @@ def run_photometry():
                             )
             elif _forceconv_diff == "REF":
                 logging.debug(
-                    "SFFT ForceConv=REF: difference image has science PSF (consistent with PSF model)."
+                    "ForceConv=REF: difference image has science PSF (consistent with PSF model)."
                 )
 
         # Gets the WCS information from the header.
