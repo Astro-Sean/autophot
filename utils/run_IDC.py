@@ -2723,7 +2723,7 @@ NNW
 
                 except Exception as e:
                     self.logger.error("Failed to create temporary catalog for SCAMP: %s", e)
-                    self.logger.info("Falling back to single-catalog SCAMP on reference...")
+                    self.logger.warning("Falling back to single-catalog SCAMP on reference...")
                     scamp_result = self.run_scamp(
                         ref_catalog_scamp_backup,
                         reference_cat=sci_catalog_scamp_backup,
@@ -5834,7 +5834,7 @@ NNW
                         and np.isfinite(_p95_resid)
                     )
             except Exception as e:
-                self.logger.info("Could not compute alignment metrics: %s", e)
+                self.logger.warning("Could not compute alignment metrics: %s", e)
 
             if not alignment_verified:
                 self.logger.warning(
@@ -6079,7 +6079,7 @@ NNW
                 "n_matched_stars": n_matched_stars,
             }
         except Exception as e:
-            self.logger.info("Could not parse SCAMP XML: %s", e)
+            self.logger.warning("Could not parse SCAMP XML: %s", e)
             return None
 
     def run_swarp(
