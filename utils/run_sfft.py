@@ -136,6 +136,12 @@ def run_sfft() -> Optional[int]:
         except Exception:
             print(msg)  # Fallback if logging not configured
 
+    def log_warning(msg: str) -> None:
+        try:
+            logger.warning(msg)
+        except Exception:
+            print(msg)  # Fallback if logging not configured
+
     def _to_dataframe(obj) -> pd.DataFrame:
         """Best-effort conversion of an SFFT table-like object to DataFrame."""
         if obj is None:
@@ -505,14 +511,14 @@ def run_sfft() -> Optional[int]:
                 raise ValueError("Must be a list of [x, y] pairs.")
             if not np.all(np.isfinite(coords_array)):
                 n_bad = int(np.sum(~np.isfinite(coords_array).all(axis=1)))
-                log_info(
-                    f"Warning: {n_bad} coordinate pairs contain non-finite values in '{s}'; "
+                log_warning(
+                    f"{n_bad} coordinate pairs contain non-finite values in '{s}'; "
                     "they will be removed during validation."
                 )
                 # Don't reject here; _sanitize_xy_sources will clean them
             return coords_array
         except Exception as e:
-            log_info(f"Warning: Could not parse list '{s}': {e}. Ignoring.")
+            log_warning(f"Could not parse list '{s}': {e}. Ignoring.")
             return None
 
     masked_sources = parse_xy_list(args.masked_sources)
@@ -602,7 +608,7 @@ def run_sfft() -> Optional[int]:
             FITS_REF = _temp_ref_path
             log_info(f"Synchronized NaN masks written to temporary FITS for SFFT input.")
     except Exception as e:
-        log_info(f"Warning: Failed to write synchronized-mask temp FITS: {e}. Using original files.")
+        log_warning(f"Failed to write synchronized-mask temp FITS: {e}. Using original files.")
         # If temp write fails, fall back to original paths (FITS_SCI/FITS_REF unchanged)
 
     def _sanitize_xy_sources(
@@ -667,8 +673,8 @@ def run_sfft() -> Optional[int]:
     # Improve prior source validation: require minimum sources for reliable kernel fitting
     MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 3) or 3)
     if matching_sources is not None and len(matching_sources) < MIN_PRIOR_SOURCES:
-        log_info(
-            f"Warning: Only {len(matching_sources)} prior sources provided "
+        log_warning(
+            f"Only {len(matching_sources)} prior sources provided "
             f"(minimum {MIN_PRIOR_SOURCES} required for reliable kernel fitting). "
             "Letting SFFT perform source matching instead."
         )
@@ -709,8 +715,8 @@ def run_sfft() -> Optional[int]:
                     )
                     log_info(f"{label}: set SATURATE = {sval}")
         except Exception as e:
-            log_info(
-                f"Warning: Could not write GAIN/SATURATE to {label} FITS header: {e}. "
+            log_warning(
+                f"Could not write GAIN/SATURATE to {label} FITS header: {e}. "
                 "SFFT will rely on header values already present."
             )
 
@@ -1048,11 +1054,11 @@ def run_sfft() -> Optional[int]:
     save_decorrelated = _parse_bool_str("save_decorrelated", args.save_decorrelated)
 
     if use_bspline_kernel and not _HAS_BSPLINE:
-        log_info("Warning: B-Spline kernel requested but not available (SFFT v1.5.0+ required). Using standard kernel.")
+        log_warning("B-Spline kernel requested but not available (SFFT v1.5.0+ required). Using standard kernel.")
         use_bspline_kernel = False
 
     if decorrelate_noise and not _HAS_DECORRELATION:
-        log_info("Warning: Noise decorrelation requested but not available (SFFT v1.5.0+ required). Skipping decorrelation.")
+        log_warning("Noise decorrelation requested but not available (SFFT v1.5.0+ required). Skipping decorrelation.")
         decorrelate_noise = False
 
     if use_bspline_kernel:
@@ -1087,7 +1093,7 @@ def run_sfft() -> Optional[int]:
                     "the science image (no transposition is applied)."
                 )
         except Exception as e:
-            log_info(f"Warning: Could not load mask '{args.mask}': {e}")
+            log_warning(f"Could not load mask '{args.mask}': {e}")
 
     # Images are NOT background-subtracted before reaching SFFT (background
     # subtraction is explicitly disabled in templates.py to preserve raw ADU).
@@ -1168,15 +1174,15 @@ def run_sfft() -> Optional[int]:
                         elif diff_image.shape == (sci_ny, sci_nx):
                             hdu.data = diff_image
                         else:
-                            log_info(
-                                f"Warning: diff_image shape {diff_image.shape} does not match "
+                            log_warning(
+                                f"diff_image shape {diff_image.shape} does not match "
                                 f"science shape {(sci_ny, sci_nx)}; writing as-is."
                             )
                             hdu.data = diff_image
                         # Use safe_fits_write to preserve NaNs
                         safe_fits_write(FITS_DIFF, hdu.data, hdu.header)
                 except Exception as e:
-                    log_info(f"Warning: Could not write ECP diff to {FITS_DIFF}: {e}")
+                    log_warning(f"Could not write ECP diff to {FITS_DIFF}: {e}")
             # Optional: write a minimal matching-sources CSV from ECP catalog if present
             cat_key = "SExCatalog-SubSource"
             if cat_key in prep_data:
@@ -1388,7 +1394,7 @@ def run_sfft() -> Optional[int]:
                         except Exception:
                             pass
                 except Exception as e:
-                    log_info(f"Warning: B-Spline kernel refinement failed: {e}. Using standard kernel result.")
+                    log_warning(f"B-Spline kernel refinement failed: {e}. Using standard kernel result.")
 
             cat_key = "SExCatalog-SubSource"
             if cat_key not in prep_data:
@@ -1461,7 +1467,7 @@ def run_sfft() -> Optional[int]:
                 out_base_name=out_base,
             )
         except Exception as e:
-            log_info(f"Warning: Could not export post-anomaly sources: {e}")
+            log_warning(f"Could not export post-anomaly sources: {e}")
 
         try:
             convd = fits.getheader(FITS_DIFF).get("CONVD", "UNKNOWN")
@@ -1616,7 +1622,7 @@ def run_sfft() -> Optional[int]:
                 return diff_decorr.astype(diff.dtype)
 
             except Exception as _e:
-                log_info(f"Warning: decorrelation kernel failed ({_e}); skipping.")
+                log_warning(f"Decorrelation kernel failed ({_e}); skipping.")
                 return diff
 
         def _scale_diffim_variance(
@@ -1668,7 +1674,7 @@ def run_sfft() -> Optional[int]:
                 return diff, 1.0
 
             except Exception as _e:
-                log_info(f"Warning: variance scaling failed ({_e}); skipping.")
+                log_warning(f"Variance scaling failed ({_e}); skipping.")
                 return diff, 1.0
 
         # Apply decorrelation + variance scaling to the SFFT output.
@@ -1743,7 +1749,7 @@ def run_sfft() -> Optional[int]:
                                     f"σ_sci={np.sqrt(_sci_var):.2f}, σ_ref={np.sqrt(_ref_var):.2f}"
                                 )
                 except Exception as _e:
-                    log_info(f"Warning: could not apply decorrelation kernel: {_e}")
+                    log_warning(f"Could not apply decorrelation kernel: {_e}")
 
                 # --- Step 2: Variance scaling ---
                 _var_expected = (_sci_var or 0.0) + (_ref_var or 0.0)
@@ -1788,7 +1794,7 @@ def run_sfft() -> Optional[int]:
                                 "Decorrelated version saved as *_decorr.fits (for detection)."
                             )
                         except Exception as _save_e:
-                            log_info(f"Warning: Could not save decorrelated difference image: {_save_e}")
+                            log_warning(f"Could not save decorrelated difference image: {_save_e}")
                     
                 decorr_status = "ON" if _applied_decorr else "OFF (kernel unavailable)"
                 vscale_status = "ON" if _applied_vscale else "OFF (insufficient data)"
@@ -1798,7 +1804,7 @@ def run_sfft() -> Optional[int]:
                 hdul[0].header = diff_hdr
 
         except Exception as _post_e:
-            log_info(f"Warning: post-subtraction processing failed ({_post_e}); skipping.")
+            log_warning(f"Post-subtraction processing failed ({_post_e}); skipping.")
 
         # ------------------------------------------------------------------
         # Re-impose invalid-pixel mask on output difference image
@@ -1823,8 +1829,8 @@ def run_sfft() -> Optional[int]:
                             f"Invalid mask applied to main diff: {n_before} -> {n_after} finite pixels"
                         )
                     else:
-                        log_info(
-                            f"Warning: combined_invalid_mask shape {combined_invalid_mask.shape} "
+                        log_warning(
+                            f"combined_invalid_mask shape {combined_invalid_mask.shape} "
                             f"!= diff shape {diff.shape}; cannot reapply invalid mask."
                         )
                 
@@ -1844,8 +1850,8 @@ def run_sfft() -> Optional[int]:
                                     f"Invalid mask applied to decorrelated diff: {n_before} -> {n_after} finite pixels"
                                 )
                             else:
-                                log_info(
-                                    f"Warning: combined_invalid_mask shape {combined_invalid_mask.shape} "
+                                log_warning(
+                                    f"combined_invalid_mask shape {combined_invalid_mask.shape} "
                                     f"!= decorrelated diff shape {diff.shape}; cannot reapply invalid mask."
                                 )
                 
@@ -1854,7 +1860,7 @@ def run_sfft() -> Optional[int]:
                     f"Applied combined invalid mask: {n_mask} pixels masked"
                 )
         except Exception as e:
-            log_info(f"Warning: failed to reapply invalid mask to diff: {e}")
+            log_warning(f"Failed to reapply invalid mask to diff: {e}")
 
         # Write ForceConv and solution path to difference image header so
         # downstream photometry knows which PSF the difference image has and
@@ -1870,7 +1876,7 @@ def run_sfft() -> Optional[int]:
                         hdr["SOLPATH"] = (fits_solution, "Path to SFFT solution FITS (kernel)")
                     hdul.flush()
         except Exception as e:
-            log_info(f"Warning: failed to write ForceConv/solution header: {e}")
+            log_warning(f"Failed to write ForceConv/solution header: {e}")
 
         t1_sfft = time.time()
         log_info(f"SFFT core elapsed: {t1_sfft - t0_sfft:.3f} s")
@@ -1896,7 +1902,7 @@ def run_sfft() -> Optional[int]:
                         header_copy = hdl[0].header.copy()
                     safe_fits_write(out_path, pix_a_vis.T, header_copy)
                 except Exception as e:
-                    log_info(f"Warning: Failed to save fitted-pixel for {label}: {e}")
+                    log_warning(f"Failed to save fitted-pixel for {label}: {e}")
 
             for _label, _path in [("SCI", FITS_SCI), ("REF", FITS_REF)]:
                 save_fitted_pix(_label, _path)
@@ -1919,8 +1925,8 @@ def run_sfft() -> Optional[int]:
                     col_names = ast_ss.columns if hasattr(ast_ss, 'columns') else ast_ss.dtype.names
                     missing_cols = [c for c in required_cols if c not in col_names]
                     if missing_cols:
-                        log_info(
-                            f"Warning: Diagnostic plot skipped - missing columns: {missing_cols}. "
+                        log_warning(
+                            f"Diagnostic plot skipped - missing columns: {missing_cols}. "
                             "SFFT catalog schema may differ from expected version."
                         )
                         return
@@ -1978,7 +1984,7 @@ def run_sfft() -> Optional[int]:
                         pass
                     plt.close(fig)
                 except Exception as e:
-                    log_info(f"Warning: Failed to generate diagnostic plot: {e}")
+                    log_warning(f"Failed to generate diagnostic plot: {e}")
 
             generate_plot()
 
@@ -1990,7 +1996,7 @@ def run_sfft() -> Optional[int]:
             else "unknown"
         )
         line = exc_tb.tb_lineno if exc_tb else -1
-        log_info(f"Fatal Error: {exc_type} in {fname} at line {line}: {e}")
+        logger.error(f"Fatal Error: {exc_type} in {fname} at line {line}: {e}")
         return None
     finally:
         # Clean up temporary synchronized-mask FITS files if they were created.

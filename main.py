@@ -1882,7 +1882,7 @@ def run_photometry():
             input_yaml["NAXIS2"] = image.shape[0]
         except Exception as e:
             log_exception(e)
-            logging.info("Could not recrop the image; operation ignored.")
+            logging.warning("Could not recrop the image; operation ignored.")
 
         # Refresh WCS and target pixel coordinates after all trimming
         # This ensures catalog lookup uses correct coordinates for trimmed image
