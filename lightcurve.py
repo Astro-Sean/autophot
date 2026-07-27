@@ -709,12 +709,15 @@ def plot_lightcurve(
     # matplotlib.use() which silently fails once pyplot is loaded.
     if show:
         current_backend = str(plt.get_backend()).lower()
+        logging.info("plot_lightcurve: show=True, current backend=%s", current_backend)
         if "agg" in current_backend:
             for backend in ("QtAgg", "TkAgg"):
                 try:
                     plt.switch_backend(backend)
+                    logging.info("plot_lightcurve: switched backend to %s", plt.get_backend())
                     break
-                except Exception:
+                except Exception as e:
+                    logging.warning("plot_lightcurve: failed to switch to %s: %s", backend, e)
                     continue
 
     today_mjd = None
@@ -1566,6 +1569,7 @@ def plot_lightcurve(
     plt.savefig(outpath, **save_kw, bbox_inches="tight")
 
     if show:
+        logging.info("plot_lightcurve: calling plt.show() with backend=%s", plt.get_backend())
         plt.show()
     else:
         plt.close("all")
