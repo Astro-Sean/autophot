@@ -4970,26 +4970,20 @@ def run_photometry():
                                         f"for undersampled image (FWHM={_fwhm_for_cs:.1f}px)"
                                     )
                                 else:
-                                    cs_threshold = 0.5 if n_cs >= 10 else 0.3
+                                    cs_threshold = float(
+                                        input_yaml["template_subtraction"].get(
+                                            "sfft_min_class_star", 0.7
+                                        )
+                                    )
                                 if cs_threshold > 0:
                                     cs_pass = cs >= cs_threshold
-                                    # Only apply if at least 3 point sources
-                                    # remain.  Extended sources bias the kernel
-                                    # fit — 4 clean sources with kernel_order=1
-                                    # is better than 9 contaminated sources.
-                                    if cs_pass.sum() >= 3 or n_before_refine <= 3:
-                                        n_cs_rejected = int((cs_finite & ~cs_pass).sum())
-                                        if n_cs_rejected > 0:
-                                            logging.info(
-                                                f"CLASS_STAR filter: removed {n_cs_rejected} extended sources "
-                                                f"(CLASS_STAR < {cs_threshold}, {n_cs - n_cs_rejected}/{n_cs} kept)"
-                                            )
-                                        ms = ms[cs_pass | ~cs_finite]
-                                    elif (cs_finite & ~cs_pass).sum() > 0:
+                                    n_cs_rejected = int((cs_finite & ~cs_pass).sum())
+                                    if n_cs_rejected > 0:
                                         logging.info(
-                                            f"CLASS_STAR filter skipped: would leave only "
-                                            f"{cs_pass.sum()} sources (< 3). Keeping all {len(ms)} sources."
+                                            f"CLASS_STAR filter: removed {n_cs_rejected} extended sources "
+                                            f"(CLASS_STAR < {cs_threshold}, {n_cs - n_cs_rejected}/{n_cs} kept)"
                                         )
+                                    ms = ms[cs_pass | ~cs_finite]
 
                         # --- Ellipticity filter (backup for point-source selection) ---
                         # Point sources should be nearly circular.  The column
@@ -4997,19 +4991,23 @@ def run_photometry():
                         # 1 = highly elongated).  Galaxies often have high
                         # ellipticity.  This catches extended sources that
                         # CLASS_STAR may miss (e.g. compact galaxies).
-                        if "roundness" in ms.columns and len(ms) > 3:
+                        if "roundness" in ms.columns:
                             ell = pd.to_numeric(ms["roundness"], errors="coerce")
                             ell_finite = ell.notna()
                             if ell_finite.any():
-                                ell_pass = ell <= 0.5
-                                if ell_pass.sum() >= 3 or len(ms) <= 3:
-                                    n_ell_rejected = int((ell_finite & ~ell_pass).sum())
-                                    if n_ell_rejected > 0:
-                                        logging.info(
-                                            f"Ellipticity filter: removed {n_ell_rejected} elongated sources "
-                                            f"(ellipticity > 0.5)"
-                                        )
-                                    ms = ms[ell_pass | ~ell_finite]
+                                ell_max = float(
+                                    input_yaml["template_subtraction"].get(
+                                        "sfft_max_ellipticity", 0.3
+                                    )
+                                )
+                                ell_pass = ell <= ell_max
+                                n_ell_rejected = int((ell_finite & ~ell_pass).sum())
+                                if n_ell_rejected > 0:
+                                    logging.info(
+                                        f"Ellipticity filter: removed {n_ell_rejected} elongated sources "
+                                        f"(ellipticity > {ell_max})"
+                                    )
+                                ms = ms[ell_pass | ~ell_finite]
 
                         # Size-based outlier rejection (robust sigma-clipping on FWHM)
                         size_col = None
