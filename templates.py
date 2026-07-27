@@ -5443,6 +5443,16 @@ class Templates:
                         _conv_scale = float(_conv_match.group(1))
                         _phot_scale = float(_phot_match.group(1))
                         _discrep_pct = abs(_conv_scale - _phot_scale) / max(abs(_conv_scale), abs(_phot_scale), 1e-10) * 100.0
+                        # Write both flux scalings to the diff header for downstream use
+                        try:
+                            if outputFpath and os.path.isfile(outputFpath):
+                                with fits.open(outputFpath, mode="update", memmap=False) as _hdul:
+                                    _hdul[0].header["FSCAL_CONV"] = float(_conv_scale)
+                                    _hdul[0].header["FSCAL_PHOT"] = float(_phot_scale)
+                                    _hdul[0].header["FSCAL_DISC"] = float(_discrep_pct)
+                                    _hdul.flush()
+                        except Exception:
+                            pass
                         # BUG 110: Hard rejection for wildly wrong kernels.
                         # A negative convolution flux scaling or >50% mismatch
                         # indicates the kernel solution is completely unconstrained
