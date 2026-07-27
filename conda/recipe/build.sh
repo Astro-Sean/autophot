@@ -8,7 +8,7 @@ set -euxo pipefail
 unset PIP_NO_INDEX
 unset PIP_NO_DEPENDENCIES
 
-${PYTHON} -m pip install --index-url https://pypi.org/simple sfft==1.7.3 sip_tpv==1.1 -vv
+${PYTHON} -m pip install --no-build-isolation --index-url https://pypi.org/simple sfft==1.7.3 sip_tpv==1.1 -vv
 
 # Install the package itself
 ${PYTHON} -m pip install . -vv
