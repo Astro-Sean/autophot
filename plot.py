@@ -1718,7 +1718,12 @@ class Plot:
 
             current_backend = str(matplotlib.get_backend()).lower()
             if "agg" in current_backend:
-                matplotlib.use("TkAgg")
+                for backend in ("QtAgg", "TkAgg"):
+                    try:
+                        matplotlib.use(backend)
+                        break
+                    except Exception:
+                        continue
             plt.show()
         else:
             plt.close("all")
