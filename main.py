@@ -79,10 +79,6 @@ from collections import OrderedDict
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
-# Set matplotlib to use non-interactive backend to prevent Wayland/Qt display issues
-import matplotlib
-matplotlib.use('Agg')
-
 # Third-Party Libraries
 import numpy as np
 import pandas as pd
@@ -368,6 +364,12 @@ def run_photometry():
     inspection, WCS solving, background subtraction, template handling,
     source detection, photometry, and light-curve generation.
     """
+    # Use non-interactive backend during batch pipeline processing.
+    # This is set here (not at module import) so that downstream code
+    # (e.g. lightcurve.plot_lightcurve with show=True) can still switch
+    # to an interactive backend for user-facing plots.
+    import matplotlib
+    matplotlib.use('Agg')
 
     # ---------------------------------------------------------------------
     # Check for optional Astromatic tools

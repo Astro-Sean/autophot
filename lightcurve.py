@@ -711,15 +711,12 @@ def plot_lightcurve(
         import matplotlib
 
         current_backend = str(plt.get_backend()).lower()
-        logging.info("plot_lightcurve: show=True, current backend=%s", current_backend)
         if "agg" in current_backend:
             for backend in ("QtAgg", "TkAgg"):
                 try:
                     matplotlib.use(backend, force=True)
-                    logging.info("plot_lightcurve: switched backend to %s", plt.get_backend())
                     break
-                except Exception as e:
-                    logging.warning("plot_lightcurve: failed to switch to %s: %s", backend, e)
+                except Exception:
                     continue
 
     today_mjd = None
@@ -1571,7 +1568,11 @@ def plot_lightcurve(
     plt.savefig(outpath, **save_kw, bbox_inches="tight")
 
     if show:
-        logging.info("plot_lightcurve: calling plt.show() with backend=%s", plt.get_backend())
+        import matplotlib
+
+        # Force interactive backend right before show, in case anything
+        # (e.g. imports from main.py) reset it to Agg during the function body.
+        matplotlib.use('QtAgg', force=True)
         plt.show()
     else:
         plt.close("all")
