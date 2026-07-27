@@ -1310,6 +1310,7 @@ class Plot:
         show: bool = False,
         adaptive_snr_selection=False,
         input_yaml=None,
+        max_plot_err=0.5,
     ):
         """
         Plot lightcurve with detections and optional upper limits.
@@ -1581,6 +1582,22 @@ class Plot:
             marker = next(marker_iterator)
 
             if not detects.empty:
+                # Filter out poorly constrained detections (large error bars)
+                if max_plot_err is not None and max_plot_err > 0:
+                    err_vals = pd.to_numeric(detects[err_col], errors="coerce")
+                    good_err = err_vals.notna() & (err_vals <= max_plot_err)
+                    n_removed = int((~good_err).sum())
+                    if n_removed > 0:
+                        removed_mjds = detects.loc[~good_err, "mjd"].tolist()
+                        logger.warning(
+                            "plot_lightcurve: %d detection(s) in band %s excluded from plot "
+                            "due to magnitude error > %.2f mag. MJDs: %s",
+                            n_removed, str(b), max_plot_err,
+                            ", ".join(f"{m:.5f}" for m in removed_mjds),
+                        )
+                        detects = detects[good_err].copy()
+
+            if not detects.empty:
                 x_det = pd.to_numeric(detects["mjd"], errors="coerce") - reference_epoch
                 leg_label = (
                     label_map.get(str(b).strip().lower(), str(b))
@@ -1766,8 +1783,9 @@ class Plot:
                 n_excluded = n_before - len(df_plot)
                 if n_excluded > 0:
                     logger.debug(
-                        f"WCS vs PSF offset plot: excluded {n_excluded}/{n_before} sources "
-                        f"with position errors > FWHM ({fwhm:.1f} px)"
+                        "WCS vs PSF offset plot: excluded %d/%d sources "
+                        "with position errors > FWHM (%.1f px)",
+                        n_excluded, n_before, fwhm,
                     )
             else:
                 # No error columns available, plot without error bars
