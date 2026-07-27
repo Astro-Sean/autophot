@@ -1711,9 +1711,14 @@ class Plot:
             handletextpad=0.5,
         )
 
-        # Only show interactively when requested. In batch mode (Agg backend),
-        # calling show() emits warnings and is not useful.
+        # Only show interactively when requested. Force an interactive
+        # backend so the plot is actually displayed even in batch/headless mode.
         if bool(show):
+            import matplotlib
+
+            current_backend = str(matplotlib.get_backend()).lower()
+            if "agg" in current_backend:
+                matplotlib.use("TkAgg")
             plt.show()
         else:
             plt.close("all")
