@@ -3200,7 +3200,9 @@ NNW
             # don't correspond, so matching produces meaningless offsets.
             alignment_metadata = {}
             _post_swarp_verify = bool(
-                align_cfg.get("post_swarp_verify", False)
+                align_cfg.get("post_swarp_verify", True)
+            ) or bool(
+                align_cfg.get("alignment_require_post_swarp_verification", True)
             )
             if not _post_swarp_verify:
                 self.logger.info(
@@ -3383,14 +3385,27 @@ NNW
                         _indiv_offsets = np.sqrt(_dx_use**2 + _dy_use**2)
                         _p95_offset = float(np.percentile(_indiv_offsets, 95))
                         _max_offset = float(np.max(_indiv_offsets))
+                        _matched_xy = sci_xy[good]
+                        _local_k = min(3, len(_matched_xy))
+                        _local_indices = cKDTree(_matched_xy).query(
+                            _matched_xy, k=_local_k
+                        )[1]
+                        _local_dx = np.median(dx[_local_indices], axis=1)
+                        _local_dy = np.median(dy[_local_indices], axis=1)
+                        _local_offsets = np.hypot(_local_dx, _local_dy)
+                        _local_offset_p95 = float(
+                            np.percentile(_local_offsets, 95)
+                        )
+                        _local_offset_max = float(np.max(_local_offsets))
 
                         total_offset = np.sqrt(med_dx**2 + med_dy**2)
                         self.logger.info(
                             "Alignment verification: offset=(%.3f, %.3f) px, "
                             "RMS=(%.3f, %.3f) px, total=%.3f px, "
-                            "P95=%.3f px, max=%.3f px (%d matches)",
+                            "P95=%.3f px, max=%.3f px, local-P95/max=%.3f/%.3f px (%d matches)",
                             med_dx, med_dy, rms_dx, rms_dy, total_offset,
-                            _p95_offset, _max_offset, n_matched_verify,
+                            _p95_offset, _max_offset, _local_offset_p95,
+                            _local_offset_max, n_matched_verify,
                         )
 
                         alignment_metadata = {
@@ -3401,6 +3416,8 @@ NNW
                             "n_matched": n_matched_verify,
                             "p95_offset": _p95_offset,
                             "max_offset": _max_offset,
+                            "local_offset_p95": _local_offset_p95,
+                            "local_offset_max": _local_offset_max,
                         }
 
                     else:
@@ -3453,6 +3470,10 @@ NNW
                     + alignment_metadata.get("rms_y", 0) ** 2
                 )
                 _p95 = alignment_metadata.get("p95_offset", 0.0)
+                _local_offset_max = alignment_metadata.get("local_offset_max", 0.0)
+                _local_offset_limit = float(
+                    align_cfg.get("alignment_max_local_offset_px", 0.5)
+                )
                 _n_match = alignment_metadata.get("n_matched", 0)
 
                 # Sparse-field: use adaptive minimum for offset gate.
@@ -3472,6 +3493,9 @@ NNW
                 ) or (
                     _n_match >= _gate_min_matches
                     and _max_off > _max_off_threshold
+                ) or (
+                    _n_match >= 3
+                    and _local_offset_max > _local_offset_limit
                 )
                 if _n_match >= _min_n_for_percentile:
                     _reject = _reject or _rms > max_acceptable_rms or _p95 > max_acceptable_p95
@@ -3482,6 +3506,8 @@ NNW
                         _reasons.append("offset=%.2f px (> %.2f px)" % (_off, max_acceptable_offset))
                     if _max_off > _max_off_threshold:
                         _reasons.append("max_offset=%.2f px (> %.2f px)" % (_max_off, _max_off_threshold))
+                    if _n_match >= 3 and _local_offset_max > _local_offset_limit:
+                        _reasons.append("local_offset=%.2f px (> %.2f px)" % (_local_offset_max, _local_offset_limit))
                     if _n_match >= _min_n_for_percentile:
                         if _rms > max_acceptable_rms:
                             _reasons.append("RMS=%.2f px (> %.2f px)" % (_rms, max_acceptable_rms))
@@ -3515,6 +3541,7 @@ NNW
                     _scamp_trustworthy_override = (
                         _off <= max_acceptable_offset
                         and _max_off <= _max_off_threshold
+                        and _local_offset_max <= _local_offset_limit
                         and _scamp_rms_pix_check is not None
                         and _scamp_rms_pix_check < _scamp_rms_threshold
                         and _scamp_nstars_check is not None
