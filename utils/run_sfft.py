@@ -466,7 +466,13 @@ def run_sfft() -> Optional[int]:
         "-min_prior_sources",
         type=int,
         default=3,
-        help="Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT will perform its own source matching.",
+        help="Minimum number of vetted prior point sources required for kernel fitting.",
+    )
+    parser.add_argument(
+        "-allow_unvetted_source_retry",
+        type=str,
+        default="false",
+        help="Allow automatic SFFT source matching when vetted priors are insufficient or fail.",
     )
     parser.add_argument(
         "-coarse_var_rejection",
@@ -672,15 +678,22 @@ def run_sfft() -> Optional[int]:
     
     # Improve prior source validation: require minimum sources for reliable kernel fitting
     MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 3) or 3)
-    if matching_sources is not None and len(matching_sources) < MIN_PRIOR_SOURCES:
+    ALLOW_UNVETTED_SOURCE_RETRY = str(
+        getattr(args, "allow_unvetted_source_retry", "false")
+    ).strip().lower() in {"1", "true", "yes", "y", "on"}
+    if matching_sources is None or len(matching_sources) < MIN_PRIOR_SOURCES:
+        n_priors = 0 if matching_sources is None else len(matching_sources)
+        if not ALLOW_UNVETTED_SOURCE_RETRY:
+            raise RuntimeError(
+                f"Only {n_priors} vetted point-source priors are available "
+                f"(minimum {MIN_PRIOR_SOURCES} required); refusing automatic "
+                "SFFT source matching."
+            )
         log_warning(
-            f"Only {len(matching_sources)} prior sources provided "
-            f"(minimum {MIN_PRIOR_SOURCES} required for reliable kernel fitting). "
-            "Letting SFFT perform source matching instead."
+            f"Only {n_priors} vetted prior sources are available "
+            f"(minimum {MIN_PRIOR_SOURCES}); allowing automatic SFFT source matching."
         )
         matching_sources = None
-    elif matching_sources is None:
-        log_info("No valid prior matching sources after checks; SFFT will perform source matching.")
 
     # --- Ensure GAIN and SATURATE in FITS (pass values, not keywords) ---
     # Write values into headers so SFFT/MeLOn find the keywords (avoids KeyError when SATURATE missing).
@@ -1278,10 +1291,11 @@ def run_sfft() -> Optional[int]:
                     NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
                 )
             except (np.linalg.LinAlgError, AssertionError, ValueError, RuntimeError) as e:
-                # Degenerate kernel design matrix or assertion failure (e.g. too
-                # few / collinear sources after applying XY_PriorSelect /
-                # XY_PriorBan). Retry once letting SFFT perform its own source
-                # matching with no priors.
+                if not ALLOW_UNVETTED_SOURCE_RETRY:
+                    raise RuntimeError(
+                        "SFFT failed using vetted point-source priors; refusing "
+                        "automatic unvetted source matching."
+                    ) from e
                 log_info(
                     f"SFFT ESP failed with {type(e).__name__} when using priors ({e}). "
                     "This typically occurs when:"

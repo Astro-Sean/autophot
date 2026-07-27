@@ -5159,18 +5159,15 @@ class Templates:
                 return f"[{coords}]"
 
             def _build_sfft_cmd(run_excluded, run_matching, template_fp, diff_fp):
-                # If fewer than min_prior_sources pipeline-matched sources, let SFFT
-                # perform matching.  Must match run_sfft.py's MIN_PRIOR_SOURCES.
                 min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 3) or 3)
                 if len(run_matching) < min_sources_for_prior:
-                    logger.info(
-                        "Fewer than %d pipeline-matched sources (%d); letting SFFT perform source matching.",
-                        min_sources_for_prior,
+                    logger.warning(
+                        "Only %d vetted point-source priors are available (minimum=%d); "
+                        "not substituting SFFT automatic detections.",
                         len(run_matching),
+                        min_sources_for_prior,
                     )
-                    match_str = "[]"
-                else:
-                    match_str = _serialize_xy_pairs(run_matching)
+                match_str = _serialize_xy_pairs(run_matching)
                 excl_str = _serialize_xy_pairs(run_excluded)
 
                 cmd_local = [
@@ -5294,6 +5291,12 @@ class Templates:
                 # Prior source validation
                 min_prior_sources = ts_sub.get("sfft_min_prior_sources", 3)
                 cmd_local += ["-min_prior_sources", str(int(min_prior_sources))]
+                cmd_local += [
+                    "-allow_unvetted_source_retry",
+                    "true" if _as_bool(
+                        ts_sub.get("sfft_allow_unvetted_source_retry", False), False
+                    ) else "false",
+                ]
 
                 if sfft_crowded:
                     cmd_local.append("-crowded")
