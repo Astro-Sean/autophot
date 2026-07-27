@@ -2912,8 +2912,9 @@ class PSF:
                 plt.close(fig)
                 return None
 
-            # plt.tight_layout()
-            plt.show()
+            # No save path: close figure and return it without displaying.
+            # Per-image diagnostic plots should never block the pipeline.
+            plt.close(fig)
             return fig
 
         except Exception as exc:
