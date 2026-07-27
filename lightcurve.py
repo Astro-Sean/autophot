@@ -708,12 +708,14 @@ def plot_lightcurve(
     # plt.switch_backend() works after pyplot is already imported, unlike
     # matplotlib.use() which silently fails once pyplot is loaded.
     if show:
+        import matplotlib
+
         current_backend = str(plt.get_backend()).lower()
         logging.info("plot_lightcurve: show=True, current backend=%s", current_backend)
         if "agg" in current_backend:
             for backend in ("QtAgg", "TkAgg"):
                 try:
-                    plt.switch_backend(backend)
+                    matplotlib.use(backend, force=True)
                     logging.info("plot_lightcurve: switched backend to %s", plt.get_backend())
                     break
                 except Exception as e:
