@@ -2689,6 +2689,13 @@ def run_photometry():
                         # small for the actual PSF.  After alignment (which may
                         # resample the template), measure the FWHM if the header
                         # value matches the config default.
+                        #
+                        # Also re-measure after SWarp resampling (scamp_swarp),
+                        # because SWarp's LANCZOS3 interpolation combined with
+                        # SCAMP's PV distortion correction can broaden the PSF
+                        # significantly (e.g., 7.92 -> 10.65 px).  Using the
+                        # pre-resampling FWHM for kernel sizing causes incorrect
+                        # kernel sizing and flux scaling mismatches (dipoles).
                         try:
                             _tmpl_hdr = fits.getheader(templateFpath)
                             _tmpl_fwhm_hdr = float(
@@ -2700,7 +2707,13 @@ def run_photometry():
                             _fwhm_stale = (
                                 abs(_tmpl_fwhm_hdr - _config_fwhm_default) < 0.01
                             )
-                            if _fwhm_stale:
+                            _am = str(
+                                input_yaml.get("template_subtraction", {}).get(
+                                    "alignment_method", ""
+                                )
+                            ).lower()
+                            _was_swarp = _am in ("swarp", "scamp_swarp")
+                            if _fwhm_stale or _was_swarp:
                                 _tmpl_img = get_image(templateFpath)
                                 _tmpl_fwhm_measured, _, _ = Find_FWHM(
                                     input_yaml=input_yaml
@@ -2709,15 +2722,18 @@ def run_photometry():
                                     np.isfinite(_tmpl_fwhm_measured)
                                     and _tmpl_fwhm_measured > 0
                                 ):
+                                    _old_fwhm = _tmpl_fwhm_hdr
                                     _tmpl_hdr["FWHM"] = float(_tmpl_fwhm_measured)
                                     safe_fits_write(
                                         templateFpath, _tmpl_img, _tmpl_hdr
                                     )
                                     logging.info(
                                         "Template FWHM measured after alignment: "
-                                        "%.2f px (header had stale default %.1f px).",
+                                        "%.2f px (header had %.2f px, %s).",
                                         float(_tmpl_fwhm_measured),
-                                        _tmpl_fwhm_hdr,
+                                        float(_old_fwhm),
+                                        "stale default" if _fwhm_stale
+                                        else "pre-SWarp (resampling broadened PSF)",
                                     )
                                     del _tmpl_img
                         except Exception as e:
@@ -2994,6 +3010,10 @@ def run_photometry():
         # kernel), but an underestimate is dangerous (wrong sharpening/
         # broadening direction, flux scaling mismatch, dipoles).
         _post_align_n_sources = len(FWHMSources) if FWHMSources is not None else 0
+        _align_method = str(
+            input_yaml.get("template_subtraction", {}).get("alignment_method", "")
+        ).lower()
+        _was_swarp_resampled = _align_method in ("swarp", "scamp_swarp")
         if (
             _pre_remeasure_fwhm is not None
             and np.isfinite(_pre_remeasure_fwhm)
@@ -3013,6 +3033,19 @@ def run_photometry():
                     "to avoid kernel direction error.",
                     float(ImageFWHM), float(_pre_remeasure_fwhm),
                     _post_align_n_sources, _override_threshold,
+                )
+            elif _was_swarp_resampled:
+                # SWarp resampling with SIP/SCAMP distortion correction
+                # genuinely broadens the PSF. The post-alignment FWHM is the
+                # actual FWHM of the image SFFT works on. Capping it would
+                # give SFFT the wrong FWHM, causing incorrect kernel sizing
+                # and flux scaling mismatches (dipoles).
+                logging.info(
+                    "Post-alignment FWHM %.2f px > 1.5 x initial %.2f px, but "
+                    "image was SWarp-resampled (alignment_method=%s) — PSF "
+                    "broadening is real. Using post-alignment FWHM.",
+                    float(ImageFWHM), float(_pre_remeasure_fwhm),
+                    _align_method,
                 )
             else:
                 logging.warning(
@@ -5391,6 +5424,51 @@ def run_photometry():
                     )
 
         # -----------------------------------------------------------------------
+        # Post-SFFT flux scaling correction
+        #
+        # SFFT applies a convolution-based flux scaling (FSCAL_CONV) to the
+        # convolved image before subtraction.  When the kernel is under-constrained
+        # (few sources, constant kernel), this scaling can disagree with the
+        # true photometric flux ratio (FSCAL_PHOT) by several percent.  The
+        # residual flux error creates dipoles at source positions.
+        #
+        # For ForceConv=SCI (diff = Conv(SCI) - REF), the entire diff is
+        # proportional to FSCAL_CONV, so a multiplicative correction by
+        # FSCAL_PHOT / FSCAL_CONV brings the flux scale to the true ratio.
+        #
+        # For ForceConv=REF (diff = SCI - Conv(REF)), a multiplicative correction
+        # would incorrectly scale the science contribution.  We skip it — the
+        # gain update in the ForceConv=SCI block below handles the flux
+        # calibration for that case.
+        # -----------------------------------------------------------------------
+        if PreformSubtraction:
+            _fscal_conv = float(header.get("FSCAL_CONV", 0.0))
+            _fscal_phot = float(header.get("FSCAL_PHOT", 0.0))
+            _fscal_disc = float(header.get("FSCAL_DISC", 0.0))
+            _convd_hdr = str(header.get("CONVD", "")).strip().upper()
+            _is_forceconv_sci = _convd_hdr == "SCI" or (
+                _convd_hdr == ""
+                and "FSCAL" in header
+            )
+            if (
+                _fscal_conv > 0
+                and _fscal_phot > 0
+                and np.isfinite(_fscal_disc)
+                and _fscal_disc > 3.0
+                and _fscal_disc <= 50.0
+                and _is_forceconv_sci
+            ):
+                _flux_correction = _fscal_phot / _fscal_conv
+                logging.info(
+                    "Applying post-SFFT flux scaling correction: FSCAL_CONV=%.4f "
+                    "FSCAL_PHOT=%.4f (%.1f%% mismatch) -> diff image scaled by %.4f",
+                    _fscal_conv, _fscal_phot, _fscal_disc, _flux_correction,
+                )
+                image = image * _flux_correction
+                if background_rms is not None:
+                    background_rms = background_rms * abs(_flux_correction)
+
+        # -----------------------------------------------------------------------
         # ForceConv PSF consistency check
         #
         # When SFFT uses ForceConv=SCI, the difference image has the REFERENCE
@@ -5488,10 +5566,33 @@ def run_photometry():
                     # = F_sci * gain_sci (correct, magnitude conserved).
                     # HOTPANTS normalizes to the science image (-n i) so no gain
                     # correction is needed — skip this block for non-SFFT diffs.
+                    #
+                    # When the post-SFFT flux scaling correction above is applied
+                    # (diff *= FSCAL_PHOT / FSCAL_CONV), the effective gain must
+                    # be GAIN_SCI / FSCAL_PHOT, not GAIN_SCI / FSCAL_CONV.
                     _has_fscal = "FSCAL" in header or "SOLPATH" in header
                     if _has_fscal:
                         _diff_gain = float(header.get("GAIN", 0))
-                        if _diff_gain > 0 and np.isfinite(_diff_gain):
+                        # If flux correction was applied, adjust gain to match
+                        # the corrected pixel scale (FSCAL_PHOT instead of FSCAL_CONV).
+                        if (
+                            _fscal_conv > 0
+                            and _fscal_phot > 0
+                            and np.isfinite(_fscal_disc)
+                            and _fscal_disc > 3.0
+                            and _fscal_disc <= 50.0
+                        ):
+                            _sci_gain = float(input_yaml.get("gain", 0))
+                            _corrected_gain = _sci_gain / _fscal_phot if _sci_gain > 0 and _fscal_phot > 0 else _diff_gain
+                            if abs(_corrected_gain - _diff_gain) > 0.001:
+                                logging.info(
+                                    "Updating gain for flux-corrected diff: %.5g -> %.5g e-/ADU "
+                                    "(FSCAL_PHOT=%.4f, was FSCAL_CONV=%.4f).",
+                                    _diff_gain, _corrected_gain,
+                                    _fscal_phot, _fscal_conv,
+                                )
+                            input_yaml["gain"] = _corrected_gain
+                        elif _diff_gain > 0 and np.isfinite(_diff_gain):
                             _sci_gain = float(input_yaml.get("gain", 0))
                             if _sci_gain > 0 and abs(_diff_gain - _sci_gain) > 0.001:
                                 logging.info(
