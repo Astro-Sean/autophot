@@ -1327,13 +1327,14 @@ class Plot:
         # plt.switch_backend() works after pyplot is already imported, unlike
         # matplotlib.use() which silently fails once pyplot is loaded.
         if show:
+            import matplotlib
             import matplotlib.pyplot as _plt_check
 
             current_backend = str(_plt_check.get_backend()).lower()
             if "agg" in current_backend:
                 for backend in ("QtAgg", "TkAgg"):
                     try:
-                        _plt_check.switch_backend(backend)
+                        matplotlib.use(backend, force=True)
                         break
                     except Exception:
                         continue
