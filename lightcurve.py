@@ -703,6 +703,20 @@ def plot_lightcurve(
     str or None
         Path to detections CSV if return_detections and detections exist; else None.
     """
+    # Switch to an interactive backend before any pyplot figure creation
+    # so that plt.show() actually displays the window when show=True.
+    if show:
+        import matplotlib
+
+        current_backend = str(matplotlib.get_backend()).lower()
+        if "agg" in current_backend:
+            for backend in ("QtAgg", "TkAgg"):
+                try:
+                    matplotlib.use(backend)
+                    break
+                except Exception:
+                    continue
+
     today_mjd = None
     if mark_today:
         today = Time.now()
@@ -1552,18 +1566,6 @@ def plot_lightcurve(
     plt.savefig(outpath, **save_kw, bbox_inches="tight")
 
     if show:
-        # Force an interactive backend so the plot is actually displayed,
-        # even when the default backend is Agg (batch/headless mode).
-        import matplotlib
-
-        current_backend = str(matplotlib.get_backend()).lower()
-        if "agg" in current_backend:
-            for backend in ("QtAgg", "TkAgg"):
-                try:
-                    matplotlib.use(backend)
-                    break
-                except Exception:
-                    continue
         plt.show()
     else:
         plt.close("all")
