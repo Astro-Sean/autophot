@@ -1715,6 +1715,8 @@ class Plot:
         # calling show() emits warnings and is not useful.
         if bool(show):
             plt.show()
+        else:
+            plt.close("all")
 
         return
 
