@@ -21,7 +21,7 @@ build:
 
 requirements:
   host:
-    - python >=3.11
+    - python >=3.11,<3.13
     - pip
     - setuptools
     - wheel
@@ -53,7 +53,7 @@ requirements:
     # pip-only packages (not available on conda-forge)
     - pip
   run:
-    - python >=3.11
+    - python >=3.11,<3.13
     - astroalign >=2.6.2
     - astropy >=7.0
     - astroquery >=0.4.11
@@ -97,7 +97,7 @@ test:
   commands:
     - autophot-main -h
   requires:
-    - python >=3.11
+    - python >=3.11,<3.13
     - pandas >=3.0
     - scikit-image >=0.24
     - matplotlib >=3.10
