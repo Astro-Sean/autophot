@@ -10,6 +10,27 @@
 
 **AutoPhOT** is a comprehensive photometric pipeline built on [Photutils](https://photutils.readthedocs.io/) and [Astropy](https://www.astropy.org/). It provides automated aperture and PSF photometry for transients and variable sources, including catalogue calibration, WCS solving, and optional template subtraction.
 
+## Description
+
+AutoPhOT performs precision photometry of a transient or variable source at a fixed sky position across a heterogeneous set of imaging data. Unlike general-purpose reduction pipelines that build stacked mosaics from a single instrument, AutoPhOT is target-centric: it ingests an arbitrary collection of FITS frames (different telescopes, filters, pixel scales, and WCS solutions), locates the target in each, and produces a self-consistent, calibrated light curve.
+
+### Pipeline stages
+
+1. **Ingestion & WCS** — Frames are sorted by telescope/instrument/filter. WCS is verified or re-solved using `astrometry.net` with Gaia DR3 cross-matching, handling SIP/TPV distortion and independently plate-solved images.
+2. **Image preparation** — Cosmic-ray rejection, background estimation, and FWHM measurement are performed per frame, with adaptive detection thresholds for sparse and crowded fields.
+3. **Photometry** — Both aperture and PSF photometry are computed at the target position. PSF models are built empirically from in-frame stars using `photutils`, with MCMC (`emcee`) uncertainty estimation when signal-to-noise permits.
+4. **Calibration** — Photometric zero points are derived against a user-selectable catalog (Gaia DR3 with XP spectra, Pan-STARRS, SDSS, APASS, 2MASS, Legacy Survey, SkyMapper, and more), with per-filter catalog assignment and synthetic-photometry support for Gaia XP.
+5. **Template subtraction** (optional) — When a reference template is available, AutoPhOT aligns science and template images and performs difference imaging using SFFT, HOTPANTS, or PyZOGY.
+
+### Unique aspects
+
+- **Multi-instrument, target-focused** — Designed from the ground up for follow-up campaigns that combine data from many facilities into one light curve, rather than reducing a single instrument's dataset.
+- **Adaptive astrometric alignment** — A cascaded alignment pipeline (SCAMP+SWarp → WCS-based reproject → AstroAlign) with source-matched WCS refinement, per-quadrant verification, and FWHM-scaled quality gates that adapt to sparse fields, large distortion, and pixel-scale mismatches.
+- **Gaia XP synthetic photometry** — Calibrate optical/NIR frames directly against Gaia DR3 XP spectra, avoiding cross-filter transformations when standard catalogs are unavailable.
+- **Robust difference imaging** — Multiple subtraction backends (SFFT, HOTPANTS, PyZOGY) with automatic fallback, kernel-order auto-selection, and PSF-source pool supplementation for sparse fields.
+- **TNS integration** — Automatic target coordinate and redshift lookup via the Transient Name Server when a target name is provided.
+- **Per-filter catalog routing** — Different reference catalogs can be assigned to different filter groups (e.g., `griz` → RefCAT2, `u` → Gaia, `UBVRI` → APASS) within a single run.
+
 ## Quick Links
 - **Conda Package**: [https://anaconda.org/astro-sean/autophot](https://anaconda.org/astro-sean/autophot)
 - **Paper**: [A&A 667, A62 (2022)](https://ui.adsabs.harvard.edu/abs/2022A%26A...667A..62B)
