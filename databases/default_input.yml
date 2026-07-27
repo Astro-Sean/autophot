@@ -415,6 +415,7 @@ default_input:
     alignment_max_local_offset_px: 0.5
     alignment_min_sources_for_field_gate: 20 # int --- Minimum post-SWarp source matches required before RMS and P95 gates are applied. P95 is unreliable with fewer than 20 samples.
     alignment_require_post_swarp_verification: True # bool --- Reject common-grid SWarp output when subpixel centroid alignment cannot be measured.
+    alignment_allow_non_scamp_fallback: False
     post_swarp_verify: True # bool --- If True, run SExtractor cross-match on SWarp output images to measure post-alignment offsets. When False, SCAMP+SWarp is trusted without independent verification. Enable for diagnostics or when alignment quality is uncertain.
     alignment_subpixel_shift_correction: False # bool --- DEPRECATED/NO-OP. Post-SWarp sub-pixel shift correction has been removed because empirical shifts generally make dipoles worse.
     alignment_subpixel_shift_threshold: 0.05 # float --- DEPRECATED/NO-OP. Kept for config compatibility only.
