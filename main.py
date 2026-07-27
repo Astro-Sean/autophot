@@ -5460,6 +5460,26 @@ def run_photometry():
                     )
                     input_yaml["fwhm"] = _ref_fwhm_hdr
 
+                    # Update aperture radius to match the convolved (reference) PSF.
+                    # The aperture was originally sized from the science FWHM at line ~3367;
+                    # after convolution the diff-image PSF is broader, so the aperture must
+                    # scale proportionally to avoid underestimating counts_ref in limiting
+                    # magnitude injection/recovery.
+                    _sci_aperture = float(
+                        (input_yaml.get("photometry") or {}).get("aperture_radius", _sci_fwhm_hdr)
+                    )
+                    if _sci_fwhm_hdr > 0 and _sci_aperture > 0:
+                        _new_aperture = odd(int(np.ceil(
+                            _sci_aperture * (_ref_fwhm_hdr / _sci_fwhm_hdr)
+                        )))
+                        input_yaml["photometry"]["aperture_radius"] = _new_aperture
+                        logging.info(
+                            "Aperture radius updated for convolved PSF: %.2f -> %.2f px "
+                            "(science FWHM=%.2f -> reference FWHM=%.2f).",
+                            _sci_aperture, float(_new_aperture),
+                            _sci_fwhm_hdr, _ref_fwhm_hdr,
+                        )
+
                     # --- Update gain from diff header for correct flux calibration ---
                     # SFFT writes GAIN_DIFF = GAIN_SCI / FSCAL to the diff header
                     # when ForceConv=SCI.  Using the science gain would make
