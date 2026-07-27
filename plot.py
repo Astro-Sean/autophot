@@ -1322,6 +1322,20 @@ class Plot:
         ls : str
             Line style for connecting detection points (default "" for no line).
         """
+        # Switch to an interactive backend before any pyplot figure creation
+        # so that plt.show() actually displays the window when show=True.
+        if show:
+            import matplotlib
+
+            current_backend = str(matplotlib.get_backend()).lower()
+            if "agg" in current_backend:
+                for backend in ("QtAgg", "TkAgg"):
+                    try:
+                        matplotlib.use(backend)
+                        break
+                    except Exception:
+                        continue
+
         import numpy as np
         import pandas as pd
         import matplotlib.pyplot as plt
@@ -1711,19 +1725,7 @@ class Plot:
             handletextpad=0.5,
         )
 
-        # Only show interactively when requested. Force an interactive
-        # backend so the plot is actually displayed even in batch/headless mode.
         if bool(show):
-            import matplotlib
-
-            current_backend = str(matplotlib.get_backend()).lower()
-            if "agg" in current_backend:
-                for backend in ("QtAgg", "TkAgg"):
-                    try:
-                        matplotlib.use(backend)
-                        break
-                    except Exception:
-                        continue
             plt.show()
         else:
             plt.close("all")
