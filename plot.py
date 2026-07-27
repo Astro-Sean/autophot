@@ -1324,14 +1324,16 @@ class Plot:
         """
         # Switch to an interactive backend before any pyplot figure creation
         # so that plt.show() actually displays the window when show=True.
+        # plt.switch_backend() works after pyplot is already imported, unlike
+        # matplotlib.use() which silently fails once pyplot is loaded.
         if show:
-            import matplotlib
+            import matplotlib.pyplot as _plt_check
 
-            current_backend = str(matplotlib.get_backend()).lower()
+            current_backend = str(_plt_check.get_backend()).lower()
             if "agg" in current_backend:
                 for backend in ("QtAgg", "TkAgg"):
                     try:
-                        matplotlib.use(backend)
+                        _plt_check.switch_backend(backend)
                         break
                     except Exception:
                         continue
