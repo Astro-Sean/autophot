@@ -1298,6 +1298,7 @@ NNW
         science_already_resampled: bool = False,
         reference_already_resampled: bool = False,
         resample_mode: str = "common_grid",
+        scamp_distortion_degree: Optional[int] = None,
     ) -> Optional[dict]:
         """
         Align and resample both science and reference images.
@@ -2586,6 +2587,16 @@ NNW
                 preserve_sip_in_head = True
 
             distort_degrees = feasible_degree
+            if scamp_distortion_degree is not None:
+                distort_degrees = min(
+                    feasible_degree, max(1, int(scamp_distortion_degree))
+                )
+                preserve_sip_in_head = distort_degrees < required_degree
+                self.logger.info(
+                    "SCAMP+SWarp retry: using conservative distortion degree %d "
+                    "instead of feasible degree %d.",
+                    distort_degrees, feasible_degree,
+                )
             # Relax ellipticity cut for sparse fields to include more sources.
             # When extended sources are enabled, allow highly elliptical galaxies
             # (up to 0.95) since they provide valuable alignment anchors.
@@ -3557,6 +3568,42 @@ NNW
                             _scamp_rms_pix_check, _scamp_nstars_check,
                         )
                     else:
+                        if not bool(
+                            align_cfg.get("alignment_allow_non_scamp_fallback", False)
+                        ):
+                            if distort_degrees > 1:
+                                self.logger.warning(
+                                    "Post-SWarp alignment rejected: %s (%d matches, FWHM=%.1f px). "
+                                    "Retrying SCAMP+SWarp with distortion degree %d.",
+                                    "; ".join(_reasons) if _reasons else "unknown",
+                                    _n_match, _gate_fwhm, distort_degrees - 1,
+                                )
+                                return self.align_and_resample_both_images(
+                                    science_image,
+                                    reference_image,
+                                    output_dir=output_dir,
+                                    science_already_resampled=science_already_resampled,
+                                    reference_already_resampled=reference_already_resampled,
+                                    resample_mode=resample_mode,
+                                    scamp_distortion_degree=distort_degrees - 1,
+                                )
+                            self.logger.warning(
+                                "Post-SWarp alignment remains above the quality gate at "
+                                "the minimum SCAMP distortion degree; retaining SCAMP+SWarp "
+                                "instead of switching alignment methods."
+                            )
+                            return {
+                                "science_aligned": str(aligned_sci),
+                                "reference_aligned": str(aligned_ref),
+                                "science_resampling_method": sci_resampling_method,
+                                "reference_resampling_method": ref_resampling_method,
+                                "science_undersampled": sci_is_undersampled,
+                                "reference_undersampled": ref_is_undersampled,
+                                "science_fwhm_pixels": fwhm_sci_pix,
+                                "reference_fwhm_pixels": fwhm_ref_pix,
+                                "alignment_method": "scamp_swarp",
+                                "alignment_verification": alignment_metadata,
+                            }
                         self.logger.warning(
                             "Post-SWarp alignment rejected: %s (%d matches, FWHM=%.1f px). "
                             "Falling back to reproject/AstroAlign.",
