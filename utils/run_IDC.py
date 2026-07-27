@@ -3409,6 +3409,49 @@ NNW
                         )
                         _local_offset_max = float(np.max(_local_offsets))
 
+                        # --- Per-quadrant verification ---
+                        # Ensure ALL parts of the image are aligned, not just
+                        # the field center.  A good global median can hide a
+                        # systematic offset in one quadrant caused by
+                        # distortion-model divergence at the field edges.
+                        # We split the matched sources into a 2x2 grid based
+                        # on the median (x, y) of the matched sample and
+                        # report per-quadrant median offset and max offset.
+                        _quad_med_x = float(np.median(_matched_xy[:, 0]))
+                        _quad_med_y = float(np.median(_matched_xy[:, 1]))
+                        _quadrant_stats = {}
+                        _quadrant_labels = [
+                            ("bottom_left", _matched_xy[:, 0] <= _quad_med_x, _matched_xy[:, 1] <= _quad_med_y),
+                            ("bottom_right", _matched_xy[:, 0] > _quad_med_x, _matched_xy[:, 1] <= _quad_med_y),
+                            ("top_left", _matched_xy[:, 0] <= _quad_med_x, _matched_xy[:, 1] > _quad_med_y),
+                            ("top_right", _matched_xy[:, 0] > _quad_med_x, _matched_xy[:, 1] > _quad_med_y),
+                        ]
+                        _worst_quadrant_offset = 0.0
+                        for _qlabel, _qx_mask, _qy_mask in _quadrant_labels:
+                            _qmask = _qx_mask & _qy_mask
+                            _qn = int(_qmask.sum())
+                            if _qn >= 2:
+                                _q_dx = _dx_use[_qmask]
+                                _q_dy = _dy_use[_qmask]
+                                _q_med_off = float(np.sqrt(np.median(_q_dx)**2 + np.median(_q_dy)**2))
+                                _q_max_off = float(np.max(np.sqrt(_q_dx**2 + _q_dy**2)))
+                                _quadrant_stats[_qlabel] = {
+                                    "n": _qn,
+                                    "median_offset_px": _q_med_off,
+                                    "max_offset_px": _q_max_off,
+                                }
+                                if _q_med_off > _worst_quadrant_offset:
+                                    _worst_quadrant_offset = _q_med_off
+                        if _quadrant_stats:
+                            _quad_summary = ", ".join(
+                                f"{_ql}: n={_qd['n']} med={_qd['median_offset_px']:.2f}px max={_qd['max_offset_px']:.2f}px"
+                                for _ql, _qd in _quadrant_stats.items()
+                            )
+                            self.logger.info(
+                                "Per-quadrant alignment: %s | worst_quadrant_median=%.2f px",
+                                _quad_summary, _worst_quadrant_offset,
+                            )
+
                         total_offset = np.sqrt(med_dx**2 + med_dy**2)
                         self.logger.info(
                             "Alignment verification: offset=(%.3f, %.3f) px, "
@@ -3429,6 +3472,8 @@ NNW
                             "max_offset": _max_offset,
                             "local_offset_p95": _local_offset_p95,
                             "local_offset_max": _local_offset_max,
+                            "quadrant_stats": _quadrant_stats,
+                            "worst_quadrant_offset": _worst_quadrant_offset,
                         }
 
                     else:
@@ -3498,6 +3543,14 @@ NNW
                 # Worst-case offset: keep it sub-PSF but allow a small amount of
                 # field-edge flex for large, undersampled PSFs.
                 _max_off_threshold = max(2.0, min(5.0, 0.4 * _gate_fwhm))
+                # Per-quadrant check: if any quadrant has a median offset much
+                # larger than the global median, the distortion model is
+                # diverging in that region.  Use a generous threshold (2x the
+                # global offset threshold, floored at 1.5px) so we only reject
+                # when a quadrant is clearly misaligned, not when it's just
+                # slightly worse than the field average.
+                _worst_quad = alignment_metadata.get("worst_quadrant_offset", 0.0)
+                _worst_quad_limit = max(1.5, max_acceptable_offset * 2.0)
                 _reject = (
                     _n_match >= _gate_min_matches
                     and _off > max_acceptable_offset
@@ -3507,6 +3560,9 @@ NNW
                 ) or (
                     _n_match >= 3
                     and _local_offset_max > _local_offset_limit
+                ) or (
+                    _n_match >= 8
+                    and _worst_quad > _worst_quad_limit
                 )
                 if _n_match >= _min_n_for_percentile:
                     _reject = _reject or _rms > max_acceptable_rms or _p95 > max_acceptable_p95
@@ -3519,6 +3575,8 @@ NNW
                         _reasons.append("max_offset=%.2f px (> %.2f px)" % (_max_off, _max_off_threshold))
                     if _n_match >= 3 and _local_offset_max > _local_offset_limit:
                         _reasons.append("local_offset=%.2f px (> %.2f px)" % (_local_offset_max, _local_offset_limit))
+                    if _n_match >= 8 and _worst_quad > _worst_quad_limit:
+                        _reasons.append("worst_quadrant=%.2f px (> %.2f px)" % (_worst_quad, _worst_quad_limit))
                     if _n_match >= _min_n_for_percentile:
                         if _rms > max_acceptable_rms:
                             _reasons.append("RMS=%.2f px (> %.2f px)" % (_rms, max_acceptable_rms))
@@ -3553,6 +3611,7 @@ NNW
                         _off <= max_acceptable_offset
                         and _max_off <= _max_off_threshold
                         and _local_offset_max <= _local_offset_limit
+                        and _worst_quad <= _worst_quad_limit
                         and _scamp_rms_pix_check is not None
                         and _scamp_rms_pix_check < _scamp_rms_threshold
                         and _scamp_nstars_check is not None
@@ -4178,6 +4237,179 @@ NNW
                 )
                 return None
 
+            # --- Source-based WCS refinement ---
+            # Reproject trusts both WCS blindly — independently plate-solved
+            # images can disagree by several pixels due to differential
+            # atmospheric refraction, flexure, or plate-solution drift.  We
+            # refine the reference WCS using matched source positions before
+            # reprojection, preserving the reference's SIP distortion.
+            # _compute_relative_wcs_correction fits an affine model
+            # (shift + rotation + scale) to the pixel-space residuals and
+            # applies it as a CRVAL + CD correction.
+            try:
+                _reproj_refine_dir = Path(output_dir) / "reproject_wcs_refine"
+                _reproj_refine_dir.mkdir(parents=True, exist_ok=True)
+
+                # Extract sources from both images for matching
+                _refine_fwhm = max(
+                    float(self.input_yaml.get("fwhm", 3.0)) if hasattr(self, "input_yaml") else 3.0,
+                    2.5,
+                )
+                _sci_sex_refine = self.run_sextractor(
+                    science_image,
+                    output_dir=str(_reproj_refine_dir / "sci"),
+                    for_alignment=True,
+                    fwhm_pixels=_refine_fwhm,
+                )
+                _ref_sex_refine = self.run_sextractor(
+                    reference_image,
+                    output_dir=str(_reproj_refine_dir / "ref"),
+                    for_alignment=True,
+                    fwhm_pixels=_refine_fwhm,
+                )
+                _sci_cat_refine = _sci_sex_refine.get("catalog")
+                _ref_cat_refine = _ref_sex_refine.get("catalog")
+                _n_sci_refine = len(_sci_cat_refine) if _sci_cat_refine is not None else 0
+                _n_ref_refine = len(_ref_cat_refine) if _ref_cat_refine is not None else 0
+
+                # Sparse-field retry with lower threshold
+                if _n_sci_refine < 5 or _n_ref_refine < 5:
+                    self.logger.info(
+                        "Reproject WCS refine: sparse field (%d sci / %d ref); "
+                        "retrying SExtractor with DETECT_THRESH=0.5",
+                        _n_sci_refine, _n_ref_refine,
+                    )
+                    _SPARSE_REFINE_OVERRIDE = {
+                        "DETECT_THRESH": 0.5,
+                        "ANALYSIS_THRESH": 0.3,
+                        "DETECT_MINAREA": 1,
+                        "BACK_SIZE": 16,
+                    }
+                    if _n_sci_refine < 5:
+                        _sci_sex_refine = self.run_sextractor(
+                            science_image,
+                            output_dir=str(_reproj_refine_dir / "sci_sparse"),
+                            for_alignment=True,
+                            fwhm_pixels=_refine_fwhm,
+                            config=_SPARSE_REFINE_OVERRIDE,
+                        )
+                        _sci_cat_refine = _sci_sex_refine.get("catalog")
+                        _n_sci_refine = len(_sci_cat_refine) if _sci_cat_refine is not None else 0
+                    if _n_ref_refine < 5:
+                        _ref_sex_refine = self.run_sextractor(
+                            reference_image,
+                            output_dir=str(_reproj_refine_dir / "ref_sparse"),
+                            for_alignment=True,
+                            fwhm_pixels=_refine_fwhm,
+                            config=_SPARSE_REFINE_OVERRIDE,
+                        )
+                        _ref_cat_refine = _ref_sex_refine.get("catalog")
+                        _n_ref_refine = len(_ref_cat_refine) if _ref_cat_refine is not None else 0
+
+                if (
+                    _sci_cat_refine is not None
+                    and _ref_cat_refine is not None
+                    and _n_sci_refine >= 3
+                    and _n_ref_refine >= 3
+                ):
+                    # Match sources 1:1 using filter_matched_sources
+                    _refine_crossid = max(
+                        2.0 * _refine_fwhm * (
+                            float(self.input_yaml.get("pixel_scale", 1.0))
+                            if hasattr(self, "input_yaml") else 1.0
+                        ),
+                        3.0,
+                    )
+                    _n_matched_refine, _ = self.filter_matched_sources(
+                        sci_cat_path=_sci_sex_refine["catalog_path"],
+                        ref_cat_path=_ref_sex_refine["catalog_path"],
+                        match_radius_arcsec=_refine_crossid,
+                        sci_image_path=science_image,
+                        ref_image_path=reference_image,
+                    )
+                    if _n_matched_refine >= 3:
+                        _refine_head_path = str(
+                            _reproj_refine_dir / "reference_wcs_corrected.head"
+                        )
+                        _refine_result = self._compute_relative_wcs_correction(
+                            sci_image_path=science_image,
+                            ref_image_path=reference_image,
+                            sci_cat_path=_sci_sex_refine["catalog_path"],
+                            ref_cat_path=_ref_sex_refine["catalog_path"],
+                            output_head_path=_refine_head_path,
+                        )
+                        if _refine_result is not None and Path(_refine_head_path).exists():
+                            # Apply the corrected WCS to ref_header in memory
+                            from wcs import _normalize_projection_codes
+                            _corrected_hdr = fits.Header.fromtextfile(_refine_head_path)
+                            _corrected_hdr = _normalize_projection_codes(
+                                _corrected_hdr, inplace=False
+                            )
+                            ref_header = remove_wcs_from_header(ref_header)
+                            _wcs_prefixes = (
+                                "CRPIX", "CRVAL", "CTYPE", "CD", "PC", "CDELT",
+                                "CROTA", "PV", "LONPOLE", "LATPOLE", "EQUINOX",
+                                "WCSNAME", "CUNIT", "WCSAXES", "PROJP", "LTV",
+                                "LTM", "RADECSYS", "RADESYS", "RADYSYS",
+                                "LONGPOLE", "TNX", "SIP_",
+                            )
+                            _wcs_stems = ("A_", "B_", "AP_", "BP_", "D_", "DP_", "PV_")
+                            for _key in _corrected_hdr:
+                                if _key in ("NAXIS", "NAXIS1", "NAXIS2"):
+                                    continue
+                                _is_wcs = any(_key.startswith(p) for p in _wcs_prefixes)
+                                if not _is_wcs and "_" in _key:
+                                    _stem = _key.split("_")[0] + "_"
+                                    _is_wcs = _stem in _wcs_stems and _key.startswith(_stem.rstrip("_"))
+                                if _is_wcs:
+                                    ref_header[_key] = _corrected_hdr[_key]
+                            # Rebuild ref_wcs with the corrected header
+                            ref_wcs = get_wcs(ref_header)
+                            if ref_wcs is not None:
+                                self.logger.info(
+                                    "Reproject: reference WCS refined via source matching "
+                                    "(%d sources, method=%s, RMS=%.3f px). "
+                                    "Using corrected WCS for reprojection.",
+                                    _refine_result.get("n_sources", 0),
+                                    _refine_result.get("method", "unknown"),
+                                    _refine_result.get("rms_px", 0.0),
+                                )
+                            else:
+                                self.logger.warning(
+                                    "Reproject: corrected WCS is invalid; "
+                                    "falling back to original reference WCS."
+                                )
+                                ref_wcs = get_wcs(
+                                    fits.open(reference_image, mode="readonly")[0].header
+                                )
+                        else:
+                            self.logger.info(
+                                "Reproject: relative WCS correction failed or "
+                                "produced no .head; using original reference WCS."
+                            )
+                    else:
+                        self.logger.info(
+                            "Reproject: only %d matched sources for WCS refine "
+                            "(< 3 minimum); using original reference WCS.",
+                            _n_matched_refine,
+                        )
+                else:
+                    self.logger.info(
+                        "Reproject: insufficient sources for WCS refine "
+                        "(%d sci / %d ref); using original reference WCS.",
+                        _n_sci_refine, _n_ref_refine,
+                    )
+            except Exception as _refine_exc:
+                self.logger.debug(
+                    "Reproject WCS refinement skipped (non-fatal): %s",
+                    _refine_exc,
+                )
+                # Ensure ref_wcs is still valid (reload from original header)
+                try:
+                    ref_wcs = get_wcs(ref_header)
+                except Exception:
+                    pass
+
             # Pre-mask NaN pixels in reference data
             n_nan = int(np.sum(~np.isfinite(ref_data)))
             if n_nan > 0:
@@ -4457,6 +4689,45 @@ NNW
                         _indiv = np.sqrt(_dx**2 + _dy**2)
                         _max_reproj = float(np.max(_indiv))
                         _p95_reproj = float(np.percentile(_indiv, 95))
+
+                        # --- Per-quadrant verification (matches SCAMP+SWarp path) ---
+                        # Ensure ALL parts of the image are aligned, not just
+                        # the field center.  A good global median can hide a
+                        # systematic offset in one quadrant.
+                        _reproj_matched_xy = _sci_xy[_good]
+                        _reproj_quad_med_x = float(np.median(_reproj_matched_xy[:, 0]))
+                        _reproj_quad_med_y = float(np.median(_reproj_matched_xy[:, 1]))
+                        _reproj_quadrant_stats = {}
+                        _reproj_quad_labels = [
+                            ("bottom_left", _reproj_matched_xy[:, 0] <= _reproj_quad_med_x, _reproj_matched_xy[:, 1] <= _reproj_quad_med_y),
+                            ("bottom_right", _reproj_matched_xy[:, 0] > _reproj_quad_med_x, _reproj_matched_xy[:, 1] <= _reproj_quad_med_y),
+                            ("top_left", _reproj_matched_xy[:, 0] <= _reproj_quad_med_x, _reproj_matched_xy[:, 1] > _reproj_quad_med_y),
+                            ("top_right", _reproj_matched_xy[:, 0] > _reproj_quad_med_x, _reproj_matched_xy[:, 1] > _reproj_quad_med_y),
+                        ]
+                        _reproj_worst_quad = 0.0
+                        for _rql, _rqx, _rqy in _reproj_quad_labels:
+                            _rqmask = _rqx & _rqy
+                            _rqn = int(_rqmask.sum())
+                            if _rqn >= 2:
+                                _rq_dx = _dx[_rqmask]
+                                _rq_dy = _dy[_rqmask]
+                                _rq_med_off = float(np.sqrt(np.median(_rq_dx)**2 + np.median(_rq_dy)**2))
+                                _reproj_quadrant_stats[_rql] = {
+                                    "n": _rqn,
+                                    "median_offset_px": _rq_med_off,
+                                }
+                                if _rq_med_off > _reproj_worst_quad:
+                                    _reproj_worst_quad = _rq_med_off
+                        if _reproj_quadrant_stats:
+                            _rq_summary = ", ".join(
+                                f"{_rql}: n={_rqd['n']} med={_rqd['median_offset_px']:.2f}px"
+                                for _rql, _rqd in _reproj_quadrant_stats.items()
+                            )
+                            self.logger.info(
+                                "Reproject per-quadrant: %s | worst=%.2f px",
+                                _rq_summary, _reproj_worst_quad,
+                            )
+
                         self.logger.info(
                             "Post-reproject alignment: offset=(%.3f, %.3f) px, "
                             "RMS=(%.3f, %.3f) px, total=%.3f px, rms=%.3f px, "
@@ -4483,13 +4754,21 @@ NNW
                         _max_off *= _reproj_scale
                         _max_rms *= _reproj_scale
                         _max_p95 *= _reproj_scale
-                        _reproj_reject = _n_match_reproj >= _reproj_min_matches and _total > _max_off
+                        # Per-quadrant threshold (generous: 2x global, floored at 1.5px)
+                        _reproj_worst_quad_limit = max(1.5, _max_off * 2.0)
+                        _reproj_reject = (
+                            _n_match_reproj >= _reproj_min_matches and _total > _max_off
+                        ) or (
+                            _n_match_reproj >= 8 and _reproj_worst_quad > _reproj_worst_quad_limit
+                        )
                         if _n_match_reproj >= _reproj_min_n:
                             _reproj_reject = _reproj_reject or _rms > _max_rms or _p95_reproj > _max_p95
                         if _reproj_reject:
                             _reasons = []
                             if _total > _max_off:
                                 _reasons.append("offset=%.2f px (> %.2f px)" % (_total, _max_off))
+                            if _n_match_reproj >= 8 and _reproj_worst_quad > _reproj_worst_quad_limit:
+                                _reasons.append("worst_quadrant=%.2f px (> %.2f px)" % (_reproj_worst_quad, _reproj_worst_quad_limit))
                             if _n_match_reproj >= _reproj_min_n:
                                 if _rms > _max_rms:
                                     _reasons.append("RMS=%.2f px (> %.2f px)" % (_rms, _max_rms))
@@ -4524,6 +4803,7 @@ NNW
                                 "rms_y": _rms_dy,
                                 "n_matched": _n_match_reproj,
                                 "p95_offset": _p95_reproj,
+                                "worst_quadrant_offset": _reproj_worst_quad,
                             }
             except Exception as _ve:
                 self.logger.debug("Post-reproject verification failed (non-fatal): %s", _ve)
@@ -7393,7 +7673,10 @@ NNW
         ref_cat = add_mag_snr_aper(ref_cat)
         # SNR cut for matching: use 2.0 for alignment (lower than photometry's 3.0)
         # to retain fainter sources in sparse fields. If very few sources pass,
-        # fall back to 1.5 to maximize match count for SCAMP.
+        # fall back to 1.5 to maximize match count for SCAMP.  For extremely
+        # sparse fields (< 3 sources at SNR 1.5), lower to 1.0 to use every
+        # available detection — SCAMP's robust fitting rejects spurious
+        # low-SNR matches better than a hard pre-filter.
         _snr_match_thresh = 2.0
         sci_mask = sci_cat["SNR_APER"] >= _snr_match_thresh
         ref_mask = ref_cat["SNR_APER"] >= _snr_match_thresh
@@ -7408,6 +7691,25 @@ NNW
             ref_cat_filtered = ref_cat[ref_mask]
             self.logger.info(
                 "Sparse field: lowered SNR match threshold to %.1f "
+                "(%d sci / %d ref sources).",
+                _snr_match_thresh,
+                len(sci_cat_filtered),
+                len(ref_cat_filtered),
+            )
+        # Extreme sparse-field fallback: if still < 3 sources, lower to 1.0
+        # to use every available detection.  SCAMP and AstroAlign both have
+        # robust matching that can handle noisy low-SNR sources.
+        if (
+            (len(sci_cat_filtered) < 3 or len(ref_cat_filtered) < 3)
+            and _snr_match_thresh > 1.0
+        ):
+            _snr_match_thresh = 1.0
+            sci_mask = sci_cat["SNR_APER"] >= _snr_match_thresh
+            ref_mask = ref_cat["SNR_APER"] >= _snr_match_thresh
+            sci_cat_filtered = sci_cat[sci_mask]
+            ref_cat_filtered = ref_cat[ref_mask]
+            self.logger.info(
+                "Extreme sparse field: lowered SNR match threshold to %.1f "
                 "(%d sci / %d ref sources).",
                 _snr_match_thresh,
                 len(sci_cat_filtered),
@@ -7609,29 +7911,32 @@ NNW
             ransac_savefig(fig, str(Path(sci_cat_path).with_suffix(".png")).replace(".png", "_Mag_Fit.png"))
             plt.close(fig)
 
-        # --- Spatial uniformity selection ---
-        # Ensure matched sources are spatially distributed across the image
-        # so SCAMP's polynomial fit is constrained everywhere, not just in
-        # clustered regions.  Without this, a group of stars in one corner
-        # can dominate the distortion solution while the rest of the image
-        # is unconstrained, producing systematic offsets in sparse regions.
-        _n_matched_now = len(sci_cat_matched)
-        if _n_matched_now >= 10:
+        # --- Spatial distribution diagnostic ---
+        # Previously, this section spatially thinned matched sources to prevent
+        # clustered regions from dominating SCAMP's polynomial fit.  However,
+        # SCAMP receives the FULL (pre-filtering) catalogs via the backup paths
+        # (sci_catalog_scamp_backup / ref_catalog_scamp_backup), so the thinning
+        # had no effect on SCAMP.  It only reduced the catalog written to disk,
+        # which is used by AstroAlign control points — where MORE sources is
+        # better (aafitrans/AstroAlign have their own robust RANSAC that handles
+        # clustered inputs).
+        #
+        # We now keep ALL matched sources in the written catalog and only log
+        # the spatial distribution as a diagnostic.  The nmax downsampling below
+        # (which is itself spatially uniform) handles the case of extremely
+        # large match counts.
+        _n_pre_spatial = len(sci_cat_matched)
+        if _n_pre_spatial >= 10:
             _uni_x, _uni_y, _ = get_xy(
                 sci_cat_matched, prefer_win=True, input_origin=1, output_origin=1
             )
-            # Grid size: aim for ~2-3 sources per cell on average.
-            # Cap at 5x5 to avoid over-binning sparse fields.
-            _n_bins = max(2, min(5, int(np.sqrt(_n_matched_now / 2.5))))
+            _n_bins = max(2, min(5, int(np.sqrt(_n_pre_spatial / 2.5))))
             _cells = _n_bins * _n_bins
-            _avg_per_cell = _n_matched_now / _cells
-            # Allow up to 2x the average per cell before capping.
-            _max_per_cell = max(2, int(np.ceil(_avg_per_cell * 2)))
-
+            _avg_per_cell = _n_pre_spatial / _cells
+            # Count sources per cell to report spatial distribution
             _x_edges = np.linspace(np.min(_uni_x), np.max(_uni_x), _n_bins + 1)
             _y_edges = np.linspace(np.min(_uni_y), np.max(_uni_y), _n_bins + 1)
-
-            _uni_sel = []
+            _cell_counts = []
             for _i in range(_n_bins):
                 for _j in range(_n_bins):
                     _m = (
@@ -7640,25 +7945,17 @@ NNW
                         & (_uni_y >= _y_edges[_j])
                         & (_uni_y < _y_edges[_j + 1])
                     )
-                    _idx = np.where(_m)[0]
-                    if _idx.size:
-                        _snr_vals = np.array(sci_cat_matched["SNR_APER"][_idx], dtype=float)
-                        _idx_sorted = _idx[np.argsort(_snr_vals)[::-1]]
-                        _uni_sel.extend(_idx_sorted[:_max_per_cell])
-
-            _uni_sel = np.array(sorted(set(_uni_sel)), dtype=int)
-            if len(_uni_sel) < _n_matched_now:
+                    _cell_counts.append(int(_m.sum()))
+            _max_cell = max(_cell_counts) if _cell_counts else 0
+            _min_cell = min(_cell_counts) if _cell_counts else 0
+            if _max_cell > _avg_per_cell * 3:
                 self.logger.info(
-                    "Spatial uniformity: %dx%d grid, max %d/cell -> "
-                    "kept %d of %d sources (removed %d clustered)",
-                    _n_bins, _n_bins, _max_per_cell,
-                    len(_uni_sel), _n_matched_now, _n_matched_now - len(_uni_sel),
+                    "Spatial distribution: %dx%d grid, avg=%.1f/cell, "
+                    "range=%d-%d/cell (some clustering present, "
+                    "keeping all %d sources for maximum alignment coverage)",
+                    _n_bins, _n_bins, _avg_per_cell,
+                    _min_cell, _max_cell, _n_pre_spatial,
                 )
-                sci_cat_matched = sci_cat_matched[_uni_sel]
-                ref_cat_matched = ref_cat_matched[_uni_sel]
-                match_id = np.arange(len(sci_cat_matched), dtype=int)
-                sci_cat_matched["MATCH_ID"] = match_id
-                ref_cat_matched["MATCH_ID"] = match_id
 
         if len(sci_cat_matched) > nmax:
             n_bins = int(np.sqrt(nmax))
@@ -7691,9 +7988,15 @@ NNW
         write_ldac(sci_cat_path, sci_cat_matched, sci_header)
         write_ldac(ref_cat_path, ref_cat_matched, ref_header)
         self.logger.info(
-            f"Final matched sources: {len(sci_cat_matched)}, match radius={match_radius_arcsec:.1f} arcsec"
+            f"Final matched sources: {len(sci_cat_matched)} "
+            f"(pre-spatial-diagnostic: {_n_pre_spatial}), "
+            f"match radius={match_radius_arcsec:.1f} arcsec"
         )
-        return len(sci_cat_matched), match_radius_arcsec
+        # Return the full matched count so the alignment gate sees the true
+        # number of matched sources.  All matched sources are retained in the
+        # written catalog (no spatial thinning) to maximize alignment coverage
+        # for AstroAlign and any downstream consumer.
+        return _n_pre_spatial, match_radius_arcsec
 
     def _estimate_wcs_offset_from_headers(
         self,
