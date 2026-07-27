@@ -1552,17 +1552,14 @@ def plot_lightcurve(
     plt.savefig(outpath, **save_kw, bbox_inches="tight")
 
     if show:
-        # Avoid `FigureCanvasAgg is non-interactive` warnings in batch runs.
-        try:
-            import matplotlib
+        # Force an interactive backend so the plot is actually displayed,
+        # even when the default backend is Agg (batch/headless mode).
+        import matplotlib
 
-            backend = str(matplotlib.get_backend()).lower()
-        except Exception:
-            backend = ""
-        if "agg" in backend:
-            plt.close("all")
-        else:
-            plt.show()
+        current_backend = str(matplotlib.get_backend()).lower()
+        if "agg" in current_backend:
+            matplotlib.use("TkAgg")
+        plt.show()
     else:
         plt.close("all")
 
