@@ -638,6 +638,7 @@ def plot_lightcurve(
     plot_color=False,
     color_match_days=0.5,
     ls="",
+    max_plot_err=0.5,
 ):
     """Plot a publication-ready lightcurve with detections and limits.
 
@@ -691,6 +692,11 @@ def plot_lightcurve(
     ls : str
         Line style for connecting detection points (default "" for no line).
         Set to "-" for a solid line connecting points.
+    max_plot_err : float
+        Maximum magnitude error for a detection to be plotted (default 0.5 mag).
+        Detections with errors exceeding this threshold are excluded from the
+        plot and a warning is logged. This prevents poorly constrained
+        measurements from dominating the plot scale or obscuring real trends.
 
     Returns
     -------
@@ -962,18 +968,21 @@ def plot_lightcurve(
             inverted_only = pd.Series(False, index=df.index)
             normal_detected = detected_s
 
-        # Combine normal detections and inverted-only detections for plotting
+        # ------------------------------------------------------------------
+        # Assemble detections and non-detections for this band
+        # ------------------------------------------------------------------
         all_detects = df[normal_detected | inverted_only]
         nondetects = df[~detected_s & ~inverted_only]
-        
-        num_detect += len(all_detects)  # Count all detections
+
+        num_detect += len(all_detects)
         num_nondetect += len(nondetects)
-        
+
         if return_detections and not all_detects.empty:
             detections_list.append(all_detects)
         if return_detections and not nondetects.empty:
             nondetections_list.append(nondetects)
 
+        # Resolve the band colour and legend label (includes magnitude offset)
         c = _color_for_band(band)
         if offset != 0:
             leg_label = (
@@ -987,27 +996,28 @@ def plot_lightcurve(
             )
         else:
             leg_label = band
-        
-        # For normal detections, use apparent_mag
+
+        # ------------------------------------------------------------------
+        # Assign plot_mag / plot_err for each detection category
+        # ------------------------------------------------------------------
+        # Normal detections: use the calibrated apparent magnitude directly.
         df.loc[normal_detected, "plot_mag"] = df.loc[normal_detected, "apparent_mag"]
         df.loc[normal_detected, "plot_err"] = df.loc[normal_detected, "apparent_mag_err"]
-        
-        # Prepare magnitude columns for inverted-only detections
+
+        # Inverted-only detections: recovered on the inverted difference image.
+        # These need their own magnitude / error columns, which may be
+        # band-specific (apparent) or generic instrumental (needs ZP).
         if has_inverted and np.any(inverted_only):
-            # Check for band-specific inverted apparent magnitude first
             band_inv_mag_col = f"{band}_{method}_inverted" if f"{band}_{method}_inverted" in df.columns else None
             band_inv_err_col = f"{band}_{method}_err_inverted" if f"{band}_{method}_err_inverted" in df.columns else None
-            
-            # Fallback to generic inst_inverted if band-specific not available
+
             inv_mag_col = band_inv_mag_col if band_inv_mag_col else ("inst_inverted" if "inst_inverted" in df.columns else inverted_col)
             inv_err_col = band_inv_err_col if band_inv_err_col else ("inst_inverted_err" if "inst_inverted_err" in df.columns else None)
-            
-            # For inverted-only detections, we need to use inverted magnitudes
+
             if inv_mag_col and inv_mag_col in df.columns:
-                # Check if this is already an apparent magnitude (band-specific inverted column)
                 is_apparent = band_inv_mag_col is not None
                 if not is_apparent and zp_col in df.columns:
-                    # Convert instrumental to apparent (band_offset added later when assigning to plot_mag)
+                    # Instrumental: convert to apparent by adding the zeropoint.
                     df.loc[inverted_only, "inv_apparent_mag"] = df.loc[inverted_only, inv_mag_col] + df.loc[inverted_only, zp_col]
                     if inv_err_col and inv_err_col in df.columns:
                         df.loc[inverted_only, "inv_apparent_mag_err"] = df.loc[inverted_only, inv_err_col]
@@ -1016,17 +1026,41 @@ def plot_lightcurve(
                     df.loc[inverted_only, "plot_mag"] = df.loc[inverted_only, "inv_apparent_mag"] + band_offset
                     df.loc[inverted_only, "plot_err"] = df.loc[inverted_only, "inv_apparent_mag_err"]
                 else:
-                    # Already apparent magnitude
+                    # Already apparent magnitude (band-specific inverted column).
                     df.loc[inverted_only, "plot_mag"] = df.loc[inverted_only, inv_mag_col] + band_offset
                     df.loc[inverted_only, "plot_err"] = df.loc[inverted_only, inv_err_col]
-        
-        # First, plot error bars for all detections
+
+        # ------------------------------------------------------------------
+        # Filter out poorly constrained detections (large error bars)
+        # ------------------------------------------------------------------
+        # Detections with magnitude errors exceeding max_plot_err are excluded
+        # from the plot to prevent them from dominating the y-axis scale or
+        # obscuring scientifically meaningful trends.  The removed points are
+        # still counted in num_detect and included in the returned CSV; only
+        # their visual representation is suppressed.
+        if not all_detects.empty and max_plot_err is not None and max_plot_err > 0:
+            plot_err_vals = pd.to_numeric(all_detects["plot_err"], errors="coerce")
+            good_err = plot_err_vals.notna() & (plot_err_vals <= max_plot_err)
+            n_removed = int((~good_err).sum())
+            if n_removed > 0:
+                removed_mjds = all_detects.loc[~good_err, "mjd"].tolist()
+                logging.warning(
+                    "plot_lightcurve: %d detection(s) in band %s excluded from plot "
+                    "due to magnitude error > %.2f mag. MJDs: %s",
+                    n_removed, band, max_plot_err,
+                    ", ".join(f"{m:.5f}" for m in removed_mjds),
+                )
+                all_detects = all_detects[good_err].copy()
+
+        # ------------------------------------------------------------------
+        # Plot error bars and optional connecting line
+        # ------------------------------------------------------------------
         if not all_detects.empty:
             ax.errorbar(
                 all_detects.mjd - reference_epoch,
                 all_detects["plot_mag"],
                 yerr=all_detects["plot_err"],
-                fmt='none',  # no markers here
+                fmt='none',
                 ecolor=c,
                 capsize=2,
                 capthick=0.8,
@@ -1034,9 +1068,7 @@ def plot_lightcurve(
                 zorder=2,
             )
 
-            # Optional: draw line connecting detection points
             if ls:
-                # Sort by MJD for proper line connection
                 sorted_detects = all_detects.sort_values("mjd")
                 ax.plot(
                     sorted_detects.mjd - reference_epoch,
@@ -1048,19 +1080,20 @@ def plot_lightcurve(
                     zorder=1,
                 )
 
-        # Now plot markers, applying hatch style row by row for inverted fits
+        # ------------------------------------------------------------------
+        # Plot markers: normal (circle) vs inverted (hatched square)
+        # ------------------------------------------------------------------
         if not all_detects.empty:
             if "_inverted_fit" in all_detects.columns:
                 inv_fit_mask = _inverted_fit_series_to_bool(all_detects["_inverted_fit"])
             else:
                 inv_fit_mask = pd.Series(False, index=all_detects.index)
-            # Align inverted_only (full-band df index) to plotted rows — required for
-            # correct hatch assignment (avoids index misalignment with | on Series).
+            # Align inverted_only (full-band df index) to plotted rows.
             inv_row_mask = inverted_only.reindex(all_detects.index, fill_value=False)
             inv_row_mask = inv_row_mask.fillna(False).astype(bool)
             inv_fit_mask = inv_fit_mask | inv_row_mask
 
-            # Plot normal detections (no hatch)
+            # Normal detections: filled circles with black edge.
             normal_detects = all_detects[~inv_fit_mask]
             if not normal_detects.empty:
                 plotted_positive_flux_marker = True
@@ -1069,14 +1102,14 @@ def plot_lightcurve(
                     normal_detects["plot_mag"],
                     s=get_marker_size('medium'),
                     c=c,
-                    marker='o',  # normal circular marker
+                    marker='o',
                     edgecolors='black',
                     linewidth=0.8,
                     zorder=3,
                     label=leg_label if leg_label else "",
                 )
-            
-            # Plot inverted detections with hatch
+
+            # Inverted detections: hatched squares with white diagonal stripes.
             inv_detects = all_detects[inv_fit_mask]
             if not inv_detects.empty:
                 plotted_inverted_hatch = True
@@ -1084,16 +1117,16 @@ def plot_lightcurve(
                     inv_detects.mjd - reference_epoch,
                     inv_detects["plot_mag"],
                     s=get_marker_size('medium'),
-                    c=c,   # face color
-                    marker='s',  # square marker (patch) so hatch works
+                    c=c,
+                    marker='s',
                     edgecolors='black',
                     linewidth=0.8,
-                    zorder=3,  # markers on top of error bars
+                    zorder=3,
                 )
-                # Add diagonal stripes - only for inverted PSF fits (white hatch)
                 sc.set_hatch('////')
                 sc.set_edgecolor('white')
-                # Add label manually with detection marker in legend (only if not already added)
+                # If only inverted detections exist for this band, add a
+                # placeholder circle to the legend so the band is still listed.
                 if normal_detects.empty:
                     ax.scatter([], [], s=get_marker_size('medium'), c=c, marker='o', edgecolors='black',
                              linewidth=0.8, label=leg_label if leg_label else "")
