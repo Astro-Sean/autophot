@@ -5688,7 +5688,9 @@ def run_photometry():
                             _XY_q = np.array([[_cx, _cy]])
 
                             _ker_stack = Realize_MatchingKernel(_XY_q).FromFITS(_solpath)
-                            _ker_2d = np.asarray(_ker_stack[0]).squeeze()
+                            # SFFT stores images/kernel in transposed (X, Y) = (col, row)
+                            # order.  Transpose to numpy (Y, X) = (row, col) for fftconvolve.
+                            _ker_2d = np.asarray(_ker_stack[0]).squeeze().T
 
                             if _ker_2d.ndim == 2 and _ker_2d.shape[0] == _L:
                                 # Get the ePSF data (oversampled PSF image)
@@ -5997,7 +5999,8 @@ def run_photometry():
                     _XY_q_re = np.array([[float(target_x_pix), float(target_y_pix)]])
 
                     _ker_stack_re = Realize_MatchingKernel(_XY_q_re).FromFITS(_solpath)
-                    _ker_2d_re = np.asarray(_ker_stack_re[0]).squeeze()
+                    # Transpose from SFFT (X, Y) to numpy (Y, X) for fftconvolve
+                    _ker_2d_re = np.asarray(_ker_stack_re[0]).squeeze().T
 
                     if _ker_2d_re.ndim == 2 and _ker_2d_re.shape[0] == _L_re:
                         _epsf_data_re = np.asarray(_epsf_original.data, dtype=float)
