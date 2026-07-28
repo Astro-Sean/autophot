@@ -2285,7 +2285,7 @@ class Plot:
         except Exception as e:
             logger.warning("Alignment offset plot failed: %s", e)
 
-    def plot_spalipy_matches(
+    def plot_match_sources(
         self,
         sci_image,
         tpl_image,
@@ -2339,7 +2339,7 @@ class Plot:
             )[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
             save_path = os.path.join(
-                write_dir, f"SpalipyMatch_{base}.png"
+                write_dir, f"MatchSources_{base}.png"
             )
 
             sci_matched_xy = np.asarray(sci_matched_xy, float)
@@ -2373,22 +2373,49 @@ class Plot:
                 ax.set_xlabel("X [Pixel]")
                 ax.set_ylabel("Y [Pixel]")
 
-            # Plot all detected sources as small grey dots (context)
+            _r = max(3.0, float(self.input_yaml.get("fwhm", 3.0)))
+
+            # Determine unmatched sources (in all_xy but not in matched_xy)
+            # by checking which all_xy entries are close to a matched source.
+            def _find_unmatched(all_xy, matched_xy):
+                """Return indices of all_xy entries not near any matched source."""
+                if all_xy is None or len(all_xy) == 0:
+                    return np.array([], dtype=int)
+                all_xy = np.asarray(all_xy, float)
+                if matched_xy is None or len(matched_xy) == 0:
+                    return np.arange(len(all_xy))
+                matched_xy = np.asarray(matched_xy, float)
+                # For each all_xy source, find nearest matched source
+                from scipy.spatial import cKDTree
+                tree = cKDTree(matched_xy)
+                d, _ = tree.query(all_xy, k=1)
+                # Unmatched = distance > 1px (not coincident with a matched source)
+                return np.where(d > 1.0)[0]
+
+            # Plot unmatched sources as red crosses
+            _cross_size = max(2.0, _r * 0.5)
             if sci_all_xy is not None:
                 sci_all = np.asarray(sci_all_xy, float)
-                ax1.scatter(
-                    sci_all[:, 0], sci_all[:, 1],
-                    s=4, c="grey", alpha=0.4, zorder=2,
-                )
+                _sci_unmatched = _find_unmatched(sci_all, sci_matched_xy)
+                if len(_sci_unmatched) > 0:
+                    ax1.scatter(
+                        sci_all[_sci_unmatched, 0],
+                        sci_all[_sci_unmatched, 1],
+                        marker="x", s=12, c="red", alpha=0.6,
+                        linewidths=0.6, zorder=3,
+                    )
             if tpl_all_xy is not None:
                 tpl_all = np.asarray(tpl_all_xy, float)
-                ax2.scatter(
-                    tpl_all[:, 0], tpl_all[:, 1],
-                    s=4, c="grey", alpha=0.4, zorder=2,
-                )
+                _tpl_unmatched = _find_unmatched(tpl_all, tpl_matched_xy)
+                if len(_tpl_unmatched) > 0:
+                    ax2.scatter(
+                        tpl_all[_tpl_unmatched, 0],
+                        tpl_all[_tpl_unmatched, 1],
+                        marker="x", s=12, c="red", alpha=0.6,
+                        linewidths=0.6, zorder=3,
+                    )
 
             # Plot matched sources as blue circles
-            _r = max(3.0, float(self.input_yaml.get("fwhm", 3.0)))
             for (sx, sy) in sci_matched_xy:
                 ax1.add_patch(Circle(
                     (sx, sy), _r,
@@ -2414,7 +2441,19 @@ class Plot:
                          color="dodgerblue", fontsize=4, ha="center", va="bottom")
 
             # Stats text
-            _stats = f"Matched: {n_matched}\nMethod: {method_label}"
+            _n_sci_unmatched = len(_find_unmatched(
+                np.asarray(sci_all_xy, float) if sci_all_xy is not None else np.empty((0, 2)),
+                sci_matched_xy,
+            ))
+            _n_tpl_unmatched = len(_find_unmatched(
+                np.asarray(tpl_all_xy, float) if tpl_all_xy is not None else np.empty((0, 2)),
+                tpl_matched_xy,
+            ))
+            _stats = (
+                f"Matched: {n_matched}\n"
+                f"Unmatched: sci={_n_sci_unmatched}, tpl={_n_tpl_unmatched}\n"
+                f"Method: {method_label}"
+            )
             ax1.text(
                 0.02, 0.98, _stats,
                 transform=ax1.transAxes, fontsize=6,
@@ -2426,8 +2465,8 @@ class Plot:
                         facecolor="white")
             plt.close(fig)
             logger.info(
-                "Spalipy match plot saved: %s (%d matched sources)",
+                "Match sources plot saved: %s (%d matched sources)",
                 save_path, n_matched,
             )
         except Exception as e:
-            logger.warning("Spalipy match plot failed: %s", e)
+            logger.warning("Match sources plot failed: %s", e)

@@ -400,7 +400,7 @@ When an alignment is rejected, the pipeline falls back to the next
 method in the cascade.  Two diagnostic plots are produced:
 - **`Alignment_Offset_*.png`** - quiver plot of per-source (dx, dy)
   offsets with error bars from SExtractor centroid uncertainties.
-- **`SpalipyMatch_*.png`** - side-by-side view of matched sources
+- **`MatchSources_*.png`** - side-by-side view of matched sources
   (spalipy method only).
 
 ---
@@ -601,7 +601,7 @@ the reduced data):
 | Source check | `SourceCheck_*.png` | WCS overlay with detected sources, distortion residual vectors, and optional heatmap |
 | WCS vs PSF offset | `WCS_vs_PSF_Offset_*.png` | Quiver plot of PSF-fit vs WCS-catalog position offsets |
 | Alignment offset | `Alignment_Offset_*.png` | Per-source (dx, dy) offsets after template alignment with error bars |
-| Spalipy matches | `SpalipyMatch_*.png` | Side-by-side matched-source visualisation (spalipy method) |
+| Match sources | `MatchSources_*.png` | Side-by-side matched-source visualisation (spalipy method) |
 | PSF model | `PSF_Target_*.png` | Science image, PSF model, residuals, and oversampled ePSF |
 | MCMC corner | `PSF_MCMC_corner_*.png` | Posterior corner plot from emcee fitting |
 | Cosmic rays | `CosmicRay_*.png` | Before/after cosmic-ray cleaning |
