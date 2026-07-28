@@ -2294,6 +2294,8 @@ class Plot:
         sci_all_xy=None,
         tpl_all_xy=None,
         method_label="spalipy",
+        sci_fwhm=None,
+        tpl_fwhm=None,
     ):
         """Side-by-side plot of matched sources on science and template images.
 
@@ -2318,6 +2320,12 @@ class Plot:
             All detected sources in the template image (for context).
         method_label : str
             Label for the plot title (e.g. "spalipy" or "WCS-seeded").
+        sci_fwhm : float or None
+            FWHM in pixels for the science image.  Circle radius is 3*FWHM.
+            Falls back to ``self.input_yaml["fwhm"]`` if None.
+        tpl_fwhm : float or None
+            FWHM in pixels for the template image.  Circle radius is 3*FWHM.
+            Falls back to ``self.input_yaml["fwhm"]`` if None.
         """
         try:
             import matplotlib.pyplot as plt
@@ -2373,7 +2381,9 @@ class Plot:
                 ax.set_xlabel("X [Pixel]")
                 ax.set_ylabel("Y [Pixel]")
 
-            _r = max(3.0, float(self.input_yaml.get("fwhm", 3.0)))
+            _fwhm_default = float(self.input_yaml.get("fwhm", 3.0))
+            _r_sci = 3.0 * (float(sci_fwhm) if sci_fwhm is not None else _fwhm_default)
+            _r_tpl = 3.0 * (float(tpl_fwhm) if tpl_fwhm is not None else _fwhm_default)
 
             # Determine unmatched sources (in all_xy but not in matched_xy)
             # by checking which all_xy entries are close to a matched source.
@@ -2393,7 +2403,6 @@ class Plot:
                 return np.where(d > 1.0)[0]
 
             # Plot unmatched sources as red crosses
-            _cross_size = max(2.0, _r * 0.5)
             if sci_all_xy is not None:
                 sci_all = np.asarray(sci_all_xy, float)
                 _sci_unmatched = _find_unmatched(sci_all, sci_matched_xy)
@@ -2402,7 +2411,7 @@ class Plot:
                         sci_all[_sci_unmatched, 0],
                         sci_all[_sci_unmatched, 1],
                         marker="x", s=12, c="red", alpha=0.6,
-                        linewidths=0.6, zorder=3,
+                        linewidths=0.5, zorder=3,
                     )
             if tpl_all_xy is not None:
                 tpl_all = np.asarray(tpl_all_xy, float)
@@ -2412,21 +2421,21 @@ class Plot:
                         tpl_all[_tpl_unmatched, 0],
                         tpl_all[_tpl_unmatched, 1],
                         marker="x", s=12, c="red", alpha=0.6,
-                        linewidths=0.6, zorder=3,
+                        linewidths=0.5, zorder=3,
                     )
 
-            # Plot matched sources as blue circles
+            # Plot matched sources as blue circles (radius = 3*FWHM)
             for (sx, sy) in sci_matched_xy:
                 ax1.add_patch(Circle(
-                    (sx, sy), _r,
+                    (sx, sy), _r_sci,
                     edgecolor="dodgerblue", facecolor="none",
-                    linewidth=0.8, zorder=5,
+                    linewidth=0.5, zorder=5,
                 ))
             for (tx, ty) in tpl_matched_xy:
                 ax2.add_patch(Circle(
-                    (tx, ty), _r,
+                    (tx, ty), _r_tpl,
                     edgecolor="dodgerblue", facecolor="none",
-                    linewidth=0.8, zorder=5,
+                    linewidth=0.5, zorder=5,
                 ))
 
             # Add text annotations with match index for a subset
@@ -2435,9 +2444,9 @@ class Plot:
             for i in range(0, n_matched, _step):
                 sx, sy = sci_matched_xy[i]
                 tx, ty = tpl_matched_xy[i]
-                ax1.text(sx, sy + _r + 1, str(i),
+                ax1.text(sx, sy + _r_sci + 1, str(i),
                          color="dodgerblue", fontsize=4, ha="center", va="bottom")
-                ax2.text(tx, ty + _r + 1, str(i),
+                ax2.text(tx, ty + _r_tpl + 1, str(i),
                          color="dodgerblue", fontsize=4, ha="center", va="bottom")
 
             # Stats text
