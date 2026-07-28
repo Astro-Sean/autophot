@@ -350,10 +350,15 @@ class Zeropoint:
                 if color_coeff_errors is not None:
                     bp_errs, slope_errs, intercept_err = color_coeff_errors
                     slope1_err, slope2_err = slope_errs
+                    bp_err = float(bp_errs[0]) if len(bp_errs) > 0 else 0.0
                 else:
                     slope1_err, slope2_err = None, None
+                    bp_err = 0.0
 
                 # Segment 1 correction with error propagation
+                # correction = slope1 * color_diff
+                # d(correction)/d(color_diff) = slope1
+                # d(correction)/d(slope1)     = color_diff
                 delta_corr[mask1] = delta_mag[mask1] - slope1 * color_diff[mask1]
                 term_color_measure1 = np.abs(slope1) * sigma_color[mask1]
                 if slope1_err is not None:
@@ -363,11 +368,26 @@ class Zeropoint:
                     color_corr_err[mask1] = term_color_measure1
 
                 # Segment 2 correction (account for continuity) with error propagation
+                # correction = slope2 * color_diff + (slope1 - slope2) * bp
+                #            = slope2 * (color_diff - bp) + slope1 * bp
+                # d(correction)/d(color_diff) = slope2
+                # d(correction)/d(slope2)     = color_diff - bp
+                # d(correction)/d(slope1)     = bp
+                # d(correction)/d(bp)         = slope1 - slope2
                 delta_corr[mask2] = delta_mag[mask2] - (slope2 * color_diff[mask2] + (slope1 - slope2) * bp)
                 term_color_measure2 = np.abs(slope2) * sigma_color[mask2]
                 if slope2_err is not None:
-                    term_color_slope2 = np.abs(slope2_err) * np.abs(color_diff[mask2])
-                    color_corr_err[mask2] = np.sqrt(term_color_measure2**2 + term_color_slope2**2)
+                    term_color_slope2 = np.abs(slope2_err) * np.abs(color_diff[mask2] - bp)
+                    # Slope1 contributes via the (slope1 - slope2) * bp continuity term
+                    term_color_slope1_seg2 = np.abs(slope1_err) * np.abs(bp)
+                    # Breakpoint uncertainty contributes via d(correction)/d(bp) = slope1 - slope2
+                    term_color_bp = np.abs(bp_err) * np.abs(slope1 - slope2)
+                    color_corr_err[mask2] = np.sqrt(
+                        term_color_measure2**2
+                        + term_color_slope2**2
+                        + term_color_slope1_seg2**2
+                        + term_color_bp**2
+                    )
                 else:
                     color_corr_err[mask2] = term_color_measure2
             else:
@@ -1697,18 +1717,22 @@ class Zeropoint:
                         n_segments=n_segments,
                     )
 
-                # Select fitting method: MCMC (default), ODR, or RANSAC
+                # Select fitting method: MCMC (default), ODR, or RANSAC.
+                # Use a per-flux-type copy so the auto-fallback doesn't leak
+                # from AP into PSF (e.g. AP has < 15 sources -> ODR, but PSF
+                # may have >= 15 and should still use MCMC).
                 yerr = np.sqrt(delta_mag_err**2 + color_corr_err**2)
                 n_sources = len(inst_mag)
-                
+                fit_method_this = fit_method
+
                 # Auto-fallback to ODR for small source counts (MCMC unreliable with N < 15)
-                if fit_method.lower() == "mcmc" and n_sources < 15:
+                if fit_method_this.lower() == "mcmc" and n_sources < 15:
                     logger.info(
                         f"Small calibrator pool ({n_sources} sources): using ODR instead of MCMC for reliable convergence"
                     )
-                    fit_method = "odr"
-                
-                if fit_method.lower() == "mcmc":
+                    fit_method_this = "odr"
+
+                if fit_method_this.lower() == "mcmc":
                     # MCMC: Bayesian posterior with proper X,Y error handling
                     ZP, zp_std, inlier_short = self._mcmc_fit(
                         inst_mag,
@@ -1719,7 +1743,7 @@ class Zeropoint:
                     )
                     # Build dummy cov matrix for compatibility
                     cov = np.diag([zp_std**2, 0.0]) if np.isfinite(zp_std) else np.diag([np.nan, 0.0])
-                elif fit_method.lower() == "odr":
+                elif fit_method_this.lower() == "odr":
                     # ODR: proper X,Y error handling with perpendicular variance
                     ZP, zp_std, inlier_short = self._odr_slope1_fit(
                         inst_mag,
