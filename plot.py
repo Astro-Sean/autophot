@@ -234,7 +234,6 @@ class Plot:
                 # Set identical axis limits for all panels based on first image
                 ax.set_xlim(0, ref_width)
                 ax.set_ylim(0, ref_height)
-                # Panel titles for readability; no legends are drawn in these axes.
                 ax.set_title(title, fontsize=10, pad=5)
                 ax.set_xlabel("X [Pixel]", fontsize=9)
                 ax.set_ylabel("Y [Pixel]", fontsize=9)
@@ -1257,9 +1256,9 @@ class Plot:
                 ncol = 3
             )
 
-            # Finalize figure layout
+            # Finalize figure layout — leave room at top for the legend
             if not skip_tight_layout:
-                fig.tight_layout()
+                fig.tight_layout(rect=[0, 0, 1, 0.92])
             ax1.set_aspect("equal", adjustable="box")
 
             # Save figure
@@ -1727,6 +1726,7 @@ class Plot:
             handlelength=1.5,
             handletextpad=0.5,
         )
+        fig.tight_layout(rect=[0, 0, 1, 0.94])
 
         if bool(show):
             plt.show()
@@ -2006,40 +2006,35 @@ class Plot:
                 write_dir, f"Alignment_Offset_{base}.png"
             )
 
-            # --- Run SExtractor on both aligned images --------------------
-            from utils.run_sex import SExtractorWrapper
+            # --- Detect sources in both aligned images using SExtractor -----
+            # SExtractor is used consistently across the entire pipeline for
+            # source detection, avoiding centroiding systematics between
+            # different detectors.
+            from templates import _detect_sextractor_sources
 
             fwhm_pix = float(self.input_yaml.get("fwhm", 3.0))
-            sex = SExtractorWrapper(config=self.input_yaml)
 
-            sci_result = sex.run(
-                fits_path=sci_fpath,
-                use_FWHM=fwhm_pix,
-                return_raw=True,
-                use_for_matching=True,
+            sci_xy, _, _, sci_errx, sci_erry = _detect_sextractor_sources(
+                sci_fpath, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
+                thresh=5.0, fwhm_min=1.5, return_errors=True,
             )
-            ref_result = sex.run(
-                fits_path=template_fpath,
-                use_FWHM=fwhm_pix,
-                return_raw=True,
-                use_for_matching=True,
+            ref_xy, _, _, ref_errx, ref_erry = _detect_sextractor_sources(
+                template_fpath, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
+                thresh=5.0, fwhm_min=1.5, return_errors=True,
             )
 
-            sci_sources = sci_result[1]
-            ref_sources = ref_result[1]
-
-            if sci_sources is None or ref_sources is None:
+            if sci_xy is None or ref_xy is None:
                 logger.warning(
                     "Alignment offset plot: SExtractor returned no sources "
                     "for one or both images."
                 )
                 return
 
-            if len(sci_sources) < 3 or len(ref_sources) < 3:
+            if len(sci_xy) < 3 or len(ref_xy) < 3:
                 logger.warning(
                     "Alignment offset plot: too few sources detected "
                     "(sci=%d, ref=%d); need >= 3 each.",
-                    len(sci_sources), len(ref_sources),
+                    len(sci_xy), len(ref_xy),
                 )
                 return
 
@@ -2049,39 +2044,14 @@ class Plot:
             sci_wcs = WCS(sci_header, naxis=2)
             ref_wcs = WCS(ref_header, naxis=2)
 
-            # --- Extract pixel positions and position errors --------------
-            def _get_xy(table):
-                x_col = "XWIN_IMAGE" if "XWIN_IMAGE" in table.colnames else "X_IMAGE"
-                y_col = "YWIN_IMAGE" if "YWIN_IMAGE" in table.colnames else "Y_IMAGE"
-                x = np.asarray(table[x_col], float)
-                y = np.asarray(table[y_col], float)
-                return x, y
-
-            def _get_pos_errors(table):
-                """Decompose SExtractor error ellipse into x/y sigma.
-
-                Returns (errx, erry) arrays in pixels.  Falls back to
-                FWHM*0.1 if error columns are absent.
-                """
-                if "ERRAWIN_IMAGE" in table.colnames:
-                    erra = np.asarray(table["ERRAWIN_IMAGE"], float)
-                    errb = np.asarray(table["ERRBWIN_IMAGE"], float) if "ERRBWIN_IMAGE" in table.colnames else erra
-                    theta = np.asarray(table["ERRTHETAWIN_IMAGE"], float) if "ERRTHETAWIN_IMAGE" in table.colnames else 0.0
-                    theta_rad = np.deg2rad(theta)
-                    cos_t = np.cos(theta_rad)
-                    sin_t = np.sin(theta_rad)
-                    errx = np.sqrt((erra * cos_t) ** 2 + (errb * sin_t) ** 2)
-                    erry = np.sqrt((erra * sin_t) ** 2 + (errb * cos_t) ** 2)
-                    return errx, erry
-                # Fallback: rough estimate from FWHM
-                fwhm_val = np.asarray(table["FWHM_IMAGE"], float) if "FWHM_IMAGE" in table.colnames else 3.0
-                err = fwhm_val * 0.1
-                return err, err
-
-            sci_x, sci_y = _get_xy(sci_sources)
-            ref_x, ref_y = _get_xy(ref_sources)
-            sci_errx, sci_erry = _get_pos_errors(sci_sources)
-            ref_errx, ref_erry = _get_pos_errors(ref_sources)
+            # --- Extract pixel positions (SExtractor centroids, 0-based) --
+            sci_x, sci_y = sci_xy[:, 0], sci_xy[:, 1]
+            ref_x, ref_y = ref_xy[:, 0], ref_xy[:, 1]
+            # Position errors from SExtractor's error ellipse decomposition
+            sci_errx = np.asarray(sci_errx, float)
+            sci_erry = np.asarray(sci_erry, float)
+            ref_errx = np.asarray(ref_errx, float)
+            ref_erry = np.asarray(ref_erry, float)
 
             from scipy.spatial import cKDTree
 
@@ -2314,3 +2284,150 @@ class Plot:
 
         except Exception as e:
             logger.warning("Alignment offset plot failed: %s", e)
+
+    def plot_spalipy_matches(
+        self,
+        sci_image,
+        tpl_image,
+        sci_matched_xy,
+        tpl_matched_xy,
+        sci_all_xy=None,
+        tpl_all_xy=None,
+        method_label="spalipy",
+    ):
+        """Side-by-side plot of matched sources on science and template images.
+
+        Mirrors the SCAMP/SWarp ``plot_matched_sources_side_by_side`` but
+        works with in-memory arrays and astropy Tables instead of SExtractor
+        LDAC catalogs.
+
+        Parameters
+        ----------
+        sci_image : ndarray
+            Science image data (2D).
+        tpl_image : ndarray
+            Template image data (2D, before alignment).
+        sci_matched_xy : array-like, shape (N, 2)
+            Matched source (x, y) positions in the science image.
+        tpl_matched_xy : array-like, shape (N, 2)
+            Corresponding source (x, y) positions in the template image
+            (same ordering as ``sci_matched_xy``).
+        sci_all_xy : array-like or None
+            All detected sources in the science image (for context).
+        tpl_all_xy : array-like or None
+            All detected sources in the template image (for context).
+        method_label : str
+            Label for the plot title (e.g. "spalipy" or "WCS-seeded").
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            from functions import set_size
+            from astropy.visualization import (
+                ImageNormalize,
+                LinearStretch,
+                ZScaleInterval,
+            )
+            from matplotlib.patches import Circle
+
+            dir_path = os.path.dirname(os.path.realpath(__file__))
+            plt.style.use(os.path.join(dir_path, "autophot.mplstyle"))
+            plt.ioff()
+
+            base = os.path.splitext(
+                os.path.basename(self.input_yaml["fpath"])
+            )[0]
+            write_dir = os.path.dirname(self.input_yaml["fpath"])
+            save_path = os.path.join(
+                write_dir, f"SpalipyMatch_{base}.png"
+            )
+
+            sci_matched_xy = np.asarray(sci_matched_xy, float)
+            tpl_matched_xy = np.asarray(tpl_matched_xy, float)
+            n_matched = len(sci_matched_xy)
+
+            golden_ratio = (5**0.5 + 1) / 2
+            figsize = set_size(540, aspect=0.5 * golden_ratio)
+            fig, (ax1, ax2) = plt.subplots(
+                1, 2, figsize=figsize, constrained_layout=True
+            )
+
+            cmap = plt.get_cmap("gray").copy()
+            cmap.set_bad(color="white")
+
+            for ax, img, title in [
+                (ax1, sci_image, "Science"),
+                (ax2, tpl_image, "Template"),
+            ]:
+                img_f = np.asarray(img, dtype=np.float32)
+                z = ZScaleInterval()
+                vmin, vmax = z.get_limits(img_f)
+                norm = ImageNormalize(
+                    img_f, interval=ZScaleInterval(), stretch=LinearStretch()
+                )
+                ax.imshow(
+                    img_f, cmap=cmap, norm=norm,
+                    origin="lower", aspect="auto",
+                )
+                ax.set_title(title)
+                ax.set_xlabel("X [Pixel]")
+                ax.set_ylabel("Y [Pixel]")
+
+            # Plot all detected sources as small blue dots (context)
+            if sci_all_xy is not None:
+                sci_all = np.asarray(sci_all_xy, float)
+                ax1.scatter(
+                    sci_all[:, 0], sci_all[:, 1],
+                    s=4, c="dodgerblue", alpha=0.4, zorder=2,
+                )
+            if tpl_all_xy is not None:
+                tpl_all = np.asarray(tpl_all_xy, float)
+                ax2.scatter(
+                    tpl_all[:, 0], tpl_all[:, 1],
+                    s=4, c="dodgerblue", alpha=0.4, zorder=2,
+                )
+
+            # Plot matched sources as green circles
+            _r = max(3.0, float(self.input_yaml.get("fwhm", 3.0)))
+            for (sx, sy) in sci_matched_xy:
+                ax1.add_patch(Circle(
+                    (sx, sy), _r,
+                    edgecolor="lime", facecolor="none",
+                    linewidth=0.8, zorder=5,
+                ))
+            for (tx, ty) in tpl_matched_xy:
+                ax2.add_patch(Circle(
+                    (tx, ty), _r,
+                    edgecolor="lime", facecolor="none",
+                    linewidth=0.8, zorder=5,
+                ))
+
+            # Add text annotations with match index for a subset
+            _max_label = min(n_matched, 50)
+            _step = max(1, n_matched // _max_label)
+            for i in range(0, n_matched, _step):
+                sx, sy = sci_matched_xy[i]
+                tx, ty = tpl_matched_xy[i]
+                ax1.text(sx, sy + _r + 1, str(i),
+                         color="lime", fontsize=4, ha="center", va="bottom")
+                ax2.text(tx, ty + _r + 1, str(i),
+                         color="lime", fontsize=4, ha="center", va="bottom")
+
+            # Stats text
+            _stats = f"Matched: {n_matched}\nMethod: {method_label}"
+            ax1.text(
+                0.02, 0.98, _stats,
+                transform=ax1.transAxes, fontsize=6,
+                verticalalignment="top", horizontalalignment="left",
+                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+            )
+
+            fig.savefig(save_path, dpi=150, bbox_inches="tight",
+                        facecolor="white")
+            plt.close(fig)
+            logger.info(
+                "Spalipy match plot saved: %s (%d matched sources)",
+                save_path, n_matched,
+            )
+        except Exception as e:
+            logger.warning("Spalipy match plot failed: %s", e)

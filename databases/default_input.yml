@@ -403,7 +403,7 @@ default_input:
 
   template_subtraction:
     do_subtraction: False # bool --- Enable template subtraction step.
-    alignment_method: swarp # str --- Science-template registration method (swarp=SCAMP+SWarp [recommended, best subpixel], reproject=WCS-only, astroalign=source matching). SCAMP+SWarp consistently outperforms reproject.
+    alignment_method: swarp # str --- Science-template registration method. Options: swarp=SCAMP+SWarp [recommended, best subpixel], reproject=WCS-only, astroalign=source matching, spalipy=spline-warp for non-homogeneous distortion [requires: pip install spalipy], tweakwcs=STScI WCS tweaking+reproject [requires: pip install tweakwcs], chi2_shift=cross-correlation for extended-source fields [requires: pip install image-registration]. Each method falls back to swarp→reproject→astroalign if it fails.
     alignment_use_extended_sources: True # bool --- If True, allow large/extended sources (galaxies) in SCAMP matching catalogs. Extended sources provide valuable alignment anchors in sparse fields.
     alignment_max_fwhm_pix: 50.0 # float --- Max FWHM (pixels) kept when alignment_use_extended_sources=False.
     alignment_min_matched_sources: 6 # int --- Minimum matched sources for a reliable SCAMP WCS solution. Below this, retry with larger radius or fall back to reproject/AstroAlign.
@@ -481,8 +481,8 @@ default_input:
     sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
     sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
     sfft_min_prior_sources: 3 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT performs its own matching; this avoids under-constrained sparse prior lists.
-    sfft_min_class_star: 0.7
-    sfft_max_ellipticity: 0.3
+    sfft_min_class_star: 0.0 # float --- Minimum SExtractor CLASS_STAR for SFFT kernel sources. 0=disabled (default). SFFT does its own source vetting (SExtractor FLAGS, cross-match, PostAnomaly, CVREJ/EVREJ), so pre-filtering by CLASS_STAR is redundant and harmful after spline-warp alignment (distorts PSF, lowers CLASS_STAR for real point sources). Set >0 (e.g. 0.7) only if you have a dense field and want stricter pre-filtering.
+    sfft_max_ellipticity: 0.5 # float --- Maximum SExtractor ellipticity for SFFT kernel sources. 0.5=permissive (default), >=1.0=disabled. SFFT vets its own sources; this is only a coarse pre-filter for obviously elongated objects.
     sfft_allow_unvetted_source_retry: False
     sfft_forceconv: AUTO # str --- SFFT ForceConv direction: "REF" (always convolve reference — difference keeps science PSF), "SCI" (convolve science), "AUTO" (SFFT auto-selects based on FWHMs — RECOMMENDED). AUTO lets SFFT convolve the sharper image to match the broader one, avoiding deconvolution.
     sfft_sky_subtract: True # bool --- Subtract sigma-clipped median sky from both images before SFFT. Per Hu et al. 2022 Section 3.2, sparse-flavor SFFT requires sky-subtracted input so that masking (setting non-source regions to zero) doesn't create artificial step functions at mask boundaries. Uses constant median subtraction (not SExtractor's spatially-varying BACK_TYPE=AUTO which was previously tested and rejected).

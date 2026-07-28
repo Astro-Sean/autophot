@@ -198,7 +198,7 @@ class RemoveCosmicRays:
 
         # --- Finalize ---
         fig.suptitle(title, fontsize=10)
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        plt.tight_layout(rect=[0, 0, 1, 0.93])
 
         png_path = os.path.join(write_dir, f"Cosmic_Rays_{base}.png")
         fig.savefig(
