@@ -28,21 +28,21 @@ SCIENTIFIC_PALETTE = {
     'error_region': '#000000',  # Black with alpha for error regions
 }
 
-# Per-plot inlier primary colors — each RANSAC plot type gets a distinct color
+# Per-plot inlier primary colors - each RANSAC plot type gets a distinct color
 # drawn from the Okabe-Ito palette for colorblind safety.
 RANSAC_PLOT_COLORS = {
-    'zeropoint_ap':      '#0072B2',  # Okabe blue        — Zeropoint scatter, aperture
-    'zeropoint_psf':     '#009E73',  # Okabe green       — Zeropoint scatter, PSF
-    'zeropoint_hist_ap': '#0072B2',  # Okabe blue        — Zeropoint histogram, aperture
-    'zeropoint_hist_psf':'#009E73',  # Okabe green       — Zeropoint histogram, PSF
-    'color_term':        '#E69F00',  # Okabe orange      — Color-term polynomial plot
-    'color_term_piece':  '#CC79A7',  # Okabe reddish-purple — Piecewise color-term plot
-    'linearity':         '#D55E00',  # Okabe vermilion   — Linearity check plot
-    'flux_comparison':   '#56B4E9',  # Okabe sky blue    — Template flux comparison plot
-    'alignment':         '#56B4E9',  # Okabe sky blue    — Pre-SCAMP alignment match plot
-    'outliers':          '#e02b25',  # Red               — Outliers (all plots)
-    'fit':               '#000000',  # Black             — Fit lines (all plots)
-    'error_band':        '#999999',  # Gray              — Error shading (all plots)
+    'zeropoint_ap':      '#0072B2',  # Okabe blue        - Zeropoint scatter, aperture
+    'zeropoint_psf':     '#009E73',  # Okabe green       - Zeropoint scatter, PSF
+    'zeropoint_hist_ap': '#0072B2',  # Okabe blue        - Zeropoint histogram, aperture
+    'zeropoint_hist_psf':'#009E73',  # Okabe green       - Zeropoint histogram, PSF
+    'color_term':        '#E69F00',  # Okabe orange      - Color-term polynomial plot
+    'color_term_piece':  '#CC79A7',  # Okabe reddish-purple - Piecewise color-term plot
+    'linearity':         '#D55E00',  # Okabe vermilion   - Linearity check plot
+    'flux_comparison':   '#56B4E9',  # Okabe sky blue    - Template flux comparison plot
+    'alignment':         '#56B4E9',  # Okabe sky blue    - Pre-SCAMP alignment match plot
+    'outliers':          '#e02b25',  # Red               - Outliers (all plots)
+    'fit':               '#000000',  # Black             - Fit lines (all plots)
+    'error_band':        '#999999',  # Gray              - Error shading (all plots)
 }
 
 # Divergent color palette for source check plots
@@ -51,7 +51,7 @@ DIVERGENT_PALETTE = {
     'negative': '#313695',  # Dark blue for negative deviations
     'neutral': '#FFFFFF',  # White for neutral/center
     'positive': '#FF8C00',  # Orange for positive deviations
-    # Source-check marker colors — distinct primary colors for readability
+    # Source-check marker colors - distinct primary colors for readability
     'target': '#FF0000',    # Red
     'psf': '#00AA00',       # Green
     'reference': '#0000FF', # Blue

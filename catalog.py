@@ -146,13 +146,13 @@ def _skycoord_dedup_keep_one(catalog_df, sep_threshold_arcsec=0.1):
 
     Parameters
     ----------
-    catalog_df : pd.DataFrame  — must contain "RA" and "DEC" columns (degrees)
-    sep_threshold_arcsec : float — angular separation below which two sources
+    catalog_df : pd.DataFrame  - must contain "RA" and "DEC" columns (degrees)
+    sep_threshold_arcsec : float - angular separation below which two sources
                                    are considered duplicates (default 0.1 arcsec)
 
     Returns
     -------
-    pd.DataFrame  — deduplicated catalog with reset integer index
+    pd.DataFrame  - deduplicated catalog with reset integer index
     """
     import numpy as np
     from astropy.coordinates import SkyCoord
@@ -1173,7 +1173,7 @@ class Catalog:
                     missing_cols = [c for c in columns if c not in selectedCatalog.columns]
                     if missing_cols:
                         logger.warning(
-                            "Pan-STARRS response missing expected columns: %s — they will be absent from the catalog",
+                            "Pan-STARRS response missing expected columns: %s - they will be absent from the catalog",
                             missing_cols,
                         )
                     available_columns = [c for c in columns if c in selectedCatalog.columns]
@@ -1357,7 +1357,7 @@ class Catalog:
 
                     # Angular pre-filter: must match how the catalog was queried (usually
                     # within max_distance arcmin of the science target). Using CRVAL + a
-                    # fixed 1° cap wrongly drops on-chip sources on wide stacks / coadds
+                    # fixed 1 deg cap wrongly drops on-chip sources on wide stacks / coadds
                     # where CRVAL sits far from the field geometric center (common after
                     # astrometry.net SIP updates on template images).
                     cfg_cat = self.input_yaml.get("catalog", {}) or {}
@@ -1967,12 +1967,12 @@ class Catalog:
                 n_dups = n_before - len(existing_catalog)
                 if n_dups > 0:
                     logger.warning(
-                        f"Removed {n_dups} duplicates from existing cached catalog — resaving clean version"
+                        f"Removed {n_dups} duplicates from existing cached catalog - resaving clean version"
                     )
                     existing_catalog.to_csv(fpath, index=False, float_format="%.6f")
             elif not existing_catalog.empty:
                 logger.warning(
-                    "Existing cached catalog at %s is missing RA/DEC columns — skipping deduplication",
+                    "Existing cached catalog at %s is missing RA/DEC columns - skipping deduplication",
                     fpath,
                 )
             return existing_catalog
@@ -2000,7 +2000,7 @@ class Catalog:
             # empty (first catalog iteration).
             new_rows = []
             if output_catalog.empty:
-                # No existing sources yet — all entries are new.
+                # No existing sources yet - all entries are new.
                 # Use to_dict('records') instead of iterrows() to avoid creating
                 # a Series object per row (much faster for large catalogs).
                 catalog_cols = [c for c in cols if c in catalog_i.columns]
@@ -2022,7 +2022,7 @@ class Catalog:
                 tol_deg = tolerance_arcsec / 3600.0
                 matched = sep2d.deg < tol_deg
 
-                # Split new (unmatched) sources via boolean mask — no iterrows()
+                # Split new (unmatched) sources via boolean mask - no iterrows()
                 new_mask = ~matched
                 if new_mask.any():
                     catalog_cols = [c for c in cols if c in catalog_i.columns]
@@ -2399,7 +2399,7 @@ class Catalog:
                         linestyle=":",
                         lw=get_line_width('thin'),
                         alpha=0.7,
-                        label=f"Linearity range: {min_flux:.1f}–{max_flux:.1f} flux",
+                        label=f"Linearity range: {min_flux:.1f}-{max_flux:.1f} flux",
                     )
                     ax1.axvline(
                         x=max_inst_mag,

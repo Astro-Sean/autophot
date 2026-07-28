@@ -41,14 +41,14 @@ def _flux_for_mag_cached(m: float, counts_ref: float, exposure_time: float) -> f
     """
     ePSF ``flux`` parameter for instrumental magnitude *m* (cached).
 
-    ``counts_ref`` **must be in e⁻** (aperture sum of the unit-flux PSF render
+    ``counts_ref`` **must be in e-** (aperture sum of the unit-flux PSF render
     after multiplying ADU by gain), matching ``Aperture.counts_AP``.  The ePSF
     model is built from ADU images, so its raw aperture integral is in ADU;
     the caller is responsible for multiplying by gain before passing here.
 
-    ``m`` uses the same e⁻/s convention as ``mag(flux_AP)``.  The returned
+    ``m`` uses the same e-/s convention as ``mag(flux_AP)``.  The returned
     value is the dimensionless PSF flux scale factor such that the injected PSF
-    carries exactly ``10^(-0.4*m) * exposure_time`` e⁻ inside the photometry
+    carries exactly ``10^(-0.4*m) * exposure_time`` e- inside the photometry
     aperture.
     """
     flux_e_per_s = 10.0 ** (-0.4 * m)
@@ -176,7 +176,7 @@ def _compute_p_det(df: pd.DataFrame, beta_n: float) -> pd.Series:
     Compute detection probability (beta) for each site.
 
     Expects ``flux_AP`` and ``noiseSky`` in matching *per-second* units
-    (e⁻/s and e⁻/s per pixel) as from ``Aperture.measure()``.
+    (e-/s and e-/s per pixel) as from ``Aperture.measure()``.
     """
     def _beta_row(row):
         if (np.isfinite(row["flux_AP"]) and row["flux_AP"] > 0
@@ -1078,7 +1078,7 @@ class Limits:
                     ap_vals = stamp[in_ap]
                     ap_vals = ap_vals[np.isfinite(ap_vals)]
                     if ap_vals.size < 4:
-                        # Too few pixels to test — treat as valid (NaN filter already ran)
+                        # Too few pixels to test - treat as valid (NaN filter already ran)
                         keep[i] = True
                         continue
                     mean_ap = float(np.mean(ap_vals))
@@ -1152,7 +1152,7 @@ class Limits:
                         if ratio > _var_ratio_thr:
                             n_drop_var += 1
                             logger.debug(
-                                "Site (%.1f,%.1f) rejected: var_ap/var_ref=%.2f > %.2f (elevated pixel scatter — likely star-subtraction residual).",
+                                "Site (%.1f,%.1f) rejected: var_ap/var_ref=%.2f > %.2f (elevated pixel scatter - likely star-subtraction residual).",
                                 x, y, ratio, _var_ratio_thr,
                             )
                             continue
@@ -1163,7 +1163,7 @@ class Limits:
                         if bias > _mean_sigma_thr:
                             n_drop_mean += 1
                             logger.debug(
-                                "Site (%.1f,%.1f) rejected: |mean_ap - mean_annulus|/sigma=%.2f > %.2f (significant local mean bias — likely star-subtraction pedestal).",
+                                "Site (%.1f,%.1f) rejected: |mean_ap - mean_annulus|/sigma=%.2f > %.2f (significant local mean bias - likely star-subtraction pedestal).",
                                 x, y, bias, _mean_sigma_thr,
                             )
                             continue
@@ -1450,12 +1450,12 @@ class Limits:
             )
             _psf_phot = _psf_ap_obj.do_photometry(psf_unit, method="exact")
             counts_ref_adu = float(_psf_phot[0][0])  # integrated PSF flux in aperture (ADU)
-            # Convert to e⁻ to match Aperture.measure which operates on image*gain.
-            # Without this, _flux_for_mag_cached divides e⁻ by ADU giving F_amp that
-            # is gain× too large, making every injected source gain× too bright and the
+            # Convert to e- to match Aperture.measure which operates on image*gain.
+            # Without this, _flux_for_mag_cached divides e- by ADU giving F_amp that
+            # is gainx too large, making every injected source gainx too bright and the
             # recovered limiting magnitude ~2.5*log10(gain) mag spuriously deep.
-            counts_ref = counts_ref_adu * float(_gain_canon)  # now in e⁻
-            # F_ref = counts_ref (e⁻) / exposure_time → e⁻/s, same units as flux_AP
+            counts_ref = counts_ref_adu * float(_gain_canon)  # now in e-
+            # F_ref = counts_ref (e-) / exposure_time -> e-/s, same units as flux_AP
             exposure_time = float(local_input_yaml["exposure_time"])
             if exposure_time <= 0 or not np.isfinite(exposure_time):
                 logger.warning("Invalid exposure_time (%s) in limits calculation", exposure_time)
@@ -2079,14 +2079,14 @@ class Limits:
                                 w = float(np.clip(w, 0.0, 1.0))
                                 inject_lmag = float(lo_m + w * (hi_m - lo_m))
                                 # Propagate binomial errors through interpolation
-                                # Error in w: σ_w = sqrt((σ_lo_c/denom)² + (σ_hi_c * w/denom)²)
-                                # where σ_lo_c = sqrt(lo_c * (1-lo_c) / n_trials)
-                                # and σ_hi_c = sqrt(hi_c * (1-hi_c) / n_trials)
+                                # Error in w: sigma_w = sqrt((sigma_lo_c/denom)^2 + (sigma_hi_c * w/denom)^2)
+                                # where sigma_lo_c = sqrt(lo_c * (1-lo_c) / n_trials)
+                                # and sigma_hi_c = sqrt(hi_c * (1-hi_c) / n_trials)
                                 if n_trials > 0:
                                     sigma_lo_c = np.sqrt(max(lo_c * (1 - lo_c) / n_trials, 0))
                                     sigma_hi_c = np.sqrt(max(hi_c * (1 - hi_c) / n_trials, 0))
                                     sigma_w = np.sqrt((sigma_lo_c / denom)**2 + (sigma_hi_c * w / denom)**2)
-                                    # Error in inject_lmag: σ_m = sqrt((1-w)² * σ_lo_m² + w² * σ_hi_m² + (hi_m-lo_m)² * σ_w²)
+                                    # Error in inject_lmag: sigma_m = sqrt((1-w)^2 * sigma_lo_m^2 + w^2 * sigma_hi_m^2 + (hi_m-lo_m)^2 * sigma_w^2)
                                     # For now, assume lo_m and hi_m have negligible error compared to binomial sampling
                                     inject_lmag_err = abs(hi_m - lo_m) * sigma_w
                     except Exception:
@@ -3080,7 +3080,7 @@ class Limits:
             else:
                 oversampling_plot = 1
 
-            # ── Demo injection site selection ─────────────────────────────────────────
+            # -- Demo injection site selection -----------------------------------------
             #
             # Priority:
             #   1. Quietest valid site from injection_df (lowest |SNR|).
@@ -3088,7 +3088,7 @@ class Limits:
             #
             # Valid = within cutout bounds (with fwhm margin) AND at least
             #         (2*aperture_radius + fwhm) from the transient position.
-            # ─────────────────────────────────────────────────────────────────────────
+            # -------------------------------------------------------------------------
             min_sep   = 2.0 * aperture_radius + fwhm
             px_margin = float(np.ceil(fwhm))
             inj_dist  = float(lim_cfg.get("inject_source_location", 3.0)) * fwhm
@@ -3130,7 +3130,7 @@ class Limits:
                     scored.append((score, sx, sy))
 
                 if scored:
-                    scored.sort(key=lambda t: t[0])   # ascending → quietest first
+                    scored.sort(key=lambda t: t[0])   # ascending -> quietest first
                     _, demo_x, demo_y = scored[0]
 
             if demo_x is None:
@@ -3319,7 +3319,7 @@ class Limits:
                         inj_y_z = inject_y - y0_zoom
 
                         if recovery_method_upper == "PSF":
-                            # Fast weighted-least-squares PSF S/N — same estimator as _injection_worker.
+                            # Fast weighted-least-squares PSF S/N - same estimator as _injection_worker.
                             phot_cfg_l = self.input_yaml.get("photometry") or {}
                             scale_v    = float(phot_cfg_l.get("psf_fit_shape_vfaint_scale_fwhm", 2.0))
                             half_s     = int(np.ceil(max(3.0, scale_v * fwhm)))
@@ -3368,7 +3368,7 @@ class Limits:
                                     if np.isfinite(flux_err) and flux_err > 0:
                                         snr = np.abs(flux_hat) / flux_err
 
-                        else:  # AP / EMCEE → aperture photometry
+                        else:  # AP / EMCEE -> aperture photometry
                             ap_obj   = Aperture(input_yaml=self.input_yaml, image=injected_zoom)
                             snr_df   = pd.DataFrame({"x_pix": [inj_x_z], "y_pix": [inj_y_z]})
                             snr_meas = ap_obj.measure(
@@ -3653,7 +3653,7 @@ class Limits:
                 recovered_inst = -2.5 * np.log10(recovered_flux_e_per_s_safe)
                 # Add magnitude error propagation
                 if recovered_flux_errs is not None:
-                    # Error propagation: δ(F*counts_ref/t) = δF * counts_ref/t
+                    # Error propagation: delta(F*counts_ref/t) = deltaF * counts_ref/t
                     recovered_flux_e_per_s_err = recovered_flux_errs * counts_ref / exposure_time
                     recovered_flux_e_per_s_err_safe = np.maximum(recovered_flux_e_per_s_err, 1e-30)
                     recovered_inst_err = (2.5 / np.log(10)) * (recovered_flux_e_per_s_err_safe / recovered_flux_e_per_s_safe)
@@ -4017,7 +4017,7 @@ class Limits:
                     n_rows = 1 + len(all_details)
                     y_pos = 1.0 - (idx + 0.5) / n_rows  # Center of each row
                     fig.text(
-                        0.02, y_pos, f"S/N ≥ {d_snr:.0f}",
+                        0.02, y_pos, f"S/N >= {d_snr:.0f}",
                         fontsize=10, fontweight="bold",
                         ha="left", va="center", rotation=90,
                     )

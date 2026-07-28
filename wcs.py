@@ -38,7 +38,7 @@ except (ModuleNotFoundError, ImportError):
         m = str(message).strip()
         if not m:
             return ""
-        return f"\n\n— {m} —\n"
+        return f"\n\n- {m} -\n"
 
     def log_warning_from_exception(logger, message, exc, *, exc_info=False):
         logger.warning("%s: %s", message, exc, exc_info=exc_info)
@@ -96,8 +96,8 @@ def silence_astropy_wcs_info():
     distortion keywords are present but CTYPE lacks the '-SIP' suffix.
 
     Astropy emits this message via two independent channels:
-      1. ``warnings.warn(FITSFixedWarning)``  — caught by warnings.catch_warnings.
-      2. ``logging.getLogger('astropy.wcs.wcs').info(...)`` — caught here.
+      1. ``warnings.warn(FITSFixedWarning)``  - caught by warnings.catch_warnings.
+      2. ``logging.getLogger('astropy.wcs.wcs').info(...)`` - caught here.
 
     Both the child logger (astropy.wcs.wcs) and the parent (astropy.wcs) are
     silenced to WARNING to cover all astropy version paths.
@@ -2004,7 +2004,7 @@ class WCSSolver:
 
         logger.info(
             log_step(
-                f"WCS: Astrometry.net — {os.path.basename(self.fpath)}"
+                f"WCS: Astrometry.net - {os.path.basename(self.fpath)}"
             )
         )
         # Resolve solve-field executable: honour explicit config, then PATH,
@@ -2331,15 +2331,15 @@ class WCSSolver:
             if n_detected_sources is not None and n_detected_sources > 0:
                 if n_detected_sources < 30 and solve_nsigma_val > 3:
                     logger.info(
-                        "Proactive nsigma reduction: %d detected sources → "
-                        "nsigma %d→3 (detect more sources for sparse field)",
+                        "Proactive nsigma reduction: %d detected sources -> "
+                        "nsigma %d->3 (detect more sources for sparse field)",
                         n_detected_sources, solve_nsigma_val,
                     )
                     solve_nsigma_val = 3
                 elif n_detected_sources < 50 and solve_nsigma_val > 4:
                     logger.info(
-                        "Proactive nsigma reduction: %d detected sources → "
-                        "nsigma %d→4 (detect more sources for sparse field)",
+                        "Proactive nsigma reduction: %d detected sources -> "
+                        "nsigma %d->4 (detect more sources for sparse field)",
                         n_detected_sources, solve_nsigma_val,
                     )
                     solve_nsigma_val = 4
@@ -2363,7 +2363,7 @@ class WCSSolver:
             #
             # When n_detected_sources is provided, proactively cap the initial
             # tweak order to avoid wasted solve-field invocations. astrometry.net
-            # minimum correspondences: order 4→15, order 3→10, order 2→6, order 1→3.
+            # minimum correspondences: order 4->15, order 3->10, order 2->6, order 1->3.
             # We use a ~1.5x safety margin on detected sources (not all detections
             # match index stars). A post-solve SIP magnitude check catches any
             # overfitting (wild SIP at corners with too few constraint stars).
@@ -2397,21 +2397,21 @@ class WCSSolver:
                 if _capped:
                     if _capped != tweak_orders:
                         logger.info(
-                            "Proactive tweak order cap: %d detected sources → "
-                            "max feasible order %d → sequence %s (was %s)",
+                            "Proactive tweak order cap: %d detected sources -> "
+                            "max feasible order %d -> sequence %s (was %s)",
                             n_detected_sources, _max_feasible, _capped, tweak_orders,
                         )
                     tweak_orders = _capped
                 elif _max_feasible > 0:
                     logger.info(
-                        "Proactive tweak order cap: %d detected sources → "
-                        "requested order(s) %s exceed max feasible %d → using %d",
+                        "Proactive tweak order cap: %d detected sources -> "
+                        "requested order(s) %s exceed max feasible %d -> using %d",
                         n_detected_sources, tweak_orders, _max_feasible, _max_feasible,
                     )
                     tweak_orders = [_max_feasible]
                 else:
                     logger.info(
-                        "Proactive tweak order cap: %d detected sources → "
+                        "Proactive tweak order cap: %d detected sources -> "
                         "using order 0 only (too few for SIP)",
                         n_detected_sources,
                     )
@@ -2721,10 +2721,10 @@ class WCSSolver:
                                                                 _lower, _lmax,
                                                             )
                                                     else:
-                                                        # Zero SIP or order 0 — acceptable
+                                                        # Zero SIP or order 0 - acceptable
                                                         logger.info(
                                                             "Tweak order %d produced "
-                                                            "zero/none SIP — acceptable",
+                                                            "zero/none SIP - acceptable",
                                                             _lower,
                                                         )
                                                         break

@@ -69,7 +69,7 @@ class RemoveCosmicRays:
             Boolean mask as a numpy array.
         """
         sat_mask = image > satlevel
-        # Use robust MAD-based sigma instead of np.std — cosmic rays and
+        # Use robust MAD-based sigma instead of np.std - cosmic rays and
         # bright stars inflate std, making the mask ineffective at catching
         # the very pixels it should protect.
         finite = image[np.isfinite(image)]

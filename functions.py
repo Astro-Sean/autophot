@@ -133,7 +133,7 @@ class ColoredLevelFormatter(logging.Formatter):
             if self._msg_count == 1:
                 # First message ever: show timestamp (or just bordered message if bordered)
                 first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
-                if first_line[:1] in ("─", "┌", "+"):
+                if first_line[:1] in ("-", "+", "+"):
                     base = f"\n{msg_clean}"
                 else:
                     base = f"{time_str}  {msg_clean}"
@@ -141,7 +141,7 @@ class ColoredLevelFormatter(logging.Formatter):
                 # Same second as previous: no blank line, indent only
                 # For bordered messages: blank line before, no indent
                 first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
-                if first_line[:1] in ("─", "┌", "+"):
+                if first_line[:1] in ("-", "+", "+"):
                     base = f"\n{msg_clean}"
                 else:
                     base = f"  {msg_clean}"
@@ -149,7 +149,7 @@ class ColoredLevelFormatter(logging.Formatter):
                 # New timestamp: blank line before
                 # For bordered messages: blank line before, but no timestamp (they have their own header)
                 first_line = msg_clean.lstrip().split('\n')[0] if msg_clean else ""
-                if first_line[:1] in ("─", "┌", "+"):
+                if first_line[:1] in ("-", "+", "+"):
                     base = f"\n{msg_clean}"
                 else:
                     base = f"\n{time_str}  {msg_clean}"
@@ -752,7 +752,7 @@ def save_to_fits(data, output_filename):
 
 
 def get_distance_modulus(redshift, H0=70, omega=0.3):
-    """Return the distance modulus for *redshift* using a flat ΛCDM cosmology."""
+    """Return the distance modulus for *redshift* using a flat LambdaCDM cosmology."""
     cosmo = FlatLambdaCDM(H0=H0, Om0=omega)
     d = cosmo.luminosity_distance(redshift).value * 1e6
     dm = 5 * np.log10(d / 10)
@@ -791,13 +791,13 @@ def beta_aperture(n, flux_aperture, npix, sigma, noise=0):
     n : float
         Detection threshold in sigma (e.g., 3 for 3*sigma).
     flux_aperture : float or np.ndarray
-        Background-subtracted aperture flux in **per-second** units (e⁻/s),
+        Background-subtracted aperture flux in **per-second** units (e-/s),
         matching ``Aperture.measure``'s ``flux_AP``.
     npix : int or float
         Geometric aperture area in pixels (same ``area`` as ``Aperture`` uses
         for background subtraction), *not* the integer pixel count of a mask.
     sigma : float
-        Per-pixel background RMS in **per-second** units (e⁻/s per pixel),
+        Per-pixel background RMS in **per-second** units (e-/s per pixel),
         matching ``noiseSky`` from ``Aperture.measure``.
     noise : float, optional
         Mean background offset if not background-subtracted (default 0).
@@ -869,7 +869,7 @@ def log_step(msg: str) -> str:
     return f"[{m}]"
 
 
-def border_msg(msg: str, body: str = "─", corner: str = "+",
+def border_msg(msg: str, body: str = "-", corner: str = "+",
                metadata: str | None = None, width: int = 70, use_ansi: bool | None = None) -> str:
     """
     Clean bordered banner for major log sections with bold title.
@@ -879,9 +879,9 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
     msg : str
         Main section title (centered if shorter than width, rendered in bold)
     body : str
-        Border character (default: box-drawing '─')
+        Border character (default: box-drawing '-')
     corner : str
-        Corner character (default: '┌'/'└' with '┐'/'┘')
+        Corner character (default: '+'/'+' with '+'/'+')
     metadata : str | None
         Optional second line with key=value pairs
     width : int
@@ -922,11 +922,11 @@ def border_msg(msg: str, body: str = "─", corner: str = "+",
         bottom_right = "+"
         side = "|"
     else:
-        left_corner = "┌" if corner == "+" else corner
-        right_corner = "┐" if corner == "+" else corner
-        bottom_left = "└"
-        bottom_right = "┘"
-        side = "│"
+        left_corner = "+" if corner == "+" else corner
+        right_corner = "+" if corner == "+" else corner
+        bottom_left = "+"
+        bottom_right = "+"
+        side = "|"
 
     # Truncate or pad title to fit (account for corners and padding)
     max_title = width - 2  # space for left and right corner chars
@@ -982,21 +982,21 @@ def metrics_table(metrics: dict[str, tuple], title: str | None = None, width: in
 
     lines: list[str] = []
     if title:
-        lines.append(f"┌─ {title}{' ' * (width - len(title) - 4)}┐")
+        lines.append(f"+- {title}{' ' * (width - len(title) - 4)}+")
     else:
-        lines.append(f"┌{'─' * (width - 2)}┐")
+        lines.append(f"+{'-' * (width - 2)}+")
 
     max_label = max(len(k) for k in metrics.keys())
-    value_space = width - max_label - 10  # spacing for "│  label... value  │"
+    value_space = width - max_label - 10  # spacing for "|  label... value  |"
 
     for label, (value, unit) in metrics.items():
         val_str = f"{value} {unit}".strip()
         if len(val_str) > value_space:
             val_str = val_str[:value_space-3] + "..."
-        line = f"│  {label:<{max_label}}  {val_str:>{value_space}}  │"
+        line = f"|  {label:<{max_label}}  {val_str:>{value_space}}  |"
         lines.append(line[:width])  # safety truncate
 
-    lines.append(f"└{'─' * (width - 2)}┘")
+    lines.append(f"+{'-' * (width - 2)}+")
     return "\n".join(lines)
 
 
@@ -1013,7 +1013,7 @@ def compact_status(filename: str, results: dict) -> str:
         optionally 'zp', 'n_cal', 'template'
 
     Example output:
-        ✓ SN2024pba_ZTF_r.fits  r=18.34±0.03  S/N=12.5  ✓ Detection
+        OK SN2024pba_ZTF_r.fits  r=18.34+/-0.03  S/N=12.5  OK Detection
     """
     base = os.path.basename(filename)
     if len(base) > 30:
@@ -1026,10 +1026,10 @@ def compact_status(filename: str, results: dict) -> str:
     zp = results.get('zp')
     n_cal = results.get('n_cal')
 
-    parts = [f"{'✓' if detected else '○'} {base:>30}"]
+    parts = [f"{'OK' if detected else 'o'} {base:>30}"]
 
     if np.isfinite(mag) and np.isfinite(mag_err):
-        parts.append(f"m={mag:.2f}±{mag_err:.2f}")
+        parts.append(f"m={mag:.2f}+/-{mag_err:.2f}")
 
     if np.isfinite(snr):
         parts.append(f"S/N={snr:.1f}")
@@ -1040,7 +1040,7 @@ def compact_status(filename: str, results: dict) -> str:
     if n_cal is not None:
         parts.append(f"cal={n_cal}")
 
-    parts.append("✓ Detection" if detected else "○ Limit")
+    parts.append("OK Detection" if detected else "o Limit")
 
     return "  ".join(parts)
 
@@ -1968,7 +1968,7 @@ def mag(flux):
     Does not mutate the input. Non-positive flux values yield NaN in the output.
 
     :param flux: Brightness in *per-second* units, matching ``Aperture.flux_AP`` and
-        ``psf`` ``flux_PSF`` (e⁻/s when photometry uses ``image * gain`` in
+        ``psf`` ``flux_PSF`` (e-/s when photometry uses ``image * gain`` in
         :mod:`aperture`).
     :type flux: float or array
     :return: Instrumental magnitude; NaN where flux <= 0
@@ -2205,7 +2205,7 @@ def nan_crop(data, header, cx, cy, ny, nx):
     """
     Crop an image to (ny, nx) centred on (cx, cy), padding with NaN if the
     region extends beyond the array.  Only CRPIX1/CRPIX2 are updated in the
-    header — all other WCS keywords (CD, SIP, PV, CTYPE, etc.) are left
+    header - all other WCS keywords (CD, SIP, PV, CTYPE, etc.) are left
     untouched, avoiding the distortion-dropping problems that Cutout2D's
     WCS round-trip can introduce.
 
@@ -2256,8 +2256,8 @@ def nan_crop(data, header, cx, cy, ny, nx):
     if sy1 > sy0 and sx1 > sx0:
         out[dy0:dy1, dx0:dx1] = data[sy0:sy1, sx0:sx1]
 
-    # Update only CRPIX — the pixel that was at (cx, cy) in the source
-    # should be at (nx/2, ny/2) in the output (0-based → FITS 1-based).
+    # Update only CRPIX - the pixel that was at (cx, cy) in the source
+    # should be at (nx/2, ny/2) in the output (0-based -> FITS 1-based).
     crpix1 = header.get("CRPIX1", None)
     crpix2 = header.get("CRPIX2", None)
     if crpix1 is not None:

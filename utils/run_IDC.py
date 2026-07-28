@@ -182,7 +182,7 @@ class ImageDistortionCorrector:
         "DISTORT_KEYS": "XWIN_IMAGE,YWIN_IMAGE",
         # Reference catalog column names (science LDAC used as ASTREFCAT_NAME).
         # The science LDAC contains XWIN_WORLD/YWIN_WORLD as its windowed world
-        # coordinates — these are what SCAMP expects for ASTREFCENT_KEYS when the
+        # coordinates - these are what SCAMP expects for ASTREFCENT_KEYS when the
         # reference catalog is an LDAC (not an online catalog like GAIA).
         "ASTREF_WEIGHT": 1,
         "ASTREFMAG_KEY": "MAG_AUTO",
@@ -292,7 +292,7 @@ class ImageDistortionCorrector:
         """
         cat_path = Path(catalog_path)
         try:
-            # Prefer target coordinates from input_yaml — constant per field
+            # Prefer target coordinates from input_yaml - constant per field
             iy = getattr(self, "input_yaml", None) or {}
             target_ra = iy.get("target_ra")
             target_dec = iy.get("target_dec")
@@ -481,12 +481,12 @@ class ImageDistortionCorrector:
         Create a convolution kernel for SExtractor.
 
         Kernel half-width priority (highest to lowest):
-          1. ``scale_half_width`` — the pipeline ``scale`` parameter (already half the
+          1. ``scale_half_width`` - the pipeline ``scale`` parameter (already half the
              cutout box size). Ensures the kernel covers the same footprint used for
              PSF/cutout extraction.
-          2. ``aperture_radius`` — photometry aperture radius, so the matched-filter
+          2. ``aperture_radius`` - photometry aperture radius, so the matched-filter
              kernel exactly covers the detection aperture.
-          3. ``1.7 × fwhm_pixels`` — default aperture formula from run_sex.py.
+          3. ``1.7 x fwhm_pixels`` - default aperture formula from run_sex.py.
 
         ``fwhm_pixels`` always controls the Gaussian sigma regardless of which
         half-width source is used.
@@ -501,9 +501,9 @@ class ImageDistortionCorrector:
 
         # Enforce realistic FWHM bounds: 2.5-15 pixels for convolution kernel
         fwhm_pixels = float(max(2.5, min(fwhm_pixels, 15.0)))
-        # Kernel half-width priority: scale_half_width > aperture_radius > 1.7×FWHM.
+        # Kernel half-width priority: scale_half_width > aperture_radius > 1.7xFWHM.
         # 2*half_width+1 is always odd, so no even-size correction is needed.
-        # SExtractor hard limit: 31×31 pixels.
+        # SExtractor hard limit: 31x31 pixels.
         # Clamp half_width to reasonable range (3-15) to avoid oversized kernels.
         MAX_KERNEL_HALF_WIDTH = 15  # Gives max kernel_size = 31
         if scale_half_width is not None and int(scale_half_width) > 0:
@@ -878,9 +878,9 @@ NNW
                     pixel_scale_header = PIXEL_SCALE if PIXEL_SCALE > 0 else 1.0
                 seeing_fwhm_arcsec = float(fwhm_pixels) * pixel_scale_header
 
-            # Kernel sizing priority: scale > aperture_radius > 1.7×FWHM.
+            # Kernel sizing priority: scale > aperture_radius > 1.7xFWHM.
             # scale is already half the pipeline source-cutout box size, so it
-            # directly gives the kernel half-width — the kernel covers the same
+            # directly gives the kernel half-width - the kernel covers the same
             # footprint as PSF/cutout work.
             _eff_aperture: Optional[float] = None
             if aperture_radius is not None and float(aperture_radius) > 0:
@@ -1347,7 +1347,7 @@ NNW
                 not swarp_available and resample_mode != "wcs_only"
             ):
                 self.logger.info(
-                    "Missing SCAMP/SWarp — using WCS-based reproject fallback for alignment."
+                    "Missing SCAMP/SWarp - using WCS-based reproject fallback for alignment."
                 )
                 result = self._align_fallback_reproject_then_astroalign(
                     science_image, reference_image, output_dir
@@ -1535,7 +1535,7 @@ NNW
                     f"Science image has {distortion_type} distortion. "
                     "Correction will happen during SWarp resampling."
                 )
-                # SWarp does NOT support SIP distortion — it only reads PV/TPV.
+                # SWarp does NOT support SIP distortion - it only reads PV/TPV.
                 # Convert science SIP to PV in-place on sci_image_copy so SWarp
                 # can apply the distortion correction during resampling.
                 if has_sip:
@@ -1592,7 +1592,7 @@ NNW
                 center_dec = float(center_dec[0])
 
                 # Use the original science image for SWarp. Do NOT create a copy with
-                # modified CRPIX/CRVAL — distortion terms (SIP, PV) are evaluated
+                # modified CRPIX/CRVAL - distortion terms (SIP, PV) are evaluated
                 # relative to CRPIX, so moving CRPIX changes the WCS mapping and
                 # introduces a small systematic offset. COMBINE=Y already guarantees
                 # full-size output at the requested IMAGE_SIZE.
@@ -1604,7 +1604,7 @@ NNW
                     sci_shape[1], sci_shape[0], ref_shape[1], ref_shape[0]
                 )
                 
-                # Verify reference covers the science region (diagnostic only —
+                # Verify reference covers the science region (diagnostic only -
                 # never abort alignment if this check fails or WCS doesn't converge).
                 try:
                     sci_corners = np.array(
@@ -1781,7 +1781,7 @@ NNW
             # The header FWHM comes from the carefully measured measure_image step
             # and is far more reliable than SExtractor's estimate in the presence of
             # extended sources or galaxies that inflate the FWHM.
-            # If the alignment SExtractor returns a value > 1.5× the header FWHM,
+            # If the alignment SExtractor returns a value > 1.5x the header FWHM,
             # it's almost certainly contaminated by non-point sources.
             #
             # BUG 108: Only cap when the header FWHM was actually measured.  Pre-built
@@ -1841,7 +1841,7 @@ NNW
             # Use a smaller scale than the pipeline cutout scale to ensure proper
             # source detection. Alignment needs to detect point sources, not use
             # the large cutout scale used for PSF building/subtraction.
-            # Use 1.5×FWHM as a reasonable alignment scale (covers PSF without being excessive)
+            # Use 1.5xFWHM as a reasonable alignment scale (covers PSF without being excessive)
             sci_scale = int(max(5, 1.5 * fwhm_sci_pix))
             ref_scale = int(max(5, 1.5 * fwhm_ref_pix))
             combined_scale = max(sci_scale, ref_scale)
@@ -1941,7 +1941,7 @@ NNW
                     )
                     if sci_catalog3_raw is not None and len(sci_catalog3_raw) > _n_sci2:
                         self.logger.info(
-                            "Sparse-field retry: science %d → %d sources",
+                            "Sparse-field retry: science %d -> %d sources",
                             _n_sci2, len(sci_catalog3_raw),
                         )
                         sci_fwhm2 = sci_fwhm3
@@ -1967,7 +1967,7 @@ NNW
                     )
                     if ref_catalog3_raw is not None and len(ref_catalog3_raw) > _n_ref2:
                         self.logger.info(
-                            "Sparse-field retry: reference %d → %d sources",
+                            "Sparse-field retry: reference %d -> %d sources",
                             _n_ref2, len(ref_catalog3_raw),
                         )
                         ref_fwhm2 = ref_fwhm3
@@ -2065,7 +2065,7 @@ NNW
 
                     # Compute feasible DISTORT_DEGREES for science GAIA SCAMP.
                     # Same logic as reference SCAMP: ensure enough sources for the
-                    # polynomial degree.  Using n_sci_for_gaia as a proxy — SCAMP's
+                    # polynomial degree.  Using n_sci_for_gaia as a proxy - SCAMP's
                     # internal GAIA matching typically matches 50-80% of sources.
                     _sci_min_sources_for_degree = {1: 12, 2: 100, 3: 180, 4: 300}
                     _sci_feasible_degree = 1
@@ -2376,10 +2376,10 @@ NNW
                 if _num_matched >= 3 and _num_matched < min_matched:
                     # We have enough matches for SCAMP to solve a linear WCS
                     # (4 parameters: shift+scale/rotation).  Don't inflate the
-                    # radius — the WCS is good, we just have a sparse field.
+                    # radius - the WCS is good, we just have a sparse field.
                     self.logger.info(
                         "Sparse field: %d matched sources at %.1f\" radius (< %d default minimum). "
-                        "Proceeding with SCAMP — a linear fit needs only 3-4 matches.",
+                        "Proceeding with SCAMP - a linear fit needs only 3-4 matches.",
                         _num_matched, crossid_radius, min_matched,
                     )
                     min_matched = _num_matched
@@ -2494,8 +2494,8 @@ NNW
             if crossid_radius > crossid_arcsec:
                 crossid_arcsec = crossid_radius
             # POSITION_MAXERR: maximum positional uncertainty for sources
-            # accepted in the astrometric fit.  Too tight → SCAMP rejects
-            # sources with any WCS imprecision.  Too loose → contamination.
+            # accepted in the astrometric fit.  Too tight -> SCAMP rejects
+            # sources with any WCS imprecision.  Too loose -> contamination.
             # Floor at 1.0" to handle typical plate-solve uncertainties.
             is_sparse_field = _num_matched < 50
             # Check if extended sources are enabled for alignment
@@ -2522,7 +2522,7 @@ NNW
             # reference image's existing distortion (SIP/PV), because SCAMP's
             # .head file REPLACES the reference WCS.  If DISTORT_DEGREES is
             # lower than the reference's distortion order, the .head degrades
-            # the WCS — high-order SIP terms are lost and replaced with a
+            # the WCS - high-order SIP terms are lost and replaced with a
             # lower-order polynomial, introducing systematic offsets of several
             # pixels across the field.
             #
@@ -2539,9 +2539,9 @@ NNW
             # to be stable for sparse fields.  SCAMP does not accept degree 0.
             # BUG 119: Increased thresholds to require ~2x params to prevent
             # overfitting.  With 36 stars at degree 4 (30 params), the old
-            # threshold of 30 allowed 1.2 stars/param → SCAMP residual 0.68px
+            # threshold of 30 allowed 1.2 stars/param -> SCAMP residual 0.68px
             # but post-SWarp RMS 2.94px (4.4x overfitting ratio).
-            # Current: 1.3x params — less conservative but post-SWarp
+            # Current: 1.3x params - less conservative but post-SWarp
             # verification gate catches overfitting.  Degree 4 with 39 sources
             # (1.3x) was validated on J2344 field (38 sources, RMS=1.89px).
             _min_sources_for_degree = {0: 3, 1: 5, 2: 16, 3: 26, 4: 35}
@@ -2566,7 +2566,7 @@ NNW
             if feasible_degree < required_degree:
                 if _num_matched < _min_sources_for_degree[0]:
                     self.logger.warning(
-                        "Only %d matched sources — too few for any WCS correction "
+                        "Only %d matched sources - too few for any WCS correction "
                         "(need %d). Falling back to reproject/AstroAlign.",
                         _num_matched, _min_sources_for_degree[0],
                     )
@@ -2575,7 +2575,7 @@ NNW
                     )
                 self.logger.info(
                     "Reference has distortion order %d but only %d matched sources "
-                    "(need %d for degree %d). Running SCAMP at degree %d — "
+                    "(need %d for degree %d). Running SCAMP at degree %d - "
                     "post-SWarp verification will reject if residuals are too large.",
                     required_degree, _num_matched,
                     _min_sources_for_degree.get(required_degree, 999),
@@ -2626,7 +2626,7 @@ NNW
                 "FWHM_THRESHOLDS": f"{0.3*fwhm_ref_pix:.2f},{_fwhm_upper_mult*fwhm_ref_pix:.2f}",
             }
             # SCAMP does not accept DISTORT_DEGREES=0 ("keyword out of range").
-            # Use 1 as the minimum — degree 1 is a linear WCS (shift/rotation/scale)
+            # Use 1 as the minimum - degree 1 is a linear WCS (shift/rotation/scale)
             # which is always valid and far better than falling back to reproject.
             scamp_config_ref["DISTORT_DEGREES"] = max(1, distort_degrees)
             sparse_note = " (sparse)" if is_sparse_field else ""
@@ -2665,7 +2665,7 @@ NNW
                 "PIXEL_SCALE": pix_scale,
                 "IMAGE_SIZE": f"{output_width},{output_height}",
                 "RESAMPLING_TYPE": sci_resampling_method,
-                # OVERSAMPLING>0 causes SWarp to compute grid extents at N× sub-pixel
+                # OVERSAMPLING>0 causes SWarp to compute grid extents at Nx sub-pixel
                 # resolution internally then round back, producing off-by-one shape
                 # mismatches when two images are resampled onto the same grid.
                 # OVERSAMPLING=0 disables this entirely.
@@ -2796,23 +2796,23 @@ NNW
                     if scamp_rms is not None and scamp_rms > max_scamp_residual:
                         self.logger.warning(
                             "SCAMP astrometric residual large (%.3f\" > %.1f\"). "
-                            "Proceeding with SWarp — post-SWarp verification gate will decide.",
+                            "Proceeding with SWarp - post-SWarp verification gate will decide.",
                             scamp_rms, max_scamp_residual,
                         )
                     if scamp_nstars is not None and scamp_nstars < min_matched:
                         self.logger.warning(
                             "SCAMP matched only %d stars (< %d minimum). "
-                            "Proceeding with SWarp — post-SWarp verification gate will decide.",
+                            "Proceeding with SWarp - post-SWarp verification gate will decide.",
                             scamp_nstars, min_matched,
                         )
                     if scamp_rms is None and scamp_nstars is None:
                         self.logger.warning(
-                            "SCAMP XML parsing failed — quality gate bypassed. "
+                            "SCAMP XML parsing failed - quality gate bypassed. "
                             "Post-SWarp verification will be the only alignment check."
                         )
                 else:
                     self.logger.warning(
-                        "SCAMP distortion info unavailable — quality gate bypassed. "
+                        "SCAMP distortion info unavailable - quality gate bypassed. "
                         "Post-SWarp verification will be the only alignment check."
                     )
 
@@ -2864,7 +2864,7 @@ NNW
                 # _preserve_reference_sip_in_head uses sip_tpv to convert the
                 # reference's full-order SIP to PV, then replaces SCAMP's
                 # lower-degree PV while keeping SCAMP's linear CRVAL/CD/CRPIX.
-                # SWarp only reads PV/TPV — it silently ignores SIP keywords.
+                # SWarp only reads PV/TPV - it silently ignores SIP keywords.
                 if preserve_sip_in_head:
                     self._preserve_reference_sip_in_head(
                         head_dst, ref_image_copy
@@ -2935,7 +2935,7 @@ NNW
             ref_undersampled = (
                 ref_is_undersampled if ref_is_undersampled is not None else False
             )
-            # Use header-based FWHM for threshold checks — SExtractor FWHM can be
+            # Use header-based FWHM for threshold checks - SExtractor FWHM can be
             # inflated by extended sources, causing undersampled images to be
             # treated as well-sampled (see BUG 92).
             sci_fwhm_resample = (
@@ -2994,7 +2994,7 @@ NNW
 
                 # Copy SCAMP-corrected reference image to aligned location
                 aligned_ref = output_dir / f"aligned_ref_{Path(reference_image).stem}.fits"
-                # Science image is never modified — use the copy as-is
+                # Science image is never modified - use the copy as-is
                 aligned_sci = Path(sci_image_for_swarp)
 
                 # Copy reference image, then apply SCAMP .head WCS to its header
@@ -3077,7 +3077,7 @@ NNW
                 }
                 
                 # Reference image: native pixel scale, shape scaled to match sky coverage
-                # Use combined_resampling_method for consistency — different kernels have
+                # Use combined_resampling_method for consistency - different kernels have
                 # different phase responses that introduce systematic sub-pixel centroid
                 # shifts between images even when the grid is identical.
                 swarp_config_ref = {
@@ -3088,7 +3088,7 @@ NNW
                     "IMAGE_SIZE": f"{ref_output_width},{ref_output_height}",
                 }
                 
-                # Never resample the science image — it defines the target grid.
+                # Never resample the science image - it defines the target grid.
                 # SWarp resampling degrades the PSF and can introduce sub-pixel
                 # shifts that produce dipoles in the subtracted image.
                 aligned_sci = Path(sci_image_for_swarp)
@@ -3123,7 +3123,7 @@ NNW
             else:
                 # "common_grid" (default): Both images resampled by SWarp onto
                 # the same common grid (CENTER, PIXEL_SCALE, IMAGE_SIZE).
-                # This ensures consistent resampling — both images go through
+                # This ensures consistent resampling - both images go through
                 # the same SWarp interpolation kernel, producing matched PSFs
                 # for subtraction.  The science image's WCS defines the grid;
                 # the reference's SCAMP .head corrects its WCS before SWarp.
@@ -3132,7 +3132,7 @@ NNW
                 resample_dir_sci.mkdir(parents=True, exist_ok=True)
                 resample_dir_ref.mkdir(parents=True, exist_ok=True)
 
-                # Run SWarp on science image (no .head — uses its own WCS).
+                # Run SWarp on science image (no .head - uses its own WCS).
                 # SWarp reads WCS from the FITS header. SIP distortion was
                 # already converted to PV above for SWarp compatibility.
                 self.logger.info("Common-grid: resampling science image with SWarp")
@@ -3202,12 +3202,12 @@ NNW
             aligned_ref = ref_target
 
             # Diagnostic: measure post-SWarp alignment residual via centroid
-            # cross-match. Log-only — no pixel-level corrections are applied;
+            # cross-match. Log-only - no pixel-level corrections are applied;
             # SCAMP+SWarp is trusted as the definitive alignment.
             #
             # BUG 97: Pixel-space centroid matching is only valid for common_grid
             # mode where both images share the same pixel grid. For wcs_only and
-            # native_scale, images are on different pixel grids — pixel coordinates
+            # native_scale, images are on different pixel grids - pixel coordinates
             # don't correspond, so matching produces meaningless offsets.
             alignment_metadata = {}
             _post_swarp_verify = bool(
@@ -3372,7 +3372,7 @@ NNW
                         dx = sci_xy[good, 0] - ref_xy[i_sr[good], 0]
                         dy = sci_xy[good, 1] - ref_xy[i_sr[good], 1]
 
-                        # Skip sigma clipping for small samples —
+                        # Skip sigma clipping for small samples -
                         # MAD-based sigma estimates are unstable for
                         # N < 8 and can discard valid matches.
                         if n_matched_verify >= 8:
@@ -3673,13 +3673,13 @@ NNW
                         # If reproject and astroalign also fail, the SWarp result
                         # (even with 2px offset) is far better than no alignment.
                         # BUG 112: Copy resampled files to persistent paths before
-                        # calling fallback — reproject/AstroAlign delete the
+                        # calling fallback - reproject/AstroAlign delete the
                         # aligned_sci_* working directory, destroying the originals.
                         # BUG 113: Track all rejected results and pick the best by
                         # RMS instead of always returning SWarp. AstroAlign often
                         # has better RMS than SWarp but is still gate-rejected.
                         # BUG 115: Backup original reference_image before calling
-                        # fallbacks — reproject/AstroAlign write to output_dir/{base}
+                        # fallbacks - reproject/AstroAlign write to output_dir/{base}
                         # which is the same path as reference_image when it's already
                         # in the output dir.  Without backup, the second fallback
                         # reads the first fallback's output, not the original template.
@@ -3751,7 +3751,7 @@ NNW
                                     "reject_max": _aa_result.get("reject_max", float("inf")),
                                     "reject_n_matched": _aa_result.get("reject_n_matched", 0),
                                 }
-                        # BUG 113: All methods rejected — pick the best by RMS.
+                        # BUG 113: All methods rejected - pick the best by RMS.
                         # BUG 115: Exclude candidates whose aligned output is all-NaN
                         # (can happen when AstroAlign's affine_transform maps the
                         # entire reference outside the science grid).
@@ -3976,7 +3976,7 @@ NNW
                         )
 
                         # Large shape mismatch (>500 px) means SCAMP shifted the reference
-                        # WCS enough that it no longer covers the output grid — padding with
+                        # WCS enough that it no longer covers the output grid - padding with
                         # NaN would produce a spatially misaligned image.  Trigger fallback.
                         # Increased threshold to handle SWarp clipping when CRPIX is offset.
                         if dy > 500 or dx > 500:
@@ -3988,7 +3988,7 @@ NNW
                                 science_image, reference_image, output_dir
                             )
 
-                        # Small mismatch (<=20 px): SWarp rounding artefact — safe to trim/pad.
+                        # Small mismatch (<=20 px): SWarp rounding artefact - safe to trim/pad.
                         # Center the cutout on the same sky position used as the SWarp CENTER
                         # (center_ra, center_dec) projected into the reference pixel frame, so
                         # science and reference share the same celestial anchor point.
@@ -4239,7 +4239,7 @@ NNW
                 return None
 
             # --- Source-based WCS refinement ---
-            # Reproject trusts both WCS blindly — independently plate-solved
+            # Reproject trusts both WCS blindly - independently plate-solved
             # images can disagree by several pixels due to differential
             # atmospheric refraction, flexure, or plate-solution drift.  We
             # refine the reference WCS using matched source positions before
@@ -4415,7 +4415,7 @@ NNW
             n_nan = int(np.sum(~np.isfinite(ref_data)))
             if n_nan > 0:
                 self.logger.info(
-                    "Reference has %d NaN pixels (%.2f%%) — replacing with 0 before reprojection.",
+                    "Reference has %d NaN pixels (%.2f%%) - replacing with 0 before reprojection.",
                     n_nan, 100.0 * n_nan / ref_data.size,
                 )
                 ref_data = np.where(np.isfinite(ref_data), ref_data, 0.0)
@@ -4445,7 +4445,7 @@ NNW
                 if not center_jacobian and _rot_diff > 30.0:
                     center_jacobian = True
                     self.logger.info(
-                        "Large rotation (%.1f deg) — enabling center_jacobian for "
+                        "Large rotation (%.1f deg) - enabling center_jacobian for "
                         "more accurate reproject_adaptive resampling.",
                         _rot_diff,
                     )
@@ -4466,7 +4466,7 @@ NNW
             _fwhm = float(iy.get("fwhm", 0.0)) if isinstance(iy, dict) else 0.0
             if _fwhm > 0 and _fwhm < 2.5 and interp_order_norm in ("bicubic", "biquadratic"):
                 self.logger.info(
-                    "Undersampled image (FWHM=%.2f px < 2.5) — downgrading %s to bilinear "
+                    "Undersampled image (FWHM=%.2f px < 2.5) - downgrading %s to bilinear "
                     "to avoid ringing artifacts.",
                     _fwhm, interp_order_norm,
                 )
@@ -4528,7 +4528,7 @@ NNW
                 self.logger.warning("Reproject alignment failed (all methods): %s", last_exc)
                 return None
 
-            # Footprint coverage check — zero overlap means WCS mismatch
+            # Footprint coverage check - zero overlap means WCS mismatch
             fp_mask = footprint.astype(bool)
             n_footprint = int(np.sum(fp_mask))
             n_total = int(fp_mask.size)
@@ -4565,7 +4565,7 @@ NNW
             )
 
             # Post-reproject alignment verification via centroid cross-match.
-            # Reproject trusts both WCS blindly — independently plate-solved
+            # Reproject trusts both WCS blindly - independently plate-solved
             # images can disagree by several pixels.  Log the residual so
             # downstream stages know the alignment quality.
             reproject_metadata = {}
@@ -5189,9 +5189,9 @@ NNW
                 )
 
             else:
-                # Too few sources for affine fit — use constant CRVAL shift only
+                # Too few sources for affine fit - use constant CRVAL shift only
                 self.logger.info(
-                    "Only %d sources — using constant CRVAL shift (no affine)",
+                    "Only %d sources - using constant CRVAL shift (no affine)",
                     n_sources,
                 )
                 delta_ra = float(cd_sci[0, 0] * median_dx + cd_sci[0, 1] * median_dy)
@@ -5272,7 +5272,7 @@ NNW
         """
         Ensure SCAMP .head has PV distortion keywords for SWarp.
 
-        SWarp does NOT support SIP distortion — it only reads PV/TPV keywords.
+        SWarp does NOT support SIP distortion - it only reads PV/TPV keywords.
         However, SCAMP already converts the reference's SIP distortion into PV
         keywords in its .head file.  SCAMP solves CD + PV jointly, producing a
         self-consistent WCS solution.
@@ -5283,7 +5283,7 @@ NNW
         when the CD matrices matched within 1%, the PV coefficients were
         incompatible, causing flux scaling mismatches and position offsets.
 
-        The correct approach is to leave SCAMP's .head untouched — it already
+        The correct approach is to leave SCAMP's .head untouched - it already
         contains the PV keywords that SWarp needs.  SCAMP's degree may be lower
         than the reference's original SIP order, but a self-consistent low-degree
         PV is far better than an incompatible high-degree PV.
@@ -5308,7 +5308,7 @@ NNW
                 self.logger.info(
                     "SCAMP .head has %d PV keywords (self-consistent CD+PV). "
                     "Reference original SIP order was %d. "
-                    "Using SCAMP's PV solution as-is — SWarp will apply it correctly.",
+                    "Using SCAMP's PV solution as-is - SWarp will apply it correctly.",
                     pv_count, ref_sip_order,
                 )
             else:
@@ -5339,7 +5339,7 @@ NNW
         This replaces SWarp for common_grid alignment.  Unlike SWarp which
         creates a new TAN grid (different CRPIX, no rotation, scalar pixel
         scale), reproject maps directly from the SCAMP-corrected reference
-        WCS to the science WCS — preserving rotation, CD matrix, non-square
+        WCS to the science WCS - preserving rotation, CD matrix, non-square
         pixels, and SIP distortion exactly.
 
         Science image is never touched.  Only the reference is resampled.
@@ -5399,7 +5399,7 @@ NNW
             n_nan_ref = int(np.sum(~np.isfinite(ref_data)))
             if n_nan_ref > 0:
                 self.logger.info(
-                    "Reference has %d NaN pixels (%.2f%%) — replacing with 0 before reprojection.",
+                    "Reference has %d NaN pixels (%.2f%%) - replacing with 0 before reprojection.",
                     n_nan_ref, 100.0 * n_nan_ref / ref_data.size,
                 )
                 ref_data = np.where(np.isfinite(ref_data), ref_data, 0.0)
@@ -5409,7 +5409,7 @@ NNW
                 sci_ps = np.sqrt(abs(sci_wcs.wcs.cd[0,0]*sci_wcs.wcs.cd[1,1] - sci_wcs.wcs.cd[0,1]*sci_wcs.wcs.cd[1,0])) * 3600.0
                 sci_rot = np.degrees(np.arctan2(sci_wcs.wcs.cd[0,1], sci_wcs.wcs.cd[0,0]))
                 self.logger.info(
-                    "Reproject diagnostics — science: shape=%s, pixscale=%.3f arcsec/px, "
+                    "Reproject diagnostics - science: shape=%s, pixscale=%.3f arcsec/px, "
                     "rotation=%.2f deg, CRPIX=(%.1f, %.1f)",
                     sci_shape, sci_ps, sci_rot, sci_wcs.wcs.crpix[0], sci_wcs.wcs.crpix[1],
                 )
@@ -5466,7 +5466,7 @@ NNW
                 ref_ps = np.sqrt(abs(ref_wcs_corrected.wcs.cd[0,0]*ref_wcs_corrected.wcs.cd[1,1] - ref_wcs_corrected.wcs.cd[0,1]*ref_wcs_corrected.wcs.cd[1,0])) * 3600.0
                 ref_rot = np.degrees(np.arctan2(ref_wcs_corrected.wcs.cd[0,1], ref_wcs_corrected.wcs.cd[0,0]))
                 self.logger.info(
-                    "Reproject diagnostics — reference: shape=%s, pixscale=%.3f arcsec/px, "
+                    "Reproject diagnostics - reference: shape=%s, pixscale=%.3f arcsec/px, "
                     "rotation=%.2f deg, CRPIX=(%.1f, %.1f)",
                     ref_data.shape, ref_ps, ref_rot,
                     ref_wcs_corrected.wcs.crpix[0], ref_wcs_corrected.wcs.crpix[1],
@@ -5476,7 +5476,7 @@ NNW
                 if rot_diff > 180:
                     rot_diff = 360 - rot_diff
                 self.logger.info(
-                    "Reproject diagnostics — pixel scale ratio=%.3f, rotation difference=%.2f deg",
+                    "Reproject diagnostics - pixel scale ratio=%.3f, rotation difference=%.2f deg",
                     ps_ratio, rot_diff,
                 )
             except Exception:
@@ -5500,7 +5500,7 @@ NNW
                 if not center_jacobian and rot_diff > 30.0:
                     center_jacobian = True
                     self.logger.info(
-                        "Large rotation (%.1f deg) — enabling center_jacobian for "
+                        "Large rotation (%.1f deg) - enabling center_jacobian for "
                         "more accurate reproject_adaptive resampling.",
                         rot_diff,
                     )
@@ -5515,7 +5515,7 @@ NNW
                     self.logger.warning(
                         "Projection mismatch: science uses SIP distortion but SCAMP "
                         "produced TPV for reference. Reproject will convert between "
-                        "models — residual distortion errors of ~0.5 px are possible."
+                        "models - residual distortion errors of ~0.5 px are possible."
                     )
             except Exception:
                 pass
@@ -5536,13 +5536,13 @@ NNW
             _fwhm = float(iy.get("fwhm", 0.0)) if isinstance(iy, dict) else 0.0
             if _fwhm > 0 and _fwhm < 2.5 and interp_order_norm in ("bicubic", "biquadratic"):
                 self.logger.info(
-                    "Undersampled image (FWHM=%.2f px < 2.5) — downgrading %s to bilinear "
+                    "Undersampled image (FWHM=%.2f px < 2.5) - downgrading %s to bilinear "
                     "to avoid ringing artifacts.",
                     _fwhm, interp_order_norm,
                 )
                 interp_order_norm = "bilinear"
 
-            # --- Run reproject: reference → science grid ---
+            # --- Run reproject: reference -> science grid ---
             # exact is most geometrically accurate (exact pixel-area resampling);
             # adaptive is faster fallback; interp is last resort.
             all_methods = ("exact", "adaptive", "interp")
@@ -5609,7 +5609,7 @@ NNW
             n_total = int(fp_mask.size)
             if n_footprint == 0:
                 self.logger.warning(
-                    "Reproject footprint has zero coverage — WCS mismatch."
+                    "Reproject footprint has zero coverage - WCS mismatch."
                 )
                 return None
             if n_footprint < n_total * 0.5:
@@ -5699,7 +5699,7 @@ NNW
                 self.logger.error("_reproject_to_match: get_wcs failed for source image")
                 return None
 
-        # Reproject source onto target grid — exact-first for best accuracy
+        # Reproject source onto target grid - exact-first for best accuracy
         reprojected_data = None
         footprint = None
         for m in ("exact", "adaptive", "interp"):
@@ -5758,7 +5758,7 @@ NNW
         output_dir,
     ) -> Dict:
         """Try reproject first; if it fails or is unavailable, fall back to AstroAlign."""
-        # BUG 115: Backup reference_image before calling reproject — reproject
+        # BUG 115: Backup reference_image before calling reproject - reproject
         # writes to output_dir/{base_ref}.{ext} which can be the same path as
         # reference_image.  Without backup, AstroAlign reads reproject's output.
         _output_dir = Path(output_dir) if output_dir is not None else Path(science_image).parent
@@ -6072,7 +6072,7 @@ NNW
             # Coverage check: if the aligned output is entirely NaN/Inf, the
             # transform mapped the entire reference outside the science grid
             # or NaN input pixels propagated through interpolation.  This is
-            # a hard failure — return None so the caller falls through.
+            # a hard failure - return None so the caller falls through.
             _finite_frac = float(np.isfinite(aligned_ref_img).sum()) / aligned_ref_img.size
             if _finite_frac < 0.01:
                 self.logger.warning(
@@ -7077,7 +7077,7 @@ NNW
     def clean_image(self, path: Path):
         """Replace non-finite values (NaN/inf) in a FITS image with NaN.
 
-        Note: exact zeros are NOT replaced — zero is a valid pixel value on
+        Note: exact zeros are NOT replaced - zero is a valid pixel value on
         background-subtracted images and replacing it with NaN would create
         artificial holes in the data that corrupt downstream subtraction.
         """
@@ -7677,7 +7677,7 @@ NNW
         # to retain fainter sources in sparse fields. If very few sources pass,
         # fall back to 1.5 to maximize match count for SCAMP.  For extremely
         # sparse fields (< 3 sources at SNR 1.5), lower to 1.0 to use every
-        # available detection — SCAMP's robust fitting rejects spurious
+        # available detection - SCAMP's robust fitting rejects spurious
         # low-SNR matches better than a hard pre-filter.
         _snr_match_thresh = 2.0
         sci_mask = sci_cat["SNR_APER"] >= _snr_match_thresh
@@ -7919,7 +7919,7 @@ NNW
         # SCAMP receives the FULL (pre-filtering) catalogs via the backup paths
         # (sci_catalog_scamp_backup / ref_catalog_scamp_backup), so the thinning
         # had no effect on SCAMP.  It only reduced the catalog written to disk,
-        # which is used by AstroAlign control points — where MORE sources is
+        # which is used by AstroAlign control points - where MORE sources is
         # better (aafitrans/AstroAlign have their own robust RANSAC that handles
         # clustered inputs).
         #

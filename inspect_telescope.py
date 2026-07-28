@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-inspect_telescope.py — CLI wrapper for autophot.inspect_telescope()
+inspect_telescope.py - CLI wrapper for autophot.inspect_telescope()
 
 Usage
 -----

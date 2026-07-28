@@ -198,7 +198,7 @@ class AlignmentVerifier:
         return results
     
     def _verify_coordinate_accuracy(self, sci_wcs: WCS, ref_wcs: WCS, image_shape) -> dict:
-        """Measure round-trip pixel→world→pixel offsets across a 10×10 grid."""
+        """Measure round-trip pixel->world->pixel offsets across a 10x10 grid."""
         
         results = {
             'max_offset_pixels': 0,
@@ -299,7 +299,7 @@ class AlignmentVerifier:
         return results
     
     def _calculate_alignment_score(self, results: dict) -> float:
-        """Compute a weighted alignment score (0–1) from all sub-checks."""
+        """Compute a weighted alignment score (0-1) from all sub-checks."""
         
         score = 1.0
         

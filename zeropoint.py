@@ -840,9 +840,9 @@ class Zeropoint:
             d_perp = (y - x - ZP) / sqrt(2)
         
         The variance in the perpendicular direction is:
-            σ²_perp = (σ²_x + σ²_y) / 2
+            sigma^2_perp = (sigma^2_x + sigma^2_y) / 2
         
-        We minimize the weighted sum: χ² = Σ (y_i - x_i - ZP)² / (σ²_x + σ²_y)
+        We minimize the weighted sum: chi^2 = Sigma (y_i - x_i - ZP)^2 / (sigma^2_x + sigma^2_y)
         
         Parameters
         ----------
@@ -875,7 +875,7 @@ class Zeropoint:
         x_err, y_err = x_err[finite], y_err[finite]
         
         # Model: y = x + ZP  =>  delta = y - x = ZP (constant)
-        # We fit delta = ZP with weights = 1 / (y_err² + x_err²)
+        # We fit delta = ZP with weights = 1 / (y_err^2 + x_err^2)
         # This accounts for total uncertainty in the perpendicular direction
         delta = y - x
         var_perp = x_err**2 + y_err**2  # Variance perpendicular to slope=1 line
@@ -950,7 +950,7 @@ class Zeropoint:
         zp = np.average(delta_in, weights=weights)
         
         # ZP uncertainty from weighted standard error formula:
-        # σ² = 1 / Σ(1/σ²_i) = 1 / w_sum
+        # sigma^2 = 1 / Sigma(1/sigma^2_i) = 1 / w_sum
         var_zp = 1.0 / w_sum if w_sum > 0 else np.nan
         zp_err = np.sqrt(var_zp)
         
@@ -969,7 +969,7 @@ class Zeropoint:
         if dof > 0 and chi2 / dof > 1.0:
             scale = np.sqrt(chi2 / dof)
             zp_err *= scale
-            logger.debug("ODR DEBUG: scaled zp_err by %.2f → %.4f", scale, zp_err)
+            logger.debug("ODR DEBUG: scaled zp_err by %.2f -> %.4f", scale, zp_err)
         
         # Map back to full array
         full_mask = np.zeros(len(x), dtype=bool)
@@ -983,7 +983,7 @@ class Zeropoint:
                 f"x_err median={np.nanmedian(x_err):.3f}, y_err median={np.nanmedian(y_err):.3f}"
             )
         
-        logger.info("ODR: ZP=%.4f ± %.4f (%s/%s inliers, χ²/dof=%.2f)", zp, zp_err, inlier_mask_local.sum(), len(delta), chi2/max(dof,1))
+        logger.info("ODR: ZP=%.4f +/- %.4f (%s/%s inliers, chi^2/dof=%.2f)", zp, zp_err, inlier_mask_local.sum(), len(delta), chi2/max(dof,1))
         
         return zp, zp_err, full_mask
 
@@ -1020,18 +1020,18 @@ class Zeropoint:
         
         **robust=True (default):** Gaussian mixture model with in-model outlier
         handling. Each data point is modeled as a mixture of a main component
-        (tight Gaussian around ZP with variance = σ²_perp) and an outlier
-        component (broad Gaussian with variance = σ²_perp + V_out).
+        (tight Gaussian around ZP with variance = sigma^2_perp) and an outlier
+        component (broad Gaussian with variance = sigma^2_perp + V_out).
         
         Parameters: [ZP, f_out]
         - f_out = outlier fraction (prior: uniform [0, 0.5])
-        - V_out = outlier variance scale (fixed, default 1.0 mag²)
+        - V_out = outlier variance scale (fixed, default 1.0 mag^2)
         
         Likelihood (mixture):
-            L_i = (1-f_out) * N(ZP, σ²_perp) + f_out * N(ZP, σ²_perp + V_out)
+            L_i = (1-f_out) * N(ZP, sigma^2_perp) + f_out * N(ZP, sigma^2_perp + V_out)
         
         **robust=False:** Single Gaussian likelihood (pre-clip outliers).
-            log L = -0.5 * Σ[(y_i - x_i - ZP)² / σ²_perp_i] - 0.5 * Σ log(σ²_perp_i)
+            log L = -0.5 * Sigma[(y_i - x_i - ZP)^2 / sigma^2_perp_i] - 0.5 * Sigma log(sigma^2_perp_i)
         
         Parameters
         ----------
@@ -1055,8 +1055,8 @@ class Zeropoint:
             If True, use Gaussian mixture model for in-model outlier handling.
             If False, use single Gaussian with pre-MCMC sigma-clipping.
         V_out : float
-            Outlier variance scale in mag² (only used when robust=True).
-            Default 1.0 mag² gives ~1 mag outlier scatter.
+            Outlier variance scale in mag^2 (only used when robust=True).
+            Default 1.0 mag^2 gives ~1 mag outlier scatter.
         max_steps : int
             Hard cap on total production steps to prevent infinite runtime.
             Default 50000 when adaptive=True, 10000 otherwise.
@@ -1154,7 +1154,7 @@ class Zeropoint:
                 return lp + log_likelihood(theta)
             
             # Initialize walkers with boundary-aware rejection sampling.
-            # The old code used 0.05 ± 0.02 for f_out, which easily produced
+            # The old code used 0.05 +/- 0.02 for f_out, which easily produced
             # negative values that gave log_prior = -inf and stalled walkers.
             n_walkers_eff = min(n_walkers, max(8, len(delta) // 2))
             n_walkers_eff = max(n_walkers_eff, 8)  # Minimum 8 for 2D
@@ -1279,8 +1279,8 @@ class Zeropoint:
             n_eff = len(zp_samples) / tau_max if tau_max >= 1 else len(zp_samples)
             if n_eff < 200:  # Increased from 100 to 200 for better reliability
                 logger.warning(
-                    f"ZP MCMC low ESS: n_eff ≈ {n_eff:.0f} "
-                    f"(chain {len(zp_samples)}, tau ≈ {tau_max:.1f})"
+                    f"ZP MCMC low ESS: n_eff ~ {n_eff:.0f} "
+                    f"(chain {len(zp_samples)}, tau ~ {tau_max:.1f})"
                 )
 
             # Percentile-based error (16/50/84) to capture asymmetry
@@ -1291,8 +1291,8 @@ class Zeropoint:
             zp_err_hi = zp_p84 - zp
             zp_err = max(zp_err_lo, zp_err_hi)  # Conservative symmetric error
             f_out = np.median(f_out_samples)
-            # Release chain and sampler — the sampler object retains the full
-            # chain internally (n_walkers × n_steps × n_params) even after
+            # Release chain and sampler - the sampler object retains the full
+            # chain internally (n_walkers x n_steps x n_params) even after
             # get_chain(); freeing it now prevents accumulation across images.
             del samples, zp_samples, f_out_samples, sampler
             
@@ -1311,7 +1311,7 @@ class Zeropoint:
             final_mask = p_inlier > inlier_threshold
             
             logger.info(
-                f"MCMC (robust): ZP={zp:.4f} ± {zp_err:.4f}, "
+                f"MCMC (robust): ZP={zp:.4f} +/- {zp_err:.4f}, "
                 f"f_out={f_out:.3f} ({final_mask.sum()}/{len(delta)} inliers, "
                 f"n_walkers={n_walkers_eff}, n_steps={total_steps})"
             )
@@ -1415,8 +1415,8 @@ class Zeropoint:
             n_eff = len(samples) / tau_max if tau_max >= 1 else len(samples)
             if n_eff < 200:  # Increased from 100 to 200 for better reliability
                 logger.warning(
-                    f"ZP MCMC (standard) low ESS: n_eff ≈ {n_eff:.0f} "
-                    f"(chain {len(samples)}, tau ≈ {tau_max:.1f})"
+                    f"ZP MCMC (standard) low ESS: n_eff ~ {n_eff:.0f} "
+                    f"(chain {len(samples)}, tau ~ {tau_max:.1f})"
                 )
             del samples, sampler
             
@@ -1431,7 +1431,7 @@ class Zeropoint:
             f_out = 1.0 - final_mask.mean()
             
             logger.info(
-                f"MCMC (standard): ZP={zp:.4f} ± {zp_err:.4f} "
+                f"MCMC (standard): ZP={zp:.4f} +/- {zp_err:.4f} "
                 f"({final_mask.sum()}/{len(delta)} inliers, f_out={f_out:.3f}, n_steps={total_steps})"
             )
         
@@ -1540,7 +1540,7 @@ class Zeropoint:
         full_mask = np.zeros(orig_size, dtype=bool)
         full_mask[keep_idx] = inlier_mask
         
-        logger.info("ODR: %s/%s inliers, ZP=%.4f ± %.4f", inlier_mask.sum(), len(x), ZP, zp_std)
+        logger.info("ODR: %s/%s inliers, ZP=%.4f +/- %.4f", inlier_mask.sum(), len(x), ZP, zp_std)
         
         # If ODR fails or rejects too many points, fall back to simple median
         if not np.isfinite(ZP) or inlier_mask.sum() < 2:
@@ -2558,7 +2558,7 @@ class Zeropoint:
             y_plot[mask2] = (intercept + slope1 * bp) + slope2 * (x_plot[mask2] - bp)
 
             # Calculate error bands with proper covariance propagation
-            # For y = slope*x + intercept: var(y) = x²*var(slope) + var(intercept) + 2x*cov(slope,intercept)
+            # For y = slope*x + intercept: var(y) = x^2*var(slope) + var(intercept) + 2x*cov(slope,intercept)
             y_err = np.zeros_like(x_plot)
             
             # Segment 1 errors
@@ -2747,7 +2747,7 @@ class Zeropoint:
         """
 
         def weighted_linear_fit(x_seg, y_seg, yerr_seg):
-            """Fit y = slope*x + intercept with weights = 1/yerr².
+            """Fit y = slope*x + intercept with weights = 1/yerr^2.
             Returns (slope, intercept, slope_err, intercept_err, cov)"""
             # Remove points with zero or invalid errors
             valid = (yerr_seg > 0) & np.isfinite(yerr_seg) & np.isfinite(x_seg) & np.isfinite(y_seg)
@@ -2929,8 +2929,8 @@ class Zeropoint:
 
             logger.info(
                 f"fit_color_term: piecewise linear: breakpoint={optimal_bp:.3f}, "
-                f"slope1={slope1:.4f}±{slope1_err:.4f}, slope2={slope2:.4f}±{slope2_err:.4f}, "
-                f"intercept={intercept1:.4f}±{intercept1_err:.4f}"
+                f"slope1={slope1:.4f}+/-{slope1_err:.4f}, slope2={slope2:.4f}+/-{slope2_err:.4f}, "
+                f"intercept={intercept1:.4f}+/-{intercept1_err:.4f}"
             )
 
             return coefficients, coefficient_errors, inlier_mask, overall_method
@@ -3328,7 +3328,7 @@ class Zeropoint:
             fit_color = get_ransac_color('fit')
             err_color = get_ransac_color('error_band')
 
-            # Top panel: uncorrected data — inliers and outliers
+            # Top panel: uncorrected data - inliers and outliers
             _out_mask = ~inlier_mask
             if _out_mask.any():
                 ax1.errorbar(
@@ -3402,7 +3402,7 @@ class Zeropoint:
             std_uncorrected = float(median_abs_deviation(yi, nan_policy="omit"))
             std_corrected = float(median_abs_deviation(yi_corrected, nan_policy="omit"))
 
-            # Bottom panel: corrected data — inliers (corrected), with error band
+            # Bottom panel: corrected data - inliers (corrected), with error band
             ax2.errorbar(
                 xi,
                 yi_corrected,

@@ -79,3 +79,4 @@ docs/
 
 # Agent session notes
 agents.md
+*.egg-info/

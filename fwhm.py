@@ -1273,7 +1273,7 @@ class Find_FWHM:
         Estimate FWHM from a small cutout.
 
         Primary method (photutils >=3.0): fit a Moffat profile to the radial
-        profile using RadialProfile.moffat_fwhm — more accurate for PSF wings.
+        profile using RadialProfile.moffat_fwhm - more accurate for PSF wings.
         Fallback: fit a 2D Gaussian via LevMarLSQFitter.
         """
         data = np.array(cutout, dtype=float)
