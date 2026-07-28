@@ -2672,13 +2672,48 @@ class Templates:
                 sci_al = res["science_aligned"]
                 ref_al = res["reference_aligned"]
                 # Load outputs for RMS diagnostic (separate from alignment I/O)
+                _swarp_ok = True
                 try:
                     sci_al_data, _ = read_fits(sci_al)
                     ref_al_data, _ = read_fits(ref_al)
-                    compute_alignment_rms(sci_al_data, ref_al_data, fwhm_pix,
-                                          input_yaml=self.input_yaml)
+                    _smed, _srms, _sp90 = compute_alignment_rms(
+                        sci_al_data, ref_al_data, fwhm_pix,
+                        input_yaml=self.input_yaml,
+                    )
+                    # Quality gate (backup to post_swarp_verify in run_IDC)
+                    if _smed is not None:
+                        quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
+                        max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
+                        max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
+                        max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
+                        _tpl_fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                        _tpl_scale = max(0.5, min(3.0, _tpl_fwhm / 3.0))
+                        max_offset *= _tpl_scale
+                        max_rms *= _tpl_scale
+                        max_p90 *= _tpl_scale
+                        _swarp_reject = (
+                            (_smed is not None and np.isfinite(_smed) and _smed > max_offset)
+                            or (_srms is not None and np.isfinite(_srms) and _srms > max_rms)
+                            or (_sp90 is not None and np.isfinite(_sp90) and _sp90 > max_p90)
+                        )
+                        if _swarp_reject:
+                            _reasons = []
+                            if _smed is not None and np.isfinite(_smed) and _smed > max_offset:
+                                _reasons.append("offset=%.3f px (> %.2f px)" % (_smed, max_offset))
+                            if _srms is not None and np.isfinite(_srms) and _srms > max_rms:
+                                _reasons.append("RMS=%.3f px (> %.2f px)" % (_srms, max_rms))
+                            if _sp90 is not None and np.isfinite(_sp90) and _sp90 > max_p90:
+                                _reasons.append("P90=%.3f px (> %.2f px)" % (_sp90, max_p90))
+                            logger.warning(
+                                "SCAMP+SWarp alignment rejected: %s. "
+                                "Falling back to next alignment method.",
+                                "; ".join(_reasons) if _reasons else "unknown",
+                            )
+                            _swarp_ok = False
                 except Exception:
                     pass
+                if not _swarp_ok:
+                    return None, None
                 method_used = res.get("alignment_method", "scamp_swarp")
                 logger.info("Alignment succeeded (method: %s).", method_used)
                 # Update target coordinates to reflect new WCS after alignment
@@ -2697,13 +2732,47 @@ class Templates:
                     return None, None
                 sci_al = res["science_aligned"]
                 ref_al = res["reference_aligned"]
+                _aa_ok = True
                 try:
                     sci_al_data, _ = read_fits(sci_al)
                     ref_al_data, _ = read_fits(ref_al)
-                    compute_alignment_rms(sci_al_data, ref_al_data, fwhm_pix,
-                                          input_yaml=self.input_yaml)
+                    _amed, _arms, _ap90 = compute_alignment_rms(
+                        sci_al_data, ref_al_data, fwhm_pix,
+                        input_yaml=self.input_yaml,
+                    )
+                    if _amed is not None:
+                        quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
+                        max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
+                        max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
+                        max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
+                        _tpl_fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                        _tpl_scale = max(0.5, min(3.0, _tpl_fwhm / 3.0))
+                        max_offset *= _tpl_scale
+                        max_rms *= _tpl_scale
+                        max_p90 *= _tpl_scale
+                        _aa_reject = (
+                            (_amed is not None and np.isfinite(_amed) and _amed > max_offset)
+                            or (_arms is not None and np.isfinite(_arms) and _arms > max_rms)
+                            or (_ap90 is not None and np.isfinite(_ap90) and _ap90 > max_p90)
+                        )
+                        if _aa_reject:
+                            _reasons = []
+                            if _amed is not None and np.isfinite(_amed) and _amed > max_offset:
+                                _reasons.append("offset=%.3f px (> %.2f px)" % (_amed, max_offset))
+                            if _arms is not None and np.isfinite(_arms) and _arms > max_rms:
+                                _reasons.append("RMS=%.3f px (> %.2f px)" % (_arms, max_rms))
+                            if _ap90 is not None and np.isfinite(_ap90) and _ap90 > max_p90:
+                                _reasons.append("P90=%.3f px (> %.2f px)" % (_ap90, max_p90))
+                            logger.warning(
+                                "AstroAlign alignment rejected: %s. "
+                                "Falling back to next alignment method.",
+                                "; ".join(_reasons) if _reasons else "unknown",
+                            )
+                            _aa_ok = False
                 except Exception:
                     pass
+                if not _aa_ok:
+                    return None, None
                 method_used = res.get("alignment_method", "astroalign")
                 logger.info("Alignment succeeded (method: %s).", method_used)
                 # Update target coordinates to reflect new WCS after alignment
@@ -3107,7 +3176,8 @@ class Templates:
                             exc_info=True,
                         )
 
-                    # Alignment quality check
+                    # Alignment quality check - reject if RMS exceeds gates
+                    _align_ok = True
                     try:
                         _med_off, _rms_off, _p90_off = compute_alignment_rms(
                             scienceImage, aligned_template, fwhm_pix,
@@ -3117,8 +3187,41 @@ class Templates:
                             "spalipy: alignment RMS median=%.3f px rms=%.3f px.",
                             _med_off, _rms_off,
                         )
+                        # Check against quality gates (same logic as reproject)
+                        quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
+                        max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
+                        max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
+                        max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
+                        # FWHM-adaptive thresholds for fallback gates
+                        _tpl_fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                        _tpl_scale = max(0.5, min(3.0, _tpl_fwhm / 3.0))
+                        max_offset *= _tpl_scale
+                        max_rms *= _tpl_scale
+                        max_p90 *= _tpl_scale
+                        _reject = (
+                            (_med_off is not None and np.isfinite(_med_off) and _med_off > max_offset)
+                            or (_rms_off is not None and np.isfinite(_rms_off) and _rms_off > max_rms)
+                            or (_p90_off is not None and np.isfinite(_p90_off) and _p90_off > max_p90)
+                        )
+                        if _reject:
+                            _reasons = []
+                            if _med_off is not None and np.isfinite(_med_off) and _med_off > max_offset:
+                                _reasons.append("offset=%.3f px (> %.2f px)" % (_med_off, max_offset))
+                            if _rms_off is not None and np.isfinite(_rms_off) and _rms_off > max_rms:
+                                _reasons.append("RMS=%.3f px (> %.2f px)" % (_rms_off, max_rms))
+                            if _p90_off is not None and np.isfinite(_p90_off) and _p90_off > max_p90:
+                                _reasons.append("P90=%.3f px (> %.2f px)" % (_p90_off, max_p90))
+                            logger.warning(
+                                "spalipy alignment rejected: %s. "
+                                "Falling back to next alignment method.",
+                                "; ".join(_reasons) if _reasons else "unknown",
+                            )
+                            _align_ok = False
                     except Exception:
                         pass
+
+                    if not _align_ok:
+                        return None, None
 
                     # Write aligned template with science WCS
                     hdr = templateHeader.copy()
@@ -3316,12 +3419,47 @@ class Templates:
                         output_verify="silentfix+ignore",
                     )
 
-                    # Quality diagnostic
+                    # Quality diagnostic - reject if RMS exceeds gates
+                    _tweak_ok = True
                     try:
-                        compute_alignment_rms(scienceImage, to_write, fwhm_pix,
-                                              input_yaml=self.input_yaml)
+                        _tmed, _trms, _tp90 = compute_alignment_rms(
+                            scienceImage, to_write, fwhm_pix,
+                            input_yaml=self.input_yaml,
+                        )
+                        if _tmed is not None:
+                            quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
+                            max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
+                            max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
+                            max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
+                            _tpl_fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                            _tpl_scale = max(0.5, min(3.0, _tpl_fwhm / 3.0))
+                            max_offset *= _tpl_scale
+                            max_rms *= _tpl_scale
+                            max_p90 *= _tpl_scale
+                            _tweak_reject = (
+                                (_tmed is not None and np.isfinite(_tmed) and _tmed > max_offset)
+                                or (_trms is not None and np.isfinite(_trms) and _trms > max_rms)
+                                or (_tp90 is not None and np.isfinite(_tp90) and _tp90 > max_p90)
+                            )
+                            if _tweak_reject:
+                                _reasons = []
+                                if _tmed is not None and np.isfinite(_tmed) and _tmed > max_offset:
+                                    _reasons.append("offset=%.3f px (> %.2f px)" % (_tmed, max_offset))
+                                if _trms is not None and np.isfinite(_trms) and _trms > max_rms:
+                                    _reasons.append("RMS=%.3f px (> %.2f px)" % (_trms, max_rms))
+                                if _tp90 is not None and np.isfinite(_tp90) and _tp90 > max_p90:
+                                    _reasons.append("P90=%.3f px (> %.2f px)" % (_tp90, max_p90))
+                                logger.warning(
+                                    "tweakwcs alignment rejected: %s. "
+                                    "Falling back to next alignment method.",
+                                    "; ".join(_reasons) if _reasons else "unknown",
+                                )
+                                _tweak_ok = False
                     except Exception:
                         pass
+
+                    if not _tweak_ok:
+                        return None, None
 
                     method_used = "tweakwcs"
                     logger.info("Alignment succeeded (method: %s).", method_used)
