@@ -403,7 +403,7 @@ default_input:
 
   template_subtraction:
     do_subtraction: False # bool --- Enable template subtraction step.
-    alignment_method: swarp # str --- Science-template registration method. Options: swarp=SCAMP+SWarp [recommended, best subpixel], reproject=WCS-only, astroalign=source matching, spalipy=spline-warp for non-homogeneous distortion [requires: pip install spalipy], tweakwcs=STScI WCS tweaking+reproject [requires: pip install tweakwcs], chi2_shift=cross-correlation for extended-source fields [requires: pip install image-registration]. Each method falls back to swarp->reproject->astroalign if it fails.
+    alignment_method: spalipy # str --- Science-template registration method. Options: spalipy=spline-warp with RA/DEC source pre-matching [recommended, most robust], swarp=SCAMP+SWarp [best subpixel], reproject=WCS-only, astroalign=source matching, tweakwcs=STScI WCS tweaking+reproject [requires: pip install tweakwcs], chi2_shift=cross-correlation for extended-source fields [requires: pip install image-registration]. Each method falls back to swarp->reproject->astroalign if it fails.
     alignment_use_extended_sources: True # bool --- If True, allow large/extended sources (galaxies) in SCAMP matching catalogs. Extended sources provide valuable alignment anchors in sparse fields.
     alignment_max_fwhm_pix: 50.0 # float --- Max FWHM (pixels) kept when alignment_use_extended_sources=False.
     alignment_min_matched_sources: 6 # int --- Minimum matched sources for a reliable SCAMP WCS solution. Below this, retry with larger radius or fall back to reproject/AstroAlign.

@@ -2581,7 +2581,7 @@ class Templates:
         templateFpath: str,
         imageCatalog: Optional[Any] = None,
         center: Optional[Any] = None,
-        method: str = "swarp",
+        method: str = "spalipy",
     ) -> Tuple[Optional[str], Optional[str]]:
         """
         Align science and template images to a common pixel grid.
@@ -3670,8 +3670,8 @@ class Templates:
 
             if method == "reproject":
                 logger.warning(
-                    "alignment_method='reproject' selected. SCAMP+SWarp ('swarp') consistently "
-                    "produces better subpixel alignment. Consider switching to swarp."
+                    "alignment_method='reproject' selected. spalipy ('spalipy') is the most robust "
+                    "alignment method. Consider switching to spalipy."
                 )
                 out = _reproject()
                 if out[0]:
@@ -3748,12 +3748,16 @@ class Templates:
                 )
                 return scienceFpath, templateFpath
 
-            # Unknown method: prefer SCAMP+SWarp (consistently best alignment).
+            # Unknown method: prefer spalipy (most robust, RA/DEC pre-matching
+            # + spline-warp for non-homogeneous distortion).
             logger.warning(
-                "Unknown alignment_method=%r; defaulting to swarp -> reproject -> astroalign "
-                "(SCAMP+SWarp consistently produces the best subpixel alignment).",
+                "Unknown alignment_method=%r; defaulting to spalipy -> swarp -> reproject -> astroalign "
+                "(spalipy is the most robust alignment method).",
                 method,
             )
+            out = _spalipy()
+            if out[0]:
+                return out
             out = _swarp()
             if out[0]:
                 return out
