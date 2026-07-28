@@ -540,14 +540,20 @@ def _injection_worker(args):
         # is a noise fluctuation in the opposite direction, NOT a detection
         # of the injected source.
         #
-        # Previous code used |SNR| >= threshold, which counted negative
-        # noise dips as detections and inflated the completeness fraction.
+        # Genuine detections of positive injected sources ALWAYS require
+        # positive recovered flux.  This is the default and recommended
+        # setting; it should not be disabled for normal science images or
+        # difference images (the injection experiment always injects
+        # positive flux to measure the positive-source detection limit).
         #
-        # For difference-image experiments where negative (fading) sources
-        # are physically meaningful, set recovery_use_absolute_snr=True in
-        # the limiting_magnitude config.
+        # The recovery_use_absolute_snr flag controls only the S/N sign
+        # convention (signed vs |SNR|) and is independent of the flux-sign
+        # requirement.
         lim_cfg_det = input_yaml.get("limiting_magnitude") or {}
         use_absolute_snr = bool(lim_cfg_det.get("recovery_use_absolute_snr", False))
+        require_positive_flux = bool(
+            lim_cfg_det.get("recovery_require_positive_flux", True)
+        )
 
         # 1. S/N gate: signed SNR >= threshold (default) or |SNR| >= threshold
         if use_absolute_snr:
@@ -555,10 +561,12 @@ def _injection_worker(args):
         else:
             det_snr = np.isfinite(snr_val) and (snr_val >= effective_snr_limit)
 
-        # 2. Flux gate: recovered flux must be finite.
-        #    For positive-source injection (default), also require flux > 0.
-        #    A negative flux means the fitter found a dip, not a source.
-        require_positive_flux = not use_absolute_snr
+        # 2. Flux gate: recovered flux must be finite and, by default,
+        #    POSITIVE.  A negative flux means the fitter found a dip, not a
+        #    source — this is never a genuine detection of a positive
+        #    injected source.  The positive-flux requirement is the default
+        #    and should only be disabled for exotic negative-injection
+        #    experiments (recovery_require_positive_flux=false).
         det_flux = np.isfinite(recovered_flux)
         if require_positive_flux and det_flux:
             det_flux = recovered_flux > 0
