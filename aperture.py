@@ -468,9 +468,12 @@ def _measure_worker(args):
             mag_err_val = np.nan
 
         rn_term = empirical_std**2 + read_noise_sq
-        # raw_max is a single pixel (e-); scale sky+RN variance by area to match
-        # the same approximation used in the total_var fallback above.
-        max_flux_err = np.sqrt(np.abs(raw_max) + effective_area * rn_term) * inv_exposure_time
+        # maxPixel_err is the uncertainty of a SINGLE pixel (the brightest
+        # pixel in the aperture), not the aperture sum.  The variance of a
+        # single pixel is Poisson(|raw_max|) + sky_var + read_noise^2.
+        # Do NOT scale sky+RN by aperture area (that would overestimate by
+        # sqrt(area) and bias the m_peak_err weights in FWHM fitting).
+        max_flux_err = np.sqrt(np.abs(raw_max) + rn_term) * inv_exposure_time
 
         return {
             "idx": i,
@@ -839,8 +842,16 @@ class Aperture:
         fwhm = self.input_yaml["fwhm"]
         gain = resolve_gain_e_per_adu(gain, self.input_yaml)
         exposure_time = resolve_exposure_time_seconds(exposure_time, self.input_yaml)
-        read_noise = float(read_noise or self.input_yaml.get("read_noise", 0.0))
-        ap_size = ap_size or self.input_yaml["photometry"]["aperture_radius"]
+        # Use explicit read_noise if provided (including 0.0); fall back to
+        # input_yaml only when None.  Using `or` would ignore read_noise=0.0.
+        if read_noise is None:
+            read_noise = float(self.input_yaml.get("read_noise", 0.0))
+        else:
+            read_noise = float(read_noise)
+        if ap_size is None or ap_size <= 0:
+            ap_size = self.input_yaml["photometry"]["aperture_radius"]
+        else:
+            ap_size = float(ap_size)
 
         crowded = self.input_yaml.get("photometry", {}).get("crowded_field", False)
         enforce_nonnegative_local_bkg = bool(
