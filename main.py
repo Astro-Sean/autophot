@@ -1671,7 +1671,9 @@ def run_photometry():
                 target_x, target_y = None, None
                 if "target_ra" in input_yaml and "target_dec" in input_yaml:
                     try:
-                        wcs = get_wcs(header, silent=True)
+                        # Reuse the pipeline WCS (imageWCS) when available;
+                        # only rebuild from header if imageWCS is missing.
+                        wcs = imageWCS if imageWCS is not None else get_wcs(header, silent=True)
                         if wcs is not None and wcs.has_celestial:
                             target_x, target_y = wcs.all_world2pix(
                                 float(input_yaml["target_ra"]),
@@ -1707,14 +1709,16 @@ def run_photometry():
                     safe_fits_write(fpath, image, header)
 
                     # Refresh WCS and recalculate target pixel coordinates.
+                    # Update imageWCS in-place so all downstream code uses the
+                    # post-trim WCS consistently.
                     try:
-                        new_wcs = _safe_wcs_from_header(header, silent=True)
+                        imageWCS = _safe_wcs_from_header(header, silent=True)
                         if (
-                            new_wcs is not None
+                            imageWCS is not None
                             and "target_ra" in input_yaml
                             and "target_dec" in input_yaml
                         ):
-                            new_target_x, new_target_y = new_wcs.all_world2pix(
+                            new_target_x, new_target_y = imageWCS.all_world2pix(
                                 float(input_yaml["target_ra"]),
                                 float(input_yaml["target_dec"]),
                                 0,
@@ -1726,7 +1730,7 @@ def run_photometry():
                                 float(new_target_x),
                                 float(new_target_y),
                             )
-                        elif new_wcs is None:
+                        elif imageWCS is None:
                             logging.warning(
                                 "WCS not available after trimming; cannot refresh target coordinates"
                             )
