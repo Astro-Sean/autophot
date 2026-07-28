@@ -5405,7 +5405,7 @@ class Templates:
                 if n_eff < 15:
                     _floor_mult = 2.0
                 elif n_eff < 25:
-                    _floor_mult = 2.0
+                    _floor_mult = 2.25
                 ker_hw_from_conv = int(np.ceil(_mult_effective * fwhm_conv))
                 ker_hw_floor = int(np.ceil(_floor_mult * fwhm_broad))
 
@@ -5713,6 +5713,17 @@ class Templates:
                     kernel_order = 1
                 else:
                     kernel_order = min(2, _max_auto_order)
+
+                # Large PSF differences cause spatially-varying kernel shapes
+                # that a constant kernel (order 0) cannot model.  Boost to 1
+                # when rel_diff is large and we have enough sources.
+                if rel_diff > 0.4 and n_eff >= 15 and kernel_order < 1:
+                    kernel_order = 1
+                    logger.info(
+                        "Boosting kernel_order to 1 (large PSF rel_diff=%.2f "
+                        "needs spatially-varying kernel).",
+                        rel_diff,
+                    )
 
                 # Last-resort alignment may have spatially-varying residuals
                 # that benefit from a linear kernel.  Only boost from 0->1.
@@ -6122,14 +6133,16 @@ class Templates:
             # REF => DIFF = SCI - conv(REF): transients keep the science PSF.
             # SCI => DIFF = conv(SCI) - REF: difference has reference PSF.
             #
-            # We always convolve the reference (ForceConv=REF) so transients
-            # keep the science PSF.  When the reference is much fainter than
-            # the science, the kernel's flux scaling is large (SCI/REF), which
-            # amplifies the relative kernel error into a larger absolute error.
-            # This is accepted as a trade-off for preserving the science PSF.
+            # Default is AUTO: convolve the SHARPER image to match the BROADER
+            # one (never deconvolve).  Per Hu et al. 2022 Section 6, convolving
+            # to match better seeing causes deconvolution noise amplification.
+            # When science is sharper (FWHM_sci < FWHM_ref), ForceConv=REF
+            # would deconvolve the reference -> noise amplification.
+            # AUTO selects SCI in that case (convolve science to match ref),
+            # and REF when science is broader (preserve science PSF).
             #
-            # Users can override with sfft_forceconv in YAML.
-            _fc_cfg = str(ts_sub.get("sfft_forceconv", "REF")).strip().upper()
+            # Users can override with sfft_forceconv in YAML (REF/SCI/AUTO).
+            _fc_cfg = str(ts_sub.get("sfft_forceconv", "AUTO")).strip().upper()
             if _fc_cfg in ("REF", "SCI", "AUTO"):
                 forceconv = _fc_cfg
                 logger.info(
@@ -6137,9 +6150,9 @@ class Templates:
                     forceconv, science_fwhm, template_fwhm,
                 )
             else:
-                forceconv = "REF"
+                forceconv = "AUTO"
                 logger.warning(
-                    "Unknown sfft_forceconv=%r; defaulting to REF.",
+                    "Unknown sfft_forceconv=%r; defaulting to AUTO.",
                     _fc_cfg,
                 )
 
@@ -6778,8 +6791,14 @@ class Templates:
                 str(rss),
                 "-ko",
                 str(kernel_order),
+                # Background polynomial order: match SFFT behaviour.
+                # The pipeline only subtracts a constant median (not a
+                # spatially-varying background), so bg_order=0 can only model
+                # a constant offset.  Spatially-varying background differences
+                # (sky gradients, host galaxy light) require order 1 to avoid
+                # residual structure that mimics point-source residuals.
                 "-bgo",
-                "0",
+                str(max(int(ts.get("hotpants_bg_order", 1)), 1)),
             ]
             if stamp_loc:
                 args += ["-ssf", stamp_loc]
