@@ -4876,6 +4876,112 @@ def run_photometry():
                     f"Well-detected sources in both images: {len(image_sources)}"
                 )
 
+                # ------------------------------------------------------------------
+                # Cross-image consistency checks: ensure sources are well-behaved
+                # in BOTH science and reference images before passing to SFFT.
+                # A source can pass centroid alignment but still be unsuitable:
+                #   - Blended in one image (different FWHM)
+                #   - Variable or mismatched (extreme flux ratio)
+                #   - Non-PSF-like in one image (different morphology)
+                # These checks use the matched (index-aligned) catalogs from
+                # aperture photometry on both images.
+                # ------------------------------------------------------------------
+                _ts_cfg = input_yaml.get("template_subtraction", {}) or {}
+                _n_before_ximg = len(image_sources)
+                _ximg_mask = np.ones(len(image_sources), dtype=bool)
+
+                # --- Cross-image FWHM consistency ---
+                # A source with very different FWHM in sci vs ref is likely
+                # blended in one image or a galaxy.  Reject FWHM ratio outliers.
+                _fwhm_sci_col = None
+                for _c in ("fwhm", "FWHM_IMAGE", "fwhm_image", "FWHM"):
+                    if _c in image_sources.columns:
+                        _fwhm_sci_col = _c
+                        break
+                _fwhm_tpl_col = None
+                for _c in ("fwhm", "FWHM_IMAGE", "fwhm_image", "FWHM"):
+                    if _c in template_sources.columns:
+                        _fwhm_tpl_col = _c
+                        break
+                if _fwhm_sci_col and _fwhm_tpl_col:
+                    _fwhm_s = pd.to_numeric(image_sources[_fwhm_sci_col], errors="coerce").values
+                    _fwhm_t = pd.to_numeric(template_sources[_fwhm_tpl_col], errors="coerce").values
+                    _fwhm_finite = np.isfinite(_fwhm_s) & np.isfinite(_fwhm_t) & (_fwhm_s > 0) & (_fwhm_t > 0)
+                    if _fwhm_finite.sum() >= 5:
+                        _ratio = np.ones(len(image_sources), dtype=float)
+                        _ratio[_fwhm_finite] = _fwhm_s[_fwhm_finite] / _fwhm_t[_fwhm_finite]
+                        # Robust outlier detection on log-ratio (symmetric)
+                        _log_ratio = np.log(_ratio[_fwhm_finite])
+                        _med_lr = float(np.nanmedian(_log_ratio))
+                        _mad_lr = 1.4826 * float(np.nanmedian(np.abs(_log_ratio - _med_lr)))
+                        if not np.isfinite(_mad_lr) or _mad_lr <= 0:
+                            _mad_lr = 0.3  # fallback ~30% scatter
+                        _fwhm_sigma = float(_ts_cfg.get("sfft_fwhm_ratio_nsigma", 3.0))
+                        _fwhm_max_log = _fwhm_sigma * _mad_lr
+                        _fwhm_bad = _fwhm_finite & (np.abs(np.log(_ratio) - _med_lr) > _fwhm_max_log)
+                        # Also apply a hard physical limit: ratio outside [0.5, 2.0]
+                        # is always suspicious regardless of the distribution
+                        _fwhm_hard_lo = float(_ts_cfg.get("sfft_fwhm_ratio_min", 0.5))
+                        _fwhm_hard_hi = float(_ts_cfg.get("sfft_fwhm_ratio_max", 2.0))
+                        _fwhm_bad = _fwhm_bad | (_fwhm_finite & ((_ratio < _fwhm_hard_lo) | (_ratio > _fwhm_hard_hi)))
+                        _n_fwhm_bad = int(_fwhm_bad.sum())
+                        if _n_fwhm_bad > 0 and (_fwhm_finite & ~_fwhm_bad).sum() >= 5:
+                            _ximg_mask &= ~_fwhm_bad
+                            logging.info(
+                                f"Cross-image FWHM consistency: removed {_n_fwhm_bad} sources "
+                                f"(FWHM ratio outliers > {_fwhm_sigma}sigma or outside [{_fwhm_hard_lo}, {_fwhm_hard_hi}])"
+                            )
+                        elif _n_fwhm_bad > 0:
+                            logging.info(
+                                f"Cross-image FWHM consistency: would remove {_n_fwhm_bad} sources "
+                                f"but too few would remain; keeping all."
+                            )
+
+                # --- Cross-image flux-ratio sanity check ---
+                # Reject sources with extreme flux ratios that are physically
+                # unreasonable for non-variable stars.  This catches:
+                #   - Mismatched sources (wrong cross-match)
+                #   - Variables/transients in the field
+                #   - Sources where aperture photometry is contaminated in one image
+                if "flux_AP" in image_sources.columns and "flux_AP" in template_sources.columns:
+                    _flux_s = pd.to_numeric(image_sources["flux_AP"], errors="coerce").values
+                    _flux_t = pd.to_numeric(template_sources["flux_AP"], errors="coerce").values
+                    _flux_finite = np.isfinite(_flux_s) & np.isfinite(_flux_t) & (_flux_s > 0) & (_flux_t > 0)
+                    if _flux_finite.sum() >= 5:
+                        _flux_ratio = np.ones(len(image_sources), dtype=float)
+                        _flux_ratio[_flux_finite] = _flux_s[_flux_finite] / _flux_t[_flux_finite]
+                        _med_fr = float(np.nanmedian(_flux_ratio[_flux_finite]))
+                        if np.isfinite(_med_fr) and _med_fr > 0:
+                            # Reject ratios that deviate from the median by more
+                            # than a configurable factor (default 5x).  This is
+                            # intentionally permissive — the RANSAC fit in
+                            # find_flux_consistent_sources does the fine filtering.
+                            _flux_max_dev = float(_ts_cfg.get("sfft_flux_ratio_max_deviation", 5.0))
+                            _flux_bad = _flux_finite & (
+                                (_flux_ratio > _med_fr * _flux_max_dev) |
+                                (_flux_ratio < _med_fr / _flux_max_dev)
+                            )
+                            _n_flux_bad = int(_flux_bad.sum())
+                            if _n_flux_bad > 0 and (_flux_finite & ~_flux_bad).sum() >= 5:
+                                _ximg_mask &= ~_flux_bad
+                                logging.info(
+                                    f"Cross-image flux-ratio sanity: removed {_n_flux_bad} sources "
+                                    f"(ratio deviates > {_flux_max_dev}x from median {_med_fr:.3f})"
+                                )
+                            elif _n_flux_bad > 0:
+                                logging.info(
+                                    f"Cross-image flux-ratio sanity: would remove {_n_flux_bad} sources "
+                                    f"but too few would remain; keeping all."
+                                )
+
+                if _ximg_mask.sum() < _n_before_ximg:
+                    image_sources = image_sources[_ximg_mask].copy()
+                    template_sources = template_sources[_ximg_mask].copy()
+                    logging.info(
+                        f"Cross-image consistency: {_n_before_ximg} -> {len(image_sources)} sources "
+                        f"({_n_before_ximg - len(image_sources)} removed)"
+                    )
+
                 # Cross-match science and template sources for subtraction
                 if len(image_sources) > 5:
                     template_obj = Templates(input_yaml=input_yaml)
@@ -5144,6 +5250,94 @@ def run_photometry():
                                     f"sources leaving only {isolated.sum()} (< 5). "
                                     f"Keeping all {len(ms)} sources."
                                 )
+
+                        # --- PSF fit quality cuts ---
+                        # The PSF fit (run above on the science image) produces
+                        # cfit, qfit, reduced_chi2, and flags for each source.
+                        # These directly measure whether the source is PSF-like:
+                        #   - cfit: concentration fit (high = extended/blended)
+                        #   - qfit: goodness-of-fit (high = bad fit)
+                        #   - reduced_chi2: high = poor model fit
+                        #   - flags: non-zero = fit problem
+                        # Sources with bad PSF fits will bias the SFFT kernel
+                        # because SFFT assumes all prior sources are point-like.
+                        _ts_cfg_refine = input_yaml.get("template_subtraction", {}) or {}
+                        _psf_quality_mask = np.ones(len(ms), dtype=bool)
+
+                        # cfit cut (concentration/shape)
+                        if "cfit" in ms.columns:
+                            _cfit = pd.to_numeric(ms["cfit"], errors="coerce").values
+                            _cfit_max = float(_ts_cfg_refine.get("sfft_max_cfit", 0.5))
+                            if _cfit_max > 0:
+                                _cfit_bad = np.isfinite(_cfit) & (_cfit > _cfit_max)
+                                _n_cfit_bad = int(_cfit_bad.sum())
+                                if _n_cfit_bad > 0 and (~_cfit_bad | ~np.isfinite(_cfit)).sum() >= 5:
+                                    _psf_quality_mask &= ~_cfit_bad
+                                    logging.info(
+                                        f"PSF cfit cut: removed {_n_cfit_bad} sources (cfit > {_cfit_max})"
+                                    )
+                                elif _n_cfit_bad > 0:
+                                    logging.info(
+                                        f"PSF cfit cut skipped: would remove {_n_cfit_bad} "
+                                        f"sources leaving too few."
+                                    )
+
+                        # qfit cut (goodness-of-fit)
+                        if "qfit" in ms.columns:
+                            _qfit = pd.to_numeric(ms["qfit"], errors="coerce").values
+                            _qfit_max = float(_ts_cfg_refine.get("sfft_max_qfit", 1.0))
+                            if _qfit_max > 0:
+                                _qfit_bad = np.isfinite(_qfit) & (_qfit > _qfit_max)
+                                _n_qfit_bad = int(_qfit_bad.sum())
+                                if _n_qfit_bad > 0 and (~_qfit_bad | ~np.isfinite(_qfit)).sum() >= 5:
+                                    _psf_quality_mask &= ~_qfit_bad
+                                    logging.info(
+                                        f"PSF qfit cut: removed {_n_qfit_bad} sources (qfit > {_qfit_max})"
+                                    )
+                                elif _n_qfit_bad > 0:
+                                    logging.info(
+                                        f"PSF qfit cut skipped: would remove {_n_qfit_bad} "
+                                        f"sources leaving too few."
+                                    )
+
+                        # reduced chi-squared cut
+                        if "reduced_chi2" in ms.columns:
+                            _chi2 = pd.to_numeric(ms["reduced_chi2"], errors="coerce").values
+                            _chi2_max = float(_ts_cfg_refine.get("sfft_max_reduced_chi2", 5.0))
+                            if _chi2_max > 0:
+                                _chi2_bad = np.isfinite(_chi2) & (_chi2 > _chi2_max)
+                                _n_chi2_bad = int(_chi2_bad.sum())
+                                if _n_chi2_bad > 0 and (~_chi2_bad | ~np.isfinite(_chi2)).sum() >= 5:
+                                    _psf_quality_mask &= ~_chi2_bad
+                                    logging.info(
+                                        f"PSF chi2 cut: removed {_n_chi2_bad} sources (reduced_chi2 > {_chi2_max})"
+                                    )
+                                elif _n_chi2_bad > 0:
+                                    logging.info(
+                                        f"PSF chi2 cut skipped: would remove {_n_chi2_bad} "
+                                        f"sources leaving too few."
+                                    )
+
+                        # PSF fit flags cut
+                        if "flags" in ms.columns:
+                            _flags = pd.to_numeric(ms["flags"], errors="coerce").fillna(0).astype(int).values
+                            _flags_max = int(_ts_cfg_refine.get("sfft_max_psf_flags", 0))
+                            if _flags_max >= 0:
+                                _flags_bad = _flags > _flags_max
+                                _n_flags_bad = int(_flags_bad.sum())
+                                if _n_flags_bad > 0 and (~_flags_bad).sum() >= 5:
+                                    _psf_quality_mask &= ~_flags_bad
+                                    logging.info(
+                                        f"PSF flags cut: removed {_n_flags_bad} sources (flags > {_flags_max})"
+                                    )
+                                elif _n_flags_bad > 0:
+                                    logging.info(
+                                        f"PSF flags cut skipped: would remove {_n_flags_bad} "
+                                        f"sources leaving too few."
+                                    )
+
+                        if _psf_quality_mask.sum() < len(ms):
+                            ms = ms[_psf_quality_mask]
 
                         n_after_refine = len(ms)
                         if n_after_refine < n_before_refine:
