@@ -717,16 +717,17 @@ class MCMCFitter:
                     raise ValueError(
                         f"background_rms shape {background_rms.shape} incompatible with data shape {image_e.shape}"
                     )
-        # Ensure background RMS is not too small (minimum floor)
-        bkg_rms_e_floored = np.maximum(bkg_rms_e, 1.0)  # Minimum 1 e- RMS
-        bkg_error = np.sqrt(bkg_rms_e_floored**2 + float(readnoise) ** 2)
-        
+        # Use bkg_rms_e directly (no artificial floor) to match
+        # create_nddata_with_fitting_weights.  The 1e-12 floor on
+        # total_error below is sufficient to prevent division by zero.
+        bkg_error = np.sqrt(bkg_rms_e**2 + float(readnoise) ** 2)
+
         # When data is background-subtracted, the Poisson variance from the sky
         # is missing.  Approximate it as bkg_rms^2 (Poisson: variance ~ mean).
         poisson_e = image_e
         if is_background_subtracted:
             # Add back the sky Poisson variance that was subtracted
-            poisson_e = poisson_e + bkg_rms_e_floored**2
+            poisson_e = poisson_e + bkg_rms_e**2
             # Ensure no negative values after adding back variance
             poisson_e = np.maximum(poisson_e, 0.0)
         
@@ -2733,23 +2734,25 @@ class PSF:
             
             epsf_builder = EPSFBuilder(**epsf_builder_kwargs)
 
-            # Initialise ePSF from a Moffat profile. The wing parameter is
-            # configurable; larger values approach Gaussian-like cores.
-            moffat_alpha = float(phot_cfg.get("psf_init_moffat_beta", 4.765))
-            moffat_alpha = max(1.1, moffat_alpha)
+            # Initialise ePSF from a Moffat profile. The power-law index (beta)
+            # is configurable; larger values approach Gaussian-like cores.
+            # Note: astropy's Moffat2DKernel calls this parameter "alpha", but
+            # in astronomy it is conventionally called the Moffat beta index.
+            moffat_beta = float(phot_cfg.get("psf_init_moffat_beta", 4.765))
+            moffat_beta = max(1.1, moffat_beta)
             moffat_gamma = (oversample * fwhm) / (
-                2.0 * np.sqrt(2.0 ** (1.0 / moffat_alpha) - 1.0)
+                2.0 * np.sqrt(2.0 ** (1.0 / moffat_beta) - 1.0)
             )
             log.info(
                 "ePSF init kernel: moffat_beta=%g, gamma=%g px, size=%dx%d",
-                moffat_alpha,
+                moffat_beta,
                 float(moffat_gamma),
                 int(oversample * cutout_n),
                 int(oversample * cutout_n),
             )
             kernel = Moffat2DKernel(
                 gamma=max(float(moffat_gamma), 1e-6),
-                alpha=float(moffat_alpha),
+                alpha=float(moffat_beta),
                 x_size=oversample * cutout_n,
                 y_size=oversample * cutout_n,
             )
@@ -3227,6 +3230,17 @@ class PSF:
         if epsf_model is None:
             log.info("No ePSF model; returning sources unchanged.")
             return sources
+
+        # Detect difference images via the FORCECON header keyword (set by
+        # SFFT/ZOGY).  On difference images, negative PSF fluxes are
+        # physically meaningful (fading sources) and should NOT be clipped.
+        is_difference_image = False
+        if self.header is not None:
+            _forcecon = str(self.header.get("FORCECON", "")).strip().upper()
+            if _forcecon in ("REF", "SCI", "AUTO", "ZOGY"):
+                is_difference_image = True
+                log.info("PSF fit: detected difference image (FORCECON=%s); "
+                         "negative fluxes will be preserved.", _forcecon)
 
         fwhm = float(self.input_yaml.get("fwhm", 3.0))
         exposure_time = resolve_exposure_time_seconds(None, self.input_yaml)
@@ -4504,13 +4518,17 @@ class PSF:
             inverted_fit_mask[:] = False
 
         # Enforce positive fitted fluxes: negative solutions are unphysical for
-        # a positive PSF and indicate overfitting or local background issues.
-        # Clip at a tiny floor and propagate to errors.
-        # EXCEPTION: preserve negative flux for inverted fits (fading sources)
+        # a positive PSF on science images and indicate overfitting or local
+        # background issues.  Clip at a tiny floor and propagate to errors.
+        # EXCEPTIONS: preserve negative flux for:
+        #   1. Inverted fits (fading sources detected via image inversion)
+        #   2. Difference images (FORCECON header set by SFFT/ZOGY), where
+        #      negative fluxes are physically meaningful (fading sources)
+        allow_negative = inverted_fit_mask | is_difference_image
         with np.errstate(invalid="ignore"):
             flux_fit_clipped = np.clip(flux_fit, 1e-6, np.inf)
-            # For inverted fits, use the original negative flux; for normal fits, use clipped
-            flux_fit = np.where(inverted_fit_mask, flux_fit, flux_fit_clipped)
+            # For allowed-negative fits, use the original flux; otherwise clip
+            flux_fit = np.where(allow_negative, flux_fit, flux_fit_clipped)
             flux_err = np.where(np.isfinite(flux_err), flux_err, np.nan)
         cfit_out = self._first_present(combined, ["cfit"])
         qfit_out = self._first_present(combined, ["qfit"])
@@ -4712,18 +4730,20 @@ class PSF:
         with np.errstate(divide="ignore", invalid="ignore"):
             inst_col = f"inst_{image_filter}_PSF"
             inst_err_col = f"inst_{image_filter}_PSF_err"
-            # For inverted fits, use absolute flux for magnitude calculation
-            # Use updated's _inverted_fit column (copied at line ~3876) to match updated's shape
+            # For inverted fits and difference images, use absolute flux for
+            # magnitude calculation (negative flux = fading source, |flux| is
+            # the physically meaningful flux for mag computation).
             inverted_fit_mask_updated = updated.get("_inverted_fit", pd.Series(False, index=updated.index)).to_numpy(dtype=bool)
+            allow_negative_updated = inverted_fit_mask_updated | is_difference_image
             flux_arr = np.asarray(updated["flux_PSF"], dtype=float)
             flux_err_arr = np.asarray(updated["flux_PSF_err"], dtype=float)
             abs_flux = np.abs(flux_arr)
-            flux_for_mag = np.where(inverted_fit_mask_updated, abs_flux, flux_arr)
+            flux_for_mag = np.where(allow_negative_updated, abs_flux, flux_arr)
             # Valid flux criteria:
             #   - finite flux and flux_err
-            #   - non-inverted: flux must be positive (negative = failed fit, not a real
-            #     negative source)
-            #   - inverted: |flux| must be positive (flux is negative by design)
+            #   - science image (non-negative-allowed): flux must be positive
+            #     (negative = failed fit, not a real negative source)
+            #   - inverted/difference: |flux| must be positive
             #   - SNR sanity: |flux|/flux_err >= 0.01 to reject near-zero flux fits that
             #     produce absurd magnitudes (e.g., flux~3e-9 -> mag~21, err~3.7e8)
             with np.errstate(divide="ignore", invalid="ignore"):
@@ -4733,8 +4753,8 @@ class PSF:
                 & np.isfinite(flux_err_arr)
                 & (abs_flux > 0)
                 & (
-                    (inverted_fit_mask_updated & (abs_flux > 0))
-                    | (~inverted_fit_mask_updated & (flux_arr > 0))
+                    (allow_negative_updated & (abs_flux > 0))
+                    | (~allow_negative_updated & (flux_arr > 0))
                 )
                 & np.isfinite(_snr)
                 & (_snr >= 0.01)
