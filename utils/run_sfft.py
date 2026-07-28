@@ -1781,24 +1781,30 @@ def run_sfft() -> Optional[int]:
                         _kerhw = int(diff_hdr.get("KERHW", 0))
                         if _kerhw > 0 and _solution is not None:
                             _L = 2 * _kerhw + 1
-                            _N0, _N1 = data_sci.shape
+                            # SFFT transposes images on load (fits.getdata().T),
+                            # so its internal N0 = nx (columns), N1 = ny (rows).
+                            # data_sci.shape = (ny, nx), so swap for FromArray.
+                            _ny_img, _nx_img = data_sci.shape
                             _DK = int(diff_hdr.get("KERORDER", diff_hdr.get("KERPOLY", 0)))
                             _Fpq_raw = diff_hdr.get("BGORDER", diff_hdr.get("BGPOLY", 0))
                             _Fpq = int((_Fpq_raw + 1) * (_Fpq_raw + 2) // 2)
                             # Realize the kernel at the image centre.
-                            # Realize_MatchingKernel takes XY_q (Fortran coord) in __init__
-                            # and returns KerStack of shape (Num_request, L, L).
-                            _cx = float(_N1) / 2.0  # Fortran X = column
-                            _cy = float(_N0) / 2.0  # Fortran Y = row
+                            # Realize_MatchingKernel takes XY_q in [X, Y] = [col, row]
+                            # order (SFFT's Fortran convention).
+                            _cx = float(_nx_img) / 2.0  # X = column
+                            _cy = float(_ny_img) / 2.0  # Y = row
                             _XY_q = np.array([[_cx, _cy]])
                             _ker_stack = Realize_MatchingKernel(_XY_q).FromArray(
                                 Solution=_solution,
-                                N0=_N0, N1=_N1,
+                                N0=_nx_img, N1=_ny_img,  # SFFT: N0=nx, N1=ny
                                 L0=_L, L1=_L,
                                 DK=_DK, Fpq=_Fpq,
                             )
-                            # KerStack[0] is the kernel at the requested coordinate
-                            _ker_2d = np.asarray(_ker_stack[0]).squeeze()
+                            # KerStack[0] is the kernel at the requested coordinate.
+                            # SFFT stores the kernel in transposed (X, Y) = (col, row)
+                            # order.  Transpose to numpy (Y, X) = (row, col) for
+                            # fftconvolve with non-transposed images.
+                            _ker_2d = np.asarray(_ker_stack[0]).squeeze().T
                             if _ker_2d.ndim == 2 and _ker_2d.shape[0] == _L:
                                 diff_arr = _decorrelate_diffim(
                                     diff_arr, _ker_2d,
