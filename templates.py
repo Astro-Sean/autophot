@@ -2933,37 +2933,74 @@ class Templates:
                     _interp_order = 2 if _med_fwhm < 3.0 else 3
                     _sub_tile = 2 if _n_sources >= 200 else 1
 
+                    # Spline order: SmoothBivariateSpline requires at least
+                    # (kx+1)*(ky+1) matched sources (not detected sources).
+                    # After quad matching, typically only ~70-85% of detected
+                    # sources are matched.  We use a conservative estimate:
+                    # require 1.5x the minimum to account for unmatched
+                    # sources.  If the initial order fails at runtime, the
+                    # retry loop below progressively reduces it.
+                    #
+                    #   spline_order=3 -> needs 16 matched -> require 24 detected
+                    #   spline_order=2 -> needs  9 matched -> require 14 detected
+                    #   spline_order=1 -> needs  4 matched -> require  6 detected
+                    #   spline_order=0 -> affine only, no minimum
+                    _min_detected_for_order = {3: 24, 2: 14, 1: 6}
+                    _spline_order = 0
+                    for _o in (3, 2, 1):
+                        if _n_sources >= _min_detected_for_order.get(_o, 0):
+                            _spline_order = _o
+                            break
+
                     logger.info(
                         "spalipy: hash_dist=%.4f min_match=%d n_quad=%d "
-                        "sub_tile=%d (FWHM=%.1f, n_sources=%d).",
+                        "sub_tile=%d spline_order=%d (FWHM=%.1f, n_sources=%d).",
                         _hash_dist, _min_match, _n_quad, _sub_tile,
-                        _med_fwhm, _n_sources,
+                        _spline_order, _med_fwhm, _n_sources,
                     )
 
-                    sp = Spalipy(
-                        _tpl_fill,
-                        source_mask=_tpl_nan if _tpl_nan.any() else None,
-                        template_data=_sci_fill,
-                        source_det=_tpl_det,
-                        template_det=sci_det,
-                        output_shape=scienceImage.shape,
-                        min_n_match=_min_match,
-                        n_quad_det=_n_quad,
-                        max_quad_hash_dist=_hash_dist,
-                        min_sep=_det_sep,
-                        interp_order=_interp_order,
-                        sub_tile=_sub_tile,
-                        cval=np.nan,
-                    )
-                    try:
-                        sp.align()
-                    except Exception as _spalipy_err:
-                        logger.warning(
-                            "spalipy: align() raised %s: %s",
-                            type(_spalipy_err).__name__, _spalipy_err,
-                            exc_info=True,
+                    # Try align with progressively lower spline orders.
+                    # spalipy only catches dfitpackError internally, not
+                    # ValueError, so we catch it here and retry.
+                    _spalipy_orders_to_try = [o for o in (3, 2, 1, 0) if o <= _spline_order]
+                    sp = None
+                    for _try_order in _spalipy_orders_to_try:
+                        sp = Spalipy(
+                            _tpl_fill,
+                            source_mask=_tpl_nan if _tpl_nan.any() else None,
+                            template_data=_sci_fill,
+                            source_det=_tpl_det,
+                            template_det=sci_det,
+                            output_shape=scienceImage.shape,
+                            min_n_match=_min_match,
+                            n_quad_det=_n_quad,
+                            max_quad_hash_dist=_hash_dist,
+                            min_sep=_det_sep,
+                            interp_order=_interp_order,
+                            sub_tile=_sub_tile,
+                            spline_order=_try_order,
+                            cval=np.nan,
                         )
-                        sp._aligned_data = None
+                        try:
+                            sp.align()
+                            break  # success
+                        except Exception as _spalipy_err:
+                            if "length of x, y and z" in str(_spalipy_err) and _try_order > 0:
+                                logger.info(
+                                    "spalipy: spline_order=%d failed (not enough "
+                                    "matched sources); retrying with order=%d.",
+                                    _try_order, _try_order - 1,
+                                )
+                                sp._aligned_data = None
+                                continue
+                            else:
+                                logger.warning(
+                                    "spalipy: align() raised %s: %s",
+                                    type(_spalipy_err).__name__, _spalipy_err,
+                                    exc_info=True,
+                                )
+                                sp._aligned_data = None
+                                break
 
                     if sp.aligned_data is None:
                         logger.info("spalipy did not produce aligned output.")
