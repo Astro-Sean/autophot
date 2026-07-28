@@ -5231,17 +5231,15 @@ class PSF:
             # trigger a UserWarning).
             _handles, _labels = ax1.get_legend_handles_labels()
             if _handles:
-                import matplotlib.legend as _mlegend
+                from matplotlib.collections import Collection as _MplCollection
                 _valid = []
                 _valid_labels = []
                 for _h, _l in zip(_handles, _labels):
-                    if not isinstance(_h, _mlegend.legend.Legend):
-                        # Skip collections that legend cannot handle
-                        from matplotlib.collections import Collection as _MplCollection
-                        if isinstance(_h, _MplCollection) and not hasattr(_h, "get_facecolor"):
-                            continue
-                        _valid.append(_h)
-                        _valid_labels.append(_l)
+                    # Skip collections that legend cannot handle
+                    if isinstance(_h, _MplCollection) and not hasattr(_h, "get_facecolor"):
+                        continue
+                    _valid.append(_h)
+                    _valid_labels.append(_l)
                 if _valid:
                     ax1.legend(_valid, _valid_labels, loc="upper left")
             save_name_png = (
