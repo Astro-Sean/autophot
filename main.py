@@ -4568,20 +4568,44 @@ def run_photometry():
                     )
 
                 # If the proximity filter excluded ALL sources (common with very
-                # high NaN coverage, e.g. 60% from SWarp padding), bypass it and
-                # pass all sources through.  The aperture photometry code is the
-                # final arbiter - it will reject sources that actually have NaN
-                # in their aperture (aperture_has_nan) or too many NaN in their
-                # annulus (annulus_too_many_nans).  This is better than having
-                # zero sources for subtraction.
+                # high NaN coverage, e.g. 60% from SWarp padding), relax rather
+                # than bypass entirely.  Sources whose template pixel is NaN
+                # must still be excluded - SFFT cannot use a source that has no
+                # valid pixels in one of the images.  But sources that are near
+                # (but not in) NaN regions may still have usable photometry, so
+                # we relax the distance threshold down to just the aperture
+                # radius floor.
                 if len(matched_df) == 0 and len(excluded_sources) > 0:
-                    logging.warning(
-                        f"Proximity filter excluded all {len(excluded_sources)} sources "
-                        f"(NaN coverage too high). Bypassing filter - aperture photometry "
-                        f"will reject sources with NaN in measurement regions."
-                    )
-                    matched_df = excluded_sources.copy()
-                    excluded_sources = excluded_sources.iloc[[]]
+                    # Final safety: exclude sources whose center pixel is NaN
+                    # in either image.  These are truly unusable for SFFT.
+                    _sci_finite = np.isfinite(image[
+                        excluded_sources["y_pix"].astype(int).clip(0, image.shape[0]-1).values,
+                        excluded_sources["x_pix"].astype(int).clip(0, image.shape[1]-1).values
+                    ])
+                    _tpl_finite = np.isfinite(template_image[
+                        excluded_sources["y_pix"].astype(int).clip(0, template_image.shape[0]-1).values,
+                        excluded_sources["x_pix"].astype(int).clip(0, template_image.shape[1]-1).values
+                    ])
+                    _usable = _sci_finite & _tpl_finite
+                    _n_nan_center = int((~_usable).sum())
+                    matched_df = excluded_sources[_usable].copy()
+                    excluded_sources = excluded_sources[~_usable]
+                    if _n_nan_center > 0:
+                        logging.warning(
+                            f"Proximity filter excluded all {len(excluded_sources) + _n_nan_center} sources. "
+                            f"Relaxed filter: removed {_n_nan_center} sources with NaN center pixel "
+                            f"in science/template, kept {len(matched_df)} with valid centers."
+                        )
+                    else:
+                        logging.warning(
+                            f"Proximity filter excluded all sources but all have "
+                            f"valid center pixels. Keeping {len(matched_df)} sources."
+                        )
+                    if len(matched_df) == 0:
+                        logging.warning(
+                            "All sources fall in NaN regions of the template - "
+                            "no usable sources for subtraction."
+                        )
 
             df_zogy_science = None
             df_zogy_template = None
@@ -4872,7 +4896,10 @@ def run_photometry():
                     # SFFT only needs (x,y) positions as priors - it does its own
                     # PSF fitting and photometric ratio estimation.  Sources with
                     # valid positions but NaN flux (aperture hit a NaN pixel,
-                    # SWarp padding, edge effects) are usable as SFFT priors.
+                    # SWarp padding, edge effects) are usable as SFFT priors,
+                    # BUT only if the source center pixel is valid in both
+                    # images.  Sources whose template center is NaN are in a
+                    # NaN region and cannot be used by SFFT.
                     if "flux_AP" in image_sources.columns and not MatchingSources.empty:
                         _nan_flux_mask = ~np.isfinite(
                             image_sources["flux_AP"].values
@@ -4881,10 +4908,24 @@ def run_photometry():
                         )
                         if _nan_flux_mask.any():
                             _nan_flux_sources = image_sources[_nan_flux_mask]
+                            # Filter: only keep sources with valid center pixels
+                            # in both science and template images.
+                            _xs = _nan_flux_sources["x_pix"].astype(int).clip(0, image.shape[1]-1).values
+                            _ys = _nan_flux_sources["y_pix"].astype(int).clip(0, image.shape[0]-1).values
+                            _sci_ok = np.isfinite(image[_ys, _xs])
+                            _tpl_ok = np.isfinite(template_image[_ys, _xs])
+                            _center_valid = _sci_ok & _tpl_ok
+                            _n_center_nan = int((~_center_valid).sum())
+                            _nan_flux_sources = _nan_flux_sources[_center_valid]
                             _existing_idx = set(MatchingSources.index)
                             _new_sources = _nan_flux_sources[
                                 ~_nan_flux_sources.index.isin(_existing_idx)
                             ]
+                            if _n_center_nan > 0:
+                                logging.info(
+                                    f"Excluded {_n_center_nan} NaN-flux sources with "
+                                    f"NaN center pixel in science/template."
+                                )
                             if not _new_sources.empty:
                                 MatchingSources = pd.concat(
                                     [MatchingSources, _new_sources],
