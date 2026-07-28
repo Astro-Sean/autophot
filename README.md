@@ -204,8 +204,8 @@ cd hotpants && make
 
 AutoPhOT aligns the template image to the science image before difference
 imaging.  Six methods are available, each with different strengths.  The
-default cascade tries `swarp` -> `reproject` -> `astroalign` in sequence and
-returns the first successful result.  Setting `alignment_method` to a
+default is `spalipy` (RA/DEC source pre-matching + spline-warp), which is
+the most robust method.  Setting `alignment_method` to a
 specific method skips the cascade and uses only that method (with fallback
 to the cascade on failure).
 
@@ -807,7 +807,7 @@ def main() -> int:
     # Template subtraction
     # ------------------------------------------------------------------
     autophot_input["template_subtraction"]["do_subtraction"] = True
-    autophot_input["template_subtraction"]["alignment_method"] = "swarp"
+    autophot_input["template_subtraction"]["alignment_method"] = "spalipy"
     autophot_input["template_subtraction"]["method"] = "sfft"
     autophot_input["template_subtraction"]["kernel_order"] = 1
 
@@ -849,7 +849,7 @@ if __name__ == "__main__":
 
 1. Set subtraction options:
    - `autophot_input["template_subtraction"]["do_subtraction"] = True`
-   - `autophot_input["template_subtraction"]["alignment_method"] = "swarp"` (recommended; SCAMP+SWarp) or `"spalipy"` (sub-pixel accuracy)
+   - `autophot_input["template_subtraction"]["alignment_method"] = "spalipy"` (recommended; most robust) or `"swarp"` (SCAMP+SWarp, best subpixel)
    - `autophot_input["template_subtraction"]["method"] = "sfft"` (or `hotpants`, `zogy`)
 2. Create template directories:
    - Call `prepare_template_directory(...)`.

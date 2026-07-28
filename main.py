@@ -3013,7 +3013,7 @@ def run_photometry():
         _align_method = str(
             input_yaml.get("template_subtraction", {}).get("alignment_method", "")
         ).lower()
-        _was_swarp_resampled = _align_method in ("swarp", "scamp_swarp")
+        _was_swarp_resampled = _align_method in ("swarp", "scamp_swarp", "spalipy")
         if (
             _pre_remeasure_fwhm is not None
             and np.isfinite(_pre_remeasure_fwhm)
