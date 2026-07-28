@@ -3335,7 +3335,7 @@ class Templates:
                                     np.concatenate([sci_det["fwhm"], _tpl_det["fwhm"]]
                                 ))),
                             })
-                            _plot_inst.plot_spalipy_matches(
+                            _plot_inst.plot_match_sources(
                                 sci_image=scienceImage,
                                 tpl_image=_tpl_img,
                                 sci_matched_xy=_sci_matched_xy,
@@ -3351,7 +3351,7 @@ class Templates:
                                 method_label="spalipy",
                             )
                     except Exception as _plot_err:
-                        logger.debug("Spalipy match plot skipped: %s", _plot_err)
+                        logger.debug("Match sources plot skipped: %s", _plot_err)
 
                     method_used = "spalipy"
                     logger.info("Alignment succeeded (method: %s).", method_used)
