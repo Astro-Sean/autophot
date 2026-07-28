@@ -4916,14 +4916,17 @@ def run_photometry():
                         _mad_lr = 1.4826 * float(np.nanmedian(np.abs(_log_ratio - _med_lr)))
                         if not np.isfinite(_mad_lr) or _mad_lr <= 0:
                             _mad_lr = 0.3  # fallback ~30% scatter
-                        _fwhm_sigma = float(_ts_cfg.get("sfft_fwhm_ratio_nsigma", 3.0))
-                        _fwhm_max_log = _fwhm_sigma * _mad_lr
-                        _fwhm_bad = _fwhm_finite & (np.abs(np.log(_ratio) - _med_lr) > _fwhm_max_log)
-                        # Also apply a hard physical limit: ratio outside [0.5, 2.0]
-                        # is always suspicious regardless of the distribution
-                        _fwhm_hard_lo = float(_ts_cfg.get("sfft_fwhm_ratio_min", 0.5))
-                        _fwhm_hard_hi = float(_ts_cfg.get("sfft_fwhm_ratio_max", 2.0))
-                        _fwhm_bad = _fwhm_bad | (_fwhm_finite & ((_ratio < _fwhm_hard_lo) | (_ratio > _fwhm_hard_hi)))
+                        _fwhm_sigma = float(_ts_cfg.get("sfft_fwhm_ratio_nsigma", 0.0))
+                        if _fwhm_sigma > 0:
+                            _fwhm_max_log = _fwhm_sigma * _mad_lr
+                            _fwhm_bad = _fwhm_finite & (np.abs(np.log(_ratio) - _med_lr) > _fwhm_max_log)
+                            # Also apply a hard physical limit: ratio outside [0.5, 2.0]
+                            # is always suspicious regardless of the distribution
+                            _fwhm_hard_lo = float(_ts_cfg.get("sfft_fwhm_ratio_min", 0.5))
+                            _fwhm_hard_hi = float(_ts_cfg.get("sfft_fwhm_ratio_max", 2.0))
+                            _fwhm_bad = _fwhm_bad | (_fwhm_finite & ((_ratio < _fwhm_hard_lo) | (_ratio > _fwhm_hard_hi)))
+                        else:
+                            _fwhm_bad = np.zeros(len(image_sources), dtype=bool)
                         _n_fwhm_bad = int(_fwhm_bad.sum())
                         if _n_fwhm_bad > 0 and (_fwhm_finite & ~_fwhm_bad).sum() >= 5:
                             _ximg_mask &= ~_fwhm_bad
@@ -4956,11 +4959,14 @@ def run_photometry():
                             # than a configurable factor (default 5x).  This is
                             # intentionally permissive — the RANSAC fit in
                             # find_flux_consistent_sources does the fine filtering.
-                            _flux_max_dev = float(_ts_cfg.get("sfft_flux_ratio_max_deviation", 5.0))
-                            _flux_bad = _flux_finite & (
-                                (_flux_ratio > _med_fr * _flux_max_dev) |
-                                (_flux_ratio < _med_fr / _flux_max_dev)
-                            )
+                            _flux_max_dev = float(_ts_cfg.get("sfft_flux_ratio_max_deviation", 0.0))
+                            if _flux_max_dev > 0:
+                                _flux_bad = _flux_finite & (
+                                    (_flux_ratio > _med_fr * _flux_max_dev) |
+                                    (_flux_ratio < _med_fr / _flux_max_dev)
+                                )
+                            else:
+                                _flux_bad = np.zeros(len(image_sources), dtype=bool)
                             _n_flux_bad = int(_flux_bad.sum())
                             if _n_flux_bad > 0 and (_flux_finite & ~_flux_bad).sum() >= 5:
                                 _ximg_mask &= ~_flux_bad
@@ -5267,7 +5273,7 @@ def run_photometry():
                         # cfit cut (concentration/shape)
                         if "cfit" in ms.columns:
                             _cfit = pd.to_numeric(ms["cfit"], errors="coerce").values
-                            _cfit_max = float(_ts_cfg_refine.get("sfft_max_cfit", 0.5))
+                            _cfit_max = float(_ts_cfg_refine.get("sfft_max_cfit", 0.0))
                             if _cfit_max > 0:
                                 _cfit_bad = np.isfinite(_cfit) & (_cfit > _cfit_max)
                                 _n_cfit_bad = int(_cfit_bad.sum())
@@ -5285,7 +5291,7 @@ def run_photometry():
                         # qfit cut (goodness-of-fit)
                         if "qfit" in ms.columns:
                             _qfit = pd.to_numeric(ms["qfit"], errors="coerce").values
-                            _qfit_max = float(_ts_cfg_refine.get("sfft_max_qfit", 1.0))
+                            _qfit_max = float(_ts_cfg_refine.get("sfft_max_qfit", 0.0))
                             if _qfit_max > 0:
                                 _qfit_bad = np.isfinite(_qfit) & (_qfit > _qfit_max)
                                 _n_qfit_bad = int(_qfit_bad.sum())
@@ -5303,7 +5309,7 @@ def run_photometry():
                         # reduced chi-squared cut
                         if "reduced_chi2" in ms.columns:
                             _chi2 = pd.to_numeric(ms["reduced_chi2"], errors="coerce").values
-                            _chi2_max = float(_ts_cfg_refine.get("sfft_max_reduced_chi2", 5.0))
+                            _chi2_max = float(_ts_cfg_refine.get("sfft_max_reduced_chi2", 0.0))
                             if _chi2_max > 0:
                                 _chi2_bad = np.isfinite(_chi2) & (_chi2 > _chi2_max)
                                 _n_chi2_bad = int(_chi2_bad.sum())
@@ -5321,7 +5327,7 @@ def run_photometry():
                         # PSF fit flags cut
                         if "flags" in ms.columns:
                             _flags = pd.to_numeric(ms["flags"], errors="coerce").fillna(0).astype(int).values
-                            _flags_max = int(_ts_cfg_refine.get("sfft_max_psf_flags", 0))
+                            _flags_max = int(_ts_cfg_refine.get("sfft_max_psf_flags", -1))
                             if _flags_max >= 0:
                                 _flags_bad = _flags > _flags_max
                                 _n_flags_bad = int(_flags_bad.sum())
