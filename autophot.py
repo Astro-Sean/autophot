@@ -984,8 +984,8 @@ def inspect_telescope(
 
     For every unique (TELESCOP, INSTRUME) combination discovered, the function:
 
-    - auto-detects the filter header key (FILTER, FILTER1, …)
-    - records every raw filter value seen (as identity mappings — edit the
+    - auto-detects the filter header key (FILTER, FILTER1, ...)
+    - records every raw filter value seen (as identity mappings - edit the
       right-hand side to the appropriate catalog band name afterwards)
     - derives the pixel scale (arcsec/pixel) from the image WCS
     - records which FITS header keywords are present for gain, readnoise,
@@ -2048,7 +2048,7 @@ class AutomatedPhotometry:
                     # Auto-select GaiaXPy photometric systems based on required filters.
                     # SDSS_Std covers u,g,r,i,z; JKC_Std covers U,B,V,R,I.
                     # Only request the systems needed to avoid unnecessary archive queries.
-                    # Only run this when a Gaia-based catalog is selected — refcat, sdss,
+                    # Only run this when a Gaia-based catalog is selected - refcat, sdss,
                     # pan_starrs, 2mass, legacy, skymapper don't use Gaia XP spectra.
                     _gaia_catalogs = {"gaia", "apass"}
                     _needs_gaia_xp = any(

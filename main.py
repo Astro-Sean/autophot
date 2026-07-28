@@ -636,7 +636,7 @@ def run_photometry():
             # Astropy method with angular separation.
             # nthneighbor=2 finds the nearest *other* source for each entry.
             # For each close pair (sep < threshold) we keep the lower-index member
-            # and drop the higher-index one — this guarantees exactly one copy
+            # and drop the higher-index one - this guarantees exactly one copy
             # survives rather than both being dropped.
             from astropy.coordinates import SkyCoord
             import astropy.units as u
@@ -738,7 +738,7 @@ def run_photometry():
             )
             logging.info(
                 log_step(
-                    f"Skip (restart=False): {os.path.basename(science_file)} — {_out}. "
+                    f"Skip (restart=False): {os.path.basename(science_file)} - {_out}. "
                     "Set restart=True to reprocess."
                 )
             )
@@ -1183,7 +1183,7 @@ def run_photometry():
         input_yaml["airmass"] = airmass
         header["RDNOISE"] = readnoise
 
-        #  Handle Exposure Time — science frames must have a valid header; ZTF reference
+        #  Handle Exposure Time - science frames must have a valid header; ZTF reference
         # templates often omit EXPTIME, so use default_input exposure_time for template paths only.
         primary_key = telescope_config.get("exptime", "EXPTIME")
         pref = [] if primary_key == "not_given_by_user" else [primary_key]
@@ -1445,7 +1445,7 @@ def run_photometry():
                     )
                     header["gain"] = header[IR_gain_key]
 
-        #  Handle Gain — after instrument-specific header patches (e.g. GROND IR).
+        #  Handle Gain - after instrument-specific header patches (e.g. GROND IR).
         # telescope.yml gain can be either a numeric value (e-/ADU) or a header keyword.
         primary_gain = telescope_config.get("gain", "GAIN")
         
@@ -1992,7 +1992,7 @@ def run_photometry():
         background_rms = np.asarray(result["background_rms"], dtype=np.float32)
         defects_mask = np.asarray(result["defects_mask"], dtype=bool)
         hardware_defects_mask = np.asarray(result["hardware_defects_mask"], dtype=bool)
-        # Drop the result dict — it holds references to 4-6 full-image arrays
+        # Drop the result dict - it holds references to 4-6 full-image arrays
         # (background, rms, defects_mask, hardware_defects_mask, source_mask,
         # subtracted image) that are no longer needed here.  Without this the
         # dict keeps all of them alive until a new `result =` assignment.
@@ -2635,7 +2635,7 @@ def run_photometry():
                         input_yaml["template_subtraction"]["do_subtraction"] = False
                         template_available = False
                         logging.info(
-                            log_step("No template images — skip subtraction")
+                            log_step("No template images - skip subtraction")
                         )
                     else:
                         fpath, templateFpath = template_functions.align(
@@ -3004,9 +3004,9 @@ def run_photometry():
         # However, the initial measurement can also be biased low when many
         # faint sources have truncated profiles (SExtractor underestimates
         # FWHM_IMAGE at low S/N).  When the post-alignment measurement has
-        # sufficient sources (≥20), it is more reliable because the image has
+        # sufficient sources (>=20), it is more reliable because the image has
         # been resampled and the source detection is more stable.  In that
-        # case, use the larger FWHM — an overestimate is safe (slightly larger
+        # case, use the larger FWHM - an overestimate is safe (slightly larger
         # kernel), but an underestimate is dangerous (wrong sharpening/
         # broadening direction, flux scaling mismatch, dipoles).
         _post_align_n_sources = len(FWHMSources) if FWHMSources is not None else 0
@@ -3029,7 +3029,7 @@ def run_photometry():
             if _post_align_n_sources >= _override_threshold:
                 logging.info(
                     "Post-alignment FWHM %.2f px > 1.5 x initial %.2f px, but "
-                    "post-alignment has %d sources (>= %d) — using larger FWHM "
+                    "post-alignment has %d sources (>= %d) - using larger FWHM "
                     "to avoid kernel direction error.",
                     float(ImageFWHM), float(_pre_remeasure_fwhm),
                     _post_align_n_sources, _override_threshold,
@@ -3042,7 +3042,7 @@ def run_photometry():
                 # and flux scaling mismatches (dipoles).
                 logging.info(
                     "Post-alignment FWHM %.2f px > 1.5 x initial %.2f px, but "
-                    "image was SWarp-resampled (alignment_method=%s) — PSF "
+                    "image was SWarp-resampled (alignment_method=%s) - PSF "
                     "broadening is real. Using post-alignment FWHM.",
                     float(ImageFWHM), float(_pre_remeasure_fwhm),
                     _align_method,
@@ -3648,7 +3648,7 @@ def run_photometry():
                         background_rms=result_orig["background_rms"],
                     )
                     # Release the original full-resolution image immediately after
-                    # PSF build — it is no longer needed and can be ~64MB.
+                    # PSF build - it is no longer needed and can be ~64MB.
                     del image_orig, result_orig
                     if epsf_model is not None:
                         logging.info(
@@ -4437,7 +4437,7 @@ def run_photometry():
                 )
 
             # Recalculates pixel coordinates from RA/DEC returned by the aggregation if present.
-            # Only do this when centroiding did NOT update positions — otherwise the
+            # Only do this when centroiding did NOT update positions - otherwise the
             # WCS round-trip overwrites the centroid-refined x_pix/y_pix with a
             # cruder WCS-based estimate and can introduce NaN/Inf for edge sources.
             ra_vals = merged_sources.get("RA")
@@ -4456,7 +4456,7 @@ def run_photometry():
                     "y_pix", merged_sources.get("y_coord")
                 )
 
-            # Filter out sources with NaN/Inf coordinates — these can arise from
+            # Filter out sources with NaN/Inf coordinates - these can arise from
             # WCS round-trip failures (edge sources) or centroiding failures.
             _finite_mask = np.isfinite(merged_sources["x_pix"]) & np.isfinite(merged_sources["y_pix"])
             if not _finite_mask.all():
@@ -4514,7 +4514,7 @@ def run_photometry():
                 )
                 proximity_threshold = ImageFWHM * proximity_fwhm_mult
                 # The proximity threshold should at least cover the aperture
-                # radius — sources whose aperture overlaps NaN will fail with
+                # radius - sources whose aperture overlaps NaN will fail with
                 # aperture_has_nan.  The annulus can tolerate partial NaN
                 # coverage (aperture.py checks for >= 50% valid annulus pixels),
                 # so we don't need to exclude based on the full annulus outer
@@ -4541,7 +4541,7 @@ def run_photometry():
                 # photometry (aperture_has_nan), but sources between aperture
                 # radius and annulus outer radius may still have valid photometry
                 # (annulus tolerates partial NaN).  The aperture photometry code
-                # is the final arbiter — it will reject sources that actually
+                # is the final arbiter - it will reject sources that actually
                 # have NaN in their aperture.
                 min_sources_needed = 5
                 while True:
@@ -4555,7 +4555,7 @@ def run_photometry():
                     proximity_threshold = max(ImageFWHM * proximity_fwhm_mult, _proximity_floor)
                     logging.info(
                         f"Relaxing masked-region proximity threshold to FWHM x {proximity_fwhm_mult:.2f} "
-                        f"({proximity_threshold:.1f} px) — only {n_kept} sources survived at previous threshold."
+                        f"({proximity_threshold:.1f} px) - only {n_kept} sources survived at previous threshold."
                     )
 
                 excluded_sources = matched_df[min_distances <= proximity_threshold]
@@ -4570,14 +4570,14 @@ def run_photometry():
                 # If the proximity filter excluded ALL sources (common with very
                 # high NaN coverage, e.g. 60% from SWarp padding), bypass it and
                 # pass all sources through.  The aperture photometry code is the
-                # final arbiter — it will reject sources that actually have NaN
+                # final arbiter - it will reject sources that actually have NaN
                 # in their aperture (aperture_has_nan) or too many NaN in their
                 # annulus (annulus_too_many_nans).  This is better than having
                 # zero sources for subtraction.
                 if len(matched_df) == 0 and len(excluded_sources) > 0:
                     logging.warning(
                         f"Proximity filter excluded all {len(excluded_sources)} sources "
-                        f"(NaN coverage too high). Bypassing filter — aperture photometry "
+                        f"(NaN coverage too high). Bypassing filter - aperture photometry "
                         f"will reject sources with NaN in measurement regions."
                     )
                     matched_df = excluded_sources.copy()
@@ -4738,7 +4738,7 @@ def run_photometry():
 
                 # A systematic alignment offset (e.g. 3px uniform shift from WCS
                 # residual) affects ALL sources equally.  Filtering on absolute
-                # distance would remove every source even though they are valid —
+                # distance would remove every source even though they are valid -
                 # just uniformly shifted.  Instead, measure the median systematic
                 # offset and filter only on residual deviations from it.
                 if np.any(np.isfinite(distance)) and len(distance) >= 5:
@@ -4759,7 +4759,7 @@ def run_photometry():
                 # This preserves sources that share a common systematic offset while
                 # removing sources with truly bad centroids (blends, cosmic rays, etc.)
                 # Sources with NaN centroids (centroiding failed on one or both
-                # images) are KEPT — we can't verify their alignment but their
+                # images) are KEPT - we can't verify their alignment but their
                 # SExtractor positions are typically good to ~1px, which is
                 # sufficient for SFFT priors.
                 well_aligned_mask = (residual_distance < POSITION_TOLERANCE) | ~np.isfinite(residual_distance)
@@ -4869,7 +4869,7 @@ def run_photometry():
                         )
                         MatchingSources = image_sources.copy()
                     # Add back sources with NaN flux (failed aperture photometry).
-                    # SFFT only needs (x,y) positions as priors — it does its own
+                    # SFFT only needs (x,y) positions as priors - it does its own
                     # PSF fitting and photometric ratio estimation.  Sources with
                     # valid positions but NaN flux (aperture hit a NaN pixel,
                     # SWarp padding, edge effects) are usable as SFFT priors.
@@ -5066,7 +5066,7 @@ def run_photometry():
 
                         # Crowding rejection: require each prior star to be relatively
                         # isolated from OTHER prior stars within a radius ~2.5*FWHM.
-                        # Self-query ms only — a source should not be rejected because
+                        # Self-query ms only - a source should not be rejected because
                         # of a neighbour that was already filtered out by CLASS_STAR or
                         # flux consistency.
                         if len(ms) > 3 and {"x_pix", "y_pix"}.issubset(ms.columns):
@@ -5420,7 +5420,7 @@ def run_photometry():
         #
         # Note: if remove_local_surface runs below, it recomputes background_rms
         # from the diff image directly, which is already consistent with the
-        # rescaled pixels — so the correction below is safe in both cases (it is
+        # rescaled pixels - so the correction below is safe in both cases (it is
         # overwritten by the recomputed value when remove_local_surface is active).
         # -----------------------------------------------------------------------
         if PreformSubtraction:
@@ -5455,7 +5455,7 @@ def run_photometry():
         # FSCAL_PHOT / FSCAL_CONV brings the flux scale to the true ratio.
         #
         # For ForceConv=REF (diff = SCI - Conv(REF)), a multiplicative correction
-        # would incorrectly scale the science contribution.  We skip it — the
+        # would incorrectly scale the science contribution.  We skip it - the
         # gain update in the ForceConv=SCI block below handles the flux
         # calibration for that case.
         # -----------------------------------------------------------------------
@@ -5583,7 +5583,7 @@ def run_photometry():
                     # Using GAIN_DIFF gives flux_PSF = F_sci * FSCAL * gain_sci/FSCAL
                     # = F_sci * gain_sci (correct, magnitude conserved).
                     # HOTPANTS normalizes to the science image (-n i) so no gain
-                    # correction is needed — skip this block for non-SFFT diffs.
+                    # correction is needed - skip this block for non-SFFT diffs.
                     #
                     # When the post-SFFT flux scaling correction above is applied
                     # (diff *= FSCAL_PHOT / FSCAL_CONV), the effective gain must
@@ -5621,7 +5621,7 @@ def run_photometry():
                             input_yaml["gain"] = _diff_gain
                     else:
                         logging.debug(
-                            "Gain update skipped (no FSCAL/SOLPATH in header — "
+                            "Gain update skipped (no FSCAL/SOLPATH in header - "
                             "not an SFFT diff, science gain is correct)."
                         )
 
@@ -6583,7 +6583,7 @@ def run_photometry():
                         input_yaml=input_yaml,
                         image=inverted_image,
                     )
-                    # Measure on inverted image (no copy needed — .measure() returns a new DataFrame)
+                    # Measure on inverted image (no copy needed - .measure() returns a new DataFrame)
                     TargetPositionInverted = AperturePhotometryInverted.measure(
                         sources=TargetPositionInverted,
                         plot=True,
@@ -7315,7 +7315,7 @@ def run_photometry():
                         # no sources, so we want to inject in those regions too.
                         is_diff_image = "diff_" in os.path.basename(str(fpath))
                         if is_diff_image:
-                            # Copy at float32 precision then mask in-place — avoids creating a
+                            # Copy at float32 precision then mask in-place - avoids creating a
                             # temporary float64 intermediate that np.where().astype() would produce.
                             image_for_limits = np.asarray(image, dtype=np.float32)
                             image_for_limits[hardware_defects_mask] = np.nan
@@ -7394,7 +7394,7 @@ def run_photometry():
                                     image_zeropoint=image_zeropoint,
                                 )
                                 
-                                # Extract the primary limit for backward compatibility (use 3σ if available, otherwise first)
+                                # Extract the primary limit for backward compatibility (use 3sigma if available, otherwise first)
                                 if 'snr_3.0' in multi_snr_results and multi_snr_results['snr_3.0'].get('valid', False):
                                     InjectedLimit = multi_snr_results['snr_3.0']['limiting_mag']
                                 elif len(multi_snr_results) > 0:
@@ -7975,7 +7975,7 @@ def run_photometry():
             # Disambiguate duplicate SNR columns:
             #   SNR  = aperture photometry SNR (aperture_sum / sqrt_var)
             #   snr  = maxPixel / noiseSky (from functions.snr)
-            #   SNR_err is never populated — drop it
+            #   SNR_err is never populated - drop it
             if "SNR" in _calib_df.columns:
                 _calib_df.rename(columns={"SNR": "snr_ap"}, inplace=True)
             if "snr" in _calib_df.columns:

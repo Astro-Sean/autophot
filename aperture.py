@@ -88,7 +88,7 @@ def resolve_exposure_time_seconds(exposure_time, input_yaml: dict) -> float:
     exposure_time : float or None
         If not ``None``, this value is used (must be finite and > 0).
     input_yaml : dict
-        Must contain ``exposure_time`` when *exposure_time* is ``None`` — normally
+        Must contain ``exposure_time`` when *exposure_time* is ``None`` - normally
         set from the FITS header in ``main`` before any photometry.
 
     Raises
@@ -188,7 +188,7 @@ def resolve_gain_e_per_adu(gain, input_yaml: dict) -> float:
     gain : float or None
         If not ``None``, this value is used (must be finite and > 0).
     input_yaml : dict
-        Must contain ``gain`` when *gain* is ``None`` — normally set from the
+        Must contain ``gain`` when *gain* is ``None`` - normally set from the
         FITS header in ``main`` before any photometry.
 
     Raises
@@ -443,8 +443,8 @@ def _measure_worker(args):
             sqrt_var = np.nan
             snr = 0.0
 
-        # Aperture sum is integrated over the exposure in image_e units (e⁻ in frame);
-        # flux is the rate in e⁻/s for use with mag() and PSF outputs (also e⁻/s).
+        # Aperture sum is integrated over the exposure in image_e units (e- in frame);
+        # flux is the rate in e-/s for use with mag() and PSF outputs (also e-/s).
         # Aperture-only flux (for total light include aperture correction).
         flux_ap = aperture_sum * inv_exposure_time
 
@@ -468,7 +468,7 @@ def _measure_worker(args):
             mag_err_val = np.nan
 
         rn_term = empirical_std**2 + read_noise_sq
-        # raw_max is a single pixel (e⁻); scale sky+RN variance by area to match
+        # raw_max is a single pixel (e-); scale sky+RN variance by area to match
         # the same approximation used in the total_var fallback above.
         max_flux_err = np.sqrt(np.abs(raw_max) + effective_area * rn_term) * inv_exposure_time
 
@@ -664,11 +664,11 @@ class Aperture:
     *electrons* integrated over the exposure, unless the caller uses gain=1.0
     and treats ADU as a proxy.
 
-    * ``counts_AP`` — background-subtracted aperture sum over the *full* exposure
-      (e⁻ in the frame, i.e. integrated, not a rate).
-    * ``flux_AP`` — per-second rate ``counts_AP / exposure_time`` (e⁻/s), matching
-      ``functions.mag()`` and PSF photometry’s ``flux_PSF`` (also e⁻/s).
-    * ``noiseSky`` — local sky RMS per *pixel* in the same *rate* units (e⁻/s per
+    * ``counts_AP`` - background-subtracted aperture sum over the *full* exposure
+      (e- in the frame, i.e. integrated, not a rate).
+    * ``flux_AP`` - per-second rate ``counts_AP / exposure_time`` (e-/s), matching
+      ``functions.mag()`` and PSF photometry's ``flux_PSF`` (also e-/s).
+    * ``noiseSky`` - local sky RMS per *pixel* in the same *rate* units (e-/s per
       pixel), consistent with ``flux_AP`` in ``beta_aperture``-style S/N.
     """
 
@@ -826,7 +826,7 @@ class Aperture:
         sources : DataFrame (in-place columns added / updated)
 
         ``counts_AP`` and ``flux_AP`` follow the conventions described in
-        :class:`Aperture` (integrated e⁻ in frame, and e⁻/s, respectively, when
+        :class:`Aperture` (integrated e- in frame, and e-/s, respectively, when
         the pipeline uses ``image * gain`` as in this implementation).
         """
         warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -1433,7 +1433,7 @@ class Aperture:
 
         gain = resolve_gain_e_per_adu(None, self.input_yaml)
         if background_rms is not None:
-            # Convert both data and bkg_error to electrons so total_error is in e⁻.
+            # Convert both data and bkg_error to electrons so total_error is in e-.
             # Matches the convention used in Aperture.measure() (image_e = image*gain,
             # bkg_error = background_rms_ADU * gain, effective_gain=1).
             _image_e_opt = np.where(
@@ -1927,7 +1927,7 @@ class Aperture:
             all_radii = all_radii[np.isfinite(all_radii)]
 
             if len(all_radii) > 0:
-                # Freedman–Diaconis rule for bin edges (shared between selected/rejected).
+                # Freedman-Diaconis rule for bin edges (shared between selected/rejected).
                 # Constrain to [0, max_radius] since radii are in FWHM units here.
                 all_clip = all_radii[(all_radii >= 0.0) & (all_radii <= float(max_radius))]
                 if all_clip.size == 0:
@@ -1973,7 +1973,7 @@ class Aperture:
             n_selected = int(np.count_nonzero(np.isfinite(per_source)))
             n_rejected = int(np.count_nonzero(np.isfinite(other)))
             fig.suptitle(
-                f"Optimum Aperture Radius — Selected (N={n_selected}), Rejected (N={n_rejected})",
+                f"Optimum Aperture Radius - Selected (N={n_selected}), Rejected (N={n_rejected})",
                 fontsize=9,
                 y=0.99,
             )

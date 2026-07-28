@@ -321,7 +321,7 @@ default_input:
     use_lacosmic: False # bool --- Use L.A.Cosmic-style algorithm (if available/configured).
     cr_sigclip: 4.5 # float --- Detection threshold (sigma) for cosmic ray pixels in astroscrappy/LACosmic.
     cr_sigfrac: 0.3 # float --- Fraction of neighboring pixels required for detection (LACosmic/astroscrappy).
-    cr_objlim: 10.0 # float --- Object detection limit — rejects CRs that look like real objects (higher = more aggressive CR removal, may clip star cores).
+    cr_objlim: 10.0 # float --- Object detection limit - rejects CRs that look like real objects (higher = more aggressive CR removal, may clip star cores).
     cr_dilate_factor: 1.0 # float --- Dilation radius as fraction of FWHM for CR mask post-processing.
     cr_dilate_iterations: 2 # int --- Number of dilation iterations for CR mask (covers residual CR wings/bleed).
     cr_plot: False # bool --- Save side-by-side before/after CR removal plot.
@@ -337,7 +337,7 @@ default_input:
     use_catalog: null # str|null --- Optional catalog to seed/guide source detection (if supported).
 
   limiting_magnitude:
-    snr_thresholds: [3, 5] # list[float] --- S/N thresholds for limiting magnitude columns in lightcurve output (e.g., [3, 5] for 3σ and 5σ limits). The code will generate columns like Limit_3p0S2N, Limit_5p0S2N. Can be customized to any values (e.g., [3, 5, 10] for additional thresholds).
+    snr_thresholds: [3, 5] # list[float] --- S/N thresholds for limiting magnitude columns in lightcurve output (e.g., [3, 5] for 3sigma and 5sigma limits). The code will generate columns like Limit_3p0S2N, Limit_5p0S2N. Can be customized to any values (e.g., [3, 5, 10] for additional thresholds).
     beta_limit: 0.5 # float --- Legacy beta diagnostic threshold. Injected-source recovery is now gated by S/N only; beta is computed for diagnostics and completeness plots but does not affect the detection decision.
     detection_limit: null # float|null --- S/N threshold for declaring an injected source recovered in limiting-magnitude experiments. If null, recovery requires S/N >= 3.0. Higher values (e.g., 5.0) match the detection thresholds used by ZTF and LSST automated pipelines. For discovery-style runs, set this to 5.0 to be consistent with photometry.detection_limit.
     completeness_target: 0.5 # float --- Target recovery fraction at the limiting magnitude (Harris 1990 completeness definition; 0.5 = 50% completeness).
@@ -376,7 +376,7 @@ default_input:
     # - The second threshold (typically 5.0) is used for upper limits on non-detections (SNU)
     # - If photometry.upper_limit_snr is in this list, that threshold is used for upper limits
     snr_thresholds: [3.0, 5.0] # list[float] --- S/N thresholds to calculate for detection limits (e.g., [3.0, 5.0]). Default [3.0] for backward compatibility.
-    adaptive_snr_selection: true # bool --- Use adaptive S/N threshold selection in plots (use 5σ limit when source S/N<3).
+    adaptive_snr_selection: true # bool --- Use adaptive S/N threshold selection in plots (use 5sigma limit when source S/N<3).
     report_all_limits: true # bool --- Include all S/N limits in output tables and CALIB files.
 
   alignment:
@@ -403,7 +403,7 @@ default_input:
 
   template_subtraction:
     do_subtraction: False # bool --- Enable template subtraction step.
-    alignment_method: swarp # str --- Science-template registration method. Options: swarp=SCAMP+SWarp [recommended, best subpixel], reproject=WCS-only, astroalign=source matching, spalipy=spline-warp for non-homogeneous distortion [requires: pip install spalipy], tweakwcs=STScI WCS tweaking+reproject [requires: pip install tweakwcs], chi2_shift=cross-correlation for extended-source fields [requires: pip install image-registration]. Each method falls back to swarp→reproject→astroalign if it fails.
+    alignment_method: swarp # str --- Science-template registration method. Options: swarp=SCAMP+SWarp [recommended, best subpixel], reproject=WCS-only, astroalign=source matching, spalipy=spline-warp for non-homogeneous distortion [requires: pip install spalipy], tweakwcs=STScI WCS tweaking+reproject [requires: pip install tweakwcs], chi2_shift=cross-correlation for extended-source fields [requires: pip install image-registration]. Each method falls back to swarp->reproject->astroalign if it fails.
     alignment_use_extended_sources: True # bool --- If True, allow large/extended sources (galaxies) in SCAMP matching catalogs. Extended sources provide valuable alignment anchors in sparse fields.
     alignment_max_fwhm_pix: 50.0 # float --- Max FWHM (pixels) kept when alignment_use_extended_sources=False.
     alignment_min_matched_sources: 6 # int --- Minimum matched sources for a reliable SCAMP WCS solution. Below this, retry with larger radius or fall back to reproject/AstroAlign.
@@ -462,9 +462,9 @@ default_input:
     sfft_only_flags: [0, 1, 2] # list[int]|null --- SExtractor FLAGS values kept by SFFT source selection (null disables flag filtering).
     sfft_allow_crowded_bg_order_override: False # bool --- If True, crowded SFFT may override bg_order=0 to 2 for stability.
     sfft_cvrej_magd_thresh: 0.12 # float --- Coarse variable-rejection magnitude-difference threshold (lower is stricter).
-    sfft_coarse_var_rejection: False # bool --- Enable SFFT coarse variable-star rejection. When True, sources with magnitude differences exceeding sfft_cvrej_magd_thresh are excluded from the kernel fit. Disabled by default — in sparse fields with PSF differences, this rejects most sources (e.g. 14/15 killed with 0.12 mag threshold) because aperture mag differences are caused by PSF mismatch, not variability.
+    sfft_coarse_var_rejection: False # bool --- Enable SFFT coarse variable-star rejection. When True, sources with magnitude differences exceeding sfft_cvrej_magd_thresh are excluded from the kernel fit. Disabled by default - in sparse fields with PSF differences, this rejects most sources (e.g. 14/15 killed with 0.12 mag threshold) because aperture mag differences are caused by PSF mismatch, not variability.
     sfft_evrej_ratio_thresh: 6.0 # float --- Elaborate variable-rejection ratio threshold (lower is stricter).
-    sfft_elabo_var_rejection: False # bool --- Enable SFFT elaborate variable-star rejection. When True, SFFT performs a second-pass ratio-based rejection using sfft_evrej_ratio_thresh and sfft_evrej_safe_magdev to further filter variable sources from the kernel fit. Disabled by default — same problem as coarse variable rejection: in sparse fields with PSF differences, the 0.04 mag threshold rejects 60% of matched sources (9/15) because aperture mag differences are caused by PSF mismatch, not variability. With only 6 sources left, the kernel is poorly constrained → flux scaling mismatch → dipoles.
+    sfft_elabo_var_rejection: False # bool --- Enable SFFT elaborate variable-star rejection. When True, SFFT performs a second-pass ratio-based rejection using sfft_evrej_ratio_thresh and sfft_evrej_safe_magdev to further filter variable sources from the kernel fit. Disabled by default - same problem as coarse variable rejection: in sparse fields with PSF differences, the 0.04 mag threshold rejects 60% of matched sources (9/15) because aperture mag differences are caused by PSF mismatch, not variability. With only 6 sources left, the kernel is poorly constrained -> flux scaling mismatch -> dipoles.
     sfft_evrej_safe_magdev: 0.04 # float --- Safe magnitude-deviation threshold for elaborate rejection.
     sfft_pac_ratio_thresh: 4.0 # float --- Post-anomaly-check ratio threshold for SFFT source filtering.
     sfft_use_post_anomaly_feedback: True # bool --- If True, run one extra SFFT pass using MeLOn post-anomaly sources as additional banned priors.
@@ -484,7 +484,7 @@ default_input:
     sfft_min_class_star: 0.0 # float --- Minimum SExtractor CLASS_STAR for SFFT kernel sources. 0=disabled (default). SFFT does its own source vetting (SExtractor FLAGS, cross-match, PostAnomaly, CVREJ/EVREJ), so pre-filtering by CLASS_STAR is redundant and harmful after spline-warp alignment (distorts PSF, lowers CLASS_STAR for real point sources). Set >0 (e.g. 0.7) only if you have a dense field and want stricter pre-filtering.
     sfft_max_ellipticity: 0.5 # float --- Maximum SExtractor ellipticity for SFFT kernel sources. 0.5=permissive (default), >=1.0=disabled. SFFT vets its own sources; this is only a coarse pre-filter for obviously elongated objects.
     sfft_allow_unvetted_source_retry: False
-    sfft_forceconv: AUTO # str --- SFFT ForceConv direction: "REF" (always convolve reference — difference keeps science PSF), "SCI" (convolve science), "AUTO" (SFFT auto-selects based on FWHMs — RECOMMENDED). AUTO lets SFFT convolve the sharper image to match the broader one, avoiding deconvolution.
+    sfft_forceconv: AUTO # str --- SFFT ForceConv direction: "REF" (always convolve reference - difference keeps science PSF), "SCI" (convolve science), "AUTO" (SFFT auto-selects based on FWHMs - RECOMMENDED). AUTO lets SFFT convolve the sharper image to match the broader one, avoiding deconvolution.
     sfft_sky_subtract: True # bool --- Subtract sigma-clipped median sky from both images before SFFT. Per Hu et al. 2022 Section 3.2, sparse-flavor SFFT requires sky-subtracted input so that masking (setting non-source regions to zero) doesn't create artificial step functions at mask boundaries. Uses constant median subtraction (not SExtractor's spatially-varying BACK_TYPE=AUTO which was previously tested and rejected).
 
     inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).

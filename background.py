@@ -8,7 +8,7 @@ Key design choices
 ------------------
 1. **Large box sizes** -- mesh_scale ~10 with a hard minimum of 64 px so
    individual sources don't dominate a box.
-2. **Iterative source masking** -- 3-pass detect → mask → re-estimate cycle
+2. **Iterative source masking** -- 3-pass detect -> mask -> re-estimate cycle
    that catches extended wings and faint field sources.
 3. **Large smoothing filter** -- scales as ``box_size // 2`` for a genuinely
    smooth mesh.
@@ -464,7 +464,7 @@ class BackgroundSubtractor:
         mask = np.zeros(image.shape, dtype=bool)
         # float32 is sufficient precision for iterative source-masking.
         # Using float32 halves the memory footprint vs float64 (~64 MB saved
-        # for a 4096×4096 image).  Avoid an unconditional full copy when possible.
+        # for a 4096x4096 image).  Avoid an unconditional full copy when possible.
         try:
             residual = np.asarray(image, dtype=np.float32, copy=False)
         except (TypeError, ValueError):
@@ -535,7 +535,7 @@ class BackgroundSubtractor:
                         cur_iters = 1
 
                 if best_new_mask is None:
-                    # Even minimal dilation exceeds budget — use undilated cores
+                    # Even minimal dilation exceeds budget - use undilated cores
                     best_new_mask = new_mask
                     self.logger.info(
                         "Source mask: even 1px dilation exceeds %.0f%% budget; "
@@ -1538,7 +1538,7 @@ class BackgroundSubtractor:
         # - NaN/inf (chip gaps / invalid data)
         # - exact zeros (common "no data" pads after resampling/subtraction)
         # - saturation cores and extended bleed/streaks/trails
-        # - detected sources (iterative source mask) — included so that PSF
+        # - detected sources (iterative source mask) - included so that PSF
         #   building, aperture photometry, and injection-site selection all
         #   receive a full "bad-pixel" mask rather than only the hardware defects.
         #
@@ -1553,7 +1553,7 @@ class BackgroundSubtractor:
         # defects_mask: adds the iterative source mask so that PSF building,
         # aperture photometry, and injection-site selection on THIS SAME image all
         # receive a full bad-pixel mask.  Do NOT pass this to steps that operate
-        # on a resampled copy of the image — source positions will have shifted.
+        # on a resampled copy of the image - source positions will have shifted.
         defects_mask = hardware_defects_mask | source_mask
 
         # After background subtraction, pixels that were exact zeros in the

@@ -91,9 +91,9 @@ def _odd(n: int) -> int:
 
     Historical note: this function used to round up to the next odd integer,
     based on the incorrect assumption that KerHW must be odd.  SFFT constructs
-    the kernel as (2*KerHW + 1) × (2*KerHW + 1), so the *full kernel* is
+    the kernel as (2*KerHW + 1) x (2*KerHW + 1), so the *full kernel* is
     always odd-sized regardless of whether KerHW is even or odd.  Forcing KerHW
-    to be odd (e.g. 4 → 5) inflates the kernel from 9×9 to 11×11 for no reason.
+    to be odd (e.g. 4 -> 5) inflates the kernel from 9x9 to 11x11 for no reason.
     The function is kept for call-site compatibility but now just casts to int.
     """
     return int(n)
@@ -493,7 +493,7 @@ def run_sfft() -> Optional[int]:
         help=(
             "Divisor on SFFT's auto-computed cross-match tolerance "
             "(default 2.0 = half of auto). Auto tolerance is "
-            "~1.6*max(FWHM_REF, FWHM_SCI) ≈ 12px; factor=2.0 → ~6px. "
+            "~1.6*max(FWHM_REF, FWHM_SCI) ~ 12px; factor=2.0 -> ~6px. "
             "Higher values enforce stricter positional overlap between "
             "sci and ref sources, preventing misaligned sources from "
             "biasing the kernel fit."
@@ -808,19 +808,19 @@ def run_sfft() -> Optional[int]:
     #   SFFT (Hu et al. 2022, ApJ 936):
     #       KerHW = int(KerHWRatio * max(FWHM_REF, FWHM_SCI)), KerHWRatio in [1.5, 2.5].
     #       The kernel must enclose the broader PSF, not just the difference kernel.
-    #       SFFT source comment: "Ratio of kernel half-width to FWHM (typically 1.5–2.5)."
+    #       SFFT source comment: "Ratio of kernel half-width to FWHM (typically 1.5-2.5)."
     #
     #   Alard & Lupton 1998 / Astier (private comm. cited in Miller et al. 2008):
     #       sigma_kernel = 0.5 * |sigma_sci - sigma_ref|  (sigma = FWHM/2.355)
     #       L = 8 * sigma_kernel + 5  =>  KerHW = (L-1)/2 = 4*sigma_kernel + 2
-    #       = 4*(FWHM_broad-FWHM_narrow)/(2*2.355) + 2  ≈ 0.85*FWHM_diff + 2
-    #       This sets a *minimum* — the kernel must contain the PSF mismatch lobe.
+    #       = 4*(FWHM_broad-FWHM_narrow)/(2*2.355) + 2  ~ 0.85*FWHM_diff + 2
+    #       This sets a *minimum* - the kernel must contain the PSF mismatch lobe.
     #
     #   LSST ip_diffim (PsfMatchConfigAL):
     #       kernel_size = kernelSizeFwhmScaling * sigma_largest_Gaussian_basis
-    #       kernelSizeFwhmScaling = 6.0 (default); sigma_basis ≈ FWHM_broad/2.355
-    #       => kernel_size ≈ 6 * FWHM_broad/2.355 ≈ 2.55 * FWHM_broad
-    #       KerHW = (kernel_size - 1)/2 ≈ 1.28 * FWHM_broad  (min 10, max 17)
+    #       kernelSizeFwhmScaling = 6.0 (default); sigma_basis ~ FWHM_broad/2.355
+    #       => kernel_size ~ 6 * FWHM_broad/2.355 ~ 2.55 * FWHM_broad
+    #       KerHW = (kernel_size - 1)/2 ~ 1.28 * FWHM_broad  (min 10, max 17)
     #
     #   Israel 2007 (Astron. Nachr.):
     #       Kernel half-width must be >= 3*sigma_conv to enclose 99.7% of the
@@ -828,7 +828,7 @@ def run_sfft() -> Optional[int]:
     #       sigma_conv = sqrt(sigma_broad^2 - sigma_narrow^2) = fwhm_conv/2.355
     #       => minimum contribution: ceil(3 * fwhm_conv / 2.355)
     #
-    # Design decision — two independent lower bounds, take the larger:
+    # Design decision - two independent lower bounds, take the larger:
     #
     #   hw_broad:  multiplier * FWHM_broad
     #              The kernel must contain the broader PSF's support. This is the
@@ -841,7 +841,7 @@ def run_sfft() -> Optional[int]:
     #              fwhm_conv -> 0 so this term vanishes.
     #
     # Undersampled images (FWHM_broad < 2 px): PSF wings extend far relative to
-    # pixel size. Boost the broad-PSF multiplier (not the difference term) by 1.5×
+    # pixel size. Boost the broad-PSF multiplier (not the difference term) by 1.5x
     # to capture ringing artefacts, capped at 4.0.
     # ---------------------------------------------------------------------------
     KER_HW_LIMIT_MIN = int(getattr(args, "kernel_hw_min", 3) or 3)
@@ -875,7 +875,7 @@ def run_sfft() -> Optional[int]:
         hw_broad = int(np.ceil(_mult_effective * fwhm_broad))
 
         # hw_conv: must enclose the PSF-difference lobe to 3-sigma (Israel 2007).
-        # sigma_conv = fwhm_conv / 2.355; 3*sigma_conv = 3*fwhm_conv/2.355 ≈ 1.274*fwhm_conv.
+        # sigma_conv = fwhm_conv / 2.355; 3*sigma_conv = 3*fwhm_conv/2.355 ~ 1.274*fwhm_conv.
         SIGMA_FWHM = 2.3548200450309493   # 2*sqrt(2*ln2)
         hw_conv = int(np.ceil(3.0 * fwhm_conv / SIGMA_FWHM)) if fwhm_conv > 0 else 0
 
@@ -1105,7 +1105,7 @@ def run_sfft() -> Optional[int]:
             # orientation and no transposition is needed.  The previous heuristic
             # (pick the orientation whose unmasked science median is closest to 0)
             # was unreliable on background-subtracted images because both
-            # orientations give median ≈ 0, making the choice effectively random.
+            # orientations give median ~ 0, making the choice effectively random.
             if mask_raw.shape == data_sci.shape:
                 prior_ban_mask = mask_raw
                 log_info(
@@ -1284,7 +1284,7 @@ def run_sfft() -> Optional[int]:
                     XY_PriorBan=masked_sources,
                     MatchTol=None,
                     # Tighter cross-match: factor=2.0 halves the auto tolerance
-                    # (~12px → ~6px), ensuring only well-aligned sources are
+                    # (~12px -> ~6px), ensuring only well-aligned sources are
                     # used for the kernel fit. Misaligned sources produce
                     # off-center stamps and dipole residuals.
                     MatchTolFactor=float(getattr(args, "match_tol_factor", 2.0)),
@@ -1443,7 +1443,7 @@ def run_sfft() -> Optional[int]:
             if _n_matched < 10:
                 log_info(
                     f"WARNING: Only {_n_matched} sources used for SFFT kernel fitting. "
-                    f"Kernel solution may be unreliable — dipole residuals likely. "
+                    f"Kernel solution may be unreliable - dipole residuals likely. "
                     f"Consider providing more pipeline-matched sources or relaxing source filtering."
                 )
 
@@ -1545,36 +1545,36 @@ def run_sfft() -> Optional[int]:
         #    This whitens correlated noise in the difference image.
         #
         # 2. DECORRELATION KERNEL  (LSST DMTN-021, Reiss & Lupton 2016)
-        #    The A&L PSF-matching kernel κ is convolved with the template,
+        #    The A&L PSF-matching kernel kappa is convolved with the template,
         #    which introduces pixel-pixel covariance in the difference image D.
         #    Detected sources therefore appear correlated, inflating peak S/N
         #    at scales of ~KerHW px and causing a detection threshold that must
-        #    be raised to ~5.5σ (rather than the canonical 5.0σ) to control false
+        #    be raised to ~5.5sigma (rather than the canonical 5.0sigma) to control false
         #    positives.  LSST corrects this by convolving D with a whitening
-        #    (decorrelation) kernel ψ computed in Fourier space from κ and the
+        #    (decorrelation) kernel psi computed in Fourier space from kappa and the
         #    mean variances of the two images (DMTN-021 Eq. 2):
         #
-        #      ψ(k) = sqrt( (σ₁² + σ₂²) / (σ₁² + κ²(k)·σ₂²) )
-        #      D′   = ψ ⊗ D
+        #      psi(k) = sqrt( (sigma_1^2 + sigma_2^2) / (sigma_1^2 + kappa^2(k)*sigma_2^2) )
+        #      D'   = psi x D
         #
         #    After decorrelation, pixel noise is spatially uncorrelated and
-        #    matched-filter detection can be run at 5.0σ with no excess FPR.
-        #    The decorrelation kernel is ~2×KerHW px in size and inexpensive.
+        #    matched-filter detection can be run at 5.0sigma with no excess FPR.
+        #    The decorrelation kernel is ~2xKerHW px in size and inexpensive.
         #
-        # 3. VARIANCE SCALING  (LSST ScaleVarianceTask, DMTN-021 §4.1)
+        # 3. VARIANCE SCALING  (LSST ScaleVarianceTask, DMTN-021 4.1)
         #    Warping and co-adding introduce pixel covariance that causes the
         #    variance plane to underestimate the true noise.  LSST rescales the
         #    variance by a factor that brings IQR(D/sqrt(V)) to unity.
         #    Here we propagate the expected Gaussian variance of the difference
-        #    image ( σ_diff² = σ_sci² + σ_ref² ) from the sigma-clipped image
+        #    image ( sigma_diff^2 = sigma_sci^2 + sigma_ref^2 ) from the sigma-clipped image
         #    statistics, then rescale the difference image so its measured noise
         #    matches that expectation.  This is equivalent to the LSST
         #    pixel-based ScaleVarianceTask estimator.
         # ------------------------------------------------------------------
         log_info(border_msg("Post-subtraction quality improvements", metadata="LSST-inspired + SFFT v1.5.0+", use_ansi=False))
-        log_info("  SFFT noise decorrelation (v1.5.0+) — whitens correlated noise")
-        log_info("  Decorrelation kernel (DMTN-021) — whitens A&L convolution noise")
-        log_info("  Variance scaling (ScaleVarianceTask) — IQR-based noise calibration")
+        log_info("  SFFT noise decorrelation (v1.5.0+) - whitens correlated noise")
+        log_info("  Decorrelation kernel (DMTN-021) - whitens A&L convolution noise")
+        log_info("  Variance scaling (ScaleVarianceTask) - IQR-based noise calibration")
 
         # Apply noise decorrelation if requested
         # Note: SFFT's DeCorrelation_Calculator requires kernel information from the SFFT solution
@@ -1600,33 +1600,33 @@ def run_sfft() -> Optional[int]:
 
             Parameters
             ----------
-            diff : (H, W) float array — the raw difference image.
-            kernel : (kH, kW) float array — the A&L matching kernel κ used to
-                     convolve the template (already normalised to sum ≈ 1).
-            var_sci : mean per-pixel variance of the science image (σ₁²).
-            var_ref : mean per-pixel variance of the reference/template image (σ₂²).
+            diff : (H, W) float array - the raw difference image.
+            kernel : (kH, kW) float array - the A&L matching kernel kappa used to
+                     convolve the template (already normalised to sum ~ 1).
+            var_sci : mean per-pixel variance of the science image (sigma_1^2).
+            var_ref : mean per-pixel variance of the reference/template image (sigma_2^2).
             nan_mask : bool array, True where pixels are invalid; used to
                        temporarily fill NaN regions with zeros for FFTs.
 
             Returns
             -------
-            Decorrelated difference image D′ (same shape as diff).
+            Decorrelated difference image D' (same shape as diff).
 
             Notes
             -----
-            Algorithm (DMTN-021 §2.1):
-              ψ(k) = sqrt( (σ₁² + σ₂²) / (σ₁² + |κ(k)|² · σ₂²) )
+            Algorithm (DMTN-021 2.1):
+              psi(k) = sqrt( (sigma_1^2 + sigma_2^2) / (sigma_1^2 + |kappa(k)|^2 * sigma_2^2) )
 
             Implementation:
-              1. Embed κ in a zero-padded array of the full image size (H×W).
-                 This makes ψ(k) defined at the same Fourier frequencies as D.
-              2. Compute ψ(k) in Fourier space.
+              1. Embed kappa in a zero-padded array of the full image size (HxW).
+                 This makes psi(k) defined at the same Fourier frequencies as D.
+              2. Compute psi(k) in Fourier space.
               3. IRFFT2 back to image size, FFT-shift to centre, and extract the
-                 central (2·kH + 1) × (2·kW + 1) support of ψ.
-                 ψ is compact — its real-space support is the same spatial scale
-                 as κ itself.  Extracting at hw = kH captures >99% of the power
+                 central (2*kH + 1) x (2*kW + 1) support of psi.
+                 psi is compact - its real-space support is the same spatial scale
+                 as kappa itself.  Extracting at hw = kH captures >99% of the power
                  and avoids edge wrap-around artefacts.
-              4. Convolve D with ψ via scipy.fftconvolve (real-space, so masked
+              4. Convolve D with psi via scipy.fftconvolve (real-space, so masked
                  pixels are handled gracefully without full-image FFT).
             """
             try:
@@ -1635,14 +1635,14 @@ def run_sfft() -> Optional[int]:
                 H, W = diff.shape
                 kH, kW = kernel.shape
 
-                # --- Build ψ in the full-image Fourier domain ---
-                # Embed κ in a (H, W) zero-padded array, centred at (0,0) via
+                # --- Build psi in the full-image Fourier domain ---
+                # Embed kappa in a (H, W) zero-padded array, centred at (0,0) via
                 # ifftshift so that the origin is at the top-left corner (numpy
                 # rfft2 convention).
                 ker_full = np.zeros((H, W), dtype=np.float64)
                 ker_full[:kH, :kW] = kernel
                 K_f = np.fft.rfft2(np.fft.ifftshift(ker_full))   # (H, W//2+1)
-                K2  = np.real(K_f * np.conj(K_f))                 # |κ(k)|²
+                K2  = np.real(K_f * np.conj(K_f))                 # |kappa(k)|^2
 
                 denom = var_sci + K2 * var_ref
                 # Guard against near-zero denominator (numerical safety)
@@ -1653,12 +1653,12 @@ def run_sfft() -> Optional[int]:
                 )
                 psi_f = np.sqrt((var_sci + var_ref) / denom)      # (H, W//2+1)
 
-                # --- Extract compact real-space ψ kernel ---
+                # --- Extract compact real-space psi kernel ---
                 # IRFFT2 back to image size then FFT-shift to centre.
                 psi_full = np.real(np.fft.irfft2(psi_f, s=(H, W)))  # (H, W)
                 psi_full = np.fft.fftshift(psi_full)
 
-                # Extract central ±kH / ±kW support (ψ is compact at ~kernel scale)
+                # Extract central +/-kH / +/-kW support (psi is compact at ~kernel scale)
                 cH, cW = H // 2, W // 2
                 hw_h, hw_w = max(kH, 1), max(kW, 1)
                 psi_small = psi_full[
@@ -1666,12 +1666,12 @@ def run_sfft() -> Optional[int]:
                     cW - hw_w : cW + hw_w + 1,
                 ].copy()
 
-                # Normalise so ψ preserves total flux (unit sum, not unit energy)
+                # Normalise so psi preserves total flux (unit sum, not unit energy)
                 psi_sum = float(psi_small.sum())
                 if abs(psi_sum) > 1e-10:
                     psi_small /= psi_sum
 
-                # --- Convolve D with ψ ---
+                # --- Convolve D with psi ---
                 # Replace NaNs with 0 for convolution; restore afterwards.
                 diff_filled = diff.copy()
                 diff_filled[nan_mask] = 0.0
@@ -1701,8 +1701,8 @@ def run_sfft() -> Optional[int]:
 
             Parameters
             ----------
-            diff : (H, W) float array — the difference image.
-            var_expected : expected Gaussian variance σ_diff² = σ_sci² + σ_ref².
+            diff : (H, W) float array - the difference image.
+            var_expected : expected Gaussian variance sigma_diff^2 = sigma_sci^2 + sigma_ref^2.
             nan_mask : bool array, True where pixels are invalid.
 
             Returns
@@ -1720,13 +1720,13 @@ def run_sfft() -> Optional[int]:
 
                 # IQR-based robust standard-deviation estimate (LSST convention)
                 q25, q75 = np.percentile(snr_vals, [25.0, 75.0])
-                iqr_sigma = (q75 - q25) / 1.3489795003921634   # 1/Φ⁻¹(0.75)
+                iqr_sigma = (q75 - q25) / 1.3489795003921634   # 1/Phi-^1(0.75)
 
                 if iqr_sigma < 0.1 or not np.isfinite(iqr_sigma):
                     return diff, 1.0   # pathological image, skip
 
                 # Safety: only rescale if the discrepancy is non-trivial (>5%)
-                # but not extreme (>3×, which suggests a bug rather than covariance).
+                # but not extreme (>3x, which suggests a bug rather than covariance).
                 if 0.95 <= iqr_sigma <= 3.0:
                     if abs(iqr_sigma - 1.0) < 0.05:
                         return diff, 1.0   # already consistent, nothing to do
@@ -1746,7 +1746,7 @@ def run_sfft() -> Optional[int]:
                 diff_arr = np.asarray(hdul[0].data, dtype=np.float64)
                 diff_hdr = hdul[0].header
 
-                # Build an invalid-pixel mask for this stage (NaN or ±Inf).
+                # Build an invalid-pixel mask for this stage (NaN or +/-Inf).
                 _nan_mask = ~np.isfinite(diff_arr)
 
                 # Retrieve image variances from SFFT header (sigma-clipped means)
@@ -1807,7 +1807,7 @@ def run_sfft() -> Optional[int]:
                                 _applied_decorr = True
                                 log_info(
                                     f"Decorrelation kernel applied: KerHW={_kerhw} px, "
-                                    f"σ_sci={np.sqrt(_sci_var):.2f}, σ_ref={np.sqrt(_ref_var):.2f}"
+                                    f"sigma_sci={np.sqrt(_sci_var):.2f}, sigma_ref={np.sqrt(_ref_var):.2f}"
                                 )
                 except Exception as _e:
                     log_warning(f"Could not apply decorrelation kernel: {_e}")

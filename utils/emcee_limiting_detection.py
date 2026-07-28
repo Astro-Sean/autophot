@@ -126,7 +126,7 @@ def _recover_psf_mcmc_snr(
     Returns
     -------
     tuple of (float, float)
-        ``(snr, flux_hat)`` — signal-to-noise and median recovered flux.
+        ``(snr, flux_hat)`` - signal-to-noise and median recovered flux.
         Both are ``np.nan`` if the fit fails.
     """
     ny, nx = data2d.shape
@@ -180,7 +180,7 @@ def _recover_psf_mcmc_snr(
 
 
 def main() -> int:
-    """CLI entry point — run injection/recovery and print limiting magnitude."""
+    """CLI entry point - run injection/recovery and print limiting magnitude."""
     ap = argparse.ArgumentParser(description="emcee injection/recovery limiting magnitude")
     ap.add_argument("--fits", required=True, help="Science image FITS path")
     ap.add_argument("--epsf-pickle", required=True, help="Pickled photutils/astropy ePSF model")

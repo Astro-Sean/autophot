@@ -142,7 +142,7 @@ def create_image_mask(filename, layers=None):
         Path to the ``*.mask.fits`` file produced by :func:`run_maximask_with_file`.
         If ``None``, returns ``None`` immediately.
     layers : list of str, optional
-        Maximask layer codes to include (default ``["CR"]`` — cosmic rays only).
+        Maximask layer codes to include (default ``["CR"]`` - cosmic rays only).
         See the module docstring for the full list of codes.
 
     Returns

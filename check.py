@@ -601,8 +601,8 @@ class FitsInfo:
         """
         Map a FITS header filter value to a standard band name.
 
-        Resolution order: global cache (normalized) → global cache (simplified)
-        → heuristic → manual prompt.
+        Resolution order: global cache (normalized) -> global cache (simplified)
+        -> heuristic -> manual prompt.
         """
         opts = sorted(
             self.available_filters, key=lambda x: (x not in "ugriz", x.lower())
@@ -688,8 +688,8 @@ class FitsInfo:
         """
         Select best filter keyword from header.
 
-        Priority: existing filter_key_N → auto-search for 'filter' in key name
-        → fallback to any short non-empty value → 'FILTER' default.
+        Priority: existing filter_key_N -> auto-search for 'filter' in key name
+        -> fallback to any short non-empty value -> 'FILTER' default.
         Skips 'open'/'clear' filters. Dynamically registers new filter_key_N entries.
         """
         fkeys = ["FILTER"] + [k for k in entry if k.startswith("filter_key_")]
