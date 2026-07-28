@@ -202,7 +202,7 @@ def filter_value_matches_band(band_char: str, raw_filter) -> bool:
     """
     True if a photometry-table ``filter`` cell corresponds to band ``band_char``.
 
-    Maps survey-style names (e.g. ``gp`` → ``g``) using ``main._heuristic_filter_mapping``
+    Maps survey-style names (e.g. ``gp`` -> ``g``) using ``main._heuristic_filter_mapping``
     so long-form CSV rows match the band order used in plots.
     """
     if raw_filter is None or pd.isna(raw_filter):
@@ -223,7 +223,7 @@ def filter_value_matches_band(band_char: str, raw_filter) -> bool:
 
 
 def photometry_filter_series(df: pd.DataFrame):
-    """Return the per-row filter column if present (``filter``, ``imagefilter``, …)."""
+    """Return the per-row filter column if present (``filter``, ``imagefilter``, ...)."""
     if df is None or df.empty:
         return None
     preferred = ("filter", "imagefilter", "band", "image_filter")
@@ -272,7 +272,7 @@ def canonical_band_label_map_from_filter_series(fser: pd.Series) -> dict[str, st
 
     This keeps legend labels faithful to the input data (e.g. if the CSV filter
     column contains "wp", the plotted label is "wp"), while still grouping rows
-    by canonical band (e.g. wp→w) for long-form photometry tables.
+    by canonical band (e.g. wp->w) for long-form photometry tables.
     """
     if fser is None or len(fser) == 0:
         return {}
@@ -802,7 +802,7 @@ def plot_lightcurve(
     # Discover which bands are actually present. For long-form CSVs (shared
     # mag_psf / zp_psf + per-row ``filter``), every band letter would otherwise
     # resolve to the same triplet and only the first letter in band_order (``F``)
-    # would be used — wrong for e.g. Pan-STARRS/ZTF ``w``.
+    # would be used - wrong for e.g. Pan-STARRS/ZTF ``w``.
     m_low_plot = str(method).strip().lower()
     long_form_uniform = (
         f"mag_{m_low_plot}" in data.columns
@@ -920,14 +920,14 @@ def plot_lightcurve(
         # not for visual plot positioning.
         df["lmag"] = _lmag_to_apparent(df, zp_col)
 
-        # ZTF-style SNU (upper limit): prefer 5σ limit if available, otherwise use 50% completeness limit
+        # ZTF-style SNU (upper limit): prefer 5sigma limit if available, otherwise use 50% completeness limit
         # This matches the ZTF forced-photometry service where SNU=5 is used for upper limits.
         upper_limit_snr = 5.0  # Default ZTF SNU
         upper_limit_col = f"limiting_mag_{upper_limit_snr:.0f}s2n"
         if upper_limit_col in df.columns:
             # main.py outputs apparent magnitude columns directly
             df["lmag_upper"] = pd.to_numeric(df[upper_limit_col], errors="coerce")
-            # Use 5σ limit where valid, otherwise fall back to 50% completeness limit
+            # Use 5sigma limit where valid, otherwise fall back to 50% completeness limit
             valid_upper = np.isfinite(df["lmag_upper"]) & (df["lmag_upper"] > 10) & (df["lmag_upper"] < 30)
             df.loc[~valid_upper, "lmag_upper"] = df.loc[~valid_upper, "lmag"]
         else:
@@ -1149,7 +1149,7 @@ def plot_lightcurve(
 
         if show_limits and not nondetects.empty:
             has_limits_plotted = True
-            # Use ZTF-style SNU (5σ) upper limit for non-detections where available
+            # Use ZTF-style SNU (5sigma) upper limit for non-detections where available
             limit_col = "lmag_upper" if "lmag_upper" in nondetects.columns else "lmag"
             ax.errorbar(
                 nondetects.mjd - reference_epoch,
@@ -1364,7 +1364,7 @@ def plot_lightcurve(
             d1["lmag"] = _lmag_to_apparent(d1, zp1)
             d2["lmag"] = _lmag_to_apparent(d2, zp2)
 
-            # ZTF-style SNU (upper limit): prefer 5σ limit if available
+            # ZTF-style SNU (upper limit): prefer 5sigma limit if available
             upper_limit_snr = 5.0
             upper_limit_col = f"limiting_mag_{upper_limit_snr:.0f}s2n"
             if upper_limit_col in d1.columns:
@@ -1474,7 +1474,7 @@ def plot_lightcurve(
             lmag1_upper = d1["lmag_upper"].values if "lmag_upper" in d1.columns else lmag1_arr
             # Color = b1 - b2. Limit direction: b1 det + b2 limit -> true color <= color_value (upper limit, v);
             # b1 limit + b2 det -> true color >= color_value (lower limit, ^).
-            # Use ZTF-style 5σ upper limits (lmag_upper) where available.
+            # Use ZTF-style 5sigma upper limits (lmag_upper) where available.
             phase_pts, color_pts, err_pts = [], [], []
             phase_ul, color_ul = [], []  # upper limit on color (downward triangle v)
             phase_ll, color_ll = [], []  # lower limit on color (upward triangle ^)
@@ -1631,7 +1631,7 @@ def generate_photometry_table(
     if complete_data.columns.duplicated().any():
         complete_data = complete_data.loc[:, ~complete_data.columns.duplicated()].copy()
     phot_table = []
-    # Prefer using the per-row filter column if present. Map raw names (gp, Sloan_g, …)
+    # Prefer using the per-row filter column if present. Map raw names (gp, Sloan_g, ...)
     # to canonical bands so `_resolve_band_triplet` matches the uniform mag/zp schema.
     fser_all = photometry_filter_series(complete_data)
     if fser_all is not None and fser_all.notna().any():
@@ -1697,13 +1697,13 @@ def generate_photometry_table(
         # Pipeline stores limiting mag in instrumental system; detection cut uses apparent mags.
         data["lmag"] = lmag_inst + zp_num
 
-        # ZTF-style SNU (upper limit): prefer 5σ limit if available, otherwise use 50% completeness limit
+        # ZTF-style SNU (upper limit): prefer 5sigma limit if available, otherwise use 50% completeness limit
         upper_limit_snr = 5.0  # Default ZTF SNU
         upper_limit_col = f"limiting_mag_{upper_limit_snr:.0f}s2n"
         if upper_limit_col in data.columns:
             # main.py outputs apparent magnitude columns directly
             data["lmag_upper"] = pd.to_numeric(data[upper_limit_col], errors="coerce")
-            # Use 5σ limit where valid, otherwise fall back to 50% completeness limit
+            # Use 5sigma limit where valid, otherwise fall back to 50% completeness limit
             valid_upper = np.isfinite(data["lmag_upper"]) & (data["lmag_upper"] > 10) & (data["lmag_upper"] < 30)
             data.loc[~valid_upper, "lmag_upper"] = data.loc[~valid_upper, "lmag"]
         else:

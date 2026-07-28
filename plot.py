@@ -1256,7 +1256,7 @@ class Plot:
                 ncol = 3
             )
 
-            # Finalize figure layout — leave room at top for the legend
+            # Finalize figure layout - leave room at top for the legend
             if not skip_tight_layout:
                 fig.tight_layout(rect=[0, 0, 1, 0.92])
             ax1.set_aspect("equal", adjustable="box")
@@ -1409,21 +1409,21 @@ class Plot:
                     lim_cfg = self.input_yaml.get("limiting_magnitude") or {}
                     snr_thresholds = lim_cfg.get("snr_thresholds", [3.0, 5.0])
                     
-                    # Use 5σ limit if median S/N < 3, otherwise use 3σ
+                    # Use 5sigma limit if median S/N < 3, otherwise use 3sigma
                     if median_snr < 3.0 and len(snr_thresholds) >= 2:
                         # Use the second (higher) threshold
                         higher_threshold = sorted(snr_thresholds)[1]
                         adaptive_limit_col = f'Limit_{higher_threshold:.1f}S2N'.replace('.', 'p')
                         if adaptive_limit_col not in data.columns:
                             adaptive_limit_col = "Limit_5p0S2N"  # Fallback
-                        logger.info("Adaptive S/N selection: median S/N=%.2f < 3, using %sσ limiting magnitude", median_snr, higher_threshold)
+                        logger.info("Adaptive S/N selection: median S/N=%.2f < 3, using %ssigma limiting magnitude", median_snr, higher_threshold)
                     else:
                         # Use the first (lower) threshold
                         lower_threshold = sorted(snr_thresholds)[0]
                         adaptive_limit_col = f'Limit_{lower_threshold:.1f}S2N'.replace('.', 'p')
                         if adaptive_limit_col not in data.columns:
                             adaptive_limit_col = "Limit_3p0S2N"  # Fallback
-                        logger.info("Adaptive S/N selection: median S/N=%.2f >= 3, using %sσ limiting magnitude", median_snr, lower_threshold)
+                        logger.info("Adaptive S/N selection: median S/N=%.2f >= 3, using %ssigma limiting magnitude", median_snr, lower_threshold)
         if data.columns.duplicated().any():
             data = data.loc[:, ~data.columns.duplicated()].copy()
 
@@ -1511,7 +1511,7 @@ class Plot:
             else:
                 continue
 
-            # Long-form CSV: assign rows to this band (gp→g, Sloan_g→g, etc.).
+            # Long-form CSV: assign rows to this band (gp->g, Sloan_g->g, etc.).
             if use_filter_bands:
                 mask = filter_series.map(
                     lambda rv: filter_value_matches_band(b, rv)
@@ -1896,7 +1896,7 @@ class Plot:
                 ax_top = ax.twiny()
                 ax_right = ax.twinx()
                 # set_aspect is incompatible with shared/twin axes; the symmetric
-                # ±_lim xlim/ylim already enforces a square data region.
+                # +/-_lim xlim/ylim already enforces a square data region.
 
                 # Set the limits for twin axes to match the main axes
                 ax_top.set_xlim(ax.get_xlim())
@@ -1919,7 +1919,7 @@ class Plot:
                 ax_top.tick_params(axis="x", which="both", labeltop=True, labelbottom=False)
                 ax_right.tick_params(axis="y", which="both", labelright=True, labelleft=False)
             else:
-                # No twin axes — safe to enforce equal aspect
+                # No twin axes - safe to enforce equal aspect
                 ax.set_aspect("equal", adjustable="box")
             # ax.set_title(f"WCS vs PSF Position Offset (N={len(df_plot)})")
             # ax.legend(loc="upper right", fontsize="small", framealpha=0.9)
@@ -1977,7 +1977,7 @@ class Plot:
         Runs SExtractor on both the aligned science and template images,
         cross-matches detected sources by RA/Dec, and compares their pixel
         positions.  In a perfectly aligned image pair every matched source
-        should have dx ≈ 0, dy ≈ 0.
+        should have dx ~ 0, dy ~ 0.
 
         Parameters
         ----------

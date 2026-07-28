@@ -16,36 +16,36 @@ AutoPhOT performs precision photometry of a transient or variable source at a fi
 
 ### Pipeline stages
 
-1. **Ingestion & WCS** — Frames are sorted by telescope/instrument/filter. WCS is verified or re-solved using `astrometry.net` with Gaia DR3 cross-matching, handling SIP/TPV distortion and independently plate-solved images.
-2. **Image preparation** — Cosmic-ray rejection (with satellite-streak detection), background estimation, and FWHM measurement are performed per frame, with adaptive detection thresholds for sparse and crowded fields.
-3. **Photometry** — Both aperture and PSF photometry are computed at the target position. PSF models are built empirically from in-frame stars using `photutils` ePSFBuilder, with optional adaptive oversampling for undersampled data. Three fitters are available: least-squares (default), Poisson likelihood (Fermilab TM-2543-AE), and MCMC (`emcee`) with adaptive convergence for principled uncertainty estimation.
-4. **Calibration** — Photometric zero points are derived against a user-selectable catalog (Gaia DR3 with XP spectra, Pan-STARRS, SDSS, APASS, 2MASS, Legacy Survey, SkyMapper, and more), with per-filter catalog assignment and synthetic-photometry support for Gaia XP.
-5. **Template subtraction** (optional) — When a reference template is available, AutoPhOT aligns science and template images using a cascaded alignment pipeline with six methods, then performs difference imaging using SFFT, HOTPANTS, or PyZOGY with automatic fallback.
-6. **Limiting magnitudes** — Source injection and recovery at multiple S/N thresholds (default 3σ and 5σ) using logistic-emcee fitting to produce robust upper limits for non-detections.
+1. **Ingestion & WCS** - Frames are sorted by telescope/instrument/filter. WCS is verified or re-solved using `astrometry.net` with Gaia DR3 cross-matching, handling SIP/TPV distortion and independently plate-solved images.
+2. **Image preparation** - Cosmic-ray rejection (with satellite-streak detection), background estimation, and FWHM measurement are performed per frame, with adaptive detection thresholds for sparse and crowded fields.
+3. **Photometry** - Both aperture and PSF photometry are computed at the target position. PSF models are built empirically from in-frame stars using `photutils` ePSFBuilder, with optional adaptive oversampling for undersampled data. Three fitters are available: least-squares (default), Poisson likelihood (Fermilab TM-2543-AE), and MCMC (`emcee`) with adaptive convergence for principled uncertainty estimation.
+4. **Calibration** - Photometric zero points are derived against a user-selectable catalog (Gaia DR3 with XP spectra, Pan-STARRS, SDSS, APASS, 2MASS, Legacy Survey, SkyMapper, and more), with per-filter catalog assignment and synthetic-photometry support for Gaia XP.
+5. **Template subtraction** (optional) - When a reference template is available, AutoPhOT aligns science and template images using a cascaded alignment pipeline with six methods, then performs difference imaging using SFFT, HOTPANTS, or PyZOGY with automatic fallback.
+6. **Limiting magnitudes** - Source injection and recovery at multiple S/N thresholds (default 3sigma and 5sigma) using logistic-emcee fitting to produce robust upper limits for non-detections.
 
 ### Unique aspects
 
-- **Multi-instrument, target-focused** — Designed from the ground up for follow-up campaigns that combine data from many facilities into one light curve, rather than reducing a single instrument's dataset.
+- **Multi-instrument, target-focused** - Designed from the ground up for follow-up campaigns that combine data from many facilities into one light curve, rather than reducing a single instrument's dataset.
 
-- **Adaptive astrometric alignment** — A cascaded alignment pipeline (SCAMP+SWarp → WCS-based reproject → AstroAlign) with source-matched WCS refinement, per-quadrant verification, and FWHM-scaled quality gates that adapt to sparse fields, large distortion, and pixel-scale mismatches. Optional methods (spalipy spline-warp achieving ~0.05 px RMS, tweakwcs STScI WCS tweaking, chi2_shift cross-correlation) extend coverage to distorted wide-field, HST/JWST, and extended-source-dominated fields. All source detection uses SExtractor for consistency across the pipeline.
+- **Adaptive astrometric alignment** - A cascaded alignment pipeline (SCAMP+SWarp -> WCS-based reproject -> AstroAlign) with source-matched WCS refinement, per-quadrant verification, and FWHM-scaled quality gates that adapt to sparse fields, large distortion, and pixel-scale mismatches. Optional methods (spalipy spline-warp achieving ~0.05 px RMS, tweakwcs STScI WCS tweaking, chi2_shift cross-correlation) extend coverage to distorted wide-field, HST/JWST, and extended-source-dominated fields. All source detection uses SExtractor for consistency across the pipeline.
 
-- **Inverted-fit detection** — Optionally fits the target on a sign-flipped (×−1) image to detect negative PSF dips — critical for fading sources in template-subtracted images where the transient may appear as a deficit relative to the template. The pipeline automatically replaces poor normal fits with inverted fits when appropriate, and flags results with an `_inverted_fit` column.
+- **Inverted-fit detection** - Optionally fits the target on a sign-flipped (x-1) image to detect negative PSF dips - critical for fading sources in template-subtracted images where the transient may appear as a deficit relative to the template. The pipeline automatically replaces poor normal fits with inverted fits when appropriate, and flags results with an `_inverted_fit` column.
 
-- **Poisson likelihood PSF fitting** — Implements the Poisson likelihood fitter from Fermilab TM-2543-AE, which is statistically superior to χ² methods for low-count PSF photometry. Uses analytic gradient and Hessian computation for fast convergence.
+- **Poisson likelihood PSF fitting** - Implements the Poisson likelihood fitter from Fermilab TM-2543-AE, which is statistically superior to chi^2 methods for low-count PSF photometry. Uses analytic gradient and Hessian computation for fast convergence.
 
-- **Adaptive MCMC with principled convergence** — emcee-based Bayesian PSF fitting with adaptive chain length (runs until integrated autocorrelation time stabilises), principled burn-in (10×τ discard), and full covariance matrix extraction from the posterior chain. Produces corner plots with posterior contours when `emcee_store_samples` is enabled.
+- **Adaptive MCMC with principled convergence** - emcee-based Bayesian PSF fitting with adaptive chain length (runs until integrated autocorrelation time stabilises), principled burn-in (10xtau discard), and full covariance matrix extraction from the posterior chain. Produces corner plots with posterior contours when `emcee_store_samples` is enabled.
 
-- **Gaia XP synthetic photometry** — Calibrate optical/NIR frames directly against Gaia DR3 XP spectra, avoiding cross-filter transformations when standard catalogs are unavailable. Supports custom transmission curves via `gaia_custom` catalog mode.
+- **Gaia XP synthetic photometry** - Calibrate optical/NIR frames directly against Gaia DR3 XP spectra, avoiding cross-filter transformations when standard catalogs are unavailable. Supports custom transmission curves via `gaia_custom` catalog mode.
 
-- **Robust difference imaging** — Multiple subtraction backends (SFFT, HOTPANTS, PyZOGY) with automatic fallback, kernel-order auto-selection, noise decorrelation (SFFT v1.5.0+), PSF-source pool supplementation for sparse fields, and optional inpainting of saturated template star cores.
+- **Robust difference imaging** - Multiple subtraction backends (SFFT, HOTPANTS, PyZOGY) with automatic fallback, kernel-order auto-selection, noise decorrelation (SFFT v1.5.0+), PSF-source pool supplementation for sparse fields, and optional inpainting of saturated template star cores.
 
-- **Multi-S/N limiting magnitudes** — Generates limiting magnitude columns at multiple signal-to-noise thresholds (e.g., `Limit_3p0S2N`, `Limit_5p0S2N`) in a single run, using source injection with quiet-site selection and logistic-emcee recovery fitting.
+- **Multi-S/N limiting magnitudes** - Generates limiting magnitude columns at multiple signal-to-noise thresholds (e.g., `Limit_3p0S2N`, `Limit_5p0S2N`) in a single run, using source injection with quiet-site selection and logistic-emcee recovery fitting.
 
-- **TNS integration** — Automatic target coordinate and redshift lookup via the Transient Name Server when a target name is provided.
+- **TNS integration** - Automatic target coordinate and redshift lookup via the Transient Name Server when a target name is provided.
 
-- **Per-filter catalog routing** — Different reference catalogs can be assigned to different filter groups (e.g., `griz` → RefCAT2, `u` → Gaia, `UBVRI` → APASS) within a single run.
+- **Per-filter catalog routing** - Different reference catalogs can be assigned to different filter groups (e.g., `griz` -> RefCAT2, `u` -> Gaia, `UBVRI` -> APASS) within a single run.
 
-- **Comprehensive diagnostic plots** — Source check overlays with distortion vectors and heatmap, WCS-vs-PSF offset quiver plots, alignment offset diagnostics with SExtractor centroid error bars, spalipy match visualisation, PSF residual and oversampled-ePSF panels, MCMC corner plots, and injection-recovery diagnostic plots.
+- **Comprehensive diagnostic plots** - Source check overlays with distortion vectors and heatmap, WCS-vs-PSF offset quiver plots, alignment offset diagnostics with SExtractor centroid error bars, spalipy match visualisation, PSF residual and oversampled-ePSF panels, MCMC corner plots, and injection-recovery diagnostic plots.
 
 ## Quick Links
 - **Conda Package**: [https://anaconda.org/astro-sean/autophot](https://anaconda.org/astro-sean/autophot)
@@ -204,7 +204,7 @@ cd hotpants && make
 
 AutoPhOT aligns the template image to the science image before difference
 imaging.  Six methods are available, each with different strengths.  The
-default cascade tries `swarp` → `reproject` → `astroalign` in sequence and
+default cascade tries `swarp` -> `reproject` -> `astroalign` in sequence and
 returns the first successful result.  Setting `alignment_method` to a
 specific method skips the cascade and uses only that method (with fallback
 to the cascade on failure).
@@ -213,14 +213,14 @@ to the cascade on failure).
 
 | Method | `alignment_method` | Install | Typical RMS | Speed |
 |--------|---------------------|---------|-------------|-------|
-| **SWarp** (SCAMP+SWarp) | `swarp` | Astromatic suite (required) | 0.1–0.5 px | Fast |
-| **WCS Reproject** | `reproject` | `reproject` (bundled) | 0.1–0.3 px | Fast |
-| **AstroAlign** | `astroalign` | `astroalign` (bundled) | 0.2–1.0 px | Medium |
-| **spalipy** | `spalipy` | `pip install spalipy>=3.5` | 0.05–0.2 px | Medium |
-| **tweakwcs** | `tweakwcs` | `pip install tweakwcs>=0.8` | 0.1–0.5 px | Medium |
-| **chi2_shift** | `chi2_shift` | `pip install image-registration>=0.2` | 0.5–2.0 px | Fast |
+| **SWarp** (SCAMP+SWarp) | `swarp` | Astromatic suite (required) | 0.1-0.5 px | Fast |
+| **WCS Reproject** | `reproject` | `reproject` (bundled) | 0.1-0.3 px | Fast |
+| **AstroAlign** | `astroalign` | `astroalign` (bundled) | 0.2-1.0 px | Medium |
+| **spalipy** | `spalipy` | `pip install spalipy>=3.5` | 0.05-0.2 px | Medium |
+| **tweakwcs** | `tweakwcs` | `pip install tweakwcs>=0.8` | 0.1-0.5 px | Medium |
+| **chi2_shift** | `chi2_shift` | `pip install image-registration>=0.2` | 0.5-2.0 px | Fast |
 
-#### SWarp (SCAMP + SWarp) — `swarp` (default)
+#### SWarp (SCAMP + SWarp) - `swarp` (default)
 
 Runs SExtractor on both images, cross-matches the source catalogs with
 SCAMP to derive a per-frame astrometric solution, then resamples the
@@ -240,14 +240,14 @@ template onto the science pixel grid with SWarp.
 - Assumes a smooth (polynomial) WCS distortion model; cannot correct
   high-order or localised distortion that deviates from the fit.
 
-#### WCS Reproject — `reproject`
+#### WCS Reproject - `reproject`
 
 Uses the existing WCS headers from both images to reproject the template
 onto the science frame via `reproject` (interpolation or adaptive
 resampling).  No source matching is performed.
 
 **Pros**
-- No source detection needed — works even on empty or extended fields.
+- No source detection needed - works even on empty or extended fields.
 - Very fast (pure Python, no subprocess).
 - Handles arbitrary WCS projections (SIP, TPV, DW).
 - No external binaries required.
@@ -260,7 +260,7 @@ resampling).  No source matching is performed.
 - Not suitable when the science and template have significantly
   different pixel scales or rotations (interpolation degrades).
 
-#### AstroAlign — `astroalign`
+#### AstroAlign - `astroalign`
 
 Python-only image registration using triangle-based asterism matching
 (similar to the classic "point-pattern matching" algorithm).  Detects
@@ -273,15 +273,15 @@ transform.
 - Fast for small images.
 
 **Cons**
-- Only fits a single affine transform (6 parameters) — no correction
+- Only fits a single affine transform (6 parameters) - no correction
   for spatially-varying distortion.
 - Triangle matching can fail in crowded fields (too many false
   triangles) or sparse fields (too few stars).
 - Does not update the WCS header.
-- Typically achieves 0.2–1.0 px RMS, which may be insufficient for
+- Typically achieves 0.2-1.0 px RMS, which may be insufficient for
   sharp PSFs or sub-pixel photometry.
 
-#### spalipy — `spalipy` (recommended for wide-field)
+#### spalipy - `spalipy` (recommended for wide-field)
 
 Quad-based asterism matching for an initial affine transform, followed
 by 2D thin-plate spline fitting to the residual source-position field.
@@ -289,7 +289,7 @@ This corrects non-homogeneous optical distortion that a single affine
 or polynomial cannot capture.
 
 **Pros**
-- **Sub-pixel accuracy** (typically 0.05–0.2 px RMS) — the most
+- **Sub-pixel accuracy** (typically 0.05-0.2 px RMS) - the most
   accurate method when enough matched sources are available.
 - Spline warp corrects spatially-varying distortion (optical
   aberrations, focal-plane distortions, differential atmospheric
@@ -304,16 +304,16 @@ or polynomial cannot capture.
 
 **Cons**
 - Requires `pip install spalipy>=3.5` (not on conda).
-- Needs ≥ 20 matched sources for reliable spline fitting; sparse
+- Needs >= 20 matched sources for reliable spline fitting; sparse
   fields may fall back to affine-only (still good, but less accurate).
 - Spline fitting can over-fit in regions with few matched stars
   (mitigated by `sub_tile` adaptive subdivision).
-- Cannot perform reflections itself — relies on the pre-flip logic
+- Cannot perform reflections itself - relies on the pre-flip logic
   in the pipeline (which handles both x- and y-reflections via a
-  180° rotation trick).
+  180 deg rotation trick).
 - Slightly slower than SWarp/reproject due to spline computation.
 
-#### tweakwcs — `tweakwcs`
+#### tweakwcs - `tweakwcs`
 
 STScI-style WCS tweaking: detects sources in both images, cross-matches
 them, and fits a corrective WCS transform (linear or polynomial) with
@@ -328,18 +328,18 @@ sigma-clipped outlier rejection.  The template is then resampled with
 
 **Cons**
 - Requires `pip install tweakwcs>=0.8` (not on conda).
-- Fits a global WCS correction (polynomial), not a local spline —
+- Fits a global WCS correction (polynomial), not a local spline -
   cannot correct highly localised distortion as well as spalipy.
 - Needs a reasonable initial WCS to converge; will not work if the
   headers are completely wrong.
 - Slower than pure reproject due to the matching + fitting loop.
 
-#### chi2_shift — `chi2_shift`
+#### chi2_shift - `chi2_shift`
 
 DFT-based cross-correlation shift measurement.  Does not detect point
 sources; instead it correlates the full 2D image arrays to find the
 global (dx, dy) shift that best aligns them.  Only a translation is
-fit — no rotation, scale, or distortion correction.
+fit - no rotation, scale, or distortion correction.
 
 **Pros**
 - Works on extended-source-dominated fields (galaxy hosts, nebulae)
@@ -349,9 +349,9 @@ fit — no rotation, scale, or distortion correction.
 - Pure Python (`image-registration` package).
 
 **Cons**
-- Only corrects a constant (dx, dy) translation — no rotation, scale,
+- Only corrects a constant (dx, dy) translation - no rotation, scale,
   or distortion handling.
-- Accuracy is limited to ~0.5–2.0 px (cross-correlation peak width).
+- Accuracy is limited to ~0.5-2.0 px (cross-correlation peak width).
 - Can be confused by bright edges, saturated stars, or large
   background gradients.
 - Not suitable for images with significant rotation or pixel-scale
@@ -398,9 +398,9 @@ template_subtraction:
 
 When an alignment is rejected, the pipeline falls back to the next
 method in the cascade.  Two diagnostic plots are produced:
-- **`Alignment_Offset_*.png`** — quiver plot of per-source (dx, dy)
+- **`Alignment_Offset_*.png`** - quiver plot of per-source (dx, dy)
   offsets with error bars from SExtractor centroid uncertainties.
-- **`SpalipyMatch_*.png`** — side-by-side view of matched sources
+- **`SpalipyMatch_*.png`** - side-by-side view of matched sources
   (spalipy method only).
 
 ---
@@ -415,15 +415,15 @@ undersampled images (FWHM < 2.5 px).  Three fitters are available:
 
 | Fitter | Config key | Use case |
 |--------|-----------|----------|
-| **Least-squares** (default) | — | Fast, general-purpose |
-| **Poisson likelihood** | `use_poisson_likelihood_fitter: True` | Low-count regime; statistically superior to χ² (Fermilab TM-2543-AE) |
+| **Least-squares** (default) | - | Fast, general-purpose |
+| **Poisson likelihood** | `use_poisson_likelihood_fitter: True` | Low-count regime; statistically superior to chi^2 (Fermilab TM-2543-AE) |
 | **MCMC (emcee)** | `perform_emcee_fitting_s2n: 10` | Bayesian uncertainty estimation; triggered when target S/N < threshold |
 
 ### MCMC configuration
 
-The emcee fitter runs adaptively — it extends the chain until the
+The emcee fitter runs adaptively - it extends the chain until the
 integrated autocorrelation time stabilises (up to 50,000 steps), then
-applies principled burn-in (10×τ discard) and thinning (τ/2).  Key
+applies principled burn-in (10xtau discard) and thinning (tau/2).  Key
 parameters:
 
 ```yaml
@@ -431,7 +431,7 @@ photometry:
   perform_emcee_fitting_s2n: 10   # run MCMC when target S/N < this
   emcee_nwalkers: 32              # number of walkers
   emcee_nsteps: null              # null = adaptive; or set fixed step count
-  emcee_burnin_frac: 0.3          # burn-in fraction (overridden by 10×τ rule)
+  emcee_burnin_frac: 0.3          # burn-in fraction (overridden by 10xtau rule)
   emcee_thin: 10                  # thinning factor
   emcee_adaptive_tau_target: 50   # target autocorrelation time for convergence
   emcee_min_autocorr_N: 100       # min chain length before autocorr checks
@@ -453,7 +453,7 @@ photometry:
   check_inverted_image: True
 ```
 
-When enabled, the pipeline fits both the normal and inverted (×−1)
+When enabled, the pipeline fits both the normal and inverted (x-1)
 images, and replaces poor normal fits with inverted fits when
 appropriate.  Results are flagged with an `_inverted_fit` column in
 the output table.
@@ -498,7 +498,7 @@ template_subtraction:
   method: sfft
   kernel_order: 0                  # 0=constant, 1=linear, 2=quadratic, 3=cubic, or "auto"
   kernel_hw_fwhm_multiplier: 2.5   # kernel half-width as FWHM multiplier
-  sfft_forceconv: AUTO             # AUTO, REF, or SCI — which image to convolve
+  sfft_forceconv: AUTO             # AUTO, REF, or SCI - which image to convolve
   sfft_decorrelate_noise: True     # apply noise decorrelation (SFFT v1.5.0+)
   sfft_save_decorrelated: True     # save decorrelated difference image separately
   sfft_use_bspline_kernel: False   # B-spline kernel (requires CUDA/Cupy)

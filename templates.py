@@ -175,7 +175,7 @@ except (ModuleNotFoundError, ImportError):
         m = str(message).strip()
         if not m:
             return ""
-        return f"\n\n— {m} —\n"
+        return f"\n\n- {m} -\n"
 
     distance_to_uniform_row_col = None
     get_header = None
@@ -527,7 +527,7 @@ def _detect_sextractor_sources(data_or_path, input_yaml=None, fwhm_pix=3.0,
             fits_path = str(data_or_path)
         else:
             # Write in-memory array to temp FITS file
-            # Replace NaNs with median — SExtractor can crash on NaN pixels.
+            # Replace NaNs with median - SExtractor can crash on NaN pixels.
             import tempfile
             data = np.asarray(data_or_path, dtype=np.float32)
             if data.ndim != 2:
@@ -790,7 +790,7 @@ def _reproject_template(
             if _REPROJECT_ADAPTIVE_EXTRAS.get("_has_center_jacobian"):
                 adaptive_kwargs["center_jacobian"] = True
                 logger.info(
-                    "Large rotation (%.1f deg) — enabling center_jacobian for "
+                    "Large rotation (%.1f deg) - enabling center_jacobian for "
                     "more accurate reproject_adaptive resampling.",
                     rot_diff,
                 )
@@ -804,7 +804,7 @@ def _reproject_template(
     if isinstance(fwhm_pixels, (int, float)) and fwhm_pixels > 0 and fwhm_pixels < 2.5:
         if interp_order_eff in ("bicubic", "biquadratic"):
             logger.info(
-                "Undersampled image (FWHM=%.2f px < 2.5) — downgrading %s to bilinear "
+                "Undersampled image (FWHM=%.2f px < 2.5) - downgrading %s to bilinear "
                 "to avoid ringing artifacts.",
                 fwhm_pixels, interp_order_eff,
             )
@@ -893,7 +893,7 @@ def _reproject_template(
     hdu.writeto(output_path, overwrite=True, output_verify="silentfix+ignore")
 
     # ------------------------------------------------------------------
-    # Alignment quality diagnostic — same pixels as on disk, without
+    # Alignment quality diagnostic - same pixels as on disk, without
     # re-reading the FITS (avoids a full redundant I/O on large mosaics).
     # ------------------------------------------------------------------
     try:
@@ -2775,7 +2775,7 @@ class Templates:
                 transform, then fits 2D spline surfaces to the residual field
                 to correct non-homogeneous/optical distortion.  This handles
                 spatially-varying distortion that a single affine or polynomial
-                cannot — the failure mode that per-quadrant verification detects.
+                cannot - the failure mode that per-quadrant verification detects.
 
                 Source detection uses SExtractor for consistency with the rest
                 of the pipeline.  Only the template is resampled; the science
@@ -2789,7 +2789,7 @@ class Templates:
 
                     # --- Source detection with SExtractor ---
                     # SExtractor's robust deblending means a single low-threshold
-                    # run finds plenty of sources — no need for adaptive multi-
+                    # run finds plenty of sources - no need for adaptive multi-
                     # threshold scanning like SEP required.
                     def _detect_for_spalipy(data, min_sources=20):
                         """Detect sources via SExtractor, return spalipy-format Table."""
@@ -2914,7 +2914,7 @@ class Templates:
                     except Exception:
                         pass
 
-                    # Replace NaNs with median — spalipy can't handle NaNs.
+                    # Replace NaNs with median - spalipy can't handle NaNs.
                     _tpl_nan = ~np.isfinite(_tpl_img)
                     _sci_nan = ~np.isfinite(scienceImage)
                     _tpl_fill = np.where(_tpl_nan, float(np.nanmedian(_tpl_img)), _tpl_img).astype(np.float32)
@@ -2978,7 +2978,7 @@ class Templates:
                                 if _e is not None and hasattr(_e, "__len__"):
                                     _n_matched += len(_e)
                         logger.info(
-                            "spalipy: transform scale=%.3f rot=%.1f° "
+                            "spalipy: transform scale=%.3f rot=%.1f deg "
                             "(%d matched sources).",
                             sp.affine_transform.scale,
                             sp.affine_transform.rotation,
@@ -3149,7 +3149,7 @@ class Templates:
 
                     method_used = "spalipy"
                     logger.info("Alignment succeeded (method: %s).", method_used)
-                    # Science image unchanged — no target coordinate update needed
+                    # Science image unchanged - no target coordinate update needed
                     return scienceFpath, new_templateFpath
 
                 except Exception as _e:
@@ -3161,7 +3161,7 @@ class Templates:
 
                 tweakwcs computes corrections to WCS objects to minimize mismatch
                 between image source catalogs and reference catalogs.  It uses
-                tangent-plane linear corrections with sigma-clipped fitting —
+                tangent-plane linear corrections with sigma-clipped fitting -
                 the same approach as HST/JWST pipeline alignment.
 
                 After tweaking the template WCS, reproject is used to resample
@@ -3301,7 +3301,7 @@ class Templates:
                 performs DFT-upsampling cross-correlation with chi-squared
                 error estimation.  This works on **extended emission**
                 (nebulae, galaxy-dominated fields) where there are no point
-                sources to match — the gap that all source-based methods
+                sources to match - the gap that all source-based methods
                 cannot fill.
 
                 Only a translation is computed; the template is shifted and
@@ -3363,7 +3363,7 @@ class Templates:
                         return None, None
 
                     # Shift the template to match the science image
-                    # shiftnd takes (y_shift, x_shift) — we shift tpl by (-yoff, -xoff)
+                    # shiftnd takes (y_shift, x_shift) - we shift tpl by (-yoff, -xoff)
                     aligned_tpl = _imgreg_shift.shiftnd(
                         np.where(np.isfinite(templateImage), templateImage, 0.0),
                         (-yoff, -xoff),
@@ -3404,7 +3404,7 @@ class Templates:
                 if out[0]:
                     return out
                 logger.error(
-                    "All alignment methods failed (swarp→reproject→astroalign). "
+                    "All alignment methods failed (swarp->reproject->astroalign). "
                     "Proceeding with original unaligned images; subtraction quality may be poor."
                 )
                 return scienceFpath, templateFpath
@@ -3420,7 +3420,7 @@ class Templates:
                 if out[0]:
                     return out
                 logger.error(
-                    "All alignment methods failed (astroalign→reproject→swarp). "
+                    "All alignment methods failed (astroalign->reproject->swarp). "
                     "Proceeding with original unaligned images; subtraction quality may be poor."
                 )
                 return scienceFpath, templateFpath
@@ -3440,7 +3440,7 @@ class Templates:
                 if out[0]:
                     return out
                 logger.error(
-                    "All alignment methods failed (reproject→swarp→astroalign). "
+                    "All alignment methods failed (reproject->swarp->astroalign). "
                     "Proceeding with original unaligned images; subtraction quality may be poor."
                 )
                 return scienceFpath, templateFpath
@@ -3460,7 +3460,7 @@ class Templates:
                 if out[0]:
                     return out
                 logger.error(
-                    "All alignment methods failed (spalipy→swarp→reproject→astroalign). "
+                    "All alignment methods failed (spalipy->swarp->reproject->astroalign). "
                     "Proceeding with original unaligned images; subtraction quality may be poor."
                 )
                 return scienceFpath, templateFpath
@@ -3480,7 +3480,7 @@ class Templates:
                 if out[0]:
                     return out
                 logger.error(
-                    "All alignment methods failed (tweakwcs→swarp→reproject→astroalign). "
+                    "All alignment methods failed (tweakwcs->swarp->reproject->astroalign). "
                     "Proceeding with original unaligned images; subtraction quality may be poor."
                 )
                 return scienceFpath, templateFpath
@@ -3500,7 +3500,7 @@ class Templates:
                 if out[0]:
                     return out
                 logger.error(
-                    "All alignment methods failed (chi2_shift→swarp→reproject→astroalign). "
+                    "All alignment methods failed (chi2_shift->swarp->reproject->astroalign). "
                     "Proceeding with original unaligned images; subtraction quality may be poor."
                 )
                 return scienceFpath, templateFpath
@@ -4002,7 +4002,7 @@ class Templates:
         (constant) works well for small fields with good alignment.
 
         Auto-selection is capped at order 1 to avoid excessive RAM usage.
-        Order 2+ scales as (n_terms × kernel_pixels)^2 and can require
+        Order 2+ scales as (n_terms x kernel_pixels)^2 and can require
         >7 GB for typical kernel sizes.  Users can override via YAML.
 
         Returns
@@ -4010,7 +4010,7 @@ class Templates:
         (order, explanation) : (int, str)
         """
         if n_sources < 20:
-            return 0, "Few sources (<20). Constant kernel — sufficient for small fields."
+            return 0, "Few sources (<20). Constant kernel - sufficient for small fields."
         else:
             return 1, "Sufficient sources (>=20). Linear spatial variation."
 
@@ -4239,7 +4239,7 @@ class Templates:
             idx_r = indices[robust_mask]
 
             # --- Optional spatial thinning to avoid over-clustered regions ---
-            # Skip for sparse fields — thinning can remove valid sources when
+            # Skip for sparse fields - thinning can remove valid sources when
             # we already have too few for reliable kernel fitting.
             if (
                 params.use_spatial_thinning
@@ -4288,7 +4288,7 @@ class Templates:
                     # Calculate S/N from flux and flux_err (using the arrays extracted earlier)
                     # We need to re-extract the original flux values for the filtered subset
                     # For simplicity, use magnitude error as a proxy: S/N ~ 1/me
-                    # me < 0.2 mag corresponds to S/N > 5 (since me = 2.5/ln(10) * fe/f ≈ 1.086 * 1/SNR)
+                    # me < 0.2 mag corresponds to S/N > 5 (since me = 2.5/ln(10) * fe/f ~ 1.086 * 1/SNR)
                     # So me < 0.2 corresponds to SNR > 5.4
                     snr_mask = mag_err_r < 0.2
                     if snr_mask.sum() >= 4:
@@ -4404,7 +4404,7 @@ class Templates:
             # "lucky" inliers in noisy regimes). No continuity constraint: allow
             # inliers across the full magnitude range so the flux comparison is not
             # over-restricted. Use a modest majority threshold to avoid over-masking.
-            # Skip for sparse fields — bins with 1-2 sources make the inlier fraction
+            # Skip for sparse fields - bins with 1-2 sources make the inlier fraction
             # meaningless and can remove valid sources.
             bin_majority_frac = 0.25  # reject bin only if inlier fraction below this
             if final_inliers.sum() >= params.min_absolute_samples and len(mag_img_r) >= 15:
@@ -5124,7 +5124,7 @@ class Templates:
                 if fwhm_broad > fwhm_narrow and fwhm_broad > 0:
                     fwhm_conv = np.sqrt(max(fwhm_broad ** 2 - fwhm_narrow ** 2, 0.0))
                 else:
-                    fwhm_conv = fwhm_broad  # identical PSFs: kernel ≈ delta function; use broad as floor
+                    fwhm_conv = fwhm_broad  # identical PSFs: kernel ~ delta function; use broad as floor
 
                 # Adaptive multiplier: boost for undersampled images to capture PSF wings
                 # FWHM < 2 px is typically undersampled (Nyquist requires FWHM >= 2 px)
@@ -5154,10 +5154,10 @@ class Templates:
                 # With auto ForceConv, we always convolve the sharper image to match
                 # the broader one (never deconvolve), so a standard 2x FWHM_broad
                 # floor is sufficient.
-                # Base floor: 2.5×FWHM_broad for good PSF wing coverage.
+                # Base floor: 2.5xFWHM_broad for good PSF wing coverage.
                 # Cap down for sparse fields where a smaller kernel is more
                 # constrained (BUG 120: 32px half-width with order 1 gives
-                # 12675 unknowns vs ~17 sources → flux scaling discrepancy).
+                # 12675 unknowns vs ~17 sources -> flux scaling discrepancy).
                 _floor_mult = 2.5
                 if n_eff < 15:
                     _floor_mult = 2.0
@@ -5178,7 +5178,7 @@ class Templates:
 
             # SFFT kernel half-width: always use the FWHM-based ker_hw.
             # The caller's `scale` (pipeline source-detection cutout size, typically
-            # 5*FWHM) is NOT the kernel half-width — it is kept for the HOTPANTS
+            # 5*FWHM) is NOT the kernel half-width - it is kept for the HOTPANTS
             # path below, which uses it as the kernel half-width by convention.
             sfft_kernel_hw = max(ker_hw, 5)
             if scale is None or int(scale) <= 0:
@@ -5202,7 +5202,7 @@ class Templates:
 
             # NaN / sentinel masks
             # NOTE: the original (abs(x) < 1.1e-20) & (x != 0) condition was
-            # logically impossible — any float that close to zero IS 0.0 in
+            # logically impossible - any float that close to zero IS 0.0 in
             # IEEE 754 and will never satisfy != 0.  The guard has been removed
             # so that true near-zero sentinel pixels (written by SWarp/SFFT in
             # no-coverage regions) are correctly marked as invalid.
@@ -5271,7 +5271,7 @@ class Templates:
                     background_defects_mask = dm_crop
                     logger.info(
                         "Background defects mask shape %s != science shape %s; "
-                        "cropped to overlap region (%d×%d).",
+                        "cropped to overlap region (%dx%d).",
                         dm.shape, scienceImage.shape, crop_h, crop_w,
                     )
                 mask_essential = mask_essential | background_defects_mask
@@ -5386,15 +5386,15 @@ class Templates:
             # null/None defaults to 0 (constant kernel, minimal RAM).
             #
             # RAM scaling (SFFT linear system):
-            #   order 0:  1 term  →  manageable
-            #   order 1:  3 terms →  moderate
-            #   order 2:  6 terms →  ~7 GB (auto caps at 2)
-            #   order 3: 10 terms →  ~20 GB (user must set explicitly)
+            #   order 0:  1 term  ->  manageable
+            #   order 1:  3 terms ->  moderate
+            #   order 2:  6 terms ->  ~7 GB (auto caps at 2)
+            #   order 3: 10 terms ->  ~20 GB (user must set explicitly)
             # Default is 0 (constant kernel, minimal RAM).  Set "auto" in
             # YAML to enable auto-selection (capped at order 2).
             _raw_kernel = ts_cfg.get("kernel_order", 0)
             _is_auto = isinstance(_raw_kernel, str) and _raw_kernel.strip().lower() == "auto"
-            # null/None → 0 (constant).  Only "auto" string triggers auto-select.
+            # null/None -> 0 (constant).  Only "auto" string triggers auto-select.
             # Numeric strings like "0", "1", "2" are valid user overrides.
             if _is_auto:
                 user_kernel = None
@@ -5438,7 +5438,7 @@ class Templates:
                 # Auto-select kernel polynomial order based on source count.
                 #
                 # The polynomial order controls how the kernel varies SPATIALLY
-                # across the field of view — NOT how the PSF difference is
+                # across the field of view - NOT how the PSF difference is
                 # modelled.  The DFT kernel itself handles the PSF shape
                 # difference at each position.  The polynomial just determines
                 # how many independent spatial terms are used.
@@ -5448,19 +5448,19 @@ class Templates:
                 # allows the kernel to vary linearly across the field.
                 #
                 # RAM CONSTRAINT: SFFT's linear system scales as
-                #   (n_poly_terms × kernel_pixels)^2
-                # With KerHW=35 (kernel 71×71 = 5041 px):
-                #   order 0:  1 term  →  ~5K unknowns  →  manageable
-                #   order 1:  3 terms →  ~15K unknowns →  moderate
-                #   order 2:  6 terms →  ~30K unknowns →  ~7 GB matrix
-                #   order 3: 10 terms →  ~50K unknowns →  ~20 GB matrix
+                #   (n_poly_terms x kernel_pixels)^2
+                # With KerHW=35 (kernel 71x71 = 5041 px):
+                #   order 0:  1 term  ->  ~5K unknowns  ->  manageable
+                #   order 1:  3 terms ->  ~15K unknowns ->  moderate
+                #   order 2:  6 terms ->  ~30K unknowns ->  ~7 GB matrix
+                #   order 3: 10 terms ->  ~50K unknowns ->  ~20 GB matrix
                 # Order 3+ can exhaust RAM on typical machines.  Auto-selection
                 # is capped at order 2 for small kernels (KerHW <= 25), order 1
                 # otherwise.  Users can override with kernel_order in YAML.
                 rel_diff = abs(science_fwhm - template_fwhm) / max((science_fwhm + template_fwhm) / 2, 0.1)
 
                 # BUG 121: With KerHW=20, order 2 needs only ~812 MB
-                # (6×1681=10086 unknowns).  Allow order 2 for small kernels
+                # (6x1681=10086 unknowns).  Allow order 2 for small kernels
                 # to model spatially-varying astrometric residuals.
                 _max_auto_order = 2 if ker_hw <= 25 else 1
 
@@ -5472,12 +5472,12 @@ class Templates:
                     kernel_order = min(2, _max_auto_order)
 
                 # Last-resort alignment may have spatially-varying residuals
-                # that benefit from a linear kernel.  Only boost from 0→1.
+                # that benefit from a linear kernel.  Only boost from 0->1.
                 _is_last_resort = "last_resort" in Path(scienceFpath).name.lower()
                 if _is_last_resort and kernel_order == 0:
                     kernel_order = 1
                     logger.info(
-                        "Boosting kernel_order to 1 (last-resort alignment — "
+                        "Boosting kernel_order to 1 (last-resort alignment - "
                         "spatially-varying residuals need linear terms).",
                     )
 
@@ -5536,7 +5536,7 @@ class Templates:
                 # (matches HOTPANTS behavior and prevents crosstalk)
                 if not os.path.exists(scienceFpath):
                     logger.warning(
-                        "scienceFpath does not exist before SFFT clean_fits_nans: %s — "
+                        "scienceFpath does not exist before SFFT clean_fits_nans: %s - "
                         "falling back to original science path.",
                         scienceFpath,
                     )
@@ -6146,7 +6146,7 @@ class Templates:
                 ]
 
                 # Cross-match tolerance factor: DIVIDES SFFT's auto tolerance
-                # (~1.6*max(FWHM) ≈ 12px). Default 2.0 → ~6px, enforcing
+                # (~1.6*max(FWHM) ~ 12px). Default 2.0 -> ~6px, enforcing
                 # stricter positional overlap between sci and ref sources.
                 # Higher values = tighter matching.
                 _match_tol_factor = ts_sub.get("sfft_match_tol_factor", 2.0)
@@ -6279,7 +6279,7 @@ class Templates:
             # the true flux ratio. This happens when PSFs are nearly identical (kernel
             # is delta-like, integral ~1.0 regardless of true flux ratio) or when too
             # few sources were used for kernel fitting (unconstrained solution).
-            # Note: pre-scaling the reference doesn't fix this — SFFT re-estimates
+            # Note: pre-scaling the reference doesn't fix this - SFFT re-estimates
             # both scalings from the pre-scaled input, preserving the relative mismatch.
             # The discrepancy is a diagnostic indicator of kernel quality, not a
             # correctable error. Dipoles from this are best addressed by increasing
@@ -6350,7 +6350,7 @@ class Templates:
                                 )
                             logger.warning(
                                 "SFFT flux scaling discrepancy: convolution=%.4f vs photometric=%.4f "
-                                "(%.1f%% mismatch). Kernel integral does not match true flux ratio — "
+                                "(%.1f%% mismatch). Kernel integral does not match true flux ratio - "
                                 "dipole residuals likely at source positions. "
                                 "This can be caused by nearly-identical PSFs with few sources, "
                                 "poor astrometric alignment, or deconvolution from wrong ForceConv.%s",
@@ -6458,7 +6458,7 @@ class Templates:
             # fall back to FWHM-based sizing if scale not provided.
             # scale is already half the cutout box size, so it directly gives the kernel half-width.
             # r = kernel half-width for HOTPANTS convolution kernel.
-            # rss = substamp half-width (typically 3× r).
+            # rss = substamp half-width (typically 3x r).
             # Clamp scale-derived kernel half-width to reasonable range to avoid
             # impractically large kernels when scale is very large (sparse fields)
             MAX_KERNEL_HALF_WIDTH_FROM_SCALE = 50

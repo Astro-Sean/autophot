@@ -485,7 +485,7 @@ class MCMCFitter:
     Key implementation details
     --------------------------
     * Save/restore in log_likelihood: each walker evaluation saves the model
-      parameters, sets new ones, evaluates, then restores — avoiding a deep
+      parameters, sets new ones, evaluates, then restores - avoiding a deep
       model.copy() per likelihood call (the dominant MCMC cost).
     * Parameter-aware jitter in _jitter_within_bounds: position parameters
       (x_0, y_0) get an absolute pixel jitter ``scale``, while flux/shape
@@ -722,7 +722,7 @@ class MCMCFitter:
         bkg_error = np.sqrt(bkg_rms_e_floored**2 + float(readnoise) ** 2)
         
         # When data is background-subtracted, the Poisson variance from the sky
-        # is missing.  Approximate it as bkg_rms^2 (Poisson: variance ≈ mean).
+        # is missing.  Approximate it as bkg_rms^2 (Poisson: variance ~ mean).
         poisson_e = image_e
         if is_background_subtracted:
             # Add back the sky Poisson variance that was subtracted
@@ -817,7 +817,7 @@ class MCMCFitter:
 
             # Start autocorrelation checks only after enough steps per walker.
             # emcee's get_autocorr_time issues warnings when the chain is
-            # shorter than 50*tau — which is exactly the regime we're in
+            # shorter than 50*tau - which is exactly the regime we're in
             # during early iterations.  Suppress these warnings aggressively
             # since they're expected and not actionable.
             if total_steps >= self.min_autocorr_N:
@@ -830,8 +830,8 @@ class MCMCFitter:
                     # Standard emcee recommendation: each walker must run for at
                     # least 50 * tau steps.  We use 100*tau as the convergence
                     # threshold to ensure a healthy effective sample size
-                    # (n_eff ≈ n_walkers * (total_steps - burnin) / thin / tau).
-                    # The old 50*tau threshold produced n_eff ≈ 92, which is
+                    # (n_eff ~ n_walkers * (total_steps - burnin) / thin / tau).
+                    # The old 50*tau threshold produced n_eff ~ 92, which is
                     # marginal for reliable posterior contours.
                     if np.isfinite(tau_est) and total_steps > 100 * tau_est:
                         log.info(
@@ -925,7 +925,7 @@ class MCMCFitter:
             else:
                 # Fallback: recompute from the cutout.  Add bkg_rms^2 to the Poisson term
                 # because data is background-subtracted and the Poisson noise from the sky
-                # is missing.  For Poisson background, variance ≈ mean ≈ rms^2.
+                # is missing.  For Poisson background, variance ~ mean ~ rms^2.
                 sigma = self._recompute_noise_variance(
                     data,
                     gain=gain,
@@ -998,8 +998,8 @@ class MCMCFitter:
                 n_eff = chain.shape[0] / tau_max_post
                 if n_eff < 100:
                     log.warning(
-                        "[MCMC] Low effective sample size: n_eff ≈ %.0f "
-                        "(chain length %d, tau ≈ %.1f). Corner contours may be noisy.",
+                        "[MCMC] Low effective sample size: n_eff ~ %.0f "
+                        "(chain length %d, tau ~ %.1f). Corner contours may be noisy.",
                         n_eff, chain.shape[0], tau_max_post,
                     )
 
@@ -1052,8 +1052,8 @@ class MCMCFitter:
             self.fit_info["samples"][self.counter] = chain
             self.fit_info["log_prob"] = logp
         # Release the raw chain and log-prob arrays now that summary stats are
-        # extracted — the full chain can be ~8 MB per source (50 walkers × 5000
-        # steps × 4 params) and accumulates across all sources in a batch.
+        # extracted - the full chain can be ~8 MB per source (50 walkers x 5000
+        # steps x 4 params) and accumulates across all sources in a batch.
         del chain, logp
         self.fit_info["param_errs"] = perr_sym
         self.fit_info["param_errs_lower"] = perr_lo
@@ -1065,7 +1065,7 @@ class MCMCFitter:
         )
         self.fit_info["total_steps"] = int(self.sampler.iteration)
         # Release the sampler object so its internal chain buffer
-        # (n_walkers × n_steps × n_params) is freed for each source.
+        # (n_walkers x n_steps x n_params) is freed for each source.
         # The chain extracted above is already stored in fit_info["samples"]
         # for corner-plot use; we don't need the sampler any further.
         self.sampler = None
@@ -1087,10 +1087,10 @@ class PoissonLikelihoodFitter:
     fitting is superior to chi-squared methods for PSF photometry.
     
     The likelihood function is:
-        L = ∏ e^(-n̄_i) * n̄_i^(n_i) / n_i!
-    ln(L) = Σ [-n̄_i + ln(n̄_i) - n_i ln(n_i) + n_i]
+        L = prod e^(-n_i) * n_i^(n_i) / n_i!
+    ln(L) = Sigma [-n_i + ln(n_i) - n_i ln(n_i) + n_i]
     
-    where n̄_i = A * P(x_i - s_x, y_i - s_y) + B
+    where n_i = A * P(x_i - s_x, y_i - s_y) + B
     A = source amplitude, B = background, s_x, s_y = position
     """
     
@@ -1114,7 +1114,7 @@ class PoissonLikelihoodFitter:
         """
         Compute Poisson log-likelihood.
 
-        ln(L) = Σ [n_i * ln(n̄_i) - n̄_i]
+        ln(L) = Sigma [n_i * ln(n_i) - n_i]
         Only terms depending on model parameters matter for optimization.
         """
         n_i = np.asarray(data, float)
@@ -1130,11 +1130,11 @@ class PoissonLikelihoodFitter:
         Compute first and second derivatives of ln(L) w.r.t. parameters.
         
         Following Fermilab document Appendix A:
-        ∂lnL/∂α_k = Σ (dlnL/dn̄_i) * (∂n̄_i/∂α_k)
-        ∂²lnL/∂α_l∂α_k = Σ (d²lnL/dn̄_i²) * (∂n̄_i/∂α_k) * (∂n̄_i/∂α_l)
+        dlnL/dalpha_k = Sigma (dlnL/dn_i) * (dn_i/dalpha_k)
+        d^2lnL/dalpha_ldalpha_k = Sigma (d^2lnL/dn_i^2) * (dn_i/dalpha_k) * (dn_i/dalpha_l)
         
-        where dlnL/dn̄_i = -1 + 1/n̄_i
-              d²lnL/dn̄_i² = -1/n̄_i²
+        where dlnL/dn_i = -1 + 1/n_i
+              d^2lnL/dn_i^2 = -1/n_i^2
         """
         n_i = np.asarray(data, float)
         n_bar = np.asarray(model, float)
@@ -1181,7 +1181,7 @@ class PoissonLikelihoodFitter:
         """
         Solve for parameter updates using Newton-Raphson step.
         
-        H * δα = -∇lnL
+        H * deltaalpha = -gradlnL
         """
         try:
             delta = np.linalg.solve(hessian, -gradient)
@@ -3501,7 +3501,7 @@ class PSF:
                 bkg_sub2 = bkg_sub - bkg_median
                 inv_data = -bkg_sub2
                 ndimage_inverted = _nddata_clone(ndimage, data=inv_data)
-                log.info("Target PSF: inverted image built as -(data - 2*bkg) — double subtraction, keeping all values.")
+                log.info("Target PSF: inverted image built as -(data - 2*bkg) - double subtraction, keeping all values.")
             except Exception as exc:
                 log_warning_from_exception(log, "Failed to create inverted image for PSF fitting", exc)
                 ndimage_inverted = None
@@ -3530,21 +3530,21 @@ class PSF:
         x_all = np.asarray(sources["x_pix"], float)
         y_all = np.asarray(sources["y_pix"], float)
         flux_all = np.asarray(sources[flux_col], float).copy()
-        # PSF model is fit to the same data as Aperture: image*gain in e⁻. The fit
-        # amplitude is *integrated* signal in the exposure (e⁻), never a rate.
-        # `flux_AP` / `maxPixel` / `sky_bkg_total_flux` are e⁻/s (or e⁻/s-like);
-        # `counts_AP` / `counts` are already per-frame integrated e⁻.
+        # PSF model is fit to the same data as Aperture: image*gain in e-. The fit
+        # amplitude is *integrated* signal in the exposure (e-), never a rate.
+        # `flux_AP` / `maxPixel` / `sky_bkg_total_flux` are e-/s (or e-/s-like);
+        # `counts_AP` / `counts` are already per-frame integrated e-.
         if flux_col in ("flux_AP", "maxPixel", "sky_bkg_total_flux"):
             flux_all = flux_all * float(exposure_time)
             log.info(
                 "PSF init: column %r is a per-second rate; multiplied by exposure_time=%.4g s "
-                "to match integrated e⁻ in the frame.",
+                "to match integrated e- in the frame.",
                 flux_col,
                 float(exposure_time),
             )
         elif flux_col == "flux":
             log.info(
-                "PSF init: using column 'flux' as integrated e⁻ in the frame; "
+                "PSF init: using column 'flux' as integrated e- in the frame; "
                 "if your table stores a rate, use flux_AP instead."
             )
 
@@ -3709,7 +3709,7 @@ class PSF:
         # same background variance sigma_pix^2, this simplifies to:
         #   F_11 = C / sigma_pix^2 + 1/fs   (background + Poisson terms)
         #   sigma_fs^2 = 1/F_11 = sigma_pix^2 / C + fs
-        # where C = sum(PSF_i^2) ≈ 1/(4*pi*sigma^2) for a 2D Gaussian with
+        # where C = sum(PSF_i^2) ~ 1/(4*pi*sigma^2) for a 2D Gaussian with
         # sigma = fwhm * gaussian_fwhm_to_sigma.
         # All quantities are in electrons to match the aperture photometry
         # convention (image_e = image * gain).
@@ -3766,7 +3766,7 @@ class PSF:
         use_emcee_for_all = False
         use_emcee_tiered = False
         if is_target_fit and emcee_s2n > 0 and len(init_params) == 1:
-            # Use PSF S/N (not aperture S/N) for the MCMC trigger — the aperture
+            # Use PSF S/N (not aperture S/N) for the MCMC trigger - the aperture
             # SNR can be much higher than the PSF S/N for faint sources because
             # it includes more sky noise, causing MCMC to be skipped when it's
             # actually needed.
@@ -4247,7 +4247,7 @@ class PSF:
             if np.any(bootstrap_negative) and not np.any(significant_negative_fit):
                 log.info(
                     "Target PSF: flux_fit >= 0 (MCMC prior forces positive), but bootstrap "
-                    "flux was negative for %d/%d fit(s) — triggering inverted retry.",
+                    "flux was negative for %d/%d fit(s) - triggering inverted retry.",
                     int(np.sum(bootstrap_negative)),
                     len(combined),
                 )
@@ -4737,7 +4737,7 @@ class PSF:
             _ok_mag = valid_flux & (_flux_mag_arr > 0)
             mag_arr[_ok_mag] = -2.5 * np.log10(_flux_mag_arr[_ok_mag])
             updated[inst_col] = mag_arr
-            # Error: (2.5/ln10) * (flux_err / |flux|) — only for valid fits
+            # Error: (2.5/ln10) * (flux_err / |flux|) - only for valid fits
             mag_err = np.full(len(updated), np.nan, dtype=float)
             _ok_err = valid_flux & (abs_flux > 0)
             mag_err[_ok_err] = (2.5 / np.log(10.0)) * (flux_err_arr[_ok_err] / abs_flux[_ok_err])
