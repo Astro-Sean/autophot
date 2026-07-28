@@ -486,6 +486,19 @@ def run_sfft() -> Optional[int]:
         default="false",
         help="Enable SFFT elaborate variable-star rejection (true/false).",
     )
+    parser.add_argument(
+        "-match_tol_factor",
+        type=float,
+        default=2.0,
+        help=(
+            "Divisor on SFFT's auto-computed cross-match tolerance "
+            "(default 2.0 = half of auto). Auto tolerance is "
+            "~1.6*max(FWHM_REF, FWHM_SCI) ≈ 12px; factor=2.0 → ~6px. "
+            "Higher values enforce stricter positional overlap between "
+            "sci and ref sources, preventing misaligned sources from "
+            "biasing the kernel fit."
+        ),
+    )
     args = parser.parse_args()
 
     # --- Parse Coordinate Lists ---
@@ -1270,8 +1283,11 @@ def run_sfft() -> Optional[int]:
                     XY_PriorSelect=matching_sources,
                     XY_PriorBan=masked_sources,
                     MatchTol=None,
-                    # Matching tolerance: overly tight tolerances can lock onto a bad solution.
-                    MatchTolFactor=1.0,
+                    # Tighter cross-match: factor=2.0 halves the auto tolerance
+                    # (~12px → ~6px), ensuring only well-aligned sources are
+                    # used for the kernel fit. Misaligned sources produce
+                    # off-center stamps and dipole residuals.
+                    MatchTolFactor=float(getattr(args, "match_tol_factor", 2.0)),
                     Hough_MINFR=0.3,
                     Hough_PeakClip=0.4,
                     BeltHW=0.2,
@@ -1331,7 +1347,7 @@ def run_sfft() -> Optional[int]:
                     XY_PriorSelect=None,
                     XY_PriorBan=masked_sources,
                     MatchTol=None,
-                    MatchTolFactor=1,
+                    MatchTolFactor=float(getattr(args, "match_tol_factor", 0.5)),
                     Hough_MINFR=0.3,
                     Hough_PeakClip=0.4,
                     BeltHW=0.2,
@@ -1462,6 +1478,37 @@ def run_sfft() -> Optional[int]:
                     if a in matched_sources.columns and b in matched_sources.columns:
                         xcol, ycol = a, b
                         break
+
+            # --- Position consistency check: verify SFFT matched sources are
+            # close to pipeline-vetted prior positions.  Sources that SFFT
+            # finds on its own (not in the prior list) may be poorly aligned
+            # and produce dipole residuals.  Log how many are far from any
+            # prior so the user can diagnose subtraction quality issues.
+            if (
+                matching_sources is not None
+                and len(matching_sources) > 0
+                and xcol is not None
+                and ycol is not None
+            ):
+                prior_xy = np.asarray(matching_sources, dtype=float)  # 1-based FITS
+                sfft_xy = matched_sources[[xcol, ycol]].values.astype(float)
+                # For each SFFT source, find nearest prior source
+                from scipy.spatial import cKDTree
+                tree = cKDTree(prior_xy)
+                dists, _ = tree.query(sfft_xy, k=1)
+                _far_threshold = 5.0  # px (1-based, so ~5px in image space)
+                n_far = int((dists > _far_threshold).sum())
+                if n_far > 0:
+                    log_info(
+                        f"Position consistency: {n_far}/{len(sfft_xy)} SFFT-matched "
+                        f"sources are > {_far_threshold:.0f}px from any pipeline-vetted "
+                        f"prior (may be poorly aligned)."
+                    )
+                else:
+                    log_info(
+                        f"Position consistency: all {len(sfft_xy)} SFFT-matched "
+                        f"sources are within {_far_threshold:.0f}px of a pipeline prior."
+                    )
             out_csv = os.path.join(
                 out_dir, f"SFFT_Matching_Sources_{out_base}.csv"
             )
@@ -1987,7 +2034,7 @@ def run_sfft() -> Optional[int]:
                     ax.set_xlabel("MAG_REF (REF)")
                     ax.set_ylabel("MAG_REF (SCI) - MAG_REF (REF)")
                     ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
-                    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=9)
+                    ax.legend(loc="best", frameon=True, fontsize=9, framealpha=0.8)
                     ax.set_title(f"SFFT source matching: {n_input} input -> {n_final} final sources", fontsize=10)
                     png_path = os.path.join(out_dir, f"VarCheck_{out_base}.png")
                     try:

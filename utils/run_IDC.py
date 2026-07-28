@@ -3329,13 +3329,14 @@ NNW
                     from scipy.spatial import cKDTree
                     _x_col = "XWIN_IMAGE" if "XWIN_IMAGE" in sci_cat_verify.colnames else "X_IMAGE"
                     _y_col = "YWIN_IMAGE" if "YWIN_IMAGE" in sci_cat_verify.colnames else "Y_IMAGE"
+                    # SExtractor uses 1-based pixel coordinates; convert to 0-based
                     sci_xy = np.column_stack([
-                        np.asarray(sci_cat_verify[_x_col], float),
-                        np.asarray(sci_cat_verify[_y_col], float),
+                        np.asarray(sci_cat_verify[_x_col], float) - 1.0,
+                        np.asarray(sci_cat_verify[_y_col], float) - 1.0,
                     ])
                     ref_xy = np.column_stack([
-                        np.asarray(ref_cat_verify[_x_col], float),
-                        np.asarray(ref_cat_verify[_y_col], float),
+                        np.asarray(ref_cat_verify[_x_col], float) - 1.0,
+                        np.asarray(ref_cat_verify[_y_col], float) - 1.0,
                     ])
 
                     # Mutual nearest-neighbor matching: a sci source
@@ -4654,13 +4655,14 @@ NNW
                 if _sci_cat_v is not None and _ref_cat_v is not None and _n_sci_reproj >= _reproj_min_det and _n_ref_reproj >= _reproj_min_det:
                     _x_col = "XWIN_IMAGE" if "XWIN_IMAGE" in _sci_cat_v.colnames else "X_IMAGE"
                     _y_col = "YWIN_IMAGE" if "YWIN_IMAGE" in _sci_cat_v.colnames else "Y_IMAGE"
+                    # SExtractor uses 1-based pixel coordinates; convert to 0-based
                     _sci_xy = np.column_stack([
-                        np.asarray(_sci_cat_v[_x_col], float),
-                        np.asarray(_sci_cat_v[_y_col], float),
+                        np.asarray(_sci_cat_v[_x_col], float) - 1.0,
+                        np.asarray(_sci_cat_v[_y_col], float) - 1.0,
                     ])
                     _ref_xy = np.column_stack([
-                        np.asarray(_ref_cat_v[_x_col], float),
-                        np.asarray(_ref_cat_v[_y_col], float),
+                        np.asarray(_ref_cat_v[_x_col], float) - 1.0,
+                        np.asarray(_ref_cat_v[_y_col], float) - 1.0,
                     ])
 
                     # Mutual nearest-neighbor matching for robust verification
@@ -7231,7 +7233,6 @@ NNW
                 **imshow_kwargs,
                 origin="lower",
             )
-            ax2.set_title("Reference Image")
             cbar2 = fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
             cbar2.set_label("Reference counts", fontsize=7)
             cbar2.ax.tick_params(labelsize=6)
@@ -7284,8 +7285,9 @@ NNW
                     grid_cells = {}  # Dictionary to store sources per grid cell
                     
                     # Assign sources to grid cells
+                    # SExtractor uses 1-based pixel coordinates; convert to 0-based
                     for source in valid_sources:
-                        x, y = source["XWIN_IMAGE"], source["YWIN_IMAGE"]
+                        x, y = source["XWIN_IMAGE"] - 1.0, source["YWIN_IMAGE"] - 1.0
                         grid_x = min(int(x / grid_spacing_x), n_grid - 1)
                         grid_y = min(int(y / grid_spacing_y), n_grid - 1)
                         cell_key = (grid_x, grid_y)

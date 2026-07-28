@@ -352,18 +352,18 @@ class AlignmentVerifier:
         plt.imshow(sci_data, cmap='gray', origin='lower')
         plt.title('Science Image')
         plt.colorbar()
-        
+
         plt.subplot(2, 2, 2)
         plt.imshow(ref_data, cmap='gray', origin='lower')
         plt.title('Reference Image')
         plt.colorbar()
-        
+
         plt.subplot(2, 2, 3)
         plt.imshow(diff_data, cmap='RdBu_r', origin='lower', vmin=-np.percentile(np.abs(diff_data), 99),
                    vmax=np.percentile(np.abs(diff_data), 99))
         plt.title('Difference (Science - Reference)')
         plt.colorbar()
-        
+
         # 2. Coordinate offset map
         if 'coordinate_accuracy' in results and results['coordinate_accuracy']['test_points']:
             plt.subplot(2, 2, 4)
@@ -372,7 +372,7 @@ class AlignmentVerifier:
                 xs = [p['position'][0] for p in points]
                 ys = [p['position'][1] for p in points]
                 offsets = [p['offset_pixels'] for p in points]
-                
+
                 scatter = plt.scatter(xs, ys, c=offsets, cmap='viridis', s=20)
                 plt.colorbar(scatter, label='Offset (pixels)')
                 plt.title('Coordinate Offset Map')
