@@ -6572,6 +6572,7 @@ def run_photometry():
             TargetPosition = PSF(
                 image=image_for_target,
                 input_yaml=input_yaml,
+                header=header,
             ).fit(
                 epsf_model=epsf_model,
                 sources=TargetPosition,
