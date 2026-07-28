@@ -263,10 +263,27 @@ def _injection_worker(args):
         #   and avoids bias near chip gaps / bands).
         invalid = ~np.isfinite(cutout)
         if np.any(invalid):
-            # Check if PSF would have significant overlap with invalid pixels
-            # If so, reject this injection site to avoid biasing recovery statistics
-            invalid_fraction = np.sum(invalid) / invalid.size
-            if invalid_fraction > 0.1:  # More than 10% of PSF would be masked
+            # Check if the PSF footprint has significant overlap with invalid
+            # pixels.  We measure the invalid fraction within the PSF's
+            # significant support (where |psf_img| > 1% of peak), not over the
+            # entire cutout — a cutout can have few invalid pixels overall but
+            # all concentrated under the PSF.
+            psf_abs = np.abs(psf_img)
+            psf_peak = float(np.nanmax(psf_abs)) if np.any(np.isfinite(psf_abs)) else 0.0
+            if psf_peak > 0:
+                psf_support = psf_abs > (0.01 * psf_peak)
+                psf_support &= np.isfinite(psf_abs)
+                n_support = int(np.count_nonzero(psf_support))
+                if n_support > 0:
+                    n_invalid_in_psf = int(np.count_nonzero(psf_support & invalid))
+                    invalid_fraction = n_invalid_in_psf / n_support
+                else:
+                    invalid_fraction = 1.0
+            else:
+                invalid_fraction = float(np.sum(invalid)) / float(invalid.size)
+            # Reject site if >10% of the PSF's significant support falls on
+            # invalid pixels — recovery would be biased by missing flux.
+            if invalid_fraction > 0.1:
                 return False, 0.0, np.nan, np.nan
             psf_img = np.asarray(psf_img, dtype=float)
             psf_img[invalid] = 0.0
@@ -478,7 +495,7 @@ def _injection_worker(args):
                     flux_hat = float(fitted.parameters[i_flux])
                     flux_err = float(getattr(fitted, "stds", np.full_like(fitted.parameters, np.nan))[i_flux])
                     if np.isfinite(flux_hat) and np.isfinite(flux_err) and flux_err > 0:
-                        snr_val = np.abs(flux_hat) / flux_err
+                        snr_val = float(flux_hat) / flux_err  # signed, consistent with PSF path
                 except Exception:
                     snr_val = np.nan
                     flux_err = np.nan
@@ -514,14 +531,60 @@ def _injection_worker(args):
                 recovered_flux_err = np.nan
 
         effective_snr_limit = float(snr_limit) if snr_limit is not None else 3.0
-        # For forced photometry / limiting-magnitude experiments, use absolute SNR
-        # to allow negative PSF fits (which are valid non-detections) to be counted
-        # as recovered when their |SNR| meets the threshold. This avoids biasing
-        # recovery statistics against sources that happen to fit slightly negative.
-        det_snr = np.isfinite(snr_val) and (np.abs(snr_val) >= effective_snr_limit)
-        # Flux must be finite; sign is not a gating criterion for recovery.
+
+        # --- Detection criterion for positive-source injection-recovery ---
+        #
+        # We inject POSITIVE sources (F_amp > 0).  A "detection" means the
+        # recovery photometry found a POSITIVE signal at the injection
+        # position with S/N >= threshold.  A negative flux with high |SNR|
+        # is a noise fluctuation in the opposite direction, NOT a detection
+        # of the injected source.
+        #
+        # Previous code used |SNR| >= threshold, which counted negative
+        # noise dips as detections and inflated the completeness fraction.
+        #
+        # For difference-image experiments where negative (fading) sources
+        # are physically meaningful, set recovery_use_absolute_snr=True in
+        # the limiting_magnitude config.
+        lim_cfg_det = input_yaml.get("limiting_magnitude") or {}
+        use_absolute_snr = bool(lim_cfg_det.get("recovery_use_absolute_snr", False))
+
+        # 1. S/N gate: signed SNR >= threshold (default) or |SNR| >= threshold
+        if use_absolute_snr:
+            det_snr = np.isfinite(snr_val) and (np.abs(snr_val) >= effective_snr_limit)
+        else:
+            det_snr = np.isfinite(snr_val) and (snr_val >= effective_snr_limit)
+
+        # 2. Flux gate: recovered flux must be finite.
+        #    For positive-source injection (default), also require flux > 0.
+        #    A negative flux means the fitter found a dip, not a source.
+        require_positive_flux = not use_absolute_snr
         det_flux = np.isfinite(recovered_flux)
-        return (det_snr and det_flux), beta_p, recovered_flux, recovered_flux_err
+        if require_positive_flux and det_flux:
+            det_flux = recovered_flux > 0
+
+        # 3. Flux-error gate: the error must be finite and positive.
+        #    Without a valid error, the SNR is meaningless.
+        det_flux_err = (
+            np.isfinite(recovered_flux_err) and recovered_flux_err > 0
+        )
+
+        # 4. Optional flux-consistency gate: reject if recovered flux is
+        #    wildly inconsistent with the injected flux (e.g. cosmic ray or
+        #    unmasked source dominates the aperture).  Disabled by default
+        #    (ratio=0) to avoid biasing near the detection limit.
+        max_flux_ratio = float(lim_cfg_det.get("recovery_max_flux_ratio", 0.0))
+        det_flux_consistent = True
+        if (
+            max_flux_ratio > 0
+            and np.isfinite(recovered_flux)
+            and np.isfinite(F_amp)
+            and F_amp > 0
+        ):
+            det_flux_consistent = abs(recovered_flux) <= max_flux_ratio * abs(F_amp)
+
+        detected = det_snr and det_flux and det_flux_err and det_flux_consistent
+        return detected, beta_p, recovered_flux, recovered_flux_err
 
     except Exception:
         return False, 0.0, np.nan, np.nan
