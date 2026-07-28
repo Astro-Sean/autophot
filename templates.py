@@ -6822,14 +6822,14 @@ class Templates:
                 str(rss),
                 "-ko",
                 str(kernel_order),
-                # Background polynomial order: match SFFT behaviour.
-                # The pipeline only subtracts a constant median (not a
-                # spatially-varying background), so bg_order=0 can only model
-                # a constant offset.  Spatially-varying background differences
-                # (sky gradients, host galaxy light) require order 1 to avoid
-                # residual structure that mimics point-source residuals.
+                # Background polynomial order: the pipeline always subtracts a
+                # constant median from both images before subtraction, so the
+                # background is ~0.  bg_order=0 (constant offset) is sufficient
+                # to absorb any residual constant difference.  Higher orders
+                # can overfit and introduce spatial structure that mimics
+                # point-source residuals.
                 "-bgo",
-                str(max(int(ts.get("hotpants_bg_order", 1)), 1)),
+                str(max(int(ts.get("hotpants_bg_order", 0)), 0)),
             ]
             if stamp_loc:
                 args += ["-ssf", stamp_loc]
