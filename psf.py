@@ -3606,14 +3606,22 @@ class PSF:
                     log, "Target PSF init: flux bootstrap failed", exc
                 )
 
-        valid = np.isfinite(x_all) & np.isfinite(flux_all)
+        valid = np.isfinite(x_all) & np.isfinite(y_all) & np.isfinite(flux_all)
         # For target fit, force inclusion even if flux was NaN before bootstrap
         # (bootstrap should have fixed it). This prevents the target from being
-        # excluded from the valid mask.
+        # excluded from the valid mask.  Still require finite x/y positions -
+        # a NaN position means the centroid failed and PSF fitting cannot proceed.
         if is_target_fit and len(sources) == 1 and not valid[0]:
-            if np.isfinite(flux_all[0]):
+            if np.isfinite(x_all[0]) and np.isfinite(y_all[0]) and np.isfinite(flux_all[0]):
                 valid[0] = True
                 log.info("Target PSF: forcing target into valid mask (flux now finite)")
+            elif not np.isfinite(x_all[0]) or not np.isfinite(y_all[0]):
+                log.warning(
+                    "Target PSF: target has non-finite x/y position (%.3g, %.3g); "
+                    "cannot force inclusion into PSF fit.",
+                    float(x_all[0]) if len(x_all) > 0 else float("nan"),
+                    float(y_all[0]) if len(y_all) > 0 else float("nan"),
+                )
             else:
                 log.warning("Target PSF: target flux still NaN after bootstrap; cannot force inclusion")
         # Debug: log target flux status after bootstrap
