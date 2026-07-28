@@ -47,7 +47,11 @@ dependencies = [
 refcat = ["mastcasjobs==0.0.7"]
 sfft = ["sfft==1.7.3"]
 aafitrans = ["aafitrans==0.2.1"]
-all = ["mastcasjobs==0.0.7", "sfft==1.7.3", "aafitrans==0.2.1"]
+# Optional alignment methods (each falls back to swarp→reproject→astroalign if unavailable)
+spalipy = ["spalipy>=3.5"]
+tweakwcs = ["tweakwcs>=0.8"]
+chi2-shift = ["image-registration>=0.2"]
+all = ["mastcasjobs==0.0.7", "sfft==1.7.3", "aafitrans==0.2.1", "spalipy>=3.5", "tweakwcs>=0.8", "image-registration>=0.2"]
 
 [project.scripts]
 autophot-main = "main:run_photometry"

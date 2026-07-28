@@ -214,6 +214,35 @@ except ImportError:
     _HAS_PYZOGY = False
 
 # =============================================================================
+# Optional Alignment Packages
+# =============================================================================
+try:
+    import spalipy
+
+    _HAS_SPALIPY = True
+except ImportError:
+    spalipy = None  # type: ignore[assignment]
+    _HAS_SPALIPY = False
+
+try:
+    import tweakwcs  # noqa: F401
+
+    _HAS_TWEAKWCS = True
+except ImportError:
+    tweakwcs = None  # type: ignore[assignment]
+    _HAS_TWEAKWCS = False
+
+try:
+    from image_registration import chi2_shift
+    from image_registration.fft_tools import shift as _imgreg_shift
+
+    _HAS_IMGREG = True
+except ImportError:
+    chi2_shift = None  # type: ignore[assignment]
+    _imgreg_shift = None  # type: ignore[assignment]
+    _HAS_IMGREG = False
+
+# =============================================================================
 # Logging Configuration
 # =============================================================================
 logging.basicConfig(
@@ -462,55 +491,163 @@ def _build_adaptive_kwargs(cfg: ReprojectConfig) -> Dict[str, Any]:
     return kwargs
 
 
+def _detect_sextractor_sources(data_or_path, input_yaml=None, fwhm_pix=3.0,
+                               thresh=2.0, fwhm_min=1.5, ell_max=0.5,
+                               return_errors=False):
+    """Detect sources using SExtractor.
+
+    Accepts either a FITS file path (str) or an in-memory 2D array.
+    For in-memory arrays, a temporary FITS file is written, SExtractor is
+    run, and the temp file is cleaned up.
+
+    Returns (xy, flux, fwhm) arrays or (None, ...) if no sources found.
+    If ``return_errors=True``, returns (xy, flux, fwhm, errx, erry) where
+    errx/erry are the 1-sigma centroid uncertainties decomposed from
+    SExtractor's error ellipse (ERRAWIN/ERRBWIN/ERRTHETAWIN).
+
+    All coordinates are 0-based (SExtractor's 1-based XWIN_IMAGE is
+    converted to 0-based to match the rest of the codebase).
+
+    This is the standard source detection for all alignment-related code,
+    ensuring consistent centroiding across spalipy, compute_alignment_rms,
+    and the alignment offset diagnostic plot.
+    """
+    _n_err = 5 if return_errors else 3
+    _none = (None,) * _n_err
+    try:
+        from utils.run_sex import SExtractorWrapper
+    except ModuleNotFoundError:
+        return _none
+
+    _tmp_path = None
+    try:
+        # Determine input path: use existing FITS or write temp file
+        # Accept str, os.PathLike (e.g. pathlib.Path), or in-memory array.
+        if isinstance(data_or_path, (str, os.PathLike)):
+            fits_path = str(data_or_path)
+        else:
+            # Write in-memory array to temp FITS file
+            # Replace NaNs with median — SExtractor can crash on NaN pixels.
+            import tempfile
+            data = np.asarray(data_or_path, dtype=np.float32)
+            if data.ndim != 2:
+                return _none
+            nan_mask = ~np.isfinite(data)
+            if nan_mask.any():
+                data = np.where(nan_mask, float(np.nanmedian(data)), data)
+            _tmp_fd, _tmp_path = tempfile.mkstemp(suffix=".fits")
+            os.close(_tmp_fd)
+            from astropy.io import fits as _fits
+            hdr = _fits.Header()
+            hdr["NAXIS1"] = data.shape[1]
+            hdr["NAXIS2"] = data.shape[0]
+            _fits.PrimaryHDU(data, header=hdr).writeto(
+                _tmp_path, overwrite=True, output_verify="silentfix+ignore",
+            )
+            fits_path = _tmp_path
+
+        # Build config if not provided
+        if input_yaml is None:
+            input_yaml = {"fwhm": fwhm_pix, "saturate": 65000.0}
+
+        sex = SExtractorWrapper(config=input_yaml)
+        _fwhm, sources, _scale = sex.run(
+            fits_path=fits_path,
+            use_FWHM=fwhm_pix,
+            return_raw=True,
+            use_for_matching=True,
+            detect_thresh=thresh,
+        )
+
+        if sources is None or len(sources) == 0:
+            return _none
+
+        # Extract positions (convert SExtractor 1-based to 0-based)
+        x = np.asarray(sources["XWIN_IMAGE"], float) - 1.0
+        y = np.asarray(sources["YWIN_IMAGE"], float) - 1.0
+        flux = np.asarray(sources["FLUX_AUTO"], float)
+        fwhm = np.asarray(sources["FWHM_IMAGE"], float)
+        ell = np.asarray(sources["ELLIPTICITY"], float)
+
+        # Filter by FWHM and ellipticity
+        good = (fwhm >= fwhm_min) & (fwhm <= 30) & (ell < ell_max) & np.isfinite(x) & np.isfinite(y)
+        if not good.any():
+            return _none
+
+        xy = np.column_stack([x[good], y[good]])
+        flux = flux[good]
+        fwhm = fwhm[good]
+
+        if return_errors:
+            # Decompose SExtractor error ellipse into x/y sigma.
+            # SExtractorWrapper guarantees these columns exist (with fallbacks),
+            # but guard defensively in case of truncated catalogs.
+            _erra_col = "ERRAWIN_IMAGE" if "ERRAWIN_IMAGE" in sources.colnames else None
+            _errb_col = "ERRBWIN_IMAGE" if "ERRBWIN_IMAGE" in sources.colnames else None
+            _errt_col = "ERRTHETAWIN_IMAGE" if "ERRTHETAWIN_IMAGE" in sources.colnames else None
+            if _erra_col and _errb_col and _errt_col:
+                erra = np.asarray(sources[_erra_col], float)[good]
+                errb = np.asarray(sources[_errb_col], float)[good]
+                theta = np.asarray(sources[_errt_col], float)[good]
+                theta_rad = np.deg2rad(theta)
+                cos_t = np.cos(theta_rad)
+                sin_t = np.sin(theta_rad)
+                errx = np.sqrt((erra * cos_t) ** 2 + (errb * sin_t) ** 2)
+                erry = np.sqrt((erra * sin_t) ** 2 + (errb * cos_t) ** 2)
+            else:
+                # Fallback: estimate position error from FWHM (rough)
+                _pos_err = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+                errx = _pos_err
+                erry = _pos_err
+            return xy, flux, fwhm, errx, erry
+
+        return xy, flux, fwhm
+
+    except Exception as _det_err:
+        logger.debug("_detect_sextractor_sources failed: %s", _det_err, exc_info=True)
+        return _none
+    finally:
+        if _tmp_path is not None:
+            try:
+                os.unlink(_tmp_path)
+            except OSError:
+                pass
+
+
 def compute_alignment_rms(
     sci_data: np.ndarray,
     ref_data: np.ndarray,
     fwhm_pixels: float,
+    input_yaml: Optional[Dict[str, Any]] = None,
 ) -> Optional[tuple]:
     """
     Compute robust alignment quality from pre-loaded arrays.
 
-    Accepts arrays directly to avoid redundant FITS I/O. Uses mutual
-    nearest-neighbour star matching for robustness in crowded fields.
+    Uses SExtractor for source detection (consistent with the rest of the
+    pipeline).  Mutual nearest-neighbour star matching for robustness in
+    crowded fields.
 
     Returns (median_offset, rms, p90) tuple in pixels, or None if measurement fails.
     """
-    if DAOStarFinder is None:
-        return None
     if sci_data.shape != ref_data.shape:
         return None
 
     try:
         fwhm = min(max(float(fwhm_pixels), 2.0), 8.0)
-        from astropy.stats import sigma_clipped_stats as _scs
 
-        _, med_sci, std_sci = _scs(sci_data, sigma=3.0)
-        _, med_ref, std_ref = _scs(ref_data, sigma=3.0)
-
-        if std_sci <= 0 or std_ref <= 0:
-            return None
-
-        daofind_sci = DAOStarFinder(fwhm=fwhm, threshold=5.0 * std_sci)
-        daofind_ref = DAOStarFinder(fwhm=fwhm, threshold=5.0 * std_ref)
-
-        tbl_sci = daofind_sci(sci_data - med_sci)
-        tbl_ref = daofind_ref(ref_data - med_ref)
-
-        if tbl_sci is None or tbl_ref is None:
-            return None
-        if len(tbl_sci) < 5 or len(tbl_ref) < 5:
-            return None
-
-        _xcol = "x_centroid" if "x_centroid" in tbl_sci.colnames else "xcentroid"
-        _ycol = "y_centroid" if "y_centroid" in tbl_sci.colnames else "ycentroid"
-        sci_xy = np.column_stack(
-            (tbl_sci[_xcol].data, tbl_sci[_ycol].data)
+        sci_xy, _, _ = _detect_sextractor_sources(
+            sci_data, input_yaml=input_yaml, fwhm_pix=fwhm,
+            thresh=5.0, fwhm_min=1.5,
         )
-        _xcol = "x_centroid" if "x_centroid" in tbl_ref.colnames else "xcentroid"
-        _ycol = "y_centroid" if "y_centroid" in tbl_ref.colnames else "ycentroid"
-        ref_xy = np.column_stack(
-            (tbl_ref[_xcol].data, tbl_ref[_ycol].data)
+        ref_xy, _, _ = _detect_sextractor_sources(
+            ref_data, input_yaml=input_yaml, fwhm_pix=fwhm,
+            thresh=5.0, fwhm_min=1.5,
         )
+
+        if sci_xy is None or ref_xy is None:
+            return None
+        if len(sci_xy) < 5 or len(ref_xy) < 5:
+            return None
 
         max_sep = float(max(2.5, 2.5 * fwhm))
         tree_ref = cKDTree(ref_xy)
@@ -536,8 +673,6 @@ def compute_alignment_rms(
         _dy_mut = sci_xy[mutual, 1][_mut_idx] - ref_xy[i_sr[mutual], 1][_mut_idx]
 
         # Sigma-clip outliers before computing RMS/P90.
-        # A single bad match (e.g., blended source, edge effect) can inflate
-        # RMS significantly.  Median is robust but RMS is not.
         from astropy.stats import sigma_clip as _sc_align
         _clipped = _sc_align(d_mut, sigma=2.5, maxiters=3)
         _clip_mask = _clipped.mask if hasattr(_clipped, 'mask') else None
@@ -2455,6 +2590,9 @@ class Templates:
           - ``swarp``: try SCAMP+SWarp, then WCS reproject, then AstroAlign.
           - ``astroalign``: try AstroAlign, then WCS reproject, then SCAMP+SWarp.
           - ``reproject``: try WCS reproject, then AstroAlign, then SCAMP+SWarp.
+          - ``spalipy``: try spalipy (spline-warp), then SCAMP+SWarp, reproject, AstroAlign.
+          - ``tweakwcs``: try tweakwcs (STScI WCS tweaking + reproject), then SCAMP+SWarp, reproject, AstroAlign.
+          - ``chi2_shift``: try chi2_shift (cross-correlation for extended fields), then SCAMP+SWarp, reproject, AstroAlign.
 
         Images are loaded once and passed to module-level helpers to avoid
         redundant FITS I/O. ReprojectConfig and projection headers are built
@@ -2537,7 +2675,8 @@ class Templates:
                 try:
                     sci_al_data, _ = read_fits(sci_al)
                     ref_al_data, _ = read_fits(ref_al)
-                    compute_alignment_rms(sci_al_data, ref_al_data, fwhm_pix)
+                    compute_alignment_rms(sci_al_data, ref_al_data, fwhm_pix,
+                                          input_yaml=self.input_yaml)
                 except Exception:
                     pass
                 method_used = res.get("alignment_method", "scamp_swarp")
@@ -2561,7 +2700,8 @@ class Templates:
                 try:
                     sci_al_data, _ = read_fits(sci_al)
                     ref_al_data, _ = read_fits(ref_al)
-                    compute_alignment_rms(sci_al_data, ref_al_data, fwhm_pix)
+                    compute_alignment_rms(sci_al_data, ref_al_data, fwhm_pix,
+                                          input_yaml=self.input_yaml)
                 except Exception:
                     pass
                 method_used = res.get("alignment_method", "astroalign")
@@ -2628,6 +2768,628 @@ class Templates:
                 logger.info("Alignment succeeded (method: %s).", method_used)
                 return scienceFpath, result.template_path
 
+            def _spalipy() -> Tuple[Optional[str], Optional[str]]:
+                """Align template to science using spalipy (spline-warp registration).
+
+                spalipy uses quad-based asterism matching for an initial affine
+                transform, then fits 2D spline surfaces to the residual field
+                to correct non-homogeneous/optical distortion.  This handles
+                spatially-varying distortion that a single affine or polynomial
+                cannot — the failure mode that per-quadrant verification detects.
+
+                Source detection uses SExtractor for consistency with the rest
+                of the pipeline.  Only the template is resampled; the science
+                image is unchanged.
+                """
+                if not _HAS_SPALIPY:
+                    logger.info("spalipy not installed; skipping spalipy alignment.")
+                    return None, None
+                try:
+                    from spalipy import Spalipy
+
+                    # --- Source detection with SExtractor ---
+                    # SExtractor's robust deblending means a single low-threshold
+                    # run finds plenty of sources — no need for adaptive multi-
+                    # threshold scanning like SEP required.
+                    def _detect_for_spalipy(data, min_sources=20):
+                        """Detect sources via SExtractor, return spalipy-format Table."""
+                        xy, flux, fwhm = _detect_sextractor_sources(
+                            data, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
+                            thresh=2.0, fwhm_min=1.5,
+                        )
+                        if xy is None or len(xy) < 4:
+                            return None
+                        if len(xy) < min_sources:
+                            logger.info(
+                                "spalipy: detection found only %d sources.",
+                                len(xy),
+                            )
+                        return Table({
+                            "x": xy[:, 0],
+                            "y": xy[:, 1],
+                            "flux": flux,
+                            "fwhm": fwhm,
+                            "flag": np.zeros(len(xy), dtype=int),
+                        })
+
+                    sci_det = _detect_for_spalipy(scienceImage)
+                    tpl_det = _detect_for_spalipy(templateImage)
+                    if sci_det is None or tpl_det is None:
+                        logger.info("spalipy: insufficient sources for alignment.")
+                        return None, None
+                    if len(sci_det) < 4 or len(tpl_det) < 4:
+                        logger.info(
+                            "spalipy: too few sources (sci=%d, tpl=%d; need >=4).",
+                            len(sci_det), len(tpl_det),
+                        )
+                        return None, None
+
+                    # WCS-based overlap filtering: when science and template
+                    # have significantly different WCS (rotation, scale, or
+                    # pointing), many detected sources have no counterpart
+                    # in the other image.  These create false quad matches
+                    # and wrong affine transforms.  Filter both detection
+                    # lists to only sources within the overlapping sky region.
+                    try:
+                        from astropy.wcs import WCS as _WCS
+                        _sci_wcs = _WCS(scienceHeader)
+                        _tpl_wcs = _WCS(templateHeader)
+                        _sci_shape = scienceImage.shape
+                        _tpl_shape = templateImage.shape
+
+                        # Science detections -> template pixel frame
+                        _ra, _dec = _sci_wcs.all_pix2world(
+                            sci_det["x"], sci_det["y"], 0,
+                        )
+                        _px, _py = _tpl_wcs.all_world2pix(_ra, _dec, 0)
+                        _sci_in_tpl = (
+                            (_px >= 0) & (_px < _tpl_shape[1]) &
+                            (_py >= 0) & (_py < _tpl_shape[0])
+                        )
+                        _n_sci_before = len(sci_det)
+                        sci_det = sci_det[_sci_in_tpl]
+
+                        # Template detections -> science pixel frame
+                        _ra, _dec = _tpl_wcs.all_pix2world(
+                            tpl_det["x"], tpl_det["y"], 0,
+                        )
+                        _px, _py = _sci_wcs.all_world2pix(_ra, _dec, 0)
+                        _tpl_in_sci = (
+                            (_px >= 0) & (_px < _sci_shape[1]) &
+                            (_py >= 0) & (_py < _sci_shape[0])
+                        )
+                        _n_tpl_before = len(tpl_det)
+                        tpl_det = tpl_det[_tpl_in_sci]
+
+                        if len(sci_det) < _n_sci_before or len(tpl_det) < _n_tpl_before:
+                            logger.info(
+                                "spalipy: WCS overlap filter sci %d->%d, "
+                                "tpl %d->%d sources.",
+                                _n_sci_before, len(sci_det),
+                                _n_tpl_before, len(tpl_det),
+                            )
+                    except Exception:
+                        pass  # WCS filtering is best-effort
+
+                    if len(sci_det) < 4 or len(tpl_det) < 4:
+                        logger.info(
+                            "spalipy: too few overlapping sources "
+                            "(sci=%d, tpl=%d; need >=4).",
+                            len(sci_det), len(tpl_det),
+                        )
+                        return None, None
+
+                    logger.info(
+                        "Attempting spalipy alignment (sci=%d sources, tpl=%d sources).",
+                        len(sci_det), len(tpl_det),
+                    )
+
+                    # Spalipy(source, template_data=..., source_det=..., template_det=...)
+                    # transforms source -> template grid.  We want template -> science,
+                    # so science is the template and template is the source.
+                    _n_sources = min(len(sci_det), len(tpl_det))
+
+                    # --- Reflection detection: flip template if needed ---
+                    # spalipy's similarity transform [[a,-b],[b,a]] has positive
+                    # determinant and can only represent rotations, NOT reflections.
+                    # If the template is reflected relative to the science (det(A)<0
+                    # where A = inv(CD_s) @ CD_t), flip the template in x to
+                    # convert the reflection into a rotation spalipy can handle.
+                    _tpl_img = templateImage
+                    _tpl_det = tpl_det
+                    try:
+                        from astropy.wcs import WCS as _WCS2
+                        _sw = _WCS2(scienceHeader)
+                        _tw = _WCS2(templateHeader)
+                        _A = np.linalg.inv(_sw.pixel_scale_matrix) @ _tw.pixel_scale_matrix
+                        if np.linalg.det(_A) < 0:
+                            logger.info(
+                                "spalipy: template is REFLECTED relative to science "
+                                "(det(A)=%.3f). Flipping template in x.",
+                                np.linalg.det(_A),
+                            )
+                            _tpl_img = np.fliplr(templateImage).copy()
+                            _tpl_det = tpl_det.copy()
+                            _tpl_det["x"] = (templateImage.shape[1] - 1) - tpl_det["x"]
+                    except Exception:
+                        pass
+
+                    # Replace NaNs with median — spalipy can't handle NaNs.
+                    _tpl_nan = ~np.isfinite(_tpl_img)
+                    _sci_nan = ~np.isfinite(scienceImage)
+                    _tpl_fill = np.where(_tpl_nan, float(np.nanmedian(_tpl_img)), _tpl_img).astype(np.float32)
+                    _sci_fill = np.where(_sci_nan, float(np.nanmedian(scienceImage)), scienceImage).astype(np.float32)
+
+                    _med_fwhm = float(np.median(
+                        np.concatenate([sci_det["fwhm"], _tpl_det["fwhm"]])
+                    ))
+
+                    # spalipy parameters: use defaults, relax min_n_match for
+                    # sparse fields and hash_dist for centroid uncertainty.
+                    _min_match = max(6, min(_n_sources // 3, 20))
+                    _n_quad = _n_sources if _n_sources <= 25 else 20
+                    _hash_dist = max(0.005, 2.0 * _med_fwhm / 50.0)
+                    _det_sep = max(5, int(_med_fwhm))
+                    _interp_order = 2 if _med_fwhm < 3.0 else 3
+                    _sub_tile = 2 if _n_sources >= 200 else 1
+
+                    logger.info(
+                        "spalipy: hash_dist=%.4f min_match=%d n_quad=%d "
+                        "sub_tile=%d (FWHM=%.1f, n_sources=%d).",
+                        _hash_dist, _min_match, _n_quad, _sub_tile,
+                        _med_fwhm, _n_sources,
+                    )
+
+                    sp = Spalipy(
+                        _tpl_fill,
+                        source_mask=_tpl_nan if _tpl_nan.any() else None,
+                        template_data=_sci_fill,
+                        source_det=_tpl_det,
+                        template_det=sci_det,
+                        output_shape=scienceImage.shape,
+                        min_n_match=_min_match,
+                        n_quad_det=_n_quad,
+                        max_quad_hash_dist=_hash_dist,
+                        min_sep=_det_sep,
+                        interp_order=_interp_order,
+                        sub_tile=_sub_tile,
+                        cval=np.nan,
+                    )
+                    try:
+                        sp.align()
+                    except Exception as _spalipy_err:
+                        logger.warning(
+                            "spalipy: align() raised %s: %s",
+                            type(_spalipy_err).__name__, _spalipy_err,
+                            exc_info=True,
+                        )
+                        sp._aligned_data = None
+
+                    if sp.aligned_data is None:
+                        logger.info("spalipy did not produce aligned output.")
+                        return None, None
+
+                    # Log transform diagnostics
+                    try:
+                        _n_matched = 0
+                        _sdm = getattr(sp, "_source_det_matched", None)
+                        if _sdm:
+                            for _e in _sdm:
+                                if _e is not None and hasattr(_e, "__len__"):
+                                    _n_matched += len(_e)
+                        logger.info(
+                            "spalipy: transform scale=%.3f rot=%.1f° "
+                            "(%d matched sources).",
+                            sp.affine_transform.scale,
+                            sp.affine_transform.rotation,
+                            _n_matched,
+                        )
+                    except Exception:
+                        pass
+
+                    aligned_template = np.asarray(sp.aligned_data, dtype=np.float32)
+
+                    # Restore NaN mask: apply warped source_mask + cval NaNs
+                    _aligned_nan = ~np.isfinite(aligned_template)
+                    try:
+                        _warped_mask = getattr(sp, "aligned_mask", None)
+                        if _warped_mask is not None:
+                            _aligned_nan = _aligned_nan | np.asarray(_warped_mask).astype(bool)
+                    except Exception:
+                        pass
+                    if _aligned_nan.any():
+                        aligned_template = np.where(_aligned_nan, np.nan, aligned_template)
+
+                    # --- Sub-pixel shift correction ---
+                    # spalipy's SmoothBivariateSpline introduces a small systematic
+                    # offset (typically ~0.3px) because the smoothing parameter
+                    # doesn't perfectly preserve the mean of the residuals.  We
+                    # correct this by cross-matching sources between the science
+                    # and aligned template, computing the median (dx, dy) offset,
+                    # and applying a corrective sub-pixel shift.
+                    try:
+                        from scipy.ndimage import shift as _nd_shift
+                        _sci_xy2, _, _ = _detect_sextractor_sources(
+                            scienceImage, input_yaml=self.input_yaml,
+                            fwhm_pix=fwhm_pix, thresh=5.0, fwhm_min=1.5,
+                        )
+                        _tpl_xy2, _, _ = _detect_sextractor_sources(
+                            aligned_template, input_yaml=self.input_yaml,
+                            fwhm_pix=fwhm_pix, thresh=5.0, fwhm_min=1.5,
+                        )
+                        if _sci_xy2 is not None and _tpl_xy2 is not None:
+                            _tree_s2 = cKDTree(_sci_xy2)
+                            _tree_t2 = cKDTree(_tpl_xy2)
+                            _d_s2t, _i_s2t = _tree_t2.query(_sci_xy2, k=1)
+                            _d_t2s, _i_t2s = _tree_s2.query(_tpl_xy2, k=1)
+                            _idx_s2 = np.arange(len(_sci_xy2), dtype=int)
+                            _mut2 = (_i_t2s[_i_s2t] == _idx_s2) & np.isfinite(_d_s2t)
+                            _mut2 &= (_d_s2t <= max(2.0 * _med_fwhm, 3.0))
+                            if _mut2.sum() >= 10:
+                                _dx_corr = float(np.median(
+                                    _sci_xy2[_mut2, 0] - _tpl_xy2[_i_s2t[_mut2], 0]
+                                ))
+                                _dy_corr = float(np.median(
+                                    _sci_xy2[_mut2, 1] - _tpl_xy2[_i_s2t[_mut2], 1]
+                                ))
+                                _shift_mag = np.sqrt(_dx_corr**2 + _dy_corr**2)
+                                if _shift_mag > 0.05:
+                                    logger.info(
+                                        "spalipy: applying sub-pixel shift correction "
+                                        "dx=%.3f dy=%.3f px (%d matched sources).",
+                                        _dx_corr, _dy_corr, _mut2.sum(),
+                                    )
+                                    # Shift template to match science: shift by
+                                    # (dx, dy) in (x, y) = (col, row) order for
+                                    # scipy.ndimage.shift which uses (row, col).
+                                    _aligned_fill = np.where(
+                                        _aligned_nan,
+                                        float(np.nanmedian(aligned_template)),
+                                        aligned_template,
+                                    ).astype(np.float32)
+                                    _aligned_fill = _nd_shift(
+                                        _aligned_fill,
+                                        shift=(_dy_corr, _dx_corr),
+                                        order=_interp_order,
+                                        mode="constant",
+                                        cval=float(np.nanmedian(aligned_template)),
+                                    )
+                                    # Re-apply NaN mask after shift
+                                    aligned_template = np.where(
+                                        _aligned_nan, np.nan, _aligned_fill
+                                    ).astype(np.float32)
+                                else:
+                                    logger.info(
+                                        "spalipy: no shift correction needed "
+                                        "(dx=%.3f dy=%.3f px).",
+                                        _dx_corr, _dy_corr,
+                                    )
+                    except Exception as _shift_err:
+                        logger.warning(
+                            "spalipy: shift correction failed: %s", _shift_err,
+                            exc_info=True,
+                        )
+
+                    # Alignment quality check
+                    try:
+                        _med_off, _rms_off, _p90_off = compute_alignment_rms(
+                            scienceImage, aligned_template, fwhm_pix,
+                            input_yaml=self.input_yaml,
+                        )
+                        logger.info(
+                            "spalipy: alignment RMS median=%.3f px rms=%.3f px.",
+                            _med_off, _rms_off,
+                        )
+                    except Exception:
+                        pass
+
+                    # Write aligned template with science WCS
+                    hdr = templateHeader.copy()
+                    hdr = remove_wcs_from_header(hdr)
+                    from functions import copy_wcs_from_header
+                    copy_wcs_from_header(scienceHeader, hdr)
+                    hdr["NAXIS1"] = aligned_template.shape[1]
+                    hdr["NAXIS2"] = aligned_template.shape[0]
+                    fits.PrimaryHDU(aligned_template, header=hdr).writeto(
+                        new_templateFpath, overwrite=True,
+                        output_verify="silentfix+ignore",
+                    )
+
+                    # Diagnostic plot: matched sources side-by-side
+                    # NOTE: when the template was flipped for reflection
+                    # correction, _tpl_matched_xy and _tpl_det are in the
+                    # FLIPPED frame.  We pass the flipped image and flipped
+                    # all-detections so the plot circles align correctly.
+                    try:
+                        _sci_matched_xy = None
+                        _tpl_matched_xy = None
+                        if (
+                            hasattr(sp, "_source_det_matched")
+                            and sp._source_det_matched
+                            and sp._source_det_matched[0] is not None
+                            and hasattr(sp, "_template_det_matched")
+                            and sp._template_det_matched
+                            and sp._template_det_matched[0] is not None
+                        ):
+                            _src_m = sp._source_det_matched[0]
+                            _tpl_m = sp._template_det_matched[0]
+                            _tpl_matched_xy = np.column_stack([
+                                np.asarray(_src_m["x"], float),
+                                np.asarray(_src_m["y"], float),
+                            ])
+                            _sci_matched_xy = np.column_stack([
+                                np.asarray(_tpl_m["x"], float),
+                                np.asarray(_tpl_m["y"], float),
+                            ])
+                        if _sci_matched_xy is not None and len(_sci_matched_xy) > 0:
+                            from plot import Plot as _Plot
+                            _plot_inst = _Plot(input_yaml={
+                                "fpath": scienceFpath,
+                                "fwhm": float(np.median(
+                                    np.concatenate([sci_det["fwhm"], _tpl_det["fwhm"]]
+                                ))),
+                            })
+                            _plot_inst.plot_spalipy_matches(
+                                sci_image=scienceImage,
+                                tpl_image=_tpl_img,
+                                sci_matched_xy=_sci_matched_xy,
+                                tpl_matched_xy=_tpl_matched_xy,
+                                sci_all_xy=np.column_stack([
+                                    np.asarray(sci_det["x"], float),
+                                    np.asarray(sci_det["y"], float),
+                                ]),
+                                tpl_all_xy=np.column_stack([
+                                    np.asarray(_tpl_det["x"], float),
+                                    np.asarray(_tpl_det["y"], float),
+                                ]),
+                                method_label="spalipy",
+                            )
+                    except Exception as _plot_err:
+                        logger.debug("Spalipy match plot skipped: %s", _plot_err)
+
+                    method_used = "spalipy"
+                    logger.info("Alignment succeeded (method: %s).", method_used)
+                    # Science image unchanged — no target coordinate update needed
+                    return scienceFpath, new_templateFpath
+
+                except Exception as _e:
+                    log_warning_from_exception(logger, "spalipy alignment failed", _e)
+                    return None, None
+
+            def _tweakwcs() -> Tuple[Optional[str], Optional[str]]:
+                """Align template to science using tweakwcs (STScI WCS tweaking).
+
+                tweakwcs computes corrections to WCS objects to minimize mismatch
+                between image source catalogs and reference catalogs.  It uses
+                tangent-plane linear corrections with sigma-clipped fitting —
+                the same approach as HST/JWST pipeline alignment.
+
+                After tweaking the template WCS, reproject is used to resample
+                the template onto the science pixel grid.
+                """
+                if not _HAS_TWEAKWCS:
+                    logger.info("tweakwcs not installed; skipping tweakwcs alignment.")
+                    return None, None
+                if not _REPROJECT_AVAILABLE:
+                    logger.info("reproject not available; tweakwcs requires reproject for resampling.")
+                    return None, None
+                try:
+                    from tweakwcs.correctors import FITSWCSCorrector
+                    from tweakwcs.imalign import align_wcs
+                    from tweakwcs.matchutils import XYXYMatch
+
+                    # --- Detect sources in both images using SExtractor ---
+                    fwhm = min(max(float(fwhm_pix), 2.0), 8.0)
+
+                    def _detect_for_tweakwcs(data):
+                        xy, _, _ = _detect_sextractor_sources(
+                            data, input_yaml=self.input_yaml,
+                            fwhm_pix=fwhm, thresh=5.0, fwhm_min=1.5,
+                        )
+                        if xy is None or len(xy) < 4:
+                            return None
+                        return Table({"x": xy[:, 0], "y": xy[:, 1]})
+
+                    sci_cat = _detect_for_tweakwcs(scienceImage)
+                    tpl_cat = _detect_for_tweakwcs(templateImage)
+                    if sci_cat is None or tpl_cat is None:
+                        logger.info("tweakwcs: insufficient sources for alignment.")
+                        return None, None
+
+                    logger.info(
+                        "Attempting tweakwcs alignment (sci=%d sources, tpl=%d sources).",
+                        len(sci_cat), len(tpl_cat),
+                    )
+
+                    # Convert science sources to sky coordinates for reference catalog
+                    # _detect_sextractor_sources already returns 0-based coordinates
+                    sci_wcs = WCS(scienceHeader)
+                    sci_ra, sci_dec = sci_wcs.all_pix2world(
+                        np.asarray(sci_cat["x"]),
+                        np.asarray(sci_cat["y"]),
+                        0,
+                    )
+                    ref_cat = Table({
+                        "RA": np.asarray(sci_ra, float),
+                        "DEC": np.asarray(sci_dec, float),
+                    })
+
+                    # Build corrector for the template WCS
+                    tpl_wcs = WCS(templateHeader)
+                    tpl_corrector = FITSWCSCorrector(
+                        tpl_wcs,
+                        {"wcsname": str(templateHeader.get("WCSNAME", "TPL"))},
+                    )
+                    # Attach the template source catalog (pixel coords)
+                    tpl_corrector.meta["catalog"] = tpl_cat
+
+                    # Create a reference corrector for the science WCS
+                    # (defines the tangent plane for the reference catalog)
+                    sci_corrector = FITSWCSCorrector(
+                        sci_wcs,
+                        {"wcsname": str(scienceHeader.get("WCSNAME", "SCI"))},
+                    )
+
+                    # Match and align: template is aligned to science reference
+                    match = XYXYMatch(
+                        searchrad=10.0,
+                        separation=5.0,
+                        tolerance=2.0,
+                        use2dhist=True,
+                    )
+                    align_wcs(
+                        [tpl_corrector],
+                        refcat=ref_cat,
+                        ref_tpwcs=sci_corrector,
+                        match=match,
+                        fitgeom="general",
+                        nclip=3,
+                        sigma=(3.0, "rmse"),
+                    )
+
+                    # Get corrected template WCS and reproject
+                    corrected_wcs = tpl_corrector.wcs
+
+                    # Mask NaN in template
+                    tpl_data = np.where(
+                        np.isfinite(templateImage), templateImage, 0.0
+                    ).astype(np.float32)
+
+                    aligned_tpl, footprint = reproject_exact(
+                        (tpl_data, corrected_wcs),
+                        sci_wcs,
+                        shape_out=scienceImage.shape,
+                    )
+                    fp_mask = footprint.astype(bool)
+                    if fp_mask.sum() == 0:
+                        logger.info("tweakwcs: zero footprint coverage after reproject.")
+                        return None, None
+                    aligned_tpl[~fp_mask] = np.nan
+
+                    # Write aligned template with science WCS
+                    hdr = templateHeader.copy()
+                    hdr = remove_wcs_from_header(hdr)
+                    from functions import copy_wcs_from_header
+                    copy_wcs_from_header(scienceHeader, hdr)
+                    hdr["NAXIS1"] = aligned_tpl.shape[1]
+                    hdr["NAXIS2"] = aligned_tpl.shape[0]
+                    to_write = np.asarray(aligned_tpl, dtype=np.float32)
+                    fits.PrimaryHDU(to_write, header=hdr).writeto(
+                        new_templateFpath, overwrite=True,
+                        output_verify="silentfix+ignore",
+                    )
+
+                    # Quality diagnostic
+                    try:
+                        compute_alignment_rms(scienceImage, to_write, fwhm_pix,
+                                              input_yaml=self.input_yaml)
+                    except Exception:
+                        pass
+
+                    method_used = "tweakwcs"
+                    logger.info("Alignment succeeded (method: %s).", method_used)
+                    return scienceFpath, new_templateFpath
+
+                except Exception as _e:
+                    log_warning_from_exception(logger, "tweakwcs alignment failed", _e)
+                    return None, None
+
+            def _chi2_shift() -> Tuple[Optional[str], Optional[str]]:
+                """Align template to science using chi2_shift cross-correlation.
+
+                Uses the ``image_registration`` package's ``chi2_shift`` which
+                performs DFT-upsampling cross-correlation with chi-squared
+                error estimation.  This works on **extended emission**
+                (nebulae, galaxy-dominated fields) where there are no point
+                sources to match — the gap that all source-based methods
+                cannot fill.
+
+                Only a translation is computed; the template is shifted and
+                written with the science WCS.
+                """
+                if not _HAS_IMGREG:
+                    logger.info("image_registration not installed; skipping chi2_shift alignment.")
+                    return None, None
+                try:
+                    # Replace NaN with 0 for cross-correlation
+                    sci_data = np.where(
+                        np.isfinite(scienceImage), scienceImage, 0.0
+                    ).astype(np.float64)
+                    tpl_data = np.where(
+                        np.isfinite(templateImage), templateImage, 0.0
+                    ).astype(np.float64)
+
+                    # chi2_shift needs same shape; crop to intersection if needed
+                    if sci_data.shape != tpl_data.shape:
+                        h = min(sci_data.shape[0], tpl_data.shape[0])
+                        w = min(sci_data.shape[1], tpl_data.shape[1])
+                        sci_data = sci_data[:h, :w]
+                        tpl_data = tpl_data[:h, :w]
+
+                    logger.info("Attempting chi2_shift cross-correlation alignment.")
+
+                    xoff, yoff, exoff, eyoff = chi2_shift(
+                        sci_data, tpl_data,
+                        noise=None,
+                        upsample_factor="auto",
+                        return_error=True,
+                        zeromean=True,
+                    )
+
+                    xoff = float(xoff)
+                    yoff = float(yoff)
+                    total_offset = float(np.sqrt(xoff**2 + yoff**2))
+
+                    logger.info(
+                        "chi2_shift: offset=(%.3f, %.3f) px, total=%.3f px, "
+                        "error=(%.4f, %.4f) px",
+                        xoff, yoff, total_offset, float(exoff or 0), float(eyoff or 0),
+                    )
+
+                    # Quality gate
+                    quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
+                    max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
+                    _fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                    _scale = max(0.5, min(3.0, _fwhm / 3.0))
+                    max_offset *= _scale
+
+                    if total_offset > max_offset and total_offset < 100:
+                        # Reject large offsets (likely spurious correlation)
+                        logger.warning(
+                            "chi2_shift alignment rejected: offset=%.2f px (> %.2f px). "
+                            "Falling back to next alignment method.",
+                            total_offset, max_offset,
+                        )
+                        return None, None
+
+                    # Shift the template to match the science image
+                    # shiftnd takes (y_shift, x_shift) — we shift tpl by (-yoff, -xoff)
+                    aligned_tpl = _imgreg_shift.shiftnd(
+                        np.where(np.isfinite(templateImage), templateImage, 0.0),
+                        (-yoff, -xoff),
+                    )
+                    aligned_tpl = np.asarray(aligned_tpl, dtype=np.float32)
+
+                    # Write with science WCS
+                    hdr = templateHeader.copy()
+                    hdr = remove_wcs_from_header(hdr)
+                    from functions import copy_wcs_from_header
+                    copy_wcs_from_header(scienceHeader, hdr)
+                    hdr["NAXIS1"] = aligned_tpl.shape[1]
+                    hdr["NAXIS2"] = aligned_tpl.shape[0]
+                    fits.PrimaryHDU(aligned_tpl, header=hdr).writeto(
+                        new_templateFpath, overwrite=True,
+                        output_verify="silentfix+ignore",
+                    )
+
+                    method_used = "chi2_shift"
+                    logger.info("Alignment succeeded (method: %s).", method_used)
+                    return scienceFpath, new_templateFpath
+
+                except Exception as _e:
+                    log_warning_from_exception(logger, "chi2_shift alignment failed", _e)
+                    return None, None
+
             # ------------------------------------------------------------------
             # Cascade
             # ------------------------------------------------------------------
@@ -2679,6 +3441,66 @@ class Templates:
                     return out
                 logger.error(
                     "All alignment methods failed (reproject→swarp→astroalign). "
+                    "Proceeding with original unaligned images; subtraction quality may be poor."
+                )
+                return scienceFpath, templateFpath
+
+            if method == "spalipy":
+                # spalipy: spline-warp registration for non-homogeneous distortion
+                out = _spalipy()
+                if out[0]:
+                    return out
+                out = _swarp()
+                if out[0]:
+                    return out
+                out = _reproject()
+                if out[0]:
+                    return out
+                out = _astroalign()
+                if out[0]:
+                    return out
+                logger.error(
+                    "All alignment methods failed (spalipy→swarp→reproject→astroalign). "
+                    "Proceeding with original unaligned images; subtraction quality may be poor."
+                )
+                return scienceFpath, templateFpath
+
+            if method == "tweakwcs":
+                # tweakwcs: STScI WCS tweaking + reproject (HST/JWST-grade)
+                out = _tweakwcs()
+                if out[0]:
+                    return out
+                out = _swarp()
+                if out[0]:
+                    return out
+                out = _reproject()
+                if out[0]:
+                    return out
+                out = _astroalign()
+                if out[0]:
+                    return out
+                logger.error(
+                    "All alignment methods failed (tweakwcs→swarp→reproject→astroalign). "
+                    "Proceeding with original unaligned images; subtraction quality may be poor."
+                )
+                return scienceFpath, templateFpath
+
+            if method == "chi2_shift":
+                # chi2_shift: cross-correlation for extended-source-dominated fields
+                out = _chi2_shift()
+                if out[0]:
+                    return out
+                out = _swarp()
+                if out[0]:
+                    return out
+                out = _reproject()
+                if out[0]:
+                    return out
+                out = _astroalign()
+                if out[0]:
+                    return out
+                logger.error(
+                    "All alignment methods failed (chi2_shift→swarp→reproject→astroalign). "
                     "Proceeding with original unaligned images; subtraction quality may be poor."
                 )
                 return scienceFpath, templateFpath
@@ -4065,6 +4887,12 @@ class Templates:
                             write_fits(_sci_tmp, scienceImage, scienceHeader)
                             _sci_prepared_path = _sci_tmp
                             scienceFpath = _sci_tmp
+                            if not os.path.exists(_sci_tmp):
+                                logger.warning(
+                                    "Sky-subtracted science temp file not found after write: %s",
+                                    _sci_tmp,
+                                )
+                                scienceFpath = str(scienceDir / sci_name)
                             logger.info(
                                 "Science image sky-subtracted (median %.4g ADU removed).",
                                 float(_sky_median),
@@ -4567,7 +5395,18 @@ class Templates:
             _raw_kernel = ts_cfg.get("kernel_order", 0)
             _is_auto = isinstance(_raw_kernel, str) and _raw_kernel.strip().lower() == "auto"
             # null/None → 0 (constant).  Only "auto" string triggers auto-select.
-            user_kernel = _raw_kernel if (not _is_auto and _raw_kernel is not None and not isinstance(_raw_kernel, str)) else None
+            # Numeric strings like "0", "1", "2" are valid user overrides.
+            if _is_auto:
+                user_kernel = None
+            elif isinstance(_raw_kernel, str):
+                try:
+                    user_kernel = int(_raw_kernel.strip())
+                except ValueError:
+                    user_kernel = None
+            elif _raw_kernel is not None:
+                user_kernel = _raw_kernel
+            else:
+                user_kernel = None
             n_matched = len(matching_sources) if matching_sources else 0
 
             # n_eff was computed earlier for kernel floor adaptation (BUG 120).
@@ -4695,6 +5534,14 @@ class Templates:
             if method == "sfft":
                 # Clean input files to prevent SFFT from modifying originals in-place
                 # (matches HOTPANTS behavior and prevents crosstalk)
+                if not os.path.exists(scienceFpath):
+                    logger.warning(
+                        "scienceFpath does not exist before SFFT clean_fits_nans: %s — "
+                        "falling back to original science path.",
+                        scienceFpath,
+                    )
+                    # Walk back to the original science file (stored at function entry)
+                    scienceFpath = str(scienceDir / sci_name)
                 sci_clean = clean_fits_nans(scienceFpath, str(scienceDir))
                 ref_clean = clean_fits_nans(template_work_fpath, str(scienceDir))
                 _sci_clean_path = sci_clean
@@ -5297,6 +6144,13 @@ class Templates:
                         ts_sub.get("sfft_allow_unvetted_source_retry", False), False
                     ) else "false",
                 ]
+
+                # Cross-match tolerance factor: DIVIDES SFFT's auto tolerance
+                # (~1.6*max(FWHM) ≈ 12px). Default 2.0 → ~6px, enforcing
+                # stricter positional overlap between sci and ref sources.
+                # Higher values = tighter matching.
+                _match_tol_factor = ts_sub.get("sfft_match_tol_factor", 2.0)
+                cmd_local += ["-match_tol_factor", str(float(_match_tol_factor))]
 
                 if sfft_crowded:
                     cmd_local.append("-crowded")

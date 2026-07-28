@@ -1363,13 +1363,19 @@ class AutomatedPhotometry:
         return default_input
 
     @staticmethod
-    def run_photometry(default_input: dict, do_photometry: bool = True) -> str:
+    def run_photometry(
+        default_input: dict,
+        do_photometry: bool = True,
+        debug: int = 0,
+    ) -> str:
         """
         Executes the photometry pipeline based on the provided configuration.
 
         Args:
             default_input (dict): Configuration dictionary for the pipeline.
             do_photometry (bool): If True, runs reductions before concatenation.
+            debug (int): If > 0, only process that many science images (templates
+                are always processed). If 0, process all science images.
 
         Returns:
             str: Path to the aggregated light curve CSV.
@@ -2196,6 +2202,13 @@ class AutomatedPhotometry:
                     file_list = np.sort(file_list)[
                         ::-1
                     ]  # Sort newest first if filenames encode time
+
+                    if debug and debug > 0:
+                        _log(
+                            f"DEBUG mode: limiting to {debug} science image(s) "
+                            f"(of {len(file_list)} available)."
+                        )
+                        file_list = file_list[:debug]
 
                     if parallel_files and len(file_list) > 1:
                         # Parallel image-level execution: each worker runs main.py on one file.

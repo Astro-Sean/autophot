@@ -4937,77 +4937,97 @@ def run_photometry():
                     try:
                         # --- Point-source selection via CLASS_STAR ---
                         # SExtractor's CLASS_STAR ranges from 0 (extended) to 1
-                        # (point-like).  Extended sources bias the SFFT kernel fit
-                        # because their profiles differ from the PSF.  Use an
-                        # adaptive threshold: stricter when we have enough sources,
-                        # more permissive for sparse fields.
+                        # (point-like).  This filter is DISABLED by default
+                        # (sfft_min_class_star=0) because:
+                        #
+                        # 1. SFFT does its own source vetting: it runs SExtractor
+                        #    on both images, excludes bad FLAGS, cross-matches,
+                        #    and does PostAnomaly/CVREJ/EVREJ rejection of
+                        #    variable/extended sources AFTER the kernel fit.
+                        # 2. After spline-warp alignment (spalipy), the PSF is
+                        #    distorted, causing SExtractor to classify real point
+                        #    sources as extended (CLASS_STAR < 0.7).  This removes
+                        #    valid kernel-fitting sources.
+                        # 3. In sparse fields, the filter leaves too few sources
+                        #    for a reliable kernel fit.
+                        #
+                        # Users who want stricter pre-filtering can set
+                        # sfft_min_class_star > 0 in their YAML config.
                         if "class_star" in ms.columns:
                             cs = pd.to_numeric(ms["class_star"], errors="coerce")
                             cs_finite = cs.notna()
                             if cs_finite.any():
                                 n_cs = int(cs_finite.sum())
-                                # CLASS_STAR is unreliable for undersampled
-                                # images (FWHM < 3px) because the PSF spans
-                                # very few pixels, causing real point sources
-                                # to get low scores.  Lower the threshold
-                                # adaptively, and skip entirely for severely
-                                # undersampled (FWHM < 2px) fields where
-                                # CLASS_STAR is essentially noise.
                                 _fwhm_for_cs = float(
                                     input_yaml.get("science_fwhm", ImageFWHM)
                                 )
                                 if _fwhm_for_cs < 2.0:
                                     cs_threshold = 0.0
-                                    logging.info(
-                                        f"CLASS_STAR filter skipped: FWHM={_fwhm_for_cs:.1f}px "
-                                        f"(severely undersampled, CLASS_STAR unreliable). "
-                                        f"Keeping all {len(ms)} sources."
-                                    )
-                                elif _fwhm_for_cs < 3.0:
-                                    cs_threshold = 0.2 if n_cs >= 10 else 0.1
-                                    logging.info(
-                                        f"CLASS_STAR threshold lowered to {cs_threshold} "
-                                        f"for undersampled image (FWHM={_fwhm_for_cs:.1f}px)"
-                                    )
                                 else:
                                     cs_threshold = float(
                                         input_yaml["template_subtraction"].get(
-                                            "sfft_min_class_star", 0.7
+                                            "sfft_min_class_star", 0.0
                                         )
                                     )
                                 if cs_threshold > 0:
                                     cs_pass = cs >= cs_threshold
                                     n_cs_rejected = int((cs_finite & ~cs_pass).sum())
-                                    if n_cs_rejected > 0:
+                                    n_cs_kept = int((cs_finite & cs_pass).sum())
+                                    # Safety: if the filter would remove ALL or
+                                    # nearly all finite-CLASS_STAR sources, skip it.
+                                    if n_cs_kept < 5 and n_cs_rejected > 0:
+                                        logging.info(
+                                            f"CLASS_STAR filter skipped: only {n_cs_kept} sources "
+                                            f"would survive (need >= 5 for reliable kernel). "
+                                            f"Keeping all {n_cs} sources."
+                                        )
+                                    elif n_cs_rejected > 0:
                                         logging.info(
                                             f"CLASS_STAR filter: removed {n_cs_rejected} extended sources "
-                                            f"(CLASS_STAR < {cs_threshold}, {n_cs - n_cs_rejected}/{n_cs} kept)"
+                                            f"(CLASS_STAR < {cs_threshold}, {n_cs_kept}/{n_cs} kept)"
                                         )
-                                    ms = ms[cs_pass | ~cs_finite]
+                                        ms = ms[cs_pass | ~cs_finite]
+                                else:
+                                    logging.info(
+                                        f"CLASS_STAR filter disabled (sfft_min_class_star=0). "
+                                        f"SFFT will vet sources independently. "
+                                        f"Keeping all {len(ms)} sources."
+                                    )
 
                         # --- Ellipticity filter (backup for point-source selection) ---
-                        # Point sources should be nearly circular.  The column
-                        # "roundness" is SExtractor's ELLIPTICITY (0 = circular,
-                        # 1 = highly elongated).  Galaxies often have high
-                        # ellipticity.  This catches extended sources that
-                        # CLASS_STAR may miss (e.g. compact galaxies).
+                        # DISABLED by default (sfft_max_ellipticity=0.5, permissive).
+                        # SFFT does its own source vetting; this filter is only
+                        # a coarse pre-filter for obviously elongated objects.
+                        # Set sfft_max_ellipticity < 0.5 in YAML for stricter filtering.
                         if "roundness" in ms.columns:
                             ell = pd.to_numeric(ms["roundness"], errors="coerce")
                             ell_finite = ell.notna()
                             if ell_finite.any():
                                 ell_max = float(
                                     input_yaml["template_subtraction"].get(
-                                        "sfft_max_ellipticity", 0.3
+                                        "sfft_max_ellipticity", 0.5
                                     )
                                 )
-                                ell_pass = ell <= ell_max
-                                n_ell_rejected = int((ell_finite & ~ell_pass).sum())
-                                if n_ell_rejected > 0:
-                                    logging.info(
-                                        f"Ellipticity filter: removed {n_ell_rejected} elongated sources "
-                                        f"(ellipticity > {ell_max})"
-                                    )
-                                ms = ms[ell_pass | ~ell_finite]
+                                if ell_max >= 1.0:
+                                    # Fully disabled
+                                    pass
+                                else:
+                                    ell_pass = ell <= ell_max
+                                    n_ell_rejected = int((ell_finite & ~ell_pass).sum())
+                                    n_ell_kept = int((ell_finite & ell_pass).sum())
+                                    # Safety: skip if it would leave < 5 sources
+                                    if n_ell_kept < 5 and n_ell_rejected > 0:
+                                        logging.info(
+                                            f"Ellipticity filter skipped: only {n_ell_kept} sources "
+                                            f"would survive (need >= 5 for reliable kernel). "
+                                            f"Keeping all {len(ms)} sources."
+                                        )
+                                    elif n_ell_rejected > 0:
+                                        logging.info(
+                                            f"Ellipticity filter: removed {n_ell_rejected} elongated sources "
+                                            f"(ellipticity > {ell_max})"
+                                        )
+                                        ms = ms[ell_pass | ~ell_finite]
 
                         # Size-based outlier rejection (robust sigma-clipping on FWHM)
                         size_col = None
@@ -6521,9 +6541,12 @@ def run_photometry():
                 logging.warning("Failed to convert cutout coordinates: %s", e)
 
             if "flags" in TargetPosition:
-                from photutils.psf import decode_psf_flags
+                try:
+                    from photutils.psf import decode_psf_flags
+                except ImportError:
+                    decode_psf_flags = None  # photutils < 3.0
 
-                if np.isfinite(TargetPosition["flags"].iloc[0]):
+                if decode_psf_flags is not None and np.isfinite(TargetPosition["flags"].iloc[0]):
                     target_flags = int(TargetPosition["flags"].iloc[0])
 
                     # logging.info("Target Flags: %s", target_flags)
@@ -7100,23 +7123,40 @@ def run_photometry():
                 cal_mag_col = f"{input_yaml['imageFilter']}_{method}"
                 cal_err_col = f"{input_yaml['imageFilter']}_{method}_err"
 
-                logging.info(
-                    "Instrumental %s %s%s-band magnitude: %.3f +/- %.3f [mag]",
-                    method,
-                    input_yaml["imageFilter"],
-                    inverted_tag if method == "PSF" else "",
-                    TargetPosition.at[idx, inst_col],
-                    TargetPosition.at[idx, inst_err_col],
-                )
+                # Skip logging for failed PSF fits (NaN instrumental magnitude)
+                _inst_val = TargetPosition.at[idx, inst_col]
+                if method == "PSF" and not np.isfinite(_inst_val):
+                    logging.info(
+                        "Instrumental %s %s%s-band magnitude: NaN (PSF fit failed or "
+                        "near-zero flux; using aperture photometry only)",
+                        method,
+                        input_yaml["imageFilter"],
+                        inverted_tag if method == "PSF" else "",
+                    )
+                    logging.info(
+                        "Calibrated %s %s%s-band magnitude: NaN (PSF fit failed)",
+                        method,
+                        input_yaml["imageFilter"],
+                        inverted_tag if method == "PSF" else "",
+                    )
+                else:
+                    logging.info(
+                        "Instrumental %s %s%s-band magnitude: %.3f +/- %.3f [mag]",
+                        method,
+                        input_yaml["imageFilter"],
+                        inverted_tag if method == "PSF" else "",
+                        TargetPosition.at[idx, inst_col],
+                        TargetPosition.at[idx, inst_err_col],
+                    )
 
-                logging.info(
-                    "Calibrated %s %s%s-band magnitude: %.3f +/- %.3f [mag]",
-                    method,
-                    input_yaml["imageFilter"],
-                    inverted_tag if method == "PSF" else "",
-                    TargetPosition.at[idx, cal_mag_col],
-                    TargetPosition.at[idx, cal_err_col],
-                )
+                    logging.info(
+                        "Calibrated %s %s%s-band magnitude: %.3f +/- %.3f [mag]",
+                        method,
+                        input_yaml["imageFilter"],
+                        inverted_tag if method == "PSF" else "",
+                        TargetPosition.at[idx, cal_mag_col],
+                        TargetPosition.at[idx, cal_err_col],
+                    )
 
             except Exception as e:
                 log_exception(e)

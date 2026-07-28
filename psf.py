@@ -77,6 +77,39 @@ from photutils.utils import calc_total_error
 from photutils.utils.cutouts import overlap_slices
 
 # ---------------------------------------------------------------------------
+# photutils version compatibility
+# ---------------------------------------------------------------------------
+# photutils >=3.0: build_epsf(stars, epsf=init_epsf) -> EPSFBuildResult
+# photutils  <3.0: build_epsf(stars, init_epsf=init_epsf) -> (epsf, fitted_stars)
+import inspect as _inspect
+
+_build_epsf_sig = _inspect.signature(EPSFBuilder.build_epsf)
+_EPSF_KWARG = "epsf" if "epsf" in _build_epsf_sig.parameters else "init_epsf"
+
+# photutils >=3.0: PSFPhotometry(local_bkg_estimator=...)
+# photutils  <3.0: PSFPhotometry(localbkg_estimator=...)
+_psfphot_sig = _inspect.signature(PSFPhotometry.__init__)
+_LOCALBKG_KWARG = (
+    "local_bkg_estimator"
+    if "local_bkg_estimator" in _psfphot_sig.parameters
+    else "localbkg_estimator"
+)
+
+# photutils >=3.0: make_residual_image(..., include_local_bkg=...)
+# photutils  <3.0: make_residual_image(..., include_localbkg=...)
+_residual_sig = _inspect.signature(PSFPhotometry.make_residual_image)
+_INCLUDE_LOCALBKG_KWARG = (
+    "include_local_bkg"
+    if "include_local_bkg" in _residual_sig.parameters
+    else "include_localbkg"
+)
+
+
+def _call_build_epsf(builder, epsfstars, init_epsf):
+    """Call build_epsf with the version-correct init-epsf kwarg."""
+    return builder.build_epsf(epsfstars, **{_EPSF_KWARG: init_epsf})
+
+# ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
 from functions import log_step, set_size, log_warning_from_exception
@@ -483,7 +516,7 @@ class MCMCFitter:
         random_state=None,
         inplace=None,
         adaptive_tau_target: int = 50,
-        min_autocorr_N: int = 100,
+        min_autocorr_N: int = 300,
         batch_steps: int = 100,
         jitter_scale: float = 0.02,
         use_nddata_uncertainty: bool = False,
@@ -783,17 +816,24 @@ class MCMCFitter:
                 continue
 
             # Start autocorrelation checks only after enough steps per walker.
+            # emcee's get_autocorr_time issues warnings when the chain is
+            # shorter than 50*tau — which is exactly the regime we're in
+            # during early iterations.  Suppress these warnings aggressively
+            # since they're expected and not actionable.
             if total_steps >= self.min_autocorr_N:
                 try:
                     with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
+                        warnings.filterwarnings("ignore", message=".*chain is shorter.*")
+                        warnings.filterwarnings("ignore", message=".*autocorrelation.*")
                         tau = self.sampler.get_autocorr_time(quiet=True)
                     tau_est = np.nanmean(tau)
                     # Standard emcee recommendation: each walker must run for at
-                    # least 50 * tau steps.  The old code multiplied
-                    # total_steps by nwalkers, which diluted the threshold by
-                    # nwalkers (e.g. 20 walkers => only 2.5*tau per walker).
-                    if np.isfinite(tau_est) and total_steps > 50 * tau_est:
+                    # least 50 * tau steps.  We use 100*tau as the convergence
+                    # threshold to ensure a healthy effective sample size
+                    # (n_eff ≈ n_walkers * (total_steps - burnin) / thin / tau).
+                    # The old 50*tau threshold produced n_eff ≈ 92, which is
+                    # marginal for reliable posterior contours.
+                    if np.isfinite(tau_est) and total_steps > 100 * tau_est:
                         log.info(
                             "[MCMC] Converged at %d steps, tau=%.1f",
                             total_steps,
@@ -814,7 +854,8 @@ class MCMCFitter:
         tau_arr = None
         try:
             with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+                warnings.filterwarnings("ignore", message=".*chain is shorter.*")
+                warnings.filterwarnings("ignore", message=".*autocorrelation.*")
                 tau_arr = self.sampler.get_autocorr_time(quiet=True)
             log.info("[MCMC] acc=%.3f  tau~%.1f", acc, np.nanmean(tau_arr))
         except Exception:
@@ -978,7 +1019,26 @@ class MCMCFitter:
         perr_sym = np.maximum(0.5 * (perr_lo + perr_hi), 0.0)
 
         fitted_model.stds = perr_sym
-        fitted_model.cov_matrix = Covariance(np.diag(perr_sym**2))
+        # Build a full covariance matrix from the MCMC chain when available,
+        # otherwise fall back to a diagonal approximation from the
+        # percentile-derived symmetric errors.
+        _cov_diag = np.diag(perr_sym ** 2)
+        if chain.shape[0] > 10:
+            try:
+                _cov_full = np.cov(chain, rowvar=False)
+                if _cov_full.shape == _cov_diag.shape and np.all(np.isfinite(_cov_full)):
+                    fitted_model.cov_matrix = Covariance(_cov_full)
+                else:
+                    fitted_model.cov_matrix = Covariance(_cov_diag)
+            except Exception:
+                fitted_model.cov_matrix = Covariance(_cov_diag)
+        else:
+            fitted_model.cov_matrix = Covariance(_cov_diag)
+
+        # photutils checks 'param_cov' in fit_info to decide whether to set
+        # the NO_COVARIANCE flag (bit 16).  Without this key, photutils marks
+        # the fit as lacking a covariance matrix even though we computed one.
+        self.fit_info["param_cov"] = fitted_model.cov_matrix.cov_matrix
 
         record = {
             "src_index": self.counter,
@@ -2701,7 +2761,7 @@ class PSF:
                 oversampling=oversample,
             )
 
-            build_result = epsf_builder.build_epsf(epsfstars, epsf=init_epsf)
+            build_result = _call_build_epsf(epsf_builder, epsfstars, init_epsf)
             # photutils >=3.0 returns EPSFBuildResult; <3.0 returns (epsf, fitted_stars)
             if hasattr(build_result, 'epsf'):
                 epsf = build_result.epsf
@@ -2732,7 +2792,7 @@ class PSF:
                         smoothing_kernel=smooth_kernel,
                         progress_bar=False,
                     )
-                    build_result_retry = epsf_builder_retry.build_epsf(epsfstars, epsf=init_epsf)
+                    build_result_retry = _call_build_epsf(epsf_builder_retry, epsfstars, init_epsf)
                     if hasattr(build_result_retry, 'epsf'):
                         if build_result_retry.converged:
                             log.info("ePSF converged on retry with %d iterations", max_maxiters)
@@ -3862,7 +3922,7 @@ class PSF:
                     fitter_maxiters=1000,
                     fit_shape=fit_shape,
                     aperture_radius=aperture_radius,
-                    local_bkg_estimator=localbkg,
+                    **{_LOCALBKG_KWARG: localbkg},
                     grouper=group_maker,  # Added for overlapping source handling
                     xy_bounds=xy_bounds_this,
                     progress_bar=False,
@@ -3881,7 +3941,7 @@ class PSF:
                     fitter_maxiters=100,
                     fit_shape=fit_shape,
                     aperture_radius=aperture_radius,
-                    local_bkg_estimator=localbkg,
+                    **{_LOCALBKG_KWARG: localbkg},
                     grouper=group_maker,
                     xy_bounds=xy_bounds_this,
                     progress_bar=False,
@@ -3977,7 +4037,7 @@ class PSF:
                                 fitter_maxiters=1500,
                                 fit_shape=fit_shape_retry,
                                 aperture_radius=aperture_radius,
-                                local_bkg_estimator=localbkg,
+                                **{_LOCALBKG_KWARG: localbkg},
                                 xy_bounds=xy_bounds_retry,
                                 progress_bar=False,
                             )
@@ -4590,7 +4650,20 @@ class PSF:
             )
             # Compute inverted instrumental magnitudes (negative flux = fading source)
             with np.errstate(divide="ignore", invalid="ignore"):
-                valid_inv_flux = (updated["flux_PSF_inverted"] < 0) & np.isfinite(updated["flux_PSF_inverted"])
+                _inv_flux = np.asarray(updated["flux_PSF_inverted"], dtype=float)
+                _inv_err = np.asarray(updated["flux_PSF_err_inverted"], dtype=float)
+                _inv_abs = np.abs(_inv_flux)
+                # Same SNR sanity: reject near-zero flux fits that produce absurd mags
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    _inv_snr = _inv_abs / _inv_err
+                valid_inv_flux = (
+                    (_inv_flux < 0)
+                    & np.isfinite(_inv_flux)
+                    & np.isfinite(_inv_err)
+                    & (_inv_abs > 0)
+                    & np.isfinite(_inv_snr)
+                    & (_inv_snr >= 0.01)
+                )
                 updated.loc[valid_inv_flux, "inst_inverted"] = -2.5 * np.log10(
                     np.abs(updated.loc[valid_inv_flux, "flux_PSF_inverted"])
                 )
@@ -4634,16 +4707,50 @@ class PSF:
             # For inverted fits, use absolute flux for magnitude calculation
             # Use updated's _inverted_fit column (copied at line ~3876) to match updated's shape
             inverted_fit_mask_updated = updated.get("_inverted_fit", pd.Series(False, index=updated.index)).to_numpy(dtype=bool)
-            flux_for_mag = np.where(inverted_fit_mask_updated, np.abs(updated["flux_PSF"]), updated["flux_PSF"])
-            updated[inst_col] = -2.5 * np.log10(flux_for_mag)
-            # Valid flux: positive for normal, any non-zero finite for inverted
-            valid_flux = np.isfinite(updated["flux_PSF"]) & (updated["flux_PSF"] != 0)
-            mag_err = np.full(len(updated), np.nan)
-            mag_err[valid_flux] = (2.5 / np.log(10.0)) * (
-                updated.loc[valid_flux, "flux_PSF_err"]
-                / np.abs(updated.loc[valid_flux, "flux_PSF"])
+            flux_arr = np.asarray(updated["flux_PSF"], dtype=float)
+            flux_err_arr = np.asarray(updated["flux_PSF_err"], dtype=float)
+            abs_flux = np.abs(flux_arr)
+            flux_for_mag = np.where(inverted_fit_mask_updated, abs_flux, flux_arr)
+            # Valid flux criteria:
+            #   - finite flux and flux_err
+            #   - non-inverted: flux must be positive (negative = failed fit, not a real
+            #     negative source)
+            #   - inverted: |flux| must be positive (flux is negative by design)
+            #   - SNR sanity: |flux|/flux_err >= 0.01 to reject near-zero flux fits that
+            #     produce absurd magnitudes (e.g., flux~3e-9 -> mag~21, err~3.7e8)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _snr = abs_flux / flux_err_arr
+            valid_flux = (
+                np.isfinite(flux_arr)
+                & np.isfinite(flux_err_arr)
+                & (abs_flux > 0)
+                & (
+                    (inverted_fit_mask_updated & (abs_flux > 0))
+                    | (~inverted_fit_mask_updated & (flux_arr > 0))
+                )
+                & np.isfinite(_snr)
+                & (_snr >= 0.01)
             )
+            # Compute magnitude only for valid fluxes; NaN otherwise
+            mag_arr = np.full(len(updated), np.nan, dtype=float)
+            _flux_mag_arr = np.asarray(flux_for_mag, dtype=float)
+            _ok_mag = valid_flux & (_flux_mag_arr > 0)
+            mag_arr[_ok_mag] = -2.5 * np.log10(_flux_mag_arr[_ok_mag])
+            updated[inst_col] = mag_arr
+            # Error: (2.5/ln10) * (flux_err / |flux|) — only for valid fits
+            mag_err = np.full(len(updated), np.nan, dtype=float)
+            _ok_err = valid_flux & (abs_flux > 0)
+            mag_err[_ok_err] = (2.5 / np.log(10.0)) * (flux_err_arr[_ok_err] / abs_flux[_ok_err])
             updated[inst_err_col] = mag_err
+            if np.any(~valid_flux & np.isfinite(flux_arr) & (abs_flux > 0)):
+                _n_rejected = int(np.sum(~valid_flux & np.isfinite(flux_arr) & (abs_flux > 0)))
+                log.warning(
+                    "PSF instrumental magnitude set to NaN for %d source(s) with "
+                    "near-zero or negative flux (failed fit); flux=%.2e to %.2e e/s.",
+                    _n_rejected,
+                    float(np.nanmin(abs_flux[~valid_flux & (abs_flux > 0)])),
+                    float(np.nanmax(abs_flux[~valid_flux & (abs_flux > 0)])),
+                )
             # Instrumental mag from difference-image PSF before invert (|F|); only filled when invert replaced fit
             inst_normal = f"inst_{image_filter}_PSF_normal"
             inst_normal_err = f"inst_{image_filter}_PSF_normal_err"
@@ -4656,7 +4763,14 @@ class PSF:
                 dtype=float, copy=False
             )
             absf = np.abs(fn)
-            ok_mag = np.isfinite(fn) & np.isfinite(absf) & (absf > 0)
+            # Same SNR sanity check as primary magnitude: reject near-zero flux fits
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _snr_n = absf / fe
+            ok_mag = (
+                np.isfinite(fn) & np.isfinite(absf) & (absf > 0)
+                & np.isfinite(fe) & (fe > 0)
+                & np.isfinite(_snr_n) & (_snr_n >= 0.01)
+            )
             with np.errstate(divide="ignore", invalid="ignore"):
                 m_n = np.full(len(updated), np.nan, dtype=float)
                 m_n[ok_mag] = -2.5 * np.log10(absf[ok_mag])
@@ -4740,7 +4854,7 @@ class PSF:
                 subtracted = psfphot.make_residual_image(
                     nd_for_plot.data * nd_for_plot.unit,
                     psf_shape=first_image.shape,
-                    include_local_bkg=True,
+                    **{_INCLUDE_LOCALBKG_KWARG: True},
                 )
                 second_image = np.asarray(subtracted.data)
                 fitted_model = first_image - second_image
@@ -5112,7 +5226,24 @@ class PSF:
             for _ax, _ax_R, _ax_B in ax_list:
                 _ax_B.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
                 _ax_R.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
-            ax1.legend(loc="upper left")
+            # Build legend only from handle types that matplotlib can render
+            # (PatchCollection / QuadMesh are not supported by legend and
+            # trigger a UserWarning).
+            _handles, _labels = ax1.get_legend_handles_labels()
+            if _handles:
+                import matplotlib.legend as _mlegend
+                _valid = []
+                _valid_labels = []
+                for _h, _l in zip(_handles, _labels):
+                    if not isinstance(_h, _mlegend.legend.Legend):
+                        # Skip collections that legend cannot handle
+                        from matplotlib.collections import Collection as _MplCollection
+                        if isinstance(_h, _MplCollection) and not hasattr(_h, "get_facecolor"):
+                            continue
+                        _valid.append(_h)
+                        _valid_labels.append(_l)
+                if _valid:
+                    ax1.legend(_valid, _valid_labels, loc="upper left")
             save_name_png = (
                 f"PSF_Target_{base}.png" if plotTarget else f"PSF_Subtractions_{base}.png"
             )
