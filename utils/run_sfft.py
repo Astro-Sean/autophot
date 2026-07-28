@@ -970,18 +970,21 @@ def run_sfft() -> Optional[int]:
     )
     if args.crowded and bg_poly_order == 0 and allow_crowded_bg_order_override:
         # MultiEasyCrowdedPacket default favours a non-trivial BGPolyOrder.
-        # Pipelines often pass 0 as "no explicit background model", but in crowded
-        # (non-sky-subtracted) cases this can destabilize scaling.
-        bg_poly_order = 2
-        log_info("Crowded SFFT: bg_order=0 overridden to 2 for stability.")
+        # However, the pipeline always subtracts a constant median from both
+        # images before SFFT (templates.py sfft_sky_subtract=True), so the
+        # background is already ~0.  BGPolyOrder=0 (constant offset) is
+        # sufficient to absorb any residual constant difference.  Higher
+        # orders can overfit and introduce spatial structure in crowded
+        # fields.  Only override if the user explicitly requests it.
+        log_info("Crowded SFFT: bg_order=0 kept (images are background-subtracted).")
     elif bg_poly_order == 0 and not args.crowded:
-        # Sparse field: images are not background-subtracted (BACK_TYPE=MANUAL),
-        # so BGPolyOrder=0 can only model a constant offset.  Spatially-varying
-        # background differences (sky gradients, host galaxy light, twilight)
-        # require at least order 1 to avoid leaving residual structure around
-        # sources that mimics point-source subtraction residuals.
-        bg_poly_order = 1
-        log_info("Sparse SFFT: bg_order=0 auto-increased to 1 for non-background-subtracted images.")
+        # Sparse field: the pipeline always subtracts a constant median from
+        # both images before SFFT (templates.py sfft_sky_subtract=True), so
+        # the background is already ~0.  BGPolyOrder=0 (constant offset) is
+        # sufficient to absorb any residual constant difference between the
+        # two images.  Higher orders can overfit sparse fields and introduce
+        # spatial structure that mimics point-source residuals.
+        log_info("Sparse SFFT: bg_order=0 kept (images are background-subtracted).")
     log_info(f"Background polynomial order: {bg_poly_order}")
 
     # --- SExtractor parameters (both sparse and crowded) ---
@@ -990,10 +993,10 @@ def run_sfft() -> Optional[int]:
     is_crowded = args.crowded
 
     # SExtractor detection threshold for SFFT source selection.
-    # 2.0 sigma for sparse fields: images are NOT background-subtracted
-    # (BACK_TYPE=MANUAL), so 1.5 sigma included noise peaks that biased the
-    # kernel fit.  2.0 provides a safer margin while still detecting faint
-    # sources.  3.0 sigma for crowded fields (avoids noise peaks in dense regions).
+    # 2.0 sigma for sparse fields: images are background-subtracted (constant
+    # median removed), so the noise floor is well-defined.  2.0 provides a
+    # safer margin while still detecting faint sources.  3.0 sigma for crowded
+    # fields (avoids noise peaks in dense regions).
     # User can override via -detect_thresh argument.
     if args.detect_thresh is not None and args.detect_thresh > 0:
         DETECT_THRESH = float(args.detect_thresh)
@@ -1121,17 +1124,14 @@ def run_sfft() -> Optional[int]:
         except Exception as e:
             log_warning(f"Could not load mask '{args.mask}': {e}")
 
-    # Images are NOT background-subtracted before reaching SFFT (background
-    # subtraction is explicitly disabled in templates.py to preserve raw ADU).
-    # BACK_TYPE=MANUAL with BACK_VALUE=0.0 tells SFFT's internal SExtractor not
-    # to subtract any background. SFFT's background polynomial handles the
-    # background difference between images in the kernel fit.
-    #
-    # BGPolyOrder=0 can only model a constant offset.  For non-background-
-    # subtracted images, spatially-varying background differences (sky gradients,
-    # host galaxy light, twilight) require at least order 1 to avoid leaving
-    # residual structure around sources.  Auto-increase from 0 to 1 unless the
-    # user explicitly set 0 (checked below after the crowded override).
+    # Images ARE background-subtracted before reaching SFFT: the pipeline
+    # subtracts a sigma-clipped median from both science and template
+    # (templates.py sfft_sky_subtract=True, default).  BACK_TYPE=MANUAL with
+    # BACK_VALUE=0.0 tells SFFT's internal SExtractor not to subtract any
+    # additional background.  SFFT's BGPolyOrder=0 models any residual constant
+    # offset between the two background-subtracted images.  Higher orders are
+    # unnecessary and can overfit, introducing spatial structure that mimics
+    # point-source subtraction residuals.
     BACK_TYPE = "MANUAL"
     BACK_VALUE = 0.0
     log_info(f"SFFT BACK_TYPE={BACK_TYPE}, BACK_VALUE={BACK_VALUE}.")
