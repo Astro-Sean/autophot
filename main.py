@@ -5793,9 +5793,28 @@ def run_photometry():
                 # the diff PSF, but ZOGY PSF matching is not implemented here.
                 # Use the geometric mean FWHM from the header for photometry.
                 _zogy_fwhm = float(header.get("DIFFFWHM", 0))
+                _zogy_sci_fwhm = float(header.get("FWHM_SCI", 0))
                 if _zogy_fwhm > 0:
                     input_yaml["fwhm"] = _zogy_fwhm
                     input_yaml["science_fwhm"] = _zogy_fwhm
+                    # Update aperture radius to match the geometric-mean PSF.
+                    # The aperture was sized from the science FWHM; the ZOGY
+                    # diff PSF is broader (geometric mean of sci and ref),
+                    # so the aperture must scale proportionally.
+                    _zogy_aperture = float(
+                        (input_yaml.get("photometry") or {}).get("aperture_radius", _zogy_sci_fwhm)
+                    )
+                    if _zogy_sci_fwhm > 0 and _zogy_aperture > 0:
+                        _zogy_new_aperture = odd(int(np.ceil(
+                            _zogy_aperture * (_zogy_fwhm / _zogy_sci_fwhm)
+                        )))
+                        input_yaml["photometry"]["aperture_radius"] = _zogy_new_aperture
+                        logging.info(
+                            "Aperture radius updated for ZOGY geometric-mean PSF: "
+                            "%.2f -> %.2f px (science FWHM=%.2f -> diff FWHM=%.2f).",
+                            _zogy_aperture, float(_zogy_new_aperture),
+                            _zogy_sci_fwhm, _zogy_fwhm,
+                        )
                     logging.warning(
                         "ZOGY difference image has geometric-mean PSF "
                         "(FWHM=%.2f px). ePSF not convolved to match - "
