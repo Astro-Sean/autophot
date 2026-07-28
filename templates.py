@@ -3349,6 +3349,8 @@ class Templates:
                                     np.asarray(_tpl_det["y"], float),
                                 ]),
                                 method_label="spalipy",
+                                sci_fwhm=float(np.median(sci_det["fwhm"])),
+                                tpl_fwhm=float(np.median(_tpl_det["fwhm"])),
                             )
                     except Exception as _plot_err:
                         logger.debug("Match sources plot skipped: %s", _plot_err)
