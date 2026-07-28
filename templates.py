@@ -2893,60 +2893,126 @@ class Templates:
                         )
                         return None, None
 
-                    # WCS-based overlap filtering: when science and template
-                    # have significantly different WCS (rotation, scale, or
-                    # pointing), many detected sources have no counterpart
-                    # in the other image.  These create false quad matches
-                    # and wrong affine transforms.  Filter both detection
-                    # lists to only sources within the overlapping sky region.
+                    # --- RA/DEC source matching ---
+                    # Detect sources in the science image, convert to RA/DEC
+                    # using the science WCS, then match with template sources
+                    # (also in RA/DEC) using a sky matching radius.  Only
+                    # these matched pairs are passed to spalipy.  This avoids
+                    # spalipy's quad matching finding wrong transforms (e.g.
+                    # scale=0.777 when the true scale is 1.0) from false quad
+                    # matches between unrelated sources in non-overlapping
+                    # sky regions.
                     try:
                         from astropy.wcs import WCS as _WCS
+                        from astropy.coordinates import SkyCoord
+                        import astropy.units as u
+                        from astropy.coordinates import match_coordinates_sky
+
                         _sci_wcs = _WCS(scienceHeader)
                         _tpl_wcs = _WCS(templateHeader)
-                        _sci_shape = scienceImage.shape
-                        _tpl_shape = templateImage.shape
 
-                        # Science detections -> template pixel frame
-                        _ra, _dec = _sci_wcs.all_pix2world(
+                        # Convert science detections to RA/DEC
+                        _sci_ra, _sci_dec = _sci_wcs.all_pix2world(
                             sci_det["x"], sci_det["y"], 0,
                         )
-                        _px, _py = _tpl_wcs.all_world2pix(_ra, _dec, 0)
-                        _sci_in_tpl = (
-                            (_px >= 0) & (_px < _tpl_shape[1]) &
-                            (_py >= 0) & (_py < _tpl_shape[0])
-                        )
-                        _n_sci_before = len(sci_det)
-                        sci_det = sci_det[_sci_in_tpl]
+                        _sci_sky = SkyCoord(_sci_ra * u.deg, _sci_dec * u.deg)
 
-                        # Template detections -> science pixel frame
-                        _ra, _dec = _tpl_wcs.all_pix2world(
+                        # Convert template detections to RA/DEC
+                        _tpl_ra, _tpl_dec = _tpl_wcs.all_pix2world(
                             tpl_det["x"], tpl_det["y"], 0,
                         )
-                        _px, _py = _sci_wcs.all_world2pix(_ra, _dec, 0)
-                        _tpl_in_sci = (
-                            (_px >= 0) & (_px < _sci_shape[1]) &
-                            (_py >= 0) & (_py < _sci_shape[0])
+                        _tpl_sky = SkyCoord(_tpl_ra * u.deg, _tpl_dec * u.deg)
+
+                        # Match: for each science source, find nearest template source
+                        _match_radius = 3.0 * u.arcsec  # generous: WCS can be off by a few arcsec
+                        _idx_tpl, _sep2d, _ = match_coordinates_sky(
+                            _sci_sky, _tpl_sky, nthNeighbor=1,
                         )
+                        _matched = _sep2d < _match_radius
+
+                        # Also require mutual nearest neighbour to avoid one-to-many
+                        _idx_sci_rev, _sep2d_rev, _ = match_coordinates_sky(
+                            _tpl_sky, _sci_sky, nthNeighbor=1,
+                        )
+                        _mutual = _matched & (
+                            _idx_sci_rev[_idx_tpl] == np.arange(len(sci_det))
+                        )
+
+                        _n_sci_before = len(sci_det)
                         _n_tpl_before = len(tpl_det)
-                        tpl_det = tpl_det[_tpl_in_sci]
+                        _sci_matched = sci_det[_mutual]
+                        _tpl_matched = tpl_det[_idx_tpl[_mutual]]
 
-                        if len(sci_det) < _n_sci_before or len(tpl_det) < _n_tpl_before:
-                            logger.info(
-                                "spalipy: WCS overlap filter sci %d->%d, "
-                                "tpl %d->%d sources.",
-                                _n_sci_before, len(sci_det),
-                                _n_tpl_before, len(tpl_det),
-                            )
-                    except Exception:
-                        pass  # WCS filtering is best-effort
-
-                    if len(sci_det) < 4 or len(tpl_det) < 4:
                         logger.info(
-                            "spalipy: too few overlapping sources "
-                            "(sci=%d, tpl=%d; need >=4).",
-                            len(sci_det), len(tpl_det),
+                            "spalipy: RA/DEC matching sci %d + tpl %d -> %d matched pairs "
+                            "(radius=%.1f arcsec).",
+                            _n_sci_before, _n_tpl_before, len(_sci_matched),
+                            _match_radius.value,
                         )
-                        return None, None
+
+                        if len(_sci_matched) < 4:
+                            logger.info(
+                                "spalipy: too few RA/DEC matched sources (%d; need >=4).",
+                                len(_sci_matched),
+                            )
+                            return None, None
+
+                        sci_det = _sci_matched
+                        tpl_det = _tpl_matched
+
+                    except Exception as _match_err:
+                        logger.warning(
+                            "spalipy: RA/DEC matching failed (%s); "
+                            "falling back to overlap filtering.",
+                            _match_err,
+                        )
+                        # Fallback: old WCS overlap filtering
+                        try:
+                            from astropy.wcs import WCS as _WCS
+                            _sci_wcs = _WCS(scienceHeader)
+                            _tpl_wcs = _WCS(templateHeader)
+                            _sci_shape = scienceImage.shape
+                            _tpl_shape = templateImage.shape
+
+                            _ra, _dec = _sci_wcs.all_pix2world(
+                                sci_det["x"], sci_det["y"], 0,
+                            )
+                            _px, _py = _tpl_wcs.all_world2pix(_ra, _dec, 0)
+                            _sci_in_tpl = (
+                                (_px >= 0) & (_px < _tpl_shape[1]) &
+                                (_py >= 0) & (_py < _tpl_shape[0])
+                            )
+                            _n_sci_before = len(sci_det)
+                            sci_det = sci_det[_sci_in_tpl]
+
+                            _ra, _dec = _tpl_wcs.all_pix2world(
+                                tpl_det["x"], tpl_det["y"], 0,
+                            )
+                            _px, _py = _sci_wcs.all_world2pix(_ra, _dec, 0)
+                            _tpl_in_sci = (
+                                (_px >= 0) & (_px < _sci_shape[1]) &
+                                (_py >= 0) & (_py < _sci_shape[0])
+                            )
+                            _n_tpl_before = len(tpl_det)
+                            tpl_det = tpl_det[_tpl_in_sci]
+
+                            if len(sci_det) < _n_sci_before or len(tpl_det) < _n_tpl_before:
+                                logger.info(
+                                    "spalipy: WCS overlap filter sci %d->%d, "
+                                    "tpl %d->%d sources.",
+                                    _n_sci_before, len(sci_det),
+                                    _n_tpl_before, len(tpl_det),
+                                )
+                        except Exception:
+                            pass  # WCS filtering is best-effort
+
+                        if len(sci_det) < 4 or len(tpl_det) < 4:
+                            logger.info(
+                                "spalipy: too few overlapping sources "
+                                "(sci=%d, tpl=%d; need >=4).",
+                                len(sci_det), len(tpl_det),
+                            )
+                            return None, None
 
                     logger.info(
                         "Attempting spalipy alignment (sci=%d sources, tpl=%d sources).",
