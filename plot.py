@@ -2373,32 +2373,32 @@ class Plot:
                 ax.set_xlabel("X [Pixel]")
                 ax.set_ylabel("Y [Pixel]")
 
-            # Plot all detected sources as small blue dots (context)
+            # Plot all detected sources as small grey dots (context)
             if sci_all_xy is not None:
                 sci_all = np.asarray(sci_all_xy, float)
                 ax1.scatter(
                     sci_all[:, 0], sci_all[:, 1],
-                    s=4, c="dodgerblue", alpha=0.4, zorder=2,
+                    s=4, c="grey", alpha=0.4, zorder=2,
                 )
             if tpl_all_xy is not None:
                 tpl_all = np.asarray(tpl_all_xy, float)
                 ax2.scatter(
                     tpl_all[:, 0], tpl_all[:, 1],
-                    s=4, c="dodgerblue", alpha=0.4, zorder=2,
+                    s=4, c="grey", alpha=0.4, zorder=2,
                 )
 
-            # Plot matched sources as green circles
+            # Plot matched sources as blue circles
             _r = max(3.0, float(self.input_yaml.get("fwhm", 3.0)))
             for (sx, sy) in sci_matched_xy:
                 ax1.add_patch(Circle(
                     (sx, sy), _r,
-                    edgecolor="lime", facecolor="none",
+                    edgecolor="dodgerblue", facecolor="none",
                     linewidth=0.8, zorder=5,
                 ))
             for (tx, ty) in tpl_matched_xy:
                 ax2.add_patch(Circle(
                     (tx, ty), _r,
-                    edgecolor="lime", facecolor="none",
+                    edgecolor="dodgerblue", facecolor="none",
                     linewidth=0.8, zorder=5,
                 ))
 
@@ -2409,9 +2409,9 @@ class Plot:
                 sx, sy = sci_matched_xy[i]
                 tx, ty = tpl_matched_xy[i]
                 ax1.text(sx, sy + _r + 1, str(i),
-                         color="lime", fontsize=4, ha="center", va="bottom")
+                         color="dodgerblue", fontsize=4, ha="center", va="bottom")
                 ax2.text(tx, ty + _r + 1, str(i),
-                         color="lime", fontsize=4, ha="center", va="bottom")
+                         color="dodgerblue", fontsize=4, ha="center", va="bottom")
 
             # Stats text
             _stats = f"Matched: {n_matched}\nMethod: {method_label}"
