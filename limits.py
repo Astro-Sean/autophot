@@ -16,7 +16,7 @@ import os
 import sys
 import time
 import copy
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from functools import lru_cache
 
@@ -65,22 +65,17 @@ def _flux_for_mag_cached(m: float, counts_ref: float, exposure_time: float) -> f
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-from scipy.optimize import curve_fit
-from astropy.stats import sigma_clipped_stats, mad_std
+from astropy.stats import mad_std
 from astropy.nddata import Cutout2D
-from astropy.visualization import ZScaleInterval, ImageNormalize
+from astropy.visualization import ZScaleInterval
 from photutils.detection import DAOStarFinder
 from photutils.aperture import CircularAperture, CircularAnnulus
-
-from functions import log_warning_from_exception
 
 # ---------------------------------------------------------------------------
 # Local
 # ---------------------------------------------------------------------------
 from functions import (
     set_size,
-    gauss_1d,  # used directly - NOT redefined inside methods
-    flux_upper_limit,
     mag,
     points_in_circum,
     beta_aperture,
@@ -178,18 +173,23 @@ def _compute_p_det(df: pd.DataFrame, beta_n: float) -> pd.Series:
     Expects ``flux_AP`` and ``noiseSky`` in matching *per-second* units
     (e-/s and e-/s per pixel) as from ``Aperture.measure()``.
     """
-    def _beta_row(row):
-        if (np.isfinite(row["flux_AP"]) and row["flux_AP"] > 0
-                and np.isfinite(row["noiseSky"]) and row["noiseSky"] > 0
-                and np.isfinite(row["area"]) and row["area"] > 0):
-            return beta_aperture(
-                n=beta_n,
-                flux_aperture=row["flux_AP"],
-                sigma=row["noiseSky"],
-                npix=row["area"],
-            )
-        return 0.0
-    return df.apply(_beta_row, axis=1)
+    flux_ap = np.asarray(df["flux_AP"].values, dtype=float)
+    noise = np.asarray(df["noiseSky"].values, dtype=float)
+    area = np.asarray(df["area"].values, dtype=float)
+    valid = (
+        np.isfinite(flux_ap) & (flux_ap > 0)
+        & np.isfinite(noise) & (noise > 0)
+        & np.isfinite(area) & (area > 0)
+    )
+    result = np.zeros(len(df), dtype=float)
+    if valid.any():
+        result[valid] = beta_aperture(
+            n=beta_n,
+            flux_aperture=flux_ap[valid],
+            sigma=noise[valid],
+            npix=area[valid],
+        )
+    return pd.Series(result, index=df.index)
 
 
 # ===========================================================================
@@ -805,7 +805,6 @@ class Limits:
             configured_radius = float(phot_cfg.get("aperture_radius", fwhm))
 
             # Use local copy of config to avoid mutating shared state
-            import copy
             local_input_yaml = copy.deepcopy(self.input_yaml)
             # Canonical exposure and gain for every Aperture call and for flux_for_mag
             # (must match ``Aperture.measure`` resolution on this frame).
@@ -1102,15 +1101,12 @@ class Limits:
                             )
                             ann_vals = ann.to_mask(method="center").get_values(imgf)
                             if ann_vals is not None:
-                                ann_vals = np.asarray(ann_vals, dtype=float)
-                                ann_vals = ann_vals[np.isfinite(ann_vals)]
+                                ann_vals_raw = np.asarray(ann_vals, dtype=float)
+                                total_annulus = ann_vals_raw.size
+                                ann_vals = ann_vals_raw[np.isfinite(ann_vals_raw)]
                             # Require at least _annulus_valid_fraction of annulus pixels to be finite.
-                            if ann_vals is not None and ann_vals.size >= 4:
-                                total_annulus = ann_vals.size
-                                if ann_vals.size >= (total_annulus * _annulus_valid_fraction):
-                                    mean_annulus = float(np.median(ann_vals))
-                                else:
-                                    mean_annulus = 0.0
+                            if ann_vals is not None and ann_vals.size >= 4 and ann_vals.size >= (total_annulus * _annulus_valid_fraction):
+                                mean_annulus = float(np.median(ann_vals))
                             else:
                                 mean_annulus = 0.0
                         except Exception:
@@ -1123,20 +1119,15 @@ class Limits:
                             )
                             ann_vals = ann.to_mask(method="center").get_values(imgf)
                             if ann_vals is not None:
-                                ann_vals = np.asarray(ann_vals, dtype=float)
-                                ann_vals = ann_vals[np.isfinite(ann_vals)]
+                                ann_vals_raw = np.asarray(ann_vals, dtype=float)
+                                total_annulus = ann_vals_raw.size
+                                ann_vals = ann_vals_raw[np.isfinite(ann_vals_raw)]
                             # Require at least _annulus_valid_fraction of annulus pixels to be finite.
-                            if ann_vals is not None:
-                                total_annulus = ann_vals.size
-                                if ann_vals.size >= (total_annulus * _annulus_valid_fraction):
-                                    mean_annulus = float(np.median(ann_vals))
-                                    mad = float(np.median(np.abs(ann_vals - mean_annulus)))
-                                    sigma_ref = max(mad * 1.4826, 1e-30)
-                                    var_ref = sigma_ref ** 2
-                                else:
-                                    mean_annulus = 0.0
-                                    var_ref = _global_var
-                                    sigma_ref = float(np.sqrt(max(var_ref, 1e-60)))
+                            if ann_vals is not None and ann_vals.size >= 4 and ann_vals.size >= (total_annulus * _annulus_valid_fraction):
+                                mean_annulus = float(np.median(ann_vals))
+                                mad = float(np.median(np.abs(ann_vals - mean_annulus)))
+                                sigma_ref = max(mad * 1.4826, 1e-30)
+                                var_ref = sigma_ref ** 2
                             else:
                                 mean_annulus = 0.0
                                 var_ref = _global_var
@@ -1170,7 +1161,11 @@ class Limits:
 
                     keep[i] = True
 
-                n_drop = n_drop_var + n_drop_mean
+                if n_drop_var or n_drop_mean:
+                    logger.info(
+                        "Pixel-statistics filter: dropped %d sites (variance) + %d sites (mean bias) of %d candidates.",
+                        n_drop_var, n_drop_mean, len(df),
+                    )
                 return df[keep].copy()
 
             def _robust_site_snr(df: pd.DataFrame) -> pd.DataFrame:
@@ -1711,14 +1706,11 @@ class Limits:
                 _jitter_rng = np.random.default_rng(42)
                 _jitter_dx = _jitter_rng.uniform(-0.5, 0.5, (len(stage1_chosen), redo_default))
                 _jitter_dy = _jitter_rng.uniform(-0.5, 0.5, (len(stage1_chosen), redo_default))
-                jittered_rows = []
-                for i, (x0, y0) in enumerate(zip(stage1_chosen["x_pix"], stage1_chosen["y_pix"])):
-                    for j in range(redo_default):
-                        jittered_rows.append({
-                            "x_pix": x0 + _jitter_dx[i, j],
-                            "y_pix": y0 + _jitter_dy[i, j],
-                        })
-                jittered_df = pd.DataFrame(jittered_rows)
+                x0_vals = np.asarray(stage1_chosen["x_pix"].values, float)
+                y0_vals = np.asarray(stage1_chosen["y_pix"].values, float)
+                jittered_x = (x0_vals[:, None] + _jitter_dx).ravel()
+                jittered_y = (y0_vals[:, None] + _jitter_dy).ravel()
+                jittered_df = pd.DataFrame({"x_pix": jittered_x, "y_pix": jittered_y})
                 jittered_df = ini_ap.measure(
                     sources=jittered_df,
                     plot=False,
@@ -2080,11 +2072,11 @@ class Limits:
                                 inject_lmag = float(lo_m + w * (hi_m - lo_m))
                                 # Propagate binomial errors through interpolation
                                 # Error in w: sigma_w = sqrt((sigma_lo_c/denom)^2 + (sigma_hi_c * w/denom)^2)
-                                # where sigma_lo_c = sqrt(lo_c * (1-lo_c) / n_trials)
-                                # and sigma_hi_c = sqrt(hi_c * (1-hi_c) / n_trials)
-                                if n_trials > 0:
-                                    sigma_lo_c = np.sqrt(max(lo_c * (1 - lo_c) / n_trials, 0))
-                                    sigma_hi_c = np.sqrt(max(hi_c * (1 - hi_c) / n_trials, 0))
+                                # where sigma_lo_c = sqrt(lo_c * (1-lo_c) / n_sites)
+                                # and sigma_hi_c = sqrt(hi_c * (1-hi_c) / n_sites)
+                                if n_sites > 0:
+                                    sigma_lo_c = np.sqrt(max(lo_c * (1 - lo_c) / n_sites, 0))
+                                    sigma_hi_c = np.sqrt(max(hi_c * (1 - hi_c) / n_sites, 0))
                                     sigma_w = np.sqrt((sigma_lo_c / denom)**2 + (sigma_hi_c * w / denom)**2)
                                     # Error in inject_lmag: sigma_m = sqrt((1-w)^2 * sigma_lo_m^2 + w^2 * sigma_hi_m^2 + (hi_m-lo_m)^2 * sigma_w^2)
                                     # For now, assume lo_m and hi_m have negligible error compared to binomial sampling
@@ -2588,13 +2580,10 @@ class Limits:
             logger.error("Source catalog missing SNR column")
             return {}
         
-        # Calculate apparent magnitudes using same scale as limiting magnitude
-        exposure_time = _effective_exposure_seconds(self.input_yaml)
-
         if "flux_AP" in sources.columns:
             # flux_AP is e-/s from Aperture.measure; mag() is instrumental in that system
             from functions import mag
-            sources["apparent_mag"] = sources["flux_AP"].apply(mag) + zeropoint
+            sources["apparent_mag"] = mag(sources["flux_AP"].values) + zeropoint
             logger.info("Using pipeline convention: mag(flux_AP/s) + zeropoint")
         elif "mag" in sources.columns:
             # Use existing magnitude column (assuming it's apparent)
@@ -3115,9 +3104,7 @@ class Limits:
                     if xi < 0 or yi < 0 or xi >= nx_c or yi >= ny_c:
                         continue
                     v0 = float(cutout[yi, xi])
-                    if not np.isfinite(v0) or (
-                        False and v0 == 0.0
-                    ):
+                    if not np.isfinite(v0):
                         continue
                     # Consistent with main injection-site selection: score by |SNR|.
                     if snr_col is not None:
@@ -3146,9 +3133,7 @@ class Limits:
                         yi = int(np.round(cy_try))
                         if 0 <= xi < nx_c and 0 <= yi < ny_c:
                             v0 = float(cutout[yi, xi])
-                            if not np.isfinite(v0) or (
-                                False and v0 == 0.0
-                            ):
+                            if not np.isfinite(v0):
                                 continue
                         demo_x = cx_try
                         demo_y = cy_try
@@ -3733,11 +3718,9 @@ class Limits:
                 # These are typically the catalog sources that passed quality cuts
                 zeropoint_apparent = catalog_apparent.copy()
             else:
-                catalog_inst = None
                 catalog_apparent = None
                 zeropoint_apparent = None
         else:
-            catalog_inst = None
             catalog_apparent = None
             zeropoint_apparent = None
 
