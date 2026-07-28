@@ -5583,7 +5583,22 @@ def run_photometry():
                         _forceconv_diff = ""
             else:
                 _forceconv_diff = _forceconv_hdr
-            if _forceconv_diff == "SCI":
+            if _forceconv_diff == "ZOGY":
+                # ZOGY produces a difference image with the geometric mean PSF
+                # of science and reference.  The science ePSF does NOT match
+                # the diff PSF, but ZOGY PSF matching is not implemented here.
+                # Use the geometric mean FWHM from the header for photometry.
+                _zogy_fwhm = float(header.get("DIFFFWHM", 0))
+                if _zogy_fwhm > 0:
+                    input_yaml["fwhm"] = _zogy_fwhm
+                    input_yaml["science_fwhm"] = _zogy_fwhm
+                    logging.warning(
+                        "ZOGY difference image has geometric-mean PSF "
+                        "(FWHM=%.2f px). ePSF not convolved to match - "
+                        "photometry may have slight PSF mismatch.",
+                        _zogy_fwhm,
+                    )
+            elif _forceconv_diff == "SCI":
                 _ref_fwhm_hdr = float(header.get("FWHM_REF", 0))
                 _sci_fwhm_hdr = float(header.get("FWHM_SCI", 0))
                 # Save original science ePSF for potential re-realization at target position

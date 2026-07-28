@@ -5430,6 +5430,9 @@ class Templates:
             sfft_kernel_hw = max(ker_hw, 5)
             if scale is None or int(scale) <= 0:
                 scale = sfft_kernel_hw
+            # Store the actual kernel half-width for the return value.
+            # This is used by plot.py to draw the kernel-size overlay.
+            kernel_half_width = sfft_kernel_hw
             target_location = [
                 (self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"])
             ]
@@ -5787,6 +5790,8 @@ class Templates:
                     science_saturate,
                     template_saturate,
                     method,
+                    science_fwhm=science_fwhm,
+                    template_fwhm=template_fwhm,
                 )
 
             if method == "sfft":
@@ -6028,6 +6033,8 @@ class Templates:
         science_saturate,
         template_saturate,
         method,
+        science_fwhm=0.0,
+        template_fwhm=0.0,
     ) -> str:
         """Attempt ZOGY subtraction; return next method to try on failure."""
         logger.info("Starting ZOGY subtraction...")
@@ -6065,6 +6072,26 @@ class Templates:
             write_fits(
                 str(differenceFpath), np.asarray(diff_image, dtype=float), scienceHeader
             )
+            # Write headers so downstream code (ePSF consistency, flux scaling)
+            # knows the PSF situation.  ZOGY produces a difference image with
+            # the geometric mean PSF of science and reference, normalized to
+            # the science image.  Mark it as ZOGY so the ePSF block can handle
+            # it appropriately (or at least log a warning).
+            try:
+                with fits.open(differenceFpath, mode="update") as _hdul:
+                    _hdr = _hdul[0].header
+                    _hdr["FORCECON"] = "ZOGY"
+                    _hdr["CONVD"] = "ZOGY"
+                    _hdr["FWHM_SCI"] = float(science_fwhm) if science_fwhm else 0.0
+                    _hdr["FWHM_REF"] = float(template_fwhm) if template_fwhm else 0.0
+                    # ZOGY diff PSF FWHM ~ geometric mean of sci and ref FWHM
+                    if science_fwhm and template_fwhm:
+                        _zogy_fwhm = np.sqrt(float(science_fwhm) * float(template_fwhm))
+                        _hdr["FWHM"] = _zogy_fwhm
+                        _hdr["DIFFFWHM"] = _zogy_fwhm
+                    _hdul.flush()
+            except Exception as _ze:
+                logger.warning("Failed to write ZOGY headers to diff: %s", _ze)
             logger.info("ZOGY subtraction succeeded")
             return "done"
         except Exception as exc:
