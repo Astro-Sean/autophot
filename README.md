@@ -20,7 +20,7 @@ AutoPhOT performs precision photometry of a transient or variable source at a fi
 2. **Image preparation** - Cosmic-ray rejection (with satellite-streak detection), background estimation, and FWHM measurement are performed per frame, with adaptive detection thresholds for sparse and crowded fields.
 3. **Photometry** - Both aperture and PSF photometry are computed at the target position. PSF models are built empirically from in-frame stars using `photutils` ePSFBuilder, with optional adaptive oversampling for undersampled data. Three fitters are available: least-squares (default), Poisson likelihood (Fermilab TM-2543-AE), and MCMC (`emcee`) with adaptive convergence for principled uncertainty estimation.
 4. **Calibration** - Photometric zero points are derived against a user-selectable catalog (Gaia DR3 with XP spectra, Pan-STARRS, SDSS, APASS, 2MASS, Legacy Survey, SkyMapper, and more), with per-filter catalog assignment and synthetic-photometry support for Gaia XP.
-5. **Template subtraction** (optional) - When a reference template is available, AutoPhOT aligns science and template images using a cascaded alignment pipeline with six methods, then performs difference imaging using SFFT, HOTPANTS, or PyZOGY with automatic fallback.
+5. **Template subtraction** (optional) - When a reference template is available, AutoPhOT aligns science and template images using a cascaded alignment pipeline with six methods, then performs difference imaging using SFFT, HOTPANTS, or ZOGY with automatic fallback.
 6. **Limiting magnitudes** - Source injection and recovery at multiple S/N thresholds (default 3sigma and 5sigma) using logistic-emcee fitting to produce robust upper limits for non-detections.
 
 ### Unique aspects
@@ -37,7 +37,7 @@ AutoPhOT performs precision photometry of a transient or variable source at a fi
 
 - **Gaia XP synthetic photometry** - Calibrate optical/NIR frames directly against Gaia DR3 XP spectra, avoiding cross-filter transformations when standard catalogs are unavailable. Supports custom transmission curves via `gaia_custom` catalog mode.
 
-- **Robust difference imaging** - Multiple subtraction backends (SFFT, HOTPANTS, PyZOGY) with automatic fallback, kernel-order auto-selection, noise decorrelation (SFFT v1.5.0+), PSF-source pool supplementation for sparse fields, and optional inpainting of saturated template star cores.
+- **Robust difference imaging** - Multiple subtraction backends (SFFT, HOTPANTS, ZOGY) with automatic fallback, kernel-order auto-selection, noise decorrelation (SFFT v1.5.0+), PSF-source pool supplementation for sparse fields, and optional inpainting of saturated template star cores.
 
 - **Multi-S/N limiting magnitudes** - Generates limiting magnitude columns at multiple signal-to-noise thresholds (e.g., `Limit_3p0S2N`, `Limit_5p0S2N`) in a single run, using source injection with quiet-site selection and logistic-emcee recovery fitting.
 
@@ -489,7 +489,7 @@ photometry:
 |--------|---------------|---------|-------|
 | **SFFT** | `sfft` | `pip install sfft` | Default; supports noise decorrelation, B-spline kernel, variable-star rejection |
 | **HOTPANTS** | `hotpants` | Build from source | Classic kernel-matching algorithm |
-| **PyZOGY** | `zogy` | Bundled | Optimal for PSF-matched subtraction; propagates noise correctly |
+| **ZOGY** | `zogy` | Auto-downloaded from [pmvreeswijk/ZOGY](https://github.com/pmvreeswijk/ZOGY) | Optimal for PSF-matched subtraction; propagates noise correctly |
 
 ### SFFT advanced features
 

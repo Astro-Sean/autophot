@@ -172,7 +172,7 @@ class Prepare:
                     # Construct the expected output directory for this file.
                     # IMPORTANT: mirror main.py's directory logic so that restart
                     # checks are consistent and we don't re-run files that already
-                    # have OUTPUT_{base}.csv.
+                    # have Output_{base}.csv.
                     base = (
                         os.path.splitext(filename)[0]
                         .replace(" ", "_")
@@ -204,11 +204,11 @@ class Prepare:
                         # CSV; use the generated template catalog as the completion
                         # marker.
                         output_csv_path = os.path.join(
-                            cur_dir, f"imageCalib_template_{base}.csv"
+                            cur_dir, f"ImageCalib_Template_{base}.csv"
                         )
                     else:
                         output_csv_path = os.path.join(
-                            cur_dir, f"OUTPUT_{base}.csv"
+                            cur_dir, f"Output_{base}.csv"
                         )
 
                     # Honour the restart flag (default True = redo all):
@@ -226,9 +226,9 @@ class Prepare:
             "Restart = %s -> %s",
             restart,
             (
-                "reprocess all files (ignore existing OUTPUT_{base}.csv)"
+                "reprocess all files (ignore existing Output_{base}.csv)"
                 if restart
-                else "skip files that already have OUTPUT_{base}.csv (only process new/unprocessed)"
+                else "skip files that already have Output_{base}.csv (only process new/unprocessed)"
             ),
         )
         self.logger.info(

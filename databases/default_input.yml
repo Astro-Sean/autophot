@@ -28,6 +28,7 @@ default_input:
 
   use_header_radec: False # bool|list[str]|str --- If True, try header RA/Dec keys (`CAT-RA`,`CAT-DEC`). If a 2-item list or comma-separated string, treat as `(RA_KEY, DEC_KEY)` header keys and copy those into `target_ra`/`target_dec` (degrees, FK5/J2000; units auto-detected for sexagesimal vs degrees).
 
+  do_other_transients: False # bool --- If True, perform PSF+aperture photometry on other transient-like sources (SN*, No*, etc.) from the SIMBAD variable-source query, in addition to the primary target.
   save_cutout_plot: True # bool --- Save diagnostic cutout plots where supported (e.g. star-shape checks).
 
   # The following are typically populated per-image from FITS headers during processing.
@@ -91,6 +92,7 @@ default_input:
     sextractor_reject_constant_regions: True # bool --- If False, do not reject sources in flat-variance regions.
     # Robust median FWHM from SExtractor FWHM_IMAGE (sigma-clipping iterations).
     fwhm_sigma_clip_maxiters: 15 # int --- Higher = more stable FWHM on noisy outlier stars; slower is negligible.
+    fwhm_inflation_max_factor: 1.5 # float --- Maximum acceptable FWHM inflation ratio (post-alignment / pre-alignment). Beyond this, initial FWHM is preserved to prevent kernel sizing errors from galaxy contamination. SWarp LANCZOS3 broadens ~30-50%; 1.5x is generous.
 
     # PSF star selection: FFT-based outlier rejection (blends, cosmic rays).
     psf_min_candidates: 8 # int --- Minimum PSF candidates to preserve during quality cuts (adaptive guard against over-pruning).
@@ -124,23 +126,19 @@ default_input:
     psf_auto_oversample_undersampled: True # bool --- Automatically increase oversampling to 4x for undersampled images (FWHM <= 2.5 px).
     psf_adaptive_sigma_clip: True # bool --- Adapt sigma clipping parameters based on number of PSF stars (less aggressive with few stars, more aggressive with many).
     psf_adaptive_smoothing_kernel: True # bool --- Use Gaussian smoothing kernel for undersampled data, quartic for well-sampled data.
-    psf_fit_boxsize_scale_fwhm: 2.5 # float --- EPSF star-fitting box size in FWHM units (larger captures more wings; too small can make PSF too narrow).
-    psf_fit_box_min_arcsec: 2.5 # float --- Minimum PSF build fit-box size in arcsec (converted to pixels via pixel_scale).
     psf_cutout_size_scale_fwhm: 10.0 # float --- EPSF star-cutout size in FWHM units (controls total wing coverage in PSF build).
     psf_cutout_min_arcsec: 9.0 # float --- Minimum PSF build cutout size in arcsec (converted to pixels via pixel_scale).
     psf_norm_radius_scale_fwhm: 2.8 # float --- Minimum EPSF normalization radius in FWHM units (helps preserve PSF wings).
     psf_norm_radius_min_pixels: 5.0 # float --- Absolute lower bound for EPSF normalization radius (pixels).
     psf_build_sigma_clip_sigma: 4.0 # float --- SigmaClip threshold used while stacking stars in EPSFBuilder (higher is less restrictive and preserves wings better).
     psf_build_sigma_clip_maxiters: 15 # int --- Maximum SigmaClip iterations for EPSFBuilder stacking.
-    psf_fit_shape_bright_scale_fwhm: 3.0 # float --- PSF photometry fit window scale (bright tier) in FWHM units.
-    psf_fit_shape_faint_scale_fwhm: 2.5 # float --- PSF photometry fit window scale (faint tier) in FWHM units.
-    psf_fit_shape_vfaint_scale_fwhm: 2.5 # float --- PSF photometry fit window scale (very-faint tier) in FWHM units.
-    psf_fit_shape_bright_min_arcsec: 3.0 # float --- Minimum bright-tier fit window size in arcsec (converted to pixels via pixel_scale).
-    psf_fit_shape_faint_min_arcsec: 2.5 # float --- Minimum faint-tier fit window size in arcsec (converted to pixels via pixel_scale).
-    psf_fit_shape_vfaint_min_arcsec: 2.0 # float --- Minimum very-faint-tier fit window size in arcsec (converted to pixels via pixel_scale).
+    psf_fit_shape_bright_scale_fwhm: 3.0 # float --- PSF photometry fit window scale in FWHM units (used for ALL sources: target and catalog).
+    psf_fit_shape_bright_min_arcsec: 3.0 # float --- Minimum fit window size in arcsec (converted to pixels via pixel_scale). Used for ALL sources.
     psf_fit_sampling_boost_max: 1.6 # float --- Maximum adaptive boost for fit-window scales on coarse/undersampled images.
     psf_local_background_floor: 0.0 # float|null --- Floor for per-source local background used during PSF fitting (in image data units). Use null to disable flooring and allow negative local backgrounds.
     psf_target_fit_shape_boost: 1.5 # float --- Multiplier applied to all fit-window scales for target-only PSF fits to better capture wings.
+    psf_fwhm_guard_lo_frac: 0.8 # float --- Lower guard for ePSF build FWHM re-estimation: clamped to >= this fraction of runtime FWHM. Prevents excessive FWHM shrinkage from PSF-star selection bias (point sources are naturally sharper than global median including galaxies). 0.8 allows 20% shrinkage.
+    psf_fwhm_guard_hi_frac: 1.3 # float --- Upper guard for ePSF build FWHM re-estimation: clamped to <= this fraction of runtime FWHM. Prevents excessive FWHM inflation from blended/extended contaminants in the PSF star sample. 1.3 allows 30% inflation.
 
     # MCMC (emcee) tuning for PSF fits.
     perform_emcee_fitting_s2n: 10 # float --- If >0, run emcee PSF/MAG fitting when target PSF S/N is below this value. Uses PSF fitting S/N (not aperture S/N) for the trigger. Set to 0 to disable MCMC entirely.
@@ -160,7 +158,6 @@ default_input:
     optimum_radius_min_keep_abs: 8 # int --- Minimum number of stars to retain in optimum-radius source selection (adaptive rescue if strict filters over-prune).
     optimum_radius_min_keep_frac: 0.25 # float --- Minimum retained fraction (of prefiltered stars) in optimum-radius selection.
     optimum_radius_use_moffat_cog: False # bool --- If True, derive per-source optimum radius from analytic Moffat encircled-energy inversion instead of empirical CoG interpolation.
-    optimum_radius_moffat_beta: 4.765 # float --- Moffat beta used when optimum_radius_use_moffat_cog=True (higher -> narrower wings; 4.765 ~ turbulence-like PSF).
     optimum_radius_core_radius_fwhm: 1.7 # float --- Core concentration radius (in FWHM) used to reject very broad stars.
     optimum_radius_core_flux_min: 0.50 # float --- Minimum enclosed normalized flux required within optimum_radius_core_radius_fwhm.
     optimum_radius_outer_start_fwhm: 2.2 # float --- Radius (in FWHM) beyond which tail flatness/negligibility is evaluated.
@@ -236,7 +233,10 @@ default_input:
     scamp_distort_keys: XWIN_IMAGE,YWIN_IMAGE # str --- Image-coordinate columns used by SCAMP distortion fit.
     scamp_mosaic_type: UNCHANGED # str --- SCAMP mosaic handling mode.
     scamp_stability_type: EXPOSURE # str --- SCAMP stability model type.
-    scamp_sn_thresholds: "3.0,100000.0" # str --- SCAMP S/N thresholds, "min,max".
+    scamp_sn_thresholds: "3.0,100000.0" # str --- SCAMP S/N thresholds, "min,max". 2nd value controls high-SN sample for quad formation; 0=auto for both.
+    scamp_match_nmax: 0 # int --- Max detections used for SCAMP pattern matching (quad matching). 0=auto (use all). Lower values speed up matching on dense fields.
+    scamp_pixscale_maxerr: 1.2 # float --- Max scale-factor uncertainty for SCAMP quad matching (default 1.2=20%).
+    scamp_posangle_maxerr: 5.0 # float --- Max position-angle uncertainty (degrees) for SCAMP quad matching.
 
     search_radius: 0.5 # float --- Search radius (degrees) for blind/assisted WCS solving.
     downsample: 4 # int --- Downsampling factor used for source detection/solving speed-up.
@@ -315,6 +315,14 @@ default_input:
     saturation_peak_frac: 0.99 # float --- Sources with peak_flux >= this fraction of saturation level are flagged as saturated (subset of non-linear reject; kept for diagnostics).
     max_flags: 2 # int --- Maximum SExtractor FLAGS value allowed for ZP calibrators (0=clean, 1=nearby source, 2=blended, etc.).
     variable_source_match_radius_pix: 5.0 # float --- Matching radius (pixels) for removing known variable sources (from SIMBAD) from the ZP calibration catalog. Sources within this distance of a known variable are excluded from the zeropoint fit.
+    min_source_no: 3 # int --- Minimum number of sources required for color-term fitting.
+    color_term_density_downsample: null # float|null --- Fraction of sources to keep in dense color regions during color-term fitting (e.g., 0.5 keeps 50%). Set to null to disable downsampling. Use to reduce cluster bias in fields with highly non-uniform color distributions.
+    mcmc_n_walkers: 32 # int --- Number of emcee walkers for ZP MCMC fit. 32 is sufficient for the 2-parameter (ZP + f_out) model. Increase for more robust posterior exploration.
+    mcmc_n_burn: 500 # int --- Burn-in steps for ZP MCMC. 500 is sufficient for the simple 2-parameter model.
+    mcmc_n_steps: 1000 # int --- Initial production steps per batch for ZP MCMC. The sampler runs in adaptive batches until convergence.
+    mcmc_max_steps: 10000 # int --- Hard cap on total MCMC production steps. Prevents runaway convergence attempts on pathological data.
+    mcmc_tau_factor: 10.0 # float --- Convergence criterion: stop when chain length > tau_factor * autocorrelation_time. 10 is sufficient for a 2-parameter model (emcee recommends ~10).
+    fit_method: mcmc # str --- ZP fitting method: "mcmc" (Bayesian, slow), "odr" (orthogonal distance regression, fast), or "ransac" (robust, medium). MCMC is default but ODR is ~50x faster and gives equivalent results for clean calibrator sets.
 
   cosmic_rays:
     remove_cmrays: False # bool --- Enable cosmic-ray removal in preprocessing.
@@ -351,7 +359,6 @@ default_input:
     logistic_emcee_nwalkers: 32 # int --- For completeness_solver=logistic_emcee: emcee walkers for the logistic fit.
     logistic_emcee_nsteps: 2000 # int --- For completeness_solver=logistic_emcee: emcee steps for the logistic fit.
     logistic_emcee_burnin_frac: 0.3 # float --- For completeness_solver=logistic_emcee: burn-in fraction for the logistic fit.
-    logistic_emcee_save_plot: True # bool --- Deprecated (ignored): logistic_emcee always saves a diagnostic plot.
     emcee_save_diagnostic_plot: True # bool --- If True and recovery_method is EMCEE/MCMC, save a small emcee diagnostic plot for one representative injected trial near the final limiting magnitude.
     initial_guess: null # float|null --- Initial instrumental-magnitude seed for injected-limit search. Null enables automatic annulus-based estimation around the target.
     inject_source_location: 3 # int --- Injection position strategy for limiting-mag trials (pipeline-specific).
@@ -420,17 +427,34 @@ default_input:
     alignment_require_post_swarp_verification: True # bool --- Reject common-grid SWarp output when subpixel centroid alignment cannot be measured.
     alignment_allow_non_scamp_fallback: False
     post_swarp_verify: True # bool --- If True, run SExtractor cross-match on SWarp output images to measure post-alignment offsets. When False, SCAMP+SWarp is trusted without independent verification. Enable for diagnostics or when alignment quality is uncertain.
-    alignment_subpixel_shift_correction: False # bool --- DEPRECATED/NO-OP. Post-SWarp sub-pixel shift correction has been removed because empirical shifts generally make dipoles worse.
-    alignment_subpixel_shift_threshold: 0.05 # float --- DEPRECATED/NO-OP. Kept for config compatibility only.
     alignment_sparse_field_retry_count: 15 # int --- If SExtractor detects fewer than this many sources in either image, re-run with maximum sensitivity (DETECT_THRESH=0.5, smaller BACK_SIZE, CLEAN=N). Set to 0 to disable sparse-field retry.
+    # --- spalipy parameters (alignment_method=spalipy) ---
+    spalipy_match_radius_arcsec: 3.0 # float --- RA/DEC cross-match radius (arcsec) for source pre-matching before spalipy quad matching.
+    spalipy_detect_thresh: 2.0 # float --- SExtractor detection threshold (sigma) for spalipy source detection.
+    spalipy_n_quad_det: null # int|null --- Number of detections used for quad matching. null=auto (all sources if <=25, else 20).
+    spalipy_min_n_match: null # int|null --- Minimum matched sources for spalipy alignment. null=auto (max(6, min(n//3, 20))).
+    spalipy_max_quad_hash_dist: null # float|null --- Max hash distance for quad matching. null=auto (scaled by FWHM).
+    spalipy_min_sep: null # int|null --- Minimum detection separation (pixels). null=auto (max(5, int(FWHM))).
+    spalipy_interp_order: null # int|null --- Spline interpolation order (1-3). null=auto (2 for undersampled, 3 otherwise).
+    spalipy_sub_tile: null # int|null --- Sub-tiling factor for affine fitting. null=auto (2 for >=200 sources, 1 otherwise).
+    spalipy_spline_order: null # int|null --- Spline order for distortion correction (0-3). null=auto (based on source count).
     skip_resampling: True # bool --- DEPRECATED: use resample_mode instead. If True, maps to resample_mode="wcs_only".
     resample_mode: common_grid # str --- SWarp resampling mode: "common_grid" (both to science grid), "native_scale" (each keeps own pixel scale), "wcs_only" (no resampling).
     science_first_astrometry: False # bool --- If True, distortion-correct the science image against GAIA-DR3 first via SCAMP+SWarp, then use the corrected catalog as astrometric reference for the reference image. Disabled: science-first astrometry adds an extra SCAMP+SWarp step that can introduce overfitting on sparse fields. Direct reference-to-science alignment is more reliable.
     gaia_cache_dir: null # str|null --- Directory to cache downloaded GAIA-DR3 reference catalogs for SCAMP. If null, uses ~/.autophot/scamp_gaia_cache. Caching avoids repeated Vizier downloads for the same field.
     gaia_cache_ttl_days: 30 # int --- Time-to-live for cached GAIA catalogs (days). GAIA-DR3 is static, so long TTLs are safe.
     preserve_scamp_logs: False # bool --- If True, keep SCAMP log files on failure for debugging. Useful when diagnosing astrometric alignment issues.
-    method: sfft # str --- Subtraction backend (sfft default; hotpants or zogy optional where available).
-    kernel_order: 0 # int|"auto" --- Spatial polynomial order for the SFFT kernel. 0=constant (low RAM, default), 1=linear, 2=quadratic, 3=cubic. "auto" auto-selects based on matched source count and PSF difference (capped at 2). Orders >=2 can require >7 GB RAM.
+    method: sfft # str --- Subtraction backend (sfft default; hotpants or zogy optional where available). When method=zogy, the pipeline downloads pmvreeswijk/ZOGY from GitHub into wdir/ZOGY/ automatically.
+    zogy_update: False # bool --- If True, re-download the ZOGY package from GitHub even if it already exists in wdir/ZOGY/. Only used when method=zogy.
+    sky_subtract: True # bool --- Subtract sigma-clipped median sky from both images before subtraction (SFFT and ZOGY). Both methods assume background-subtracted images; without this, the DC offset creates a coherent zero-frequency Fourier component that contaminates the difference image. Backward compat: sfft_sky_subtract and zogy_sky_subtract are still read as fallbacks.
+    zogy_per_pixel_noise: False # bool --- Compute per-pixel noise maps for ZOGY variance estimation. When True, estimates local noise on a coarse grid (zogy_noise_map_box_size) and upsamples. Captures spatially varying noise (chip gaps, bright galaxy backgrounds). Default False (scalar noise is faster and usually sufficient).
+    zogy_noise_map_box_size: 64 # int --- Tile size (pixels) for local noise estimation when zogy_per_pixel_noise=True. Smaller boxes capture finer spatial variations but are noisier; larger boxes are smoother but may miss small-scale structure.
+    zogy_nan_fill: median # str --- NaN fill method for ZOGY: "median" (fill with image median, recommended) or "zero" (fill with 0). Zero-filling creates step functions at NaN boundaries causing FFT ringing; median-filling provides smoother transitions.
+    zogy_crossmatch_psf_sources: True # bool --- Cross-match science and template PSF source pools by RA/DEC to find mutually-isolated stars for ZOGY PSF construction. Ensures both PSFs are built from the same stars (isolated in both images), critical for ZOGY's optimal subtraction. Falls back to independent selection if cross-match yields < 5 sources.
+    zogy_psf_crossmatch_radius_arcsec: 1.0 # float --- Match radius (arcseconds) for cross-matching PSF sources between science and template images. 1.0" is sub-pixel for most instruments. Increase for poor astrometry or wide pixels.
+    zogy_template_psf_independent: True # bool --- If True (default), select PSF stars for the reference image independently from the reference image (better quality reference PSF). If False, use the same matched stars for both science and reference PSFs. Only used as fallback when zogy_crossmatch_psf_sources fails.
+    forceconv: REF # str --- Convolution direction for both SFFT and ZOGY: "REF" (convolve reference to science PSF, RECOMMENDED - difference has science PSF so ePSF matches directly), "SCI" (convolve science to reference PSF), "AUTO" (auto-select - NOT recommended for SFFT: SWarp LANCZOS3 resampling can flip PSF ordering, see BUG 122; for ZOGY: no pre-convolution, uses geometric-mean PSF). REF is the standard convention (Bramich 2008, Hu et al. 2022). Backward compat: sfft_forceconv and zogy_forceconv are still read as fallbacks.
+    kernel_order: "auto" # int|"auto" --- Spatial polynomial order for the SFFT kernel. 0=constant (low RAM), 1=linear, 2=quadratic, 3=cubic. "auto" (default) auto-selects based on matched source count and PSF difference (capped at 2). Orders >=2 can require >7 GB RAM. Constant (0) is too rigid for large PSF differences and causes dipole residuals.
     kernel_hw_fwhm_multiplier: 2.5 # float|null --- Multiplier applied to the FWHM of the convolution kernel when sizing the subtraction kernel half-width. If null, uses 2.0 (recommended). The kernel FWHM is computed as sqrt(FWHM_broad^2 - FWHM_narrow^2); kernel_hw = ceil(multiplier * FWHM_conv). Lower values (e.g. 1.5) give a tighter kernel; higher (e.g. 3.0) allow more fitting freedom at the cost of computation. For undersampled images (FWHM < 2 px), the multiplier is automatically boosted by 1.5x to capture extended PSF wings.
     kernel_hw_override: null # int|null --- If set, directly overrides the auto-computed kernel half-width in pixels. Use for debugging or when automatic sizing is wrong.
     download_templates: False # bool|str --- If set, download templates into `fits_dir/templates/` before subtraction. Use one of: "panstarrs", "legacy", "sdss" (or False to disable).
@@ -449,8 +473,8 @@ default_input:
     use_catalog_for_matching: True # bool --- If True, use catalog sources (when available) for matching/registration heuristics.
 
     sfft_crowded_auto: False # bool --- Auto-enable SFFT crowded-field tuning based on source density heuristics.
-    sfft_crowded_min_sources: 500 # int --- Crowded-field trigger: minimum number of detected sources for SFFT tuning.
-    sfft_crowded_min_density: 100 # float --- Crowded-field trigger: minimum sources per area (pipeline-specific units).
+    sfft_crowded_min_sources: 300 # int --- Crowded-field trigger: minimum number of detected sources for SFFT crowded-mode auto-trigger.
+    sfft_crowded_min_density: 1.5 # float --- Crowded-field trigger: minimum sources per sq arcmin for SFFT crowded-mode auto-trigger.
     sfft_bg_order: 0 # int --- SFFT background spatial polynomial order (0=constant). Images are always background-subtracted (constant median removed by pipeline before SFFT), so bg_order=0 is sufficient to absorb any residual constant offset. Higher orders can overfit and introduce spatial structure that mimics point-source residuals. Set to 1-2 only for fields with strong residual spatial background gradients after median subtraction.
     sfft_star_ext_iter: 4 # int|null --- SFFT StarExt_iter (source extension iterations). If null, uses SFFT defaults (4 for sparse, 2 for crowded). Higher values (6-8) improve deblending for complex PSFs but are slower.
     sfft_back_size: 128 # int --- SExtractor BACK_SIZE used by SFFT source selection/background estimation.
@@ -462,7 +486,7 @@ default_input:
     sextractor_crowded: False # bool --- Use crowded-field SExtractor settings for subtraction/source selection (if supported).
     sfft_crowded_method: False # bool --- Force SFFT crowded-field configuration (overrides auto logic). Default False (sparse) for better performance.
     sfft_const_phot_ratio: False # bool --- SFFT ConstPhotRatio; False fits flux scaling polynomial (spatially-varying, like HOTPANTS). True enforces constant photometric ratio (can cause oversubtraction when flux varies).
-    sfft_only_flags: [0, 1, 2] # list[int]|null --- SExtractor FLAGS values kept by SFFT source selection (null disables flag filtering).
+    sfft_only_flags: [0, 1, 2, 3, 16, 17, 18, 19] # list[int]|null --- SExtractor FLAGS values kept by SFFT source selection (null disables flag filtering). FLAGS=3 (blended) is common in dense fields; FLAGS=16+ (near invalid/NaN pixels) common in masked images. Restrictive [0,1,2] rejects most sources in ZTF and similar surveys.
     sfft_allow_crowded_bg_order_override: False # bool --- If True, crowded SFFT may override bg_order=0 to 2 for stability.
     sfft_cvrej_magd_thresh: 0.12 # float --- Coarse variable-rejection magnitude-difference threshold (lower is stricter).
     sfft_coarse_var_rejection: False # bool --- Enable SFFT coarse variable-star rejection. When True, sources with magnitude differences exceeding sfft_cvrej_magd_thresh are excluded from the kernel fit. Disabled by default - in sparse fields with PSF differences, this rejects most sources (e.g. 14/15 killed with 0.12 mag threshold) because aperture mag differences are caused by PSF mismatch, not variability.
@@ -471,7 +495,7 @@ default_input:
     sfft_evrej_safe_magdev: 0.04 # float --- Safe magnitude-deviation threshold for elaborate rejection.
     sfft_pac_ratio_thresh: 4.0 # float --- Post-anomaly-check ratio threshold for SFFT source filtering.
     sfft_use_post_anomaly_feedback: True # bool --- If True, run one extra SFFT pass using MeLOn post-anomaly sources as additional banned priors.
-    sfft_post_anomaly_min_count: 3 # int --- Minimum number of post-anomaly sources required before feedback retry is triggered.
+    sfft_post_anomaly_min_count: 1 # int --- Minimum number of post-anomaly sources required before feedback retry is triggered. 1=retry on any anomaly (aggressive). 3=only retry when multiple sources flag anomalies (conservative).
     sfft_post_anomaly_max_fraction: 0.80 # float --- Skip feedback retry if post-anomaly count exceeds this fraction of prior-selected sources.
     sfft_post_anomaly_match_radius_px: 1.5 # float --- Radius (pixels) for removing prior-selected matches near post-anomaly sources on retry.
     sfft_pass_masked_sources: False # bool --- If True, pass excluded/masked sources to SFFT via -masked_sources argument. If False, SFFT will not receive source bans from the pipeline.
@@ -479,8 +503,8 @@ default_input:
 
     # SFFT v1.5.0+ advanced features (enabled by default)
     sfft_use_bspline_kernel: False # bool --- Use B-Spline kernel matching for complex PSF variations (SFFT v1.5.0+). Requires CUDA/Cupy backend. Better for non-Gaussian PSFs.
-    sfft_decorrelate_noise: True # bool --- Apply noise decorrelation to difference image (SFFT v1.5.0+). Whitens correlated noise using LSST DMTN-021 method.
-    sfft_save_decorrelated: True # bool --- Save decorrelated difference image separately as *_decorr.fits. Main diff.fits is non-decorrelated for photometry.
+    sfft_decorrelate_noise: False # bool --- Apply noise decorrelation to difference image (SFFT v1.5.0+). Whitens correlated noise using LSST DMTN-021 method. Disabled by default: the decorrelated image is only used for a cosmetic plot panel, not for detection or photometry. The main diff image is always non-decorrelated regardless.
+    sfft_save_decorrelated: False # bool --- Save decorrelated difference image separately as *_decorr.fits. Disabled by default since decorrelation is off.
     sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
     sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
     sfft_min_prior_sources: 3 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT performs its own matching; this avoids under-constrained sparse prior lists.
@@ -495,8 +519,7 @@ default_input:
     sfft_max_reduced_chi2: 0.0 # float --- Maximum PSF fit reduced chi-squared for SFFT kernel sources. High chi2 = poor model fit. 0=disabled (default). SFFT does its own source vetting; enable only if kernel fits are poor.
     sfft_max_psf_flags: -1 # int --- Maximum PSF fit flags value for SFFT kernel sources. Non-zero flags indicate fit problems (blend, edge, etc). -1=disabled (default). SFFT does its own source vetting; set 0 to reject any flagged source.
     sfft_allow_unvetted_source_retry: False
-    sfft_forceconv: AUTO # str --- SFFT ForceConv direction: "REF" (always convolve reference - difference keeps science PSF), "SCI" (convolve science), "AUTO" (SFFT auto-selects based on FWHMs - RECOMMENDED). AUTO lets SFFT convolve the sharper image to match the broader one, avoiding deconvolution.
-    sfft_sky_subtract: True # bool --- Subtract sigma-clipped median sky from both images before SFFT. Per Hu et al. 2022 Section 3.2, sparse-flavor SFFT requires sky-subtracted input so that masking (setting non-source regions to zero) doesn't create artificial step functions at mask boundaries. Uses constant median subtraction (not SExtractor's spatially-varying BACK_TYPE=AUTO which was previously tested and rejected).
+    sfft_timeout: 600 # int --- SFFT subprocess timeout in seconds. 600=10min (default). Large images or crowded fields with kernel_order>=1 may need 900+. Timeout triggers fallback to HOTPANTS.
 
     inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).
     inpaint_method: biharmonic # str --- Inpainting algorithm name (e.g. biharmonic).
@@ -546,16 +569,9 @@ default_input:
     local_exclude_percentile: 95.0 # float --- Percentile threshold to exclude brightest pixels from background fit.
     local_sigma_clip: 3.0 # float --- Sigma clipping threshold for background statistics.
     local_sigma_clip_maxiters: 10 # int --- Maximum sigma-clipping iterations.
-    local_nonnegative_target_offset: True # bool --- If True, after local subtraction in the cutout, add a uniform constant to the residual (and subtract the same from the returned local surface) so a chosen cutout statistic meets a floor (see local_cutout_floor_stat/local_cutout_min_value). This is a robustness hack for difference images. The pipeline removes this constant again for AP/PSF/limiting-magnitude measurements to avoid biasing fluxes.
+    local_nonnegative_target_offset: False # bool --- If True, after local subtraction in the cutout, add a uniform constant to the residual so a chosen cutout statistic meets a floor. DISABLED by default: the lift inflates the Poisson term in calc_total_error (abs(image*gain)), overestimating noise and underestimating SNR on difference images.
     local_cutout_floor_stat: median # str --- Which statistic to floor in the locally subtracted cutout: "median" (recommended; allows some negatives) or "min" (forces all finite pixels >= floor; stronger bias).
     local_cutout_min_value: 0.0 # float --- Floor value for the chosen statistic in the locally subtracted cutout. Use 0.0 for nonnegative median; small positive if you truly require >0.
     local_cutout_annulus_sigma_mult: 2.0 # float --- Additional requirement: raise the local cutout floor so the background-like median is >= (this * annulus_std), where annulus_std is sigma-clipped std in an annulus around the target on the locally subtracted cutout.
     local_cutout_annulus_in_scale_fwhm: 3.0 # float --- Inner radius for the annulus_std estimate, in units of FWHM (pixels). The effective inner radius is max(exclude_inner_radius, this*FWHM).
     local_cutout_annulus_width_scale_fwhm: 2.0 # float --- Width of the annulus used for annulus_std estimate, in units of FWHM (pixels).
-
-  zeropoint:
-    min_source_no: 3 # int --- Minimum number of sources required for color-term fitting.
-    reject_nonlinear_sources: True # bool --- If True, reject likely saturated/non-linear zeropoint stars using peak_flux vs saturate.
-    nonlinear_peak_frac: 0.85 # float --- Reject zeropoint stars when peak_flux >= nonlinear_peak_frac * saturate.
-    saturation_peak_frac: 0.99 # float --- Log subset considered saturated when peak_flux >= saturation_peak_frac * saturate.
-    color_term_density_downsample: null # float|null --- Fraction of sources to keep in dense color regions during color-term fitting (e.g., 0.5 keeps 50%). Set to null to disable downsampling. Use to reduce cluster bias in fields with highly non-uniform color distributions.

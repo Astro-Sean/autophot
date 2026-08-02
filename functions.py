@@ -1267,6 +1267,110 @@ def load_telescope_config(wdir):
     return out
 
 
+def download_zogy(wdir, update=False, repo_url="https://github.com/pmvreeswijk/ZOGY"):
+    """Download the ZOGY package from GitHub and extract it next to telescope.yml.
+
+    The repository is downloaded as a zip archive and extracted into
+    ``<wdir>/ZOGY/``.  If the directory already exists and *update* is False,
+    the existing copy is used.  When *update* is True, the directory is
+    removed and re-downloaded.
+
+    After extraction, ``<wdir>`` is prepended to ``sys.path`` so that
+    ``import zogy`` works from the local copy.
+
+    Parameters
+    ----------
+    wdir : str
+        Working directory where ``telescope.yml`` lives.  The ZOGY repo
+        will be extracted into ``<wdir>/ZOGY/``.
+    update : bool
+        If True, overwrite an existing ``ZOGY/`` directory.
+    repo_url : str
+        GitHub repository URL (default: pmvreeswijk/ZOGY).
+
+    Returns
+    -------
+    str or None
+        Path to the extracted ``zogy.py`` file, or None on failure.
+    """
+    import io
+    import zipfile
+    import tempfile
+    import shutil
+
+    logger = logging.getLogger(__name__)
+
+    zogy_dir = os.path.join(wdir, "ZOGY")
+    zogy_py = os.path.join(zogy_dir, "zogy.py")
+
+    if os.path.isfile(zogy_py) and not update:
+        logger.info("ZOGY already present at %s (use update=True to re-download).", zogy_dir)
+        if wdir not in sys.path:
+            sys.path.insert(0, wdir)
+        if zogy_dir not in sys.path:
+            sys.path.insert(0, zogy_dir)
+        return zogy_py
+
+    if os.path.isdir(zogy_dir) and update:
+        logger.info("Removing existing ZOGY directory at %s for update.", zogy_dir)
+        shutil.rmtree(zogy_dir, ignore_errors=True)
+
+    archive_url = f"{repo_url}/archive/refs/heads/main.zip"
+    logger.info("Downloading ZOGY from %s ...", archive_url)
+
+    try:
+        import requests as _requests
+
+        resp = _requests.get(archive_url, stream=True, timeout=120)
+        resp.raise_for_status()
+        zip_bytes = io.BytesIO(resp.content)
+    except Exception as req_err:
+        logger.warning("requests-based download failed (%s); trying urllib fallback.", req_err)
+        try:
+            from urllib.request import urlretrieve
+
+            tmp_zip = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+            tmp_zip.close()
+            urlretrieve(archive_url, tmp_zip.name)
+            with open(tmp_zip.name, "rb") as f:
+                zip_bytes = io.BytesIO(f.read())
+            os.unlink(tmp_zip.name)
+        except Exception as url_err:
+            logger.error("Failed to download ZOGY: %s", url_err)
+            return None
+
+    try:
+        with zipfile.ZipFile(zip_bytes) as zf:
+            zf.extractall(zogy_dir)
+    except Exception as extract_err:
+        logger.error("Failed to extract ZOGY archive: %s", extract_err)
+        return None
+
+    # GitHub zip extracts into a subfolder like "ZOGY-main/"
+    extracted_items = os.listdir(zogy_dir)
+    if len(extracted_items) == 1 and extracted_items[0].startswith("ZOGY-"):
+        nested = os.path.join(zogy_dir, extracted_items[0])
+        # Move contents up one level
+        for item in os.listdir(nested):
+            shutil.move(os.path.join(nested, item), os.path.join(zogy_dir, item))
+        os.rmdir(nested)
+
+    if not os.path.isfile(zogy_py):
+        logger.error(
+            "ZOGY download completed but zogy.py not found at %s. "
+            "Check repo structure.", zogy_py
+        )
+        return None
+
+    if wdir not in sys.path:
+        sys.path.insert(0, wdir)
+    if zogy_dir not in sys.path:
+        sys.path.insert(0, zogy_dir)
+
+    logger.info("ZOGY downloaded and extracted to %s", zogy_dir)
+    return zogy_py
+
+
 def compute_target_crowding(
     image,
     center_xy,
@@ -1741,7 +1845,7 @@ def concatenate_csv_files(folder_path, output_filename, loc_file="output.csv"):
     # Traverse the folder using os.walk
     for root, dirs, files in os.walk(folder_path):
         for file in files:
-            # Support wildcard patterns, e.g. loc_file="OUTPUT_*.csv"
+            # Support wildcard patterns, e.g. loc_file="Output_*.csv"
             if ("*" in loc_file) and fnmatch(file, loc_file):
                 file_path = os.path.join(root, file)
 
@@ -1901,7 +2005,10 @@ def snr_err(snr_value):
     """
 
     with np.errstate(divide="ignore", invalid="ignore"):
-        snr_err_value = 2.5 * np.log10(1 + (1 / snr_value))
+        # Standard linear approximation: dm = (2.5/ln(10)) / SNR = 1.0857/SNR.
+        # This is the upper bound of the exact 2.5*log10(1 + 1/SNR) formula and
+        # is the convention used by aperture.py and zeropoint._compute_delta_mag.
+        snr_err_value = (2.5 / np.log(10.0)) / snr_value
 
     return snr_err_value
 

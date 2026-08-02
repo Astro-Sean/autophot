@@ -743,7 +743,7 @@ class Plot:
         axes[2].imshow(nmask.astype(int), origin="lower", cmap=overlay, alpha=0.35)
         axes[2].axvline(tx, color="#0000FF", lw=0.6, alpha=0.9)
         axes[2].axhline(ty, color="#0000FF", lw=0.6, alpha=0.9)
-        fig.savefig(save_path, dpi=150)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
 
     def source_check(
@@ -976,26 +976,7 @@ class Plot:
                 lw=1.0,
             )
             ax1.add_patch(circle)
-            # Get target name with TNS prefix if available
-            target_name = self.input_yaml["target_name"]
-            name_prefix = self.input_yaml.get("name_prefix", "")
-            objname = self.input_yaml.get("objname", target_name)
-            # Add prefix if it exists and is not already in the name
-            if name_prefix and name_prefix.strip() and not target_name.startswith(name_prefix):
-                display_name = f"{name_prefix}{objname}"
-            else:
-                display_name = target_name
-
-            ax1.text(
-                self.input_yaml["target_x_pix"],
-                self.input_yaml["target_y_pix"] + radius + 2,
-                display_name,
-                color="#FFD700",
-                fontsize=4,
-                ha="center",
-                va="bottom",
-                fontweight="bold",
-            )
+            # Target name text removed to avoid overlapping with other annotations
 
             # Plot PSF sources as hexagons with 4*FWHM width
             if psfSources is not None and len(psfSources) > 0:
@@ -1083,12 +1064,13 @@ class Plot:
 
             # from matplotlib.patches import Rectangle
 
-            # Plot variable sources as yellow "x" and annotate with otype
+            # Plot variable sources as gold "x" and annotate with name/otype
             if variable_sources is not None:
 
                 if len(variable_sources) > 0:
 
                     cross_len = scale / 4  # Length of each arm of the cross
+                    _gold = "#FFD700"
 
                     for x, y, otype, name in zip(
                         variable_sources["x_pix"],
@@ -1106,38 +1088,52 @@ class Plot:
                             if np.isnan(image[iy, ix]):
                                 continue
 
-                        # Draw "x" as two lines rotated 45 degrees (divergent color for distinct visibility)
+                        # Draw "x" as two lines rotated 45 degrees (gold for contrast)
                         ax1.plot(
                             [x - cross_len, x + cross_len],
                             [y - cross_len, y + cross_len],
-                            color=get_divergent_color('cross'),
+                            color=_gold,
                             lw=1.0,
                             zorder=3,
                         )
                         ax1.plot(
                             [x - cross_len, x + cross_len],
                             [y + cross_len, y - cross_len],
-                            color=get_divergent_color('cross'),
+                            color=_gold,
                             lw=1.0,
                             zorder=3,
                         )
 
-                        if "SN*" in otype:
-                            otype = name
-                        # Annotate otype centered below the cross
-                        ax1.annotate(
-                            otype,
-                            xy=(x, y),
-                            xytext=(
-                                x,
-                                y + cross_len * 2,
-                            ),  # offset down in display (pixels)
-                            ha="center",
-                            va="bottom",
-                            fontsize=4,
-                            color=get_divergent_color('cross'),
-                            zorder=4,
-                        )
+                        # Build the label: prefer the source name, fall back to otype.
+                        # Skip NaN / non-string labels entirely (blank = no annotation).
+                        _label = None
+                        if name is not None and isinstance(name, str) and name.strip() and name.strip().lower() != "nan":
+                            _label = name.strip()
+                        elif otype is not None and isinstance(otype, str) and otype.strip() and otype.strip().lower() != "nan":
+                            if "SN*" in otype:
+                                _label = None  # SN* without a real name -> skip
+                            else:
+                                _label = otype.strip()
+
+                        # Smart shortening: if label is long, truncate intelligently
+                        if _label is not None and len(_label) > 20:
+                            # Keep first 8 chars + "..." + last 8 chars
+                            _label = f"{_label[:8]}...{_label[-8:]}"
+
+                        if _label:
+                            ax1.annotate(
+                                _label,
+                                xy=(x, y),
+                                xytext=(
+                                    x,
+                                    y + cross_len * 2,
+                                ),
+                                ha="center",
+                                va="bottom",
+                                fontsize=4,
+                                color=_gold,
+                                zorder=4,
+                            )
 
             # Optional: distortion/residual vectors (catalog -> detected/FWHM sources).
             # This helps visualize non-uniform astrometric residuals across the field.
@@ -1250,7 +1246,10 @@ class Plot:
                 by_label.keys(),
                 loc="lower center",
                 bbox_to_anchor=(0.5, 1.0),
-                frameon=False,
+                frameon=True,
+                facecolor="white",
+                edgecolor="grey",
+                framealpha=0.9,
                 handlelength=1.5,
                 handletextpad=0.5,
                 ncol = 3
@@ -1264,17 +1263,17 @@ class Plot:
             # Save figure
             if not subtracted:
                 save_loc = os.path.join(
-                    write_dir, "SourceCheck_" + base + ".png"
+                    write_dir, f"Source_Check_{base}.png"
                 )
             else:
                 save_loc = os.path.join(
-                    write_dir, "Subtracted_SourceCheck_" + base + ".png"
+                    write_dir, f"Subtracted_Source_Check_{base}.png"
                 )
 
             fig.savefig(
                 save_loc, dpi=150, bbox_extra_artists=[leg], facecolor="white"
             )
-            plt.close()
+            plt.close(fig)
 
         except Exception as exc:
             import sys
@@ -1731,7 +1730,7 @@ class Plot:
         if bool(show):
             plt.show()
         else:
-            plt.close("all")
+            plt.close(fig)
 
         return
 
@@ -2273,7 +2272,7 @@ class Plot:
             )
 
             fig.tight_layout()
-            fig.savefig(save_path, dpi=150, facecolor="white")
+            fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
             plt.close(fig)
 
             logger.debug("Saved alignment offset plot: %s", save_path)
@@ -2347,7 +2346,7 @@ class Plot:
             )[0]
             write_dir = os.path.dirname(self.input_yaml["fpath"])
             save_path = os.path.join(
-                write_dir, f"MatchSources_{base}.png"
+                write_dir, f"Match_Sources_{base}.png"
             )
 
             sci_matched_xy = np.asarray(sci_matched_xy, float)
@@ -2425,6 +2424,7 @@ class Plot:
                     )
 
             # Plot matched sources as blue circles (radius = 3*FWHM)
+            _first_match_label = "Matched" if n_matched > 0 else None
             for (sx, sy) in sci_matched_xy:
                 ax1.add_patch(Circle(
                     (sx, sy), _r_sci,
@@ -2449,6 +2449,89 @@ class Plot:
                 ax2.text(tx, ty + _r_tpl + 1, str(i),
                          color="dodgerblue", fontsize=4, ha="center", va="bottom")
 
+            # Mark transient position as a yellow box on both images
+            from matplotlib.patches import Rectangle as _Rect
+            from matplotlib.lines import Line2D as _L2
+            _target_x = self.input_yaml.get("target_x_pix")
+            _target_y = self.input_yaml.get("target_y_pix")
+            _target_name = self.input_yaml.get("target_name", "")
+            _name_prefix = self.input_yaml.get("name_prefix", "")
+            _objname = self.input_yaml.get("objname", _target_name)
+            if _name_prefix and _name_prefix.strip() and not str(_target_name).startswith(_name_prefix):
+                _display_name = f"{_name_prefix}{_objname}"
+            else:
+                _display_name = str(_target_name) if _target_name else ""
+            _box_size = 4.0 * _fwhm_default
+            _box_half = _box_size / 2.0
+            _target_xy_tpl = None
+            # Try to compute template pixel coords from WCS
+            if _target_x is not None and _target_y is not None and np.isfinite(_target_x) and np.isfinite(_target_y):
+                # Science image: use pixel coords directly
+                ax1.add_patch(_Rect(
+                    (_target_x - _box_half, _target_y - _box_half),
+                    _box_size, _box_size,
+                    edgecolor="gold", facecolor="none",
+                    linewidth=1.5, linestyle="-", zorder=10,
+                ))
+                if _display_name:
+                    ax1.text(
+                        _target_x, _target_y + _box_half + 2,
+                        _display_name,
+                        color="goldenrod", fontsize=5, fontweight="bold",
+                        ha="center", va="bottom", zorder=11,
+                    )
+                # Template image: convert via WCS if available
+                try:
+                    from astropy.wcs import WCS
+                    from astropy.io import fits as _fits
+                    _fpath = self.input_yaml["fpath"]
+                    with _fits.open(_fpath, memmap=False) as _hdul:
+                        _sci_wcs = WCS(_hdul[0].header, fix=True, relax=True)
+                    _ra, _dec = _sci_wcs.all_pix2world(_target_x, _target_y, 0)
+                    _tpl_fpath = self.input_yaml.get("template_path") or self.input_yaml.get("templateFpath")
+                    if _tpl_fpath and os.path.exists(_tpl_fpath):
+                        with _fits.open(_tpl_fpath, memmap=False) as _hdul2:
+                            _tpl_wcs = WCS(_hdul2[0].header, fix=True, relax=True)
+                        _tx, _ty = _tpl_wcs.all_world2pix(_ra, _dec, 0)
+                        if np.isfinite(_tx) and np.isfinite(_ty):
+                            _target_xy_tpl = (_tx, _ty)
+                            ax2.add_patch(_Rect(
+                                (_tx - _box_half, _ty - _box_half),
+                                _box_size, _box_size,
+                                edgecolor="gold", facecolor="none",
+                                linewidth=1.5, linestyle="-", zorder=10,
+                            ))
+                            if _display_name:
+                                ax2.text(
+                                    _tx, _ty + _box_half + 2,
+                                    _display_name,
+                                    color="goldenrod", fontsize=5, fontweight="bold",
+                                    ha="center", va="bottom", zorder=11,
+                                )
+                except Exception:
+                    pass
+
+            # Build legend with opaque background
+            _legend_handles = []
+            if n_matched > 0:
+                _legend_handles.append(_L2([0], [0], marker="o", color="dodgerblue",
+                                           markerfacecolor="none", markersize=5,
+                                           linestyle="None", label=f"Matched [{n_matched}]"))
+            if sci_all_xy is not None and len(np.asarray(sci_all_xy, float)) > 0:
+                _legend_handles.append(_L2([0], [0], marker="x", color="red",
+                                           markersize=5, linestyle="None",
+                                           label="Unmatched"))
+            if _target_x is not None and np.isfinite(_target_x):
+                _legend_handles.append(_L2([0], [0], marker="s", color="gold",
+                                           markerfacecolor="none", markersize=5,
+                                           linestyle="None", label="Transient"))
+            if _legend_handles:
+                ax1.legend(
+                    handles=_legend_handles, loc="upper right",
+                    frameon=True, facecolor="white", edgecolor="grey",
+                    framealpha=0.9, fontsize=6,
+                )
+
             # Stats text
             _n_sci_unmatched = len(_find_unmatched(
                 np.asarray(sci_all_xy, float) if sci_all_xy is not None else np.empty((0, 2)),
@@ -2459,15 +2542,16 @@ class Plot:
                 tpl_matched_xy,
             ))
             _stats = (
-                f"Matched: {n_matched}\n"
-                f"Unmatched: sci={_n_sci_unmatched}, tpl={_n_tpl_unmatched}\n"
+                f"Matching sources: {n_matched}\n"
+                f"Ignored in Science: {_n_sci_unmatched}\n"
+                f"Ignored in Reference: {_n_tpl_unmatched}\n"
                 f"Method: {method_label}"
             )
             ax1.text(
                 0.02, 0.98, _stats,
                 transform=ax1.transAxes, fontsize=6,
                 verticalalignment="top", horizontalalignment="left",
-                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+                bbox=dict(facecolor="white", edgecolor="grey", alpha=0.9, boxstyle="round,pad=0.3"),
             )
 
             fig.savefig(save_path, dpi=150, bbox_inches="tight",
@@ -2478,4 +2562,5 @@ class Plot:
                 save_path, n_matched,
             )
         except Exception as e:
+            logger.warning("Match sources plot failed: %s", e)
             logger.warning("Match sources plot failed: %s", e)

@@ -1820,12 +1820,13 @@ class BackgroundSubtractor:
         cutout_nonneg_lift = 0.0
         nn_enabled_cfg = None
         try:
-            # Default ON: keep local cutout mean shifted positive unless explicitly disabled.
-            nn_enabled_cfg = bcfg.get("local_nonnegative_target_offset", True)
+            # Default OFF: adding a DC lift inflates the Poisson term in
+            # calc_total_error on difference images, overestimating noise.
+            nn_enabled_cfg = bcfg.get("local_nonnegative_target_offset", False)
             enforce_nn_cutout = bool(nn_enabled_cfg)
         except Exception:
-            enforce_nn_cutout = True
-            nn_enabled_cfg = True
+            enforce_nn_cutout = False
+            nn_enabled_cfg = False
         if enforce_nn_cutout:
             try:
                 cut_floor = float(bcfg.get("local_cutout_min_value", 0.0))

@@ -47,9 +47,24 @@ _SEXTRACTOR_PROBE_FAILED: bool = False
 # =============================================================================
 
 
+def _parse_sextractor_version(version_str: str) -> tuple:
+    """Parse a SExtractor version string into a comparable tuple."""
+    import re
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
+    if m:
+        return tuple(int(x) for x in m.groups())
+    return (0, 0, 0)
+
+
 def get_sextractor_executable() -> Optional[str]:
     """
     Resolve and cache a working SExtractor binary (`sex` or `sextractor` on PATH).
+
+    SExtractor < 2.25.0 has a critical bug: it cannot handle NaN pixels in
+    images, computing background=-nan and detecting 0 sources.  This affects
+    ZTF reference images (which have ~3% NaN pixels from chip gaps) and any
+    image with NaN-masked borders.  We therefore prefer the newest available
+    SExtractor on PATH, requiring version >= 2.25.0 for NaN handling.
 
     Returns:
         Absolute path to the executable, or None if not found / not working.
@@ -59,23 +74,51 @@ def get_sextractor_executable() -> Optional[str]:
         return _SEXTRACTOR_EXE
     if _SEXTRACTOR_PROBE_FAILED:
         return None
+
+    candidates = []
     for name in ("sex", "sextractor"):
-        path = shutil.which(name)
-        if path is None:
-            continue
+        # Search all PATH entries, not just the first hit
+        for search_dir in os.environ.get("PATH", "").split(os.pathsep):
+            candidate = os.path.join(search_dir, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                candidates.append(candidate)
+
+    best_path = None
+    best_version = (0, 0, 0)
+    for path in candidates:
         try:
-            subprocess.run(
+            result = subprocess.run(
                 [path, "--version"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=True,
+                capture_output=True,
+                text=True,
                 timeout=15,
             )
-            _SEXTRACTOR_EXE = path
-            logger.debug("SExtractor executable detected: %s", path)
-            return path
+            if result.returncode != 0:
+                continue
+            version_str = (result.stdout + result.stderr).strip()
+            version = _parse_sextractor_version(version_str)
+            if version > best_version:
+                best_version = version
+                best_path = path
         except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             continue
+
+    if best_path is not None:
+        _SEXTRACTOR_EXE = best_path
+        if best_version < (2, 25, 0):
+            logger.warning(
+                "SExtractor %s.%s.%s at %s does not handle NaN pixels correctly; "
+                "images with NaN borders will produce 0 detections. "
+                "Install SExtractor >= 2.25.0 for robust NaN handling.",
+                *best_version, best_path,
+            )
+        else:
+            logger.debug(
+                "SExtractor %s.%s.%s executable detected: %s",
+                *best_version, best_path,
+            )
+        return best_path
+
     _SEXTRACTOR_PROBE_FAILED = True
     logger.error(
         "SExtractor not found. Install SExtractor and ensure `sex` or `sextractor` is on PATH."
@@ -382,7 +425,22 @@ class SExtractorWrapper:
             except (TypeError, ValueError):
                 n_iterations = 15
         n_iterations = max(1, int(n_iterations))
-        clipped = sigma_clip(fwhm_values, sigma=3.0, maxiters=n_iterations)
+        # Filter out SExtractor error values (FWHM_IMAGE = 0 or -99 for bad fits)
+        # before sigma clipping, as these contaminate the robust median.
+        fwhm_values = fwhm_values[np.isfinite(fwhm_values) & (fwhm_values > 0)]
+        if len(fwhm_values) == 0:
+            fallback = float(self.config.get("fwhm_fallback_pixels", 3.0))
+            logger.warning(
+                "No valid FWHM values after filtering error values; "
+                "falling back to %.2f pixels.",
+                fallback,
+            )
+            return fallback
+        # Adaptive sigma: use 2.5 for small samples (< 20) where 3.0 sigma
+        # clipping is too aggressive and can remove real outliers that are
+        # actually the dominant population.
+        _sigma = 2.5 if len(fwhm_values) < 20 else 3.0
+        clipped = sigma_clip(fwhm_values, sigma=_sigma, maxiters=n_iterations)
         fwhm_value = float(np.ma.median(clipped))
         # Guard against pathological estimates (all zeros, NaNs, etc.).
         if not np.isfinite(fwhm_value) or fwhm_value <= 0.0:
@@ -394,6 +452,70 @@ class SExtractorWrapper:
             )
             return fallback
         return fwhm_value
+
+    def _estimate_fwhm_from_catalog(
+        self,
+        sources: pd.DataFrame,
+        fwhm_col: str = "FWHM_IMAGE",
+        relaxed_cuts: bool = False,
+        use_fwhm_fallback: float = 0.0,
+    ) -> float:
+        """Estimate robust FWHM from a SExtractor catalog.
+
+        Shared logic for return_raw, return_full_table, and filter_sextractor_sources.
+        Filters SExtractor error values, applies FWHM range cut (adaptive for
+        undersampled images), sharpness cut, and high-SNR preference before
+        calling calculate_robust_fwhm.
+
+        Args:
+            sources: DataFrame with SExtractor columns (FWHM_IMAGE, SNR_WIN, SHARPNESS).
+            fwhm_col: Column name for FWHM values.
+            relaxed_cuts: If True, use wider FWHM/sharpness bounds.
+            use_fwhm_fallback: Fallback FWHM if no valid sources found.
+
+        Returns:
+            float: Estimated FWHM in pixels.
+        """
+        if fwhm_col not in sources.columns or len(sources) == 0:
+            return float(use_fwhm_fallback) if use_fwhm_fallback > 0 else 8.5
+
+        fwhm_subset = sources.copy()
+        fwhm_vals = pd.to_numeric(fwhm_subset[fwhm_col], errors="coerce")
+
+        # Filter SExtractor error values (0, -99, NaN)
+        fwhm_subset = fwhm_subset[fwhm_vals > 0]
+        fwhm_vals = fwhm_vals[fwhm_vals > 0]
+        if len(fwhm_subset) == 0:
+            return float(use_fwhm_fallback) if use_fwhm_fallback > 0 else 8.5
+
+        # FWHM range cut
+        if relaxed_cuts:
+            fwhm_lo, fwhm_hi = 0.5, 150.0
+        else:
+            _fwhm_est_early = float(fwhm_vals.median())
+            fwhm_lo = 0.8 if _fwhm_est_early < 2.0 else 1.1
+            fwhm_hi = 100.0
+        fwhm_subset = fwhm_subset[(fwhm_vals > fwhm_lo) & (fwhm_vals < fwhm_hi)]
+
+        # Sharpness cut
+        if "SHARPNESS" in fwhm_subset.columns:
+            sharp_lo, sharp_hi = (0.1, 1.2) if relaxed_cuts else (0.2, 1.0)
+            sharp_vals = pd.to_numeric(fwhm_subset["SHARPNESS"], errors="coerce").fillna(1.0)
+            fwhm_subset = fwhm_subset[(sharp_vals > sharp_lo) & (sharp_vals < sharp_hi)]
+
+        # High-SNR preference
+        snr_col = "SNR_WIN" if "SNR_WIN" in fwhm_subset.columns else (
+            "SNR" if "SNR" in fwhm_subset.columns else None
+        )
+        if snr_col is not None:
+            high_snr = fwhm_subset[pd.to_numeric(fwhm_subset[snr_col], errors="coerce") >= 10.0]
+            if len(high_snr) >= 5:
+                fwhm_subset = high_snr
+
+        if len(fwhm_subset) > 0:
+            return self.calculate_robust_fwhm(fwhm_subset[fwhm_col].values)
+        else:
+            return self.calculate_robust_fwhm(sources[fwhm_col].values)
 
     # import numpy as np
     #  import pandas as pd
@@ -482,10 +604,24 @@ class SExtractorWrapper:
         # --- Step 2: FWHM sanity cut (relaxed_cuts keeps more for matching) ---
         # Keep a copy so we can fall back if this cut is too aggressive.
         sources_before_fwhm = sources.copy()
+        # Filter SExtractor error values (FWHM_IMAGE = 0 or -99 for bad fits)
+        # These contaminate FWHM estimation and should never be kept.
+        _sex_err_mask = (sources["fwhm"] <= 0) | ~np.isfinite(sources["fwhm"])
+        if _sex_err_mask.any():
+            sources = sources[~_sex_err_mask].copy()
+            logger.info(
+                "Rejected %d sources with invalid FWHM (<=0 or non-finite)",
+                int(_sex_err_mask.sum()),
+            )
         if relaxed_cuts:
             fwhm_lo, fwhm_hi = 0.5, 150.0
         else:
-            fwhm_lo, fwhm_hi = 1.1, 100.0
+            # Lower FWHM cut from 1.1 to 0.8 for undersampled images where
+            # the true FWHM can be ~1.0 px. SExtractor FWHM_IMAGE is quantized
+            # but values >= 0.8 are still real detections.
+            _fwhm_est_early = float(np.nanmedian(sources["fwhm"].values)) if len(sources) > 0 else 3.0
+            fwhm_lo = 0.8 if _fwhm_est_early < 2.0 else 1.1
+            fwhm_hi = 100.0
         mask = (sources["fwhm"] <= fwhm_lo) | (sources["fwhm"] >= fwhm_hi)
         n_rejected_fwhm = int(mask.sum())
         sources = sources[~mask].copy()
@@ -1155,7 +1291,8 @@ class SExtractorWrapper:
                             else:
                                 # Compute from FLUX_AUTO if available
                                 if 'FLUX_AUTO' in table.colnames:
-                                    flux_safe = np.maximum(np.asarray(table['FLUX_AUTO'], float), 1e-10)
+                                    flux_safe = np.asarray(table['FLUX_AUTO'], float)
+                                    flux_safe[flux_safe <= 0] = np.nan
                                     table['MAG_AUTO'] = -2.5 * np.log10(flux_safe)
                                 else:
                                     table['MAG_AUTO'] = 0.0
@@ -1203,34 +1340,11 @@ class SExtractorWrapper:
                 # but FWHM must be estimated from point sources only to avoid
                 # inflation by extended sources/galaxies.
                 if "FWHM_IMAGE" in sources_df.columns:
-                    fwhm_subset = sources_df.copy()
-                    # Apply FWHM range cut
-                    if relaxed_cuts:
-                        fwhm_lo, fwhm_hi = 0.5, 150.0
-                    else:
-                        fwhm_lo, fwhm_hi = 1.1, 100.0
-                    fwhm_subset = fwhm_subset[
-                        (fwhm_subset["FWHM_IMAGE"] > fwhm_lo)
-                        & (fwhm_subset["FWHM_IMAGE"] < fwhm_hi)
-                    ]
-                    # Apply sharpness cut
-                    if "SHARPNESS" in fwhm_subset.columns:
-                        sharp_lo, sharp_hi = (0.1, 1.2) if relaxed_cuts else (0.2, 1.0)
-                        sharp_vals = pd.to_numeric(fwhm_subset["SHARPNESS"], errors="coerce").fillna(1.0)
-                        fwhm_subset = fwhm_subset[
-                            (sharp_vals > sharp_lo) & (sharp_vals < sharp_hi)
-                        ]
-                    # Use high-S/N sources for FWHM to avoid bias from faint sources
-                    snr_col = "SNR_WIN" if "SNR_WIN" in fwhm_subset.columns else ("SNR" if "SNR" in fwhm_subset.columns else None)
-                    if snr_col is not None:
-                        high_snr = fwhm_subset[pd.to_numeric(fwhm_subset[snr_col], errors="coerce") >= 10.0]
-                        if len(high_snr) >= 5:
-                            fwhm_subset = high_snr
-                    # Use point-source subset for FWHM; fall back to full sample if empty
-                    if len(fwhm_subset) > 0:
-                        fwhm_est = self.calculate_robust_fwhm(fwhm_subset["FWHM_IMAGE"].values)
-                    else:
-                        fwhm_est = self.calculate_robust_fwhm(sources_df["FWHM_IMAGE"].values)
+                    fwhm_est = self._estimate_fwhm_from_catalog(
+                        sources_df, fwhm_col="FWHM_IMAGE",
+                        relaxed_cuts=relaxed_cuts,
+                        use_fwhm_fallback=float(use_FWHM) if use_FWHM > 0 else 8.5,
+                    )
                 else:
                     fwhm_est = float(use_FWHM) if use_FWHM > 0 else 8.5
                 return fwhm_est, sources, default_scale
@@ -1294,31 +1408,11 @@ class SExtractorWrapper:
                 )
                 # Calculate FWHM from point-source-quality subset
                 if "FWHM_IMAGE" in sources.columns:
-                    fwhm_subset = sources.copy()
-                    if relaxed_cuts:
-                        fwhm_lo, fwhm_hi = 0.5, 150.0
-                    else:
-                        fwhm_lo, fwhm_hi = 1.1, 100.0
-                    fwhm_subset = fwhm_subset[
-                        (fwhm_subset["FWHM_IMAGE"] > fwhm_lo)
-                        & (fwhm_subset["FWHM_IMAGE"] < fwhm_hi)
-                    ]
-                    if "SHARPNESS" in fwhm_subset.columns:
-                        sharp_lo, sharp_hi = (0.1, 1.2) if relaxed_cuts else (0.2, 1.0)
-                        sharp_vals = pd.to_numeric(fwhm_subset["SHARPNESS"], errors="coerce").fillna(1.0)
-                        fwhm_subset = fwhm_subset[
-                            (sharp_vals > sharp_lo) & (sharp_vals < sharp_hi)
-                        ]
-                    # Use high-S/N sources for FWHM to avoid bias from faint sources
-                    snr_col = "SNR_WIN" if "SNR_WIN" in fwhm_subset.columns else ("SNR" if "SNR" in fwhm_subset.columns else None)
-                    if snr_col is not None:
-                        high_snr = fwhm_subset[pd.to_numeric(fwhm_subset[snr_col], errors="coerce") >= 10.0]
-                        if len(high_snr) >= 5:
-                            fwhm_subset = high_snr
-                    if len(fwhm_subset) > 0:
-                        fwhm_est = self.calculate_robust_fwhm(fwhm_subset["FWHM_IMAGE"].values)
-                    else:
-                        fwhm_est = self.calculate_robust_fwhm(sources["FWHM_IMAGE"].values)
+                    fwhm_est = self._estimate_fwhm_from_catalog(
+                        sources, fwhm_col="FWHM_IMAGE",
+                        relaxed_cuts=relaxed_cuts,
+                        use_fwhm_fallback=float(use_FWHM) if use_FWHM > 0 else 8.5,
+                    )
                 else:
                     fwhm_est = float(use_FWHM) if use_FWHM > 0 else 8.5
                 return fwhm_est, sources, default_scale
@@ -1332,6 +1426,17 @@ class SExtractorWrapper:
                 sources["vignet"] = vignet_data
             elif len(sources.columns) == len(newcols):
                 sources.columns = newcols
+            elif len(sources.columns) == len(newcols) - 1:
+                # SExtractor 2.5.0 doesn't support ERRTHETAWIN_IMAGE;
+                # drop the last column name and map by position.
+                logger.info(
+                    "SExtractor output has %d columns (expected %d); "
+                    "assuming ERRTHETAWIN_IMAGE is unsupported by this SExtractor version.",
+                    len(sources.columns), len(newcols),
+                )
+                _short_cols = newcols[:-1]
+                sources.columns = _short_cols
+                sources["errtheta_win"] = np.nan
             else:
                 logger.warning(
                     "SExtractor output has %d columns but expected %d; skipping column rename to avoid data corruption.",
@@ -1340,8 +1445,16 @@ class SExtractorWrapper:
                 )
 
             # SExtractor uses 1-based pixel coordinates; convert to 0-based
-            sources["x_pix"] -= 1
-            sources["y_pix"] -= 1
+            if "x_pix" in sources.columns:
+                sources["x_pix"] -= 1
+                sources["y_pix"] -= 1
+            else:
+                # Column rename was skipped; cannot proceed with this catalog.
+                logger.warning(
+                    "SExtractor column mismatch unresolved; returning empty catalog."
+                )
+                _fallback_fwhm = float(use_FWHM) if use_FWHM > 0 else 8.5
+                return _fallback_fwhm, sources.iloc[0:0], default_scale
 
             # Initial filtering (keep more sources when use_for_matching or crowded)
             initial_count = len(sources)
