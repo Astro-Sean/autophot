@@ -377,7 +377,11 @@ def run_photometry():
     logger = logging.getLogger(__name__)
 
     # Check which tools are available
-    sextractor_exe = shutil.which("sex")
+    try:
+        from utils.run_sex import get_sextractor_executable
+    except (ModuleNotFoundError, ImportError):
+        get_sextractor_executable = lambda: shutil.which("sex") or shutil.which("sextractor")
+    sextractor_exe = get_sextractor_executable()
     scamp_exe = shutil.which("scamp")
     swarp_exe = shutil.which("swarp")
 
@@ -638,9 +642,6 @@ def run_photometry():
             # For each close pair (sep < threshold) we keep the lower-index member
             # and drop the higher-index one - this guarantees exactly one copy
             # survives rather than both being dropped.
-            from astropy.coordinates import SkyCoord
-            import astropy.units as u
-
             coords = SkyCoord(
                 ra=catalog_df["RA"].values * u.degree,
                 dec=catalog_df["DEC"].values * u.degree
@@ -713,11 +714,11 @@ def run_photometry():
         # template catalog rather than the normal per-image output CSV.
         if prepare_template:
             output_csv_path = os.path.join(
-                os.path.dirname(science_file), f"imageCalib_template_{base}.csv"
+                os.path.dirname(science_file), f"ImageCalib_Template_{base}.csv"
             )
         else:
-            output_csv_path = os.path.join(cur_dir, f"OUTPUT_{base}.csv")
-            calibration_file = os.path.join(cur_dir, f"CALIB_{base}.csv")
+            output_csv_path = os.path.join(cur_dir, f"Output_{base}.csv")
+            calibration_file = os.path.join(cur_dir, f"Calib_{base}.csv")
 
         #  Store Base Filename in YAML
         # Stores the base filename without any extension in the YAML configuration.
@@ -725,16 +726,16 @@ def run_photometry():
 
         #  Skip if output exists and we are not restarting (resume mode).
         # restart=True (default): reprocess all files (redo even if OUTPUT exists).
-        # restart=False: skip files that already have OUTPUT_{base}.csv (only process new/unprocessed).
+        # restart=False: skip files that already have Output_{base}.csv (only process new/unprocessed).
         if (
             os.path.exists(output_csv_path)
             and not input_yaml.get("restart", True)
             and not prepare_template
         ):
             _out = (
-                f"imageCalib_template_{base}.csv in {os.path.dirname(science_file)}"
+                f"ImageCalib_Template_{base}.csv in {os.path.dirname(science_file)}"
                 if prepare_template
-                else f"OUTPUT_{base}.csv in {cur_dir}"
+                else f"Output_{base}.csv in {cur_dir}"
             )
             logging.info(
                 log_step(
@@ -2002,7 +2003,9 @@ def run_photometry():
         # dict keeps all of them alive until a new `result =` assignment.
         del result
 
+        _seeing_arcsec = float(ImageFWHM) * pixel_scale if np.isfinite(ImageFWHM) else float("nan")
         logging.info("Preliminary FWHM: %.1f pixels", ImageFWHM)
+        logging.info("Image seeing: %.2f arcseconds", _seeing_arcsec)
 
         # Save the initially measured FWHM for the post-alignment inflation
         # check.  input_yaml["fwhm"] may still hold the config default (e.g.,
@@ -3018,38 +3021,54 @@ def run_photometry():
             input_yaml.get("template_subtraction", {}).get("alignment_method", "")
         ).lower()
         _was_swarp_resampled = _align_method in ("swarp", "scamp_swarp", "spalipy")
+        _fwhm_inflation_factor = float(phot_cfg.get("fwhm_inflation_max_factor", 1.5) or 1.5)
         if (
             _pre_remeasure_fwhm is not None
             and np.isfinite(_pre_remeasure_fwhm)
             and np.isfinite(ImageFWHM)
             and float(ImageFWHM) > 1.5 * float(_pre_remeasure_fwhm)
         ):
-            # BUG 118: When pre-alignment had significantly more sources (>=2x),
-            # require more post-alignment sources to trust the inflated FWHM.
-            # Galaxy contamination in sparse fields can inflate FWHM by 60%+
-            # with as few as 20-25 sources.
+            _inflation_ratio = float(ImageFWHM) / float(_pre_remeasure_fwhm)
             _pre_align_n_sources = _pre_align_fwhm_n_sources
-            _override_threshold = 30 if _pre_align_n_sources >= 2 * _post_align_n_sources else 20
-            if _post_align_n_sources >= _override_threshold:
-                logging.info(
-                    "Post-alignment FWHM %.2f px > 1.5 x initial %.2f px, but "
-                    "post-alignment has %d sources (>= %d) - using larger FWHM "
-                    "to avoid kernel direction error.",
-                    float(ImageFWHM), float(_pre_remeasure_fwhm),
-                    _post_align_n_sources, _override_threshold,
+
+            # With very few post-alignment sources (< 10), the FWHM measurement
+            # is dominated by galaxy contamination and is completely unreliable.
+            # Always preserve the initial measurement in this case.
+            if _post_align_n_sources < 10:
+                logging.warning(
+                    "Post-alignment FWHM %.2f px from only %d sources is unreliable "
+                    "(initial: %.2f px from %d sources) - preserving initial FWHM.",
+                    float(ImageFWHM), _post_align_n_sources,
+                    float(_pre_remeasure_fwhm), _pre_align_n_sources,
                 )
-            elif _was_swarp_resampled:
-                # SWarp resampling with SIP/SCAMP distortion correction
-                # genuinely broadens the PSF. The post-alignment FWHM is the
-                # actual FWHM of the image SFFT works on. Capping it would
-                # give SFFT the wrong FWHM, causing incorrect kernel sizing
-                # and flux scaling mismatches (dipoles).
+                ImageFWHM = float(_pre_remeasure_fwhm)
+                input_yaml["fwhm"] = ImageFWHM
+                input_yaml["science_fwhm"] = ImageFWHM
+            elif _inflation_ratio > _fwhm_inflation_factor:
+                # Beyond the inflation cap (default 1.5x), the measurement is
+                # almost certainly contaminated by galaxies/extended sources.
+                # SWarp LANCZOS3 broadens FWHM by ~30-50%; spalipy spline
+                # warping by up to ~70%. 1.5x is at the upper end of physical
+                # resampling broadening.
+                logging.warning(
+                    "Post-alignment FWHM %.2f px is %.1fx initial %.2f px (>%.1fx cap) - "
+                    "preserving initial FWHM. Alignment: %s, sources: %d.",
+                    float(ImageFWHM), _inflation_ratio,
+                    float(_pre_remeasure_fwhm), _fwhm_inflation_factor,
+                    _align_method, _post_align_n_sources,
+                )
+                ImageFWHM = float(_pre_remeasure_fwhm)
+                input_yaml["fwhm"] = ImageFWHM
+                input_yaml["science_fwhm"] = ImageFWHM
+            elif _post_align_n_sources >= 30 and _was_swarp_resampled:
+                # Sufficient sources (>=30) and SWarp resampling: genuine PSF
+                # broadening. Use the post-alignment FWHM.
                 logging.info(
-                    "Post-alignment FWHM %.2f px > 1.5 x initial %.2f px, but "
-                    "image was SWarp-resampled (alignment_method=%s) - PSF "
-                    "broadening is real. Using post-alignment FWHM.",
+                    "Post-alignment FWHM %.2f px > 1.5 x initial %.2f px (%.1fx), but "
+                    "post-alignment has %d sources and image was resampled (%s) - "
+                    "using post-alignment FWHM.",
                     float(ImageFWHM), float(_pre_remeasure_fwhm),
-                    _align_method,
+                    _inflation_ratio, _post_align_n_sources, _align_method,
                 )
             else:
                 logging.warning(
@@ -3073,6 +3092,9 @@ def run_photometry():
             )
         except Exception:
             pixel_scale_arcsec = 0.3
+        _seeing_arcsec = float(ImageFWHM) * pixel_scale_arcsec if np.isfinite(ImageFWHM) else float("nan")
+        logging.info("Image FWHM: %.2f px", float(ImageFWHM))
+        logging.info("Image seeing: %.2f arcseconds", _seeing_arcsec)
         area_sq_arcmin = (
             (ny * nx) * (pixel_scale_arcsec / 60.0) ** 2 if pixel_scale_arcsec else 0.0
         )
@@ -3543,6 +3565,147 @@ def run_photometry():
                 CatalogSources["fwhm"] = np.nan
                 if "peak_flux" not in CatalogSources.columns:
                     CatalogSources["peak_flux"] = np.nan
+
+            # ---- Diagnostic plot: FWHM vs instrumental magnitude ----
+            try:
+                _fwhm_col = CatalogSources.get("fwhm")
+                _flux_col = CatalogSources.get("flux_AP")
+                if (
+                    _fwhm_col is not None
+                    and _flux_col is not None
+                    and len(CatalogSources) > 0
+                ):
+                    _fwhm_vals = np.asarray(_fwhm_col, dtype=float)
+                    _flux_vals = np.asarray(_flux_col, dtype=float)
+                    _valid = (
+                        np.isfinite(_fwhm_vals)
+                        & np.isfinite(_flux_vals)
+                        & (_flux_vals > 0)
+                        & (_fwhm_vals > 0)
+                    )
+                    if np.sum(_valid) >= 3:
+                        import matplotlib
+                        matplotlib.use("Agg", force=True)
+                        import matplotlib.pyplot as plt
+                        from functions import set_size
+                        from scipy.stats import median_abs_deviation
+
+                        _inst_mag = -2.5 * np.log10(_flux_vals[_valid])
+                        _fwhm_plot = _fwhm_vals[_valid]
+
+                        # Apply the same FWHM sigma-clipping as zeropoint.clean()
+                        _zp_cfg = input_yaml.get("zeropoint", {}) or {}
+                        _fwhm_sigma = float(_zp_cfg.get("fwhm_reject_sigma", 3.0))
+                        _fwhm_rejected = np.zeros(len(_fwhm_plot), dtype=bool)
+                        _fwhm_lo = _fwhm_hi = np.nan
+                        if _fwhm_sigma > 0 and len(_fwhm_plot) >= 10:
+                            _med_fwhm = float(np.nanmedian(_fwhm_plot))
+                            _mad_fwhm = float(
+                                median_abs_deviation(_fwhm_plot, nan_policy="omit")
+                            ) * 1.4826
+                            if _mad_fwhm > 1e-6:
+                                _fwhm_lo = _med_fwhm - _fwhm_sigma * _mad_fwhm
+                                _fwhm_hi = _med_fwhm + _fwhm_sigma * _mad_fwhm
+                                _fwhm_rejected = (
+                                    (_fwhm_plot < _fwhm_lo)
+                                    | (_fwhm_plot > _fwhm_hi)
+                                )
+
+                        _style_path = os.path.join(
+                            os.path.dirname(os.path.abspath(__file__)),
+                            "autophot.mplstyle",
+                        )
+                        if os.path.exists(_style_path):
+                            plt.style.use(_style_path)
+                        plt.ioff()
+                        _fig, _ax = plt.subplots(figsize=set_size(540, 1))
+
+                        # Plot kept sources (blue) and rejected sources (red)
+                        _kept = ~_fwhm_rejected
+                        _n_kept = int(_kept.sum())
+                        _n_rej = int(_fwhm_rejected.sum())
+
+                        if _n_kept > 0:
+                            _ax.scatter(
+                                _inst_mag[_kept],
+                                _fwhm_plot[_kept],
+                                s=20,
+                                alpha=0.6,
+                                edgecolors="none",
+                                c="steelblue",
+                                label=f"Kept [{_n_kept}]",
+                            )
+                        if _n_rej > 0:
+                            _ax.scatter(
+                                _inst_mag[_fwhm_rejected],
+                                _fwhm_plot[_fwhm_rejected],
+                                s=30,
+                                alpha=0.8,
+                                edgecolors="darkred",
+                                c="crimson",
+                                marker="x",
+                                label=f"FWHM rejected [{_n_rej}]",
+                            )
+
+                        # Median FWHM reference line
+                        _med_fwhm = float(np.nanmedian(_fwhm_plot))
+                        _ax.axhline(
+                            _med_fwhm,
+                            color="crimson",
+                            ls="--",
+                            lw=1.0,
+                            label=f"Median FWHM = {_med_fwhm:.2f} px",
+                        )
+
+                        # Shaded acceptance band and threshold lines
+                        if np.isfinite(_fwhm_lo) and np.isfinite(_fwhm_hi):
+                            _ax.axhspan(_fwhm_lo, _fwhm_hi, color="steelblue", alpha=0.08)
+                            _ax.axhline(
+                                _fwhm_lo,
+                                color="grey",
+                                ls=":",
+                                lw=0.8,
+                            )
+                            _ax.axhline(
+                                _fwhm_hi,
+                                color="grey",
+                                ls=":",
+                                lw=0.8,
+                                label=f"$\\pm{_fwhm_sigma:.0f}\\sigma$ band "
+                                      f"[{_fwhm_lo:.2f}, {_fwhm_hi:.2f}] px",
+                            )
+
+                        _ax.set_xlabel(r"Instrumental magnitude $[-2.5\,\log_{10}(\mathrm{Flux})]$")
+                        _ax.set_ylabel("FWHM [pixels]")
+                        _ax.invert_xaxis()
+                        _ax.legend(loc="best", frameon=True, fontsize="small")
+                        _ax.set_title(
+                            f"FWHM vs Instrumental Magnitude ({input_yaml.get('imageFilter', '')})"
+                        )
+                        # Ensure y-axis spans at least 1 pixel and has >= 1px buffer
+                        # beyond the 3sigma boundary edges
+                        _ymin_auto, _ymax_auto = _ax.get_ylim()
+                        _ylo = _ymin_auto
+                        _yhi = _ymax_auto
+                        if np.isfinite(_fwhm_lo):
+                            _ylo = min(_ylo, _fwhm_lo - 1.0)
+                        if np.isfinite(_fwhm_hi):
+                            _yhi = max(_yhi, _fwhm_hi + 1.0)
+                        if _yhi - _ylo < 1.0:
+                            _ymid = (_yhi + _ylo) / 2.0
+                            _ylo, _yhi = _ymid - 0.5, _ymid + 0.5
+                        _ax.set_ylim(_ylo, _yhi)
+                        _fig.tight_layout()
+
+                        _plot_path = os.path.join(
+                            os.path.dirname(fpath),
+                            f"FWHM_vs_InstMag_{os.path.splitext(os.path.basename(fpath))[0]}.png",
+                        )
+                        _fig.savefig(_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
+                        plt.close(_fig)
+                        logging.info("Saved FWHM vs instrumental magnitude plot: %s", _plot_path)
+            except Exception as _e:
+                logging.debug("FWHM vs inst_mag plot failed: %s", _e)
         else:
             logging.warning(
                 "No catalog sources available for photometric calibration; proceeding without catalog-based calibration."
@@ -3576,6 +3739,111 @@ def run_photometry():
         # =============================================================================
         # Build PSF Model
         # =============================================================================
+        # Diagnostic plot: FWHM vs instrumental magnitude for PSF source pool
+        try:
+            _psf_fwhm = psf_source_pool.get("fwhm")
+            _psf_flux = psf_source_pool.get("flux_AP")
+            if (
+                _psf_fwhm is not None
+                and _psf_flux is not None
+                and len(psf_source_pool) > 0
+            ):
+                _pfwhm = np.asarray(_psf_fwhm, dtype=float)
+                _pflux = np.asarray(_psf_flux, dtype=float)
+                _pvalid = (
+                    np.isfinite(_pfwhm)
+                    & np.isfinite(_pflux)
+                    & (_pflux > 0)
+                    & (_pfwhm > 0)
+                )
+                if np.sum(_pvalid) >= 3:
+                    import matplotlib
+                    matplotlib.use("Agg", force=True)
+                    import matplotlib.pyplot as plt
+                    from functions import set_size
+                    from scipy.stats import median_abs_deviation
+
+                    _pinst = -2.5 * np.log10(_pflux[_pvalid])
+                    _pfwhm_plot = _pfwhm[_pvalid]
+
+                    _zp_cfg = input_yaml.get("zeropoint", {}) or {}
+                    _fwhm_sigma = float(_zp_cfg.get("fwhm_reject_sigma", 3.0))
+                    _prej = np.zeros(len(_pfwhm_plot), dtype=bool)
+                    _plo = _phi = np.nan
+                    if _fwhm_sigma > 0 and len(_pfwhm_plot) >= 10:
+                        _pmed = float(np.nanmedian(_pfwhm_plot))
+                        _pmad = float(
+                            median_abs_deviation(_pfwhm_plot, nan_policy="omit")
+                        ) * 1.4826
+                        if _pmad > 1e-6:
+                            _plo = _pmed - _fwhm_sigma * _pmad
+                            _phi = _pmed + _fwhm_sigma * _pmad
+                            _prej = (_pfwhm_plot < _plo) | (_pfwhm_plot > _phi)
+
+                    _style_path = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        "autophot.mplstyle",
+                    )
+                    if os.path.exists(_style_path):
+                        plt.style.use(_style_path)
+                    plt.ioff()
+                    _pfig, _pax = plt.subplots(figsize=set_size(540, 1))
+
+                    _pkept = ~_prej
+                    if _pkept.sum() > 0:
+                        _pax.scatter(
+                            _pinst[_pkept], _pfwhm_plot[_pkept],
+                            s=20, alpha=0.6, edgecolors="none", c="steelblue",
+                            label=f"Kept [{int(_pkept.sum())}]",
+                        )
+                    if _prej.sum() > 0:
+                        _pax.scatter(
+                            _pinst[_prej], _pfwhm_plot[_prej],
+                            s=30, alpha=0.8, edgecolors="darkred", c="crimson",
+                            marker="x", label=f"FWHM rejected [{int(_prej.sum())}]",
+                        )
+
+                    _pmed = float(np.nanmedian(_pfwhm_plot))
+                    _pax.axhline(_pmed, color="crimson", ls="--", lw=1.0,
+                                 label=f"Median FWHM = {_pmed:.2f} px")
+                    if np.isfinite(_plo) and np.isfinite(_phi):
+                        _pax.axhspan(_plo, _phi, color="steelblue", alpha=0.08)
+                        _pax.axhline(_plo, color="grey", ls=":", lw=0.8)
+                        _pax.axhline(_phi, color="grey", ls=":", lw=0.8,
+                                     label=f"$\\pm{_fwhm_sigma:.0f}\\sigma$ band "
+                                           f"[{_plo:.2f}, {_phi:.2f}] px")
+
+                    _pax.set_xlabel(r"Instrumental magnitude $[-2.5\,\log_{10}(\mathrm{Flux})]$")
+                    _pax.set_ylabel("FWHM [pixels]")
+                    _pax.invert_xaxis()
+                    _pax.legend(loc="best", frameon=True, fontsize="small")
+                    _pax.set_title(
+                        f"PSF Source Pool: FWHM vs Inst Mag ({input_yaml.get('imageFilter', '')})"
+                    )
+                    # Ensure y-axis spans at least 1 pixel and has >= 1px buffer
+                    # beyond the 3sigma boundary edges
+                    _pymin_auto, _pymax_auto = _pax.get_ylim()
+                    _pylo = _pymin_auto
+                    _pyhi = _pymax_auto
+                    if np.isfinite(_plo):
+                        _pylo = min(_pylo, _plo - 1.0)
+                    if np.isfinite(_phi):
+                        _pyhi = max(_pyhi, _phi + 1.0)
+                    if _pyhi - _pylo < 1.0:
+                        _pymid = (_pyhi + _pylo) / 2.0
+                        _pylo, _pyhi = _pymid - 0.5, _pymid + 0.5
+                    _pax.set_ylim(_pylo, _pyhi)
+                    _pfig.tight_layout()
+                    _plot_path_psf = os.path.join(
+                        os.path.dirname(fpath),
+                        f"FWHM_vs_InstMag_PSFPool_{os.path.splitext(os.path.basename(fpath))[0]}.png",
+                    )
+                    _pfig.savefig(_plot_path_psf, dpi=150, bbox_inches="tight", facecolor="white")
+                    plt.close(_pfig)
+                    logging.info("Saved PSF pool FWHM vs inst_mag plot: %s", _plot_path_psf)
+        except Exception as _e:
+            logging.debug("PSF pool FWHM vs inst_mag plot failed: %s", _e)
+
         # By default, build the ePSF from the aligned image to ensure the PSF model
         # matches the data it will be applied to. This avoids PSF shape mismatches when
         # resampling changes pixel scale or introduces distortion.
@@ -4019,12 +4287,12 @@ def run_photometry():
             # Saves the cleaned catalog and PSF sources to CSV files.
             # Use the FITS filename stem for consistent naming.
             CatalogSources.to_csv(
-                os.path.join(cur_dir, f"imageCalib_template_{input_yaml['base']}.csv"),
+                os.path.join(cur_dir, f"ImageCalib_Template_{input_yaml['base']}.csv"),
                 index=False,
                 float_format="%.6f",
             )
             IsolatedSources.to_csv(
-                os.path.join(cur_dir, f"PSFSources_template_{input_yaml['base']}.csv"),
+                os.path.join(cur_dir, f"PSFSources_Template_{input_yaml['base']}.csv"),
                 index=False,
                 float_format="%.6f",
             )
@@ -5548,17 +5816,12 @@ def run_photometry():
                     filename_prefix="PSF_model_template",
                 )
 
-            # =============================================================================
-            #          Perform Subtraction
-            # =============================================================================
-            # Performs the subtraction.
-
             try:
                 sfft_matched_sources = os.path.join(
                     write_dir, f"SFFT_Matching_Sources_{input_yaml['base']}.csv"
                 )
                 sfft_matched_sources_legacy = os.path.join(
-                    write_dir, "sfft_matching_sources.csv"
+                    write_dir, "SFFT_Matching_Sources.csv"
                 )
                 if not os.path.exists(sfft_matched_sources) and os.path.exists(
                     sfft_matched_sources_legacy
@@ -5643,9 +5906,8 @@ def run_photometry():
                 PreformSubtraction = False
                 image = get_image(fpath)
 
-            # Difference image background is already zeroed (sigma-clipped median,
-            # with target exclusion) inside templates.subtract() before writing the
-            # FITS file.  Do not re-subtract here.
+            # Difference image is written by subtract() with NaN masking only
+            # (no background zeroing).  Do not re-subtract here.
 
         # Gets the header of the image.
         header = get_header(fpath)
@@ -5787,20 +6049,30 @@ def run_photometry():
                         _forceconv_diff = ""
             else:
                 _forceconv_diff = _forceconv_hdr
+                # ZOGY sets FORCECON=ZOGY but also writes CONVD=REF/SCI/ZOGY
+                # to indicate the actual convolution direction.  Use CONVD
+                # to pick the correct photometry path.
+                if _forceconv_diff == "ZOGY":
+                    _zogy_convd = str(header.get("CONVD", "")).strip().upper()
+                    if _zogy_convd in ("REF", "SCI"):
+                        _forceconv_diff = _zogy_convd
+                        logging.info(
+                            "ZOGY ForceConv=REF/SCI (CONVD=%s): difference image "
+                            "has %s PSF.",
+                            _zogy_convd,
+                            "science" if _zogy_convd == "REF" else "reference",
+                        )
             if _forceconv_diff == "ZOGY":
-                # ZOGY produces a difference image with the geometric mean PSF
-                # of science and reference.  The science ePSF does NOT match
-                # the diff PSF, but ZOGY PSF matching is not implemented here.
-                # Use the geometric mean FWHM from the header for photometry.
+                # ZOGY with no pre-convolution: geometric mean PSF.
+                # The science ePSF does NOT match the diff PSF.
+                # Use the exact ZOGY difference PSF (P_D) written by
+                # _subtract_zogy as the PSF model for photometry.
                 _zogy_fwhm = float(header.get("DIFFFWHM", 0))
                 _zogy_sci_fwhm = float(header.get("FWHM_SCI", 0))
                 if _zogy_fwhm > 0:
                     input_yaml["fwhm"] = _zogy_fwhm
                     input_yaml["science_fwhm"] = _zogy_fwhm
                     # Update aperture radius to match the geometric-mean PSF.
-                    # The aperture was sized from the science FWHM; the ZOGY
-                    # diff PSF is broader (geometric mean of sci and ref),
-                    # so the aperture must scale proportionally.
                     _zogy_aperture = float(
                         (input_yaml.get("photometry") or {}).get("aperture_radius", _zogy_sci_fwhm)
                     )
@@ -5815,12 +6087,87 @@ def run_photometry():
                             _zogy_aperture, float(_zogy_new_aperture),
                             _zogy_sci_fwhm, _zogy_fwhm,
                         )
+
+                # Load the exact ZOGY difference PSF and build an ImagePSF
+                _diffpsf_path = str(header.get("DIFFPSF", "")).strip()
+                if _diffpsf_path and os.path.isfile(_diffpsf_path):
+                    try:
+                        from photutils.psf import ImagePSF
+                        _psf_stamp = np.asarray(fits.getdata(_diffpsf_path), dtype=float)
+                        _psf_h, _psf_w = _psf_stamp.shape
+                        _psf_model_zogy = ImagePSF(
+                            data=_psf_stamp,
+                            flux=1.0,
+                            x_0=float(_psf_w // 2),
+                            y_0=float(_psf_h // 2),
+                            oversampling=1,
+                        )
+                        epsf_model = _psf_model_zogy
+                        do_aperture_ONLY = False
+                        logging.info(
+                            "ZOGY: using exact difference PSF (P_D) from %s "
+                            "for photometry (%dx%d px, FWHM=%.2f). "
+                            "ePSF replaced with ZOGY diff PSF model.",
+                            _diffpsf_path, _psf_h, _psf_w, _zogy_fwhm,
+                        )
+                    except Exception as _zpsf_e:
+                        logging.warning(
+                            "ZOGY: failed to load diff PSF stamp (%s); "
+                            "using science ePSF with geometric-mean FWHM. "
+                            "Photometry may have PSF mismatch.",
+                            _zpsf_e,
+                        )
+                else:
                     logging.warning(
                         "ZOGY difference image has geometric-mean PSF "
-                        "(FWHM=%.2f px). ePSF not convolved to match - "
-                        "photometry may have slight PSF mismatch.",
+                        "(FWHM=%.2f px) but no DIFFPSF file found. "
+                        "Using science ePSF - photometry may have PSF mismatch.",
                         _zogy_fwhm,
                     )
+            elif _forceconv_diff == "REF" and str(header.get("FORCECON", "")).strip().upper() == "ZOGY":
+                # ZOGY with reference pre-convolved to science PSF.
+                # The difference image has the science PSF, so the science
+                # ePSF matches directly — no FWHM or aperture adjustment needed.
+                _zogy_sci_fwhm = float(header.get("FWHM_SCI", 0))
+                if _zogy_sci_fwhm > 0:
+                    input_yaml["fwhm"] = _zogy_sci_fwhm
+                    input_yaml["science_fwhm"] = _zogy_sci_fwhm
+                logging.info(
+                    "ZOGY CONVD=REF: difference image has science PSF "
+                    "(FWHM=%.2f px). ePSF matches directly - no adjustment needed.",
+                    _zogy_sci_fwhm,
+                )
+                # If science ePSF build failed (sparse field), load the
+                # PSF model file built by the ZOGY PSF builder.
+                if epsf_model is None:
+                    _sci_psf_file = os.path.join(
+                        write_dir,
+                        f"PSF_model_image_{os.path.splitext(os.path.basename(science_path_original))[0]}.fits",
+                    )
+                    if os.path.isfile(_sci_psf_file):
+                        try:
+                            from photutils.psf import ImagePSF
+                            _psf_stamp = np.asarray(fits.getdata(_sci_psf_file), dtype=float)
+                            _psf_h, _psf_w = _psf_stamp.shape
+                            epsf_model = ImagePSF(
+                                data=_psf_stamp,
+                                flux=1.0,
+                                x_0=float(_psf_w // 2),
+                                y_0=float(_psf_h // 2),
+                                oversampling=1,
+                            )
+                            do_aperture_ONLY = False
+                            logging.info(
+                                "ZOGY CONVD=REF: loaded science PSF model from %s "
+                                "(%dx%d px) for photometry.",
+                                os.path.basename(_sci_psf_file), _psf_h, _psf_w,
+                            )
+                        except Exception as _e:
+                            logging.warning(
+                                "ZOGY CONVD=REF: failed to load science PSF model (%s); "
+                                "PSF photometry will be skipped.",
+                                _e,
+                            )
             elif _forceconv_diff == "SCI":
                 _ref_fwhm_hdr = float(header.get("FWHM_REF", 0))
                 _sci_fwhm_hdr = float(header.get("FWHM_SCI", 0))
@@ -6052,9 +6399,9 @@ def run_photometry():
                                     _fig.tight_layout(rect=[0, 0, 1, 0.92])
                                     _plot_path = os.path.join(
                                         os.path.dirname(fpath),
-                                        f"PSF_convolution_{os.path.splitext(base_filename)[0]}.png",
+                                        f"PSF_Convolution_{os.path.splitext(base_filename)[0]}.png",
                                     )
-                                    _fig.savefig(_plot_path, dpi=150, bbox_inches="tight")
+                                    _fig.savefig(_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
                                     plt.close(_fig)
                                     logging.info("Saved PSF convolution diagnostic plot: %s", _plot_path)
                                 except Exception as _pe:
@@ -6341,9 +6688,9 @@ def run_photometry():
                             _fig_r.tight_layout(rect=[0, 0, 1, 0.92])
                             _plot_path_re = os.path.join(
                                 os.path.dirname(fpath),
-                                f"PSF_reconvolution_target_{os.path.splitext(base_filename)[0]}.png",
+                                f"PSF_Reconvolution_Target_{os.path.splitext(base_filename)[0]}.png",
                             )
-                            _fig_r.savefig(_plot_path_re, dpi=150, bbox_inches="tight")
+                            _fig_r.savefig(_plot_path_re, dpi=150, bbox_inches="tight", facecolor="white")
                             plt.close(_fig_r)
                             logging.info("Saved PSF re-convolution diagnostic plot: %s", _plot_path_re)
                         except Exception as _pe_re:
@@ -6521,11 +6868,15 @@ def run_photometry():
         local_cutout_nonneg_lift = 0.0
         local_cutout_box = None
         if input_yaml["photometry"].get("remove_local_surface", 3):
-            # Ensure the local-cutout DC lift is enabled (shifted-mean mode).
+            # DC lift disabled: adding a uniform offset to difference image
+            # pixels inflates the Poisson term in calc_total_error (abs(image*gain)),
+            # overestimating noise and underestimating SNR.  Flux is unbiased
+            # because AP/PSF annulus subtraction cancels the constant, but the
+            # error model is corrupted.  Keep pixels at their true near-zero values.
             try:
                 if "background" not in input_yaml or input_yaml["background"] is None:
                     input_yaml["background"] = {}
-                input_yaml["background"]["local_nonnegative_target_offset"] = True
+                input_yaml["background"]["local_nonnegative_target_offset"] = False
             except Exception:
                 pass
             bg_remover = BackgroundSubtractor(input_yaml)
@@ -6537,7 +6888,7 @@ def run_photometry():
                 y0=bg_target_y_pix,
                 box_half_size=int(25 * ImageFWHM),
                 fwhm_pixels=ImageFWHM,
-                exclude_inner_radius=None,
+                exclude_inner_radius=2.0 * ImageFWHM,
             )
             try:
                 local_cutout_nonneg_lift = float(nn_meta.get("lift", 0.0) or 0.0)
@@ -6610,18 +6961,18 @@ def run_photometry():
                 target_cutout = None
                 target_cutout_rms = None
 
-        # If a uniform DC lift was applied to make the cutout background nonnegative,
-        # keep it in place for measurements so the *mean level* is shifted positive.
-        # Flux remains unbiased because both AP and PSF subtract a local background
-        # estimated from an annulus (the constant cancels), but Poisson terms avoid
-        # pathological negative-count regimes in some noise models.
+        # If a DC lift was applied (only when explicitly enabled via YAML), log it.
+        # By default the lift is disabled because it inflates the Poisson noise term
+        # in calc_total_error on difference images.
         if (
             target_cutout is not None
             and np.isfinite(local_cutout_nonneg_lift)
             and float(local_cutout_nonneg_lift) != 0.0
         ):
-            logging.info(
-                "Target cutout: keeping uniform bias level %.6g in measurement image (shifted mean enabled).",
+            logging.warning(
+                "Target cutout: uniform DC lift %.6g is active — this inflates the "
+                "Poisson noise term in calc_total_error. Disable "
+                "local_nonnegative_target_offset for unbiased error estimates.",
                 float(local_cutout_nonneg_lift),
             )
 
@@ -6678,7 +7029,7 @@ def run_photometry():
         try:
             _old_enforce_nn = bool(
                 (input_yaml.get("photometry") or {}).get(
-                    "enforce_nonnegative_local_background", True
+                    "enforce_nonnegative_local_background", False
                 )
             )
             if "photometry" not in input_yaml or input_yaml["photometry"] is None:
@@ -7165,20 +7516,26 @@ def run_photometry():
 
         # Converts pixel coordinates to world coordinates.
         # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
-        extracted_position = imageWCS.all_pix2world(
-            TargetPosition["x_fit"].iloc[0],
-            TargetPosition["y_fit"].iloc[0],
-            0,
-        )
-
-        # Creates a SkyCoord object for the extracted position.
-        coords_science_i = SkyCoord(
-            extracted_position[0],
-            extracted_position[1],
-            unit=(u.deg, u.deg),
-            frame="icrs",
-        )
-        separation = coords_science_i.separation(target_coords).arcsecond
+        # Guard against NaN x_fit/y_fit (PSF fit failure) which would crash SkyCoord.
+        fitted_ra_deg = np.nan
+        fitted_dec_deg = np.nan
+        separation = np.nan
+        try:
+            _xf = float(TargetPosition["x_fit"].iloc[0])
+            _yf = float(TargetPosition["y_fit"].iloc[0])
+            if np.isfinite(_xf) and np.isfinite(_yf):
+                extracted_position = imageWCS.all_pix2world(_xf, _yf, 0)
+                fitted_ra_deg = float(extracted_position[0])
+                fitted_dec_deg = float(extracted_position[1])
+                coords_science_i = SkyCoord(
+                    fitted_ra_deg,
+                    fitted_dec_deg,
+                    unit=(u.deg, u.deg),
+                    frame="icrs",
+                )
+                separation = float(coords_science_i.separation(target_coords).arcsecond)
+        except Exception as e:
+            logging.warning("Could not compute fitted WCS position / separation: %s", e)
         try:
             # Prefer PSF-based beta when flux and error are available (better for detection criteria)
             if (
@@ -7284,8 +7641,8 @@ def run_photometry():
         ):
             # Builds sky coordinates for (xpix, ypix).
             sky_center = SkyCoord(
-                extracted_position[0],
-                extracted_position[1],
+                fitted_ra_deg,
+                fitted_dec_deg,
                 unit=(u.deg, u.deg),
                 frame="icrs",
             )
@@ -7375,11 +7732,78 @@ def run_photometry():
                         "apply_aperture_correction", False
                     )
                 )
+
+                # BUG 155: Color term correction for the target.
+                # The ZP was computed after subtracting slope * color_diff from
+                # calibrator delta_mags, so ZP = median(m_cat - m_inst - slope*color).
+                # For the target: cal_mag = m_inst + ZP + slope * color_target.
+                # If the target has catalog colors (known variable), apply the
+                # actual correction.  If not (transient), the current cal_mag
+                # implicitly assumes color_target ≈ median_color (correction ≈ 0),
+                # but we must add |slope| * color_scatter as a systematic.
+                _zp_info = image_zeropoint[method]
+                _color_slope = _zp_info.get("color_term", 0.0)
+                _color_slope_err = _zp_info.get("color_term_error", 0.0)
+                _color1_name = _zp_info.get("color1")
+                _color2_name = _zp_info.get("color2")
+                _median_color = _zp_info.get("median_color", 0.0)
+                _color_scatter = _zp_info.get("color_scatter", 0.0)
+                _target_color_diff = None
+                _target_color_err = None
+                _has_color_term = (
+                    _color1_name is not None
+                    and _color2_name is not None
+                    and abs(_color_slope) > 1e-8
+                )
+                if _has_color_term:
+                    # Try to look up the target's color from CatalogSources
+                    try:
+                        _target_ra = float(input_yaml.get("target_ra", np.nan))
+                        _target_dec = float(input_yaml.get("target_dec", np.nan))
+                        if (
+                            np.isfinite(_target_ra)
+                            and np.isfinite(_target_dec)
+                            and CatalogSources is not None
+                            and len(CatalogSources) > 0
+                            and "RA" in CatalogSources.columns
+                            and "DEC" in CatalogSources.columns
+                            and _color1_name in CatalogSources.columns
+                            and _color2_name in CatalogSources.columns
+                        ):
+                            _target_coord = SkyCoord(
+                                ra=_target_ra * u.deg, dec=_target_dec * u.deg
+                            )
+                            _cat_coords = SkyCoord(
+                                ra=CatalogSources["RA"].values * u.deg,
+                                dec=CatalogSources["DEC"].values * u.deg,
+                            )
+                            _idx, _sep, _ = _target_coord.match_to_catalog_sky(
+                                _cat_coords
+                            )
+                            if _sep.arcsec < 3.0:
+                                _c1_val = float(CatalogSources.iloc[_idx][_color1_name])
+                                _c2_val = float(CatalogSources.iloc[_idx][_color2_name])
+                                _target_color_diff = _c1_val - _c2_val
+                                _c1_err_col = f"{_color1_name}_err"
+                                _c2_err_col = f"{_color2_name}_err"
+                                _c1_e = float(CatalogSources.iloc[_idx].get(_c1_err_col, 0.0) or 0.0)
+                                _c2_e = float(CatalogSources.iloc[_idx].get(_c2_err_col, 0.0) or 0.0)
+                                _target_color_err = float(np.sqrt(_c1_e**2 + _c2_e**2))
+                                logging.info(
+                                    f"{method}: Target color ({_color1_name}-{_color2_name}) "
+                                    f"= {_target_color_diff:.3f} from catalog match "
+                                    f"({_sep.arcsec:.2f}\" separation). "
+                                    f"Applying color correction {_color_slope:.4f} * {_target_color_diff:.3f} "
+                                    f"= {_color_slope * _target_color_diff:.4f} mag."
+                                )
+                    except Exception as _e:
+                        logging.debug(f"Color term lookup for target failed: {_e}")
+
                 if method == "AP" and apply_ap_corr and np.isfinite(ap_corr):
                     cal_mag = (
                         TargetPosition.at[idx, inst_col]
                         + image_zeropoint[method]["zeropoint"]
-                        - ap_corr
+                        + ap_corr
                     )
                     errorTerms = [
                         TargetPosition.at[idx, f"{inst_col}_err"],
@@ -7395,6 +7819,30 @@ def run_photometry():
                         TargetPosition.at[idx, f"{inst_col}_err"],
                         image_zeropoint[method]["zeropoint_error"],
                     ]
+
+                # Apply color term correction to target (BUG 155)
+                if _has_color_term:
+                    if _target_color_diff is not None and np.isfinite(_target_color_diff):
+                        # Target has catalog colors: apply actual correction
+                        _color_corr = _color_slope * _target_color_diff
+                        cal_mag += _color_corr
+                        # Error: slope_err * |color_diff| + |slope| * sigma_color
+                        _color_corr_err = 0.0
+                        if _color_slope_err is not None and np.isfinite(_color_slope_err):
+                            _color_corr_err += abs(_color_slope_err) * abs(_target_color_diff)
+                        if _target_color_err is not None and np.isfinite(_target_color_err):
+                            _color_corr_err += abs(_color_slope) * _target_color_err
+                        if _color_corr_err > 0:
+                            errorTerms.append(_color_corr_err)
+                    elif _color_scatter > 0:
+                        # Target color unknown: add systematic from color uncertainty
+                        _color_syst = abs(_color_slope) * _color_scatter
+                        errorTerms.append(_color_syst)
+                        logging.info(
+                            f"{method}: Target color unknown; adding color-term "
+                            f"systematic {_color_syst:.4f} mag "
+                            f"(|slope|={abs(_color_slope):.4f} * scatter={_color_scatter:.3f})."
+                        )
                 TargetPosition.at[idx, f"{input_yaml['imageFilter']}_{method}"] = (
                     cal_mag
                 )
@@ -7450,6 +7898,160 @@ def run_photometry():
                 TargetPosition.at[idx, f"{input_yaml['imageFilter']}_{method}_err"] = (
                     np.nan
                 )
+
+        # =============================================================================
+        # Other Transients Photometry (optional, default False)
+        # Performs PSF + aperture photometry on other transient-like sources
+        # from the SIMBAD variable-source query (SN*, No*, DN*, NL*, CV*, etc.)
+        # =============================================================================
+        _other_transients_df = None
+        if input_yaml.get("do_other_transients", False):
+            try:
+                _transient_otypes = {"SN*", "No*", "DN*", "NL*", "CV*", "AM*", "DQ*"}
+                _ot_sources = variable_sources[
+                    variable_sources["OTYPE_opt"].isin(_transient_otypes)
+                ].copy() if (
+                    variable_sources is not None
+                    and not variable_sources.empty
+                    and "OTYPE_opt" in variable_sources.columns
+                ) else pd.DataFrame()
+
+                # Exclude the primary target (match by proximity within 3 px)
+                if not _ot_sources.empty and "x_pix" in _ot_sources.columns:
+                    _tx = float(input_yaml.get("target_x_pix", np.nan))
+                    _ty = float(input_yaml.get("target_y_pix", np.nan))
+                    if np.isfinite(_tx) and np.isfinite(_ty):
+                        _dx = _ot_sources["x_pix"].astype(float).values - _tx
+                        _dy = _ot_sources["y_pix"].astype(float).values - _ty
+                        _dist = np.sqrt(_dx**2 + _dy**2)
+                        _ot_sources = _ot_sources[_dist > 3.0].copy()
+
+                if not _ot_sources.empty:
+                    logging.info(
+                        border_msg(
+                            f"Other transients: {len(_ot_sources)} sources found "
+                            f"(types: {', '.join(sorted(_ot_sources['OTYPE_opt'].unique()))})"
+                        )
+                    )
+
+                    _ot_results = []
+                    for _, _ot_row in _ot_sources.iterrows():
+                        _ot_x = float(_ot_row["x_pix"])
+                        _ot_y = float(_ot_row["y_pix"])
+                        _ot_name = str(_ot_row.get("MAIN_ID", ""))
+                        _ot_otype = str(_ot_row.get("OTYPE_opt", ""))
+
+                        if not (np.isfinite(_ot_x) and np.isfinite(_ot_y)):
+                            continue
+                        if not (0 <= _ot_x < image.shape[1] and 0 <= _ot_y < image.shape[0]):
+                            continue
+
+                        _ot_df = pd.DataFrame({"x_pix": [_ot_x], "y_pix": [_ot_y]})
+
+                        # Aperture photometry
+                        try:
+                            _ot_ap = Aperture(
+                                input_yaml=input_yaml,
+                                image=image,
+                            ).measure(
+                                sources=_ot_df.copy(),
+                                plot=False,
+                                saveTarget=False,
+                                background_rms=background_rms,
+                                n_jobs=1,
+                            )
+                        except Exception as _ap_err:
+                            logging.debug("Other transient AP failed for %s: %s", _ot_name, _ap_err)
+                            _ot_ap = _ot_df.copy()
+
+                        # PSF photometry
+                        if not do_aperture_ONLY and epsf_model is not None:
+                            try:
+                                _ot_psf = PSF(
+                                    image=image,
+                                    input_yaml=input_yaml,
+                                    header=header,
+                                ).fit(
+                                    epsf_model=epsf_model,
+                                    sources=_ot_df.copy(),
+                                    plotTarget=False,
+                                    is_target_fit=False,
+                                    background_rms=background_rms,
+                                )
+                            except Exception as _psf_err:
+                                logging.debug("Other transient PSF failed for %s: %s", _ot_name, _psf_err)
+                                _ot_psf = _ot_df.copy()
+                        else:
+                            _ot_psf = _ot_df.copy()
+
+                        # Calibrate with zeropoint
+                        _ot_record = {
+                            "name": _ot_name,
+                            "otype": _ot_otype,
+                            "ra": float(_ot_row.get("RA", np.nan)),
+                            "dec": float(_ot_row.get("DEC", np.nan)),
+                            "x_pix": _ot_x,
+                            "y_pix": _ot_y,
+                            "mjd": input_yaml.get("MJD", np.nan),
+                            "filter": input_yaml.get("imageFilter", ""),
+                            "filename": input_yaml.get("base", ""),
+                        }
+
+                        for _method in ["AP", "PSF"]:
+                            _src_df = _ot_ap if _method == "AP" else _ot_psf
+                            _inst_col = f"inst_{input_yaml['imageFilter']}_{_method}"
+                            _cal_col = f"{input_yaml['imageFilter']}_{_method}"
+                            _inst_err_col = f"{_inst_col}_err"
+                            _cal_err_col = f"{_cal_col}_err"
+
+                            _inst_mag = float(_src_df.iloc[0][_inst_col]) if _inst_col in _src_df.columns else np.nan
+                            _inst_err = float(_src_df.iloc[0][_inst_err_col]) if _inst_err_col in _src_df.columns else np.nan
+
+                            _zp = np.nan
+                            _zp_err = np.nan
+                            if _method in image_zeropoint:
+                                _zp = float(image_zeropoint[_method].get("zeropoint", np.nan))
+                                _zp_err = float(image_zeropoint[_method].get("zeropoint_error", np.nan))
+
+                            _cal_mag = _inst_mag + _zp if (np.isfinite(_inst_mag) and np.isfinite(_zp)) else np.nan
+                            _cal_err = np.sqrt(_inst_err**2 + _zp_err**2) if (np.isfinite(_inst_err) and np.isfinite(_zp_err)) else np.nan
+
+                            _ot_record[f"inst_mag_{_method.lower()}"] = _inst_mag
+                            _ot_record[f"inst_mag_{_method.lower()}_err"] = _inst_err
+                            _ot_record[f"mag_{_method.lower()}"] = _cal_mag
+                            _ot_record[f"mag_{_method.lower()}_err"] = _cal_err
+
+                        # SNR from aperture
+                        if "SNR" in _ot_ap.columns:
+                            _ot_record["snr_ap"] = float(_ot_ap.iloc[0]["SNR"])
+                        if "flux_AP" in _ot_ap.columns:
+                            _ot_record["flux_ap"] = float(_ot_ap.iloc[0]["flux_AP"])
+                        if "flux_AP_err" in _ot_ap.columns:
+                            _ot_record["flux_ap_err"] = float(_ot_ap.iloc[0]["flux_AP_err"])
+
+                        _ot_results.append(_ot_record)
+
+                    if _ot_results:
+                        _other_transients_df = pd.DataFrame(_ot_results)
+                        _ot_csv_path = os.path.join(
+                            write_dir,
+                            f"OtherTransients_{input_yaml['base']}.csv",
+                        )
+                        _other_transients_df.to_csv(
+                            _ot_csv_path,
+                            index=False,
+                            float_format="%.6f",
+                        )
+                        logging.info(
+                            "Other transients photometry saved: %s (%d sources)",
+                            _ot_csv_path, len(_ot_results),
+                        )
+                    else:
+                        logging.info("Other transients: no valid sources after filtering.")
+                else:
+                    logging.info("Other transients: no transient-like sources found in variable_sources.")
+            except Exception as _ot_err:
+                logging.warning("Other transients photometry failed: %s", _ot_err)
 
         # =============================================================================
         #          Detection Limits
@@ -7651,7 +8253,7 @@ def run_photometry():
                         try:
                             _old_enforce_nn_lim = bool(
                                 (input_yaml.get("photometry") or {}).get(
-                                    "enforce_nonnegative_local_background", True
+                                    "enforce_nonnegative_local_background", False
                                 )
                             )
                             if "photometry" not in input_yaml or input_yaml["photometry"] is None:
@@ -7859,16 +8461,17 @@ def run_photometry():
         except Exception:
             output["snr_psf"] = np.nan
 
-        # Update generic snr column to use the best available SNR (prefer PSF if higher)
-        # This ensures the default snr column reflects the most reliable detection statistic
+        # Update generic snr column to use the SNR from the primary photometry
+        # method (PSF when available, AP otherwise).  Using max(PSF, AP) creates
+        # a positive bias: the max of two noisy estimates is systematically high,
+        # pushing marginal non-detections above the detection threshold.  This
+        # causes noisy magnitude measurements to be classified as detections
+        # instead of upper limits, producing scatter in low-S/N lightcurves.
         # IMPORTANT: This must happen BEFORE the detection flag computation below
         try:
             snr_ap = output.get("snr_ap", np.nan)
             snr_psf = output.get("snr_psf", np.nan)
-            if np.isfinite(snr_psf) and np.isfinite(snr_ap):
-                # Use PSF SNR if it's higher (better detection)
-                output["snr"] = max(snr_psf, snr_ap)
-            elif np.isfinite(snr_psf):
+            if not do_aperture_ONLY and np.isfinite(snr_psf):
                 output["snr"] = snr_psf
             else:
                 output["snr"] = snr_ap
@@ -7877,17 +8480,34 @@ def run_photometry():
 
         # Explicit detection flag for downstream light-curve processing.
         # Forced photometry is always performed; this records whether the measured
-        # S/N exceeds the configured detection threshold. Using the best
-        # available SNR (max of PSF/AP) gives a single, clear detection state.
+        # S/N exceeds the configured detection threshold.  Uses the SNR from the
+        # primary photometry method (PSF when available, AP otherwise) for
+        # consistency with the magnitudes reported downstream.
         # Note: We check SNR only (not magnitude finiteness) because magnitudes are
         # populated later in the code (after zeropoint application). The SNR is
         # sufficient for detection classification.
+        #
+        # AP SNR fallback: when PSF SNR is marginal (below threshold) but AP SNR
+        # is clearly above (>= 1.5x threshold), flag as detection.  The PSF fit
+        # can underperform aperture photometry for faint/marginal sources due to
+        # PSF model mismatch, poor centroiding, or subtraction residuals.  The
+        # aperture is more robust in these cases because it simply sums pixels.
+        # The reported SNR and magnitude still come from the primary method; only
+        # the detection flag uses the fallback.
         try:
             best_snr = float(output.get("snr", np.nan))
             det_thresh = float(detection_limit)
-            output["is_detection"] = bool(
-                np.isfinite(best_snr) and best_snr >= det_thresh
-            )
+            is_det = bool(np.isfinite(best_snr) and best_snr >= det_thresh)
+            if not is_det and not do_aperture_ONLY:
+                ap_snr = float(output.get("snr_ap", np.nan))
+                if np.isfinite(ap_snr) and ap_snr >= det_thresh * 1.5:
+                    is_det = True
+                    logging.info(
+                        "Detection fallback: PSF SNR=%.2f < %.1f but AP SNR=%.2f >= %.1f; "
+                        "flagging as detection.",
+                        best_snr, det_thresh, ap_snr, det_thresh * 1.5,
+                    )
+            output["is_detection"] = is_det
         except Exception:
             output["is_detection"] = False
 
@@ -7995,8 +8615,8 @@ def run_photometry():
         # Converts pixel coordinates to world coordinates.
         output.update(
             {
-                "ra": extracted_position[0],
-                "dec": extracted_position[1],
+                "ra": fitted_ra_deg,
+                "dec": fitted_dec_deg,
             }
         )
         output.update(
@@ -8017,6 +8637,9 @@ def run_photometry():
                         output[f"zp_{m_low}_err"] = image_zeropoint[method][
                             "zeropoint_error"
                         ]
+                        output[f"zp_{m_low}_nsrc"] = int(
+                            image_zeropoint[method].get("n_sources", 0)
+                        )
                 except Exception:
                     pass
 
@@ -8106,8 +8729,10 @@ def run_photometry():
             # calibration
             "zp_psf",
             "zp_psf_err",
+            "zp_psf_nsrc",
             "zp_ap",
             "zp_ap_err",
+            "zp_ap_nsrc",
             # PSF / seeing
             "target_fwhm",
             "fwhm_psf",

@@ -67,7 +67,6 @@ from functions import (
     log_warning_from_exception,
     mag,
     set_size,
-    snr_err,
 )
 
 # ---------------------------------------------------------------------------
@@ -428,12 +427,13 @@ def _measure_worker(args):
                     sqrt_var = np.sqrt(var_from_error)
 
         if not np.isfinite(sqrt_var):
-            # Fallback variance: |source| + area * (sigma_sky^2 + RN^2)
-            # Ensure source flux is positive for Poisson term
-            source_flux = max(aperture_sum, 0.0)
-            # Use robust empirical_std but ensure it's not too small
+            # Fallback variance: |source| + area * sigma_sky^2
+            # empirical_std is the MAD-based per-pixel scatter from the
+            # annulus, which already includes read noise.  Do NOT add
+            # read_noise_sq again — that double-counts it.
+            source_flux = abs(aperture_sum)
             sky_var = max(empirical_std**2, 0.25)  # Minimum sky variance of 0.25 e^2
-            total_var = source_flux + effective_area * (sky_var + read_noise_sq)
+            total_var = source_flux + effective_area * sky_var
             if total_var > 0 and np.isfinite(total_var):
                 sqrt_var = np.sqrt(total_var)
 
@@ -453,8 +453,13 @@ def _measure_worker(args):
         except Exception:
             mag_val = np.nan
 
-        # Magnitude uncertainty: guard against non-positive / non-finite flux and
-        # invalid SNR values so we don't emit inf/complex errors at low SNR.
+        # Magnitude uncertainty: use the standard linear approximation
+        # (2.5/ln(10)) * (flux_err/flux) = 1.0857/SNR, consistent with PSF
+        # photometry (psf.py) and _compute_delta_mag (zeropoint.py).
+        # The old snr_err(snr) = 2.5*log10(1 + 1/SNR) is the exact lower
+        # error bar and is always smaller than the linear approx, causing
+        # AP magnitude errors to be systematically underestimated relative
+        # to PSF at the same SNR (15% bias at SNR=5, 25% at SNR=3).
         mag_err_val = np.nan
         try:
             if (
@@ -463,17 +468,17 @@ def _measure_worker(args):
                 and np.isfinite(snr)
                 and snr > 0
             ):
-                mag_err_val = snr_err(snr)
+                mag_err_val = (2.5 / np.log(10.0)) / snr
         except Exception:
             mag_err_val = np.nan
 
-        rn_term = empirical_std**2 + read_noise_sq
         # maxPixel_err is the uncertainty of a SINGLE pixel (the brightest
         # pixel in the aperture), not the aperture sum.  The variance of a
-        # single pixel is Poisson(|raw_max|) + sky_var + read_noise^2.
-        # Do NOT scale sky+RN by aperture area (that would overestimate by
+        # single pixel is Poisson(|raw_max|) + sky_var (which already
+        # includes read noise via empirical_std).
+        # Do NOT scale sky by aperture area (that would overestimate by
         # sqrt(area) and bias the m_peak_err weights in FWHM fitting).
-        max_flux_err = np.sqrt(np.abs(raw_max) + rn_term) * inv_exposure_time
+        max_flux_err = np.sqrt(np.abs(raw_max) + empirical_std**2) * inv_exposure_time
 
         return {
             "idx": i,
@@ -856,7 +861,7 @@ class Aperture:
         crowded = self.input_yaml.get("photometry", {}).get("crowded_field", False)
         enforce_nonnegative_local_bkg = bool(
             self.input_yaml.get("photometry", {}).get(
-                "enforce_nonnegative_local_background", True
+                "enforce_nonnegative_local_background", False
             )
         )
         
@@ -914,11 +919,13 @@ class Aperture:
 
         # ---- Error model ---------------------------------------------------
         if background_rms is not None:
-            # Poisson term must be non-negative. Slightly negative backgrounds
-            # (common after background subtraction / difference imaging) can
-            # produce NaNs in calc_total_error and degrade injection/recovery.
+            # calc_total_error already drops the Poisson term for negative
+            # pixels (returns only bkg_error), which is physically correct for
+            # difference images: negative pixels are noise fluctuations with
+            # no source photons.  Do NOT wrap with abs() or maximum(,0) — that
+            # would add spurious Poisson noise for negative pixels.
             image_e_pois = np.where(
-                np.isfinite(image_e), np.maximum(image_e, 0.0), np.nan
+                np.isfinite(image_e), image_e, np.nan
             )
             error = calc_total_error(
                 image_e_pois, np.abs(background_rms) * gain, effective_gain=1
@@ -1275,7 +1282,7 @@ class Aperture:
                 bkg_level_raw = float(np.median(bkg_pix))
                 enforce_nn = bool(
                     (self.input_yaml.get("photometry") or {}).get(
-                        "enforce_nonnegative_local_background", True
+                        "enforce_nonnegative_local_background", False
                     )
                 )
                 bkg_level_used = (
@@ -1448,7 +1455,7 @@ class Aperture:
             # Matches the convention used in Aperture.measure() (image_e = image*gain,
             # bkg_error = background_rms_ADU * gain, effective_gain=1).
             _image_e_opt = np.where(
-                np.isfinite(self.image), np.maximum(self.image * gain, 0.0), np.nan
+                np.isfinite(self.image), self.image * gain, np.nan
             )
             error = calc_total_error(
                 _image_e_opt, np.abs(background_rms) * gain, effective_gain=1
@@ -1896,7 +1903,7 @@ class Aperture:
 
             save_loc = os.path.join(
                 self.input_yaml["write_dir"],
-                f'optimum_aperture_{self.input_yaml["base"]}.png',
+                f'Optimum_Aperture_{self.input_yaml["base"]}.png',
             )
             fig = plt.figure(figsize=set_size(340, 1.5))
             gs = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
@@ -1913,16 +1920,34 @@ class Aperture:
                     ax1.plot(radii / fwhm, prof, color="grey", alpha=0.3, lw=0.5)
 
             if fine_r is not None:
-                ax1.plot(fine_r / fwhm, fine_profile, ls="--", color="black")
+                ax1.plot(fine_r / fwhm, fine_profile, ls="--", color="black",
+                         label="Median profile")
 
             ax1.axvline(
-                global_optimum_pre, color="black", ls=":", label=r"$f_{{enc}}={:.0f}\%$".format(norm_factor*100)
+                global_optimum_pre, color="black", ls=":",
             )
-            ax1.axvline(optimum_radius, color="black", ls="--",label=r"$f_{{enc}}={:.0f}\%$".format(aperture_norm_factor*100)
+            ax1.axvline(optimum_radius, color="black", ls="--",
+            )
+            # Vertical text labels on the lines, placed at bottom of upper plot
+            ax1.text(
+                global_optimum_pre, 0.02,
+                r"$f_{{enc}}={:.0f}\%$".format(norm_factor * 100),
+                rotation=90, va="bottom", ha="right", fontsize=7,
+                color="black",
+            )
+            ax1.text(
+                optimum_radius, 0.02,
+                r"$f_{{enc}}={:.0f}\%$".format(aperture_norm_factor * 100),
+                rotation=90, va="bottom", ha="right", fontsize=7,
+                color="black",
             )
             ax1.set_ylabel("Normalized Flux")
             plt.setp(ax1.get_xticklabels(), visible=False)
-            ax1.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8,ncol = 2)
+            # Legend below the plot, no title overlap
+            ax1.legend(
+                loc="lower center", bbox_to_anchor=(0.5, 1.0),
+                frameon=False, fontsize=8, ncol=3,
+            )
 
             per_source = (
                 sources.loc[list(kept_set), "optimum_radius"].values
@@ -1955,13 +1980,15 @@ class Aperture:
                         min(max_radius, r_max + 0.02 * r_range),
                         n_bins + 1,
                     )
+                n_selected = int(np.count_nonzero(np.isfinite(per_source)))
+                n_rejected = int(np.count_nonzero(np.isfinite(other)))
                 if len(per_source) > 0:
                     ax2.hist(
                         per_source,
                         bins=bins,
                         facecolor="tab:blue",
                         alpha=0.85,
-                        label="Selected",
+                        label=f"Selected (N={n_selected})",
                         zorder=1,
                     )
                 if len(other) > 0:
@@ -1970,24 +1997,23 @@ class Aperture:
                         bins=bins,
                         facecolor="grey",
                         alpha=0.5,
-                        label="Rejected",
+                        label=f"Rejected (N={n_rejected})",
                         zorder=0,
                     )
+                ax2.axvline(optimum_radius, color="black", ls="--", label="Final")
                 ax2.legend(loc="upper right", frameon=False, fontsize=7)
 
-            ax2.axvline(optimum_radius, color="black", ls="--", label="Final")
             ax2.set_xlabel("Aperture Radius [FWHM]")
             ax2.set_ylabel("Count")
             ax1.set_ylim(-0.05, 1.05)
             ax1.set_xlim(-0.05, max_radius + 0.05)
 
-            n_selected = int(np.count_nonzero(np.isfinite(per_source)))
-            n_rejected = int(np.count_nonzero(np.isfinite(other)))
             fig.suptitle(
-                f"Optimum Aperture Radius - Selected (N={n_selected}), Rejected (N={n_rejected})",
+                "Optimum Aperture Radius",
                 fontsize=9,
-                y=0.99,
+                y=0.98,
             )
+            fig.tight_layout(rect=[0, 0, 1, 0.93])
 
             fig.savefig(save_loc, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
@@ -2048,7 +2074,7 @@ class Aperture:
         if background_rms is not None:
             # Convert both data and bkg_error to electrons (matches Aperture.measure convention).
             _image_e_ac = np.where(
-                np.isfinite(image), np.maximum(image * gain, 0.0), np.nan
+                np.isfinite(image), image * gain, np.nan
             )
             error = calc_total_error(
                 _image_e_ac, np.abs(background_rms) * gain, effective_gain=1

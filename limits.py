@@ -388,11 +388,11 @@ def _injection_worker(args):
                     model_adu = np.maximum(float(F_amp) * np.asarray(psf1, dtype=float), 0.0)
                     var = var + (model_adu / gain_e_per_adu)
 
-                if include_readnoise and np.isfinite(gain_e_per_adu) and gain_e_per_adu > 0:
-                    rn_e = float(input_yaml.get("read_noise", 0.0))
-                    rn_adu = (rn_e / gain_e_per_adu) if np.isfinite(rn_e) and rn_e > 0 else 0.0
-                    if rn_adu > 0:
-                        var = var + (rn_adu * rn_adu)
+                # Read noise is already included in background_rms (from
+                # MADStdBackgroundRMS) and in the fallback nanstd.  Do NOT
+                # add it again — that double-counts it (same fix as BUG 131
+                # in psf.py and aperture.py).
+                _ = bool(lim_cfg.get("psf_snr_include_readnoise", True))  # kept for config compat
 
                 var = np.maximum(var, 1e-30)
 
@@ -2459,7 +2459,7 @@ class Limits:
         fpath = self.input_yaml.get("fpath", "frame")
         base = os.path.splitext(os.path.basename(str(fpath)))[0]
         outdir = os.path.dirname(str(fpath)) if os.path.dirname(str(fpath)) else "."
-        save_png = os.path.join(outdir, f"EMCEE_InjectionDiag_{base}.png")
+        save_png = os.path.join(outdir, f"EMCEE_Injection_Diag_{base}.png")
         fig.suptitle(f"EMCEE recovery diagnostic (m_inj={float(m_inj):.3f})", fontsize=10)
         fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
@@ -2570,7 +2570,12 @@ class Limits:
             if not outdir:
                 outdir = "."
             os.makedirs(outdir, exist_ok=True)
-            save_png = os.path.join(outdir, f"Completeness_LogisticEMCEE_{base}.png")
+            save_png = os.path.join(outdir, f"Completeness_Logistic_EMCEE_{base}.png")
+
+            dir_path = os.path.dirname(os.path.realpath(__file__))
+            _style = os.path.join(dir_path, "autophot.mplstyle")
+            if os.path.exists(_style):
+                plt.style.use(_style)
 
             # empirical completeness per mag point
             emp = []
@@ -2721,7 +2726,12 @@ class Limits:
         )
         if not write_dir:
             write_dir = "."
-        
+
+        dir_path = os.path.dirname(os.path.realpath(__file__))
+        _style = os.path.join(dir_path, "autophot.mplstyle")
+        if os.path.exists(_style):
+            plt.style.use(_style)
+
         fig, ax = plt.subplots(figsize=set_size(340, 1.5))
         
         # Scatter plot of all sources
@@ -3476,13 +3486,14 @@ class Limits:
                             # PSF method: flux_hat is PSF flux parameter
                             if counts_ref is not None and exposure_time is not None and counts_ref > 0 and exposure_time > 0:
                                 recovered_flux_e_per_s = flux_hat * counts_ref / exposure_time
-                                recovered_inst = -2.5 * np.log10(max(recovered_flux_e_per_s, 1e-30))
+                                _r = float(recovered_flux_e_per_s)
+                                recovered_inst = -2.5 * np.log10(_r) if _r > 0 else float("nan")
                                 recovered_apparent = recovered_inst + selected_zeropoint
                         elif recovery_method_upper in ["AP", "EMCEE"]:
                             # AP/EMCEE method: use aperture flux from snr_meas
                             try:
                                 recovered_flux = float(snr_meas["flux_AP"].iloc[0])
-                                recovered_inst = -2.5 * np.log10(max(recovered_flux, 1e-30))
+                                recovered_inst = -2.5 * np.log10(recovered_flux) if recovered_flux > 0 else float("nan")
                                 recovered_apparent = recovered_inst + selected_zeropoint
                             except Exception:
                                 pass
@@ -3692,11 +3703,13 @@ class Limits:
         recovery_method_upper = str(recovery_method).strip().upper() if recovery_method is not None else "AP"
         if recovery_method_upper == "AP":
             # AP method: flux_AP is already e-/s, apply mag() directly
-            recovered_fluxes_safe = np.maximum(recovered_fluxes, 1e-30)
+            # NaN for non-positive fluxes (same convention as functions.mag)
+            recovered_fluxes_safe = np.asarray(recovered_fluxes, float).copy()
+            recovered_fluxes_safe[recovered_fluxes_safe <= 0] = np.nan
             recovered_inst = -2.5 * np.log10(recovered_fluxes_safe)
             # Add magnitude error propagation
             if recovered_flux_errs is not None:
-                recovered_flux_errs_safe = np.maximum(recovered_flux_errs, 1e-30)
+                recovered_flux_errs_safe = np.maximum(np.asarray(recovered_flux_errs, float), 1e-30)
                 recovered_inst_err = (2.5 / np.log(10)) * (recovered_flux_errs_safe / recovered_fluxes_safe)
             else:
                 recovered_inst_err = np.full_like(recovered_inst, np.nan)
@@ -3705,13 +3718,14 @@ class Limits:
             # Convert to physical flux rate: flux_e_per_s = flux_hat * counts_ref / exposure_time
             if counts_ref is not None and exposure_time is not None and counts_ref > 0 and exposure_time > 0:
                 recovered_flux_e_per_s = recovered_fluxes * counts_ref / exposure_time
-                recovered_flux_e_per_s_safe = np.maximum(recovered_flux_e_per_s, 1e-30)
+                recovered_flux_e_per_s_safe = np.asarray(recovered_flux_e_per_s, float).copy()
+                recovered_flux_e_per_s_safe[recovered_flux_e_per_s_safe <= 0] = np.nan
                 recovered_inst = -2.5 * np.log10(recovered_flux_e_per_s_safe)
                 # Add magnitude error propagation
                 if recovered_flux_errs is not None:
                     # Error propagation: delta(F*counts_ref/t) = deltaF * counts_ref/t
                     recovered_flux_e_per_s_err = recovered_flux_errs * counts_ref / exposure_time
-                    recovered_flux_e_per_s_err_safe = np.maximum(recovered_flux_e_per_s_err, 1e-30)
+                    recovered_flux_e_per_s_err_safe = np.maximum(np.asarray(recovered_flux_e_per_s_err, float), 1e-30)
                     recovered_inst_err = (2.5 / np.log(10)) * (recovered_flux_e_per_s_err_safe / recovered_flux_e_per_s_safe)
                 else:
                     recovered_inst_err = np.full_like(recovered_inst, np.nan)
@@ -3719,17 +3733,19 @@ class Limits:
                 # Fallback: treat as raw integrated e- divided by exposure_time.
                 if exposure_time is not None and exposure_time > 0:
                     recovered_flux_e_per_s = recovered_fluxes / exposure_time
-                    recovered_flux_e_per_s_safe = np.maximum(recovered_flux_e_per_s, 1e-30)
+                    recovered_flux_e_per_s_safe = np.asarray(recovered_flux_e_per_s, float).copy()
+                    recovered_flux_e_per_s_safe[recovered_flux_e_per_s_safe <= 0] = np.nan
                     recovered_inst = -2.5 * np.log10(recovered_flux_e_per_s_safe)
                     # Add magnitude error propagation
                     if recovered_flux_errs is not None:
                         recovered_flux_e_per_s_err = recovered_flux_errs / exposure_time
-                        recovered_flux_e_per_s_err_safe = np.maximum(recovered_flux_e_per_s_err, 1e-30)
+                        recovered_flux_e_per_s_err_safe = np.maximum(np.asarray(recovered_flux_e_per_s_err, float), 1e-30)
                         recovered_inst_err = (2.5 / np.log(10)) * (recovered_flux_e_per_s_err_safe / recovered_flux_e_per_s_safe)
                     else:
                         recovered_inst_err = np.full_like(recovered_inst, np.nan)
                 else:
-                    recovered_fluxes_safe = np.maximum(recovered_fluxes, 1e-30)
+                    recovered_fluxes_safe = np.asarray(recovered_fluxes, float).copy()
+                    recovered_fluxes_safe[recovered_fluxes_safe <= 0] = np.nan
                     recovered_inst = -2.5 * np.log10(recovered_fluxes_safe)
                     recovered_inst_err = np.full_like(recovered_inst, np.nan)
         
@@ -3957,7 +3973,7 @@ class Limits:
         ax.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
 
         fig.tight_layout()
-        save_path = os.path.join(write_dir, f"InjectionRecovery_{base}.png")
+        save_path = os.path.join(write_dir, f"Injection_Recovery_{base}.png")
         fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
         plt.close(fig)
 

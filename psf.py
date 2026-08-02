@@ -717,19 +717,22 @@ class MCMCFitter:
                     raise ValueError(
                         f"background_rms shape {background_rms.shape} incompatible with data shape {image_e.shape}"
                     )
-        # Use bkg_rms_e directly (no artificial floor) to match
-        # create_nddata_with_fitting_weights.  The 1e-12 floor on
-        # total_error below is sufficient to prevent division by zero.
-        bkg_error = np.sqrt(bkg_rms_e**2 + float(readnoise) ** 2)
+        # background_rms from Background2D already includes read noise.
+        # Do NOT add readnoise^2 again — that double-counts it.
+        if background_rms is None:
+            bkg_error = np.full_like(image_e, float(readnoise))
+        else:
+            bkg_error = bkg_rms_e  # already includes sky Poisson + read noise
 
-        # When data is background-subtracted, the Poisson variance from the sky
-        # is missing.  Approximate it as bkg_rms^2 (Poisson: variance ~ mean).
+        # Poisson variance term for calc_total_error.
+        # For background-subtracted data, the sky Poisson + read noise are
+        # already encoded in bkg_error (= bkg_rms_e).  The Poisson term from
+        # the source itself is only meaningful for positive pixels (real
+        # source photons).  calc_total_error already drops the Poisson term
+        # for negative pixels (returns only bkg_error), which is physically
+        # correct for difference images where negative pixels are noise
+        # fluctuations with no source photons.
         poisson_e = image_e
-        if is_background_subtracted:
-            # Add back the sky Poisson variance that was subtracted
-            poisson_e = poisson_e + bkg_rms_e**2
-            # Ensure no negative values after adding back variance
-            poisson_e = np.maximum(poisson_e, 0.0)
         
         total_error = calc_total_error(
             data=poisson_e, bkg_error=bkg_error, effective_gain=1.0
@@ -1496,7 +1499,14 @@ class PSF:
                     raise ValueError(
                         f"background_rms shape {background_rms.shape} incompatible with data shape {image_e.shape}"
                     )
-        bkg_error = np.sqrt(bkg_rms_e**2 + float(read_noise) ** 2)
+        # background_rms from Background2D (MADStdBackgroundRMS) measures the
+        # actual per-pixel scatter, which already includes read noise.  Do NOT
+        # add read_noise^2 again — that double-counts it and inflates PSF flux
+        # errors, especially for faint sources where RN dominates.
+        if background_rms is None:
+            bkg_error = np.full_like(image_e, float(read_noise))
+        else:
+            bkg_error = bkg_rms_e  # already includes sky Poisson + read noise
         total_error = calc_total_error(
             data=image_e, bkg_error=bkg_error, effective_gain=1.0
         )
@@ -1563,7 +1573,10 @@ class PSF:
                 log.error("[robust_extract_stars] No candidates after edge filter")
                 return EPSFStars([]), Table()
 
-            # Centroiding.
+            # ---- Centroiding ----
+            # For undersampled data (FWHM < ~2 px), centroiding is critical:
+            # a single pass with a large box can jump to a neighbouring source.
+            # We use a two-pass approach with adaptive box sizes.
             phot_cfg = self.input_yaml.get("photometry", {}) or {}
             undersampled_thr = float(
                 phot_cfg.get("undersampled_fwhm_threshold", 2.5)
@@ -1574,32 +1587,145 @@ class PSF:
                     bool(fwhm is not None and float(fwhm) <= undersampled_thr),
                 )
             )
-            cen_func = centroid_2dg if undersampled_mode else centroid_com
-            cen_box = _odd(max(7, int(np.ceil(3.0 * max(1.0, fwhm or 2.0)))))
+
+            fwhm_eff = max(1.0, float(fwhm or 2.0))
+
+            if undersampled_mode:
+                # Smaller boxes for undersampled data to avoid neighbour pickup.
+                # First pass: 2*FWHM (min 5) to get close; second pass: 1.5*FWHM (min 5) to refine.
+                cen_box_1 = _odd(max(5, int(np.ceil(2.0 * fwhm_eff))))
+                cen_box_2 = _odd(max(5, int(np.ceil(1.5 * fwhm_eff))))
+                cen_func = centroid_2dg
+            else:
+                # Well-sampled: larger boxes are safe.
+                cen_box_1 = _odd(max(7, int(np.ceil(3.0 * fwhm_eff))))
+                cen_box_2 = _odd(max(7, int(np.ceil(2.0 * fwhm_eff))))
+                cen_func = centroid_com
+
+            log.info(
+                "[robust_extract_stars] Centroiding %d sources (undersampled=%s, "
+                "fwhm=%.2f, func=%s, box=%d->%d)",
+                len(x), undersampled_mode, fwhm_eff,
+                cen_func.__name__, cen_box_1, cen_box_2,
+            )
 
             if weightmap is None:
-                weightmap = 1.0 / ndimage.uncertainty.array**2  # 1/variance for chi^2 fitting
+                if ndimage.uncertainty is not None and ndimage.uncertainty.array is not None:
+                    weightmap = 1.0 / ndimage.uncertainty.array**2  # 1/variance for chi^2 fitting
+                else:
+                    weightmap = np.ones_like(ndimage.data, dtype=float)
 
+            # --- Pass 1: initial centroid with larger box ---
             try:
-                x_cen, y_cen = centroid_sources(
-                    ndimage.data, x, y, box_size=cen_box, centroid_func=cen_func
+                x_c1, y_c1 = centroid_sources(
+                    ndimage.data, x, y, box_size=cen_box_1, centroid_func=cen_func
                 )
             except Exception as exc:
                 log.warning(
-                    f"[robust_extract_stars] Centroiding failed ({exc}); using COM"
+                    f"[robust_extract_stars] Pass 1 centroiding failed ({exc}); using COM"
                 )
-                x_cen, y_cen = centroid_sources(
-                    ndimage.data, x, y, box_size=cen_box, centroid_func=centroid_com
+                x_c1, y_c1 = centroid_sources(
+                    ndimage.data, x, y, box_size=cen_box_1, centroid_func=centroid_com
                 )
 
+            # --- Pass 2: refine with smaller box centered on pass-1 result ---
+            good1 = np.isfinite(x_c1) & np.isfinite(y_c1)
+            x_c2 = x_c1.copy()
+            y_c2 = y_c1.copy()
+            if np.any(good1):
+                try:
+                    x_r, y_r = centroid_sources(
+                        ndimage.data,
+                        x_c1[good1], y_c1[good1],
+                        box_size=cen_box_2, centroid_func=cen_func,
+                    )
+                    x_c2[good1] = x_r
+                    y_c2[good1] = y_r
+                except Exception as exc:
+                    log.debug(
+                        f"[robust_extract_stars] Pass 2 centroiding failed ({exc}); "
+                        "using pass-1 results"
+                    )
+
+            x_cen, y_cen = x_c2, y_c2
+
+            # --- Centroid quality checks ---
             good = np.isfinite(x_cen) & np.isfinite(y_cen)
+
+            # Offset rejection: reject sources where centroid jumped far from
+            # the initial SExtractor position (likely centroided on a neighbour).
+            offset = np.sqrt((x_cen - x) ** 2 + (y_cen - y) ** 2)
+            max_offset = max(2.0, 1.5 * fwhm_eff)
+            too_far = good & (offset > max_offset)
+            if np.any(too_far):
+                log.info(
+                    "[robust_extract_stars] Rejected %d sources with centroid offset > %.2f px "
+                    "(mean offset of rejected: %.2f px)",
+                    int(too_far.sum()), max_offset,
+                    float(np.nanmean(offset[too_far])),
+                )
+            good &= ~too_far
+
+            # Peak-pixel cross-check for undersampled data:
+            # For FWHM < 2, the centroid should be close to the brightest pixel.
+            # If it's not, the centroid was likely pulled by a neighbour.
+            if undersampled_mode and np.any(good):
+                peak_offsets = np.full(len(x_cen), np.nan)
+                for i in np.where(good)[0]:
+                    xc, yc = x_cen[i], y_cen[i]
+                    # Search a small window around the centroid for the peak pixel
+                    px = int(round(xc))
+                    py = int(round(yc))
+                    r = max(1, int(fwhm_eff))
+                    y0 = max(0, py - r)
+                    y1 = min(ny, py + r + 1)
+                    x0 = max(0, px - r)
+                    x1 = min(nx, px + r + 1)
+                    sub = ndimage.data[y0:y1, x0:x1]
+                    if sub.size > 0 and np.any(np.isfinite(sub)):
+                        py_local, px_local = np.unravel_index(
+                            np.nanargmax(sub), sub.shape
+                        )
+                        peak_x = x0 + px_local
+                        peak_y = y0 + py_local
+                        peak_offsets[i] = np.sqrt(
+                            (peak_x - xc) ** 2 + (peak_y - yc) ** 2
+                        )
+                # Reject if centroid is more than 1.5 pixels from peak (for FWHM < 2,
+                # the PSF core is 1-2 pixels, so centroid should be very close to peak)
+                peak_thresh = max(1.0, fwhm_eff * 0.75)
+                bad_peak = good & np.isfinite(peak_offsets) & (peak_offsets > peak_thresh)
+                if np.any(bad_peak):
+                    log.info(
+                        "[robust_extract_stars] Rejected %d undersampled sources "
+                        "with centroid > %.2f px from peak pixel",
+                        int(bad_peak.sum()), peak_thresh,
+                    )
+                good &= ~bad_peak
+
             n_bad = int((~good).sum())
             if n_bad:
-                log.info("[robust_extract_stars] Dropped %s non-finite centroids", n_bad)
+                log.info(
+                    "[robust_extract_stars] Dropped %d sources total (non-finite/offset/peak)",
+                    n_bad,
+                )
+
+            # Log centroid quality statistics for surviving sources
+            if np.any(good):
+                surv_offsets = offset[good]
+                log.info(
+                    "[robust_extract_stars] Centroid quality: mean offset=%.3f px, "
+                    "median=%.3f px, max=%.3f px (n=%d)",
+                    float(np.nanmean(surv_offsets)),
+                    float(np.nanmedian(surv_offsets)),
+                    float(np.nanmax(surv_offsets)),
+                    int(good.sum()),
+                )
+
             x_cen, y_cen = x_cen[good], y_cen[good]
 
             if x_cen.size == 0:
-                log.error("[robust_extract_stars] No valid centroids")
+                log.error("[robust_extract_stars] No valid centroids after quality checks")
                 return EPSFStars([]), Table()
 
             stars_tbl = Table({"x": x_cen, "y": y_cen})
@@ -1623,10 +1749,15 @@ class PSF:
             # Vectorized NaN checking: compute bad fraction per star
             core_bad = ~np.isfinite(core_regions)
             
-            # Check masks if present (vectorized where possible)
-            has_masks = all(hasattr(star, 'mask') and star.mask is not None for star in epsfstars)
-            if has_masks:
-                mask_stack = np.stack([star.mask for star in epsfstars])
+            # Check masks if present (per-star, not all-or-nothing)
+            star_masks = [getattr(star, 'mask', None) for star in epsfstars]
+            has_any_mask = any(m is not None for m in star_masks)
+            if has_any_mask:
+                # Build a uniform mask stack: use zeros for stars without masks
+                mask_stack = np.zeros_like(all_data, dtype=bool)
+                for i, m in enumerate(star_masks):
+                    if m is not None:
+                        mask_stack[i] = m
                 core_bad |= mask_stack[:, cy_core, cx_core]
             
             # Compute bad fraction per star (vectorized)
@@ -2304,8 +2435,14 @@ class PSF:
                         break
             if fwhm_candidates is not None and fwhm_candidates.size >= 3:
                 fwhm_psf = float(np.nanmedian(fwhm_candidates))
-                fwhm_guard_lo = 0.5 * fwhm_input
-                fwhm_guard_hi = 2.0 * fwhm_input
+                fwhm_guard_lo_frac = float(
+                    phot_cfg.get("psf_fwhm_guard_lo_frac", 0.8)
+                )
+                fwhm_guard_hi_frac = float(
+                    phot_cfg.get("psf_fwhm_guard_hi_frac", 1.3)
+                )
+                fwhm_guard_lo = fwhm_guard_lo_frac * fwhm_input
+                fwhm_guard_hi = fwhm_guard_hi_frac * fwhm_input
                 if np.isfinite(fwhm_input) and fwhm_input > 0:
                     if fwhm_psf < fwhm_guard_lo or fwhm_psf > fwhm_guard_hi:
                         log.warning(
@@ -2382,18 +2519,33 @@ class PSF:
             # undersampled data, a 2-D Gaussian centroid is generally more
             # stable than a pure centre-of-mass on a few bright pixels.
             recenter_func = centroid_2dg if undersampled else centroid_com
-            log.info(
-                f"FWHM={fwhm:.2f} pix  recenter={recenter_func.__name__}  "
-                f"oversample={oversample}x"
-            )
 
             # Centroid and fit windows scale with FWHM, but must remain odd.
-            cen_box = _odd(max(7, int(np.ceil(2.0 * fwhm))))
+            # For undersampled data, use a smaller recentering box to avoid
+            # picking up neighbouring sources during EPSFBuilder recentering.
+            if undersampled:
+                cen_box = _odd(max(5, int(np.ceil(1.5 * fwhm))))
+            else:
+                cen_box = _odd(max(7, int(np.ceil(2.0 * fwhm))))
+
+            log.info(
+                f"FWHM={fwhm:.2f} pix  recenter={recenter_func.__name__}  "
+                f"recenter_box={cen_box}  oversample={oversample}x"
+            )
+            # The build fit_boxsize MUST match (or exceed) the photometry
+            # fit_shape scale.  If the build box is smaller, the ePSF wings
+            # beyond the build box are poorly constrained, and sigma clipping
+            # during stacking can bias them toward the faint-star profile.
+            # This creates magnitude-dependent flux bias (bright sources
+            # underestimated) → slope > 1 in zeropoint plots.
+            phot_fit_shape_scale = float(
+                phot_cfg.get("psf_fit_shape_bright_scale_fwhm", 3.0)
+            )
             fit_boxsize_scale_base = float(
-                phot_cfg.get("psf_fit_boxsize_scale_fwhm", 2.5)
+                phot_cfg.get("psf_fit_boxsize_scale_fwhm", phot_fit_shape_scale)
             )
             fit_boxsize_scale = fit_boxsize_scale_base * build_sampling_boost
-            fit_box_min_arcsec = float(phot_cfg.get("psf_fit_box_min_arcsec", 2.5))
+            fit_box_min_arcsec = float(phot_cfg.get("psf_fit_box_min_arcsec", 3.0))
             fit_box_min_px = (
                 fit_box_min_arcsec / pixel_scale if has_pixel_scale else np.nan
             )
@@ -2404,6 +2556,31 @@ class PSF:
                     int(np.ceil(fit_box_min_px)) if np.isfinite(fit_box_min_px) else 0,
                 )
             )
+
+            # Safety: ensure build fit_boxsize is sufficiently larger than the
+            # photometry fit_shape.  The build uses the re-estimated PSF-star
+            # FWHM, which can be sharper than the global FWHM.  Even when
+            # fit_box = fit_shape, the ePSF wings at the edge of the fit window
+            # are poorly constrained (EE can be < 95%), causing magnitude-
+            # dependent flux bias.  Use 1.3x to ensure wings are data-driven
+            # beyond the photometry fit window.
+            _phot_fit_shape_min = _odd(
+                max(
+                    7,
+                    int(phot_fit_shape_scale * fwhm_input * build_sampling_boost),
+                    int(np.ceil(fit_box_min_px)) if np.isfinite(fit_box_min_px) else 0,
+                )
+            )
+            if fwhm <= 2.5:  # undersampled minimum
+                _phot_fit_shape_min = _odd(max(_phot_fit_shape_min, 9))
+            _build_box_min = _odd(int(np.ceil(_phot_fit_shape_min * 1.3)))
+            if fit_boxsize < _build_box_min:
+                log.info(
+                    "Build fit_boxsize %d < 1.3x photometry fit_shape %d (PSF-star FWHM=%.2f, global FWHM=%.2f); "
+                    "enlarging build box for better wing constraint.",
+                    fit_boxsize, _build_box_min, fwhm, fwhm_input,
+                )
+                fit_boxsize = _build_box_min
 
             # PSF cutout size: use both the configured angular scale and the
             # image-space FWHM to guarantee that even undersampled wings are
@@ -2815,6 +2992,84 @@ class PSF:
             # Do not apply secondary normalization as it corrupts the flux scale
             # by dividing by total array sum (including wings outside norm_radius).
 
+            # ---- ePSF quality diagnostics ----
+            n_epsf_stars = len(epsfstars)
+            if n_epsf_stars < 20:
+                log.warning(
+                    "ePSF built from only %d stars — model may be noisy, "
+                    "especially in the wings.  Consider relaxing PSF source "
+                    "selection cuts or increasing psf_min_candidates.",
+                    n_epsf_stars,
+                )
+            else:
+                log.info("ePSF built from %d stars", n_epsf_stars)
+
+            # Compute encircled energy at the photometry fit_shape radius.
+            # If EE is significantly < 1.0 at fit_shape, the ePSF wings are
+            # truncated and photometry will be biased.
+            # Compute the expected photometry fit_shape from the same config
+            # used in fit() so this diagnostic works in build().
+            _phot_fs_scale = float(
+                phot_cfg.get("psf_fit_shape_bright_scale_fwhm", 3.0)
+            )
+            _phot_fit_min_arcsec = float(
+                phot_cfg.get("psf_fit_shape_bright_min_arcsec", 3.0)
+            )
+            _phot_fit_min_px = (
+                _phot_fit_min_arcsec / pixel_scale if has_pixel_scale else np.nan
+            )
+            _phot_fit_shape_val = _odd(
+                max(
+                    7,
+                    int(_phot_fs_scale * fwhm * build_sampling_boost),
+                    int(np.ceil(_phot_fit_min_px)) if np.isfinite(_phot_fit_min_px) else 0,
+                )
+            )
+            if undersampled:
+                _phot_fit_shape_val = _odd(max(_phot_fit_shape_val, 9))
+            try:
+                epsf_data = np.asarray(epsf.data, float)
+                epsf_total = float(np.nansum(epsf_data))
+                if epsf_total > 0:
+                    ny_e, nx_e = epsf_data.shape
+                    cy_e, cx_e = (ny_e - 1) / 2.0, (nx_e - 1) / 2.0
+                    yy, xx = np.ogrid[:ny_e, :nx_e]
+                    rr = np.sqrt((xx - cx_e)**2 + (yy - cy_e)**2)
+                    # Radius in pixels (accounting for oversampling)
+                    fit_shape_radius_px = _phot_fit_shape_val / 2.0 * oversample
+                    ee_at_fitshape = float(
+                        np.nansum(epsf_data[rr <= fit_shape_radius_px]) / epsf_total
+                    )
+                    log.info(
+                        "ePSF encircled energy at fit_shape radius (%.1f px) = %.3f",
+                        _phot_fit_shape_val / 2.0, ee_at_fitshape,
+                    )
+                    if ee_at_fitshape < 0.95:
+                        log.warning(
+                            "ePSF encircled energy at fit_shape radius is only %.1f%% — "
+                            "wings may be truncated.  This can cause magnitude-dependent "
+                            "flux bias (slope != 1 in zeropoint plot).",
+                            ee_at_fitshape * 100,
+                        )
+                    # Check for residual background in ePSF edge pixels
+                    edge_pixels = np.concatenate([
+                        epsf_data[0, :].ravel(),
+                        epsf_data[-1, :].ravel(),
+                        epsf_data[:, 0].ravel(),
+                        epsf_data[:, -1].ravel(),
+                    ])
+                    edge_median = float(np.nanmedian(edge_pixels))
+                    edge_frac = abs(edge_median) / max(abs(epsf_total), 1e-10)
+                    if edge_frac > 1e-4:
+                        log.warning(
+                            "ePSF edge pixels have median=%.3e (fraction=%.2e of total) — "
+                            "possible residual background in ePSF model.  This can cause "
+                            "magnitude-dependent flux bias.",
+                            edge_median, edge_frac,
+                        )
+            except Exception as _diag_err:
+                log.debug("ePSF diagnostic failed: %s", _diag_err)
+
             if oversample > 1:
                 self.plot_oversampled_psf(
                     epsf,
@@ -3166,7 +3421,7 @@ class PSF:
             dpi=150,
             facecolor="white",
         )
-        plt.close()
+        plt.close(fig)
         return 1
 
     # -----------------------------------------------------------------------
@@ -3269,12 +3524,11 @@ class PSF:
             pixel_scale = np.nan
         has_pixel_scale = np.isfinite(pixel_scale) and pixel_scale > 0
 
-        # Fit box sizes chosen to enclose several FWHM in each regime.
-        # We also apply an adaptive boost for undersampled/coarse-scale data.
-        fs_bright_scale = float(phot_cfg.get("psf_fit_shape_bright_scale_fwhm", 3.0))
-        fs_faint_scale = float(phot_cfg.get("psf_fit_shape_faint_scale_fwhm", 2.5))
-        fs_vfaint_scale = float(phot_cfg.get("psf_fit_shape_vfaint_scale_fwhm", 2.0))
-        
+        # Fit box size chosen to enclose several FWHM.
+        # A single consistent fit_shape is used for ALL sources (target and catalog)
+        # to avoid magnitude-dependent flux bias from different fit box sizes.
+        fs_scale = float(phot_cfg.get("psf_fit_shape_bright_scale_fwhm", 3.0))
+
         fit_sampling_boost = 1.0
         if fwhm <= 2.5:
             fit_sampling_boost += 0.20
@@ -3292,41 +3546,17 @@ class PSF:
         if is_target_fit:
             target_shape_boost = max(1.0, target_shape_boost)
 
-        bright_min_arcsec = float(
+        fit_min_arcsec = float(
             phot_cfg.get("psf_fit_shape_bright_min_arcsec", 3.0)
         )
-        faint_min_arcsec = float(phot_cfg.get("psf_fit_shape_faint_min_arcsec", 2.5))
-        vfaint_min_arcsec = float(
-            phot_cfg.get("psf_fit_shape_vfaint_min_arcsec", 2.0)
-        )
-        bright_min_px = bright_min_arcsec / pixel_scale if has_pixel_scale else np.nan
-        faint_min_px = faint_min_arcsec / pixel_scale if has_pixel_scale else np.nan
-        vfaint_min_px = vfaint_min_arcsec / pixel_scale if has_pixel_scale else np.nan
+        fit_min_px = fit_min_arcsec / pixel_scale if has_pixel_scale else np.nan
 
-        fit_shape_bright = (
+        fit_shape = (
             _odd(
                 max(
                     7,
-                    int(fs_bright_scale * fwhm * fit_sampling_boost),
-                    int(np.ceil(bright_min_px)) if np.isfinite(bright_min_px) else 0,
-                )
-            ),
-        ) * 2
-        fit_shape_faint = (
-            _odd(
-                max(
-                    7,
-                    int(fs_faint_scale * fwhm * fit_sampling_boost),
-                    int(np.ceil(faint_min_px)) if np.isfinite(faint_min_px) else 0,
-                )
-            ),
-        ) * 2
-        fit_shape_vfaint = (
-            _odd(
-                max(
-                    7,
-                    int(fs_vfaint_scale * fwhm * fit_sampling_boost),
-                    int(np.ceil(vfaint_min_px)) if np.isfinite(vfaint_min_px) else 0,
+                    int(fs_scale * fwhm * fit_sampling_boost),
+                    int(np.ceil(fit_min_px)) if np.isfinite(fit_min_px) else 0,
                 )
             ),
         ) * 2
@@ -3335,15 +3565,11 @@ class PSF:
         # the first Airy ring / broader wings, helping the PSF distinguish
         # true point sources from neighbouring structure.
         if undersampled:
-            fit_shape_bright = (_odd(max(fit_shape_bright[0], 9)),) * 2
-            fit_shape_faint = (_odd(max(fit_shape_faint[0], 9)),) * 2
-            fit_shape_vfaint = (_odd(max(fit_shape_vfaint[0], 7)),) * 2
+            fit_shape = (_odd(max(fit_shape[0], 9)),) * 2
 
         # Apply target_shape_boost when is_target_fit
         if is_target_fit:
-            fit_shape_bright = (_odd(int(fit_shape_bright[0] * target_shape_boost)),) * 2
-            fit_shape_faint = (_odd(int(fit_shape_faint[0] * target_shape_boost)),) * 2
-            fit_shape_vfaint = (_odd(int(fit_shape_vfaint[0] * target_shape_boost)),) * 2
+            fit_shape = (_odd(int(fit_shape[0] * target_shape_boost)),) * 2
 
         if xy_bounds is None:
             # Default xy-bounds are configured in arcseconds and converted to pixels.
@@ -3387,9 +3613,7 @@ class PSF:
             max_from_shape = max(0.5, frac_limit * half_box)
             return float(max(0.5, min(float(xy_bounds), max_from_shape)))
 
-        xb_bright = _effective_xy_bounds_for_shape(fit_shape_bright)
-        xb_faint = _effective_xy_bounds_for_shape(fit_shape_faint)
-        xb_vfaint = _effective_xy_bounds_for_shape(fit_shape_vfaint)
+        xy_bounds_eff = _effective_xy_bounds_for_shape(fit_shape)
         cfg_xy_arcsec_log = phot_cfg.get("fitting_xy_bounds", 3.0)
         pix_scale_log = self.input_yaml.get("pixel_scale", None)
         if (
@@ -3400,33 +3624,32 @@ class PSF:
         ):
             log.debug(
                 "PSF fit bounds: xy_bounds=%.3g px (%.3g arcsec at %.3g arcsec/px), "
-                "per-tier=%.3g/%.3g/%.3g px",
+                "effective=%.3g px",
                 float(xy_bounds), float(cfg_xy_arcsec_log), float(pix_scale_log),
-                float(xb_bright), float(xb_faint), float(xb_vfaint),
+                float(xy_bounds_eff),
             )
         else:
             log.debug(
                 "PSF fit bounds: xy_bounds=%.3g px (%s arcsec at %s arcsec/px), "
-                "per-tier=%.3g/%.3g/%.3g px",
+                "effective=%.3g px",
                 float(xy_bounds), str(cfg_xy_arcsec_log), str(pix_scale_log),
-                float(xb_bright), float(xb_faint), float(xb_vfaint),
+                float(xy_bounds_eff),
             )
 
         if is_target_fit:
             log.info(
-                "Target-fit:\tshapes=%s/%s/%s (b/f/vf) | scale=%.2g/%.2g/%.2g FWHM | "
+                "Target-fit:\tshape=%s | scale=%.2g FWHM | "
                 "boost=%.2g (target %.2g) | xy_bounds=%.3g px | undersampled=%s | pix_scale=%s\"/px",
-                str(fit_shape_bright[0]), str(fit_shape_faint[0]), str(fit_shape_vfaint[0]),
-                fs_bright_scale, fs_faint_scale, fs_vfaint_scale,
+                str(fit_shape[0]),
+                fs_scale,
                 fit_sampling_boost, target_shape_boost,
                 float(xy_bounds), str(bool(undersampled)),
                 f"{pixel_scale:.3f}" if has_pixel_scale else "unknown",
             )
         else:
             log.debug(
-                "Fit shapes: bright=%s faint=%s vfaint=%s | xy_bounds=%.3g px | undersampled=%s",
-                str(fit_shape_bright), str(fit_shape_faint), str(fit_shape_vfaint),
-                float(xy_bounds), str(bool(undersampled)),
+                "Fit shape: %s | xy_bounds=%.3g px | undersampled=%s",
+                str(fit_shape), float(xy_bounds), str(bool(undersampled)),
             )
 
         # NDData creation already converts to float and allocates a new array in electrons,
@@ -3661,24 +3884,43 @@ class PSF:
         # For very faint sources, flux can be close to background - clip to minimum reasonable value
         flux_clipped = np.clip(flux_e_frame, 1e-6, 1e12)
         
+        # Resolve gain early — needed for both flux boosting and Fisher SNR below.
+        # background_rms is in ADU (from photutils Background2D on the raw image).
+        # ndimage.uncertainty.array is in electrons (from create_nddata_with_fitting_weights
+        # where image_e = image * gain).  Normalise to ADU so the S/N formula's
+        # (bkgrmsval * gain) conversion is correct in all paths.
+        _gain_for_bkg = float(resolve_gain_e_per_adu(None, self.input_yaml))
+
         # Additional sanity: if flux is too low relative to background RMS, boost it
-        # This prevents convergence issues for extremely faint sources
+        # This prevents convergence issues for extremely faint sources.
+        # Use the local background_rms (passed as parameter) rather than global
+        # np.std of the entire image — on difference images with large subtraction
+        # residuals, the global std is much larger than the actual per-pixel noise,
+        # which would inflate the initial flux guess and bias the PSF fit.
         if is_target_fit and len(flux_clipped) == 1:
-            data_e = np.asarray(ndimage.data, dtype=float)
-            if data_e.ndim == 2:
-                finite_vals = data_e[np.isfinite(data_e)]
+            if background_rms is not None:
+                _bkg_rms_for_boost = float(np.nanmedian(background_rms)) * _gain_for_bkg
+            else:
+                data_e = np.asarray(ndimage.data, dtype=float)
+                finite_vals = data_e[np.isfinite(data_e)] if data_e.ndim == 2 else np.array([])
                 if len(finite_vals) > 0:
-                    bkg_rms = float(np.std(finite_vals))
-                    min_reasonable_flux = 3.0 * bkg_rms  # Minimum 3-sigma above background
-                    if flux_clipped[0] < min_reasonable_flux:
-                        log.warning(
-                            "Target PSF init: flux=%.3g is below 3-sigma threshold (%.3g); "
-                            "boosting to %.3g to improve convergence.",
-                            flux_clipped[0],
-                            min_reasonable_flux,
-                            min_reasonable_flux,
-                        )
-                        flux_clipped[0] = min_reasonable_flux
+                    from scipy.stats import median_abs_deviation
+                    _bkg_rms_for_boost = float(median_abs_deviation(finite_vals, scale="normal"))
+                else:
+                    _bkg_rms_for_boost = 5.0 * _gain_for_bkg
+            if not np.isfinite(_bkg_rms_for_boost) or _bkg_rms_for_boost <= 0:
+                _bkg_rms_for_boost = 5.0 * _gain_for_bkg
+            # Minimum 3-sigma above background (in electrons)
+            min_reasonable_flux = 3.0 * _bkg_rms_for_boost
+            if flux_clipped[0] < min_reasonable_flux:
+                log.warning(
+                    "Target PSF init: flux=%.3g e- is below 3-sigma threshold (%.3g e-); "
+                    "boosting to %.3g e- to improve convergence.",
+                    flux_clipped[0],
+                    min_reasonable_flux,
+                    min_reasonable_flux,
+                )
+                flux_clipped[0] = min_reasonable_flux
 
         init_params = QTable(
             {
@@ -3693,11 +3935,6 @@ class PSF:
             log.info("No valid sources; returning unchanged.")
             return sources
 
-        # background_rms is in ADU (from photutils Background2D on the raw image).
-        # ndimage.uncertainty.array is in electrons (from create_nddata_with_fitting_weights
-        # where image_e = image * gain).  Normalise to ADU so the S/N formula's
-        # (bkgrmsval * gain) conversion is correct in all paths.
-        _gain_for_bkg = float(resolve_gain_e_per_adu(None, self.input_yaml))
         if background_rms is not None:
             bkgrmsval = float(np.nanmedian(background_rms))  # ADU
         else:
@@ -3741,8 +3978,10 @@ class PSF:
         sigma_pix = fwhm_clamped * 0.8493218002882191  # gaussian_fwhm_to_sigma
         C = 1.0 / (4.0 * np.pi * sigma_pix ** 2)
         C = max(C, 1e-6)
-        # Per-pixel background variance in e-^2
-        bkg_var_e2 = (bkgrmsval * gain) ** 2 + read_noise ** 2  # e-^2
+        # Per-pixel background variance in e-^2.
+        # background_rms from MADStdBackgroundRMS already includes read noise,
+        # so do NOT add read_noise^2 again — that double-counts it.
+        bkg_var_e2 = (bkgrmsval * gain) ** 2  # e-^2
         # PSF photometry variance in e-^2 (background + Poisson)
         sigma_fs_sq = bkg_var_e2 / C + np.abs(flux_e_frame)
         sigma_fs_sq = np.maximum(sigma_fs_sq, 1e-10)
@@ -4184,10 +4423,10 @@ class PSF:
             vf_inner = aperture_radius + gap_fwhm * fwhm
             vf_outer = vf_inner + width_fwhm * fwhm
 
-        for mask, inner_r, outer_r, fshape, label in [
-            (bright_mask, bright_inner, bright_outer, fit_shape_bright, "bright"),
-            (faint_mask, faint_inner, faint_outer, fit_shape_faint, "faint"),
-            (vfaint_mask, vf_inner, vf_outer, fit_shape_vfaint, "very faint"),
+        for mask, inner_r, outer_r, label in [
+            (bright_mask, bright_inner, bright_outer, "bright"),
+            (faint_mask, faint_inner, faint_outer, "faint"),
+            (vfaint_mask, vf_inner, vf_outer, "very faint"),
         ]:
             if np.any(mask):
                 use_emcee_this = use_emcee_for_tier(label)
@@ -4203,7 +4442,7 @@ class PSF:
                     "MCMC" if use_emcee_this else "LSQ",
                 )
                 res, psfphot_last = _psf_fit(
-                    mask, inner_r, outer_r, fshape, tier_fitter, use_emcee_this
+                    mask, inner_r, outer_r, fit_shape, tier_fitter, use_emcee_this
                 )
                 if res is not None:
                     results.append(res)
@@ -4292,9 +4531,9 @@ class PSF:
             retry_mask_vfaint = vfaint_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
             
             for mask, inner_r, outer_r, fshape, label in [
-                (retry_mask_bright, bright_inner, bright_outer, fit_shape_bright, "bright"),
-                (retry_mask_faint, faint_inner, faint_outer, fit_shape_faint, "faint"),
-                (retry_mask_vfaint, vf_inner, vf_outer, fit_shape_vfaint, "very faint"),
+                (retry_mask_bright, bright_inner, bright_outer, fit_shape, "bright"),
+                (retry_mask_faint, faint_inner, faint_outer, fit_shape, "faint"),
+                (retry_mask_vfaint, vf_inner, vf_outer, fit_shape, "very faint"),
             ]:
                 if np.any(mask):
                     use_emcee_this = use_emcee_for_tier(label)
@@ -4441,8 +4680,13 @@ class PSF:
                         combined.loc[row_labels, ye_col] = inv_subset[iye_col].values
                     if "flags" in combined_inv_good.columns and "flags" in combined.columns:
                         combined.loc[row_labels, "flags"] = inv_subset["flags"].values
-                    if gof_col and igof_col:
-                        combined.loc[row_labels, gof_col] = inv_subset[igof_col].values
+                    # Copy ALL quality-of-fit columns individually from inverted to combined.
+                    # Using a single gof_col/igof_col only copies the first match, leaving
+                    # qfit and reduced_chi2 from the original fit — which then causes the
+                    # error scaling below to use the wrong fit's quality metrics.
+                    for _gof_name in ("cfit", "qfit", "reduced_chi2", "chi2_red"):
+                        if _gof_name in combined.columns and _gof_name in inv_subset.columns:
+                            combined.loc[row_labels, _gof_name] = inv_subset[_gof_name].values
             else:
                 log.info("Inverted PSF fit did not improve any sources.")
 
@@ -4534,6 +4778,53 @@ class PSF:
         qfit_out = self._first_present(combined, ["qfit"])
         chi2_out = self._first_present(combined, ["reduced_chi2", "chi2_red"])
         flags_out = np.asarray(combined["flags"], int)
+
+        # Scale formal flux errors by sqrt(reduced_chi2) when chi2 > 1.
+        # Formal fitter errors only capture statistical precision given the
+        # noise model; they don't account for PSF model mismatch, which
+        # dominates for undersampled images or imperfect ePSF models.
+        # Without this scaling, zeropoint MCMC sees most sources as outliers
+        # (tiny errors + real residuals = huge chi2), rejecting ~50% of
+        # PSF sources. Standard practice (IRAF/DAOPHOT). Capped at 10x.
+        _chi2 = np.asarray(chi2_out, float)
+        _chi2_scale = np.sqrt(np.maximum(_chi2, 1.0))
+        _chi2_scale = np.where(
+            np.isfinite(_chi2_scale) & (_chi2_scale > 0), _chi2_scale, 1.0
+        )
+        _chi2_scale = np.clip(_chi2_scale, 1.0, 10.0)
+
+        # qfit-based error inflation for TARGET fits was REMOVED.
+        # qfit = sum(|residuals|) / flux_fit is inversely proportional to
+        # flux, so it is inherently high (5-10) for faint sources even when
+        # the fit is perfect.  Using sqrt(qfit) as a multiplicative error
+        # scale creates a magnitude-dependent bias that suppresses marginal
+        # detections: a source at raw S/N~8 gets reported as S/N~2 because
+        # the error is inflated 4x.  The reduced_chi2 scaling above already
+        # captures non-Gaussian residuals (chi2 > 1 when residuals exceed
+        # the noise model), making the qfit scaling redundant and harmful.
+        _total_scale = _chi2_scale
+
+        _n_scaled = int(np.sum(_total_scale > 1.01))
+        if _n_scaled > 0:
+            _med_scale = float(np.median(_total_scale[_total_scale > 1.01]))
+            _scale_label = "sqrt(reduced_chi2)"
+            log.info(
+                "PSF flux errors scaled by %s: %d/%d sources "
+                "(median scale=%.1fx, max=%.1fx)",
+                _scale_label,
+                _n_scaled, len(flux_err), _med_scale,
+                float(np.max(_total_scale)),
+            )
+        flux_err = flux_err * _total_scale
+
+        # Apply the same scaling to the pre-inverted snapshot errors so that
+        # flux_PSF_err_normal is consistent with flux_PSF_err.
+        if snap_flux_err_e is not None and is_target_fit:
+            _snap_chi2 = np.asarray(snap_chi2, dtype=float)
+            _snap_chi2_scale = np.sqrt(np.maximum(_snap_chi2, 1.0))
+            _snap_chi2_scale = np.where(np.isfinite(_snap_chi2_scale) & (_snap_chi2_scale > 0), _snap_chi2_scale, 1.0)
+            _snap_chi2_scale = np.clip(_snap_chi2_scale, 1.0, 10.0)
+            snap_flux_err_e = snap_flux_err_e * _snap_chi2_scale
 
         df_out = pd.DataFrame(
             {
@@ -4665,6 +4956,21 @@ class PSF:
             with np.errstate(invalid="ignore"):
                 flux_fit_inv = np.clip(flux_fit_inv, 1e-6, np.inf)
                 flux_err_inv = np.where(np.isfinite(flux_err_inv), flux_err_inv, np.nan)
+
+            # Apply the same qfit-based error scaling to inverted fit errors.
+            # The inverted fit has its own qfit and chi2 in combined_inv.
+            if is_target_fit:
+                _qfit_inv = np.asarray(self._first_present(combined_inv, ["qfit"]), dtype=float)
+                _chi2_inv = np.asarray(self._first_present(combined_inv, ["reduced_chi2", "chi2_red"]), dtype=float)
+                _chi2_scale_inv = np.sqrt(np.maximum(_chi2_inv, 1.0))
+                _chi2_scale_inv = np.where(np.isfinite(_chi2_scale_inv) & (_chi2_scale_inv > 0), _chi2_scale_inv, 1.0)
+                _chi2_scale_inv = np.clip(_chi2_scale_inv, 1.0, 10.0)
+                _qfit_scale_inv = np.sqrt(np.maximum(_qfit_inv, 1.0))
+                _qfit_scale_inv = np.where(np.isfinite(_qfit_scale_inv) & (_qfit_scale_inv > 0), _qfit_scale_inv, 1.0)
+                _qfit_scale_inv = np.clip(_qfit_scale_inv, 1.0, 10.0)
+                _total_scale_inv = np.clip(_chi2_scale_inv * _qfit_scale_inv, 1.0, 10.0)
+                flux_err_inv = flux_err_inv * _total_scale_inv
+
             # Flux in e/s (negative sign because this was measured on inverted image)
             flux_fit_inv_arr = np.asarray(flux_fit_inv, float)
             flux_err_inv_arr = np.asarray(flux_err_inv, float)

@@ -590,8 +590,10 @@ class Catalog:
         # radius_deg = radius / 60
 
         # SQL query to search the Legacy Survey catalog using ADQL
+        # Select `type` to filter point sources (PSF) from extended objects
+        # (REX, EXP, DEV, SER) which are galaxies or resolved sources.
         query = f"""
-            SELECT TOP 1000 ra, dec, mag_g, mag_r, mag_i, mag_z,
+            SELECT TOP 1000 ra, dec, type, mag_g, mag_r, mag_i, mag_z,
                 sqrt(power(ra - {ra}, 2) + power(dec - {dec}, 2)) AS angular_distance
             FROM ls_dr10.tractor
             WHERE 't'= Q3C_RADIAL_QUERY(ra, dec, {ra}, {dec}, {radius})
@@ -614,6 +616,20 @@ class Catalog:
 
             # Convert the result to an Astropy Table
             table = result.get_results().to_pandas()
+
+            # Filter to point sources only (type = 'PSF').
+            # Other types (REX, EXP, DEV, SER) are extended/galaxies.
+            if "type" in table.columns:
+                n_before = len(table)
+                table = table[table["type"].astype(str).str.upper() == "PSF"].copy()
+                n_gal = n_before - len(table)
+                if n_gal > 0:
+                    logging.info(
+                        "Legacy Survey: removed %d extended sources (type != PSF); %d point sources remain.",
+                        n_gal, len(table),
+                    )
+            table = table.drop(columns=["type"], errors="ignore")
+
             filters = ["g", "r", "i", "z"]
 
             for f in filters:
@@ -884,10 +900,12 @@ class Catalog:
                         )
                     else:
                         # Columns to extract (RA/DEC, r-band + error, others optional)
+                        # Include objType to filter point sources (stars) from galaxies.
                         selected_cols = [
                             "ID",
                             "ra",
                             "dec",
+                            "objType",
                             "rmag",
                             "e_rmag",
                             "gmag",
@@ -921,6 +939,24 @@ class Catalog:
 
                         # Build final catalog table
                         selectedCatalog = result[available_cols].to_pandas()
+
+                        # Filter to point sources: TIC objType 'STAR' = 0x300000.
+                        # Galaxies and other extended objects are excluded.
+                        if "objType" in selectedCatalog.columns:
+                            n_before = len(selectedCatalog)
+                            # objType is a bitmask; STAR = 0x300000 in TIC
+                            _obj_type = pd.to_numeric(selectedCatalog["objType"], errors="coerce")
+                            _is_star = _obj_type == 0x300000
+                            if _is_star.sum() > 0:
+                                selectedCatalog = selectedCatalog[_is_star].copy()
+                                n_gal = n_before - len(selectedCatalog)
+                                if n_gal > 0:
+                                    logger.info(
+                                        "TIC: removed %d non-stellar sources (objType != STAR); %d stars remain.",
+                                        n_gal, len(selectedCatalog),
+                                    )
+                            selectedCatalog = selectedCatalog.drop(columns=["objType"], errors="ignore")
+
                         # Write directly to target directory instead of cwd to avoid wrong directory writes
                         csv_path = os.path.join(target_dir, f"{fname}.csv")
                         selectedCatalog.to_csv(csv_path, index=False, na_rep=np.nan)
@@ -1053,6 +1089,20 @@ class Catalog:
                                 selectedCatalog = selectedCatalog[
                                     selectedCatalog["cl"] == 6
                                 ]
+                    if catalogName == "apass":
+                            # APASS has a `cls` column: 'A' = stellar, 'G' = galaxy.
+                            # Filter to stars only for zeropoint calibration.
+                            if "cls" in selectedCatalog.columns:
+                                n_before = len(selectedCatalog)
+                                selectedCatalog = selectedCatalog[
+                                    selectedCatalog["cls"].astype(str).str.upper() == "A"
+                                ]
+                                n_gal = n_before - len(selectedCatalog)
+                                if n_gal > 0:
+                                    logger.info(
+                                        "APASS: removed %d non-stellar sources (cls != 'A'); %d stars remain.",
+                                        n_gal, len(selectedCatalog),
+                                    )
                     # Validate before writing (covers both empty-query and post-filter empty)
                     self._require_nonempty_catalog(
                         selectedCatalog, catalogName, target_coords, radius
@@ -1168,6 +1218,10 @@ class Catalog:
                         "zMeanPSFMagErr",
                         "yMeanPSFMag",
                         "yMeanPSFMagErr",
+                        # Kron magnitudes for star-galaxy separation:
+                        # stars have PSF ≈ Kron; galaxies have Kron > PSF.
+                        "rMeanKronMag",
+                        "rMeanKronMagErr",
                     ]
                     # Only keep columns that are present in the API response
                     missing_cols = [c for c in columns if c not in selectedCatalog.columns]
@@ -1178,6 +1232,31 @@ class Catalog:
                         )
                     available_columns = [c for c in columns if c in selectedCatalog.columns]
                     selectedCatalog = selectedCatalog[available_columns]
+
+                    # Star-galaxy separation: compare PSF and Kron magnitudes.
+                    # Stars: |PSF - Kron| < 0.1 mag (point sources).
+                    # Galaxies: Kron > PSF by > 0.1 mag (extended flux).
+                    if {"rMeanPSFMag", "rMeanKronMag"}.issubset(selectedCatalog.columns):
+                        _psf = pd.to_numeric(selectedCatalog["rMeanPSFMag"], errors="coerce")
+                        _kron = pd.to_numeric(selectedCatalog["rMeanKronMag"], errors="coerce")
+                        _both_finite = np.isfinite(_psf) & np.isfinite(_kron)
+                        _is_star = _both_finite & (np.abs(_psf - _kron) < 0.1)
+                        # Keep sources where both are finite and star-like, OR where Kron is missing (conservative keep)
+                        _keep = _is_star | ~np.isfinite(_kron)
+                        n_before = len(selectedCatalog)
+                        selectedCatalog = selectedCatalog[_keep].copy()
+                        n_gal = n_before - len(selectedCatalog)
+                        if n_gal > 0:
+                            logger.info(
+                                "Pan-STARRS: removed %d extended sources (|PSF-Kron| >= 0.1 mag); %d point sources remain.",
+                                n_gal, len(selectedCatalog),
+                            )
+                        # Drop Kron columns - not needed downstream
+                        selectedCatalog = selectedCatalog.drop(
+                            columns=[c for c in ["rMeanKronMag", "rMeanKronMagErr"] if c in selectedCatalog.columns],
+                            errors="ignore",
+                        )
+
                     if {"raMean", "decMean"}.issubset(selectedCatalog.columns):
                         coords = SkyCoord(
                             ra=selectedCatalog["raMean"].values * u.deg,
@@ -2152,8 +2231,9 @@ class Catalog:
             # Calculate instrumental magnitude
             flux = catalog["flux_AP"].values
             flux_err = catalog["flux_AP_err"].values
-            # Add safety check to prevent division by zero and log10(0)
-            flux_safe = np.maximum(flux, 1e-10)
+            # NaN for non-positive fluxes (same convention as functions.mag)
+            flux_safe = flux.astype(float).copy()
+            flux_safe[flux_safe <= 0] = np.nan
             inst_mag = -2.5 * np.log10(flux_safe)
             inst_mag_err = 2.5 / np.log(10) * (flux_err / flux_safe)
             catalog_mag = catalog[use_filter].values
@@ -2191,7 +2271,8 @@ class Catalog:
                     break
 
             # Compute instrumental magnitudes for the FULL clean catalog
-            flux_safe = np.maximum(flux, 1e-10)
+            flux_safe = flux.astype(float).copy()
+            flux_safe[flux_safe <= 0] = np.nan
             inst_mag_linear = -2.5 * np.log10(flux_safe)
             inst_mag_err_linear = 2.5 / np.log(10) * (flux_err / flux_safe)
             catalog_mag_linear = clean_catalog[use_filter].values
@@ -2228,7 +2309,7 @@ class Catalog:
                 ransac = RANSACRegressor(
                     estimator=base_estimator,
                     residual_threshold=ransac_residual_threshold,
-                    max_trials=2000,
+                    max_trials=500,
                     min_samples=0.25,
                 )
                 ransac.fit(X_fit, y_fit)
@@ -3083,7 +3164,7 @@ class Catalog:
                 write_dir, f"Zeropoint_Sources_{base}.png"
             )
             fig.savefig(output_path, bbox_inches="tight", dpi=150, facecolor="white")
-            plt.close()
+            plt.close(fig)
 
         logger.info("Returning %s well-behaved sources", len(cleaned_catalog))
         return cleaned_catalog

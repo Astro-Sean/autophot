@@ -190,6 +190,10 @@ except (ModuleNotFoundError, ImportError):
     run_IDC = None
 
 from functions import log_warning_from_exception
+try:
+    from functions import download_zogy
+except ImportError:
+    download_zogy = None
 
 # =============================================================================
 # External Tool Imports
@@ -201,17 +205,10 @@ try:
 except ImportError:
     legacystamps = None  # type: ignore[assignment]
     _HAS_LEGACYSTAMPS = False
-try:
-    # PyZOGY is only needed for ZOGY image subtraction.
-    # Support both historical module naming styles used in different builds.
-    try:
-        from PyZOGY.subtract import run_subtraction
-    except ImportError:
-        from pyzogy.subtract import run_subtraction  # type: ignore[no-redef]
-    _HAS_PYZOGY = True
-except ImportError:
-    run_subtraction = None  # type: ignore[assignment]
-    _HAS_PYZOGY = False
+# ZOGY subtraction uses the pmvreeswijk/ZOGY package, downloaded at
+# runtime via functions.download_zogy() into <wdir>/ZOGY/.  The module is
+# imported lazily inside _subtract_zogy() because it requires wdir on
+# sys.path.
 
 # =============================================================================
 # Optional Alignment Packages
@@ -290,6 +287,230 @@ DEFAULT_SIGMA_CLIP = 3.0
 
 # Default FWHM padding multiplier for masking around bright / saturated sources
 DEFAULT_FWHM_PADDING_MULTIPLIER = 3
+
+
+def _pad_psf_to_image(psf: np.ndarray, target_shape: tuple) -> np.ndarray:
+    """Zero-pad a PSF stamp to *target_shape* with the PSF centred.
+
+    ZOGY's FFT-based subtraction requires the PSF to be the same shape as
+    the science/reference images.  The PSF stamp is placed at the centre
+    of a zero-filled array of the target shape.
+
+    A Tukey edge taper is applied to the PSF stamp before padding to
+    smooth any non-zero values at the stamp edges to zero.  Without this,
+    truncated PSF wings create a sharp cutoff that produces sinc-like
+    ripples in Fourier space, appearing as correlated noise patterns in
+    the difference image.
+    """
+    psf = np.asarray(psf, dtype=float)
+    th, tw = target_shape
+    ph, pw = psf.shape
+    if ph == th and pw == tw:
+        return psf
+
+    # Apply Tukey edge taper: smoothly taper the outer ~20% of each axis
+    # to zero.  Only taper if there are non-zero values near the edges
+    # (avoid modifying already well-tapered PSFs).
+    _edge_frac = 0.2
+    _edge_h = max(1, int(ph * _edge_frac))
+    _edge_w = max(1, int(pw * _edge_frac))
+    _needs_taper = False
+    if ph > 2 * _edge_h:
+        _top = np.max(np.abs(psf[:_edge_h, :]))
+        _bot = np.max(np.abs(psf[-_edge_h:, :]))
+        if _top > 1e-6 * np.max(np.abs(psf)) or _bot > 1e-6 * np.max(np.abs(psf)):
+            _needs_taper = True
+    if pw > 2 * _edge_w:
+        _left = np.max(np.abs(psf[:, :_edge_w]))
+        _right = np.max(np.abs(psf[:, -_edge_w:]))
+        if _left > 1e-6 * np.max(np.abs(psf)) or _right > 1e-6 * np.max(np.abs(psf)):
+            _needs_taper = True
+    if _needs_taper:
+        _win_y = np.ones(ph)
+        _win_x = np.ones(pw)
+        if ph > 2 * _edge_h:
+            _ramp = 0.5 * (1 - np.cos(np.pi * np.arange(_edge_h) / _edge_h))
+            _win_y[:_edge_h] = _ramp
+            _win_y[-_edge_h:] = _ramp[::-1]
+        if pw > 2 * _edge_w:
+            _ramp = 0.5 * (1 - np.cos(np.pi * np.arange(_edge_w) / _edge_w))
+            _win_x[:_edge_w] = _ramp
+            _win_x[-_edge_w:] = _ramp[::-1]
+        psf = psf * np.outer(_win_y, _win_x)
+        # Renormalize after tapering
+        _s = float(np.nansum(psf))
+        if _s > 0:
+            psf = psf / _s
+
+    out = np.zeros(target_shape, dtype=float)
+    # Place PSF center at (th//2, tw//2) so ifftshift moves it to [0,0]
+    y0 = th // 2 - ph // 2
+    x0 = tw // 2 - pw // 2
+    y1 = y0 + ph
+    x1 = x0 + pw
+    # Clip to bounds in case PSF is somehow larger than the image
+    sy0 = max(0, -y0)
+    sx0 = max(0, -x0)
+    sy1 = ph - max(0, y1 - th)
+    sx1 = pw - max(0, x1 - tw)
+    out[max(0, y0):min(th, y1), max(0, x0):min(tw, x1)] = psf[sy0:sy1, sx0:sx1]
+    # Move PSF center to [0,0] for FFT-based convolution.
+    # np.fft.fft2 treats [0,0] as the origin; a centered PSF introduces
+    # a circular shift of (th//2, tw//2) in convolution results.
+    out = np.fft.ifftshift(out)
+    return out
+
+
+def _zogy_subtract(N, R, Pn, Pr, sn, sr, fn=1.0, fr=None,
+                    sn_map=None, sr_map=None, nan_mask=None):
+    """Core ZOGY subtraction (Zackay, Ofek & Gal-Yam 2016, ApJ, 830, 27).
+
+    Computes the proper difference image D, the score image S, and the
+    corrected significance Scorr using Equations 1-13 from the paper.
+    Uses only numpy FFTs — no pyfftw or external dependencies.
+
+    Parameters
+    ----------
+    N : np.ndarray
+        Science (new) image, background-subtracted.
+    R : np.ndarray
+        Reference image, background-subtracted.
+    Pn : np.ndarray
+        Science PSF, same shape as N (use _pad_psf_to_image).
+    Pr : np.ndarray
+        Reference PSF, same shape as R.
+    sn : float
+        Science background noise RMS (scalar, used if sn_map is None).
+    sr : float
+        Reference background noise RMS (scalar, used if sr_map is None).
+    fn : float
+        Science flux-based zero point (default 1.0).
+    fr : float or None
+        Reference flux-based zero point. If None, set to fn (same
+        instrument/filter).
+    sn_map, sr_map : np.ndarray or None
+        Optional per-pixel noise RMS maps.  When provided, the variance
+        images Vn/Vr use per-pixel variance (sn_map**2 / sr_map**2)
+        instead of the scalar sn**2 / sr**2, following the ZOGY paper
+        more closely for spatially varying noise (e.g. near chip gaps,
+        bright galaxy backgrounds).
+    nan_mask : np.ndarray(bool) or None
+        Optional boolean mask of pixels to zero in both images (NaN
+        regions).  When None, falls back to the (R==0)|(N==0) heuristic.
+
+    Returns
+    -------
+    D : np.ndarray (float)
+        Proper difference image (Eq. 1), in science-image flux units.
+    S : np.ndarray (float)
+        Score image (Eq. 2).
+    Scorr : np.ndarray (float)
+        Corrected significance (Eq. 13), with astrometric noise ignored
+        (approximation valid for well-aligned images).
+    P_D : np.ndarray (float)
+        PSF of the difference image (Eq. 12), in native image pixels,
+        same shape as D.  Used for photometry when forceconv=AUTO
+        (geometric-mean PSF, no pre-convolution).
+    """
+    if fr is None:
+        fr = fn
+
+    N = np.asarray(N, dtype=np.float64)
+    R = np.asarray(R, dtype=np.float64)
+    Pn = np.asarray(Pn, dtype=np.float64)
+    Pr = np.asarray(Pr, dtype=np.float64)
+
+    # Normalize PSFs to unit sum (ZOGY assumes normalized PSFs)
+    _pn_sum = float(np.nansum(Pn))
+    _pr_sum = float(np.nansum(Pr))
+    if _pn_sum > 0:
+        Pn = Pn / _pn_sum
+    if _pr_sum > 0:
+        Pr = Pr / _pr_sum
+
+    # Zero out non-overlapping / NaN regions
+    if nan_mask is not None:
+        mask_zero = np.asarray(nan_mask, dtype=bool)
+    else:
+        mask_zero = (R == 0) | (N == 0)
+    N = np.where(mask_zero, 0.0, N)
+    R = np.where(mask_zero, 0.0, R)
+
+    sn2 = sn ** 2
+    sr2 = sr ** 2
+    fn2 = fn ** 2
+    fr2 = fr ** 2
+
+    # FFTs (use numpy FFT — no pyfftw dependency)
+    N_hat = np.fft.fft2(N)
+    R_hat = np.fft.fft2(R)
+    Pn_hat = np.fft.fft2(Pn)
+    Pr_hat = np.fft.fft2(Pr)
+
+    Pn_hat2_abs = np.abs(Pn_hat) ** 2
+    Pr_hat2_abs = np.abs(Pr_hat) ** 2
+
+    denominator = (sn2 * fr2) * Pr_hat2_abs + (sr2 * fn2) * Pn_hat2_abs
+
+    # Avoid division by zero / noise amplification at high frequencies.
+    # A relative floor (not absolute 1e-30) prevents the denominator from
+    # going to near-zero at high spatial frequencies where both PSFs have
+    # low power, which would amplify noise in D_hat and P_D_hat.
+    _denom_floor = 1e-12 * float(np.max(denominator))
+    denominator = np.where(denominator < _denom_floor, _denom_floor, denominator)
+
+    fD = (fr * fn) / np.sqrt(sn2 * fr2 + sr2 * fn2)
+
+    # Difference image D (Eq. 1)
+    D_hat = (fr * (Pr_hat * N_hat) - fn * (Pn_hat * R_hat)) / np.sqrt(denominator)
+    D = np.real(np.fft.ifft2(D_hat)) / fD
+
+    # PSF of the difference image
+    P_D_hat = (fr * fn / fD) * (Pr_hat * Pn_hat) / np.sqrt(denominator)
+
+    # Score image S (Eq. 2)
+    S_hat = fD * D_hat * np.conj(P_D_hat)
+    S = np.real(np.fft.ifft2(S_hat))
+
+    # Variance images for Scorr (Eqs. 25-31)
+    kr_hat = (fr * fn2) * np.conj(Pr_hat) * Pn_hat2_abs / denominator
+    kr = np.real(np.fft.ifft2(kr_hat))
+    kr2 = kr ** 2
+    kr2_hat = np.fft.fft2(kr2)
+
+    kn_hat = (fn * fr2) * np.conj(Pn_hat) * Pr_hat2_abs / denominator
+    kn = np.real(np.fft.ifft2(kn_hat))
+    kn2 = kn ** 2
+    kn2_hat = np.fft.fft2(kn2)
+
+    # Variance: V = N + sigma^2 (background-subtracted + read noise)
+    # When per-pixel noise maps are available, use them for spatially
+    # varying noise (e.g. near chip gaps, bright galaxy backgrounds).
+    if sn_map is not None:
+        Vn = N + np.asarray(sn_map, dtype=np.float64) ** 2
+    else:
+        Vn = N + sn2
+    if sr_map is not None:
+        Vr = R + np.asarray(sr_map, dtype=np.float64) ** 2
+    else:
+        Vr = R + sr2
+    Vn_hat = np.fft.fft2(Vn)
+    Vr_hat = np.fft.fft2(Vr)
+
+    VSn = np.real(np.fft.ifft2(Vn_hat * kn2_hat))
+    VSr = np.real(np.fft.ifft2(Vr_hat * kr2_hat))
+
+    V_S = VSr + VSn
+    V_S = np.where(V_S > 0, V_S, 1e-30)
+
+    Scorr = S / np.sqrt(V_S)
+
+    # Difference-image PSF (Eq. 12): needed for photometry when no
+    # pre-convolution is applied (forceconv=AUTO).  P_D is in native
+    # image pixels, same shape as D.
+    P_D = np.real(np.fft.ifft2(P_D_hat))
+
+    return D, S, Scorr, P_D
 
 
 # =============================================================================
@@ -492,7 +713,7 @@ def _build_adaptive_kwargs(cfg: ReprojectConfig) -> Dict[str, Any]:
 
 
 def _detect_sextractor_sources(data_or_path, input_yaml=None, fwhm_pix=3.0,
-                               thresh=2.0, fwhm_min=1.5, ell_max=0.5,
+                               thresh=2.0, fwhm_min=None, ell_max=0.5,
                                return_errors=False):
     """Detect sources using SExtractor.
 
@@ -514,6 +735,11 @@ def _detect_sextractor_sources(data_or_path, input_yaml=None, fwhm_pix=3.0,
     """
     _n_err = 5 if return_errors else 3
     _none = (None,) * _n_err
+    # Adaptive fwhm_min: lower for undersampled images so real sources
+    # aren't rejected. SExtractor FWHM_IMAGE can be ~1.0 px for critically
+    # sampled data; the old fixed 1.5 px cut removed real sources.
+    if fwhm_min is None:
+        fwhm_min = 0.8 if (fwhm_pix and fwhm_pix < 2.0) else 1.5
     try:
         from utils.run_sex import SExtractorWrapper
     except ModuleNotFoundError:
@@ -635,14 +861,34 @@ def compute_alignment_rms(
     try:
         fwhm = min(max(float(fwhm_pixels), 2.0), 8.0)
 
+        # Adaptive detection threshold: lower for sparse fields to ensure
+        # enough sources for reliable RMS measurement.  The first pass at
+        # thresh=5.0 may find too few sources; fall back to 3.0 if needed.
+        _align_thresh = 5.0
+        if input_yaml is not None:
+            _ts_cfg = input_yaml.get("template_subtraction", {}) or {}
+            _align_thresh = float(_ts_cfg.get("alignment_rms_detect_thresh", 5.0) or 5.0)
+
         sci_xy, _, _ = _detect_sextractor_sources(
             sci_data, input_yaml=input_yaml, fwhm_pix=fwhm,
-            thresh=5.0, fwhm_min=1.5,
+            thresh=_align_thresh, fwhm_min=1.5,
         )
         ref_xy, _, _ = _detect_sextractor_sources(
             ref_data, input_yaml=input_yaml, fwhm_pix=fwhm,
-            thresh=5.0, fwhm_min=1.5,
+            thresh=_align_thresh, fwhm_min=1.5,
         )
+
+        # If too few sources at high threshold, retry with lower threshold
+        if (sci_xy is None or len(sci_xy) < 10) and _align_thresh > 3.0:
+            sci_xy, _, _ = _detect_sextractor_sources(
+                sci_data, input_yaml=input_yaml, fwhm_pix=fwhm,
+                thresh=3.0, fwhm_min=1.5,
+            )
+        if (ref_xy is None or len(ref_xy) < 10) and _align_thresh > 3.0:
+            ref_xy, _, _ = _detect_sextractor_sources(
+                ref_data, input_yaml=input_yaml, fwhm_pix=fwhm,
+                thresh=3.0, fwhm_min=1.5,
+            )
 
         if sci_xy is None or ref_xy is None:
             return None
@@ -680,12 +926,15 @@ def compute_alignment_rms(
         if len(d_clipped) < 5:
             d_clipped = d_mut  # fallback: too few after clipping
 
-        median_offset = float(np.nanmedian(d_clipped))
-        p90 = float(np.nanpercentile(d_clipped, 90.0))
-        rms = float(np.sqrt(np.mean(d_clipped**2)))
-
+        # Median offset = magnitude of the median per-axis offset vector.
+        # This measures the systematic offset, not the typical per-source
+        # distance (which includes centroid noise and is always >= this).
+        # Matches the post-SWarp verification logic in run_IDC.py.
         _med_dx = float(np.nanmedian(_dx_mut))
         _med_dy = float(np.nanmedian(_dy_mut))
+        median_offset = float(np.sqrt(_med_dx**2 + _med_dy**2))
+        p90 = float(np.nanpercentile(d_clipped, 90.0))
+        rms = float(np.sqrt(np.mean(d_clipped**2)))
         logger.info(
             "Alignment RMS:\tmed=%.3f px (dx=%.3f, dy=%.3f) rms=%.3f px p90=%.3f px n=%d (of %d, %d clipped) max=%.2f px",
             median_offset, _med_dx, _med_dy, rms, p90, len(d_clipped), len(d_mut),
@@ -1125,48 +1374,6 @@ def deduplicate_points(
         if all(euclidean_distance(pt, k) >= min_sep for k in kept):
             kept.append(pt)
     return kept
-
-
-# =============================================================================
-# Install PyZOGY
-# =============================================================================
-
-
-def install_pyzogy() -> None:
-    """
-    Download PyZOGY from GitHub into ~/Downloads and run ``setup.py install``.
-
-    This is a convenience bootstrap for environments where PyZOGY is not
-    available via pip.  It:
-      1. Downloads the master-branch ZIP archive to a temp directory.
-      2. Extracts it to ~/Downloads/PyZOGY.
-      3. Runs ``python setup.py install`` inside the extracted folder.
-    """
-    repo_url = "https://github.com/dguevel/PyZOGY/archive/refs/heads/master.zip"
-    downloads = Path.home() / "Downloads"
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_dir_path = Path(temp_dir)
-        logger.info("Downloading PyZOGY from GitHub...")
-        zip_path = temp_dir_path / "PyZOGY-master.zip"
-        urlretrieve(repo_url, str(zip_path))
-
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(temp_dir_path)
-
-        dest = downloads / "PyZOGY"
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(temp_dir_path / "PyZOGY-master", dest)
-        logger.info("PyZOGY extracted to %s", dest)
-
-        subprocess.run(
-            [sys.executable, "setup.py", "install"],
-            cwd=str(dest),
-            check=True,
-            timeout=120,
-        )
-        logger.info("PyZOGY installed successfully")
 
 
 # =============================================================================
@@ -2860,11 +3067,19 @@ class Templates:
                     # SExtractor's robust deblending means a single low-threshold
                     # run finds plenty of sources - no need for adaptive multi-
                     # threshold scanning like SEP required.
+                    _sp_cfg = (
+                        (self.input_yaml.get("template_subtraction") or {})
+                        if isinstance(self.input_yaml, dict)
+                        else {}
+                    )
+                    _sp_detect_thresh = float(_sp_cfg.get("spalipy_detect_thresh", 2.0) or 2.0)
+                    _sp_match_radius = float(_sp_cfg.get("spalipy_match_radius_arcsec", 3.0) or 3.0)
+
                     def _detect_for_spalipy(data, min_sources=20):
                         """Detect sources via SExtractor, return spalipy-format Table."""
                         xy, flux, fwhm = _detect_sextractor_sources(
                             data, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
-                            thresh=2.0, fwhm_min=1.5,
+                            thresh=_sp_detect_thresh, fwhm_min=1.5,
                         )
                         if xy is None or len(xy) < 4:
                             return None
@@ -2924,15 +3139,15 @@ class Templates:
                         _tpl_sky = SkyCoord(_tpl_ra * u.deg, _tpl_dec * u.deg)
 
                         # Match: for each science source, find nearest template source
-                        _match_radius = 3.0 * u.arcsec  # generous: WCS can be off by a few arcsec
+                        _match_radius = _sp_match_radius * u.arcsec
                         _idx_tpl, _sep2d, _ = match_coordinates_sky(
-                            _sci_sky, _tpl_sky, nthNeighbor=1,
+                            _sci_sky, _tpl_sky, nthneighbor=1,
                         )
                         _matched = _sep2d < _match_radius
 
                         # Also require mutual nearest neighbour to avoid one-to-many
                         _idx_sci_rev, _sep2d_rev, _ = match_coordinates_sky(
-                            _tpl_sky, _sci_sky, nthNeighbor=1,
+                            _tpl_sky, _sci_sky, nthneighbor=1,
                         )
                         _mutual = _matched & (
                             _idx_sci_rev[_idx_tpl] == np.arange(len(sci_det))
@@ -3059,14 +3274,58 @@ class Templates:
                         np.concatenate([sci_det["fwhm"], _tpl_det["fwhm"]])
                     ))
 
-                    # spalipy parameters: use defaults, relax min_n_match for
-                    # sparse fields and hash_dist for centroid uncertainty.
-                    _min_match = max(6, min(_n_sources // 3, 20))
-                    _n_quad = _n_sources if _n_sources <= 25 else 20
-                    _hash_dist = max(0.005, 2.0 * _med_fwhm / 50.0)
-                    _det_sep = max(5, int(_med_fwhm))
-                    _interp_order = 2 if _med_fwhm < 3.0 else 3
-                    _sub_tile = 2 if _n_sources >= 200 else 1
+                    # spalipy parameters: adaptive defaults with YAML overrides.
+                    # See https://github.com/Lyalpha/spalipy for parameter docs.
+                    _yaml_n_quad = _sp_cfg.get("spalipy_n_quad_det")
+                    _yaml_min_match = _sp_cfg.get("spalipy_min_n_match")
+                    _yaml_hash_dist = _sp_cfg.get("spalipy_max_quad_hash_dist")
+                    _yaml_min_sep = _sp_cfg.get("spalipy_min_sep")
+                    _yaml_interp = _sp_cfg.get("spalipy_interp_order")
+                    _yaml_sub_tile = _sp_cfg.get("spalipy_sub_tile")
+                    _yaml_spline = _sp_cfg.get("spalipy_spline_order")
+
+                    # n_quad_det: number of detections used for quad matching.
+                    # Use all sources for sparse fields, cap at 20 for dense fields.
+                    if _yaml_n_quad is not None:
+                        _n_quad = int(_yaml_n_quad)
+                    else:
+                        _n_quad = _n_sources if _n_sources <= 25 else 20
+
+                    # min_n_match: minimum matched sources for alignment.
+                    # Lower for sparse fields so spalipy doesn't reject valid matches.
+                    if _yaml_min_match is not None:
+                        _min_match = int(_yaml_min_match)
+                    else:
+                        _min_match = max(6, min(_n_sources // 3, 20))
+
+                    # max_quad_hash_dist: tolerance for quad hash matching.
+                    # Scaled by FWHM to account for centroid uncertainty.
+                    if _yaml_hash_dist is not None:
+                        _hash_dist = float(_yaml_hash_dist)
+                    else:
+                        _hash_dist = max(0.005, 2.0 * _med_fwhm / 50.0)
+
+                    # min_sep: minimum separation between detections.
+                    # Set to ~1 FWHM to avoid blended sources being used as quads.
+                    if _yaml_min_sep is not None:
+                        _det_sep = int(_yaml_min_sep)
+                    else:
+                        _det_sep = max(5, int(_med_fwhm))
+
+                    # interp_order: spline interpolation order for resampling.
+                    # Lower order for undersampled images (less smooth interpolation).
+                    if _yaml_interp is not None:
+                        _interp_order = int(_yaml_interp)
+                    else:
+                        _interp_order = 2 if _med_fwhm < 3.0 else 3
+
+                    # sub_tile: number of sub-tiles for affine fitting.
+                    # Higher values model spatially-varying distortion better
+                    # but need more sources per tile.  Set to 1 for sparse fields.
+                    if _yaml_sub_tile is not None:
+                        _sub_tile = int(_yaml_sub_tile)
+                    else:
+                        _sub_tile = 2 if _n_sources >= 200 else 1
 
                     # Spline order: SmoothBivariateSpline requires at least
                     # (kx+1)*(ky+1) matched sources (not detected sources).
@@ -3082,10 +3341,13 @@ class Templates:
                     #   spline_order=0 -> affine only, no minimum
                     _min_detected_for_order = {3: 24, 2: 14, 1: 6}
                     _spline_order = 0
-                    for _o in (3, 2, 1):
-                        if _n_sources >= _min_detected_for_order.get(_o, 0):
-                            _spline_order = _o
-                            break
+                    if _yaml_spline is not None:
+                        _spline_order = max(0, min(3, int(_yaml_spline)))
+                    else:
+                        for _o in (3, 2, 1):
+                            if _n_sources >= _min_detected_for_order.get(_o, 0):
+                                _spline_order = _o
+                                break
 
                     logger.info(
                         "spalipy: hash_dist=%.4f min_match=%d n_quad=%d "
@@ -3172,75 +3434,13 @@ class Templates:
                     if _aligned_nan.any():
                         aligned_template = np.where(_aligned_nan, np.nan, aligned_template)
 
-                    # --- Sub-pixel shift correction ---
-                    # spalipy's SmoothBivariateSpline introduces a small systematic
-                    # offset (typically ~0.3px) because the smoothing parameter
-                    # doesn't perfectly preserve the mean of the residuals.  We
-                    # correct this by cross-matching sources between the science
-                    # and aligned template, computing the median (dx, dy) offset,
-                    # and applying a corrective sub-pixel shift.
-                    try:
-                        from scipy.ndimage import shift as _nd_shift
-                        _sci_xy2, _, _ = _detect_sextractor_sources(
-                            scienceImage, input_yaml=self.input_yaml,
-                            fwhm_pix=fwhm_pix, thresh=5.0, fwhm_min=1.5,
-                        )
-                        _tpl_xy2, _, _ = _detect_sextractor_sources(
-                            aligned_template, input_yaml=self.input_yaml,
-                            fwhm_pix=fwhm_pix, thresh=5.0, fwhm_min=1.5,
-                        )
-                        if _sci_xy2 is not None and _tpl_xy2 is not None:
-                            _tree_s2 = cKDTree(_sci_xy2)
-                            _tree_t2 = cKDTree(_tpl_xy2)
-                            _d_s2t, _i_s2t = _tree_t2.query(_sci_xy2, k=1)
-                            _d_t2s, _i_t2s = _tree_s2.query(_tpl_xy2, k=1)
-                            _idx_s2 = np.arange(len(_sci_xy2), dtype=int)
-                            _mut2 = (_i_t2s[_i_s2t] == _idx_s2) & np.isfinite(_d_s2t)
-                            _mut2 &= (_d_s2t <= max(2.0 * _med_fwhm, 3.0))
-                            if _mut2.sum() >= 10:
-                                _dx_corr = float(np.median(
-                                    _sci_xy2[_mut2, 0] - _tpl_xy2[_i_s2t[_mut2], 0]
-                                ))
-                                _dy_corr = float(np.median(
-                                    _sci_xy2[_mut2, 1] - _tpl_xy2[_i_s2t[_mut2], 1]
-                                ))
-                                _shift_mag = np.sqrt(_dx_corr**2 + _dy_corr**2)
-                                if _shift_mag > 0.05:
-                                    logger.info(
-                                        "spalipy: applying sub-pixel shift correction "
-                                        "dx=%.3f dy=%.3f px (%d matched sources).",
-                                        _dx_corr, _dy_corr, _mut2.sum(),
-                                    )
-                                    # Shift template to match science: shift by
-                                    # (dx, dy) in (x, y) = (col, row) order for
-                                    # scipy.ndimage.shift which uses (row, col).
-                                    _aligned_fill = np.where(
-                                        _aligned_nan,
-                                        float(np.nanmedian(aligned_template)),
-                                        aligned_template,
-                                    ).astype(np.float32)
-                                    _aligned_fill = _nd_shift(
-                                        _aligned_fill,
-                                        shift=(_dy_corr, _dx_corr),
-                                        order=_interp_order,
-                                        mode="constant",
-                                        cval=float(np.nanmedian(aligned_template)),
-                                    )
-                                    # Re-apply NaN mask after shift
-                                    aligned_template = np.where(
-                                        _aligned_nan, np.nan, _aligned_fill
-                                    ).astype(np.float32)
-                                else:
-                                    logger.info(
-                                        "spalipy: no shift correction needed "
-                                        "(dx=%.3f dy=%.3f px).",
-                                        _dx_corr, _dy_corr,
-                                    )
-                    except Exception as _shift_err:
-                        logger.warning(
-                            "spalipy: shift correction failed: %s", _shift_err,
-                            exc_info=True,
-                        )
+                    # No post-alignment sub-pixel shift correction.
+                    # spalipy's spline-warp is the definitive alignment; applying
+                    # an empirical scipy.ndimage.shift afterwards is a post-
+                    # alignment pixel adjustment that can introduce dipoles in
+                    # subtraction (same reasoning as the SCAMP+SWarp shift
+                    # correction that was already removed).  The alignment
+                    # quality gate below measures the actual spalipy output.
 
                     # Alignment quality check - reject if RMS exceeds gates
                     _align_ok = True
@@ -4999,7 +5199,7 @@ class Templates:
 
         Supports three backends that are tried in cascade when a method
         fails:
-          - **ZOGY** (Zackay, Ofek & Gal-Yam 2016) via PyZOGY.
+          - **ZOGY** (Zackay, Ofek & Gal-Yam 2016) via pmvreeswijk/ZOGY.
           - **SFFT** (Hu et al. 2022) via an external conda environment.
           - **HOTPANTS** (Becker 2015) via a compiled executable.
 
@@ -5107,7 +5307,10 @@ class Templates:
             # constants, because the differential background term absorbs the
             # difference.
             ts_cfg_sky = self.input_yaml.get("template_subtraction", {})
-            _sky_subtract = _as_bool(ts_cfg_sky.get("sfft_sky_subtract", True), True)
+            _sky_subtract = _as_bool(
+                ts_cfg_sky.get("sky_subtract", ts_cfg_sky.get("sfft_sky_subtract", True)),
+                True,
+            )
             if _sky_subtract:
                 from astropy.stats import sigma_clipped_stats as _scs
                 for _img_label, _img_data, _img_hdr, _is_sci in [
@@ -5423,10 +5626,11 @@ class Templates:
                     ker_hw, KER_HW_MIN, KER_HW_MAX,
                 )
 
-            # SFFT kernel half-width: always use the FWHM-based ker_hw.
-            # The caller's `scale` (pipeline source-detection cutout size, typically
-            # 5*FWHM) is NOT the kernel half-width - it is kept for the HOTPANTS
-            # path below, which uses it as the kernel half-width by convention.
+            # Both SFFT and HOTPANTS use the same physics-based kernel half-width
+            # (ker_hw). The caller's `scale` (pipeline source-detection cutout
+            # size, typically 4*FWHM) is NOT used for kernel sizing — it was
+            # incorrectly used for HOTPANTS in the past (BUG 136), causing
+            # oversized kernels and under-constrained fits in sparse fields.
             sfft_kernel_hw = max(ker_hw, 5)
             if scale is None or int(scale) <= 0:
                 scale = sfft_kernel_hw
@@ -5760,6 +5964,7 @@ class Templates:
                         bg_order
                     )
                     bg_order = min(bg_order, 2)  # Clamp to 2
+                ts_cfg["sfft_bg_order"] = bg_order
 
             # Validate StarExt_iter
             star_ext_iter = ts_cfg.get("sfft_star_ext_iter", None)
@@ -5779,7 +5984,7 @@ class Templates:
             # 5. Run subtraction backend
             # =============================================================
 
-            if method.lower() in ("zogy", "pyzogy"):
+            if method.lower() == "zogy":
                 method = self._subtract_zogy(
                     scienceFpath,
                     template_work_fpath,
@@ -5851,7 +6056,7 @@ class Templates:
                     kernel_order,
                     stamp_loc,
                     scienceNoise,
-                    scale,
+                    sfft_kernel_hw,
                 )
                 if not success:
                     return None, None, None, None
@@ -5954,46 +6159,16 @@ class Templates:
             except Exception as e:
                 logger.warning("Subtraction quality validation failed (non-fatal): %s", e)
 
-            # Zero the difference image background (sigma-clipped median) so it is ~0
-            # Exclude: NaN/sentinel pixels, the universal subtraction mask, AND a
-            # circular exclusion zone around the target so that a bright transient
-            # (or imperfect-subtraction residuals) cannot bias the background median
-            # and cause the zeroing step to absorb real transient flux.
-            invalid = ~np.isfinite(diff_data) | (np.abs(diff_data) < 1.1e-20)
-            invalid = invalid | (universal_mask.astype(bool))
+            # Write the NaN-masked difference image back (no background zeroing —
+            # the subtraction backend's native output is preserved so photometry
+            # sees the true pixel values including any DC offset from the sky).
             try:
-                _tx = float(self.input_yaml.get("target_x_pix", np.nan))
-                _ty = float(self.input_yaml.get("target_y_pix", np.nan))
-                _fwhm_excl = float(self.input_yaml.get("fwhm", science_fwhm))
-                _excl_r = max(3.0 * _fwhm_excl, 15.0)
-                if np.isfinite(_tx) and np.isfinite(_ty):
-                    _ny, _nx = diff_data.shape
-                    _yy, _xx = np.ogrid[:_ny, :_nx]
-                    _target_mask = ((_xx - _tx) ** 2 + (_yy - _ty) ** 2) <= _excl_r ** 2
-                    invalid = invalid | _target_mask
-                    logger.info(
-                        "Diff background zeroing: excluding %.1f-px radius around target (%.1f, %.1f).",
-                        _excl_r, _tx, _ty,
-                    )
-            except Exception as _exc:
-                logger.debug("Could not build target exclusion mask for diff zeroing: %s", _exc)
-            if not invalid.all():
-                _, diff_median, _ = sigma_clipped_stats(
-                    diff_data, mask=invalid, sigma=3, maxiters=5
-                )
-                diff_data = diff_data - float(diff_median)
-                # Defensive: keep no-data regions as NaN after any shifts.
-                try:
-                    if np.any(combined_nan_mask) and diff_data.shape == combined_nan_mask.shape:
-                        diff_data = np.asarray(diff_data, dtype=float)
-                        diff_data[combined_nan_mask] = np.nan
-                except Exception:
-                    pass
-                write_fits(differenceFpath, diff_data, diff_header)
-                logger.info(
-                    "Difference image background zeroed (subtracted median %.4g).",
-                    float(diff_median),
-                )
+                if np.any(combined_nan_mask) and diff_data.shape == combined_nan_mask.shape:
+                    diff_data = np.asarray(diff_data, dtype=float)
+                    diff_data[combined_nan_mask] = np.nan
+            except Exception:
+                pass
+            write_fits(differenceFpath, diff_data, diff_header)
 
             elapsed = time.time() - t0
             logger.info("Image subtraction completed in %.1f s", elapsed)
@@ -6039,12 +6214,6 @@ class Templates:
         """Attempt ZOGY subtraction; return next method to try on failure."""
         logger.info("Starting ZOGY subtraction...")
         try:
-            if not _HAS_PYZOGY or run_subtraction is None:
-                raise RuntimeError(
-                    "ZOGY subtraction requested but PyZOGY is not installed. "
-                    "Install the optional dependency that provides PyZOGY, or switch "
-                    "template_subtraction.method to 'sfft' or 'hotpants'."
-                )
             if not science_psf or not template_psf:
                 raise ValueError("PSF models required for ZOGY are missing")
             science_data = np.asarray(fits.getdata(scienceFpath), dtype=float)
@@ -6055,43 +6224,393 @@ class Templates:
                 raise ValueError(
                     f"ZOGY requires same image shapes: science {science_data.shape} vs reference {reference_data.shape}"
                 )
-            diff = run_subtraction(
-                science_image=science_data,
-                reference_image=reference_data,
-                science_psf=science_psf_data,
-                reference_psf=reference_psf_data,
-                science_saturation=float(science_saturate),
-                reference_saturation=float(template_saturate),
-                max_iterations=10,
-                use_pixels=False,
-                size_cut=True,
-                show=False,
-                normalization="science",
+
+            # -----------------------------------------------------------------
+            # Download pmvreeswijk/ZOGY from GitHub for reference/config, but
+            # run the ZOGY math via the self-contained _zogy_subtract() which
+            # uses only numpy FFTs (no pyfftw/lmfit/sip_tpv/healpy deps).
+            # -----------------------------------------------------------------
+            wdir = self.input_yaml.get("wdir", ".")
+            ts_cfg = self.input_yaml.get("template_subtraction", {})
+            zogy_update = ts_cfg.get("zogy_update", False)
+
+            if download_zogy is not None:
+                logger.info(
+                    "Ensuring pmvreeswijk/ZOGY is available in %s/ZOGY/ ...", wdir
+                )
+                download_zogy(wdir, update=zogy_update)
+
+            # -----------------------------------------------------------------
+            # Sky subtraction: ZOGY assumes background-subtracted images
+            # (Zackay et al. 2016, Eq. 1 requires N and R to be pure source
+            # flux with no DC offset).  Without sky subtraction, the constant
+            # background creates a coherent Fourier component at zero
+            # frequency that contaminates the difference image.
+            # -----------------------------------------------------------------
+            from astropy.stats import sigma_clipped_stats as _scs
+
+            _zogy_sky_subtract = _as_bool(
+                ts_cfg.get("sky_subtract", ts_cfg.get("zogy_sky_subtract", True)), True
             )
-            diff_image = diff[0] if isinstance(diff, (tuple, list)) else diff
+            if _zogy_sky_subtract:
+                for _label, _data in [("science", science_data), ("reference", reference_data)]:
+                    _finite = np.isfinite(_data)
+                    if _finite.sum() > 100:
+                        _, _sky, _ = _scs(_data[_finite], sigma=3, maxiters=5)
+                        if np.isfinite(_sky) and abs(_sky) > 1e-10:
+                            if _label == "science":
+                                science_data = science_data - _sky
+                            else:
+                                reference_data = reference_data - _sky
+                            logger.info(
+                                "ZOGY: %s sky-subtracted (median %.4g removed).",
+                                _label, float(_sky),
+                            )
+
+            # Robust noise estimation using sigma-clipped stats
+            _sci_finite = science_data[np.isfinite(science_data)]
+            _ref_finite = reference_data[np.isfinite(reference_data)]
+            _, _, _sn = _scs(_sci_finite, sigma=3, maxiters=5) if _sci_finite.size > 100 else (0, 0, float(np.std(_sci_finite)) if _sci_finite.size > 0 else 1.0)
+            _, _, _sr = _scs(_ref_finite, sigma=3, maxiters=5) if _ref_finite.size > 100 else (0, 0, float(np.std(_ref_finite)) if _ref_finite.size > 0 else 1.0)
+            _sn = float(_sn) if _sn and _sn > 0 else 1.0
+            _sr = float(_sr) if _sr and _sr > 0 else 1.0
+
+            # -----------------------------------------------------------------
+            # Flux-scale matching: ZOGY requires both images in the same flux
+            # units (fn = fr).  When exposure times differ (e.g. 330s sci vs
+            # 62s ref), the raw pixel values differ by the exposure-time ratio
+            # (~5.3x) plus transparency/airmass differences (~6.6x total).
+            # Without scaling, sources don't cancel in the difference image.
+            # Scale the template to match the science image using the median
+            # ratio of bright source pixels, falling back to EXPTIME ratio.
+            # -----------------------------------------------------------------
+            _both_finite = np.isfinite(science_data) & np.isfinite(reference_data)
+            _bright_mask = _both_finite & (science_data > 5 * _sn) & (reference_data > 5 * _sr)
+            if _bright_mask.sum() > 50:
+                _flux_ratios = science_data[_bright_mask] / reference_data[_bright_mask]
+                _flux_scale = float(np.median(_flux_ratios))
+                _valid = np.abs(_flux_ratios - _flux_scale) < 0.3 * _flux_scale
+                if _valid.sum() > 20:
+                    _flux_scale = float(np.median(_flux_ratios[_valid]))
+            else:
+                _sci_exptime = float(scienceHeader.get("EXPTIME", 1.0))
+                _ref_hdr = fits.getheader(templateFpath)
+                _ref_exptime = float(_ref_hdr.get("EXPTIME", 1.0))
+                _flux_scale = _sci_exptime / _ref_exptime if _ref_exptime > 0 else 1.0
+
+            logger.info(
+                "ZOGY flux scale: %.4g (template -> science, bright pixels=%d)",
+                _flux_scale, int(_bright_mask.sum()),
+            )
+
+            # Scale template data and noise to match science flux units
+            reference_data = reference_data * _flux_scale
+            _sr = _sr * _flux_scale
+
+            # -----------------------------------------------------------------
+            # Per-pixel noise maps (optional): compute local background RMS
+            # maps to capture spatially varying noise (e.g. near chip gaps,
+            # bright galaxy backgrounds).  When disabled or too slow, fall
+            # back to scalar noise (original behaviour).
+            # -----------------------------------------------------------------
+            _sn_map = None
+            _sr_map = None
+            _use_noise_maps = _as_bool(
+                ts_cfg.get("zogy_per_pixel_noise", False), False
+            )
+            if _use_noise_maps:
+                try:
+                    def _local_noise_map(data, scalar_noise, box_size=64):
+                        """Estimate per-pixel noise via local sigma-clipped std
+                        on a coarse grid, then bilinear upsample."""
+                        h, w = data.shape
+                        # Coarse grid: local std in box_size tiles
+                        ny = max(1, h // box_size)
+                        nx = max(1, w // box_size)
+                        _noise_grid = np.full((ny, nx), scalar_noise)
+                        for iy in range(ny):
+                            y0 = iy * box_size
+                            y1 = min(y0 + box_size, h)
+                            for ix in range(nx):
+                                x0 = ix * box_size
+                                x1 = min(x0 + box_size, w)
+                                _tile = data[y0:y1, x0:x1]
+                                _tile_finite = _tile[np.isfinite(_tile)]
+                                if _tile_finite.size > 50:
+                                    _, _, _tile_std = _scs(
+                                        _tile_finite, sigma=3, maxiters=3
+                                    )
+                                    if _tile_std and _tile_std > 0:
+                                        _noise_grid[iy, ix] = float(_tile_std)
+                        # Bilinear upsample to full image size
+                        from scipy.ndimage import zoom
+                        _zoom_y = h / ny
+                        _zoom_x = w / nx
+                        _noise_map = zoom(_noise_grid, (_zoom_y, _zoom_x), order=1)
+                        # Crop/pad to exact shape
+                        if _noise_map.shape[0] > h:
+                            _noise_map = _noise_map[:h]
+                        if _noise_map.shape[1] > w:
+                            _noise_map = _noise_map[:, :w]
+                        if _noise_map.shape[0] < h or _noise_map.shape[1] < w:
+                            _pad = np.full((h, w), scalar_noise)
+                            _pad[:_noise_map.shape[0], :_noise_map.shape[1]] = _noise_map
+                            _noise_map = _pad
+                        return _noise_map
+
+                    _noise_box = int(ts_cfg.get("zogy_noise_map_box_size", 64))
+                    _sn_map = _local_noise_map(science_data, _sn, _noise_box)
+                    _sr_map = _local_noise_map(reference_data, _sr, _noise_box)
+                    logger.info(
+                        "ZOGY: computed per-pixel noise maps (box=%d px, "
+                        "sci range=[%.4g, %.4g], ref range=[%.4g, %.4g]).",
+                        _noise_box,
+                        float(np.nanmin(_sn_map)), float(np.nanmax(_sn_map)),
+                        float(np.nanmin(_sr_map)), float(np.nanmax(_sr_map)),
+                    )
+                except Exception as _e:
+                    logger.info(
+                        "ZOGY: per-pixel noise map computation failed (%s); "
+                        "using scalar noise.", _e,
+                    )
+                    _sn_map = None
+                    _sr_map = None
+
+            # -----------------------------------------------------------------
+            # PSF normalization: ensure PSFs sum to 1 before padding.
+            # EPSFBuilder normalizes to unit sum, but the saved FITS may have
+            # been re-scaled or truncated.  Log the sum for diagnostics.
+            # -----------------------------------------------------------------
+            _pn_sum = float(np.nansum(science_psf_data))
+            _pr_sum = float(np.nansum(reference_psf_data))
+            if _pn_sum > 0 and abs(_pn_sum - 1.0) > 0.01:
+                logger.info(
+                    "ZOGY: science PSF sum=%.4f (renormalizing to 1.0).", _pn_sum
+                )
+                science_psf_data = science_psf_data / _pn_sum
+            if _pr_sum > 0 and abs(_pr_sum - 1.0) > 0.01:
+                logger.info(
+                    "ZOGY: reference PSF sum=%.4f (renormalizing to 1.0).", _pr_sum
+                )
+                reference_psf_data = reference_psf_data / _pr_sum
+
+            # Pad PSFs to the image shape (ZOGY requires same-shape FFTs)
+            _psf_sci = _pad_psf_to_image(science_psf_data, science_data.shape)
+            _psf_ref = _pad_psf_to_image(reference_psf_data, reference_data.shape)
+
+            # -----------------------------------------------------------------
+            # NaN handling: replace NaNs with local median instead of zero.
+            # Zero-filling NaN regions creates artificial step functions at
+            # NaN boundaries that produce FFT ringing artifacts in the
+            # difference image.  Median-filling provides a smoother transition.
+            # MUST come before pre-convolution so _sci_clean/_ref_clean exist.
+            # -----------------------------------------------------------------
+            _nan_mask = np.isfinite(science_data) & np.isfinite(reference_data)
+            _nan_regions = ~_nan_mask
+
+            if _nan_regions.any():
+                _fill_method = str(ts_cfg.get("zogy_nan_fill", "median"))
+                if _fill_method == "median":
+                    _sci_med = float(
+                        np.nanmedian(science_data[np.isfinite(science_data)])
+                    )
+                    _ref_med = float(
+                        np.nanmedian(reference_data[np.isfinite(reference_data)])
+                    )
+                    _sci_clean = np.where(
+                        np.isfinite(science_data), science_data, _sci_med
+                    )
+                    _ref_clean = np.where(
+                        np.isfinite(reference_data), reference_data, _ref_med
+                    )
+                    logger.info(
+                        "ZOGY: filled %d NaN pixels with median (sci=%.4g, ref=%.4g).",
+                        int(_nan_regions.sum()), _sci_med, _ref_med,
+                    )
+                else:
+                    _sci_clean = np.nan_to_num(science_data, nan=0.0)
+                    _ref_clean = np.nan_to_num(reference_data, nan=0.0)
+                    logger.info(
+                        "ZOGY: filled %d NaN pixels with zero.",
+                        int(_nan_regions.sum()),
+                    )
+            else:
+                _sci_clean = science_data.copy()
+                _ref_clean = reference_data.copy()
+
+            # -----------------------------------------------------------------
+            # Pre-convolution: convolve one image to match the other's PSF
+            # so the ZOGY difference image has a known, single PSF.
+            #
+            # By default (forceconv=REF), convolve the reference to match
+            # the science PSF.  The difference image then has the science PSF,
+            # so the science ePSF model can be used directly for photometry
+            # without any PSF mismatch correction.  This matches the SFFT
+            # forceconv=REF convention (Bramich 2008, Hu et al. 2022).
+            #
+            # The convolution kernel in Fourier space is:
+            #   K_hat = Pn_hat / Pr_hat  (transforms Pr -> Pn)
+            # To avoid deconvolution noise when the reference PSF is broader
+            # (high-frequency zeros in Pr_hat), we use Wiener-like
+            # regularization: K_hat = Pn_hat * conj(Pr_hat) / (|Pr_hat|^2 + eps)
+            # -----------------------------------------------------------------
+            _zogy_forceconv = str(
+                ts_cfg.get("forceconv", ts_cfg.get("zogy_forceconv", "REF"))
+            ).strip().upper()
+            _zogy_convolved = None  # track which image was convolved
+
+            if _zogy_forceconv in ("REF", "SCI") and science_fwhm and template_fwhm:
+                try:
+                    _psf_target_hat = (
+                        np.fft.fft2(_psf_sci) if _zogy_forceconv == "REF"
+                        else np.fft.fft2(_psf_ref)
+                    )
+                    _psf_source_hat = (
+                        np.fft.fft2(_psf_ref) if _zogy_forceconv == "REF"
+                        else np.fft.fft2(_psf_sci)
+                    )
+                    _psf_source_abs2 = np.abs(_psf_source_hat) ** 2
+                    # Wiener regularization: epsilon relative to peak power.
+                    # 1e-2 (not 1e-6): a stronger floor prevents high-frequency
+                    # noise amplification in the convolution kernel.  When the
+                    # source PSF is broader (typical: ref has worse seeing),
+                    # the kernel deconvolves it; weak regularization lets PSF
+                    # estimation noise blow up at high frequencies, creating
+                    # correlated noise patterns in the convolved image.
+                    _eps_wiener = 1e-2 * float(np.max(_psf_source_abs2))
+                    _kernel_hat = (
+                        _psf_target_hat * np.conj(_psf_source_hat)
+                        / (_psf_source_abs2 + _eps_wiener)
+                    )
+                    _conv_kernel = np.real(np.fft.ifft2(_kernel_hat))
+                    # Normalize kernel to unit sum (flux conserving)
+                    _ck_sum = float(np.sum(_conv_kernel))
+                    if abs(_ck_sum) > 1e-30:
+                        _conv_kernel = _conv_kernel / _ck_sum
+
+                    if _zogy_forceconv == "REF":
+                        # Convolve reference to match science PSF
+                        _ref_clean_conv = np.real(
+                            np.fft.ifft2(
+                                np.fft.fft2(_ref_clean) * np.fft.fft2(_conv_kernel)
+                            )
+                        )
+                        _ref_clean = _ref_clean_conv
+                        # Now both PSFs are the science PSF
+                        _psf_ref = _psf_sci.copy()
+                        _zogy_convolved = "REF"
+                        logger.info(
+                            "ZOGY: convolved reference to science PSF "
+                            "(FWHM %.2f -> %.2f px, Wiener eps=%.2g). "
+                            "Difference image will have science PSF.",
+                            float(template_fwhm), float(science_fwhm), _eps_wiener,
+                        )
+                    else:
+                        # Convolve science to match reference PSF
+                        _sci_clean_conv = np.real(
+                            np.fft.ifft2(
+                                np.fft.fft2(_sci_clean) * np.fft.fft2(_conv_kernel)
+                            )
+                        )
+                        _sci_clean = _sci_clean_conv
+                        _psf_sci = _psf_ref.copy()
+                        _zogy_convolved = "SCI"
+                        logger.info(
+                            "ZOGY: convolved science to reference PSF "
+                            "(FWHM %.2f -> %.2f px, Wiener eps=%.2g). "
+                            "Difference image will have reference PSF.",
+                            float(science_fwhm), float(template_fwhm), _eps_wiener,
+                        )
+                except Exception as _conv_e:
+                    logger.info(
+                        "ZOGY: pre-convolution failed (%s); using standard "
+                        "ZOGY (geometric-mean PSF).", _conv_e,
+                    )
+                    _zogy_convolved = None
+            elif _zogy_forceconv in ("REF", "SCI"):
+                logger.info(
+                    "ZOGY: pre-convolution skipped (missing FWHM values); "
+                    "using standard ZOGY (geometric-mean PSF)."
+                )
+
+            logger.info(
+                "Running ZOGY subtraction (sr=%.4g, sn=%.4g, flux_scale=%.4g, "
+                "noise_maps=%s, sky_sub=%s)...",
+                _sr, _sn, _flux_scale,
+                "yes" if _sn_map is not None else "no",
+                "yes" if _zogy_sky_subtract else "no",
+            )
+            _D, _S, _Scorr, _P_D = _zogy_subtract(
+                _sci_clean, _ref_clean, _psf_sci, _psf_ref, _sn, _sr,
+                sn_map=_sn_map, sr_map=_sr_map, nan_mask=_nan_regions,
+            )
+            diff_image = _D
+            # Add ZOGY metadata to the header BEFORE writing so it survives
+            # the subsequent background-zeroing rewrite in subtract().
+            # When pre-convolution was applied (CONVD=REF or SCI), the
+            # difference image has that image's PSF, not the geometric mean.
+            _zogy_hdr = scienceHeader.copy()
+            _zogy_hdr["FORCECON"] = "ZOGY"
+            _zogy_hdr["FWHM_SCI"] = float(science_fwhm) if science_fwhm else 0.0
+            _zogy_hdr["FWHM_REF"] = float(template_fwhm) if template_fwhm else 0.0
+            if _zogy_convolved == "REF":
+                # Reference was convolved to science PSF -> diff has science PSF
+                _zogy_hdr["CONVD"] = "REF"
+                _zogy_hdr["FWHM"] = float(science_fwhm) if science_fwhm else 0.0
+                _zogy_hdr["DIFFFWHM"] = float(science_fwhm) if science_fwhm else 0.0
+            elif _zogy_convolved == "SCI":
+                # Science was convolved to reference PSF -> diff has reference PSF
+                _zogy_hdr["CONVD"] = "SCI"
+                _zogy_hdr["FWHM"] = float(template_fwhm) if template_fwhm else 0.0
+                _zogy_hdr["DIFFFWHM"] = float(template_fwhm) if template_fwhm else 0.0
+            else:
+                # Standard ZOGY: geometric mean PSF
+                _zogy_hdr["CONVD"] = "ZOGY"
+                _zogy_fwhm = 0.0
+                if science_fwhm and template_fwhm:
+                    _zogy_fwhm = np.sqrt(float(science_fwhm) * float(template_fwhm))
+                    _zogy_hdr["FWHM"] = _zogy_fwhm
+                    _zogy_hdr["DIFFFWHM"] = _zogy_fwhm
+
+                # Extract a centered PSF stamp from P_D and write to FITS
+                # so main.py can build an ImagePSF for photometry.
+                try:
+                    _pd = np.asarray(_P_D, dtype=float)
+                    _ny, _nx = _pd.shape
+                    # P_D from ifft2 has the PSF peak at [0,0] (FFT origin).
+                    # fftshift moves it to the center of the full array.
+                    _pd = np.fft.fftshift(_pd)
+                    # Stamp size: ~5x FWHM or 25px, whichever is larger
+                    _stamp_hw = max(int(np.ceil(5.0 * _zogy_fwhm)), 25) if _zogy_fwhm else 25
+                    _stamp_hw = min(_stamp_hw, _ny // 2, _nx // 2)
+                    _cy, _cx = _ny // 2, _nx // 2
+                    _psf_stamp = _pd[
+                        _cy - _stamp_hw: _cy + _stamp_hw + 1,
+                        _cx - _stamp_hw: _cx + _stamp_hw + 1,
+                    ]
+                    # Normalize to unit sum
+                    _ps_sum = float(np.nansum(_psf_stamp))
+                    if _ps_sum > 0:
+                        _psf_stamp = _psf_stamp / _ps_sum
+                    _diffpsf_path = os.path.join(
+                        os.path.dirname(str(differenceFpath)),
+                        f"diff_psf_{os.path.splitext(os.path.basename(str(differenceFpath)))[0]}.fits",
+                    )
+                    _psf_hdr = fits.Header()
+                    _psf_hdr["FWHM"] = _zogy_fwhm if _zogy_fwhm else 0.0
+                    _psf_hdr["ORIGIN"] = "ZOGY"
+                    write_fits(_diffpsf_path, _psf_stamp, _psf_hdr)
+                    _zogy_hdr["DIFFPSF"] = _diffpsf_path
+                    logger.info(
+                        "ZOGY: wrote difference-image PSF stamp (%dx%d px, FWHM=%.2f) to %s",
+                        _psf_stamp.shape[0], _psf_stamp.shape[1],
+                        float(_zogy_fwhm) if _zogy_fwhm else 0.0, _diffpsf_path,
+                    )
+                except Exception as _psf_e:
+                    logger.warning("ZOGY: failed to write diff PSF stamp: %s", _psf_e)
             write_fits(
-                str(differenceFpath), np.asarray(diff_image, dtype=float), scienceHeader
+                str(differenceFpath), np.asarray(diff_image, dtype=float), _zogy_hdr
             )
-            # Write headers so downstream code (ePSF consistency, flux scaling)
-            # knows the PSF situation.  ZOGY produces a difference image with
-            # the geometric mean PSF of science and reference, normalized to
-            # the science image.  Mark it as ZOGY so the ePSF block can handle
-            # it appropriately (or at least log a warning).
-            try:
-                with fits.open(differenceFpath, mode="update") as _hdul:
-                    _hdr = _hdul[0].header
-                    _hdr["FORCECON"] = "ZOGY"
-                    _hdr["CONVD"] = "ZOGY"
-                    _hdr["FWHM_SCI"] = float(science_fwhm) if science_fwhm else 0.0
-                    _hdr["FWHM_REF"] = float(template_fwhm) if template_fwhm else 0.0
-                    # ZOGY diff PSF FWHM ~ geometric mean of sci and ref FWHM
-                    if science_fwhm and template_fwhm:
-                        _zogy_fwhm = np.sqrt(float(science_fwhm) * float(template_fwhm))
-                        _hdr["FWHM"] = _zogy_fwhm
-                        _hdr["DIFFFWHM"] = _zogy_fwhm
-                    _hdul.flush()
-            except Exception as _ze:
-                logger.warning("Failed to write ZOGY headers to diff: %s", _ze)
             logger.info("ZOGY subtraction succeeded")
             return "done"
         except Exception as exc:
@@ -6164,16 +6683,17 @@ class Templates:
             # REF => DIFF = SCI - conv(REF): transients keep the science PSF.
             # SCI => DIFF = conv(SCI) - REF: difference has reference PSF.
             #
-            # Default is AUTO: convolve the SHARPER image to match the BROADER
-            # one (never deconvolve).  Per Hu et al. 2022 Section 6, convolving
-            # to match better seeing causes deconvolution noise amplification.
-            # When science is sharper (FWHM_sci < FWHM_ref), ForceConv=REF
-            # would deconvolve the reference -> noise amplification.
-            # AUTO selects SCI in that case (convolve science to match ref),
-            # and REF when science is broader (preserve science PSF).
+            # Default is REF (standard convention, Bramich 2008, Hu et al. 2022).
+            # AUTO is NOT recommended: it selects based on pre-SWarp header FWHMs,
+            # but SWarp LANCZOS3 resampling can flip PSF ordering (e.g., science
+            # was sharper pre-SWarp but broader post-SWarp), causing AUTO to
+            # deconvolve the wrong image (BUG 122).
             #
-            # Users can override with sfft_forceconv in YAML (REF/SCI/AUTO).
-            _fc_cfg = str(ts_sub.get("sfft_forceconv", "AUTO")).strip().upper()
+            # Users can override with forceconv in YAML (REF/SCI/AUTO).
+            # Backward compat: fall back to sfft_forceconv if forceconv is absent.
+            _fc_cfg = str(
+                ts_sub.get("forceconv", ts_sub.get("sfft_forceconv", "REF"))
+            ).strip().upper()
             if _fc_cfg in ("REF", "SCI", "AUTO"):
                 forceconv = _fc_cfg
                 logger.info(
@@ -6181,9 +6701,9 @@ class Templates:
                     forceconv, science_fwhm, template_fwhm,
                 )
             else:
-                forceconv = "AUTO"
+                forceconv = "REF"
                 logger.warning(
-                    "Unknown sfft_forceconv=%r; defaulting to AUTO.",
+                    "Unknown forceconv=%r; defaulting to REF.",
                     _fc_cfg,
                 )
 
@@ -6192,8 +6712,8 @@ class Templates:
             allow_bg_override = _as_bool(
                 ts_sub.get("sfft_allow_crowded_bg_order_override", False), False
             )
-            # Star extension iterations: allow user override for better deblending
-            star_ext_iter = ts_sub.get("sfft_star_ext_iter", 2)
+            # Star extension iterations: None = use SFFT defaults (4 for sparse, 2 for crowded)
+            star_ext_iter = ts_sub.get("sfft_star_ext_iter", None)
             # Allow user to control photometric scaling behavior.
             # ConstPhotRatio=False fits flux scaling polynomial (spatially-varying, like HOTPANTS).
             # ConstPhotRatio=True forces a single global flux scale, which can cause oversubtraction
@@ -6365,7 +6885,7 @@ class Templates:
                     cmd_local += ["-detect_thresh", str(float(detect_thresh))]
 
                 # Robust SFFT source rejection controls.
-                only_flags_cfg = ts_sub.get("sfft_only_flags", [0, 1, 2])
+                only_flags_cfg = ts_sub.get("sfft_only_flags", [0, 1, 2, 3, 16, 17, 18, 19])
                 if only_flags_cfg is None:
                     cmd_local += ["-only_flags", "none"]
                 elif isinstance(only_flags_cfg, (list, tuple)):
@@ -6397,9 +6917,9 @@ class Templates:
                 # New SFFT v1.5.0+ features (enabled by default)
                 if ts_sub.get("sfft_use_bspline_kernel", False):
                     cmd_local += ["-use_bspline_kernel", "true"]
-                if ts_sub.get("sfft_decorrelate_noise", True):
+                if ts_sub.get("sfft_decorrelate_noise", False):
                     cmd_local += ["-decorrelate_noise", "true"]
-                if ts_sub.get("sfft_save_decorrelated", True):
+                if ts_sub.get("sfft_save_decorrelated", False):
                     cmd_local += ["-save_decorrelated", "true"]
 
                 # Variable star rejection: enable flags must be passed alongside
@@ -6463,8 +6983,16 @@ class Templates:
             ):
                 sfft_env[_k] = "1"
 
+            # SFFT's internal MeLOn wrapper calls `sex` (SExtractor) via PATH.
+            # The esoreflex SExtractor (v2.5.0) lacks GAIN_KEY support required
+            # by SFFT. Prepend the conda env bin dir (containing sex v2.28.2)
+            # so SFFT finds the correct SExtractor.
+            _py_bin = os.path.dirname(sys.executable)
+            if _py_bin and os.path.isfile(os.path.join(_py_bin, "sex")):
+                sfft_env["PATH"] = _py_bin + os.pathsep + sfft_env.get("PATH", "")
+
             cmd = _build_sfft_cmd(current_excluded, current_matching_sources, template_work_fpath, outputFpath)
-            sfft_timeout = float(ts_sub.get("sfft_timeout", 300))
+            sfft_timeout = float(ts_sub.get("sfft_timeout", 600))
             with open(log_path, "w") as lf:
                 subprocess.run(
                     cmd, check=True, text=True, stdout=lf, stderr=lf, env=sfft_env,
@@ -6741,14 +7269,12 @@ class Templates:
                         float(science_fwhm), float(template_fwhm),
                     )
 
-            # Kernel sizing: prefer scale (pipeline source-cutout half-size),
-            # fall back to FWHM-based sizing if scale not provided.
-            # scale is already half the cutout box size, so it directly gives the kernel half-width.
+            # Kernel sizing: scale is the physics-based kernel half-width
+            # (sfft_kernel_hw), computed from FWHM via quadrature formula in
+            # subtract(). Both SFFT and HOTPANTS now use the same kernel sizing.
             # r = kernel half-width for HOTPANTS convolution kernel.
             # rss = substamp half-width (typically 3x r).
-            # Clamp scale-derived kernel half-width to reasonable range to avoid
-            # impractically large kernels when scale is very large (sparse fields)
-            MAX_KERNEL_HALF_WIDTH_FROM_SCALE = 50
+            MAX_KERNEL_HALF_WIDTH = 50
             logger.info(
                 "HOTPANTS kernel sizing: scale=%s, science_fwhm=%.2f, template_fwhm=%.2f",
                 scale,
@@ -6756,12 +7282,11 @@ class Templates:
                 float(template_fwhm),
             )
             if scale is not None and int(scale) > 0:
-                r = ensure_odd(max(min(int(scale), MAX_KERNEL_HALF_WIDTH_FROM_SCALE), 5))
+                r = ensure_odd(max(min(int(scale), MAX_KERNEL_HALF_WIDTH), 5))
                 logger.info(
-                    "HOTPANTS kernel half-width (-r) set from scale: %d px (scale=%d, clamped to max %d)",
+                    "HOTPANTS kernel half-width (-r) set from physics-based sizing: %d px (clamped to max %d)",
                     r,
-                    int(scale),
-                    MAX_KERNEL_HALF_WIDTH_FROM_SCALE,
+                    MAX_KERNEL_HALF_WIDTH,
                 )
             else:
                 hotpants_fwhm = ensure_odd(

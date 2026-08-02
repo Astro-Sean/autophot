@@ -393,8 +393,10 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-only_flags",
         type=str,
-        default="0,1,2",
-        help="Comma-separated SExtractor FLAGS values to keep (e.g. '0,1'); use 'none' to disable.",
+        default="0,1,2,3,16,17,18,19",
+        help="Comma-separated SExtractor FLAGS values to keep (e.g. '0,1'); use 'none' to disable. "
+             "Includes FLAGS=3 (blended) and FLAGS=16-19 (invalid pixels from NaN mask) which are "
+             "common in ZTF images and still have valid positions for kernel fitting.",
     )
     parser.add_argument(
         "-cvrej_magd_thresh",
@@ -417,7 +419,7 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-pac_ratio_thresh",
         type=float,
-        default=2.8,
+        default=4.0,
         help="SFFT post-anomaly-check ratio threshold.",
     )
     parser.add_argument(
@@ -441,14 +443,14 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-decorrelate_noise",
         type=str,
-        default="true",
-        help="Apply noise decorrelation to difference image (SFFT v1.5.0+). 'true' whitens correlated noise.",
+        default="false",
+        help="Apply noise decorrelation to difference image (SFFT v1.5.0+). 'true' whitens correlated noise. Disabled by default.",
     )
     parser.add_argument(
         "-save_decorrelated",
         type=str,
-        default="true",
-        help="Save decorrelated difference image separately as *_decorr.fits. 'true' saves both versions.",
+        default="false",
+        help="Save decorrelated difference image separately as *_decorr.fits. 'true' saves both versions. Disabled by default.",
     )
     parser.add_argument(
         "-kernel_hw_min",
@@ -940,10 +942,9 @@ def run_sfft() -> Optional[int]:
     # ForceConv: which image to convolve.
     # REF  => DIFF = SCI - conv(REF): transients keep the science PSF.
     # SCI  => DIFF = conv(SCI) - REF: difference has reference PSF.
-    # AUTO => SFFT chooses based on measured FWHMs.
-    # Per Hu et al. 2022 Section 6, convolving to match better seeing causes
-    # deconvolution noise amplification.  templates.py now defaults to "auto"
-    # which selects REF when science FWHM >= ref FWHM, SCI otherwise.
+    # AUTO => SFFT chooses based on measured FWHMs (NOT recommended: SWarp
+    #         resampling can flip PSF ordering, see BUG 122).
+    # Default is REF (standard convention, Bramich 2008, Hu et al. 2022).
     _fc_arg = str(getattr(args, "forceconv", "REF")).upper().strip()
     if _fc_arg in ("REF", "SCI", "AUTO"):
         ForceConv = _fc_arg
@@ -1141,7 +1142,7 @@ def run_sfft() -> Optional[int]:
     try:
         matched_sources = pd.DataFrame()
         fits_solution = (
-            os.path.join(out_dir, "sfft_solution.fits") if FITS_DIFF else None
+            os.path.join(out_dir, "SFFT_Solution.fits") if FITS_DIFF else None
         )
         if args.crowded:
             # Crowded-field subtraction (ECP): no prior source list; uses SExtractor + masking.
@@ -1253,6 +1254,28 @@ def run_sfft() -> Optional[int]:
                     matched_sources.to_csv(out_csv, index=False, float_format="%.6f")
         else:
             log_info("Running sparse-field subtraction (ESP).")
+
+            # Adaptive Hough matching parameters: with few prior sources,
+            # strict Hough thresholds (MINFR=0.3, PeakClip=0.4) can reject
+            # all matches because a single missed source drops the match
+            # fraction below 30%.  Relax toward SFFT defaults (0.1, 0.7)
+            # when the prior pool is small.
+            _n_priors = len(matching_sources) if matching_sources is not None else 0
+            if _n_priors >= 30:
+                _hough_minfr = 0.3
+                _hough_peakclip = 0.4
+            elif _n_priors >= 15:
+                _hough_minfr = 0.2
+                _hough_peakclip = 0.5
+            else:
+                _hough_minfr = 0.1
+                _hough_peakclip = 0.7
+            if _n_priors > 0:
+                log_info(
+                    f"Hough matching: MINFR={_hough_minfr:.2f} PeakClip={_hough_peakclip:.2f} "
+                    f"(adapted for {_n_priors} prior sources)"
+                )
+
             try:
                 # First attempt: honour prior matching/ban lists from the pipeline.
                 result = Easy_SparsePacket.ESP(
@@ -1288,8 +1311,8 @@ def run_sfft() -> Optional[int]:
                     # used for the kernel fit. Misaligned sources produce
                     # off-center stamps and dipole residuals.
                     MatchTolFactor=float(getattr(args, "match_tol_factor", 2.0)),
-                    Hough_MINFR=0.3,
-                    Hough_PeakClip=0.4,
+                    Hough_MINFR=_hough_minfr,
+                    Hough_PeakClip=_hough_peakclip,
                     BeltHW=0.2,
                     ANALYSIS_THRESH=DETECT_THRESH,
                     COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
@@ -1307,6 +1330,9 @@ def run_sfft() -> Optional[int]:
                     NUM_CPU_THREADS_4SUBTRACT=NUM_CPU_THREADS_4SUBTRACT,
                 )
             except (np.linalg.LinAlgError, AssertionError, ValueError, RuntimeError) as e:
+                log_info(
+                    f"SFFT ESP failed with {type(e).__name__} when using vetted priors: {e}"
+                )
                 if not ALLOW_UNVETTED_SOURCE_RETRY:
                     raise RuntimeError(
                         "SFFT failed using vetted point-source priors; refusing "
@@ -1347,9 +1373,9 @@ def run_sfft() -> Optional[int]:
                     XY_PriorSelect=None,
                     XY_PriorBan=masked_sources,
                     MatchTol=None,
-                    MatchTolFactor=float(getattr(args, "match_tol_factor", 0.5)),
-                    Hough_MINFR=0.3,
-                    Hough_PeakClip=0.4,
+                    MatchTolFactor=float(getattr(args, "match_tol_factor", 2.0)),
+                    Hough_MINFR=0.1,
+                    Hough_PeakClip=0.7,
                     BeltHW=0.2,
                     ANALYSIS_THRESH=DETECT_THRESH,
                     COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
@@ -2042,10 +2068,10 @@ def run_sfft() -> Optional[int]:
                     ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
                     ax.legend(loc="best", frameon=True, fontsize=9, framealpha=0.8)
                     ax.set_title(f"SFFT source matching: {n_input} input -> {n_final} final sources", fontsize=10)
-                    png_path = os.path.join(out_dir, f"VarCheck_{out_base}.png")
+                    png_path = os.path.join(out_dir, f"Var_Check_{out_base}.png")
                     try:
                         plt.savefig(
-                            png_path, bbox_inches="tight", dpi=150
+                            png_path, bbox_inches="tight", dpi=150, facecolor="white"
                         )
                     except Exception:
                         pass
