@@ -239,6 +239,10 @@ class Find_FWHM:
         cleaned_df = coordinates_df[coordinates_df["is_isolated"]].copy()
 
         if plot:
+            dir_path = os.path.dirname(os.path.realpath(__file__))
+            _style = os.path.join(dir_path, "autophot.mplstyle")
+            if os.path.exists(_style):
+                plt.style.use(_style)
             zscale = ZScaleInterval()
             norm = ImageNormalize(image, interval=zscale)
             fig, ax = plt.subplots(figsize=set_size(540, aspect=1.3))
@@ -389,9 +393,11 @@ class Find_FWHM:
             # --- Convert fluxes -> magnitudes ---
             flux = df["flux_AP"].values.astype(float)
             peak = df["maxPixel"].values.astype(float)
-            # Add safety check for log10
-            flux_safe = np.maximum(flux, 1e-10)
-            peak_safe = np.maximum(peak, 1e-10)
+            # NaN for non-positive fluxes (same convention as functions.mag)
+            flux_safe = flux.astype(float).copy()
+            flux_safe[flux_safe <= 0] = np.nan
+            peak_safe = peak.astype(float).copy()
+            peak_safe[peak_safe <= 0] = np.nan
             df["m_inst"] = -2.5 * np.log10(flux_safe)
             df["m_peak"] = -2.5 * np.log10(peak_safe)
 
@@ -958,7 +964,10 @@ class Find_FWHM:
                 return float(fwhm_global), df.reset_index(drop=True), scale_out
 
             # --- Automatic detection and FWHM estimation ---
-            thr_img = detect_threshold(smooth, nsigma=5.0, mask=mask)
+            # Use 3.0 sigma to match SExtractor's default detection threshold.
+            # The old 5.0 sigma was too high, producing far fewer sources than
+            # SExtractor and making the pythonic fallback unreliable.
+            thr_img = detect_threshold(smooth, nsigma=3.0, mask=mask)
             # photutils >=3.0 supports spatially varying 2D threshold arrays.
             # Use the full 2D threshold image for better detection near chip gaps/gradients.
             fwhm_fp = max(2.0, float(fwhm_initial))

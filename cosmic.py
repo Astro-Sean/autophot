@@ -157,6 +157,11 @@ class RemoveCosmicRays:
 
         from functions import set_size
 
+        dir_path = os.path.dirname(os.path.realpath(__file__))
+        _style = os.path.join(dir_path, "autophot.mplstyle")
+        if os.path.exists(_style):
+            plt.style.use(_style)
+
         fig, axes = plt.subplots(
             1, 2, figsize=set_size(540, aspect=0.65)
         )

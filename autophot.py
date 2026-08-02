@@ -842,6 +842,32 @@ def find_variable_sources(
     elif "MAIN_ID" not in df.columns:
         df["MAIN_ID"] = ""
 
+    # Replace generic SIMBAD type codes (e.g. "G", "AGN", "QSO") with
+    # IAU-style coordinate designations so plot labels are meaningful.
+    _generic_types = {"G", "AGN", "QSO", "BLL", "SyG", "LIN", "GiG", "SBG",
+                      "X", "HII", "PN", "Em*", "Be*"}
+    def _iau_name(ra_deg, dec_deg):
+        """Build an IAU-style designation JHHMMSS±DDMMSS from coordinates."""
+        from astropy.coordinates import SkyCoord as _SC
+        import astropy.units as _u
+        _c = _SC(ra=ra_deg * _u.deg, dec=dec_deg * _u.deg, frame="icrs")
+        _ra_hms = _c.ra.hms
+        _dec_dms = _c.dec.dms
+        _sign = "+" if _dec_dms.d >= 0 else "-"
+        return (f"J{int(_ra_hms.h):02d}{int(_ra_hms.m):02d}{int(_ra_hms.s):02d}"
+                f"{_sign}{abs(int(_dec_dms.d)):02d}{int(abs(_dec_dms.m)):02d}{int(abs(_dec_dms.s)):02d}")
+
+    if "MAIN_ID" in df.columns and "RA" in df.columns and "DEC" in df.columns:
+        for idx in df.index:
+            _mid = str(df.at[idx, "MAIN_ID"]).strip()
+            if _mid in _generic_types or _mid == "" or _mid.lower() == "nan":
+                try:
+                    df.at[idx, "MAIN_ID"] = _iau_name(
+                        float(df.at[idx, "RA"]), float(df.at[idx, "DEC"])
+                    )
+                except Exception:
+                    pass
+
     # result_df = df[available_cols].sort_values("separation_arcmin").reset_index(drop=True)
 
     result_df = df[available_cols].reset_index(drop=True)
@@ -2278,11 +2304,11 @@ class AutomatedPhotometry:
             # Concatenate per-image outputs into one light curve CSV
             reduced_loc = f"{default_input['fits_dir']}_{default_input['outdir_name']}"
             _log(log_step(f"Collect photometry: {reduced_loc}"))
-            output_loc = os.path.join(reduced_loc, "lightcurve_output.csv")
+            output_loc = os.path.join(reduced_loc, "LightCurve_Output.csv")
             concatenate_csv_files(
                 folder_path=reduced_loc,
                 output_filename=output_loc,
-                loc_file="OUTPUT_*.csv",
+                loc_file="Output_*.csv",
             )
             _log(
                 f"Photometry pipeline completed in {time.perf_counter() - t0:.3f} seconds."
@@ -2299,13 +2325,13 @@ class AutomatedPhotometry:
 
             # Concatenate existing per-image outputs into one light curve CSV
             _log(log_step(f"Collect photometry: {reduced_loc}"))
-            output_photometry = os.path.join(reduced_loc, "lightcurve_output.csv")
+            output_photometry = os.path.join(reduced_loc, "LightCurve_Output.csv")
 
             if os.path.exists(reduced_loc):
                 concatenate_csv_files(
                     folder_path=reduced_loc,
                     output_filename=output_photometry,
-                    loc_file="OUTPUT_*.csv",
+                    loc_file="Output_*.csv",
                 )
                 _log(f"Output light curve: {output_photometry}")
             else:

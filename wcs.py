@@ -49,6 +49,15 @@ except (ModuleNotFoundError, ImportError):
     def remove_wcs_from_header(header):
         raise RuntimeError("remove_wcs_from_header not available: functions module not found")
 
+
+def _resolve_sextractor_exe():
+    """Lazy resolver for SExtractor executable to avoid circular import."""
+    try:
+        from utils.run_sex import get_sextractor_executable
+        return get_sextractor_executable()
+    except (ModuleNotFoundError, ImportError):
+        return shutil.which("sex") or shutil.which("sextractor")
+
 # --- Configure Logging ---
 logging.basicConfig(
     level=logging.INFO,
@@ -1394,11 +1403,11 @@ class WCSSolver:
         logger.info(log_step("WCS: SCAMP"))
 
         scamp_exe = wcs_cfg.get("scamp_exe_loc") or shutil.which("scamp")
-        sex_exe = wcs_cfg.get("sextractor_exe_loc") or shutil.which("sex")
+        sex_exe = wcs_cfg.get("sextractor_exe_loc") or _resolve_sextractor_exe()
         if not scamp_exe and shutil.which("scamp") is None:
             logger.warning("SCAMP executable not found; cannot use SCAMP solver.")
             return np.nan
-        if not sex_exe and shutil.which("sex") is None:
+        if not sex_exe:
             logger.warning("SExtractor executable not found; cannot use SCAMP solver.")
             return np.nan
         scamp_exe = str(
@@ -1407,7 +1416,7 @@ class WCSSolver:
             else shutil.which("scamp")
         )
         sex_exe = str(
-            sex_exe if sex_exe and os.path.isfile(str(sex_exe)) else shutil.which("sex")
+            sex_exe if sex_exe and os.path.isfile(str(sex_exe)) else _resolve_sextractor_exe()
         )
 
         if not os.path.isfile(self.fpath):
@@ -1422,7 +1431,7 @@ class WCSSolver:
 
         dirname = os.path.dirname(self.fpath)
         base = os.path.splitext(os.path.basename(self.fpath))[0]
-        scamp_log = os.path.join(dirname, f"scamp_{base}.log")
+        scamp_log = os.path.join(dirname, f"SCAMP_{base}.log")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             param_file = os.path.join(temp_dir, "scamp.param")
@@ -2088,11 +2097,10 @@ class WCSSolver:
         dirname = os.path.dirname(self.fpath)
         base = os.path.splitext(os.path.basename(self.fpath))[0]
         wcs_file = os.path.join(dirname, "astrometry_temp.wcs.fits")
-        astrometry_log_fpath = os.path.join(dirname, f"astrometry_{base}.log")
+        astrometry_log_fpath = os.path.join(dirname, f"Astrometry_{base}.log")
         sextractor_exe = (
             wcs_cfg.get("sextractor_exe_loc")
-            or shutil.which("sex")
-            or shutil.which("sextractor")
+            or _resolve_sextractor_exe()
         )
         use_sextractor = sextractor_exe is not None
         # use_sextractor = False

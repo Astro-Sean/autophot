@@ -591,7 +591,7 @@ NNW
         self,
         image_path: str,
         catalog_path: str,
-        output_plot_path: str = "sextractor_sources.png",
+        output_plot_path: str = "SExtractor_Sources.png",
         cmap: str = "gray",
         figsize: Optional[tuple] = None,
         max_sources: int = 1000,
@@ -678,8 +678,8 @@ NNW
                     )
 
             plt.tight_layout()
-            plt.savefig(output_plot_path, dpi=150)
-            plt.close()
+            plt.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
+            plt.close(fig)
 
         except Exception as e:
             self.logger.error("Error plotting sources: %s", e)
@@ -2048,6 +2048,9 @@ NNW
             science_first_astrometry = bool(
                 isinstance(ts, dict) and ts.get("science_first_astrometry", False)
             )
+            # WCS config for SCAMP quad matching parameters
+            _sci_iy = getattr(self, "input_yaml", None) or {}
+            _sci_wcs_cfg = _sci_iy.get("wcs", {}) if isinstance(_sci_iy, dict) else {}
             if science_first_astrometry:
                 # SCAMP needs at least ~5 detections to match against GAIA.
                 # Skip the GAIA phase entirely for very sparse fields to save time
@@ -2100,7 +2103,10 @@ NNW
                             "DISTORT_DEGREES": _sci_feasible_degree,
                             "CROSSID_RADIUS": "5.0",
                             "POSITION_MAXERR": "1.0",
-                            "SN_THRESHOLDS": "3.0,100000.0",
+                            "SN_THRESHOLDS": _sci_wcs_cfg.get("scamp_sn_thresholds", "3.0,100000.0"),
+                            "MATCH_NMAX": int(_sci_wcs_cfg.get("scamp_match_nmax", 0) or 0),
+                            "PIXSCALE_MAXERR": float(_sci_wcs_cfg.get("scamp_pixscale_maxerr", 1.2) or 1.2),
+                            "POSANGLE_MAXERR": float(_sci_wcs_cfg.get("scamp_posangle_maxerr", 5.0) or 5.0),
                             "MATCH_RESOL": "0.0",
                             "ASTREF_WEIGHT": "1",
                             "VERBOSE_TYPE": "FULL"
@@ -2507,17 +2513,46 @@ NNW
                 2.0 * pix_scale,
                 0.5 * fwhm_ref_arcsec,
             )
-            # Adaptive SN threshold: lower minimum for sparse fields to retain
-            # faint sources that passed our SNR_WIN pre-filter.  SCAMP's
-            # SN_THRESHOLDS uses FLUX_AUTO/FLUXERR_AUTO which can differ from
-            # SNR_WIN (windowed), so we set it below our pre-filter threshold
-            # to avoid double-filtering. SCAMP weights each source by its
-            # positional uncertainty (ERRAWIN/ERRBWIN) regardless.
-            # Use a permissive SN threshold so SCAMP sees as many real
-            # detections as possible. SExtractor already filtered by detection
-            # significance; SCAMP's astrometric cross-match and robust fitting
-            # reject spurious/noisy sources better than a hard SNR cut.
-            sn_thresholds = "1.5,100000.0"
+            # SN_THRESHOLDS: 2nd value controls the high-SN sample used for
+            # quad formation.  For sparse fields, lower it so more sources
+            # participate in pattern matching.  SCAMP's robust fitting still
+            # rejects bad sources; the quad sample just needs enough points.
+            _sn_lo, _sn_hi = 1.5, 100000.0
+            _iy_wcs = getattr(self, "input_yaml", None) or {}
+            _wcs_cfg = _iy_wcs.get("wcs", {}) if isinstance(_iy_wcs, dict) else {}
+            _yaml_sn = _wcs_cfg.get("scamp_sn_thresholds")
+            if isinstance(_yaml_sn, str) and "," in _yaml_sn:
+                try:
+                    _parts = _yaml_sn.split(",")
+                    _sn_lo = float(_parts[0])
+                    _sn_hi = float(_parts[1])
+                except (ValueError, IndexError):
+                    pass
+            # Adaptive high-SN threshold for sparse fields: if <50 matched
+            # sources, lower the high-SN cut so more sources form quads.
+            # With ~50 sources at SN>5, SCAMP gets ~30-40 quad candidates.
+            # With <20 sources, even SN>3 may only give ~10 quads.
+            if is_sparse_field and _sn_hi > 50:
+                _sn_hi = 50.0 if _num_matched >= 30 else 20.0
+                self.logger.info(
+                    "Sparse field (%d matched): lowering SCAMP high-SN "
+                    "threshold to %.0f for quad formation",
+                    _num_matched, _sn_hi,
+                )
+            sn_thresholds = f"{_sn_lo},{_sn_hi}"
+            # MATCH_NMAX: limit detections for pattern matching.
+            # 0=auto (use all).  For very dense fields (>500 sources), cap
+            # at 500 to speed up quad matching without losing accuracy.
+            _match_nmax = int(_wcs_cfg.get("scamp_match_nmax", 0) or 0)
+            if _match_nmax == 0 and _num_matched > 500:
+                _match_nmax = 500
+                self.logger.info(
+                    "Dense field (%d matched): capping SCAMP MATCH_NMAX at %d",
+                    _num_matched, _match_nmax,
+                )
+            # PIXSCALE_MAXERR / POSANGLE_MAXERR: quad matching tolerances.
+            _pixscale_maxerr = float(_wcs_cfg.get("scamp_pixscale_maxerr", 1.2) or 1.2)
+            _posangle_maxerr = float(_wcs_cfg.get("scamp_posangle_maxerr", 5.0) or 5.0)
             # Adaptive DISTORT_DEGREES: must be high enough to model the
             # reference image's existing distortion (SIP/PV), because SCAMP's
             # .head file REPLACES the reference WCS.  If DISTORT_DEGREES is
@@ -2612,6 +2647,9 @@ NNW
                 "CROSSID_RADIUS": crossid_arcsec,
                 "POSITION_MAXERR": position_maxerr_arcsec,
                 "SN_THRESHOLDS": sn_thresholds,
+                "MATCH_NMAX": _match_nmax,
+                "PIXSCALE_MAXERR": _pixscale_maxerr,
+                "POSANGLE_MAXERR": _posangle_maxerr,
                 "MATCH_RESOL": "0.0",  # Auto-select best matching resolution
                 "ASTREF_WEIGHT": "1",  # Weight by magnitude (prioritize bright, well-measured)
                 "VERBOSE_TYPE": "FULL" if self.verbose_level >= 2 else "NORMAL",
@@ -2633,8 +2671,11 @@ NNW
             ext_note = " (extended)" if _use_extended else ""
             distort_label = max(1, distort_degrees)
             self.logger.info(
-                'SCAMP:\t\tcrossid=%.1f" maxerr=%.1f" distort=%d%s%s (ref SIP/PV order=%d, %d matched)',
+                'SCAMP:\t\tcrossid=%.1f" maxerr=%.1f" distort=%d%s%s '
+                'SN=[%s] nmax=%d pixscale=%.2f posangle=%.1f° '
+                '(ref SIP/PV order=%d, %d matched)',
                 crossid_arcsec, position_maxerr_arcsec, distort_label, sparse_note, ext_note,
+                sn_thresholds, _match_nmax, _pixscale_maxerr, _posangle_maxerr,
                 ref_distort_order, _num_matched,
             )
 
@@ -2751,11 +2792,17 @@ NNW
                     _retry_config["DISTORT_DEGREES"] = 1
                     _retry_config["CROSSID_RADIUS"] = max(float(crossid_arcsec), 5.0)
                     _retry_config["POSITION_MAXERR"] = max(float(position_maxerr_arcsec), 2.0)
+                    # Relax quad matching tolerances for retry
+                    _retry_config["PIXSCALE_MAXERR"] = max(_pixscale_maxerr * 1.5, 2.0)
+                    _retry_config["POSANGLE_MAXERR"] = max(_posangle_maxerr * 1.5, 10.0)
                     self.logger.warning(
                         "SCAMP failed. Retrying with DISTORT_DEGREES=1, "
-                        "CROSSID_RADIUS=%.1f\", POSITION_MAXERR=%.1f\".",
+                        "CROSSID_RADIUS=%.1f\", POSITION_MAXERR=%.1f\", "
+                        "PIXSCALE_MAXERR=%.2f, POSANGLE_MAXERR=%.1f.",
                         float(_retry_config["CROSSID_RADIUS"]),
                         float(_retry_config["POSITION_MAXERR"]),
+                        float(_retry_config["PIXSCALE_MAXERR"]),
+                        float(_retry_config["POSANGLE_MAXERR"]),
                     )
                     try:
                         scamp_result = self.run_scamp(
@@ -2892,7 +2939,7 @@ NNW
                     ref_image_path=str(ref_image_copy),
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
-                    output_plot_path=output_dir / f"matched_sources_{Path(sci_image_copy).stem}.png",
+                    output_plot_path=output_dir / f"Matched_Sources_{Path(sci_image_copy).stem}.png",
                     label_color="#FF0000",
                     label_fontsize=7,
                     circle_radius_sci=fwhm_sci_pix,
@@ -3708,6 +3755,7 @@ NNW
                             str(_sci_backup), str(_ref_backup), output_dir=output_dir
                         )
                         if _reproj_result and not _reproj_result.get("rejected") and _reproj_result.get("science_aligned"):
+                            _reproj_result["science_aligned"] = science_image
                             return _reproj_result
                         # Save reproject rejected result to persistent path
                         _reproj_rejected = None
@@ -3732,6 +3780,7 @@ NNW
                             str(_sci_backup), str(_ref_backup), output_dir
                         )
                         if _aa_result and not _aa_result.get("rejected") and _aa_result.get("science_aligned"):
+                            _aa_result["science_aligned"] = science_image
                             return _aa_result
                         # Save AstroAlign rejected result to persistent path
                         _aa_rejected = None
@@ -5795,6 +5844,10 @@ NNW
                         os.remove(_tmp)
                 except OSError:
                     pass
+            # Reproject does not modify the science image; fix the returned
+            # path to point at the original science_image, not the backup
+            # (which has just been deleted).
+            result["science_aligned"] = science_image
             return result
         self.logger.warning("Reproject failed. Falling back to AstroAlign.")
         # Use backups for AstroAlign so it reads the original template
@@ -5810,6 +5863,7 @@ NNW
             except OSError:
                 pass
         if aa_result is not None and not aa_result.get("rejected") and aa_result.get("science_aligned"):
+            aa_result["science_aligned"] = science_image
             return aa_result
         return None
 
@@ -5940,7 +5994,7 @@ NNW
                     ref_image_path=str(ref_image_copy),
                     sci_cat_path=sci_sex["catalog_path"],
                     ref_cat_path=ref_sex["catalog_path"],
-                    output_plot_path=science_aligned_dir / f"matched_sources_{Path(sci_image_copy).stem}.png",
+                    output_plot_path=science_aligned_dir / f"Matched_Sources_{Path(sci_image_copy).stem}.png",
                     label_color="#FF0000",
                     label_fontsize=10,
                     circle_radius_sci=fwhm_sci_pix,
@@ -7138,7 +7192,7 @@ NNW
         ref_image_path: str,
         sci_cat_path: str,
         ref_cat_path: str,
-        output_plot_path: str = "matched_sources_side_by_side.png",
+        output_plot_path: str = "Matched_Sources_Side_By_Side.png",
         label_color: str = "#FF0000",
         label_fontsize: int = 8,
         figsize: Optional[tuple] = None,
@@ -7542,7 +7596,7 @@ NNW
             # `constrained_layout=True` keeps colorbars and labels from
             # overlapping, so no additional tight_layout is needed.
             plt.savefig(output_plot_path, dpi=150, bbox_inches="tight", facecolor="white")
-            plt.close()
+            plt.close(fig)
             gc.collect()
         except Exception as e:
             import traceback

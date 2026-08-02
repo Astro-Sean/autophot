@@ -1565,7 +1565,7 @@ def plot_lightcurve(
     outname = f'LightCurve_{method}_{"single" if single_plot else "subplots"}.{format}'
     outpath = os.path.join(save_path, outname)
     save_kw = dict(dpi=dpi) if format.lower() != "pdf" else {}
-    plt.savefig(outpath, **save_kw, bbox_inches="tight")
+    plt.savefig(outpath, **save_kw, bbox_inches="tight", facecolor="white")
 
     if show:
         import matplotlib
@@ -1575,18 +1575,18 @@ def plot_lightcurve(
         matplotlib.use('QtAgg', force=True)
         plt.show()
     else:
-        plt.close("all")
+        plt.close(fig)
 
     det_file = None
     if return_detections and detections_list:
         valid_detections = [df for df in detections_list if not df.empty]
         if valid_detections:
-            det_file = os.path.join(save_path, f"detections_{base}_{method}.csv")
+            det_file = os.path.join(save_path, f"Detections_{base}_{method}.csv")
             pd.concat(valid_detections, ignore_index=True).to_csv(det_file, index=False, float_format="%.6f")
     if return_detections and nondetections_list:
         valid_nondetections = [df for df in nondetections_list if not df.empty]
         if valid_nondetections:
-            nondet_file = os.path.join(save_path, f"nondetections_{base}_{method}.csv")
+            nondet_file = os.path.join(save_path, f"Nondetections_{base}_{method}.csv")
             pd.concat(valid_nondetections, ignore_index=True).to_csv(
                 nondet_file, index=False, float_format="%.6f"
             )
@@ -1915,7 +1915,7 @@ def generate_photometry_table(
         out_phot.reset_index(drop=True, inplace=True)
 
     save_path = os.path.dirname(output_file)
-    fname = os.path.join(save_path, f"lightcurve_{method}.dat")
+    fname = os.path.join(save_path, f"LightCurve_{method}.dat")
     # Uniform numeric formatting; non-detections use NaN for Mag/Error (written as empty or "-")
     out_phot.to_csv(fname, index=False, float_format="%.3f", na_rep="-")
 
@@ -2108,7 +2108,7 @@ def generate_photometry_table(
             color_df = pd.DataFrame(color_rows)
             color_df.sort_values(["MJD", "Color"], inplace=True)
             color_table_path = os.path.join(
-                save_path, f"lightcurve_{method}_colors.dat"
+                save_path, f"LightCurve_{method}_Colors.dat"
             )
             color_df.to_csv(
                 color_table_path, index=False, float_format="%.3f", na_rep="-"
@@ -2142,11 +2142,11 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
         data = _normalize_photometry_columns(data)
         data = data.copy()
         data["is_detection"] = True
-        # If called with detections_*.csv and a matching nondetections_*.csv exists,
+        # If called with Detections_*.csv and a matching Nondetections_*.csv exists,
         # include those rows so folder split is fully populated.
         base_name = os.path.basename(output_file)
-        if base_name.startswith("detections_"):
-            nondet_name = "nondetections_" + base_name[len("detections_") :]
+        if base_name.startswith("Detections_"):
+            nondet_name = "Nondetections_" + base_name[len("Detections_") :]
             nondet_path = os.path.join(os.path.dirname(output_file), nondet_name)
             if os.path.isfile(nondet_path):
                 nd = pd.read_csv(nondet_path)
@@ -2160,14 +2160,14 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
         )
         return None
 
-    save_path = os.path.join(os.path.dirname(output_file), f"detections_{method}")
+    save_path = os.path.join(os.path.dirname(output_file), f"Detections_{method}")
     pathlib.Path(save_path).mkdir(parents=True, exist_ok=True)
-    det_root = os.path.join(save_path, "detections")
-    nondet_root = os.path.join(save_path, "nondetections")
+    det_root = os.path.join(save_path, "Detections")
+    nondet_root = os.path.join(save_path, "Nondetections")
     pathlib.Path(det_root).mkdir(parents=True, exist_ok=True)
     pathlib.Path(nondet_root).mkdir(parents=True, exist_ok=True)
 
-    prefix_map = {"AP": "aperture_", "PSF": "targetPSF_"}
+    prefix_map = {"AP": "Aperture_", "PSF": "PSF_Target_"}
     prefix = prefix_map.get(method, "")
 
     band_counter = Counter()
@@ -2264,7 +2264,7 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
             # Prefer new PNG names when both PNG and PDF exist.
             prefixes = [prefix]
             if method == "PSF":
-                # Support both legacy (`targetPSF_`) and new (`PSF_Target_`) plot prefixes.
+                # Support both legacy (`targetPSF_`) and current (`PSF_Target_`) plot prefixes.
                 prefixes = ["PSF_Target_", "targetPSF_"]
 
             candidates = []

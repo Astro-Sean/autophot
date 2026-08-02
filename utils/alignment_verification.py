@@ -109,8 +109,9 @@ class AlignmentVerifier:
                 
                 # 6. Generate diagnostic plots
                 if output_dir:
+                    _base = os.path.splitext(os.path.basename(sci_image_path))[0]
                     self._generate_diagnostics(sci_data, ref_data, sci_wcs, ref_wcs, 
-                                             results, output_dir)
+                                             results, output_dir, _base)
                     results['diagnostics']['plots_generated'] = True
                 
                 self._log_verification_results(results)
@@ -338,7 +339,7 @@ class AlignmentVerifier:
         else:
             return "failed"
     
-    def _generate_diagnostics(self, sci_data, ref_data, sci_wcs, ref_wcs, results, output_dir):
+    def _generate_diagnostics(self, sci_data, ref_data, sci_wcs, ref_wcs, results, output_dir, base="frame"):
         """Save diagnostic plots (image trio + coordinate offset map) to *output_dir*."""
         
         output_dir = Path(output_dir)
@@ -380,8 +381,8 @@ class AlignmentVerifier:
                 plt.ylabel('Y (pixels)')
         
         plt.tight_layout()
-        plt.savefig(output_dir / 'alignment_verification.png', dpi=150, bbox_inches='tight')
-        plt.close()
+        plt.savefig(output_dir / f'Alignment_Verification_{base}.png', dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close(plt.gcf())
         
         self.logger.info("Alignment verification plots saved to %s", output_dir)
     
