@@ -1213,7 +1213,10 @@ class BackgroundSubtractor:
 
         # All attempts failed - flat fallback.
         self.logger.warning("All Background2D attempts failed - using global stats")
-        gmean, gmed, gstd = sigma_clipped_stats(image, sigma=3.0, mask=mask)
+        gmean, gmed, _ = sigma_clipped_stats(image, sigma=3.0, mask=mask)
+        gstd = float(mad_std(image, mask=mask, ignore_nan=True))
+        if not np.isfinite(gstd) or gstd <= 0:
+            gstd = float(_)
         bkg_surface = np.full_like(image, gmed, dtype=np.float32)
         bkg_rms = np.full_like(image, max(gstd, 1.0), dtype=np.float32)
         return True, bkg_surface, bkg_rms, gmed
@@ -1913,8 +1916,13 @@ class BackgroundSubtractor:
         image_sub[y_min:y_max, x_min:x_max] = corrected_cutout
 
         # ---- Full-image RMS for downstream use ----
+        # Use image_sub (locally-corrected) so the RMS reflects the actual
+        # noise after local surface subtraction.  Using the original image
+        # would include residual background structure (e.g. from imperfect
+        # SFFT subtraction near host galaxies) as "noise", overestimating
+        # flux errors and underestimating SNR for the target.
         full_mask = self._make_source_mask(
-            image,
+            image_sub,
             nsigma=3,
             npixels=5,
             fwhm_pixels=fwhm_pixels,
@@ -1926,10 +1934,10 @@ class BackgroundSubtractor:
             bkg_rms_full = precomputed_rms
         else:
             box_size_full, filter_size_full, _ = self._compute_box_sizes(
-                image, full_mask, fwhm_pixels
+                image_sub, full_mask, fwhm_pixels
             )
             _, _, bkg_rms_full, _ = self._estimate_background(
-                image, full_mask, box_size_full, filter_size_full
+                image_sub, full_mask, box_size_full, filter_size_full
             )
 
         if plot:

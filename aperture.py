@@ -36,6 +36,8 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.patches import Circle
 from matplotlib.gridspec import GridSpec
+from matplotlib.ticker import MaxNLocator
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 from multiprocessing import Pool, cpu_count
 from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
@@ -321,6 +323,7 @@ def _measure_worker(args):
         gain,
         enforce_nonnegative_local_bkg,
         verbose,
+        defects_mask,
     ) = args
 
     try:
@@ -344,10 +347,24 @@ def _measure_worker(args):
         ap_pix = _finite_mask_values(ap_mask, image_e)
         bkg_pix = _finite_mask_values(an_mask, image_e)
 
+        # Apply hardware defects mask (trails, streaks, saturation, NaN)
+        # so bad pixels are excluded from aperture flux and annulus background.
+        if defects_mask is not None:
+            ap_mask_vals = _finite_mask_values(ap_mask, defects_mask)
+            bkg_mask_vals = _finite_mask_values(an_mask, defects_mask)
+            if len(ap_mask_vals) == len(ap_pix):
+                ap_pix = np.where(ap_mask_vals > 0, np.nan, ap_pix)
+            if len(bkg_mask_vals) == len(bkg_pix):
+                bkg_pix = np.where(bkg_mask_vals > 0, np.nan, bkg_pix)
+
         # Optional per-pixel uncertainty (e.g. from Background2D / calc_total_error).
         ap_err_pix = None
         if error is not None:
             ap_err_pix = _finite_mask_values(ap_mask, error)
+            if defects_mask is not None:
+                ap_err_mask_vals = _finite_mask_values(ap_mask, defects_mask)
+                if len(ap_err_mask_vals) == len(ap_err_pix):
+                    ap_err_pix = np.where(ap_err_mask_vals > 0, np.nan, ap_err_pix)
 
         # Remove NaNs/infs. Do NOT discard exact zeros here: difference images
         # and locally background-subtracted stamps can legitimately contain 0-valued
@@ -432,7 +449,7 @@ def _measure_worker(args):
             # annulus, which already includes read noise.  Do NOT add
             # read_noise_sq again — that double-counts it.
             source_flux = abs(aperture_sum)
-            sky_var = max(empirical_std**2, 0.25)  # Minimum sky variance of 0.25 e^2
+            sky_var = max(empirical_std**2, 0.0)  # No artificial floor; use measured background
             total_var = source_flux + effective_area * sky_var
             if total_var > 0 and np.isfinite(total_var):
                 sqrt_var = np.sqrt(total_var)
@@ -563,6 +580,7 @@ def _optimum_radius_worker(args):
         stability_threshold,
         use_moffat_cog,
         moffat_beta,
+        mask,
     ) = (
         args
     )
@@ -570,7 +588,7 @@ def _optimum_radius_worker(args):
     try:
         xycen = np.array([x_pix, y_pix])
         cog = CurveOfGrowth(
-            image, xycen, radii, error=error, mask=None, method="subpixel"
+            image, xycen, radii, error=error, mask=mask, method="subpixel"
         )
         cog.normalize()
 
@@ -812,6 +830,7 @@ class Aperture:
         saveTarget: bool = False,
         verbose: int = 1,
         n_jobs: int = None,
+        mask: np.ndarray = None,
     ) -> pd.DataFrame:
         """
         Measure aperture photometry for all sources in *sources*.
@@ -919,6 +938,16 @@ class Aperture:
 
         # ---- Error model ---------------------------------------------------
         if background_rms is not None:
+            # Replace NaN values (chip gaps, interpolation failures) with
+            # the median of finite values so calc_total_error doesn't break.
+            _bkg_rms = np.asarray(background_rms, dtype=float)
+            if np.any(np.isnan(_bkg_rms)):
+                _finite_median = float(np.nanmedian(_bkg_rms))
+                if not np.isfinite(_finite_median) or _finite_median <= 0:
+                    _finite_median = 1.0
+                _bkg_rms = np.where(np.isfinite(_bkg_rms), _bkg_rms, _finite_median)
+            else:
+                _bkg_rms = np.abs(_bkg_rms)
             # calc_total_error already drops the Poisson term for negative
             # pixels (returns only bkg_error), which is physically correct for
             # difference images: negative pixels are noise fluctuations with
@@ -928,7 +957,7 @@ class Aperture:
                 np.isfinite(image_e), image_e, np.nan
             )
             error = calc_total_error(
-                image_e_pois, np.abs(background_rms) * gain, effective_gain=1
+                image_e_pois, _bkg_rms * gain, effective_gain=1
             )
         else:
             error = None
@@ -950,7 +979,7 @@ class Aperture:
         apertures_obj = CircularAperture(positions, r=ap_size)
         annuli_obj = CircularAnnulus(positions, r_in=annulusIN, r_out=annulusOUT)
 
-        phot = aperture_photometry(image_e, apertures_obj, error=error).to_pandas()
+        phot = aperture_photometry(image_e, apertures_obj, error=error, mask=mask).to_pandas()
         # Use unweighted (center) pixel inclusion for consistency across the pipeline.
         # This avoids fractional-weight median biases and makes AP/PSF background
         # conventions comparable on difference images.
@@ -977,6 +1006,7 @@ class Aperture:
                 gain,
                 enforce_nonnegative_local_bkg,
                 verbose,
+                mask,
             )
             for i in range(len(sources))
         ]
@@ -1078,6 +1108,7 @@ class Aperture:
                         saveTarget=saveTarget,
                         index=i,
                         error=error,
+                        mask=mask,
                     )
                 except Exception as exc:
                     logger.exception("Plot failed for source %s: %s", i, exc)
@@ -1099,6 +1130,7 @@ class Aperture:
         saveTarget,
         index,
         error=None,
+        mask=None,
     ):
         """
         Three-panel diagnostic: main image + right / bottom flux profiles.
@@ -1129,22 +1161,27 @@ class Aperture:
             if error is not None
             else np.zeros_like(zoom_image)
         )
+        zoom_mask = (
+            mask[y_min:y_max, x_min:x_max]
+            if mask is not None
+            else None
+        )
 
         fig = plt.figure(figsize=set_size(340, 1))
-        grid = GridSpec(
-            2, 2,
-            width_ratios=[1, 0.25],
-            height_ratios=[1, 0.25],
-            wspace=0.15,
-            hspace=0.15,
-        )
-        ax_main = fig.add_subplot(grid[0, 0])
-        ax_right = fig.add_subplot(grid[0, 1], sharey=ax_main)
-        ax_bottom = fig.add_subplot(grid[1, 0], sharex=ax_main)
+        ax_main = fig.add_subplot(111)
+        divider = make_axes_locatable(ax_main)
+        ax_right = divider.append_axes("right", size="20%", pad=0.15, sharey=ax_main)
+        ax_bottom = divider.append_axes("bottom", size="20%", pad=0.15, sharex=ax_main)
 
+        ax_main.tick_params(axis="x", labelbottom=False)
+        ax_right.tick_params(axis="y", labelleft=False)
         ax_right.yaxis.tick_right()
         ax_right.xaxis.tick_top()
         ax_main.xaxis.tick_top()
+        ax_bottom.tick_params(axis="both", labelsize=8)
+        ax_right.tick_params(axis="both", labelsize=8)
+        ax_bottom.tick_params(axis="x", labelrotation=30)
+        ax_right.tick_params(axis="x", labelrotation=30)
 
         # Guard: skip profiles for tiny regions
         if zoom_image.shape[0] < 5 or zoom_image.shape[1] < 5:
@@ -1181,7 +1218,11 @@ class Aperture:
                     Circle((cx_local, cy_local), radius, ec=color, fc="none", lw=0.5, ls=ls)
                 )
             label = base if saveTarget else index
-            save_name = os.path.join(write_dir, f"Aperture_{label}.png")
+            save_name = (
+                f"Aperture_Target_{base}.png" if saveTarget
+                else f"Aperture_{label}.png"
+            )
+            save_name = os.path.join(write_dir, save_name)
             fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
             plt.close(fig)
             return
@@ -1239,6 +1280,8 @@ class Aperture:
         # still be well-defined on finite pixels. Use finite counts per row/col
         # to compute mean profiles and propagate uncertainty consistently.
         finite = np.isfinite(zoom_image)
+        if zoom_mask is not None:
+            finite &= ~np.asarray(zoom_mask, dtype=bool)
         hx = np.nanmean(zoom_image, axis=0)
         hy = np.nanmean(zoom_image, axis=1)
 
@@ -1262,13 +1305,28 @@ class Aperture:
         ax_bottom.step(x_range, hx, **kw_step)
         ax_bottom.fill_between(
             x_range, hx - hx_err, hx + hx_err,
-            color="dodgerblue", alpha=0.3, step="mid"
+            color="dodgerblue", alpha=0.5, step="mid",
         )
-        ax_right.step(hy, y_range, **kw_step)
-        ax_right.fill_betweenx(
-            y_range, hy - hy_err, hy + hy_err,
-            color="dodgerblue", alpha=0.3, step="mid"
-        )
+        ax_bottom.plot(x_range, hx - hx_err, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
+        ax_bottom.plot(x_range, hx + hx_err, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
+
+        # Right panel: step() and plot(drawstyle="steps-mid") step along the
+        # x-axis (value), but we need stepping along y-axis (coordinate) to
+        # match fill_betweenx(step="mid").  Manually construct horizontal step
+        # edges so the profile and error envelope align with the fill.
+        n_y = len(y_range)
+        if n_y > 0:
+            y_edges_r = np.empty(2 * n_y)
+            for i in range(n_y):
+                y_edges_r[2 * i] = i - 0.5 if i > 0 else 0
+                y_edges_r[2 * i + 1] = i + 0.5 if i < n_y - 1 else (n_y - 1)
+            ax_right.plot(np.repeat(hy, 2), y_edges_r, color="dodgerblue", lw=0.5)
+            ax_right.fill_betweenx(
+                y_range, hy - hy_err, hy + hy_err,
+                color="dodgerblue", alpha=0.5, step="mid"
+            )
+            ax_right.plot(np.repeat(hy - hy_err, 2), y_edges_r, color="dodgerblue", lw=0.3, alpha=0.7)
+            ax_right.plot(np.repeat(hy + hy_err, 2), y_edges_r, color="dodgerblue", lw=0.3, alpha=0.7)
 
         bias_applied = False
         try:
@@ -1302,14 +1360,19 @@ class Aperture:
             pass
 
         ax_bottom.set_xlabel("X position (pixels)")
-        ylabel = "ADU +BIAS" if bias_applied else "ADU"
+        ylabel = "Flux (e-) +BIAS" if bias_applied else "Flux (e-)"
         ax_bottom.set_ylabel(ylabel)
         ax_right.set_xlabel(ylabel)
         ax_right.yaxis.set_label_position("right")
-        ax_right.yaxis.tick_right()
+        ax_bottom.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
+        ax_right.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
 
         label = base if saveTarget else index
-        save_name = os.path.join(write_dir, f"Aperture_{label}.png")
+        save_name = (
+            f"Aperture_Target_{base}.png" if saveTarget
+            else f"Aperture_{label}.png"
+        )
+        save_name = os.path.join(write_dir, save_name)
         fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
         plt.close(fig)
 
@@ -1365,6 +1428,7 @@ class Aperture:
         fwhm_uncertainty: float = 0.5,
         n_jobs: int = None,
         crowded: bool = False,
+        mask: np.ndarray = None,
     ):
         """
         Data-driven selection of the optimal aperture radius.
@@ -1451,6 +1515,14 @@ class Aperture:
 
         gain = resolve_gain_e_per_adu(None, self.input_yaml)
         if background_rms is not None:
+            # Replace NaN values (chip gaps) with median of finite values.
+            _bkg_rms = np.asarray(background_rms, dtype=float)
+            if np.any(np.isnan(_bkg_rms)):
+                _finite_median = float(np.nanmedian(_bkg_rms))
+                if not np.isfinite(_finite_median) or _finite_median <= 0:
+                    _finite_median = 1.0
+                _bkg_rms = np.where(np.isfinite(_bkg_rms), _bkg_rms, _finite_median)
+            _bkg_rms = np.abs(_bkg_rms)
             # Convert both data and bkg_error to electrons so total_error is in e-.
             # Matches the convention used in Aperture.measure() (image_e = image*gain,
             # bkg_error = background_rms_ADU * gain, effective_gain=1).
@@ -1458,7 +1530,7 @@ class Aperture:
                 np.isfinite(self.image), self.image * gain, np.nan
             )
             error = calc_total_error(
-                _image_e_opt, np.abs(background_rms) * gain, effective_gain=1
+                _image_e_opt, _bkg_rms * gain, effective_gain=1
             )
         else:
             error = None
@@ -1490,6 +1562,7 @@ class Aperture:
                 stability_threshold,
                 use_moffat_cog,
                 moffat_beta,
+                mask,
             )
             for idx, row in sources.iterrows()
         ]
@@ -2039,6 +2112,7 @@ class Aperture:
         max_radius: float = 5.0,
         background_rms: np.ndarray = None,
         plot: bool = True,
+        mask: np.ndarray = None,
     ):
         """
         Compute the aperture correction (ap_size -> inf) via Curve of Growth.
@@ -2072,12 +2146,20 @@ class Aperture:
         gain = resolve_gain_e_per_adu(None, self.input_yaml)
         radii = np.arange(0.05, max_radius, 0.1) * fwhm
         if background_rms is not None:
+            # Replace NaN values (chip gaps) with median of finite values.
+            _bkg_rms = np.asarray(background_rms, dtype=float)
+            if np.any(np.isnan(_bkg_rms)):
+                _finite_median = float(np.nanmedian(_bkg_rms))
+                if not np.isfinite(_finite_median) or _finite_median <= 0:
+                    _finite_median = 1.0
+                _bkg_rms = np.where(np.isfinite(_bkg_rms), _bkg_rms, _finite_median)
+            _bkg_rms = np.abs(_bkg_rms)
             # Convert both data and bkg_error to electrons (matches Aperture.measure convention).
             _image_e_ac = np.where(
                 np.isfinite(image), image * gain, np.nan
             )
             error = calc_total_error(
-                _image_e_ac, np.abs(background_rms) * gain, effective_gain=1
+                _image_e_ac, _bkg_rms * gain, effective_gain=1
             )
         else:
             error = None
@@ -2089,7 +2171,7 @@ class Aperture:
             try:
                 xycen = np.array([row["x_pix"], row["y_pix"]])
                 cog = CurveOfGrowth(
-                    image, xycen, radii, error=error, mask=None, method="subpixel"
+                    image, xycen, radii, error=error, mask=mask, method="subpixel"
                 )
                 cog.normalize()
                 frac = np.interp(ap_size, cog.radii, cog.profile)

@@ -49,6 +49,7 @@ from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.linear_model import RANSACRegressor
 from scipy.optimize import minimize
+from concurrent.futures import ThreadPoolExecutor
 import astropy.units as u
 
 sys.path.append(str(Path(__file__).parent.parent))
@@ -410,15 +411,21 @@ class ImageDistortionCorrector:
                         new_hdul.append(new_hdu)
                     else:
                         new_hdul.append(hdu.copy())
-                new_hdul.writeto(str(cat_path), overwrite=True)
+                # Atomic write: write to temp then rename to avoid race conditions
+                # when parallel processes cache the same GAIA catalog simultaneously.
+                tmp_cat = cat_path.with_suffix(".cat.tmp")
+                new_hdul.writeto(str(tmp_cat), overwrite=True)
+                os.replace(str(tmp_cat), str(cat_path))
 
             meta = {
                 "created": time.time(),
                 "catalog": "GAIA-DR3",
                 "cache_key": cache_key,
             }
-            with open(meta_path, "w") as f:
+            tmp_meta = meta_path.with_suffix(".json.tmp")
+            with open(tmp_meta, "w") as f:
                 json.dump(meta, f)
+            os.replace(str(tmp_meta), str(meta_path))
             self.logger.info("Cached GAIA catalog to %s", cat_path)
             return cat_path
         except Exception as e:
@@ -499,8 +506,11 @@ class ImageDistortionCorrector:
                 Takes priority over aperture_radius when provided.
         """
 
-        # Enforce realistic FWHM bounds: 2.5-15 pixels for convolution kernel
-        fwhm_pixels = float(max(2.5, min(fwhm_pixels, 15.0)))
+        # Enforce realistic FWHM bounds: 1.0-15 pixels for convolution kernel
+        # Minimum 1.0 px allows proper kernel sizing for undersampled images
+        # (e.g. ZTF FWHM ~1.8 px).  The previous 2.5 px floor made the kernel
+        # too broad, reducing detection sensitivity.
+        fwhm_pixels = float(max(1.0, min(fwhm_pixels, 15.0)))
         # Kernel half-width priority: scale_half_width > aperture_radius > 1.7xFWHM.
         # 2*half_width+1 is always odd, so no even-size correction is needed.
         # SExtractor hard limit: 31x31 pixels.
@@ -906,6 +916,32 @@ NNW
                 self.logger.info(
                     "Using SExtractor crowded-field config overrides (tighter deblending, smaller back mesh)"
                 )
+
+            # Reduce DETECT_MINAREA for undersampled images (non-alignment path).
+            # Alignment config already has DETECT_MINAREA=1.  Undersampled PSFs
+            # (FWHM < threshold) occupy only ~2-3 pixels, so MINAREA=3 can miss
+            # real point sources.
+            if not for_alignment and not crowded:
+                _us_thresh_idc = float(
+                    (getattr(self, "input_yaml", {}) or {}).get(
+                        "photometry", {}
+                    ) or {}
+                ).get("undersampled_fwhm_threshold", 2.5) if isinstance(
+                    getattr(self, "input_yaml", None), dict
+                ) else 2.5
+                if fwhm_pixels < _us_thresh_idc:
+                    _orig_minarea = int(final_config.get("DETECT_MINAREA", 3))
+                    if fwhm_pixels < 1.5:
+                        final_config["DETECT_MINAREA"] = 1
+                    else:
+                        final_config["DETECT_MINAREA"] = max(1, min(_orig_minarea, 2))
+                    if final_config["DETECT_MINAREA"] < _orig_minarea:
+                        self.logger.info(
+                            "Undersampled image (FWHM=%.2f px < %.1f): reducing "
+                            "DETECT_MINAREA from %d to %d",
+                            fwhm_pixels, _us_thresh_idc,
+                            _orig_minarea, final_config["DETECT_MINAREA"],
+                        )
             
             final_config.update(
                 {
@@ -1224,7 +1260,7 @@ NNW
         max_fwhm_mult: float = 2.0,
         compact_fwhm_mult: float = 1.3,
         max_ellipticity: float = 0.6,
-        max_flags: int = 2,
+        max_flags: int = 1,
         min_class_star: float = 0.3,
     ) -> Optional[Table]:
         """Return a subset of ``catalog`` containing only compact, point-like sources.
@@ -1485,7 +1521,10 @@ NNW
                         int(_ref_hdr.get("A_ORDER", 0)),
                         int(_ref_hdr.get("B_ORDER", 0)),
                     )
-                    _ref_pv_count = sum(1 for k in _ref_hdr if k.startswith("PV_"))
+                    _ref_pv_count = sum(
+                        1 for k in _ref_hdr
+                        if str(k).startswith("PV") and len(str(k)) > 2 and str(k)[2:3].isdigit()
+                    )
                     if _ref_sip_order > 0:
                         ref_distort_order = _ref_sip_order
                     elif _ref_pv_count > 0:
@@ -1513,7 +1552,10 @@ NNW
                         int(_sci_hdr_dist.get("A_ORDER", 0)),
                         int(_sci_hdr_dist.get("B_ORDER", 0)),
                     )
-                    _sci_pv_count = sum(1 for k in _sci_hdr_dist if k.startswith("PV_"))
+                    _sci_pv_count = sum(
+                        1 for k in _sci_hdr_dist
+                        if str(k).startswith("PV") and len(str(k)) > 2 and str(k)[2:3].isdigit()
+                    )
                     if _sci_sip_order > 0:
                         sci_distort_order = _sci_sip_order
                     elif _sci_pv_count > 0:
@@ -1689,9 +1731,12 @@ NNW
                     sci_image_copy, science_image
                 )
 
-            # Pass 1: measure FWHM (kernel sized from aperture/FWHM header only)
-            # Use header FWHM if available (set by main pipeline after initial source detection)
-            # This avoids using stale/instrument-default FWHM values
+            # --- FWHM estimation from header (skip redundant pass-1 SExtractor) ---
+            # The header FWHM is set by main.py's careful measure_image step and is
+            # more reliable than a quick SExtractor pass (which can be inflated by
+            # galaxies).  We use it directly for kernel sizing in the single
+            # alignment SExtractor run below.  The inflation-cap sanity check is
+            # applied to the result of that run.
             sci_hdr_fwhm = None
             ref_hdr_fwhm = None
             try:
@@ -1702,80 +1747,79 @@ NNW
                 ref_hdr_fwhm = float(fits.getheader(str(ref_image_copy)).get("FWHM", fits.getheader(str(ref_image_copy)).get("fwhm")))
             except Exception:
                 pass
-            
-            # Use main pipeline's SExtractorWrapper for alignment (same as main source detection)
-            # This ensures consistent source detection behavior
-            self.logger.info("Using SExtractorWrapper.run for alignment (with sensitive detection for sparse fields)")
-            
-            # Convert pixel scale to arcsec/pixel for SExtractorWrapper
-            sci_seeing_fwhm = (sci_hdr_fwhm if sci_hdr_fwhm else 2.0) * sci_pix_scale
-            ref_seeing_fwhm = (ref_hdr_fwhm if ref_hdr_fwhm else 2.0) * ref_pix_scale
-            
+
+            # Use header FWHM directly (already measured by main pipeline).
+            # Fallback to 2.0 px only if header is missing.
+            fwhm_sci_pix = float(sci_hdr_fwhm) if sci_hdr_fwhm and sci_hdr_fwhm > 0 else 2.0
+            fwhm_ref_pix = float(ref_hdr_fwhm) if ref_hdr_fwhm and ref_hdr_fwhm > 0 else 2.0
+
+            self.logger.info(
+                "Alignment SExtractor: using header FWHM sci=%.2f px ref=%.2f px "
+                "(skipping redundant pass-1)",
+                fwhm_sci_pix, fwhm_ref_pix,
+            )
+
             # SExtractorWrapper saves catalog as <stem>_PYSEx_CAT.fits in the mdir
             # SCAMP expects .cat extension for FITS-LDAC catalogs
-            # Use return_raw=True to get the raw FITS-LDAC file path and avoid pandas conversion
-            # Catalog paths must match the image paths that filter_matched_sources expects
             sci_catalog_path = str(science_aligned_dir / "science_image_PYSEx_CAT.cat")
             ref_catalog_path = str(reference_aligned_dir / "reference_image_PYSEx_CAT.cat")
-            # SExtractorWrapper will copy the FITS-LDAC catalog to these paths when return_raw=True
-            # These are the actual SExtractor outputs with full metadata
-            
-            # Pass 1: initial source detection with header/default FWHM for scale estimation.
-            # Pass 2 (below) re-runs with FWHM-based scale for alignment-quality catalogs.
-            sci_fwhm, sci_catalog_raw, sci_scale = self.sextractor.run(
-                fits_path=str(sci_image_copy),
-                pixel_scale=sci_pix_scale,
-                seeing_fwhm=sci_seeing_fwhm,
-                catalog_type="FITS_LDAC",
-                use_FWHM=sci_hdr_fwhm if sci_hdr_fwhm else 0.0,
-                crowded=sextractor_crowded,
-                use_for_matching=True,
-                mdir=str(science_aligned_dir),
-                return_raw=True,
-                detect_thresh=1.0,
-                analysis_thresh=0.8,
-                detect_minarea=1,
-                back_size=64,
-                clean="N",
-                deblend_nthresh=32,
-                deblend_mincont=0.005,
-            )
-            
-            ref_fwhm, ref_catalog_raw, ref_scale = self.sextractor.run(
-                fits_path=str(ref_image_copy),
-                pixel_scale=ref_pix_scale,
-                seeing_fwhm=ref_seeing_fwhm,
-                catalog_type="FITS_LDAC",
-                use_FWHM=ref_hdr_fwhm if ref_hdr_fwhm else 0.0,
-                crowded=sextractor_crowded,
-                use_for_matching=True,
-                mdir=str(reference_aligned_dir),
-                return_raw=True,
-                detect_thresh=1.0,
-                analysis_thresh=0.8,
-                detect_minarea=1,
-                back_size=64,
-                clean="N",
-                deblend_nthresh=32,
-                deblend_mincont=0.005,
-            )
-            
-            # SExtractorWrapper with return_raw=True copies the FITS-LDAC catalog to the mdir
-            # The catalogs are now at the expected paths with full SExtractor metadata
-            # No need to manually write FITS-LDAC files
-            
-            # Use the raw Tables for downstream processing
-            sci_catalog = sci_catalog_raw
-            ref_catalog = ref_catalog_raw
-            
-            # Convert to expected format - use the FITS_LDAC catalog path
-            sci_sex = {"fwhm": sci_fwhm, "catalog": sci_catalog, "catalog_path": sci_catalog_path}
-            ref_sex = {"fwhm": ref_fwhm, "catalog": ref_catalog, "catalog_path": ref_catalog_path}
-            
-            self.logger.info("SExtractor pass-1: %d sci / %d ref sources", len(sci_catalog) if sci_catalog is not None else 0, len(ref_catalog) if ref_catalog is not None else 0)
 
-            fwhm_sci_pix = float(sci_sex["fwhm"]) if "fwhm" in sci_sex else 2.5
-            fwhm_ref_pix = float(ref_sex["fwhm"]) if "fwhm" in ref_sex else 2.5
+            # Single SExtractor run with FWHM-based kernel sizing.
+            # Sci and ref runs are independent — parallelize for ~2x speedup.
+            sci_scale = int(max(5, 1.5 * fwhm_sci_pix))
+            ref_scale = int(max(5, 1.5 * fwhm_ref_pix))
+            combined_scale = max(sci_scale, ref_scale)
+            self.logger.info("SExtractor alignment: scale=%d px (FWHM-based)", combined_scale)
+
+            def _run_sextractor_sci():
+                return self.sextractor.run(
+                    fits_path=str(sci_image_copy),
+                    pixel_scale=sci_pix_scale,
+                    seeing_fwhm=fwhm_sci_pix * sci_pix_scale,
+                    catalog_type="FITS_LDAC",
+                    use_FWHM=fwhm_sci_pix,
+                    crowded=sextractor_crowded,
+                    use_for_matching=True,
+                    mdir=str(science_aligned_dir),
+                    return_raw=True,
+                    detect_thresh=1.0,
+                    analysis_thresh=0.8,
+                    detect_minarea=1,
+                    back_size=64,
+                    clean="N",
+                    deblend_nthresh=32,
+                    deblend_mincont=0.005,
+                )
+
+            def _run_sextractor_ref():
+                return self.sextractor.run(
+                    fits_path=str(ref_image_copy),
+                    pixel_scale=ref_pix_scale,
+                    seeing_fwhm=fwhm_ref_pix * ref_pix_scale,
+                    catalog_type="FITS_LDAC",
+                    use_FWHM=fwhm_ref_pix,
+                    crowded=sextractor_crowded,
+                    use_for_matching=True,
+                    mdir=str(reference_aligned_dir),
+                    return_raw=True,
+                    detect_thresh=1.0,
+                    analysis_thresh=0.8,
+                    detect_minarea=1,
+                    back_size=64,
+                    clean="N",
+                    deblend_nthresh=32,
+                    deblend_mincont=0.005,
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as _sex_pool:
+                _sci_future = _sex_pool.submit(_run_sextractor_sci)
+                _ref_future = _sex_pool.submit(_run_sextractor_ref)
+                sci_fwhm2, sci_catalog2_raw, sci_scale2 = _sci_future.result()
+                ref_fwhm2, ref_catalog2_raw, ref_scale2 = _ref_future.result()
+
+            # Update FWHM from SExtractor measurement, then apply inflation cap.
+            fwhm_sci_pix = float(sci_fwhm2) if sci_fwhm2 and sci_fwhm2 > 0 else fwhm_sci_pix
+            fwhm_ref_pix = float(ref_fwhm2) if ref_fwhm2 and ref_fwhm2 > 0 else fwhm_ref_pix
 
             # Sanity check: cap alignment FWHM using the pipeline's header FWHM.
             # The header FWHM comes from the carefully measured measure_image step
@@ -1836,56 +1880,6 @@ NNW
                     fwhm_ref_pix, MAX_REASONABLE_FWHM,
                 )
                 fwhm_ref_pix = ref_hdr_fwhm if (ref_hdr_fwhm and ref_hdr_fwhm > 0) else 8.5
-
-            # Pass 2: re-run with kernel sized from FWHM-based scale for alignment.
-            # Use a smaller scale than the pipeline cutout scale to ensure proper
-            # source detection. Alignment needs to detect point sources, not use
-            # the large cutout scale used for PSF building/subtraction.
-            # Use 1.5xFWHM as a reasonable alignment scale (covers PSF without being excessive)
-            sci_scale = int(max(5, 1.5 * fwhm_sci_pix))
-            ref_scale = int(max(5, 1.5 * fwhm_ref_pix))
-            combined_scale = max(sci_scale, ref_scale)
-            self.logger.info("SExtractor pass-2: scale=%d px (FWHM-based)", combined_scale)
-            
-            # Re-run with FWHM-based scale using SExtractorWrapper
-            # The pass-2 catalogs will overwrite the pass-1 catalogs (same paths)
-            sci_fwhm2, sci_catalog2_raw, sci_scale2 = self.sextractor.run(
-                fits_path=str(sci_image_copy),
-                pixel_scale=sci_pix_scale,
-                seeing_fwhm=fwhm_sci_pix * sci_pix_scale,
-                catalog_type="FITS_LDAC",
-                use_FWHM=fwhm_sci_pix,
-                crowded=sextractor_crowded,
-                use_for_matching=True,
-                mdir=str(science_aligned_dir),
-                return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
-                detect_thresh=1.0,
-                analysis_thresh=0.8,
-                detect_minarea=1,
-                back_size=64,
-                clean="N",
-                deblend_nthresh=32,
-                deblend_mincont=0.005,
-            )
-            
-            ref_fwhm2, ref_catalog2_raw, ref_scale2 = self.sextractor.run(
-                fits_path=str(ref_image_copy),
-                pixel_scale=ref_pix_scale,
-                seeing_fwhm=fwhm_ref_pix * ref_pix_scale,
-                catalog_type="FITS_LDAC",
-                use_FWHM=fwhm_ref_pix,
-                crowded=sextractor_crowded,
-                use_for_matching=True,
-                mdir=str(reference_aligned_dir),
-                return_raw=True,  # Return raw FITS-LDAC Table for SCAMP compatibility
-                detect_thresh=1.0,
-                analysis_thresh=0.8,
-                detect_minarea=1,
-                back_size=64,
-                clean="N",
-                deblend_nthresh=32,
-                deblend_mincont=0.005,
-            )
             
             # SExtractorWrapper with return_raw=True copies the FITS-LDAC catalog to the mdir
             # The catalogs are now at the expected paths with full SExtractor metadata
@@ -1899,7 +1893,7 @@ NNW
             sci_sex = {"fwhm": sci_fwhm2, "catalog": sci_catalog2, "catalog_path": sci_catalog_path}
             ref_sex = {"fwhm": ref_fwhm2, "catalog": ref_catalog2, "catalog_path": ref_catalog_path}
             
-            self.logger.info("SExtractor pass-2: %d sci / %d ref sources", len(sci_catalog2) if sci_catalog2 is not None else 0, len(ref_catalog2) if ref_catalog2 is not None else 0)
+            self.logger.info("SExtractor alignment: %d sci / %d ref sources", len(sci_catalog2) if sci_catalog2 is not None else 0, len(ref_catalog2) if ref_catalog2 is not None else 0)
 
             # --- Sparse-field retry: if very few sources, re-run with maximum sensitivity ---
             _sparse_thresh = int(
@@ -1986,13 +1980,40 @@ NNW
             shutil.copy2(sci_catalog_path, sci_catalog_scamp_backup)
             shutil.copy2(ref_catalog_path, ref_catalog_scamp_backup)
 
+            # ---- Filter science catalog to only sources with reference counterparts ----
+            # Badly stacked science images can contain ghost/artifact sources that
+            # have no real counterpart in the reference.  These corrupt SCAMP's
+            # astrometric solution when the science catalog is used as the anchor.
+            # Cross-match by WCS position and drop any science source with no
+            # reference counterpart within a generous radius.
+            _sci_ref_filter_radius = max(
+                3.0 * max(fwhm_sci_pix * sci_pix_scale, fwhm_ref_pix * ref_pix_scale),
+                10.0,  # floor: handle WCS offsets in poorly plate-solved images
+            )
+            _n_sci_before_filter = len(fits.getdata(sci_catalog_scamp_backup, ext=2))
+            _n_sci_after_filter = self._filter_sci_to_ref_counterparts(
+                sci_cat_path=sci_catalog_scamp_backup,
+                ref_cat_path=ref_catalog_scamp_backup,
+                match_radius_arcsec=_sci_ref_filter_radius,
+            )
+            if _n_sci_after_filter > 0 and _n_sci_after_filter < _n_sci_before_filter:
+                # Also update the working catalog path so filter_matched_sources
+                # and AstroAlign see the cleaned catalog
+                shutil.copy2(sci_catalog_scamp_backup, sci_catalog_path)
+                self.logger.info(
+                    "Science catalog filtered from %d to %d sources "
+                    "(dropped %d ghost/stacking artifacts with no reference counterpart).",
+                    _n_sci_before_filter, _n_sci_after_filter,
+                    _n_sci_before_filter - _n_sci_after_filter,
+                )
+
             # Pre-compute SWarp resampling methods so Phase 1b can use them.
             # (Moved here from below so science-first GAIA SWarp has access.)
             # Use configurable undersampled threshold (default 2.5 px)
+            # Read from photometry subsection for consistency with main.py, catalog.py, psf.py
+            _phot_cfg_idc = self.input_yaml.get("photometry", {}) or {} if isinstance(self.input_yaml, dict) else {}
             undersampled_thresh = float(
-                self.input_yaml.get("undersampled_fwhm_threshold", 2.5)
-                if isinstance(self.input_yaml, dict)
-                else 2.5
+                _phot_cfg_idc.get("undersampled_fwhm_threshold", 2.5)
             )
             sci_is_undersampled = fwhm_sci_pix < undersampled_thresh
             ref_is_undersampled = fwhm_ref_pix < undersampled_thresh
@@ -3297,18 +3318,23 @@ NNW
                     "BACK_SIZE": 16,
                 }
 
-                sci_sex_result = self.run_sextractor(
-                    str(aligned_sci),
-                    output_dir=str(Path(_verify_dir) / "sci"),
-                    for_alignment=True,
-                    fwhm_pixels=_verify_fwhm,
-                )
-                ref_sex_result = self.run_sextractor(
-                    str(aligned_ref),
-                    output_dir=str(Path(_verify_dir) / "ref"),
-                    for_alignment=True,
-                    fwhm_pixels=_verify_fwhm,
-                )
+                with ThreadPoolExecutor(max_workers=2) as _pool:
+                    _sci_fut = _pool.submit(
+                        self.run_sextractor,
+                        str(aligned_sci),
+                        output_dir=str(Path(_verify_dir) / "sci"),
+                        for_alignment=True,
+                        fwhm_pixels=_verify_fwhm,
+                    )
+                    _ref_fut = _pool.submit(
+                        self.run_sextractor,
+                        str(aligned_ref),
+                        output_dir=str(Path(_verify_dir) / "ref"),
+                        for_alignment=True,
+                        fwhm_pixels=_verify_fwhm,
+                    )
+                    sci_sex_result = _sci_fut.result()
+                    ref_sex_result = _ref_fut.result()
 
                 sci_cat_verify = sci_sex_result.get("catalog")
                 ref_cat_verify = ref_sex_result.get("catalog")
@@ -3430,12 +3456,15 @@ NNW
                             if np.sum(both_ok) >= _min_matches:
                                 _dx_use = dx[both_ok]
                                 _dy_use = dy[both_ok]
+                                _matched_xy = sci_xy[good][both_ok]
                             else:
                                 _dx_use = dx
                                 _dy_use = dy
+                                _matched_xy = sci_xy[good]
                         else:
                             _dx_use = dx
                             _dy_use = dy
+                            _matched_xy = sci_xy[good]
 
                         med_dx = float(np.median(_dx_use))
                         med_dy = float(np.median(_dy_use))
@@ -3444,13 +3473,12 @@ NNW
                         _indiv_offsets = np.sqrt(_dx_use**2 + _dy_use**2)
                         _p95_offset = float(np.percentile(_indiv_offsets, 95))
                         _max_offset = float(np.max(_indiv_offsets))
-                        _matched_xy = sci_xy[good]
                         _local_k = min(3, len(_matched_xy))
                         _local_indices = cKDTree(_matched_xy).query(
                             _matched_xy, k=_local_k
                         )[1]
-                        _local_dx = np.median(dx[_local_indices], axis=1)
-                        _local_dy = np.median(dy[_local_indices], axis=1)
+                        _local_dx = np.median(_dx_use[_local_indices], axis=1)
+                        _local_dy = np.median(_dy_use[_local_indices], axis=1)
                         _local_offsets = np.hypot(_local_dx, _local_dy)
                         _local_offset_p95 = float(
                             np.percentile(_local_offsets, 95)
@@ -4305,18 +4333,23 @@ NNW
                     float(self.input_yaml.get("fwhm", 3.0)) if hasattr(self, "input_yaml") else 3.0,
                     2.5,
                 )
-                _sci_sex_refine = self.run_sextractor(
-                    science_image,
-                    output_dir=str(_reproj_refine_dir / "sci"),
-                    for_alignment=True,
-                    fwhm_pixels=_refine_fwhm,
-                )
-                _ref_sex_refine = self.run_sextractor(
-                    reference_image,
-                    output_dir=str(_reproj_refine_dir / "ref"),
-                    for_alignment=True,
-                    fwhm_pixels=_refine_fwhm,
-                )
+                with ThreadPoolExecutor(max_workers=2) as _pool:
+                    _sci_fut = _pool.submit(
+                        self.run_sextractor,
+                        science_image,
+                        output_dir=str(_reproj_refine_dir / "sci"),
+                        for_alignment=True,
+                        fwhm_pixels=_refine_fwhm,
+                    )
+                    _ref_fut = _pool.submit(
+                        self.run_sextractor,
+                        reference_image,
+                        output_dir=str(_reproj_refine_dir / "ref"),
+                        for_alignment=True,
+                        fwhm_pixels=_refine_fwhm,
+                    )
+                    _sci_sex_refine = _sci_fut.result()
+                    _ref_sex_refine = _ref_fut.result()
                 _sci_cat_refine = _sci_sex_refine.get("catalog")
                 _ref_cat_refine = _ref_sex_refine.get("catalog")
                 _n_sci_refine = len(_sci_cat_refine) if _sci_cat_refine is not None else 0
@@ -4362,6 +4395,19 @@ NNW
                     and _n_sci_refine >= 3
                     and _n_ref_refine >= 3
                 ):
+                    # Filter science catalog to only sources with reference counterparts
+                    _reproj_filter_radius = max(
+                        3.0 * _refine_fwhm * (
+                            float(self.input_yaml.get("pixel_scale", 1.0))
+                            if hasattr(self, "input_yaml") else 1.0
+                        ),
+                        10.0,
+                    )
+                    self._filter_sci_to_ref_counterparts(
+                        sci_cat_path=_sci_sex_refine["catalog_path"],
+                        ref_cat_path=_ref_sex_refine["catalog_path"],
+                        match_radius_arcsec=_reproj_filter_radius,
+                    )
                     # Match sources 1:1 using filter_matched_sources
                     _refine_crossid = max(
                         2.0 * _refine_fwhm * (
@@ -4513,11 +4559,16 @@ NNW
 
             # Auto-downgrade interpolation for undersampled images
             _fwhm = float(iy.get("fwhm", 0.0)) if isinstance(iy, dict) else 0.0
-            if _fwhm > 0 and _fwhm < 2.5 and interp_order_norm in ("bicubic", "biquadratic"):
+            _us_thresh_reproj = float(
+                (iy.get("photometry", {}) or {}).get(
+                    "undersampled_fwhm_threshold", 2.5
+                )
+            ) if isinstance(iy, dict) else 2.5
+            if _fwhm > 0 and _fwhm < _us_thresh_reproj and interp_order_norm in ("bicubic", "biquadratic"):
                 self.logger.info(
-                    "Undersampled image (FWHM=%.2f px < 2.5) - downgrading %s to bilinear "
+                    "Undersampled image (FWHM=%.2f px < %.1f) - downgrading %s to bilinear "
                     "to avoid ringing artifacts.",
-                    _fwhm, interp_order_norm,
+                    _fwhm, _us_thresh_reproj, interp_order_norm,
                 )
                 interp_order_norm = "bilinear"
 
@@ -4631,18 +4682,23 @@ NNW
                 _match_tol_fwhm = min(_verify_fwhm, 4.0)
 
                 _reproj_verify_dir = str(Path(output_dir) / "reproject_verify")
-                _sci_sex = self.run_sextractor(
-                    science_image,
-                    output_dir=str(Path(_reproj_verify_dir) / "sci"),
-                    for_alignment=True,
-                    fwhm_pixels=_verify_fwhm,
-                )
-                _ref_sex = self.run_sextractor(
-                    str(aligned_reference_fpath),
-                    output_dir=str(Path(_reproj_verify_dir) / "ref"),
-                    for_alignment=True,
-                    fwhm_pixels=_verify_fwhm,
-                )
+                with ThreadPoolExecutor(max_workers=2) as _pool:
+                    _sci_fut = _pool.submit(
+                        self.run_sextractor,
+                        science_image,
+                        output_dir=str(Path(_reproj_verify_dir) / "sci"),
+                        for_alignment=True,
+                        fwhm_pixels=_verify_fwhm,
+                    )
+                    _ref_fut = _pool.submit(
+                        self.run_sextractor,
+                        str(aligned_reference_fpath),
+                        output_dir=str(Path(_reproj_verify_dir) / "ref"),
+                        for_alignment=True,
+                        fwhm_pixels=_verify_fwhm,
+                    )
+                    _sci_sex = _sci_fut.result()
+                    _ref_sex = _ref_fut.result()
                 _sci_cat_v = _sci_sex.get("catalog")
                 _ref_cat_v = _ref_sex.get("catalog")
 
@@ -5942,9 +5998,6 @@ NNW
 
             sci_aperture_radius = sci_head.get("APER", 7)
             ref_aperture_radius = ref_head.get("APER", 7)
-            self.logger.info(
-                f"Extracting sources from science image with aperture radius - {sci_aperture_radius:.1f} [px]"
-            )
             sci_w = self._guess_map_weight_path(str(science_image))
             ref_w = self._guess_map_weight_path(str(reference_image))
             if sci_w:
@@ -5952,20 +6005,40 @@ NNW
             if ref_w:
                 self.logger.info("AstroAlign SExtractor: using reference MAP_WEIGHT %s", ref_w)
 
-            sci_sex = _extract_sources(
-                sci_image_copy, science_aligned_dir, sci_aperture_radius, weight_path=sci_w
-            )
             self.logger.info(
-                f"Extracting sources from reference image with aperture radius - {ref_aperture_radius:.1f} [px]"
+                f"Extracting sources from science/reference images "
+                f"(sci aperture={sci_aperture_radius:.1f} px, ref aperture={ref_aperture_radius:.1f} px)"
             )
-            ref_sex = _extract_sources(
-                ref_image_copy, reference_aligned_dir, ref_aperture_radius, weight_path=ref_w
-            )
+
+            with ThreadPoolExecutor(max_workers=2) as _pool:
+                _sci_fut = _pool.submit(
+                    _extract_sources,
+                    sci_image_copy, science_aligned_dir, sci_aperture_radius, sci_w
+                )
+                _ref_fut = _pool.submit(
+                    _extract_sources,
+                    ref_image_copy, reference_aligned_dir, ref_aperture_radius, ref_w
+                )
+                sci_sex = _sci_fut.result()
+                ref_sex = _ref_fut.result()
             fwhm_sci_pix = float(sci_sex.get("fwhm", 2.5))
             fwhm_ref_pix = float(ref_sex.get("fwhm", 2.5))
             fwhm_sci_arcsec = fwhm_sci_pix * sci_pix_scale
             fwhm_ref_arcsec = fwhm_ref_pix * ref_pix_scale
             crossid_radius = max(2.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec), 3.0)
+
+            # ---- Filter science catalog to only sources with reference counterparts ----
+            # Removes ghost/stacking artifacts from badly stacked science images
+            # before AstroAlign control point matching.
+            _aa_filter_radius = max(
+                3.0 * max(fwhm_sci_arcsec, fwhm_ref_arcsec),
+                10.0,
+            )
+            self._filter_sci_to_ref_counterparts(
+                sci_cat_path=sci_sex["catalog_path"],
+                ref_cat_path=ref_sex["catalog_path"],
+                match_radius_arcsec=_aa_filter_radius,
+            )
 
             def _load_matched_catalogs(sci_cat_path, ref_cat_path):
                 with fits.open(sci_cat_path) as hs, fits.open(ref_cat_path) as hr:
@@ -6088,12 +6161,29 @@ NNW
                     _nd_matrix = np.array([[_M[1, 1], _M[1, 0]],
                                            [_M[0, 1], _M[0, 0]]])
                     _nd_offset = np.array([inv_matrix[1, 2], inv_matrix[0, 2]])
+                    # Use bilinear (order=1) for undersampled images to avoid
+                    # ringing artifacts from cubic interpolation on sparse PSFs.
+                    _aa_us_thresh = float(
+                        (iy.get("photometry", {}) or {}).get(
+                            "undersampled_fwhm_threshold", 2.5
+                        )
+                    ) if isinstance(iy, dict) else 2.5
+                    _aa_interp_order = 1 if (
+                        fwhm_sci_pix < _aa_us_thresh or fwhm_ref_pix < _aa_us_thresh
+                    ) else 3
+                    if _aa_interp_order == 1:
+                        self.logger.info(
+                            "AstroAlign (aafitrans): using bilinear interpolation "
+                            "for undersampled image (sci FWHM=%.2f, ref FWHM=%.2f, "
+                            "threshold=%.1f px).",
+                            fwhm_sci_pix, fwhm_ref_pix, _aa_us_thresh,
+                        )
                     aligned_ref_img = ndimage.affine_transform(
                         ref_img,
                         _nd_matrix,
                         offset=_nd_offset,
                         output_shape=sci_img.shape,
-                        order=3,
+                        order=_aa_interp_order,
                         cval=np.nan,
                     )
                     footprint = np.isfinite(aligned_ref_img)
@@ -6116,6 +6206,13 @@ NNW
                         max_control_points=min(MAX_CONTROL_POINTS, len(pts_ref)),
                     )
             if not use_aafitrans:
+                if (fwhm_sci_pix < _aa_us_thresh or fwhm_ref_pix < _aa_us_thresh):
+                    self.logger.warning(
+                        "AstroAlign (skimage fallback): using default cubic interpolation "
+                        "for undersampled image (sci FWHM=%.2f, ref FWHM=%.2f). "
+                        "Ringing artifacts may occur; aafitrans path with bilinear is preferred.",
+                        fwhm_sci_pix, fwhm_ref_pix,
+                    )
                 aligned_ref_img, footprint = aa.apply_transform(tform, ref_img, sci_img)
             # Preserve NaNs (chip gaps) instead of replacing with sentinel
             aligned_ref_img = np.nan_to_num(
@@ -7614,6 +7711,104 @@ NNW
                 f"\n" + traceback.format_exc()
             )
 
+    def _filter_sci_to_ref_counterparts(
+        self,
+        sci_cat_path: str,
+        ref_cat_path: str,
+        match_radius_arcsec: float = 5.0,
+    ) -> int:
+        """
+        Filter the science catalog to only keep sources that have a counterpart
+        in the reference catalog within *match_radius_arcsec*.
+
+        This removes spurious/ghost sources from badly stacked science images
+        that would otherwise corrupt SCAMP's astrometric solution.  The
+        reference catalog is the trusted truth: if a science detection has no
+        real counterpart in the reference, it is likely an artifact.
+
+        Parameters
+        ----------
+        sci_cat_path : str
+            Path to the science FITS-LDAC catalog (modified in-place).
+        ref_cat_path : str
+            Path to the reference FITS-LDAC catalog (read-only).
+        match_radius_arcsec : float
+            Maximum separation for a science source to be considered as having
+            a reference counterpart.
+
+        Returns
+        -------
+        int
+            Number of science sources remaining after filtering.
+        """
+        try:
+            with fits.open(sci_cat_path) as hs, fits.open(ref_cat_path) as hr:
+                sci_tab = Table(hs[2].data)
+                sci_hdr = hs[2].header
+                ref_tab = Table(hr[2].data)
+
+            if len(sci_tab) == 0 or len(ref_tab) == 0:
+                return len(sci_tab)
+
+            # Get WCS coordinates
+            def _get_ra_dec(tbl):
+                for ra_col, dec_col in [
+                    ("XWIN_WORLD", "YWIN_WORLD"),
+                    ("X_WORLD", "Y_WORLD"),
+                    ("ALPHA_J2000", "DELTA_J2000"),
+                ]:
+                    if ra_col in tbl.colnames and dec_col in tbl.colnames:
+                        return np.asarray(tbl[ra_col], float), np.asarray(tbl[dec_col], float)
+                return None, None
+
+            sci_ra, sci_dec = _get_ra_dec(sci_tab)
+            ref_ra, ref_dec = _get_ra_dec(ref_tab)
+
+            if sci_ra is None or ref_ra is None:
+                self.logger.warning(
+                    "[sci-to-ref filter] No WCS coordinates found in catalogs; skipping."
+                )
+                return len(sci_tab)
+
+            sci_coords = SkyCoord(sci_ra * u.deg, sci_dec * u.deg)
+            ref_coords = SkyCoord(ref_ra * u.deg, ref_dec * u.deg)
+
+            # Find the nearest reference source for each science source
+            idx_ref, d2d, _ = sci_coords.match_to_catalog_sky(ref_coords)
+            sep_arcsec = d2d.to(u.arcsec).value
+
+            has_counterpart = sep_arcsec <= match_radius_arcsec
+            n_before = len(sci_tab)
+            n_after = int(has_counterpart.sum())
+            n_dropped = n_before - n_after
+
+            if n_dropped > 0:
+                sci_filtered = sci_tab[has_counterpart]
+                with fits.open(sci_cat_path, mode="update") as hdul:
+                    hdul[2].data = sci_filtered.as_array()
+                    hdul.flush()
+                self.logger.info(
+                    "[sci-to-ref filter] Dropped %d/%d science sources with no "
+                    "reference counterpart within %.1f\" (remaining: %d). "
+                    "These are likely ghost/stacking artifacts.",
+                    n_dropped, n_before, match_radius_arcsec, n_after,
+                )
+            else:
+                self.logger.debug(
+                    "[sci-to-ref filter] All %d science sources have reference "
+                    "counterparts within %.1f\".",
+                    n_before, match_radius_arcsec,
+                )
+
+            return n_after
+
+        except Exception as e:
+            self.logger.warning(
+                "[sci-to-ref filter] Failed (non-fatal): %s. "
+                "Proceeding with full science catalog.", e,
+            )
+            return -1
+
     def filter_matched_sources(
         self,
         sci_cat_path: str,
@@ -7716,13 +7911,13 @@ NNW
                 magerr = np.where(
                     (flux > 0) & (flux_err > 0),
                     2.5 / np.log(10) * (flux_err / flux),
-                    0.02,
+                    np.nan,
                 )
                 snr = np.where(flux_err > 0, np.abs(flux) / flux_err, 0.0)
                 tbl["MAG_APER"], tbl["MAGERR_APER"], tbl["SNR_APER"] = mag, magerr, snr
             else:
-                # If neither is available, fill with NaN and default values
-                tbl["MAG_APER"], tbl["MAGERR_APER"], tbl["SNR_APER"] = np.nan, 0.02, 0.0
+                # If neither is available, fill with NaN
+                tbl["MAG_APER"], tbl["MAGERR_APER"], tbl["SNR_APER"] = np.nan, np.nan, 0.0
             return tbl
 
         sci_cat = add_mag_snr_aper(sci_cat)
