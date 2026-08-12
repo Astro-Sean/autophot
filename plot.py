@@ -1812,34 +1812,58 @@ class Plot:
             width_pt = 5.5 * 72.27
             aspect = 1.0
             fig, ax = plt.subplots(figsize=set_size(width_pt, aspect=aspect))
+            fig.subplots_adjust(left=0.12, right=0.78, top=0.92, bottom=0.12)
 
-            # Scatter with error bars if available, otherwise simple scatter
+            # --- Compute distance from target for coloring ----------------
+            _target_x = self.input_yaml.get("target_x_pix")
+            _target_y = self.input_yaml.get("target_y_pix")
+            if _target_x is not None and _target_y is not None and np.isfinite(_target_x) and np.isfinite(_target_y):
+                _dist_from_target = np.sqrt(
+                    (df_plot["x_pix"].values - float(_target_x)) ** 2
+                    + (df_plot["y_pix"].values - float(_target_y)) ** 2
+                )
+            else:
+                _dist_from_target = None
+
+            # Draw error bars first (gray, behind colored points)
             if has_errors:
                 ax.errorbar(
                     df_plot["dx"],
                     df_plot["dy"],
                     xerr=df_plot["x_fit_err"],
                     yerr=df_plot["y_fit_err"],
-                    fmt="o",
-                    markersize=3,
-                    capsize = 1,
-                    markerfacecolor="#2E8B57",
-                    markeredgecolor="none",
+                    fmt="none",
                     ecolor="gray",
                     elinewidth=0.5,
-                    alpha=0.7,
-                    zorder=2,
+                    alpha=0.5,
+                    zorder=1,
+                )
+
+            # Scatter plot colored by distance from target
+            _sc_obj = None
+            if _dist_from_target is not None:
+                _cmap = plt.cm.viridis
+                _sc_obj = ax.scatter(
+                    df_plot["dx"],
+                    df_plot["dy"],
+                    s=12,
+                    c=_dist_from_target,
+                    cmap=_cmap,
+                    marker="o",
+                    edgecolor="none",
+                    alpha=0.8,
+                    zorder=3,
                 )
             else:
                 ax.scatter(
                     df_plot["dx"],
                     df_plot["dy"],
-                    s=9,
+                    s=12,
                     marker="o",
                     facecolor="#2E8B57",
                     edgecolor="none",
                     alpha=0.7,
-                    zorder=2,
+                    zorder=3,
                 )
 
             # Zero lines
@@ -1856,18 +1880,35 @@ class Plot:
             rms_dx = np.sqrt(np.nanmean(df_plot["dx"]**2))
             rms_dy = np.sqrt(np.nanmean(df_plot["dy"]**2))
 
+            # Get pixel scale before setting limits so we can enforce a
+            # minimum range of max(1 px, 1 arcsec) whichever is larger.
+            pixel_scale = None
+            if "pixel_scale" in self.input_yaml:
+                pixel_scale = float(self.input_yaml["pixel_scale"])
+            elif imageWCS is not None:
+                try:
+                    from astropy.wcs import utils as wcs_utils
+                    pixel_scale = wcs_utils.proj_plane_pixel_scales(imageWCS)[0] * 3600
+                except Exception:
+                    pass
+
+            # Minimum half-range: 1 pixel or 1 arcsec (in pixels), whichever is larger
+            _min_lim = 1.0
+            if pixel_scale is not None and pixel_scale > 0:
+                _min_lim = max(_min_lim, 1.0 / pixel_scale)
+
             # Symmetric square axes with (0,0) at centre
             if has_errors:
                 _lim = max(
                     np.nanmax(np.abs(df_plot["dx"] + df_plot["x_fit_err"])),
                     np.nanmax(np.abs(df_plot["dy"] + df_plot["y_fit_err"])),
-                    1.0,
+                    _min_lim,
                 ) * 1.1
             else:
                 _lim = max(
                     np.nanmax(np.abs(df_plot["dx"])),
                     np.nanmax(np.abs(df_plot["dy"])),
-                    1.0,
+                    _min_lim,
                 ) * 1.1
             ax.set_xlim(-_lim, _lim)
             ax.set_ylim(-_lim, _lim)
@@ -1878,17 +1919,6 @@ class Plot:
             ax.set_ylabel(r"$\Delta y = y_{\mathrm{PSF}} - y_{\mathrm{WCS}}$ [px]")
 
             # Add upper and right axes for arcsecond offsets
-            # Get pixel scale from input_yaml or WCS
-            pixel_scale = None
-            if "pixel_scale" in self.input_yaml:
-                pixel_scale = float(self.input_yaml["pixel_scale"])
-            elif imageWCS is not None:
-                # Try to get pixel scale from WCS
-                try:
-                    from astropy.wcs import utils as wcs_utils
-                    pixel_scale = wcs_utils.proj_plane_pixel_scales(imageWCS)[0] * 3600  # Convert to arcsec
-                except Exception:
-                    pass
 
             if pixel_scale is not None and pixel_scale > 0:
                 # Create twin axes for arcsecond display
@@ -1920,6 +1950,14 @@ class Plot:
             else:
                 # No twin axes - safe to enforce equal aspect
                 ax.set_aspect("equal", adjustable="box")
+
+            # --- Colorbar (manually positioned to avoid twin axis overlap) ---
+            if _sc_obj is not None:
+                _cax = fig.add_axes([0.88, 0.12, 0.025, 0.80])
+                cbar = fig.colorbar(_sc_obj, cax=_cax)
+                cbar.set_label("Distance from target [px]", fontsize="small")
+                cbar.ax.tick_params(labelsize="x-small")
+
             # ax.set_title(f"WCS vs PSF Position Offset (N={len(df_plot)})")
             # ax.legend(loc="upper right", fontsize="small", framealpha=0.9)
             ax.grid(True, ls="-", alpha=0.25, zorder=0)
@@ -1952,7 +1990,6 @@ class Plot:
                 fontsize="small",
             )
 
-            fig.tight_layout()
             fig.savefig(save_path, dpi=150, facecolor="white")
             plt.close(fig)
 
@@ -2075,6 +2112,8 @@ class Plot:
             dy_err_all = np.sqrt(
                 sci_erry[matched] ** 2 + ref_erry[idx_ref[matched]] ** 2
             )
+            sci_x_all = sci_x[matched]
+            sci_y_all = sci_y[matched]
 
             n_matched = len(dx_all)
             if n_matched < 2:
@@ -2099,6 +2138,8 @@ class Plot:
             dy_all = dy_all[reasonable_err]
             dx_err_all = dx_err_all[reasonable_err]
             dy_err_all = dy_err_all[reasonable_err]
+            sci_x_all = sci_x_all[reasonable_err]
+            sci_y_all = sci_y_all[reasonable_err]
             n_excluded = n_before - len(dx_all)
             if n_excluded > 0:
                 logger.debug(
@@ -2125,16 +2166,22 @@ class Plot:
                     dy_plot = dy_all[both_ok]
                     dx_err_plot = dx_err_all[both_ok]
                     dy_err_plot = dy_err_all[both_ok]
+                    sci_x_plot = sci_x_all[both_ok]
+                    sci_y_plot = sci_y_all[both_ok]
                 else:
                     dx_plot = dx_all
                     dy_plot = dy_all
                     dx_err_plot = dx_err_all
                     dy_err_plot = dy_err_all
+                    sci_x_plot = sci_x_all
+                    sci_y_plot = sci_y_all
             else:
                 dx_plot = dx_all
                 dy_plot = dy_all
                 dx_err_plot = dx_err_all
                 dy_err_plot = dy_err_all
+                sci_x_plot = sci_x_all
+                sci_y_plot = sci_y_all
 
             med_dx = float(np.nanmedian(dx_plot))
             med_dy = float(np.nanmedian(dy_plot))
@@ -2145,50 +2192,94 @@ class Plot:
             width_pt = 5.5 * 72.27
             aspect = 1.0
             fig, ax = plt.subplots(figsize=set_size(width_pt, aspect=aspect))
+            fig.subplots_adjust(left=0.12, right=0.78, top=0.92, bottom=0.12)
 
             # Check if we have finite errors for error bars
             has_errors = np.all(np.isfinite(dx_err_plot)) and np.all(np.isfinite(dy_err_plot))
 
+            # --- Compute distance from target for coloring ----------------
+            _target_x = self.input_yaml.get("target_x_pix")
+            _target_y = self.input_yaml.get("target_y_pix")
+            if _target_x is not None and _target_y is not None and np.isfinite(_target_x) and np.isfinite(_target_y):
+                _dist_from_target = np.sqrt(
+                    (sci_x_plot - float(_target_x)) ** 2
+                    + (sci_y_plot - float(_target_y)) ** 2
+                )
+            else:
+                _dist_from_target = None
+
+            # Draw error bars first (gray, behind colored points)
             if has_errors:
                 ax.errorbar(
                     dx_plot,
                     dy_plot,
                     xerr=dx_err_plot,
                     yerr=dy_err_plot,
-                    fmt="o",
-                    markersize=3,
-                    capsize=1,
-                    markerfacecolor="dodgerblue",
-                    markeredgecolor="none",
+                    fmt="none",
                     ecolor="gray",
                     elinewidth=0.5,
-                    alpha=0.7,
-                    zorder=2,
+                    alpha=0.5,
+                    zorder=1,
+                )
+
+            # Scatter plot colored by distance from target
+            _sc_obj = None
+            if _dist_from_target is not None:
+                _cmap = plt.cm.viridis
+                _sc_obj = ax.scatter(
+                    dx_plot,
+                    dy_plot,
+                    s=12,
+                    c=_dist_from_target,
+                    cmap=_cmap,
+                    marker="o",
+                    edgecolor="none",
+                    alpha=0.8,
+                    zorder=3,
                 )
             else:
                 ax.scatter(
                     dx_plot,
                     dy_plot,
-                    s=9,
+                    s=12,
                     marker="o",
                     facecolor="dodgerblue",
                     edgecolor="none",
                     alpha=0.7,
-                    zorder=2,
+                    zorder=3,
                 )
+
+            # Get pixel scale before setting limits so we can enforce a
+            # minimum range of max(1 px, 1 arcsec) whichever is larger.
+            pixel_scale = None
+            if "pixel_scale" in self.input_yaml:
+                pixel_scale = float(self.input_yaml["pixel_scale"])
+            else:
+                try:
+                    from astropy.wcs import utils as wcs_utils
+                    pixel_scale = (
+                        wcs_utils.proj_plane_pixel_scales(sci_wcs)[0] * 3600
+                    )
+                except Exception:
+                    pass
+
+            # Minimum half-range: 1 pixel or 1 arcsec (in pixels), whichever is larger
+            _min_lim = 1.0
+            if pixel_scale is not None and pixel_scale > 0:
+                _min_lim = max(_min_lim, 1.0 / pixel_scale)
 
             # Symmetric square axes with (0,0) at centre
             if has_errors:
                 _lim = max(
                     np.nanmax(np.abs(dx_plot + dx_err_plot)),
                     np.nanmax(np.abs(dy_plot + dy_err_plot)),
-                    1.0,
+                    _min_lim,
                 ) * 1.1
             else:
                 _lim = max(
                     np.nanmax(np.abs(dx_plot)),
                     np.nanmax(np.abs(dy_plot)),
-                    1.0,
+                    _min_lim,
                 ) * 1.1
             ax.set_xlim(-_lim, _lim)
             ax.set_ylim(-_lim, _lim)
@@ -2203,17 +2294,6 @@ class Plot:
             )
 
             # Add upper and right axes for arcsecond offsets
-            pixel_scale = None
-            if "pixel_scale" in self.input_yaml:
-                pixel_scale = float(self.input_yaml["pixel_scale"])
-            else:
-                try:
-                    from astropy.wcs import utils as wcs_utils
-                    pixel_scale = (
-                        wcs_utils.proj_plane_pixel_scales(sci_wcs)[0] * 3600
-                    )
-                except Exception:
-                    pass
 
             if pixel_scale is not None and pixel_scale > 0:
                 ax_top = ax.twiny()
@@ -2243,6 +2323,13 @@ class Plot:
             else:
                 ax.set_aspect("equal", adjustable="box")
 
+            # --- Colorbar (manually positioned to avoid twin axis overlap) ---
+            if _sc_obj is not None:
+                _cax = fig.add_axes([0.88, 0.12, 0.025, 0.80])
+                cbar = fig.colorbar(_sc_obj, cax=_cax)
+                cbar.set_label("Distance from target [px]", fontsize="small")
+                cbar.ax.tick_params(labelsize="x-small")
+
             ax.grid(True, ls="-", alpha=0.25, zorder=0)
 
             stats_text = (
@@ -2271,8 +2358,7 @@ class Plot:
                 fontsize="small",
             )
 
-            fig.tight_layout()
-            fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+            fig.savefig(save_path, dpi=150, facecolor="white")
             plt.close(fig)
 
             logger.debug("Saved alignment offset plot: %s", save_path)

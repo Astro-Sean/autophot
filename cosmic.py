@@ -291,6 +291,13 @@ class RemoveCosmicRays:
 
             if bkg_rms is None:
                 bkg_rms = np.zeros_like(self.image, dtype=np.float32)
+            else:
+                bkg_rms = np.asarray(bkg_rms, dtype=np.float32)
+                if np.any(np.isnan(bkg_rms)):
+                    _finite_median = float(np.nanmedian(bkg_rms))
+                    if not np.isfinite(_finite_median) or _finite_median <= 0:
+                        _finite_median = 1.0
+                    bkg_rms = np.where(np.isfinite(bkg_rms), bkg_rms, _finite_median)
             sigma = calc_total_error(self.image, bkg_rms, effective_gain=gain)
             invar = np.asarray(sigma, dtype=np.float32) ** 2
             self.logger.info("Computed variance map from total error.")

@@ -1224,6 +1224,7 @@ class Zeropoint:
         """
         try:
             import emcee
+            logging.getLogger("emcee.autocorr").setLevel(logging.ERROR)
         except ImportError:
             logger.warning("emcee not available, falling back to ODR")
             return self._odr_slope1_fit(x, y, x_err, y_err, min_points=min_points)

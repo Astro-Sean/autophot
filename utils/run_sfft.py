@@ -467,7 +467,7 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-min_prior_sources",
         type=int,
-        default=3,
+        default=10,
         help="Minimum number of vetted prior point sources required for kernel fitting.",
     )
     parser.add_argument(
@@ -633,12 +633,14 @@ def run_sfft() -> Optional[int]:
         # If temp write fails, fall back to original paths (FITS_SCI/FITS_REF unchanged)
 
     def _sanitize_xy_sources(
-        xy: Optional[np.ndarray], label: str, width: int, height: int
+        xy: Optional[np.ndarray], label: str, width: int, height: int,
+        invalid_mask: Optional[np.ndarray] = None,
     ) -> Optional[np.ndarray]:
         """
         Keep source lists permissive but valid:
         - remove non-finite coordinates
         - remove out-of-image coordinates
+        - remove sources on NaN/masked pixels (if invalid_mask provided)
         - de-duplicate nearly identical points
         """
         if xy is None:
@@ -660,6 +662,18 @@ def run_sfft() -> Optional[int]:
             )
             arr = arr[in_bounds]
 
+        if arr.shape[0] > 0 and invalid_mask is not None:
+            ix = np.clip(arr[:, 0].astype(int), 0, width - 1)
+            iy = np.clip(arr[:, 1].astype(int), 0, height - 1)
+            on_valid = ~invalid_mask[iy, ix]
+            n_before_nan = int(arr.shape[0])
+            arr = arr[on_valid]
+            n_nan_dropped = n_before_nan - int(arr.shape[0])
+            if n_nan_dropped > 0:
+                log_info(
+                    f"{label}: dropped {n_nan_dropped} sources on NaN/masked pixels."
+                )
+
         if arr.shape[0] > 0:
             rounded = np.round(arr, decimals=3)
             _, uniq_idx = np.unique(rounded, axis=0, return_index=True)
@@ -677,8 +691,12 @@ def run_sfft() -> Optional[int]:
         return arr if n_out > 0 else None
 
     ny, nx = data_sci.shape
-    matching_sources = _sanitize_xy_sources(matching_sources, "Matching sources", nx, ny)
-    masked_sources = _sanitize_xy_sources(masked_sources, "Masked sources", nx, ny)
+    matching_sources = _sanitize_xy_sources(
+        matching_sources, "Matching sources", nx, ny, invalid_mask=combined_invalid_mask
+    )
+    masked_sources = _sanitize_xy_sources(
+        masked_sources, "Masked sources", nx, ny, invalid_mask=combined_invalid_mask
+    )
 
     # SFFT's XY_PriorSelect and XY_PriorBan expect 1-based FITS pixel coordinates
     # (SExtractor convention).  masked_sources are already converted to 1-based in
@@ -692,7 +710,7 @@ def run_sfft() -> Optional[int]:
         )
     
     # Improve prior source validation: require minimum sources for reliable kernel fitting
-    MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 3) or 3)
+    MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 10) or 10)
     ALLOW_UNVETTED_SOURCE_RETRY = str(
         getattr(args, "allow_unvetted_source_retry", "false")
     ).strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -1341,7 +1359,7 @@ def run_sfft() -> Optional[int]:
                 log_info(
                     f"SFFT ESP failed with {type(e).__name__} when using priors ({e}). "
                     "This typically occurs when:"
-                    "  1. Too few prior sources for reliable kernel fitting (default minimum: 3)"
+                    "  1. Too few prior sources for reliable kernel fitting (default minimum: 10)"
                     "  2. Prior sources are collinear or poorly distributed"
                     "  3. Prior sources have large positional errors"
                     "Retrying without prior-selected sources (keeping prior-ban list)."

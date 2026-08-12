@@ -1512,6 +1512,7 @@ class Catalog:
                     y_pix = np.asarray(y_pix, dtype=float).ravel()
 
                     outputCatalog = outputCatalog.iloc[valid_indices].copy()
+                    selectedCatalog = selectedCatalog.iloc[valid_indices].copy()
                     outputCatalog["x_pix"] = x_pix
                     outputCatalog["y_pix"] = y_pix
 
@@ -1662,8 +1663,8 @@ class Catalog:
     def recenter(self, selectedCatalog, image, boxsize=None, error=None):
         """
         Recenter sources in an image, selecting centroiding method from FWHM.
-        Undersampled (FWHM < 3 px): 2D Gaussian fit for subpixel accuracy.
-        Well-sampled (FWHM >= 3 px): center-of-mass. Robust against fully masked cutouts.
+        Undersampled (FWHM <= undersampled_fwhm_threshold, default 2.5 px): 2D Gaussian fit for subpixel accuracy.
+        Well-sampled (FWHM > threshold): center-of-mass. Robust against fully masked cutouts.
         Error-weighted centroiding has been removed; this routine always uses
         unweighted centroiding for stability across diverse background/error maps.
         """
@@ -1745,12 +1746,12 @@ class Catalog:
             old_x_valid = old_x[valid_sources]
             old_y_valid = old_y[valid_sources]
 
-            # Undersampled (FWHM < 3): 2D Gaussian; well-sampled: COM
+            # Undersampled (FWHM <= threshold): 2D Gaussian; well-sampled: COM
             if undersampled:
-                logger.info("Using 2D Gaussian centroiding (FWHM < 3 px, undersampled)")
+                logger.info("Using 2D Gaussian centroiding (FWHM <= %.1f px, undersampled)", undersampled_thr)
                 centroid_func = centroid_2dg
             else:
-                logger.info("Using center-of-mass centroiding (FWHM >= 3 px)")
+                logger.info("Using center-of-mass centroiding (FWHM > %.1f px)", undersampled_thr)
                 centroid_func = centroid_com
             try:
                 x_valid, y_valid = centroid_sources(

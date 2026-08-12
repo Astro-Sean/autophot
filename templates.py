@@ -630,9 +630,11 @@ class ReprojectConfig:
     parallel: bool = True
     conserve_flux: bool = False
     center_jacobian: bool = False
+    undersampled_fwhm_threshold: float = 2.5
     @classmethod
     def from_yaml(cls, input_yaml: Dict[str, Any]) -> "ReprojectConfig":
         cfg = input_yaml.get("alignment", {})
+        phot_cfg = input_yaml.get("photometry", {}) or {}
         return cls(
             method=str(cfg.get("reproject_method", "exact")).lower().strip(),
             roundtrip=bool(cfg.get("reproject_roundtrip_coords", True)),
@@ -642,6 +644,9 @@ class ReprojectConfig:
             parallel=bool(cfg.get("reproject_parallel", True)),
             conserve_flux=bool(cfg.get("reproject_adaptive_conserve_flux", False)),
             center_jacobian=bool(cfg.get("reproject_adaptive_center_jacobian", False)),
+            undersampled_fwhm_threshold=float(
+                phot_cfg.get("undersampled_fwhm_threshold", 2.5)
+            ),
         )
 
 
@@ -845,6 +850,7 @@ def compute_alignment_rms(
     ref_data: np.ndarray,
     fwhm_pixels: float,
     input_yaml: Optional[Dict[str, Any]] = None,
+    sci_xy_override: Optional[np.ndarray] = None,
 ) -> Optional[tuple]:
     """
     Compute robust alignment quality from pre-loaded arrays.
@@ -852,6 +858,14 @@ def compute_alignment_rms(
     Uses SExtractor for source detection (consistent with the rest of the
     pipeline).  Mutual nearest-neighbour star matching for robustness in
     crowded fields.
+
+    If *sci_xy_override* is provided, science source detection is skipped
+    and the supplied (N, 2) array of pixel positions is used instead.  This
+    is critical for images with ghost/stacking artifacts: re-detecting
+    sources in the science image picks up artifacts that create false
+    matches and inflate the RMS.  By passing in pre-matched science
+    sources (e.g. from spalipy's RA/DEC matching step), only real sources
+    with known reference counterparts are used.
 
     Returns (median_offset, rms, p90) tuple in pixels, or None if measurement fails.
     """
@@ -869,25 +883,30 @@ def compute_alignment_rms(
             _ts_cfg = input_yaml.get("template_subtraction", {}) or {}
             _align_thresh = float(_ts_cfg.get("alignment_rms_detect_thresh", 5.0) or 5.0)
 
-        sci_xy, _, _ = _detect_sextractor_sources(
-            sci_data, input_yaml=input_yaml, fwhm_pix=fwhm,
-            thresh=_align_thresh, fwhm_min=1.5,
-        )
+        if sci_xy_override is not None:
+            sci_xy = np.asarray(sci_xy_override, float)
+            if sci_xy.ndim != 2 or sci_xy.shape[1] != 2 or len(sci_xy) < 5:
+                return None
+        else:
+            sci_xy, _, _ = _detect_sextractor_sources(
+                sci_data, input_yaml=input_yaml, fwhm_pix=fwhm,
+                thresh=_align_thresh,
+            )
         ref_xy, _, _ = _detect_sextractor_sources(
             ref_data, input_yaml=input_yaml, fwhm_pix=fwhm,
-            thresh=_align_thresh, fwhm_min=1.5,
+            thresh=_align_thresh,
         )
 
         # If too few sources at high threshold, retry with lower threshold
-        if (sci_xy is None or len(sci_xy) < 10) and _align_thresh > 3.0:
+        if (sci_xy is None or len(sci_xy) < 10) and _align_thresh > 3.0 and sci_xy_override is None:
             sci_xy, _, _ = _detect_sextractor_sources(
                 sci_data, input_yaml=input_yaml, fwhm_pix=fwhm,
-                thresh=3.0, fwhm_min=1.5,
+                thresh=3.0,
             )
         if (ref_xy is None or len(ref_xy) < 10) and _align_thresh > 3.0:
             ref_xy, _, _ = _detect_sextractor_sources(
                 ref_data, input_yaml=input_yaml, fwhm_pix=fwhm,
-                thresh=3.0, fwhm_min=1.5,
+                thresh=3.0,
             )
 
         if sci_xy is None or ref_xy is None:
@@ -918,11 +937,29 @@ def compute_alignment_rms(
         _dx_mut = sci_xy[mutual, 0][_mut_idx] - ref_xy[i_sr[mutual], 0][_mut_idx]
         _dy_mut = sci_xy[mutual, 1][_mut_idx] - ref_xy[i_sr[mutual], 1][_mut_idx]
 
-        # Sigma-clip outliers before computing RMS/P90.
-        from astropy.stats import sigma_clip as _sc_align
-        _clipped = _sc_align(d_mut, sigma=2.5, maxiters=3)
-        _clip_mask = _clipped.mask if hasattr(_clipped, 'mask') else None
-        d_clipped = d_mut[~_clip_mask] if _clip_mask is not None else d_mut
+        # Robust outlier clipping using MAD-based sigma.
+        # Standard deviation is inflated by the very outliers we're trying to
+        # remove (e.g. ghost/stacking artifacts creating false matches), making
+        # sigma_clip ineffective.  MAD is resistant to up to 50% outliers.
+        _med_d = float(np.nanmedian(d_mut))
+        _mad_d = float(np.nanmedian(np.abs(d_mut - _med_d)))
+        _robust_sigma = 1.4826 * _mad_d if _mad_d > 0 else float(np.nanstd(d_mut))
+        if _robust_sigma < 1e-10:
+            _robust_sigma = 1e-10
+        _clip_mask = np.abs(d_mut - _med_d) > 3.0 * _robust_sigma
+        # Iterative clipping: recompute MAD on kept sources and clip again
+        for _ in range(4):
+            _kept = ~_clip_mask
+            if np.sum(_kept) < 5:
+                break
+            _med_d = float(np.nanmedian(d_mut[_kept]))
+            _mad_d = float(np.nanmedian(np.abs(d_mut[_kept] - _med_d)))
+            _robust_sigma = 1.4826 * _mad_d if _mad_d > 0 else 1e-10
+            _new_clip = np.abs(d_mut - _med_d) > 3.0 * _robust_sigma
+            if np.array_equal(_new_clip, _clip_mask):
+                break
+            _clip_mask = _new_clip
+        d_clipped = d_mut[~_clip_mask]
         if len(d_clipped) < 5:
             d_clipped = d_mut  # fallback: too few after clipping
 
@@ -1048,14 +1085,15 @@ def _reproject_template(
 
     # BUG 90: Auto-downgrade interpolation for undersampled images.
     # Bicubic/biquadratic introduce ringing artifacts when PSF is undersampled
-    # (FWHM < 2.5 px). Bilinear is safer in that regime.
+    # (FWHM < threshold). Bilinear is safer in that regime.
+    _us_thresh = getattr(cfg, "undersampled_fwhm_threshold", 2.5)
     interp_order_eff = cfg.interp_order
-    if isinstance(fwhm_pixels, (int, float)) and fwhm_pixels > 0 and fwhm_pixels < 2.5:
+    if isinstance(fwhm_pixels, (int, float)) and fwhm_pixels > 0 and fwhm_pixels < _us_thresh:
         if interp_order_eff in ("bicubic", "biquadratic"):
             logger.info(
-                "Undersampled image (FWHM=%.2f px < 2.5) - downgrading %s to bilinear "
+                "Undersampled image (FWHM=%.2f px < %.1f) - downgrading %s to bilinear "
                 "to avoid ringing artifacts.",
-                fwhm_pixels, interp_order_eff,
+                fwhm_pixels, _us_thresh, interp_order_eff,
             )
             interp_order_eff = "bilinear"
 
@@ -2893,8 +2931,7 @@ class Templates:
                         max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
                         max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
                         max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
-                        _tpl_fwhm = float(self.input_yaml.get("fwhm", 3.0))
-                        _tpl_scale = max(0.5, min(3.0, _tpl_fwhm / 3.0))
+                        _tpl_scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
                         max_offset *= _tpl_scale
                         max_rms *= _tpl_scale
                         max_p90 *= _tpl_scale
@@ -2952,8 +2989,7 @@ class Templates:
                         max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
                         max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
                         max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
-                        _tpl_fwhm = float(self.input_yaml.get("fwhm", 3.0))
-                        _tpl_scale = max(0.5, min(3.0, _tpl_fwhm / 3.0))
+                        _tpl_scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
                         max_offset *= _tpl_scale
                         max_rms *= _tpl_scale
                         max_p90 *= _tpl_scale
@@ -3004,8 +3040,7 @@ class Templates:
                 max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
                 max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
                 # FWHM-adaptive thresholds for fallback gates
-                _tpl_fwhm = float(self.input_yaml.get("fwhm", 3.0))
-                _tpl_scale = max(0.5, min(3.0, _tpl_fwhm / 3.0))
+                _tpl_scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
                 max_offset *= _tpl_scale
                 max_rms *= _tpl_scale
                 max_p90 *= _tpl_scale
@@ -3044,6 +3079,55 @@ class Templates:
                 logger.info("Alignment succeeded (method: %s).", method_used)
                 return scienceFpath, result.template_path
 
+            def _check_sub_tile_feasibility(det, shape, sub_tile, min_per_tile=4):
+                """Check if spalipy's sub-tile splitting will have enough sources.
+
+                spalipy splits the *source* image (template) into sub_tile x
+                sub_tile grid and requires >=4 sources per sub-tile for quad
+                construction.  When the template only partially overlaps the
+                science image, matched sources cluster in the overlap region
+                and some sub-tiles may be empty.
+
+                This simulates the splitting and reduces sub_tile if needed.
+                """
+                if sub_tile <= 1:
+                    return sub_tile
+                try:
+                    coo = np.column_stack([
+                        np.asarray(det["x"], float),
+                        np.asarray(det["y"], float),
+                    ])
+                    width = shape[1]
+                    height = shape[0]
+                    sub_w = width / sub_tile
+                    sub_h = height / sub_tile
+                    counts = []
+                    for i in range(sub_tile):
+                        cx = width * (2 * i + 1) / (sub_tile * 2)
+                        for j in range(sub_tile):
+                            cy = height * (2 * j + 1) / (sub_tile * 2)
+                            mask = (
+                                (np.abs(cx - coo[:, 0]) <= sub_w / 2) &
+                                (np.abs(cy - coo[:, 1]) <= sub_h / 2)
+                            )
+                            counts.append(int(mask.sum()))
+                    _min_count = min(counts)
+                    if _min_count >= min_per_tile:
+                        logger.info(
+                            "spalipy: sub_tile=%d feasible (per-tile sources: %s).",
+                            sub_tile, counts,
+                        )
+                        return sub_tile
+                    else:
+                        logger.info(
+                            "spalipy: sub_tile=%d infeasible (per-tile sources: %s, "
+                            "min=%d < %d needed); reducing to sub_tile=1.",
+                            sub_tile, counts, _min_count, min_per_tile,
+                        )
+                        return 1
+                except Exception:
+                    return sub_tile
+
             def _spalipy() -> Tuple[Optional[str], Optional[str]]:
                 """Align template to science using spalipy (spline-warp registration).
 
@@ -3073,13 +3157,20 @@ class Templates:
                         else {}
                     )
                     _sp_detect_thresh = float(_sp_cfg.get("spalipy_detect_thresh", 2.0) or 2.0)
-                    _sp_match_radius = float(_sp_cfg.get("spalipy_match_radius_arcsec", 3.0) or 3.0)
+                    _sp_match_radius_cfg = _sp_cfg.get("spalipy_match_radius_arcsec", None)
+                    if _sp_match_radius_cfg is not None:
+                        _sp_match_radius = float(_sp_match_radius_cfg)
+                    else:
+                        # Adaptive: 3x FWHM in arcsec, floored at 10"
+                        # (handles WCS offsets in poorly plate-solved images)
+                        _sp_pix_scale = float(self.input_yaml.get("pixel_scale", 1.0) or 1.0)
+                        _sp_match_radius = max(3.0 * fwhm_pix * _sp_pix_scale, 10.0)
 
                     def _detect_for_spalipy(data, min_sources=20):
                         """Detect sources via SExtractor, return spalipy-format Table."""
                         xy, flux, fwhm = _detect_sextractor_sources(
                             data, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
-                            thresh=_sp_detect_thresh, fwhm_min=1.5,
+                            thresh=_sp_detect_thresh,
                         )
                         if xy is None or len(xy) < 4:
                             return None
@@ -3283,20 +3374,51 @@ class Templates:
                     _yaml_interp = _sp_cfg.get("spalipy_interp_order")
                     _yaml_sub_tile = _sp_cfg.get("spalipy_sub_tile")
                     _yaml_spline = _sp_cfg.get("spalipy_spline_order")
+                    _yaml_max_match_dist = _sp_cfg.get("spalipy_max_match_dist")
+                    _yaml_min_quad_sep = _sp_cfg.get("spalipy_min_quad_sep")
+                    _yaml_quad_edge_buffer = _sp_cfg.get("spalipy_quad_edge_buffer")
+                    _yaml_max_quad_cand = _sp_cfg.get("spalipy_max_quad_cand")
 
-                    # n_quad_det: number of detections used for quad matching.
-                    # Use all sources for sparse fields, cap at 20 for dense fields.
+                    # --- Image geometry for parameter scaling ---
+                    _tpl_h, _tpl_w = _tpl_fill.shape
+                    _sci_h, _sci_w = scienceImage.shape
+                    _min_img_dim = float(min(_tpl_w, _tpl_h, _sci_w, _sci_h))
+
+                    # n_quad_det: number of detections used for quad construction.
+                    # C(n_quad_det, 4) quads are made per sub-tile, so this has
+                    # O(n^4) performance impact.  For sparse fields, use all
+                    # sources (more quads = more chances to find a match).
+                    # For moderate fields, 25 gives C(25,4)=12650 quads.
+                    # For dense fields, 20 gives C(20,4)=4845 quads (enough).
                     if _yaml_n_quad is not None:
                         _n_quad = int(_yaml_n_quad)
                     else:
-                        _n_quad = _n_sources if _n_sources <= 25 else 20
+                        if _n_sources <= 25:
+                            _n_quad = _n_sources
+                        elif _n_sources <= 100:
+                            _n_quad = 25
+                        else:
+                            _n_quad = 20
 
                     # min_n_match: minimum matched sources for alignment.
-                    # Lower for sparse fields so spalipy doesn't reject valid matches.
+                    # Lower for sparse fields so spalipy doesn't reject valid
+                    # matches.  Floor at 6 (need >=4 for affine, +2 for robustness).
                     if _yaml_min_match is not None:
                         _min_match = int(_yaml_min_match)
                     else:
                         _min_match = max(6, min(_n_sources // 3, 20))
+
+                    # max_match_dist: maximum matching distance in template
+                    # (science) pixel frame after affine transform.  spalipy
+                    # also requires the 2nd-nearest match to be >2x this
+                    # distance (anti-double-match).  Centroid uncertainty is
+                    # ~FWHM/10, so scale with FWHM.  Too large -> false matches
+                    # pass the 2nd-nearest test; too small -> real matches
+                    # rejected.  Clamp to [2, 5] px.
+                    if _yaml_max_match_dist is not None:
+                        _max_match_dist = float(_yaml_max_match_dist)
+                    else:
+                        _max_match_dist = float(np.clip(0.5 * _med_fwhm, 2.0, 5.0))
 
                     # max_quad_hash_dist: tolerance for quad hash matching.
                     # Scaled by FWHM to account for centroid uncertainty.
@@ -3305,12 +3427,81 @@ class Templates:
                     else:
                         _hash_dist = max(0.005, 2.0 * _med_fwhm / 50.0)
 
-                    # min_sep: minimum separation between detections.
-                    # Set to ~1 FWHM to avoid blended sources being used as quads.
-                    if _yaml_min_sep is not None:
-                        _det_sep = int(_yaml_min_sep)
+                    # min_quad_sep: minimum distance between detections in a
+                    # quad.  spalipy defaults to 50 px, which is too large for
+                    # small templates (e.g. 486x501).  Quads should span a
+                    # meaningful fraction of the image for astrometric
+                    # constraining power.  Scale with min image dimension,
+                    # clamped to [10, 50] px.
+                    if _yaml_min_quad_sep is not None:
+                        _min_quad_sep = float(_yaml_min_quad_sep)
                     else:
-                        _det_sep = max(5, int(_med_fwhm))
+                        _min_quad_sep = float(np.clip(_min_img_dim / 4.0, 10.0, 50.0))
+
+                    # min_sep: minimum separation between detections used in
+                    # alignment.  Removes crowded/blended sources.  Set to
+                    # max(1 FWHM, 2*max_match_dist) per spalipy's default
+                    # logic (min_sep defaults to 2*max_match_dist when None).
+                    if _yaml_min_sep is not None:
+                        _det_sep = float(_yaml_min_sep)
+                    else:
+                        _det_sep = max(float(_med_fwhm), 2.0 * _max_match_dist)
+
+                    # quad_edge_buffer: exclude detections within this many
+                    # pixels of the template edge from quad construction.
+                    # When the template only partially overlaps the science
+                    # image, sources near the template edge may be truncated
+                    # or have poor centroids.  Set to ~1 FWHM when partial
+                    # overlap is detected, 0 otherwise.
+                    if _yaml_quad_edge_buffer is not None:
+                        _quad_edge_buffer = int(_yaml_quad_edge_buffer)
+                    else:
+                        _quad_edge_buffer = 0
+                        try:
+                            _tpl_wcs_area = _tpl_w * _tpl_h
+                            # Check if template covers science frame by
+                            # comparing WCS footprints
+                            from astropy.wcs import WCS as _WCS3
+                            _sw3 = _WCS3(scienceHeader)
+                            _tw3 = _WCS3(templateHeader)
+                            _sci_corners = _sw3.calc_footprint()
+                            _tpl_corners = _tw3.calc_footprint()
+                            # Convert template corners to science pixel frame
+                            _tpl_in_sci = _sw3.all_world2pix(
+                                _tpl_corners[:, 0], _tpl_corners[:, 1], 0
+                            )
+                            _tpl_x_min = float(np.min(_tpl_in_sci[0]))
+                            _tpl_x_max = float(np.max(_tpl_in_sci[0]))
+                            _tpl_y_min = float(np.min(_tpl_in_sci[1]))
+                            _tpl_y_max = float(np.max(_tpl_in_sci[1]))
+                            _covers_x = (_tpl_x_min <= 0) and (_tpl_x_max >= _sci_w)
+                            _covers_y = (_tpl_y_min <= 0) and (_tpl_y_max >= _sci_h)
+                            if not (_covers_x and _covers_y):
+                                _quad_edge_buffer = max(1, int(_med_fwhm))
+                                logger.info(
+                                    "spalipy: partial overlap detected "
+                                    "(tpl covers sci x:[%.0f,%.0f]/%d, y:[%.0f,%.0f]/%d); "
+                                    "setting quad_edge_buffer=%d px.",
+                                    _tpl_x_min, _tpl_x_max, _sci_w,
+                                    _tpl_y_min, _tpl_y_max, _sci_h,
+                                    _quad_edge_buffer,
+                                )
+                        except Exception:
+                            pass
+
+                    # max_quad_cand: maximum quad candidates to try for
+                    # affine transform.  More candidates = more chances to
+                    # find the correct transform, but slower.  Scale with
+                    # source count.
+                    if _yaml_max_quad_cand is not None:
+                        _max_quad_cand = int(_yaml_max_quad_cand)
+                    else:
+                        if _n_sources <= 25:
+                            _max_quad_cand = 10
+                        elif _n_sources <= 100:
+                            _max_quad_cand = 15
+                        else:
+                            _max_quad_cand = 10
 
                     # interp_order: spline interpolation order for resampling.
                     # Lower order for undersampled images (less smooth interpolation).
@@ -3321,11 +3512,23 @@ class Templates:
 
                     # sub_tile: number of sub-tiles for affine fitting.
                     # Higher values model spatially-varying distortion better
-                    # but need more sources per tile.  Set to 1 for sparse fields.
+                    # but need enough sources per tile.  spalipy splits the
+                    # *source* image (template) into sub_tile x sub_tile grid
+                    # and requires >=4 sources per sub-tile for quad construction.
+                    # When the template only partially overlaps the science
+                    # image, matched sources cluster in the overlap region and
+                    # some sub-tiles may be empty.
+                    #
+                    # We simulate spalipy's sub-tile splitting on the template
+                    # image to check that each sub-tile has enough sources.
                     if _yaml_sub_tile is not None:
                         _sub_tile = int(_yaml_sub_tile)
                     else:
                         _sub_tile = 2 if _n_sources >= 200 else 1
+                        if _sub_tile > 1:
+                            _sub_tile = _check_sub_tile_feasibility(
+                                _tpl_det, _tpl_fill.shape, _sub_tile,
+                            )
 
                     # Spline order: SmoothBivariateSpline requires at least
                     # (kx+1)*(ky+1) matched sources (not detected sources).
@@ -3350,10 +3553,12 @@ class Templates:
                                 break
 
                     logger.info(
-                        "spalipy: hash_dist=%.4f min_match=%d n_quad=%d "
+                        "spalipy: hash_dist=%.4f match_dist=%.2f min_quad_sep=%.1f "
+                        "edge_buf=%d max_cand=%d min_match=%d n_quad=%d "
                         "sub_tile=%d spline_order=%d (FWHM=%.1f, n_sources=%d).",
-                        _hash_dist, _min_match, _n_quad, _sub_tile,
-                        _spline_order, _med_fwhm, _n_sources,
+                        _hash_dist, _max_match_dist, _min_quad_sep,
+                        _quad_edge_buffer, _max_quad_cand, _min_match, _n_quad,
+                        _sub_tile, _spline_order, _med_fwhm, _n_sources,
                     )
 
                     # Try align with progressively lower spline orders.
@@ -3361,43 +3566,65 @@ class Templates:
                     # ValueError, so we catch it here and retry.
                     _spalipy_orders_to_try = [o for o in (3, 2, 1, 0) if o <= _spline_order]
                     sp = None
-                    for _try_order in _spalipy_orders_to_try:
-                        sp = Spalipy(
-                            _tpl_fill,
-                            source_mask=_tpl_nan if _tpl_nan.any() else None,
-                            template_data=_sci_fill,
-                            source_det=_tpl_det,
-                            template_det=sci_det,
-                            output_shape=scienceImage.shape,
-                            min_n_match=_min_match,
-                            n_quad_det=_n_quad,
-                            max_quad_hash_dist=_hash_dist,
-                            min_sep=_det_sep,
-                            interp_order=_interp_order,
-                            sub_tile=_sub_tile,
-                            spline_order=_try_order,
-                            cval=np.nan,
-                        )
-                        try:
-                            sp.align()
-                            break  # success
-                        except Exception as _spalipy_err:
-                            if "length of x, y and z" in str(_spalipy_err) and _try_order > 0:
-                                logger.info(
-                                    "spalipy: spline_order=%d failed (not enough "
-                                    "matched sources); retrying with order=%d.",
-                                    _try_order, _try_order - 1,
-                                )
-                                sp._aligned_data = None
-                                continue
-                            else:
-                                logger.warning(
-                                    "spalipy: align() raised %s: %s",
-                                    type(_spalipy_err).__name__, _spalipy_err,
-                                    exc_info=True,
-                                )
-                                sp._aligned_data = None
-                                break
+                    _try_sub_tile = _sub_tile
+                    _aligned_ok = False
+                    while not _aligned_ok:
+                        for _try_order in _spalipy_orders_to_try:
+                            sp = Spalipy(
+                                _tpl_fill,
+                                source_mask=_tpl_nan if _tpl_nan.any() else None,
+                                template_data=_sci_fill,
+                                source_det=_tpl_det,
+                                template_det=sci_det,
+                                output_shape=scienceImage.shape,
+                                min_n_match=_min_match,
+                                n_quad_det=_n_quad,
+                                max_quad_hash_dist=_hash_dist,
+                                max_match_dist=_max_match_dist,
+                                min_quad_sep=_min_quad_sep,
+                                quad_edge_buffer=_quad_edge_buffer,
+                                max_quad_cand=_max_quad_cand,
+                                min_sep=_det_sep,
+                                interp_order=_interp_order,
+                                sub_tile=_try_sub_tile,
+                                spline_order=_try_order,
+                                cval=np.nan,
+                            )
+                            try:
+                                sp.align()
+                                _aligned_ok = True
+                                break  # success
+                            except Exception as _spalipy_err:
+                                _err_msg = str(_spalipy_err)
+                                if "length of x, y and z" in _err_msg and _try_order > 0:
+                                    logger.info(
+                                        "spalipy: spline_order=%d failed (not enough "
+                                        "matched sources); retrying with order=%d.",
+                                        _try_order, _try_order - 1,
+                                    )
+                                    sp._aligned_data = None
+                                    continue
+                                elif "Not enough detections" in _err_msg and _try_sub_tile > 1:
+                                    logger.info(
+                                        "spalipy: sub_tile=%d failed (not enough "
+                                        "detections in sub-tile); retrying with sub_tile=1.",
+                                        _try_sub_tile,
+                                    )
+                                    _try_sub_tile = 1
+                                    sp._aligned_data = None
+                                    break  # break inner for, restart with sub_tile=1
+                                else:
+                                    logger.warning(
+                                        "spalipy: align() raised %s: %s",
+                                        type(_spalipy_err).__name__, _spalipy_err,
+                                        exc_info=True,
+                                    )
+                                    sp._aligned_data = None
+                                    _aligned_ok = True  # break outer while too
+                                    break
+                        else:
+                            # All spline orders exhausted without success
+                            _aligned_ok = True
 
                     if sp.aligned_data is None:
                         logger.info("spalipy did not produce aligned output.")
@@ -3443,11 +3670,21 @@ class Templates:
                     # quality gate below measures the actual spalipy output.
 
                     # Alignment quality check - reject if RMS exceeds gates
+                    # Use the pre-matched science sources (sci_det) instead of
+                    # re-detecting in the science image.  sci_det was already
+                    # RA/DEC matched to the reference, so it contains only real
+                    # sources — no ghost/stacking artifacts that would create
+                    # false matches and inflate the RMS.
                     _align_ok = True
                     try:
+                        _sci_xy_for_rms = np.column_stack([
+                            np.asarray(sci_det["x"], float),
+                            np.asarray(sci_det["y"], float),
+                        ])
                         _med_off, _rms_off, _p90_off = compute_alignment_rms(
                             scienceImage, aligned_template, fwhm_pix,
                             input_yaml=self.input_yaml,
+                            sci_xy_override=_sci_xy_for_rms,
                         )
                         logger.info(
                             "spalipy: alignment RMS median=%.3f px rms=%.3f px.",
@@ -3459,8 +3696,7 @@ class Templates:
                         max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
                         max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
                         # FWHM-adaptive thresholds for fallback gates
-                        _tpl_fwhm = float(self.input_yaml.get("fwhm", 3.0))
-                        _tpl_scale = max(0.5, min(3.0, _tpl_fwhm / 3.0))
+                        _tpl_scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
                         max_offset *= _tpl_scale
                         max_rms *= _tpl_scale
                         max_p90 *= _tpl_scale
@@ -3699,8 +3935,7 @@ class Templates:
                             max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
                             max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
                             max_p90 = float(quality_cfg.get("alignment_max_p95_px", 1.5))
-                            _tpl_fwhm = float(self.input_yaml.get("fwhm", 3.0))
-                            _tpl_scale = max(0.5, min(3.0, _tpl_fwhm / 3.0))
+                            _tpl_scale = max(0.5, min(3.0, float(fwhm_pix) / 3.0))
                             max_offset *= _tpl_scale
                             max_rms *= _tpl_scale
                             max_p90 *= _tpl_scale
@@ -5527,7 +5762,7 @@ class Templates:
             # one full PSF footprint, which is required for flux-conserving photometry.
             #
             # The multiplier is configurable and can be overridden entirely via
-            # kernel_hw_override for debugging. For undersampled images (FWHM < 2 px), the
+            # kernel_hw_override for debugging. For undersampled images (FWHM < undersampled_fwhm_threshold), the
             # multiplier is automatically increased to capture extended PSF wings.
             ts_cfg_ker = self.input_yaml.get("template_subtraction", {})
             KER_HW_MIN = int(ts_cfg_ker.get("kernel_hw_min", 3))
@@ -5543,7 +5778,7 @@ class Templates:
             # after cross-matching and quality filtering only ~15-20 survive
             # for kernel fitting.  Use 20 as a conservative estimate.
             _n_matched_early = len(matching_sources) if matching_sources else 0
-            _min_prior_early = int(ts_cfg_ker.get("sfft_min_prior_sources", 3) or 3)
+            _min_prior_early = int(ts_cfg_ker.get("sfft_min_prior_sources", 10) or 10)
             _sfft_self_match_early = _n_matched_early < _min_prior_early
             n_eff = 10 if _sfft_self_match_early else _n_matched_early
 
@@ -5577,14 +5812,19 @@ class Templates:
                     fwhm_conv = fwhm_broad  # identical PSFs: kernel ~ delta function; use broad as floor
 
                 # Adaptive multiplier: boost for undersampled images to capture PSF wings
-                # FWHM < 2 px is typically undersampled (Nyquist requires FWHM >= 2 px)
+                # Uses configurable undersampled_fwhm_threshold (default 2.5 px) for consistency
+                _us_thr_ker = float(
+                    (self.input_yaml.get("photometry", {}) or {}).get(
+                        "undersampled_fwhm_threshold", 2.5
+                    )
+                )
                 _mult_effective = _mult
-                if fwhm_broad < 2.0:
+                if fwhm_broad < _us_thr_ker:
                     _mult_effective = min(_mult * 1.5, 4.0)  # cap boost at 4.0 total
                     logger.debug(
-                        "Undersampled PSF detected (FWHM=%.2f < 2 px); "
+                        "Undersampled PSF detected (FWHM=%.2f < %.1f px); "
                         "boosting kernel multiplier: %.2f -> %.2f",
-                        fwhm_broad, _mult, _mult_effective,
+                        fwhm_broad, _us_thr_ker, _mult, _mult_effective,
                     )
 
                 # Warn for very large FWHM differences (potential quality issues)
@@ -5865,7 +6105,7 @@ class Templates:
 
             # n_eff was computed earlier for kernel floor adaptation (BUG 120).
             # Recompute _sfft_self_match for logging purposes.
-            _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 3) or 3)
+            _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 10) or 10)
             _sfft_self_match = n_matched < _min_prior
 
             # Use the conservative n_eff (20 for self-match) for kernel_order
@@ -6813,7 +7053,7 @@ class Templates:
                 return f"[{coords}]"
 
             def _build_sfft_cmd(run_excluded, run_matching, template_fp, diff_fp):
-                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 3) or 3)
+                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 10) or 10)
                 if len(run_matching) < min_sources_for_prior:
                     logger.warning(
                         "Only %d vetted point-source priors are available (minimum=%d); "
@@ -6943,7 +7183,7 @@ class Templates:
                     cmd_local += ["-kernel_hw_fwhm_multiplier", str(float(_ker_mult))]
 
                 # Prior source validation
-                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 3)
+                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 10)
                 cmd_local += ["-min_prior_sources", str(int(min_prior_sources))]
                 cmd_local += [
                     "-allow_unvetted_source_retry",
@@ -7125,23 +7365,13 @@ class Templates:
                                     _hdul.flush()
                         except Exception:
                             pass
-                        # BUG 110: Hard rejection for wildly wrong kernels.
-                        # A negative convolution flux scaling or >50% mismatch
-                        # indicates the kernel solution is completely unconstrained
-                        # (typically from < 3 matched sources).  Fall back to
-                        # HOTPANTS rather than producing a garbage subtraction.
-                        _hard_reject = (
-                            _conv_scale < 0
-                            or _discrep_pct > 50.0
-                        )
-                        if _hard_reject:
-                            logger.error(
-                                "SFFT kernel solution is unreliable: convolution flux scaling=%.4f "
-                                "vs photometric=%.4f (%.1f%% mismatch). Kernel is unconstrained "
-                                "(likely too few matched sources). Falling back to HOTPANTS.",
-                                _conv_scale, _phot_scale, _discrep_pct,
+                        if _conv_scale < 0:
+                            logger.warning(
+                                "SFFT convolution flux scaling is negative (%.4f). "
+                                "Kernel solution may be unconstrained (likely too few "
+                                "matched sources). Proceeding with SFFT result.",
+                                _conv_scale,
                             )
-                            return "hotpants"
                         elif _discrep_pct > 3.0:
                             _fc_msg = ""
                             # Read actual ForceConv from diff image header

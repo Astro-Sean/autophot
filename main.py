@@ -3334,6 +3334,7 @@ def run_photometry():
             ap_size=1.7 * ImageFWHM,
             background_rms=background_rms,
             n_jobs=ap_n_jobs,
+            mask=hardware_defects_mask,
         )
 
         IsolatedSources, fit_params, saturation_range = Find_FWHM(
@@ -3392,6 +3393,7 @@ def run_photometry():
                         background_rms=background_rms,
                         n_jobs=input_yaml.get('n_jobs',1),
                         crowded=crowded_field,
+                        mask=hardware_defects_mask,
                     )
                 )
                 # Checks if the optimum aperture radius is less than 5 x FWHM.
@@ -3465,6 +3467,7 @@ def run_photometry():
                             "plot_aperture_correction", False
                         )
                     ),
+                    mask=hardware_defects_mask,
                 )
                 if np.isfinite(ap_corr):
                     input_yaml["aperture_correction"] = float(ap_corr)
@@ -3916,7 +3919,7 @@ def run_photometry():
                         input_yaml=input_yaml,
                     ).build(
                         psfSources=psf_sources_orig,
-                        mask=result_orig["defects_mask"],
+                        mask=result_orig["hardware_defects_mask"],
                         background_rms=result_orig["background_rms"],
                     )
                     # Release the original full-resolution image immediately after
@@ -3951,7 +3954,7 @@ def run_photometry():
                     input_yaml=input_yaml,
                 ).build(
                     psfSources=psf_source_pool,
-                    mask=defects_mask,
+                    mask=hardware_defects_mask,
                     background_rms=background_rms,
                 )
                 if epsf_model is None:
@@ -4003,6 +4006,7 @@ def run_photometry():
                         ignore_sources=variable_sources,
                         background_rms=background_rms,
                         iterative=False,
+                        mask=hardware_defects_mask,
                     )
                     # Diagnostic plot: WCS catalog position vs PSF fitted position
                     try:
@@ -4903,6 +4907,9 @@ def run_photometry():
                     sources=image_sources,
                     exposure_time=exposure_time,
                     ap_size=science_aperture,
+                    background_rms=background_rms,
+                    n_jobs=ap_n_jobs,
+                    mask=hardware_defects_mask,
                 )
                 # Loads the template image and header.
                 template_fwhm = template_header.get("FWHM", 3)
@@ -4932,9 +4939,16 @@ def run_photometry():
                     float(template_exposure),
                     tpl_exp_key,
                 )
-                template_gain, tpl_gain_key = gain_e_per_adu_from_header(
-                    template_header, None
-                )
+                try:
+                    template_gain, tpl_gain_key = gain_e_per_adu_from_header(
+                        template_header, None
+                    )
+                except ValueError:
+                    template_gain = 1.0
+                    tpl_gain_key = "fallback (header lacks GAIN)"
+                    logging.warning(
+                        "Template header lacks GAIN; using gain=1.0 e-/ADU for aperture photometry."
+                    )
                 logging.info(
                     "Template gain: %.5g e-/ADU (header %s)",
                     float(template_gain),
@@ -5341,6 +5355,7 @@ def run_photometry():
                         epsf_model=epsf_model,
                         sources=MatchingSources,
                         background_rms=background_rms,
+                        mask=hardware_defects_mask,
                     )
 
                     # ------------------------------------------------------------------
@@ -5386,7 +5401,12 @@ def run_photometry():
                                 _fwhm_for_cs = float(
                                     input_yaml.get("science_fwhm", ImageFWHM)
                                 )
-                                if _fwhm_for_cs < 2.0:
+                                _us_thr_cs = float(
+                                    (input_yaml.get("photometry", {}) or {}).get(
+                                        "undersampled_fwhm_threshold", 2.5
+                                    )
+                                )
+                                if _fwhm_for_cs < _us_thr_cs:
                                     cs_threshold = 0.0
                                 else:
                                     cs_threshold = float(
@@ -5800,7 +5820,7 @@ def run_photometry():
                     header=header,
                 ).build(
                     psfSources=df_zogy_science,
-                    mask=defects_mask,
+                    mask=hardware_defects_mask,
                     background_rms=background_rms,
                     filename_prefix="PSF_model_image",
                 )
@@ -6905,6 +6925,7 @@ def run_photometry():
         # -------------------------------------------------------------------------
         target_cutout = None
         target_cutout_rms = None
+        target_cutout_mask = None
         cutout_x0 = 0
         cutout_y0 = 0
         cutout_target_x = float(bg_target_x_pix)
@@ -6933,6 +6954,12 @@ def run_photometry():
                     if rms_result is not None:
                         target_cutout_rms, _, _ = rms_result
                         target_cutout_rms = np.abs(np.asarray(target_cutout_rms, dtype=float))
+                # Extract corresponding hardware defects mask region
+                if hardware_defects_mask is not None and np.ndim(hardware_defects_mask) == 2:
+                    mask_result = getDetectionLimits.get_cutout(image=hardware_defects_mask)
+                    if mask_result is not None:
+                        target_cutout_mask, _, _ = mask_result
+                        target_cutout_mask = np.asarray(target_cutout_mask, dtype=bool)
                 # Target position in cutout-local coordinates, as returned by
                 # Cutout2D.position_cutout.  Do NOT assume the geometric centre
                 # of the array: near image edges the cutout is partial and the
@@ -6943,6 +6970,7 @@ def run_photometry():
             logging.warning("get_cutout failed for target cutout: %s, falling back to direct slicing", e)
             target_cutout = None
             target_cutout_rms = None
+            target_cutout_mask = None
 
         # Fallback to direct slicing if get_cutout failed
         if target_cutout is None and local_cutout_box is not None:
@@ -6955,11 +6983,17 @@ def run_photometry():
                     target_cutout_rms = np.asarray(
                         background_rms[y0b:y1b, x0b:x1b], dtype=np.float32
                     )
+                # Hardware defects mask cutout (if available)
+                if hardware_defects_mask is not None and np.ndim(hardware_defects_mask) == 2:
+                    target_cutout_mask = np.asarray(
+                        hardware_defects_mask[y0b:y1b, x0b:x1b], dtype=bool
+                    )
                 cutout_target_x = float(bg_target_x_pix) - float(x0b)
                 cutout_target_y = float(bg_target_y_pix) - float(y0b)
             except Exception:
                 target_cutout = None
                 target_cutout_rms = None
+                target_cutout_mask = None
 
         # If a DC lift was applied (only when explicitly enabled via YAML), log it.
         # By default the lift is disabled because it inflates the Poisson noise term
@@ -6980,6 +7014,9 @@ def run_photometry():
         image_for_target = target_cutout if target_cutout is not None else image
         background_rms_for_target = (
             target_cutout_rms if target_cutout_rms is not None else background_rms
+        )
+        mask_for_target = (
+            target_cutout_mask if target_cutout_mask is not None else hardware_defects_mask
         )
 
         # =============================================================================
@@ -7044,6 +7081,7 @@ def run_photometry():
                 saveTarget=True,
                 background_rms=background_rms_for_target,
                 n_jobs=input_yaml.get("n_jobs", 1),
+                mask=mask_for_target,
             )
         finally:
             if _old_enforce_nn is not None:
@@ -7155,6 +7193,7 @@ def run_photometry():
                 is_target_fit=True,
                 background_rms=background_rms_for_target,
                 inverted_image=inverted_image,
+                mask=mask_for_target,
             )
 
         
@@ -7224,6 +7263,7 @@ def run_photometry():
                         saveTarget=True,
                         background_rms=background_rms_for_target,
                         n_jobs=input_yaml.get("n_jobs", 1),
+                        mask=mask_for_target,
                     )
                     # Store inverted aperture results with _inverted suffix
                     if "flux_AP" in TargetPositionInverted.columns:
@@ -7959,6 +7999,7 @@ def run_photometry():
                                 saveTarget=False,
                                 background_rms=background_rms,
                                 n_jobs=1,
+                                mask=hardware_defects_mask,
                             )
                         except Exception as _ap_err:
                             logging.debug("Other transient AP failed for %s: %s", _ot_name, _ap_err)
@@ -7977,6 +8018,7 @@ def run_photometry():
                                     plotTarget=False,
                                     is_target_fit=False,
                                     background_rms=background_rms,
+                                    mask=hardware_defects_mask,
                                 )
                             except Exception as _psf_err:
                                 logging.debug("Other transient PSF failed for %s: %s", _ot_name, _psf_err)
@@ -8957,6 +8999,7 @@ def run_photometry():
                 sources=IsolatedSources,
                 plotTarget=False,
                 background_rms=background_rms,
+                mask=hardware_defects_mask,
             )
             # Converts pixel coordinates back to world coordinates.
             # Use origin=0 for consistent 0-based indexing (matching numpy arrays)
