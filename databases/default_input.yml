@@ -69,7 +69,7 @@ default_input:
     aperture_radius: null # float|null --- Explicit aperture radius (pixels). If null, computed from `fwhm` (typically max(1.5*FWHM, 2.0)).
     psf_oversample: 1 # int --- Oversampling factor for PSF modelling/fitting grids.
     oversample_psf: False # bool --- If True, enable adaptive PSF oversampling based on FWHM threshold. If False, use fixed psf_oversample value.
-    oversample_psf_fwhm: 1.5 # float --- FWHM threshold (pixels) below which oversampling is applied when oversample_psf=True. Only applies when oversample_psf=True.
+    oversample_psf_fwhm: 2.5 # float --- DEPRECATED: oversampling now uses undersampled_fwhm_threshold. Kept for backward compatibility.
     psf_init_moffat_beta: 4.765 # float --- Moffat beta for initial ePSF kernel (4.765 ~ atmospheric-turbulence-like PSF; lower values add stronger wings).
     psf_smoothing_kernel: quartic # str --- ePSFBuilder smoothing kernel type ("quartic" recommended; "gaussian" optional).
     psf_smoothing_kernel_size: null # int|null --- Optional explicit smoothing-kernel size (pixels, on the oversampled grid). If null, auto-sized from FWHM and oversampling.
@@ -98,6 +98,7 @@ default_input:
     psf_min_candidates: 8 # int --- Minimum PSF candidates to preserve during quality cuts (adaptive guard against over-pruning).
     psf_saturate_fraction: 0.90 # float --- Nominal saturation cutoff for PSF stars (peak < fraction * saturate); auto-relaxed when candidate pool is small. Keep in sync with template_subtraction.subtraction_saturate_fraction.
     psf_elongation_max: 1.5 # float --- Maximum allowed ELONGATION (a/b axis ratio) for PSF stars; rejects trailed or blended stars. Uses ELONGATION or ELLIPTICITY column if present; skip if neither available.
+    psf_flags_max: 1 # int --- Maximum SExtractor FLAGS for PSF stars. 0=clean, 1=nearby, 2=blended. Default 1 rejects blended sources (FLAGS >= 2) which corrupt ePSF shape. Auto-relaxed when too few candidates remain.
     psf_isolation_radius_fwhm: 3.0 # float --- Minimum neighbour-free radius (in FWHM units) for PSF star selection; rejects stars with a close companion that would contaminate the ePSF cutout.
     psf_fwhm_min_frac: 0.5 # float --- Minimum FWHM as fraction of image FWHM for PSF candidates; rejects cosmic rays (abnormally small FWHM). Set to 0 to disable.
     psf_fwhm_max_frac: 2.5 # float --- Maximum FWHM as fraction of image FWHM for PSF candidates; rejects extended defects/galaxies (abnormally large FWHM). Set to a large value to disable.
@@ -110,6 +111,12 @@ default_input:
     psf_fft_min_stars: 10 # int --- Minimum PSF stars required to run FFT rejection; otherwise skip.
     psf_fft_use_mad: True # bool --- Use MAD-based scale estimate for FFT rejection statistics.
     psf_fft_use_median_deviation: True # bool --- Use median absolute deviation around the median (robust).
+    psf_cutout_contamination_check: True # bool --- Enable pixel-level cutout contamination check (catches neighbouring stars/galaxies/trails/streaks in outer annulus that catalog-level isolation misses).
+    psf_contam_asymmetry_frac: 0.3 # float --- Max fractional deviation of quadrant medians in outer annulus before rejecting cutout (one-sided contamination from neighbour wings or trails).
+    psf_contam_edge_excess_sigma: 3.0 # float --- Max sigma excess of edge-ring median over inner-ring median before rejecting cutout (neighbour wings entering cutout edge).
+    psf_contam_border_excess_sigma: 3.0 # float --- Max sigma excess of cutout border pixel median over local background before rejecting cutout (neighbour flux at cutout boundary).
+    psf_contam_border_max_sigma: 8.0 # float --- Max sigma excess of any single border pixel over local background before rejecting cutout (trail/streak crossing cutout boundary).
+    psf_contam_radial_reversal_frac: 0.3 # float --- Max fractional increase (in ann_std units) allowed between consecutive concentric rings before rejecting cutout (contaminating source in outer region).
     psf_threshold_limit: 5.0 # float --- Minimum detection threshold for PSF-star candidates (lower is less restrictive).
     psf_snr_min: 5.0 # float --- Minimum SNR for PSF-star candidates.
     psf_snr_max: 1000000.0 # float --- Maximum SNR for PSF-star candidates.
@@ -123,7 +130,11 @@ default_input:
     psf_adaptive_iterations: True # bool --- Enable adaptive EPSFBuilder iteration strategy (start with fewer iterations, increase only if not converged).
     psf_maxiters_initial: 5 # int --- Initial EPSFBuilder max iterations when adaptive_iterations is True (lower = faster, but may need retry).
     psf_maxiters_max: 10 # int --- Maximum EPSFBuilder iterations for retry when adaptive_iterations is True and initial run didn't converge.
-    psf_auto_oversample_undersampled: True # bool --- Automatically increase oversampling to 4x for undersampled images (FWHM <= 2.5 px).
+    psf_auto_oversample_undersampled: True # bool --- Automatically increase oversampling for undersampled images (FWHM <= 2.5 px). Factor is chosen adaptively based on PSF star count.
+    psf_oversample_min_samples_per_pixel: 2.0 # float --- Minimum samples per oversampled pixel for adaptive oversampling. With N stars and oversampling k, each pixel gets ~N/k^2 samples; oversampling is capped so this threshold is met.
+    psf_oversample_max: 4 # int --- Maximum oversampling factor for adaptive oversampling.
+    psf_oversample_min_undersampled: 2 # int --- Minimum oversampling factor for undersampled images (even with few stars, 2x is better than 1x for sub-pixel resolution).
+    psf_oversample_hard_min_stars: 5 # int --- Below this star count, oversampling is disabled entirely (too few stars for a reliable oversampled ePSF).
     psf_adaptive_sigma_clip: True # bool --- Adapt sigma clipping parameters based on number of PSF stars (less aggressive with few stars, more aggressive with many).
     psf_adaptive_smoothing_kernel: True # bool --- Use Gaussian smoothing kernel for undersampled data, quartic for well-sampled data.
     psf_cutout_size_scale_fwhm: 10.0 # float --- EPSF star-cutout size in FWHM units (controls total wing coverage in PSF build).
@@ -429,15 +440,19 @@ default_input:
     post_swarp_verify: True # bool --- If True, run SExtractor cross-match on SWarp output images to measure post-alignment offsets. When False, SCAMP+SWarp is trusted without independent verification. Enable for diagnostics or when alignment quality is uncertain.
     alignment_sparse_field_retry_count: 15 # int --- If SExtractor detects fewer than this many sources in either image, re-run with maximum sensitivity (DETECT_THRESH=0.5, smaller BACK_SIZE, CLEAN=N). Set to 0 to disable sparse-field retry.
     # --- spalipy parameters (alignment_method=spalipy) ---
-    spalipy_match_radius_arcsec: 3.0 # float --- RA/DEC cross-match radius (arcsec) for source pre-matching before spalipy quad matching.
+    spalipy_match_radius_arcsec: null # float|null --- RA/DEC cross-match radius (arcsec) for source pre-matching before spalipy quad matching. null=adaptive (3x FWHM, floored at 10").
     spalipy_detect_thresh: 2.0 # float --- SExtractor detection threshold (sigma) for spalipy source detection.
     spalipy_n_quad_det: null # int|null --- Number of detections used for quad matching. null=auto (all sources if <=25, else 20).
     spalipy_min_n_match: null # int|null --- Minimum matched sources for spalipy alignment. null=auto (max(6, min(n//3, 20))).
     spalipy_max_quad_hash_dist: null # float|null --- Max hash distance for quad matching. null=auto (scaled by FWHM).
-    spalipy_min_sep: null # int|null --- Minimum detection separation (pixels). null=auto (max(5, int(FWHM))).
+    spalipy_min_sep: null # float|null --- Minimum detection separation (pixels). null=auto (max(FWHM, 2*max_match_dist)). Removes crowded/blended sources.
     spalipy_interp_order: null # int|null --- Spline interpolation order (1-3). null=auto (2 for undersampled, 3 otherwise).
     spalipy_sub_tile: null # int|null --- Sub-tiling factor for affine fitting. null=auto (2 for >=200 sources, 1 otherwise).
     spalipy_spline_order: null # int|null --- Spline order for distortion correction (0-3). null=auto (based on source count).
+    spalipy_max_match_dist: null # float|null --- Max matching distance in template pixel frame after affine transform. null=auto (clip(0.5*FWHM, 2, 5) px).
+    spalipy_min_quad_sep: null # float|null --- Minimum distance between detections in a quad (pixels). null=auto (clip(min_img_dim/4, 10, 50)).
+    spalipy_quad_edge_buffer: null # int|null --- Exclude detections within N pixels of template edge from quad construction. null=auto (FWHM if partial overlap, 0 otherwise).
+    spalipy_max_quad_cand: null # int|null --- Maximum quad candidates for affine transform. null=auto (10-15 based on source count).
     skip_resampling: True # bool --- DEPRECATED: use resample_mode instead. If True, maps to resample_mode="wcs_only".
     resample_mode: common_grid # str --- SWarp resampling mode: "common_grid" (both to science grid), "native_scale" (each keeps own pixel scale), "wcs_only" (no resampling).
     science_first_astrometry: False # bool --- If True, distortion-correct the science image against GAIA-DR3 first via SCAMP+SWarp, then use the corrected catalog as astrometric reference for the reference image. Disabled: science-first astrometry adds an extra SCAMP+SWarp step that can introduce overfitting on sparse fields. Direct reference-to-science alignment is more reliable.
@@ -507,7 +522,7 @@ default_input:
     sfft_save_decorrelated: False # bool --- Save decorrelated difference image separately as *_decorr.fits. Disabled by default since decorrelation is off.
     sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
     sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
-    sfft_min_prior_sources: 3 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT performs its own matching; this avoids under-constrained sparse prior lists.
+    sfft_min_prior_sources: 10 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT performs its own matching; this avoids under-constrained sparse prior lists. With <10 priors, SFFT's internal SExtractor typically finds 20-30 matched sources, giving a better constrained kernel.
     sfft_min_class_star: 0.0 # float --- Minimum SExtractor CLASS_STAR for SFFT kernel sources. 0=disabled (default). SFFT does its own source vetting (SExtractor FLAGS, cross-match, PostAnomaly, CVREJ/EVREJ), so pre-filtering by CLASS_STAR is redundant and harmful after spline-warp alignment (distorts PSF, lowers CLASS_STAR for real point sources). Set >0 (e.g. 0.7) only if you have a dense field and want stricter pre-filtering.
     sfft_max_ellipticity: 0.5 # float --- Maximum SExtractor ellipticity for SFFT kernel sources. 0.5=permissive (default), >=1.0=disabled. SFFT vets its own sources; this is only a coarse pre-filter for obviously elongated objects.
     sfft_fwhm_ratio_nsigma: 0.0 # float --- Cross-image FWHM consistency: reject sources whose FWHM ratio (sci/ref) deviates more than this many sigma (MAD) from the median log-ratio. Catches sources blended in one image but isolated in the other. 0=disabled (default). Enable (e.g. 3.0) only if kernel fits are poor and blended sources are suspected.

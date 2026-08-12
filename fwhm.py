@@ -36,7 +36,7 @@ from astropy.utils.exceptions import AstropyWarning
 from astropy.table import Table
 from astropy.visualization import ZScaleInterval, ImageNormalize
 from photutils.detection import StarFinder, IRAFStarFinder, DAOStarFinder, find_peaks
-from photutils.background import Background2D, MedianBackground
+from photutils.background import Background2D, MedianBackground, MADStdBackgroundRMS
 from photutils.utils import circular_footprint
 from photutils.profiles import RadialProfile
 from photutils.segmentation import (
@@ -885,6 +885,8 @@ class Find_FWHM:
                     box_size=box,
                     filter_size=3,
                     bkg_estimator=MedianBackground(),
+                    bkgrms_estimator=MADStdBackgroundRMS(),
+                    sigma_clip=SigmaClip(sigma=3.0, maxiters=5),
                     mask=mask,
                 )
                 bkg = bkg2d.background
@@ -895,7 +897,8 @@ class Find_FWHM:
                     np.nanmedian(bkg_rms),
                 )
             else:
-                mean, med, std = sigma_clipped_stats(image[~mask], sigma=3.0)
+                mean, med, _ = sigma_clipped_stats(image[~mask], sigma=3.0)
+                std = float(mad_std(image[~mask], ignore_nan=True))
                 bkg = np.full_like(image, med)
                 bkg_rms = np.full_like(image, std)
 

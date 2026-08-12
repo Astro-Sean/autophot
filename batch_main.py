@@ -77,6 +77,7 @@ def _run_single_image(
     fits_path: str,
     yaml_path: str,
     prepare_template: bool = False,
+    suppress_output: bool = False,
 ) -> Tuple[str, int]:
     """
     Run the existing single-image pipeline (main.py) on one FITS file.
@@ -95,10 +96,15 @@ def _run_single_image(
     if prepare_template:
         cmd.append("-temp")
 
-    # Inherit stdout/stderr so logs appear live for each subprocess.
-    # This keeps behaviour close to calling main.py directly.
+    # Inherit stdout/stderr so logs appear live for each subprocess in serial mode.
+    # In parallel mode, suppress child output to avoid interleaved terminal noise;
+    # each main.py still writes per-image log files.
     try:
-        result = subprocess.run(cmd, check=False)
+        kwargs = {"check": False}
+        if suppress_output:
+            from subprocess import DEVNULL
+            kwargs.update({"stdout": DEVNULL, "stderr": DEVNULL})
+        result = subprocess.run(cmd, **kwargs)
         return fits_path, result.returncode
     except Exception:
         # Treat unexpected failures as non-zero for reporting.
@@ -203,6 +209,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 f,
                 args.config,
                 args.prepare_template,
+                jobs > 1,
             ): f
             for f in fits_files
         }

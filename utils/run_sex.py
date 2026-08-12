@@ -296,9 +296,11 @@ class SExtractorWrapper:
         )
 
         if fwhm_pixels > 0:
-            # Enforce realistic FWHM bounds: 2.5-15 pixels
-            # Minimum 2.5 px ensures kernel is never too small for astronomical seeing
-            fp = float(max(2.5, min(fwhm_pixels, 15.0)))
+            # Enforce realistic FWHM bounds: 1.0-15 pixels
+            # Minimum 1.0 px allows proper kernel sizing for undersampled
+            # images (e.g. ZTF FWHM ~1.8 px).  The previous 2.5 px floor
+            # made the kernel too broad, reducing detection sensitivity.
+            fp = float(max(1.0, min(fwhm_pixels, 15.0)))
             kernel_size = max(3, int(np.ceil(fp * 3)))
             if kernel_size % 2 == 0:
                 kernel_size += 1  # Ensure odd size
@@ -1075,6 +1077,28 @@ class SExtractorWrapper:
                     fwhm_for_kernel,
                 )
                 phot_apertures = 1.7 * fwhm_for_kernel
+
+                # Reduce DETECT_MINAREA for undersampled images.
+                # Undersampled PSFs (FWHM < 2.5 px) occupy only ~2-3 pixels,
+                # so the default MINAREA=5 can miss real point sources.
+                _us_thresh_sex = float(
+                    (self.config.get("photometry", {}) or {}).get(
+                        "undersampled_fwhm_threshold", 2.5
+                    )
+                )
+                if fwhm_for_kernel < _us_thresh_sex and not crowded:
+                    _orig_minarea = int(detect_minarea)
+                    if fwhm_for_kernel < 1.5:
+                        detect_minarea = max(1, min(detect_minarea, 1))
+                    else:
+                        detect_minarea = max(1, min(detect_minarea, 2))
+                    if detect_minarea < _orig_minarea:
+                        logger.info(
+                            "Undersampled image (FWHM=%.2f px < %.1f threshold): "
+                            "reducing DETECT_MINAREA from %d to %d",
+                            fwhm_for_kernel, _us_thresh_sex,
+                            _orig_minarea, detect_minarea,
+                        )
 
             conv_path = (
                 self._create_conv_file(temp_dir, fwhm_pixels=fwhm_for_kernel)

@@ -371,7 +371,9 @@ def _injection_worker(args):
                     rms = np.asarray(background_rms[y1:y2, x1:x2], dtype=float)
                     var = np.maximum(rms * rms, 0.0)
                 else:
-                    sig = float(np.nanstd(data))
+                    sig = float(mad_std(data, ignore_nan=True))
+                    if not np.isfinite(sig) or sig <= 0:
+                        sig = float(np.nanstd(data))
                     var = np.full_like(data, max(sig * sig, 0.0), dtype=float)
 
                 # Optional Poisson + read-noise contributions (conservative defaults).
@@ -2579,14 +2581,26 @@ class Limits:
 
             # empirical completeness per mag point
             emp = []
+            emp_err = []
             for m in mags:
-                emp.append(
-                    float(np.mean(y[x == float(m)]) if np.any(x == float(m)) else np.nan)
-                )
+                mask = x == float(m)
+                n = int(np.sum(mask))
+                if n > 0:
+                    p = float(np.mean(y[mask]))
+                    emp.append(p)
+                    emp_err.append(np.sqrt(p * (1.0 - p) / n))
+                else:
+                    emp.append(np.nan)
+                    emp_err.append(np.nan)
             emp = np.asarray(emp, float)
+            emp_err = np.asarray(emp_err, float)
 
             fig, ax = plt.subplots(figsize=set_size(340, 1))
-            ax.plot(mags, emp, "o", ms=4, color="0.2", label="empirical")
+            ax.errorbar(
+                mags, emp, yerr=emp_err,
+                fmt="o", ms=4, color="0.2", ecolor="0.6",
+                capsize=2, elinewidth=0.5, label="empirical",
+            )
 
             # median model curve
             s_med = float(np.exp(np.nanmedian(flat[:, 1])))
@@ -3761,6 +3775,7 @@ class Limits:
         detected_mask = det_rates >= 0.5
         detected_injected = injected_apparent[detected_mask]
         detected_recovered = recovered_apparent[detected_mask]
+        detected_recovered_err = recovered_apparent_err[detected_mask]
         nondet_injected = injected_apparent[~detected_mask]
         nondet_recovered = recovered_apparent[~detected_mask]
 
@@ -3853,17 +3868,21 @@ class Limits:
                 zorder=25,
             )
 
-        # Plot detected injected sources
+        # Plot detected injected sources with error bars on recovered magnitude
         if len(detected_injected) > 0:
-            ax.scatter(
+            ax.errorbar(
                 detected_injected,
                 detected_recovered,
-                s=get_marker_size('medium'),
-                c=get_okabe_color('blue'),
+                yerr=detected_recovered_err,
+                fmt='o',
+                ms=get_marker_size('medium'),
+                color=get_okabe_color('blue'),
+                ecolor='lightgrey',
                 alpha=get_alpha('dark'),
-                marker='o',
-                edgecolors='black',
-                linewidth=0.5,
+                capsize=1.5,
+                elinewidth=0.4,
+                markeredgecolor='black',
+                markeredgewidth=0.5,
                 label=f"Detected injected [{len(detected_injected)}]",
                 zorder=10,
             )

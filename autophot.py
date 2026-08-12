@@ -589,6 +589,18 @@ def _log(message: str) -> None:
             print(message)
 
 
+def _log_always(message: str) -> None:
+    """
+    Log a message that should be visible even in QUIET_MODE (parallel mode).
+    Used for failures, final summaries, and other critical output.
+    """
+    logger = logging.getLogger(__name__)
+    if logger.handlers:
+        logger.warning(message)
+    else:
+        print(message)
+
+
 def _run_main_subprocess(
     python_executable: str,
     autophot_exe: str,
@@ -1429,20 +1441,6 @@ class AutomatedPhotometry:
             n_cpu = 1
         if n_cpu < 1:
             n_cpu = 1
-        # SFFT subprocess uses libgomp/OpenMP and can leak semaphores; avoid nested
-        # parallelism (ProcessPoolExecutor + SFFT) and HPC thread limits by forcing 1 worker
-        # unless the user explicitly set AUTOPHOT_NCPU.
-        tsub = default_input.get("template_subtraction") or {}
-        if (
-            env_ncpu is None
-            and tsub.get("do_subtraction")
-            and (tsub.get("method") or "").strip().lower() == "sfft"
-        ):
-            if n_cpu > 1:
-                logging.getLogger(__name__).info(
-                    "SFFT template subtraction enabled: forcing nCPU=1 to avoid thread/semaphore issues."
-                )
-            n_cpu = 1
         parallel_files = n_cpu > 1
 
         global QUIET_MODE
@@ -2180,6 +2178,9 @@ class AutomatedPhotometry:
                     _log("")
                     if parallel_files and len(template_file_list) > 1:
                         # Parallelise template reductions when multiple workers requested.
+                        _log_always(
+                            f"Running {len(template_file_list)} template files with nCPU={n_cpu} (parallel)."
+                        )
                         with ProcessPoolExecutor(max_workers=n_cpu) as executor:
                             futures = {
                                 executor.submit(
@@ -2198,8 +2199,7 @@ class AutomatedPhotometry:
                                 fname, rc = fut.result()
                                 done_t += 1
                                 if rc != 0:
-                                    # Minimal reporting; main.py already logged details.
-                                    _log(
+                                    _log_always(
                                         f"[{done_t}/{total_t}] [TEMPLATE FAIL] {fname} (exit code {rc})"
                                     )
                                 else:
@@ -2238,7 +2238,7 @@ class AutomatedPhotometry:
 
                     if parallel_files and len(file_list) > 1:
                         # Parallel image-level execution: each worker runs main.py on one file.
-                        _log(
+                        _log_always(
                             f"Running {len(file_list)} science files with nCPU={n_cpu} (parallel)."
                         )
                         with ProcessPoolExecutor(max_workers=n_cpu) as executor:
@@ -2260,9 +2260,9 @@ class AutomatedPhotometry:
                                 if rc == 0:
                                     _log(f"[{counter}/{total}] [OK]    {fname}")
                                 else:
-                                    _log(f"[{counter}/{total}] [FAIL]  {fname} (exit code {rc})")
+                                    _log_always(f"[{counter}/{total}] [FAIL]  {fname} (exit code {rc})")
                                     if rc == 2 and (not os.path.exists(input_file)):
-                                        _log(
+                                        _log_always(
                                             "[ERROR] Input YAML snapshot disappeared during processing. "
                                             "Stopping early; re-run required."
                                         )
@@ -2303,14 +2303,14 @@ class AutomatedPhotometry:
 
             # Concatenate per-image outputs into one light curve CSV
             reduced_loc = f"{default_input['fits_dir']}_{default_input['outdir_name']}"
-            _log(log_step(f"Collect photometry: {reduced_loc}"))
+            _log_always(log_step(f"Collect photometry: {reduced_loc}"))
             output_loc = os.path.join(reduced_loc, "LightCurve_Output.csv")
             concatenate_csv_files(
                 folder_path=reduced_loc,
                 output_filename=output_loc,
                 loc_file="Output_*.csv",
             )
-            _log(
+            _log_always(
                 f"Photometry pipeline completed in {time.perf_counter() - t0:.3f} seconds."
             )
             output_photometry = output_loc
@@ -2333,12 +2333,12 @@ class AutomatedPhotometry:
                     output_filename=output_photometry,
                     loc_file="Output_*.csv",
                 )
-                _log(f"Output light curve: {output_photometry}")
+                _log_always(f"Output light curve: {output_photometry}")
             else:
-                _log(f"[WARNING] Reduced directory not found: {reduced_loc}")
+                _log_always(f"[WARNING] Reduced directory not found: {reduced_loc}")
                 output_photometry = ""
 
-            _log(
+            _log_always(
                 f"Recovery completed in {time.perf_counter() - t0:.3f} seconds."
             )
 
