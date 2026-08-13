@@ -134,3 +134,92 @@ def get_coords(objname, TNS_BOT_ID=None, TNS_BOT_NAME=None, TNS_BOT_API=None):
             "Error querying TNS for object '%s': %s", objname, exc, exc_info=True
         )
         return None
+
+
+def get_coords_simbad(target_name):
+    """Query SIMBAD for object coordinates by name.
+
+    Uses :mod:`astroquery.simbad` to resolve ``target_name`` to J2000
+    coordinates.  No API credentials are required.
+
+    Parameters
+    ----------
+    target_name : str
+        Object name to resolve (e.g. ``'SN 2024aifs'``, ``'Vega'``,
+        ``'M31'``, or a bare IAU name like ``'2024aifs'``).
+
+    Returns
+    -------
+    dict or None
+        A dictionary with keys ``objname``, ``name_prefix``, ``radeg``,
+        ``decdeg``, ``ra``, ``dec``, ``object_type``, and ``source``
+        matching the structure returned by :func:`get_coords`, or
+        ``None`` if SIMBAD cannot resolve the name.
+    """
+    try:
+        from astroquery.simbad import Simbad
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+
+        # Configure Simbad to return coordinates and object type
+        Simbad.reset_votable_fields()
+        Simbad.add_votable_fields("ra", "dec", "otype")
+
+        result = Simbad.query_object(target_name)
+        if result is None or len(result) == 0:
+            logger.warning("SIMBAD did not find object '%s'.", target_name)
+            return None
+
+        row = result[0]
+        ra_deg = float(row["ra"])
+        dec_deg = float(row["dec"])
+        obj_type = str(row.get("otype", "Unknown"))
+
+        # Build a response dict that matches the TNS structure so
+        # downstream code can use it transparently.
+        simbad_data = {
+            "objname": target_name,
+            "name_prefix": "",
+            "radeg": ra_deg,
+            "decdeg": dec_deg,
+            "ra": _ra_deg_to_hms(ra_deg),
+            "dec": _dec_deg_to_dms(dec_deg),
+            "object_type": {"name": obj_type},
+            "type": obj_type,
+            "source": "simbad",
+        }
+
+        logger.info(
+            "SIMBAD resolved '%s': RA=%.6f, Dec=%.6f, Type=%s",
+            target_name, ra_deg, dec_deg, obj_type,
+        )
+        return simbad_data
+
+    except Exception as exc:
+        logger.error(
+            "Error querying SIMBAD for object '%s': %s",
+            target_name, exc, exc_info=True,
+        )
+        return None
+
+
+def _ra_deg_to_hms(ra_deg):
+    """Convert RA in degrees to HH:MM:SS string."""
+    try:
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+        sc = SkyCoord(ra=ra_deg * u.deg, dec=0 * u.deg)
+        return sc.ra.to_string(unit=u.hour, sep=":", pad=True, precision=2)
+    except Exception:
+        return str(ra_deg)
+
+
+def _dec_deg_to_dms(dec_deg):
+    """Convert Dec in degrees to DD:MM:SS string."""
+    try:
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+        sc = SkyCoord(ra=0 * u.deg, dec=dec_deg * u.deg)
+        return sc.dec.to_string(unit=u.deg, sep=":", pad=True, precision=2)
+    except Exception:
+        return str(dec_deg)

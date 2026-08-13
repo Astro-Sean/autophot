@@ -2074,7 +2074,7 @@ class Aperture:
                         zorder=0,
                     )
                 ax2.axvline(optimum_radius, color="black", ls="--", label="Final")
-                ax2.legend(loc="upper right", frameon=False, fontsize=7)
+                ax2.legend(loc="upper right", frameon=False, fontsize=8)
 
             ax2.set_xlabel("Aperture Radius [FWHM]")
             ax2.set_ylabel("Count")
@@ -2212,7 +2212,7 @@ class Aperture:
             )
             ax.set_xlabel("Aperture Correction [mag]")
             ax.set_ylabel("Frequency")
-            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
+            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8)
             fig.tight_layout()
             png_path = os.path.join(
                 write_dir, f"Aperture_Correction_{base_name}.png"
