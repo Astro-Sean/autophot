@@ -6,6 +6,8 @@ default_input:
 
   skip_file_check: False # bool --- If True, skip FITS header consistency checks (use with care).
 
+  validate_fits_headers: False # bool --- If True, review all FITS files for required header keywords before processing. Files missing critical keywords (TELESCOP, INSTRUME, FILTER) are rejected; files missing important keywords (EXPTIME, GAIN, MJD-OBS/DATE-OBS) are flagged with warnings and the user is asked whether to continue.
+
   outdir_name: REDUCED # str --- Output directory suffix (e.g. `REDUCED`).
 
   select_filter: False # bool --- If True, only run on selected_filters.

@@ -3156,7 +3156,7 @@ class Catalog:
             )
             ax_right.set_xlabel("Radius [pixels]")
             ax_right.set_ylabel("Normalized Flux")
-            ax_right.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
+            ax_right.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8)
             ax_right.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
             ax_right.ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))
             pos = ax_right.get_position()

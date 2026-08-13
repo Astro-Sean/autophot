@@ -531,6 +531,7 @@ try:
         concatenate_csv_files,
         log_step,
         log_exception,
+        normalize_target_name,
         print_progress_bar,
         sanitize_photometric_filters,
     )
@@ -549,6 +550,7 @@ except Exception as _exc:  # pragma: no cover
             concatenate_csv_files,
             log_step,
             log_exception,
+            normalize_target_name,
             print_progress_bar,
             sanitize_photometric_filters,
         )
@@ -1638,7 +1640,7 @@ class AutomatedPhotometry:
                     raise ValueError(
                         "catalog.use_catalog requests 'gaia_custom', but target_ra/target_dec are missing. "
                         "Please set both coordinates in degrees, or provide target_name "
-                        "with working TNS credentials."
+                        "with working TNS credentials or a SIMBAD-resolvable name."
                     )
 
                 radius_deg = float(
@@ -1883,9 +1885,17 @@ class AutomatedPhotometry:
                     )
                     do_photometry = False
                 else:
-                    file_list, required_filters = prepare_db.check_filters(
-                        flist=file_list, available_filters=available_filters
-                    )
+                    if default_input.get("validate_fits_headers", False):
+                        file_list = prepare_db.validate_fits_headers(flist=file_list)
+                        if len(file_list) == 0:
+                            _log(
+                                log_step("No images left after header validation; skipping photometry")
+                            )
+                            do_photometry = False
+                    if do_photometry:
+                        file_list, required_filters = prepare_db.check_filters(
+                            flist=file_list, available_filters=available_filters
+                        )
             else:
                 required_filters = available_filters
 
@@ -1982,6 +1992,10 @@ class AutomatedPhotometry:
                     template_file_list = prepare_db.check_files(
                         flist=template_file_list, template_files=True
                     )
+                    if default_input.get("validate_fits_headers", False):
+                        template_file_list = prepare_db.validate_fits_headers(
+                            flist=template_file_list, template_files=True
+                        )
                     template_file_list, _ = prepare_db.check_filters(
                         flist=template_file_list, available_filters=available_filters
                     )
@@ -2026,6 +2040,24 @@ class AutomatedPhotometry:
                 work_loc = base_dir + new_dir
                 new_output_dir = os.path.join(os.path.dirname(work_dir), work_loc)
                 Path(new_output_dir).mkdir(parents=True, exist_ok=True)
+
+                # Resolve wdir to an absolute path so the catalog cache
+                # directory is stable across the os.chdir() that main.py does
+                # per-image.  Without this, wdir='.' resolves to different
+                # directories before/after chdir, causing cache misses and
+                # redundant Gaia archive downloads.
+                _raw_wdir = backup_yaml.get("wdir", ".")
+                backup_yaml["wdir"] = os.path.abspath(_raw_wdir)
+
+                # Normalize target_name to match what main.py does, so the
+                # catalog cache directory is consistent between pre-fetch and
+                # per-image processing.  Without this, the pre-fetch saves the
+                # cached catalog under e.g. "sn2026yos/" but main.py looks for
+                # it under "2026yos/", causing a cache miss and redundant Gaia
+                # archive downloads.
+                backup_yaml["target_name"] = normalize_target_name(
+                    backup_yaml.get("target_name")
+                )
 
                 # Pre-download reference catalog(s) once, before the per-image loop.
                 # main.py will find the cached CSV and skip re-downloading.

@@ -85,7 +85,7 @@ from aperture import (
     resolve_exposure_time_seconds,
     resolve_gain_e_per_adu,
 )
-from plotting_utils import get_marker_size
+from plotting_utils import get_marker_size, PLOT_COLORS
 
 
 def _effective_exposure_seconds(input_yaml: dict) -> float:
@@ -1403,10 +1403,41 @@ class Limits:
                 needed_scale = needed_half_size - location_fwhm_mult * fwhm_px
                 # Ensure scale is at least the base scale and is reasonable
                 new_scale = max(base_scale, needed_scale, 10.0)  # minimum 10px scale
-                
-                                
-                # Update the scale used for cutout extraction
-                scale_used = new_scale
+
+                # Re-extract cutout with the larger scale — the initial extraction
+                # at line ~851 used a simpler formula that doesn't account for
+                # target_exclusion_r or r_max, so the cutout can be too small
+                # for injection sites, causing all candidates to fail edge clearance.
+                _old_H, _old_W = int(H), int(W)
+                if new_scale > scale_used:
+                    scale_used = new_scale
+                    _new_cutout, _new_rms, _new_cx, _new_cy = _extract_cutouts(scale_used)
+                    if _new_cutout is not None and np.isfinite(_new_cx) and np.isfinite(_new_cy):
+                        cutout = _new_cutout
+                        cutout_rms = _new_rms
+                        background_rms = _new_rms
+                        cutout_cx = _new_cx
+                        cutout_cy = _new_cy
+                        H, W = cutout.shape
+                        logger.info(
+                            "Re-extracted injection cutout: scale %.1f -> %.1f, "
+                            "size %dx%d -> %dx%d (target=%.1f,%.1f cutout_cx=%.1f,%.1f "
+                            "needed_half=%.1f edge_margin=%.1f r_max=%.1f excl=%.1f)",
+                            float(base_scale), float(scale_used),
+                            _old_W, _old_H, int(W), int(H),
+                            float(_orig_position[0]), float(_orig_position[1]),
+                            float(cutout_cx), float(cutout_cy),
+                            float(min_half_size), float(edge_margin),
+                            float(r_max), float(target_exclusion_r),
+                        )
+                    else:
+                        logger.warning(
+                            "Re-extraction of larger injection cutout failed (scale=%.1f); "
+                            "using original cutout (%dx%d). Injection sites may be limited.",
+                            float(scale_used), int(W), int(H),
+                        )
+                else:
+                    scale_used = new_scale
             
             # Data-driven initial guess from instrumental magnitudes measured
             # on an annulus around the target location.
@@ -1668,7 +1699,17 @@ class Limits:
             )
             n5 = int(len(cand_df))
 
-            logger.info("Found %s valid candidate sites for injection", n5)
+            logger.info(
+                "Injection candidate attrition: generated=%d -> excl_target=%d -> "
+                "edge=%d -> aperture_validity=%d -> annulus_support=%d -> pixel_stats=%d "
+                "(cutout %dx%d, cx=%.1f cy=%.1f, r_min=%.1f r_max=%.1f edge_margin=%.1f "
+                "ap_r=%.1f annulus_in=%.1f annulus_out=%.1f)",
+                n0, n1, n2, n3, n4, n5,
+                int(W), int(H), float(cutout_cx), float(cutout_cy),
+                float(r_min_with_jitter), float(r_max), float(edge_margin),
+                float(aperture_radius_local),
+                float(annulus_in_local), float(annulus_out_local),
+            )
 
             if len(cand_df) == 0:
                 logger.warning(
@@ -2463,7 +2504,7 @@ class Limits:
         outdir = os.path.dirname(str(fpath)) if os.path.dirname(str(fpath)) else "."
         save_png = os.path.join(outdir, f"EMCEE_Injection_Diag_{base}.png")
         fig.suptitle(f"EMCEE recovery diagnostic (m_inj={float(m_inj):.3f})", fontsize=10)
-        fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor="white")
+        fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
         plt.close(fig)
 
     def _solve_m50_logistic_emcee(
@@ -2614,9 +2655,9 @@ class Limits:
             ax.set_ylabel("Recovery fraction")
 
             ax.invert_xaxis()
-            ax.legend(loc="upper left", fontsize=7, frameon=False)
+            ax.legend(loc="upper left", fontsize=8, frameon=False)
             fig.tight_layout()
-            fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor="white")
+            fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
         except Exception:
             pass
@@ -2754,7 +2795,7 @@ class Limits:
             sources["apparent_mag"],
             s=get_marker_size('medium'),
             alpha=0.3,
-            color="tab:blue",
+            color=PLOT_COLORS.get('scatter_primary', '#0072B2'),
             label="Sources",
         )
         
@@ -2764,7 +2805,7 @@ class Limits:
                 stats["snr_median"],
                 stats["mag_median"],
                 "o",
-                color="red",
+                color=PLOT_COLORS.get('target', '#FF0000'),
                 markersize=8,
                 markeredgecolor="black",
                 markeredgewidth=1.0,
@@ -2776,7 +2817,7 @@ class Limits:
                 stats["mag_median"],
                 yerr=stats["mag_std"],
                 fmt="none",
-                color="red",
+                color=PLOT_COLORS.get('target', '#FF0000'),
                 linewidth=0.5,
                 capsize=3,
                 alpha=0.7,
@@ -2786,12 +2827,12 @@ class Limits:
         ax.set_ylabel("Apparent magnitude [mag]", fontsize=10)
         ax.set_xscale("log")
         ax.invert_yaxis()
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=8, frameon=False)
         ax.grid(True, alpha=0.3, linestyle="--")
         
         fig.tight_layout()
         save_loc = os.path.join(write_dir, f"SNR_vs_Magnitude_{base}.png")
-        fig.savefig(save_loc, dpi=150, bbox_inches="tight", facecolor="white")
+        fig.savefig(save_loc, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
         plt.close(fig)
         
         logger.info("S/N vs magnitude plot saved to %s", save_loc)
@@ -3006,24 +3047,24 @@ class Limits:
                     bm, bc, _ = zip(*bracket_steps)
                     bc_percent = np.asarray(bc, float) * 100.0
                     bm = np.asarray(bm, float)
-                    ax.scatter(bm, bc_percent, s=14, color="#0000FF", alpha=0.8,
+                    ax.scatter(bm, bc_percent, s=14, color=PLOT_COLORS.get('reference', '#0072B2'), alpha=0.8,
                                edgecolors="none", label=f"Bracket search{snr_label}", zorder=4)
                     for i in range(len(bm) - 1):
                         ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
                                     xytext=(bm[i], bc_percent[i]),
-                                    arrowprops=dict(arrowstyle="->", color="#0000FF",
+                                    arrowprops=dict(arrowstyle="->", color=PLOT_COLORS.get('reference', '#0072B2'),
                                                     lw=0.5, alpha=0.7))
 
                 if bisect_steps:
                     bm, bc, _ = zip(*bisect_steps)
                     bc_percent = np.asarray(bc, float) * 100.0
                     bm = np.asarray(bm, float)
-                    ax.scatter(bm, bc_percent, s=14, color="#00AA00", alpha=0.8,
+                    ax.scatter(bm, bc_percent, s=14, color=PLOT_COLORS.get('psf', '#00AA00'), alpha=0.8,
                                edgecolors="none", label=f"Bisection{snr_label}", zorder=5)
                     for i in range(len(bm) - 1):
                         ax.annotate("", xy=(bm[i+1], bc_percent[i+1]),
                                     xytext=(bm[i], bc_percent[i]),
-                                    arrowprops=dict(arrowstyle="->", color="#00AA00",
+                                    arrowprops=dict(arrowstyle="->", color=PLOT_COLORS.get('psf', '#00AA00'),
                                                     lw=0.5, alpha=0.7))
 
                 if np.isfinite(adopted_mag):
@@ -3069,7 +3110,7 @@ class Limits:
                 # do not call secax.invert_xaxis() as it would double-invert.
 
             ncol = 2 if (multi_snr_details is not None and len(multi_snr_details) > 1) else 1
-            ax.legend(loc="best", fontsize=7, frameon=False, ncol=ncol)
+            ax.legend(loc="best", fontsize=8, frameon=False, ncol=ncol)
 
             if owns_figure:
                 fig.tight_layout()
@@ -3353,8 +3394,8 @@ class Limits:
                         vmin, vmax = zscale.get_limits(np.clip(injected_disp, lower, upper))
                     else:
                         vmin, vmax = np.nanmin(injected_disp), np.nanmax(injected_disp)
-                    cmap = plt.get_cmap("grey").copy()
-                    cmap.set_bad(color="white")
+                    cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
+                    cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
                     im = ax_inject.imshow(
                         np.ma.array(injected_disp, mask=~np.isfinite(injected_disp)),
                         origin="lower",
@@ -3368,7 +3409,7 @@ class Limits:
                     # Mark transient position (center of cutout, where actual target is)
                     from matplotlib.patches import Circle
                     transient_marker = Circle((x_center, y_center), radius=aperture_radius,
-                                            edgecolor='red', facecolor='none', linestyle='-', linewidth=0.5)
+                                            edgecolor=PLOT_COLORS.get('target', '#FF0000'), facecolor='none', linestyle='-', linewidth=0.5)
                     ax_inject.add_patch(transient_marker)
                     # Use target_name with TNS prefix if available, otherwise use '1'
                     if target_name and target_name.strip():
@@ -3383,12 +3424,12 @@ class Limits:
                     else:
                         transient_label = '1'
                     ax_inject.text(x_center, y_center + aperture_radius, transient_label,
-                                   color='red', fontsize=8, ha='center', va='bottom')
+                                   color=PLOT_COLORS.get('target', '#FF0000'), fontsize=8, ha='center', va='bottom')
 
                     # Mark injected source location with aperture circle
                     # Circle centre is in cutout-local coordinates (imshow displays full cutout)
                     aperture_circle = Circle((inject_x, inject_y), radius=aperture_radius,
-                                           edgecolor='white', facecolor='none', linestyle='--', linewidth=0.5)
+                                           edgecolor=PLOT_COLORS.get('nan_color', 'white'), facecolor='none', linestyle='--', linewidth=0.5)
                     ax_inject.add_patch(aperture_circle)
                     
                     try:
@@ -3478,7 +3519,7 @@ class Limits:
                     ax_inject.text(
                         inject_x, inject_y + aperture_radius,
                         f"S/N={snr:.1f}",
-                        color="white", fontsize=8, ha="center", va="bottom",
+                        color=PLOT_COLORS.get('nan_color', 'white'), fontsize=8, ha="center", va="bottom",
                     )
 
                     # Set title with injected magnitude and target recovery level.
@@ -3538,8 +3579,8 @@ class Limits:
                     ny, nx = cutout.shape
                     from astropy.visualization import simple_norm
                     norm = simple_norm(cutout, 'sqrt', percent=99.5)
-                    cmap = plt.get_cmap("grey").copy()
-                    cmap.set_bad(color="white")
+                    cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
+                    cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
                     # Use only hardware mask (NaN/inf pixels) for plotting - don't mask out zero-valued pixels
                     cut_disp = np.asarray(cutout, dtype=float).copy()
                     ax_inject.imshow(
@@ -3566,8 +3607,8 @@ class Limits:
                 # Display original cutout (no injections)
                 from astropy.visualization import simple_norm
                 norm = simple_norm(cutout, 'sqrt', percent=99.5)
-                cmap = plt.get_cmap("grey").copy()
-                cmap.set_bad(color="white")
+                cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
+                cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
                 # Use only hardware mask (NaN/inf pixels) for plotting - don't mask out zero-valued pixels
                 cut_disp = np.asarray(cutout, dtype=float).copy()
                 ax_sites.imshow(
@@ -3582,10 +3623,10 @@ class Limits:
                 # Mark target position
                 from matplotlib.patches import Circle
                 target_marker = Circle((target_x, target_y), radius=aperture_radius,
-                                      edgecolor='red', facecolor='none', linestyle='-', linewidth=0.5)
+                                      edgecolor=PLOT_COLORS.get('target', '#FF0000'), facecolor='none', linestyle='-', linewidth=0.5)
                 ax_sites.add_patch(target_marker)
                 ax_sites.text(target_x, target_y + aperture_radius, transient_label,
-                             color='red', fontsize=8, ha='center', va='bottom')
+                             color=PLOT_COLORS.get('target', '#FF0000'), fontsize=8, ha='center', va='bottom')
 
                 # Mark all injection sites
                 for _, site in injection_df.iterrows():
@@ -3594,10 +3635,10 @@ class Limits:
                         continue
                     # Circle marker for each injection site
                     site_circle = Circle((sx, sy), radius=aperture_radius,
-                                        edgecolor='cyan', facecolor='none', linestyle='--', linewidth=0.5)
+                                        edgecolor=PLOT_COLORS.get('scatter_primary', '#0072B2'), facecolor='none', linestyle='--', linewidth=0.5)
                     ax_sites.add_patch(site_circle)
                     # Small cross at center
-                    ax_sites.plot([sx], [sy], '+', color='cyan', markersize=4, markeredgewidth=0.5)
+                    ax_sites.plot([sx], [sy], '+', color=PLOT_COLORS.get('scatter_primary', '#0072B2'), markersize=4, markeredgewidth=0.5)
 
                 ax_sites.set_title("Injection sites", fontsize=9)
                 ax_sites.set_xlabel('X [pixels]', fontsize=8)
@@ -3628,7 +3669,7 @@ class Limits:
                     ax.plot(
                         [xv, xv],
                         [y_bottom, y_top],
-                        color="red",
+                        color=PLOT_COLORS.get('target', '#FF0000'),
                         alpha=0.55,
                         linewidth=1.2,
                         linestyle="--",
@@ -3642,7 +3683,7 @@ class Limits:
         if owns_figure:
             fig.tight_layout(pad=0.8, h_pad=0.6, w_pad=0.6)
             save_loc_png = os.path.join(write_dir, f"Completeness_{base}.png")
-            fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor="white")
+            fig.savefig(save_loc_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
 
         # ---- Plot injection recovery vs magnitude (apparent vs instrumental) ----
@@ -3988,7 +4029,7 @@ class Limits:
             margin = 0.5  # 0.5 mag margin
             ax.set_xlim(mag_max + margin, mag_min - margin)  # Inverted for magnitude
             ax.set_ylim(mag_max + margin, mag_min - margin)  # Inverted for magnitude
-        ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2, fontsize=7)
+        ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2, fontsize=8)
         ax.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
 
         fig.tight_layout()
