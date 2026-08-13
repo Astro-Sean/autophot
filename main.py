@@ -130,6 +130,7 @@ from functions import (
     get_header,
     get_image,
     get_image_and_header,
+    normalize_target_name,
     pix_dist,
     quadrature_add,
     SuppressStdout,
@@ -763,6 +764,31 @@ def run_photometry():
             # Finally, creates a folder with the filename as its name.
             cur_dir = os.path.join(cur_dir, input_yaml["base"])
             Path(cur_dir).mkdir(parents=True, exist_ok=True)
+
+            # When restart=True, clear any existing content in the per-image
+            # output directory.  Filenames can be shortened/truncated between
+            # runs, so old outputs with different names would otherwise
+            # accumulate and cause confusion.
+            if input_yaml.get("restart", True):
+                import shutil as _shutil_for_clean
+                _stale = [
+                    os.path.join(cur_dir, f)
+                    for f in os.listdir(cur_dir)
+                    if not f.startswith(".")
+                ]
+                if _stale:
+                    logging.info(
+                        "Clearing %d stale file(s) from previous run in %s",
+                        len(_stale), cur_dir,
+                    )
+                    for _f in _stale:
+                        try:
+                            if os.path.isdir(_f):
+                                _shutil_for_clean.rmtree(_f)
+                            else:
+                                os.remove(_f)
+                        except Exception:
+                            pass
 
         #  Set Up Logging
         # Closes any existing logging handlers to avoid duplicate logs.
@@ -1593,8 +1619,8 @@ def run_photometry():
         #  Set Target Name
         # Sets the target name based on available information.
         if not (input_yaml["target_name"] is None):
-            input_yaml["target_name"] = (
-                input_yaml["target_name"].replace("SN", "").replace("AT", "")
+            input_yaml["target_name"] = normalize_target_name(
+                input_yaml["target_name"]
             )
         elif not (input_yaml["target_ra"] is None) and not (
             input_yaml["target_dec"] is None
@@ -3681,7 +3707,7 @@ def run_photometry():
                         _ax.set_xlabel(r"Instrumental magnitude $[-2.5\,\log_{10}(\mathrm{Flux})]$")
                         _ax.set_ylabel("FWHM [pixels]")
                         _ax.invert_xaxis()
-                        _ax.legend(loc="best", frameon=True, fontsize="small")
+                        _ax.legend(loc="best", frameon=False, fontsize=8)
                         _ax.set_title(
                             f"FWHM vs Instrumental Magnitude ({input_yaml.get('imageFilter', '')})"
                         )
@@ -3819,7 +3845,7 @@ def run_photometry():
                     _pax.set_xlabel(r"Instrumental magnitude $[-2.5\,\log_{10}(\mathrm{Flux})]$")
                     _pax.set_ylabel("FWHM [pixels]")
                     _pax.invert_xaxis()
-                    _pax.legend(loc="best", frameon=True, fontsize="small")
+                    _pax.legend(loc="best", frameon=False, fontsize=8)
                     _pax.set_title(
                         f"PSF Source Pool: FWHM vs Inst Mag ({input_yaml.get('imageFilter', '')})"
                     )
@@ -8242,7 +8268,7 @@ def run_photometry():
                         # no sources, so we want to inject in those regions too.
                         is_diff_image = "diff_" in os.path.basename(str(fpath))
                         if is_diff_image:
-                            # Copy at float32 precision then mask in-place - avoids creating a
+                            # Copy at float32 precision then mask in place - avoids creating a
                             # temporary float64 intermediate that np.where().astype() would produce.
                             image_for_limits = np.asarray(image, dtype=np.float32)
                             image_for_limits[hardware_defects_mask] = np.nan
@@ -8250,8 +8276,23 @@ def run_photometry():
                                 "Limiting magnitude: using hardware_defects_mask (no source masking) for difference image."
                             )
                         else:
+                            # Use hardware_defects_mask (not defects_mask) for injection.
+                            # defects_mask includes the source mask which can cover 39%+
+                            # of the image.  With a 7px aperture (~154 pixels), the
+                            # probability of a NaN-free aperture is (0.61)^154 ≈ 0,
+                            # so every candidate site fails _filter_aperture_validity.
+                            # hardware_defects_mask covers only true hardware defects
+                            # (NaN, zeros, saturation, bleed, satellite trails).
+                            # The injection site filters already reject bright sources
+                            # via _filter_pixel_statistics.
                             image_for_limits = np.asarray(image, dtype=np.float32)
-                            image_for_limits[defects_mask] = np.nan
+                            image_for_limits[hardware_defects_mask] = np.nan
+                            _src_frac = float(np.mean(defects_mask & ~hardware_defects_mask)) if defects_mask is not None else 0.0
+                            logging.info(
+                                "Limiting magnitude: using hardware_defects_mask for injection "
+                                "(source mask excluded: %.1f%% of pixels would have been NaN).",
+                                _src_frac * 100.0,
+                            )
                         try:
                             lim_cfg_local = input_yaml.get("limiting_magnitude") or {}
                             revert_lift = bool(lim_cfg_local.get("revert_target_dc_bias_for_injection", False))

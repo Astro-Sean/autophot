@@ -40,7 +40,7 @@ from functions import (
     log_warning_from_exception,
 )
 from check import FitsInfo
-from tns import get_coords
+from tns import get_coords, get_coords_simbad
 from wcs import get_wcs
 
 
@@ -256,6 +256,162 @@ class Prepare:
         return FitsInfo(
             input_yaml=self.input_yaml, flist=flist, template_files=template_files
         ).check()
+
+    # --- Validate FITS Headers ---
+    def validate_fits_headers(self, flist: List[str], template_files: bool = False) -> List[str]:
+        """
+        Review all FITS files for required header keywords.
+
+        Critical keywords (file rejected if missing):
+            FILTER (or alias: FILTERS, FLTRNAM, FILNAM1, FILTNAM1, FILTER1)
+
+        TELESCOP and INSTRUME are already checked by ``check_files`` (FitsInfo),
+        so they are NOT re-checked here to avoid redundant I/O.
+
+        Important keywords (file flagged with warning, user asked to continue):
+            EXPTIME (or alias), GAIN (or alias, unless telescope.yml provides
+            a numeric gain), MJD-OBS or DATE-OBS (or alias),
+            WCS keywords (CRPIX + CRVAL + CTYPE at minimum)
+
+        Args:
+            flist: List of FITS file paths to validate.
+            template_files: If True, relax checks for template images
+                (FILTER may be inferred from path; EXPTIME may be absent).
+
+        Returns:
+            List of file paths that passed validation.
+        """
+        FILTER_ALIASES = ["FILTER", "FILTERS", "FLTRNAM", "FILNAM1", "FILTNAM1", "FILTER1", "FILTER2", "FILTERID", "INSFILTE"]
+        IMPORTANT_KEYS = {
+            "EXPTIME": ["EXPTIME", "EXPOSURE", "TEXP", "EXPTIME0", "TEXPTIME", "INTTIME", "EXPTIM"],
+            "GAIN": ["GAIN", "EGAIN", "CONADU", "CELL.GAIN", "DET.GAIN"],
+            "MJD/DATE": ["MJD-OBS", "MJD_OBS", "MJD", "MJDSTART", "OBSMJD", "DATE-OBS", "DATEOBS", "UTC-OBS", "OBS-DATE"],
+        }
+        WCS_REQUIRED = ["CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CTYPE1", "CTYPE2"]
+
+        self.logger.info(log_step(f"FITS header validation: {len(flist)} files"))
+
+        # Check if telescope.yml provides a numeric gain for any instrument,
+        # in which case missing GAIN header keyword is not a warning.
+        gain_provided_by_telescope_yml = False
+        try:
+            tele_data = load_telescope_config(self.input_yaml.get("wdir", "."))
+            for _tele, tele_block in tele_data.items():
+                if not isinstance(tele_block, dict):
+                    continue
+                for _block_key, inst_block in tele_block.items():
+                    if not isinstance(inst_block, dict):
+                        continue
+                    for _inst, inst_cfg in inst_block.items():
+                        if not isinstance(inst_cfg, dict):
+                            continue
+                        gain_val = inst_cfg.get("gain")
+                        if isinstance(gain_val, (int, float)) and gain_val > 0:
+                            gain_provided_by_telescope_yml = True
+                            break
+        except Exception:
+            pass
+
+        rejected = []
+        warnings_list = []
+        accepted = []
+
+        for fpath in flist:
+            is_template = template_files or ("templates" in os.path.normpath(fpath))
+            reasons = []
+
+            try:
+                header = get_header(fpath)
+            except Exception as e:
+                reasons.append(f"Cannot read FITS header: {e}")
+                rejected.append((fpath, reasons))
+                continue
+
+            if not header:
+                reasons.append("Empty or unreadable FITS header")
+                rejected.append((fpath, reasons))
+                continue
+
+            # --- Critical: FILTER (or alias) ---
+            # Templates may have FILTER inferred from path by main.py, so only
+            # reject if no alias is present AND it's not a template.
+            has_filter = any(alias in header for alias in FILTER_ALIASES)
+            if not has_filter:
+                filter_val = None
+                for alias in FILTER_ALIASES:
+                    if alias in header:
+                        filter_val = header[alias]
+                        break
+                if filter_val is not None and isinstance(filter_val, str) and filter_val.strip():
+                    has_filter = True
+
+            if not has_filter and not is_template:
+                reasons.append(
+                    f"missing critical keyword FILTER (tried: {', '.join(FILTER_ALIASES[:5])})"
+                )
+
+            if reasons:
+                rejected.append((fpath, reasons))
+                continue
+
+            # --- Important keywords (warnings only) ---
+            file_warnings = []
+            for label, aliases in IMPORTANT_KEYS.items():
+                found = any(alias in header for alias in aliases)
+                if not found:
+                    if is_template and label == "EXPTIME":
+                        continue
+                    if label == "GAIN" and gain_provided_by_telescope_yml:
+                        continue
+                    file_warnings.append(f"missing {label} (tried: {', '.join(aliases[:4])})")
+
+            # --- WCS keywords ---
+            missing_wcs = [k for k in WCS_REQUIRED if k not in header]
+            if missing_wcs:
+                # CD matrix or CDELT can substitute for each other, but CTYPE/CRPIX/CRVAL are mandatory
+                has_cd = "CD1_1" in header and "CD2_2" in header
+                has_cdelt = "CDELT1" in header and "CDELT2" in header
+                if not (has_cd or has_cdelt):
+                    file_warnings.append(
+                        f"missing WCS keywords: {', '.join(missing_wcs)}"
+                    )
+
+            if file_warnings:
+                warnings_list.append((fpath, file_warnings))
+
+            accepted.append(fpath)
+
+        if rejected:
+            self.logger.warning("FITS header validation: %d file(s) REJECTED:", len(rejected))
+            for fpath, reasons in rejected:
+                self.logger.warning("  %s: %s", os.path.basename(fpath), "; ".join(reasons))
+
+        if warnings_list:
+            self.logger.warning("FITS header validation: %d file(s) with MISSING important keywords:", len(warnings_list))
+            for fpath, warns in warnings_list:
+                self.logger.warning("  %s: %s", os.path.basename(fpath), "; ".join(warns))
+
+            if not self.input_yaml.get("validate_fits_headers_non_interactive", False):
+                try:
+                    response = input(
+                        f"\n  {len(warnings_list)} file(s) have missing important header keywords.\n"
+                        f"  These files may cause issues during processing.\n"
+                        f"  Continue anyway? [y/N]: "
+                    ).strip().lower()
+                    if response not in ("y", "yes"):
+                        self.logger.info("User chose to stop. Exiting.")
+                        sys.exit("Stopped: FITS header validation failed (missing important keywords).")
+                    self.logger.info("User chose to continue despite missing keywords.")
+                except (EOFError, OSError):
+                    self.logger.info(
+                        "Non-interactive mode: continuing despite missing important keywords."
+                    )
+
+        self.logger.info(
+            "FITS header validation complete: %d accepted, %d rejected, %d warnings.",
+            len(accepted), len(rejected), len(warnings_list),
+        )
+        return accepted
 
     # --- Check Catalog ---
     def check_catalog(self) -> List[str]:
@@ -543,9 +699,18 @@ class Prepare:
             isinstance(tns_bot_id, str) and tns_bot_id.strip() == ""
         ):
             self.logger.warning(
-                "No TNS Bot ID configured for target '%s'. Falling back to manual coordinates.",
+                "No TNS Bot ID configured for target '%s'. Trying SIMBAD fallback.",
                 target_name,
             )
+            simbad_response = get_coords_simbad(target_name)
+            if simbad_response is not None:
+                AutophotYaml.create(str(transient_path), simbad_response)
+                self.logger.info(
+                    "Resolved target '%s' via SIMBAD (no TNS credentials).",
+                    target_name,
+                )
+                _log_tns_summary(simbad_response, source="simbad")
+                return simbad_response
             if (
                 self.input_yaml["target_ra"] is not None
                 and self.input_yaml["target_dec"] is not None
@@ -554,7 +719,7 @@ class Prepare:
                     "ra": self.input_yaml["target_ra"],
                     "dec": self.input_yaml["target_dec"],
                 }
-            raise Exception("No TNS Bot ID and no manual RA/DEC coordinates provided.")
+            raise Exception("No TNS Bot ID, SIMBAD failed, and no manual RA/DEC coordinates provided.")
 
         try:
             self.logger.info("Querying TNS for target '%s'.", target_name)
@@ -568,12 +733,27 @@ class Prepare:
             # If TNS returned None (object not found) and no manual coordinates provided,
             # stop and ask user for RA/Dec
             if tns_response is None:
+                # TNS did not find the object — try SIMBAD before giving up.
+                self.logger.info(
+                    "TNS lookup returned no result for '%s'. Trying SIMBAD fallback.",
+                    target_name,
+                )
+                simbad_response = get_coords_simbad(target_name)
+                if simbad_response is not None:
+                    AutophotYaml.create(str(transient_path), simbad_response)
+                    self.logger.info(
+                        "Resolved target '%s' via SIMBAD (TNS returned no result).",
+                        target_name,
+                    )
+                    _log_tns_summary(simbad_response, source="simbad")
+                    return simbad_response
+
                 if (
                     self.input_yaml.get("target_ra") is not None
                     and self.input_yaml.get("target_dec") is not None
                 ):
                     self.logger.warning(
-                        "TNS lookup failed for '%s', but manual RA/Dec provided. Using manual coordinates.",
+                        "TNS and SIMBAD both failed for '%s', but manual RA/Dec provided. Using manual coordinates.",
                         target_name,
                     )
                     return {
@@ -581,17 +761,18 @@ class Prepare:
                         "dec": float(self.input_yaml["target_dec"]),
                     }
                 else:
-                    # No TNS response and no manual coordinates - cannot proceed with target_name
+                    # No TNS/SIMBAD response and no manual coordinates
                     self.logger.error(
-                        "TNS lookup failed for target '%s' and no RA/Dec coordinates provided.",
+                        "TNS and SIMBAD both failed for target '%s' and no RA/Dec coordinates provided.",
                         target_name,
                     )
                     print(
                         f"\n{'='*60}\n"
-                        f"ERROR: Target '{target_name}' not found on TNS.\n\n"
+                        f"ERROR: Target '{target_name}' not found on TNS or SIMBAD.\n\n"
                         f"You provided a target_name but:\n"
                         f"  1. TNS lookup failed (no API credentials or object not found), AND\n"
-                        f"  2. No manual RA/Dec coordinates were provided.\n\n"
+                        f"  2. SIMBAD lookup also failed, AND\n"
+                        f"  3. No manual RA/Dec coordinates were provided.\n\n"
                         f"To fix this, either:\n"
                         f"  a) Provide TNS API credentials in your input YAML:\n"
                         f"       wcs:\n"
@@ -604,7 +785,7 @@ class Prepare:
                         f"  c) Remove target_name to run without a specific target\n"
                         f"{'='*60}\n"
                     )
-                    sys.exit("Stopped: TNS lookup failed and no RA/Dec provided for target_name.")
+                    sys.exit("Stopped: TNS and SIMBAD both failed and no RA/Dec provided for target_name.")
             
             AutophotYaml.create(str(transient_path), tns_response)
             obj_name = tns_response.get("name_prefix", "") + tns_response["objname"]
@@ -626,8 +807,34 @@ class Prepare:
                 line,
                 exc,
             )
+            # TNS API call failed — try SIMBAD before giving up.
+            self.logger.info(
+                "TNS API error for '%s'. Trying SIMBAD fallback.",
+                target_name,
+            )
+            simbad_response = get_coords_simbad(target_name)
+            if simbad_response is not None:
+                AutophotYaml.create(str(transient_path), simbad_response)
+                self.logger.info(
+                    "Resolved target '%s' via SIMBAD (TNS API error).",
+                    target_name,
+                )
+                _log_tns_summary(simbad_response, source="simbad")
+                return simbad_response
+            if (
+                self.input_yaml.get("target_ra") is not None
+                and self.input_yaml.get("target_dec") is not None
+            ):
+                self.logger.warning(
+                    "TNS and SIMBAD both failed for '%s', but manual RA/Dec provided. Using manual coordinates.",
+                    target_name,
+                )
+                return {
+                    "ra": float(self.input_yaml["target_ra"]),
+                    "dec": float(self.input_yaml["target_dec"]),
+                }
             sys.exit(
-                "Cannot reach TNS server - check internet connection and API credentials."
+                "Cannot reach TNS or SIMBAD - check internet connection and API credentials."
             )
 
     def _update_telescope_yml(

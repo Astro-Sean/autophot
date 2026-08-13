@@ -491,6 +491,19 @@ def odd(n: int) -> int:
     return n + (n % 2 == 0)
 
 
+def normalize_target_name(name):
+    """Strip transient-name prefixes (SN, AT) so catalog cache keys are stable.
+
+    Both autophot.py (pre-fetch) and main.py (per-image) must use the same
+    normalized name, otherwise the cached CSV is saved under one directory
+    (e.g. ``sn2026yos/``) but looked up under another (``2026yos/``),
+    causing redundant Gaia archive downloads.
+    """
+    if name and isinstance(name, str):
+        return name.replace("SN", "").replace("AT", "")
+    return name
+
+
 def format_exception_origin(exc: BaseException) -> str:
     """
     Return ``path:lineno`` for the stack frame where *exc* was raised.

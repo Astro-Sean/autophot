@@ -15,11 +15,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Import plotting utilities with fallback
 try:
-    from plotting_utils import get_divergent_color, get_marker_size
+    from plotting_utils import get_divergent_color, get_marker_size, get_plot_color, PLOT_COLORS
 except ImportError:
     logger.warning("plotting_utils module not found, some plotting features may be limited")
     get_divergent_color = None
     get_marker_size = None
+    get_plot_color = None
+    PLOT_COLORS = {}
 
 try:
     from lightcurve import (
@@ -221,8 +223,8 @@ class Plot:
             for i, (ax, title) in enumerate(zip(axes, image_titles)):
                 img_data = images[title]
                 # Use grayscale for full images to improve contrast with colored markers
-                cmap = plt.get_cmap("gray").copy()
-                cmap.set_bad(color="white")
+                cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
+                cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
                 ax.imshow(
                     img_data,
                     origin="lower",
@@ -305,7 +307,7 @@ class Plot:
                                 square_size,
                                 square_size,
                                 linewidth=0.5,
-                                edgecolor="blue",
+                                edgecolor=PLOT_COLORS.get('reference', '#0072B2'),
                                 facecolor="none",
                                 alpha=0.5,
                             )
@@ -366,7 +368,7 @@ class Plot:
                             circle = mpatches.Circle(
                                 (x, y),
                                 cross_len * 2,
-                                edgecolor="#FF0000",
+                                edgecolor=PLOT_COLORS.get('target', '#FF0000'),
                                 facecolor="none",
                                 zorder=4,
                                 lw=0.5,
@@ -396,7 +398,7 @@ class Plot:
                                 ha="center",
                                 va="bottom",
                                 fontsize=3,
-                                color="#FF0000",
+                                color=PLOT_COLORS.get('target', '#FF0000'),
                                 zorder=3,
                             )
 
@@ -426,14 +428,14 @@ class Plot:
                             ax.plot(
                                 [x - cross_len, x + cross_len],
                                 [y - cross_len, y + cross_len],
-                                color="#FF0000",
+                                color=PLOT_COLORS.get('target', '#FF0000'),
                                 lw=0.5,
                                 zorder=2,
                             )
                             ax.plot(
                                 [x - cross_len, x + cross_len],
                                 [y + cross_len, y - cross_len],
-                                color="#FF0000",
+                                color=PLOT_COLORS.get('target', '#FF0000'),
                                 lw=0.5,
                                 zorder=2,
                             )
@@ -463,8 +465,8 @@ class Plot:
 
                     # Inset
                     ax_inset = inset_axes(ax, width="30%", height="30%", loc=inset_loc)
-                    cmap = plt.get_cmap("gray").copy()
-                    cmap.set_bad(color="white")
+                    cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
+                    cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
                     ax_inset.imshow(
                         img_data,
                         origin="lower",
@@ -478,7 +480,7 @@ class Plot:
                     ax_inset.set_xticks([])
                     ax_inset.set_yticks([])
                     for spine in ax_inset.spines.values():
-                        spine.set_color("#000000")
+                        spine.set_color(PLOT_COLORS.get('spine_color', '#000000'))
                         spine.set_linewidth(0.5)
                     inset_axes_list.append(ax_inset)
 
@@ -488,7 +490,7 @@ class Plot:
                         2 * inset_size,
                         2 * inset_size,
                         linewidth=0.5,
-                        edgecolor="#FF0000",
+                        edgecolor=PLOT_COLORS.get('target', '#FF0000'),
                         facecolor="none",
                     )
                     ax.add_patch(rect)
@@ -524,14 +526,14 @@ class Plot:
                                 coordsB=ax_inset.transAxes,
                                 axesA=ax,
                                 axesB=ax_inset,
-                                color="#FF0000",
+                                color=PLOT_COLORS.get('target', '#FF0000'),
                                 linewidth=0.5,
                             )
                         )
 
             # Optional mask overlay (skip difference and decorrelated images)
             if mask is not None:
-                red_overlay = colors.ListedColormap(["none", "#FF0000"])
+                red_overlay = colors.ListedColormap(["none", PLOT_COLORS.get('mask_overlay', '#FF0000')])
                 for i, ax in enumerate(fig.axes[:-1]):
                     if ax not in inset_axes_list:
                         # Skip difference image (index 2) and decorrelated image (index 3 if present)
@@ -548,7 +550,7 @@ class Plot:
                         # Red hollow circle at fitted location
                         circle = mpatches.Circle(
                             fitted_location,
-                            edgecolor="#FF0000",
+                            edgecolor=PLOT_COLORS.get('target', '#FF0000'),
                             facecolor="none",
                             linewidth=0.5,
                             transform=ax.transData,
@@ -558,29 +560,29 @@ class Plot:
                         # Green cross at expected location (2 lines)
                         if expected_location and len(expected_location) == 2:
                             x, y = expected_location
-                    cross_len = aperture_size / 2  # half-length of each arm
+                            cross_len = aperture_size / 2  # half-length of each arm
 
-                    # hline = mlines.Line2D(
-                    #     [x - cross_len, x + cross_len],
-                    #     [y, y],
-                    #     color="#0000FF",
-                    #     linewidth=0.5,
-                    #     transform=ax.transData,
-                    # )
-                    # vline = mlines.Line2D(
-                    #     [x, x],
-                    #     [y - cross_len, y + cross_len],
-                    #     color="#0000FF",
-                    #     linewidth=0.5,
-                    #     transform=ax.transData,
-                    # )
-                    # ax.add_line(hline)
-                    # ax.add_line(vline)
+                            # hline = mlines.Line2D(
+                            #     [x - cross_len, x + cross_len],
+                            #     [y, y],
+                            #     color="#0000FF",
+                            #     linewidth=0.5,
+                            #     transform=ax.transData,
+                            # )
+                            # vline = mlines.Line2D(
+                            #     [x, x],
+                            #     [y - cross_len, y + cross_len],
+                            #     color="#0000FF",
+                            #     linewidth=0.5,
+                            #     transform=ax.transData,
+                            # )
+                            # ax.add_line(hline)
+                            # ax.add_line(vline)
 
 
             # Save figure (PNG only)
             fig.savefig(
-                save_path, dpi=150, bbox_inches="tight", facecolor="white"
+                save_path, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white')
             )
             plt.close(fig)
             return 1
@@ -696,13 +698,13 @@ class Plot:
         ty = cy - y0
 
         # Panel 1
-        cmap_vir = plt.get_cmap("viridis").copy()
-        cmap_vir.set_bad(color="white")
+        cmap_vir = plt.get_cmap(PLOT_COLORS.get('image_cmap_alt', 'viridis')).copy()
+        cmap_vir.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
         axes[0].imshow(
             cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
         )
-        axes[0].axvline(tx, color="#0000FF", lw=0.6, alpha=0.9)
-        axes[0].axhline(ty, color="#0000FF", lw=0.6, alpha=0.9)
+        axes[0].axvline(tx, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
+        axes[0].axhline(ty, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
         if (
             aperture_radius is not None
             and np.isfinite(aperture_radius)
@@ -712,7 +714,7 @@ class Plot:
                 mpatches.Circle(
                     (tx, ty),
                     float(aperture_radius),
-                        edgecolor="#0000FF",
+                        edgecolor=PLOT_COLORS.get('reference', '#0072B2'),
                     facecolor="none",
                     lw=0.8,
                 )
@@ -728,22 +730,22 @@ class Plot:
             axes[1].contour(
                 seg,
                 levels=levels,
-                    colors="#00AA00",
+                colors=PLOT_COLORS.get('segmentation', '#00AA00'),
                 linewidths=0.4,
                 alpha=0.9,
             )
-        axes[1].axvline(tx, color="#0000FF", lw=0.6, alpha=0.9)
-        axes[1].axhline(ty, color="#0000FF", lw=0.6, alpha=0.9)
+        axes[1].axvline(tx, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
+        axes[1].axhline(ty, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
 
         # Panel 3
         axes[2].imshow(
             cut, origin="lower", cmap=cmap_vir, vmin=vmin, vmax=vmax
         )
-        overlay = colors.ListedColormap(["none", "#FF0000"])
+        overlay = colors.ListedColormap(["none", PLOT_COLORS.get('mask_overlay', '#FF0000')])
         axes[2].imshow(nmask.astype(int), origin="lower", cmap=overlay, alpha=0.35)
-        axes[2].axvline(tx, color="#0000FF", lw=0.6, alpha=0.9)
-        axes[2].axhline(ty, color="#0000FF", lw=0.6, alpha=0.9)
-        fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor="white")
+        axes[2].axvline(tx, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
+        axes[2].axhline(ty, color=PLOT_COLORS.get('reference', '#0072B2'), lw=0.6, alpha=0.9)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
         plt.close(fig)
 
     def source_check(
@@ -904,8 +906,8 @@ class Plot:
                 image, interval=ZScaleInterval(), stretch=LinearStretch()
             )
             # Set NaN values to display as white
-            cmap = plt.get_cmap("gray")
-            cmap.set_bad(color='white')
+            cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray'))
+            cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
             im = ax1.imshow(
                 image,
                 origin="lower",
@@ -966,7 +968,7 @@ class Plot:
                     pass
 
             # Plot the target source as a circle
-            edge_color = get_divergent_color('target') if get_divergent_color else 'blue'
+            edge_color = PLOT_COLORS.get('target', '#FF0000')
             circle = Circle(
                 (self.input_yaml["target_x_pix"], self.input_yaml["target_y_pix"]),
                 radius,
@@ -991,7 +993,7 @@ class Plot:
                         numVertices=6,
                         radius=hex_radius,
                         orientation=np.pi/6,  # Point up
-                        edgecolor=get_divergent_color('psf'),
+                        edgecolor=PLOT_COLORS.get('psf', '#00AA00'),
                         facecolor="none",
                         linewidth=0.5,
                         label="PSF sources" if x == psfSources["x_pix"].iloc[0] else None,
@@ -1013,7 +1015,7 @@ class Plot:
                         lower_left,
                         square_size,
                         square_size,
-                        edgecolor=get_divergent_color('reference') if get_divergent_color else '#0000FF',
+                        edgecolor=PLOT_COLORS.get('reference', '#0072B2'),
                         facecolor="none",
                         label="Reference Sources",
                         zorder=1,
@@ -1032,7 +1034,7 @@ class Plot:
                         vmin=np.nanmin(fwhm_values), vmax=np.nanmax(fwhm_values)
                     )
                     # Orange colormap for FWHM scaling (distinct from red target and blue catalog).
-                    cmap = plt.get_cmap("Oranges")
+                    cmap = plt.get_cmap(PLOT_COLORS.get('fwhm_sources', 'Oranges'))
 
                     # Create a ScalarMappable for the colorbar
                     sm = ScalarMappable(norm=norm_fwhm, cmap=cmap)
@@ -1070,7 +1072,7 @@ class Plot:
                 if len(variable_sources) > 0:
 
                     cross_len = scale / 4  # Length of each arm of the cross
-                    _gold = "#FFD700"
+                    _gold = PLOT_COLORS.get('variable', '#FFD700')
 
                     for x, y, otype, name in zip(
                         variable_sources["x_pix"],
@@ -1188,7 +1190,7 @@ class Plot:
                             angles="xy",
                             scale_units="xy",
                             scale=1.0,
-                            color=get_divergent_color('positive'),
+                            color=PLOT_COLORS.get('positive', '#FF8C00') if PLOT_COLORS else (get_divergent_color('positive') if get_divergent_color else '#FF8C00'),
                             alpha=0.65,
                             width=0.0020,
                             zorder=5,
@@ -1204,7 +1206,7 @@ class Plot:
                 from matplotlib import colors
 
                 # White overlay for masked regions
-                mask_cmap = colors.ListedColormap(["none", "white"])
+                mask_cmap = colors.ListedColormap(["none", PLOT_COLORS.get('mask_overlay_alt', 'white')])
                 ax1.imshow(mask, cmap=mask_cmap, alpha=1.0, origin="lower")
 
             # Optional colorbar for distortion grid-map magnitude.
@@ -1246,13 +1248,11 @@ class Plot:
                 by_label.keys(),
                 loc="lower center",
                 bbox_to_anchor=(0.5, 1.0),
-                frameon=True,
-                facecolor="white",
-                edgecolor="grey",
-                framealpha=0.9,
+                frameon=False,
+                fontsize=8,
                 handlelength=1.5,
                 handletextpad=0.5,
-                ncol = 3
+                ncol=3,
             )
 
             # Finalize figure layout - leave room at top for the legend
@@ -1271,7 +1271,7 @@ class Plot:
                 )
 
             fig.savefig(
-                save_loc, dpi=150, bbox_extra_artists=[leg], facecolor="white"
+                save_loc, dpi=150, bbox_extra_artists=[leg], facecolor=PLOT_COLORS.get('figure_facecolor', 'white')
             )
             plt.close(fig)
 
@@ -1342,40 +1342,21 @@ class Plot:
         import matplotlib.pyplot as plt
         from functions import set_size
 
-        # Default color array (legacy). If `lightcurve.BAND_COLORS` is available
-        # it will override known filter colors using `databases/filters.yml`.
-        cols = {
-            "u": "dodgerblue",
-            "g": "g",
-            "r": "r",
-            "i": "goldenrod",
-            "z": "k",
-            "y": "0.5",
-            "w": "firebrick",
-            "Y": "0.5",
-            "U": "slateblue",
-            "B": "b",
-            "V": "yellowgreen",
-            "R": "crimson",
-            "I": "chocolate",
-            "G": "salmon",
-            "E": "salmon",
-            "J": "darkred",
-            "H": "orangered",
-            "K": "saddlebrown",
-            "S": "mediumorchid",
-            "D": "purple",
-            "A": "midnightblue",
-            "F": "hotpink",
-            "N": "magenta",
-            "o": "darkorange",
-            "c": "cyan",
-            "W": "forestgreen",
-            "Q": "peru",
-        }
-        palette = cols
+        # Use the shared per-band palette from lightcurve.py (BAND_COLORS).
+        # If BAND_COLORS is unavailable, fall back to a minimal built-in dict.
         if isinstance(BAND_COLORS, dict) and BAND_COLORS:
-            palette = {**cols, **BAND_COLORS}
+            palette = dict(BAND_COLORS)
+        else:
+            palette = {
+                "u": "dodgerblue", "g": "g", "r": "r", "i": "goldenrod",
+                "z": "k", "y": "0.5", "w": "firebrick", "Y": "0.5",
+                "U": "slateblue", "B": "b", "V": "yellowgreen", "R": "crimson",
+                "I": "chocolate", "G": "salmon", "E": "salmon",
+                "J": "darkred", "H": "orangered", "K": "saddlebrown",
+                "S": "mediumorchid", "D": "purple", "A": "midnightblue",
+                "F": "hotpink", "N": "magenta", "o": "darkorange",
+                "c": "cyan", "W": "forestgreen", "Q": "peru",
+            }
 
         # Maintains order from blue to red effective wavelength
         bandlist = "FSDNAuUBgcVwrRoGEiIzyYJHKWQ"
@@ -1707,7 +1688,7 @@ class Plot:
                 transform=ax1.transAxes,
                 verticalalignment="top",
                 horizontalalignment="left",
-                bbox=dict(facecolor="white", alpha=0.8),
+                bbox=dict(facecolor=PLOT_COLORS.get('stats_bbox', 'white'), alpha=0.8),
             )
 
         handles, labels = ax1.get_legend_handles_labels()
@@ -1722,6 +1703,7 @@ class Plot:
             loc="lower center",
             bbox_to_anchor=(0.5, 1.0),
             frameon=False,
+            fontsize=8,
             handlelength=1.5,
             handletextpad=0.5,
         )
@@ -1833,7 +1815,7 @@ class Plot:
                     xerr=df_plot["x_fit_err"],
                     yerr=df_plot["y_fit_err"],
                     fmt="none",
-                    ecolor="gray",
+                    ecolor=PLOT_COLORS.get('error_bar', '#999999'),
                     elinewidth=0.5,
                     alpha=0.5,
                     zorder=1,
@@ -1842,7 +1824,7 @@ class Plot:
             # Scatter plot colored by distance from target
             _sc_obj = None
             if _dist_from_target is not None:
-                _cmap = plt.cm.viridis
+                _cmap = plt.get_cmap(PLOT_COLORS.get('scatter_cmap', 'viridis'))
                 _sc_obj = ax.scatter(
                     df_plot["dx"],
                     df_plot["dy"],
@@ -1860,7 +1842,7 @@ class Plot:
                     df_plot["dy"],
                     s=12,
                     marker="o",
-                    facecolor="#2E8B57",
+                    facecolor=PLOT_COLORS.get('scatter_primary', '#0072B2'),
                     edgecolor="none",
                     alpha=0.7,
                     zorder=3,
@@ -1912,8 +1894,8 @@ class Plot:
                 ) * 1.1
             ax.set_xlim(-_lim, _lim)
             ax.set_ylim(-_lim, _lim)
-            ax.axhline(0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=1)
-            ax.axvline(0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=1)
+            ax.axhline(0, color=PLOT_COLORS.get('zero_line', '#FF0000'), lw=0.8, ls="--", alpha=0.5, zorder=1)
+            ax.axvline(0, color=PLOT_COLORS.get('zero_line', '#FF0000'), lw=0.8, ls="--", alpha=0.5, zorder=1)
 
             ax.set_xlabel(r"$\Delta x = x_{\mathrm{PSF}} - x_{\mathrm{WCS}}$ [px]")
             ax.set_ylabel(r"$\Delta y = y_{\mathrm{PSF}} - y_{\mathrm{WCS}}$ [px]")
@@ -1974,7 +1956,7 @@ class Plot:
                 transform=ax.transAxes,
                 verticalalignment="top",
                 horizontalalignment="left",
-                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+                bbox=dict(facecolor=PLOT_COLORS.get('stats_bbox', 'white'), alpha=0.75, edgecolor="none"),
                 fontsize="small",
             )
 
@@ -1986,11 +1968,11 @@ class Plot:
                 transform=ax.transAxes,
                 verticalalignment="bottom",
                 horizontalalignment="left",
-                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+                bbox=dict(facecolor=PLOT_COLORS.get('stats_bbox', 'white'), alpha=0.75, edgecolor="none"),
                 fontsize="small",
             )
 
-            fig.savefig(save_path, dpi=150, facecolor="white")
+            fig.savefig(save_path, dpi=150, facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
 
             logger.debug("Saved WCS vs PSF offset plot: %s", save_path)
@@ -2216,7 +2198,7 @@ class Plot:
                     xerr=dx_err_plot,
                     yerr=dy_err_plot,
                     fmt="none",
-                    ecolor="gray",
+                    ecolor=PLOT_COLORS.get('error_bar', '#999999'),
                     elinewidth=0.5,
                     alpha=0.5,
                     zorder=1,
@@ -2225,7 +2207,7 @@ class Plot:
             # Scatter plot colored by distance from target
             _sc_obj = None
             if _dist_from_target is not None:
-                _cmap = plt.cm.viridis
+                _cmap = plt.get_cmap(PLOT_COLORS.get('scatter_cmap', 'viridis'))
                 _sc_obj = ax.scatter(
                     dx_plot,
                     dy_plot,
@@ -2243,7 +2225,7 @@ class Plot:
                     dy_plot,
                     s=12,
                     marker="o",
-                    facecolor="dodgerblue",
+                    facecolor=PLOT_COLORS.get('scatter_primary', '#0072B2'),
                     edgecolor="none",
                     alpha=0.7,
                     zorder=3,
@@ -2283,8 +2265,8 @@ class Plot:
                 ) * 1.1
             ax.set_xlim(-_lim, _lim)
             ax.set_ylim(-_lim, _lim)
-            ax.axhline(0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=1)
-            ax.axvline(0, color="red", lw=0.8, ls="--", alpha=0.5, zorder=1)
+            ax.axhline(0, color=PLOT_COLORS.get('zero_line', '#FF0000'), lw=0.8, ls="--", alpha=0.5, zorder=1)
+            ax.axvline(0, color=PLOT_COLORS.get('zero_line', '#FF0000'), lw=0.8, ls="--", alpha=0.5, zorder=1)
 
             ax.set_xlabel(
                 r"$\Delta x = x_{\mathrm{sci}} - x_{\mathrm{ref}}$ [px]"
@@ -2343,7 +2325,7 @@ class Plot:
                 transform=ax.transAxes,
                 verticalalignment="top",
                 horizontalalignment="left",
-                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+                bbox=dict(facecolor=PLOT_COLORS.get('stats_bbox', 'white'), alpha=0.75, edgecolor="none"),
                 fontsize="small",
             )
 
@@ -2354,11 +2336,11 @@ class Plot:
                 transform=ax.transAxes,
                 verticalalignment="bottom",
                 horizontalalignment="left",
-                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none"),
+                bbox=dict(facecolor=PLOT_COLORS.get('stats_bbox', 'white'), alpha=0.75, edgecolor="none"),
                 fontsize="small",
             )
 
-            fig.savefig(save_path, dpi=150, facecolor="white")
+            fig.savefig(save_path, dpi=150, facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
 
             logger.debug("Saved alignment offset plot: %s", save_path)
@@ -2445,8 +2427,8 @@ class Plot:
                 1, 2, figsize=figsize, constrained_layout=True
             )
 
-            cmap = plt.get_cmap("gray").copy()
-            cmap.set_bad(color="white")
+            cmap = plt.get_cmap(PLOT_COLORS.get('image_cmap', 'gray')).copy()
+            cmap.set_bad(color=PLOT_COLORS.get('nan_color', 'white'))
 
             for ax, img, title in [
                 (ax1, sci_image, "Science"),
@@ -2495,7 +2477,7 @@ class Plot:
                     ax1.scatter(
                         sci_all[_sci_unmatched, 0],
                         sci_all[_sci_unmatched, 1],
-                        marker="x", s=12, c="red", alpha=0.6,
+                        marker="x", s=12, c=PLOT_COLORS.get('unmatched', '#FF0000'), alpha=0.6,
                         linewidths=0.5, zorder=3,
                     )
             if tpl_all_xy is not None:
@@ -2505,7 +2487,7 @@ class Plot:
                     ax2.scatter(
                         tpl_all[_tpl_unmatched, 0],
                         tpl_all[_tpl_unmatched, 1],
-                        marker="x", s=12, c="red", alpha=0.6,
+                        marker="x", s=12, c=PLOT_COLORS.get('unmatched', '#FF0000'), alpha=0.6,
                         linewidths=0.5, zorder=3,
                     )
 
@@ -2514,13 +2496,13 @@ class Plot:
             for (sx, sy) in sci_matched_xy:
                 ax1.add_patch(Circle(
                     (sx, sy), _r_sci,
-                    edgecolor="dodgerblue", facecolor="none",
+                    edgecolor=PLOT_COLORS.get('matched', '#0072B2'), facecolor="none",
                     linewidth=0.5, zorder=5,
                 ))
             for (tx, ty) in tpl_matched_xy:
                 ax2.add_patch(Circle(
                     (tx, ty), _r_tpl,
-                    edgecolor="dodgerblue", facecolor="none",
+                    edgecolor=PLOT_COLORS.get('matched', '#0072B2'), facecolor="none",
                     linewidth=0.5, zorder=5,
                 ))
 
@@ -2531,9 +2513,9 @@ class Plot:
                 sx, sy = sci_matched_xy[i]
                 tx, ty = tpl_matched_xy[i]
                 ax1.text(sx, sy + _r_sci + 1, str(i),
-                         color="dodgerblue", fontsize=4, ha="center", va="bottom")
+                         color=PLOT_COLORS.get('matched', '#0072B2'), fontsize=4, ha="center", va="bottom")
                 ax2.text(tx, ty + _r_tpl + 1, str(i),
-                         color="dodgerblue", fontsize=4, ha="center", va="bottom")
+                         color=PLOT_COLORS.get('matched', '#0072B2'), fontsize=4, ha="center", va="bottom")
 
             # Mark transient position as a yellow box on both images
             from matplotlib.patches import Rectangle as _Rect
@@ -2556,14 +2538,14 @@ class Plot:
                 ax1.add_patch(_Rect(
                     (_target_x - _box_half, _target_y - _box_half),
                     _box_size, _box_size,
-                    edgecolor="gold", facecolor="none",
+                    edgecolor=PLOT_COLORS.get('variable', '#FFD700'), facecolor="none",
                     linewidth=1.5, linestyle="-", zorder=10,
                 ))
                 if _display_name:
                     ax1.text(
                         _target_x, _target_y + _box_half + 2,
                         _display_name,
-                        color="goldenrod", fontsize=5, fontweight="bold",
+                        color=PLOT_COLORS.get('variable_label', '#B8860B'), fontsize=5, fontweight="bold",
                         ha="center", va="bottom", zorder=11,
                     )
                 # Template image: convert via WCS if available
@@ -2584,14 +2566,14 @@ class Plot:
                             ax2.add_patch(_Rect(
                                 (_tx - _box_half, _ty - _box_half),
                                 _box_size, _box_size,
-                                edgecolor="gold", facecolor="none",
+                                edgecolor=PLOT_COLORS.get('variable', '#FFD700'), facecolor="none",
                                 linewidth=1.5, linestyle="-", zorder=10,
                             ))
                             if _display_name:
                                 ax2.text(
                                     _tx, _ty + _box_half + 2,
                                     _display_name,
-                                    color="goldenrod", fontsize=5, fontweight="bold",
+                                    color=PLOT_COLORS.get('variable_label', '#B8860B'), fontsize=5, fontweight="bold",
                                     ha="center", va="bottom", zorder=11,
                                 )
                 except Exception:
@@ -2600,22 +2582,21 @@ class Plot:
             # Build legend with opaque background
             _legend_handles = []
             if n_matched > 0:
-                _legend_handles.append(_L2([0], [0], marker="o", color="dodgerblue",
+                _legend_handles.append(_L2([0], [0], marker="o", color=PLOT_COLORS.get('matched', '#0072B2'),
                                            markerfacecolor="none", markersize=5,
                                            linestyle="None", label=f"Matched [{n_matched}]"))
             if sci_all_xy is not None and len(np.asarray(sci_all_xy, float)) > 0:
-                _legend_handles.append(_L2([0], [0], marker="x", color="red",
+                _legend_handles.append(_L2([0], [0], marker="x", color=PLOT_COLORS.get('unmatched', '#FF0000'),
                                            markersize=5, linestyle="None",
                                            label="Unmatched"))
             if _target_x is not None and np.isfinite(_target_x):
-                _legend_handles.append(_L2([0], [0], marker="s", color="gold",
+                _legend_handles.append(_L2([0], [0], marker="s", color=PLOT_COLORS.get('variable', '#FFD700'),
                                            markerfacecolor="none", markersize=5,
                                            linestyle="None", label="Transient"))
             if _legend_handles:
                 ax1.legend(
                     handles=_legend_handles, loc="upper right",
-                    frameon=True, facecolor="white", edgecolor="grey",
-                    framealpha=0.9, fontsize=6,
+                    frameon=False, fontsize=8,
                 )
 
             # Stats text
@@ -2637,11 +2618,11 @@ class Plot:
                 0.02, 0.98, _stats,
                 transform=ax1.transAxes, fontsize=6,
                 verticalalignment="top", horizontalalignment="left",
-                bbox=dict(facecolor="white", edgecolor="grey", alpha=0.9, boxstyle="round,pad=0.3"),
+                bbox=dict(facecolor=PLOT_COLORS.get('stats_bbox', 'white'), edgecolor=PLOT_COLORS.get('legend_edgecolor', '#999999'), alpha=0.9, boxstyle="round,pad=0.3"),
             )
 
             fig.savefig(save_path, dpi=150, bbox_inches="tight",
-                        facecolor="white")
+                        facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
             logger.info(
                 "Match sources plot saved: %s (%d matched sources)",

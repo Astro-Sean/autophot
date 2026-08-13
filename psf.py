@@ -118,7 +118,7 @@ def _call_build_epsf(builder, epsfstars, init_epsf):
 # Local
 # ---------------------------------------------------------------------------
 from functions import log_step, set_size, log_warning_from_exception
-from plotting_utils import get_marker_size
+from plotting_utils import get_marker_size, PLOT_COLORS
 from aperture import (
     gain_e_per_adu_from_header,
     resolve_exposure_time_seconds,
@@ -3705,8 +3705,8 @@ class PSF:
             )
 
             cx, cy = nx // 2, ny // 2
-            ax.axvline(cx, color="#00FFFF", lw=0.5, alpha=0.8, ls="--")
-            ax.axhline(cy, color="#00FFFF", lw=0.5, alpha=0.8, ls="--")
+            ax.axvline(cx, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
+            ax.axhline(cy, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
             ax.set_title(f"Oversample={oversample}x", fontsize=8, pad=2)
             ax.set_xlabel("Pixels")
             ax.set_ylabel("Pixels")
@@ -3721,7 +3721,7 @@ class PSF:
             hy = np.nanmean(_data_f, axis=1)
             del _data_f
 
-            ax_B.step(x_phys, hx, color="#00FF00", lw=0.5, where="mid")
+            ax_B.step(x_phys, hx, color=PLOT_COLORS.get('psf', '#00AA00'), lw=0.5, where="mid")
             # Right panel: step() steps along x-axis (value), but we need
             # stepping along y-axis (coordinate) to match the orientation.
             _n_r = len(hy)
@@ -3730,9 +3730,9 @@ class PSF:
                 for i in range(_n_r):
                     _y_e[2 * i] = i - 0.5 if i > 0 else 0
                     _y_e[2 * i + 1] = i + 0.5 if i < _n_r - 1 else (_n_r - 1)
-                ax_R.plot(np.repeat(hy, 2), _y_e, color="#00FF00", lw=0.5)
-            ax_B.axvline(cx, color="#00FFFF", lw=0.5, alpha=0.8, ls="--")
-            ax_R.axhline(cy, color="#00FFFF", lw=0.5, alpha=0.8, ls="--")
+                ax_R.plot(np.repeat(hy, 2), _y_e, color=PLOT_COLORS.get('psf', '#00AA00'), lw=0.5)
+            ax_B.axvline(cx, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
+            ax_R.axhline(cy, color=PLOT_COLORS.get('spine_color', '#000000'), lw=0.5, alpha=0.8, ls="--")
             ax_B.set_ylabel("Intensity")
             ax_B.set_xlabel("X Pixels")
             ax_R.yaxis.tick_right()
@@ -5866,7 +5866,7 @@ class PSF:
                                 for x, y in _xy
                             ]
                             if _rects:
-                                rc = _PC(_rects, edgecolors="cyan", facecolors="none",
+                                rc = _PC(_rects, edgecolors=PLOT_COLORS.get('reference', '#0072B2'), facecolors="none",
                                           linewidths=1.0, linestyles="--", alpha=0.6,
                                           label="Fitting bounds")
                                 ax1.add_collection(rc)
@@ -6048,7 +6048,7 @@ class PSF:
                 ax2_R.fill_betweenx(y_vals, hy2 - eyh2, hy2 + eyh2, **kw_right)
                 _draw_right_step(ax2_R, hy2 - eyh2, y0, y1, color="dodgerblue", lw=0.3, alpha=0.7)
                 _draw_right_step(ax2_R, hy2 + eyh2, y0, y1, color="dodgerblue", lw=0.3, alpha=0.7)
-                _draw_right_step(ax2_R, hy2, y0, y1, color="#00FFFF")
+                _draw_right_step(ax2_R, hy2, y0, y1, color=PLOT_COLORS.get('psf', '#00AA00'))
 
                 # Zoom bottom and right panels onto the fit profile (scale to data range).
                 _lo_b = np.nanmin(hx2 - exh2)
@@ -6140,7 +6140,7 @@ class PSF:
                     _valid.append(_h)
                     _valid_labels.append(_l)
                 if _valid:
-                    ax1.legend(_valid, _valid_labels, loc="upper left")
+                    ax1.legend(_valid, _valid_labels, loc="upper left", frameon=False, fontsize=8)
             save_name_png = (
                 f"PSF_Target_{base}.png" if plotTarget else f"PSF_Subtractions_{base}.png"
             )
