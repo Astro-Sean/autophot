@@ -249,6 +249,8 @@ class SExtractorWrapper:
             config (dict): Configuration parameters for SExtractor.
         """
         self.config = config
+        # FWHM uncertainty (SE of median), set by calculate_robust_fwhm().
+        self.fwhm_err = np.nan
         # Default number of threads for SExtractor; top-level or under wcs.* in YAML.
         _wcs_cfg = config.get("wcs") or {}
         try:
@@ -444,6 +446,15 @@ class SExtractorWrapper:
         _sigma = 2.5 if len(fwhm_values) < 20 else 3.0
         clipped = sigma_clip(fwhm_values, sigma=_sigma, maxiters=n_iterations)
         fwhm_value = float(np.ma.median(clipped))
+        # FWHM uncertainty: SE of the median (1.858 * MAD / sqrt(N)).
+        # Stored on the instance for callers that need it.
+        _clipped_arr = np.asarray(clipped)
+        _n_clipped = int(np.ma.count(clipped))
+        if _n_clipped >= 2:
+            _fwhm_mad = float(np.ma.median(np.abs(_clipped_arr - fwhm_value)))
+            self.fwhm_err = float(1.858 * _fwhm_mad / np.sqrt(_n_clipped))
+        else:
+            self.fwhm_err = np.nan
         # Guard against pathological estimates (all zeros, NaNs, etc.).
         if not np.isfinite(fwhm_value) or fwhm_value <= 0.0:
             fallback = float(self.config.get("fwhm_fallback_pixels", 3.0))

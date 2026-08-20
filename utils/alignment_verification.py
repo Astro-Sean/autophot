@@ -5,6 +5,7 @@ Provides comprehensive diagnostics to ensure science and reference images are pr
 """
 
 import logging
+import os
 import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS

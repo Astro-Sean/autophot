@@ -220,6 +220,41 @@ def table_to_ldac(table, header=None, writeto=None) -> fits.HDUList:
     return hdulist
 
 
+# --- WCS cache -------------------------------------------------------------
+# Cache WCS objects keyed by a tuple of the critical WCS keywords so that
+# repeated get_wcs() calls with the same (unchanged) header avoid re-parsing
+# SIP/TPV distortion coefficients and re-validating the WCS.  The cache is
+# invalidated automatically when any key WCS keyword changes value.
+_WCS_CACHE = {}
+_WCS_CACHE_MAX = 32
+
+# Keywords that define the WCS transformation.  If any of these change, the
+# cached WCS is stale and must be rebuilt.
+_WCS_KEY_KEYWORDS = (
+    "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2",
+    "CTYPE1", "CTYPE2", "CUNIT1", "CUNIT2",
+    "CDELT1", "CDELT2", "CROTA2",
+    "CD1_1", "CD1_2", "CD2_1", "CD2_2",
+    "PC1_1", "PC1_2", "PC2_1", "PC2_2",
+    "EQUINOX", "RADESYS",
+)
+
+
+def _wcs_cache_key(header):
+    """Build a hashable cache key from the critical WCS keywords in *header*."""
+    try:
+        return tuple(
+            (kw, header.get(kw)) for kw in _WCS_KEY_KEYWORDS
+        )
+    except Exception:
+        return None
+
+
+def invalidate_wcs_cache():
+    """Clear the WCS cache (call after WCS solving or header modification)."""
+    _WCS_CACHE.clear()
+
+
 def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
     """
     Create a WCS object from a FITS header, handling SIP if present.
@@ -235,6 +270,14 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
     if header is None:
         logger.warning("get_wcs: header is None")
         return None
+
+    # Check WCS cache — avoids re-parsing SIP/TPV coefficients on repeated calls
+    # with the same header.  The key is a tuple of critical WCS keyword values.
+    cache_key = _wcs_cache_key(header)
+    if cache_key is not None:
+        cached = _WCS_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
     try:
         # Normalise CTYPE first so the WCS() constructor always receives a
@@ -286,6 +329,11 @@ def get_wcs(header: fits.Header, silent: bool = True) -> WCS:
                     logger.warning("get_wcs: WCS transformation test failed with exception: %s", e)
                     return None
 
+        # Store in cache for future calls with the same WCS keywords
+        if cache_key is not None:
+            if len(_WCS_CACHE) >= _WCS_CACHE_MAX:
+                _WCS_CACHE.pop(next(iter(_WCS_CACHE)))
+            _WCS_CACHE[cache_key] = wcs
         return wcs
 
     except Exception as e:

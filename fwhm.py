@@ -90,10 +90,41 @@ class Find_FWHM:
         """
         self.input_yaml = input_yaml
         self.logger = logger
+        # FWHM uncertainty (SE of median), set by measure_image().
+        self.fwhm_err = np.nan
 
     # =============================================================================
     #  Utility Functions
     # =============================================================================
+
+    @staticmethod
+    def _adaptive_detection_params(fwhm_px: float) -> dict:
+        """Return FWHM-adaptive IRAFStarFinder/DAOStarFinder parameters.
+
+        Undersampled data (FWHM < 2 px) has broader intrinsic PSF shapes
+        because a single pixel can contain most of the flux.  The default
+        sharpness/roundness cuts are too restrictive and reject real
+        detections.  See Howell (1989) sampling parameter discussion.
+
+        Parameters
+        ----------
+        fwhm_px : float
+            Estimated FWHM in pixels.
+
+        Returns
+        -------
+        dict with keys: sharplo, sharphi, roundlo, roundhi
+        """
+        fwhm_px = float(fwhm_px) if np.isfinite(fwhm_px) else 3.0
+        if fwhm_px < 2.0:
+            # Undersampled: broader PSF tolerance, allow more ellipticity
+            return dict(sharplo=0.2, sharphi=1.5, roundlo=-1.0, roundhi=1.0)
+        elif fwhm_px < 3.0:
+            # Critically sampled: moderate tolerance
+            return dict(sharplo=0.4, sharphi=1.2, roundlo=-0.6, roundhi=0.6)
+        else:
+            # Well/oversampled: standard tight cuts
+            return dict(sharplo=0.5, sharphi=1.0, roundlo=-0.3, roundhi=0.3)
 
     def create_circular_mask(
         self,
@@ -270,7 +301,8 @@ class Find_FWHM:
                 label="Segment COMs",
                 s=get_marker_size('medium'),
             )
-            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
+            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
+                      frameon=True, facecolor="white", framealpha=1.0, edgecolor="black")
             fpath = self.input_yaml["fpath"]
             write_dir = self.input_yaml["write_dir"]
             base = os.path.basename(fpath).split(".")[0]
@@ -434,7 +466,7 @@ class Find_FWHM:
             min_samples = min(min_samples, n_pts)
             if n_pts < 2:
                 logger.warning("Too few points for linearity RANSAC (need at least 2).")
-                return catalog, fit_params, saturation_range
+                return df.reset_index(drop=True), fit_params, saturation_range
 
             # Increased max_trials for better sampling
             max_trials = int(min(500, max(100, 15 * n_pts)))
@@ -912,12 +944,17 @@ class Find_FWHM:
             # --- Direct run with provided fwhm and sigma ---
             if (fwhm is not None) and (sigma is not None):
                 thr = sigma * std
+                _det_params = self._adaptive_detection_params(fwhm)
                 finder = IRAFStarFinder(
                     fwhm=fwhm,
                     threshold=thr,
                     minsep_fwhm=1.0,
                     exclude_border=True,
                     peakmax=0.98 * saturate,
+                    sharplo=_det_params["sharplo"],
+                    sharphi=_det_params["sharphi"],
+                    roundlo=_det_params["roundlo"],
+                    roundhi=_det_params["roundhi"],
                 )
                 tbl = finder(image - med, mask=mask)
                 if tbl is None or len(tbl) == 0:
@@ -936,10 +973,12 @@ class Find_FWHM:
                 df["s2n"] = df["peak"] / std_safe
                 fwhm_list = []
                 half = int(max(default_scale, np.ceil(scale_multiplier * fwhm / 2)))
-                for _, r in df.iterrows():
+                _xs = df["x_pix"].values.astype(float)
+                _ys = df["y_pix"].values.astype(float)
+                for i in range(len(df)):
                     cut = Cutout2D(
                         image,
-                        (float(r.x_pix), float(r.y_pix)),
+                        (_xs[i], _ys[i]),
                         2 * half,
                         mode="partial",
                         fill_value=np.nan,
@@ -974,14 +1013,15 @@ class Find_FWHM:
             # photutils >=3.0 supports spatially varying 2D threshold arrays.
             # Use the full 2D threshold image for better detection near chip gaps/gradients.
             fwhm_fp = max(2.0, float(fwhm_initial))
+            _det_params = self._adaptive_detection_params(fwhm_fp)
             finder = IRAFStarFinder(
                 fwhm=fwhm_fp,
                 threshold=thr_img,
                 minsep_fwhm=1.0,
-                roundlo=0.0,
-                roundhi=1.0,
-                sharplo=0.2,
-                sharphi=2.0,
+                roundlo=_det_params["roundlo"],
+                roundhi=_det_params["roundhi"],
+                sharplo=_det_params["sharplo"],
+                sharphi=_det_params["sharphi"],
                 exclude_border=True,
                 peakmax=0.98 * saturate,
             )
@@ -1057,17 +1097,19 @@ class Find_FWHM:
             fwhm_meas, s2n_list = [], []
             _xcol = "x_centroid" if "x_centroid" in df.columns else "xcentroid"
             _ycol = "y_centroid" if "y_centroid" in df.columns else "ycentroid"
-            for _, r in df.iterrows():
-                x0, y0 = float(r[_xcol]), float(r[_ycol])
+            _xs = df[_xcol].values.astype(float)
+            _ys = df[_ycol].values.astype(float)
+            _peaks = df["peak"].values.astype(float)
+            for i in range(len(df)):
                 cut = Cutout2D(
-                    image, (x0, y0), 2 * half, mode="partial", fill_value=np.nan
+                    image, (_xs[i], _ys[i]), 2 * half, mode="partial", fill_value=np.nan
                 ).data
                 fit = self._fit_gaussian_2d(cut)
                 if fit is not None and all(np.isfinite(v) for v in fit):
                     fwhm_meas.append(float(np.mean(fit)))
                 else:
                     fwhm_meas.append(np.nan)
-                s2n_list.append(float(r["peak"]) / max(std, 1e-12))
+                s2n_list.append(_peaks[i] / max(std, 1e-12))
             df["fwhm"] = np.asarray(fwhm_meas, dtype=float)
             df["s2n"] = np.asarray(s2n_list, dtype=float)
             df["x_pix"] = df[_xcol].astype(float)
@@ -1089,12 +1131,31 @@ class Find_FWHM:
 
             # --- Global FWHM and final cutout scale ---
             fwhm_global = float(np.nanmedian(df["fwhm"]))
+            # FWHM uncertainty: standard error of the median.
+            # SE_median = 1.858 * MAD / sqrt(N) (asymptotic, consistent with
+            # the zeropoint and aperture-correction error convention).
+            # This captures star-to-star scatter (PSF variation, fitting noise)
+            # and decreases with more sources.  For N < 2, use the MAD itself.
+            _fwhm_finite = df["fwhm"].values[np.isfinite(df["fwhm"].values)]
+            _n_fwhm = len(_fwhm_finite)
+            if _n_fwhm >= 2:
+                _fwhm_mad = float(np.nanmedian(np.abs(_fwhm_finite - fwhm_global)))
+                fwhm_err = float(1.858 * _fwhm_mad / np.sqrt(_n_fwhm))
+            else:
+                fwhm_err = np.nan
+            # Store on the instance for callers that check self.fwhm_err
+            self.fwhm_err = fwhm_err
+
             scale_out = float(
                 max(default_scale, np.ceil(scale_multiplier * fwhm_global))
             )
 
             self.logger.info("Accepted sources: %s", len(df))
-            self.logger.info("Image FWHM ~ %.3f px", fwhm_global)
+            self.logger.info(
+                "Image FWHM ~ %.3f +/- %.3f px (N=%d, SE of median)",
+                fwhm_global, fwhm_err if np.isfinite(fwhm_err) else float("nan"),
+                _n_fwhm,
+            )
             self.logger.info("Cutout scale = %.1f px", scale_out)
             self.logger.info("Elapsed: %.3f s", time.time() - t0)
             return fwhm_global, df.reset_index(drop=True), scale_out

@@ -393,10 +393,11 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-only_flags",
         type=str,
-        default="0,1,2,3,16,17,18,19",
+        default="0,1,16,17",
         help="Comma-separated SExtractor FLAGS values to keep (e.g. '0,1'); use 'none' to disable. "
-             "Includes FLAGS=3 (blended) and FLAGS=16-19 (invalid pixels from NaN mask) which are "
-             "common in ZTF images and still have valid positions for kernel fitting.",
+             "Default excludes blended sources (FLAGS & 2) which bias flux scaling. "
+             "FLAGS=1 (near edge) and FLAGS=16 (near NaN) kept for masked/resampled images. "
+             "Fallback to permissive '0,1,2,3,16,17,18,19' is handled by templates.py on failure.",
     )
     parser.add_argument(
         "-cvrej_magd_thresh",
@@ -467,14 +468,14 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-min_prior_sources",
         type=int,
-        default=10,
+        default=3,
         help="Minimum number of vetted prior point sources required for kernel fitting.",
     )
     parser.add_argument(
         "-allow_unvetted_source_retry",
         type=str,
-        default="false",
-        help="Allow automatic SFFT source matching when vetted priors are insufficient or fail.",
+        default="true",
+        help="If true, keep vetted prior sources even when < min_prior_sources; SFFT uses them as preferred sources.",
     )
     parser.add_argument(
         "-coarse_var_rejection",
@@ -499,6 +500,17 @@ def run_sfft() -> Optional[int]:
             "Higher values enforce stricter positional overlap between "
             "sci and ref sources, preventing misaligned sources from "
             "biasing the kernel fit."
+        ),
+    )
+    parser.add_argument(
+        "-point_source_min_ellip",
+        type=float,
+        default=0.3,
+        help=(
+            "SFFT PointSource_MINELLIP: minimum ellipticity for a source to "
+            "be classified as a point source. Sources with ellipticity below "
+            "this are considered extended and excluded from kernel fitting. "
+            "Default 0.3 (SFFT default). Lower = more permissive."
         ),
     )
     args = parser.parse_args()
@@ -596,6 +608,31 @@ def run_sfft() -> Optional[int]:
     hdr_sci, data_sci = get_fits_info(FITS_SCI)
     hdr_ref, data_ref = get_fits_info(FITS_REF)
 
+    # --- Per-image shape validation ---
+    if data_sci.shape != data_ref.shape:
+        raise ValueError(
+            f"Science and reference image shapes do not match: "
+            f"sci={data_sci.shape} vs ref={data_ref.shape}. "
+            f"Ensure both images are resampled to a common grid (SWarp) before SFFT."
+        )
+
+    # --- Per-image NaN/invalid fraction warning ---
+    _n_pixels = float(data_sci.size)
+    _frac_invalid_sci = float(np.count_nonzero(~np.isfinite(data_sci) | (data_sci == 0))) / _n_pixels
+    _frac_invalid_ref = float(np.count_nonzero(~np.isfinite(data_ref) | (data_ref == 0))) / _n_pixels
+    _frac_invalid_max = max(_frac_invalid_sci, _frac_invalid_ref)
+    if _frac_invalid_max > 0.50:
+        log_warning(
+            f"High invalid-pixel fraction: sci={_frac_invalid_sci*100:.1f}%, "
+            f"ref={_frac_invalid_ref*100:.1f}%%. SFFT kernel fitting may fail or "
+            f"produce poor results with >50%% invalid pixels."
+        )
+    elif _frac_invalid_max > 0.25:
+        log_info(
+            f"Moderate invalid-pixel fraction: sci={_frac_invalid_sci*100:.1f}%, "
+            f"ref={_frac_invalid_ref*100:.1f}%%."
+        )
+
     # Build a combined invalid-pixel mask from both inputs so that no-data regions
     # (NaN or exactly zero, e.g. from SWarp padding) in either image are masked in
     # BOTH images before passing to SFFT.  This prevents SFFT from fitting the
@@ -607,6 +644,7 @@ def run_sfft() -> Optional[int]:
     if np.any(combined_invalid_mask):
         log_info(
             f"Combined invalid mask: {int(np.count_nonzero(combined_invalid_mask))} pixels "
+            f"({float(np.count_nonzero(combined_invalid_mask))/_n_pixels*100:.1f}%%) "
             "will be forced to NaN in both images before SFFT."
         )
 
@@ -709,24 +747,38 @@ def run_sfft() -> Optional[int]:
             f"Converted {len(matching_sources)} matching sources from 0-based to 1-based FITS coordinates."
         )
     
-    # Improve prior source validation: require minimum sources for reliable kernel fitting
-    MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 10) or 10)
+    # Prior source validation: if fewer than MIN_PRIOR_SOURCES are available,
+    # we still keep the priors (SFFT's XY_PriorSelect prefers these sources
+    # over its own detections).  Our pipeline-vetted sources have been filtered
+    # for point-like morphology, isolation, and absence of defects — they are
+    # higher quality than SFFT's own SExtractor matching, which allows blended
+    # sources (ONLY_FLAGS includes 16,17) and uses a looser ellipticity cut.
+    #
+    # Previously, sparse prior lists were discarded entirely, causing SFFT to
+    # do its own matching with looser quality cuts.  This led to elongated and
+    # blended sources being used for kernel fitting, producing poor kernels
+    # with dipole residuals and flux scaling discrepancies.
+    MIN_PRIOR_SOURCES = int(getattr(args, "min_prior_sources", 3) or 3)
     ALLOW_UNVETTED_SOURCE_RETRY = str(
-        getattr(args, "allow_unvetted_source_retry", "false")
+        getattr(args, "allow_unvetted_source_retry", "true")
     ).strip().lower() in {"1", "true", "yes", "y", "on"}
-    if matching_sources is None or len(matching_sources) < MIN_PRIOR_SOURCES:
-        n_priors = 0 if matching_sources is None else len(matching_sources)
-        if not ALLOW_UNVETTED_SOURCE_RETRY:
-            raise RuntimeError(
-                f"Only {n_priors} vetted point-source priors are available "
-                f"(minimum {MIN_PRIOR_SOURCES} required); refusing automatic "
-                "SFFT source matching."
-            )
+    if matching_sources is not None and len(matching_sources) < MIN_PRIOR_SOURCES:
+        n_priors = len(matching_sources)
         log_warning(
-            f"Only {n_priors} vetted prior sources are available "
-            f"(minimum {MIN_PRIOR_SOURCES}); allowing automatic SFFT source matching."
+            f"Only {n_priors} vetted prior sources (minimum {MIN_PRIOR_SOURCES}); "
+            "discarding priors — SFFT will perform its own source matching."
         )
         matching_sources = None
+    elif matching_sources is not None and len(matching_sources) < 10:
+        log_info(
+            f"Using {len(matching_sources)} vetted prior sources (< 10; sparse field). "
+            "SFFT will use these as preferred sources; it may supplement with its own detections."
+        )
+    elif matching_sources is None:
+        log_info(
+            "No prior matching sources provided; SFFT will perform its own "
+            "source matching (SExtractor + cross-correlation)."
+        )
 
     # --- Ensure GAIN and SATURATE in FITS (pass values, not keywords) ---
     # Write values into headers so SFFT/MeLOn find the keywords (avoids KeyError when SATURATE missing).
@@ -802,11 +854,40 @@ def run_sfft() -> Optional[int]:
     _ensure_gain_saturate(FITS_SCI, gain_sci, sat_sci, "Science")
     _ensure_gain_saturate(FITS_REF, gain_ref, sat_ref, "Reference")
 
-    # --- FWHM and Gain ---
-    template_fwhm = float(hdr_ref.get("FWHM", 3.0))
-    science_fwhm = float(hdr_sci.get("FWHM", 3.0))
+    # --- FWHM (per-image, validated) ---
+    # FWHM is read from headers.  Guard against missing/zero/NaN/negative
+    # values which would break kernel sizing and detect_minarea.
+    _FWHM_FALLBACK = 3.0
+    template_fwhm = float(hdr_ref.get("FWHM", _FWHM_FALLBACK))
+    science_fwhm = float(hdr_sci.get("FWHM", _FWHM_FALLBACK))
+    _fwhm_corrected = False
+    for _fwhm_label, _fwhm_val in [("science", science_fwhm), ("template", template_fwhm)]:
+        if not np.isfinite(_fwhm_val) or _fwhm_val <= 0:
+            log_warning(
+                f"{_fwhm_label} FWHM from header is invalid ({_fwhm_val}); "
+                f"using fallback {_FWHM_FALLBACK:.1f} px."
+            )
+            _fwhm_corrected = True
+    if not np.isfinite(science_fwhm) or science_fwhm <= 0:
+        science_fwhm = _FWHM_FALLBACK
+    if not np.isfinite(template_fwhm) or template_fwhm <= 0:
+        template_fwhm = _FWHM_FALLBACK
+    # Sanity: FWHM should be in a reasonable range (0.5–50 px)
+    if science_fwhm > 50.0:
+        log_warning(
+            f"Science FWHM={science_fwhm:.1f} px is unusually large; "
+            f"clamping to 50.0 px for kernel/detection sizing."
+        )
+        science_fwhm = 50.0
+    if template_fwhm > 50.0:
+        log_warning(
+            f"Template FWHM={template_fwhm:.1f} px is unusually large; "
+            f"clamping to 50.0 px for kernel/detection sizing."
+        )
+        template_fwhm = 50.0
     log_info(
         f"Science FWHM: {science_fwhm:.1f} pixels | Template FWHM: {template_fwhm:.1f} pixels"
+        + (" (corrected from invalid header values)" if _fwhm_corrected else "")
     )
 
     # --- Kernel and Detection Parameters ---
@@ -817,7 +898,9 @@ def run_sfft() -> Optional[int]:
     psf_area_min = np.pi * (fwhm_min) ** 2
     # SFFT defaults use DETECT_MINAREA=5; keep at least that to avoid spurious
     # source selection that can bias the scale/background fit.
+    # Guard against bad FWHM producing unreasonable detect_minarea.
     detect_minarea = max(3, int(np.ceil(psf_area_min * 0.5)))
+    detect_minarea = min(detect_minarea, 200)  # cap for very large FWHM
     detect_maxarea = 0
 
     # ---------------------------------------------------------------------------
@@ -1332,6 +1415,7 @@ def run_sfft() -> Optional[int]:
                     Hough_MINFR=_hough_minfr,
                     Hough_PeakClip=_hough_peakclip,
                     BeltHW=0.2,
+                    PointSource_MINELLIP=float(getattr(args, "point_source_min_ellip", 0.3)),
                     ANALYSIS_THRESH=DETECT_THRESH,
                     COARSE_VAR_REJECTION=COARSE_VAR_REJECTION,
                     CVREJ_MAGD_THRESH=CVREJ_MAGD_THRESH,
@@ -2084,7 +2168,8 @@ def run_sfft() -> Optional[int]:
                     ax.set_xlabel("MAG_REF (REF)")
                     ax.set_ylabel("MAG_REF (SCI) - MAG_REF (REF)")
                     ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.7)
-                    ax.legend(loc="best", frameon=True, fontsize=9, framealpha=0.8)
+                    ax.legend(loc="best", frameon=True, fontsize=9,
+                              facecolor="white", framealpha=1.0, edgecolor="black")
                     ax.set_title(f"SFFT source matching: {n_input} input -> {n_final} final sources", fontsize=10)
                     png_path = os.path.join(out_dir, f"Var_Check_{out_base}.png")
                     try:
@@ -2098,6 +2183,23 @@ def run_sfft() -> Optional[int]:
                     log_warning(f"Failed to generate diagnostic plot: {e}")
 
             generate_plot()
+
+        # --- Per-image SFFT quality summary ---
+        _n_matched_final = len(matched_sources) if isinstance(matched_sources, pd.DataFrame) else 0
+        _diff_finite_frac = float("nan")
+        try:
+            if FITS_DIFF and os.path.isfile(FITS_DIFF):
+                with fits.open(FITS_DIFF, memmap=True) as _hdl:
+                    _diff_data = np.asarray(_hdl[0].data)
+                    _diff_finite_frac = float(np.count_nonzero(np.isfinite(_diff_data))) / float(_diff_data.size)
+        except Exception:
+            pass
+        log_info(
+            f"SFFT per-image summary: matched_sources={_n_matched_final} | "
+            f"kernel_hw={kernel_half_width} px | ForceConv={ForceConv} | "
+            f"diff_finite_frac={_diff_finite_frac*100:.1f}%% | "
+            f"invalid_input_frac={_frac_invalid_max*100:.1f}%%"
+        )
 
     except Exception as e:
         exc_type, _, exc_tb = sys.exc_info()

@@ -42,7 +42,7 @@ from multiprocessing import Pool, cpu_count
 from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
 import scipy.optimize
-from scipy.stats import mstats
+from scipy.stats import mstats, median_abs_deviation
 
 from astropy.stats import (
     biweight_midvariance,
@@ -1091,29 +1091,380 @@ class Aperture:
 
         # ---- Per-source diagnostic plots -----------------------------------
         if plot:
-            for i in range(len(sources)):
-                if sources.at[i, "fail_reason"]:
-                    continue
+            # When saveTarget=True and there are multiple target rows, produce
+            # a single multi-target plot (1 row x N columns) instead of
+            # individual per-source plots that would overwrite each other.
+            _multi_target = (
+                saveTarget
+                and len(sources) > 1
+                and "x_pix" in sources.columns
+                and "y_pix" in sources.columns
+            )
+            if _multi_target:
                 try:
-                    self._generate_plot(
-                        image=image_e,
-                        cutout_center=(
+                    _centers = []
+                    _names = []
+                    for i in range(len(sources)):
+                        if sources.at[i, "fail_reason"]:
+                            continue
+                        _centers.append((
                             float(sources.at[i, "x_pix"]),
                             float(sources.at[i, "y_pix"]),
-                        ),
-                        ap_size=ap_size,
-                        annulusIN=annulusIN,
-                        annulusOUT=annulusOUT,
-                        fwhm=fwhm,
-                        saveTarget=saveTarget,
-                        index=i,
-                        error=error,
-                        mask=mask,
-                    )
+                        ))
+                        # Use _additional_target_name if available, else generic
+                        _nm = sources.at[i, "_additional_target_name"] if "_additional_target_name" in sources.columns else None
+                        if not _nm or str(_nm) == "nan":
+                            if i == 0:
+                                _nm = self.input_yaml.get("target_name", "Main target")
+                                # Use "Main target" for generic placeholder names
+                                if _nm in ("Transient", "Center of Field", "Primary", None, "nan"):
+                                    _nm = "Main target"
+                            else:
+                                _nm = f"Sub target {i}"
+                        _names.append(str(_nm))
+                    if _centers:
+                        self._generate_multi_target_plot(
+                            image=image_e,
+                            target_centers=_centers,
+                            target_names=_names,
+                            ap_size=ap_size,
+                            annulusIN=annulusIN,
+                            annulusOUT=annulusOUT,
+                            fwhm=fwhm,
+                            error=error,
+                            mask=mask,
+                        )
                 except Exception as exc:
-                    logger.exception("Plot failed for source %s: %s", i, exc)
+                    logger.exception("Multi-target aperture plot failed: %s", exc)
+                    # Fall back to per-source plots
+                    _multi_target = False
+
+            if not _multi_target:
+                for i in range(len(sources)):
+                    if sources.at[i, "fail_reason"]:
+                        continue
+                    try:
+                        self._generate_plot(
+                            image=image_e,
+                            cutout_center=(
+                                float(sources.at[i, "x_pix"]),
+                                float(sources.at[i, "y_pix"]),
+                            ),
+                            ap_size=ap_size,
+                            annulusIN=annulusIN,
+                            annulusOUT=annulusOUT,
+                            fwhm=fwhm,
+                            saveTarget=saveTarget,
+                            index=i,
+                            error=error,
+                            mask=mask,
+                        )
+                    except Exception as exc:
+                        logger.exception("Plot failed for source %s: %s", i, exc)
 
         return sources
+
+    # -----------------------------------------------------------------------
+    # Multi-target diagnostic plot (1 row x N columns, one per target)
+    # -----------------------------------------------------------------------
+
+    def _generate_multi_target_plot(
+        self,
+        image,
+        target_centers,
+        target_names,
+        ap_size,
+        annulusIN,
+        annulusOUT,
+        fwhm,
+        error=None,
+        mask=None,
+    ):
+        """
+        Multi-target diagnostic: 1 row x N columns, one column per target.
+
+        Each column has the same 3-panel layout (main image + right profile +
+        bottom profile) zoomed around that target.  All other target positions
+        are marked with crosshairs on every panel so contamination is visible.
+
+        Parameters
+        ----------
+        image            : 2-D array (electrons)
+        target_centers   : list of (x, y) tuples in full-image coordinates
+        target_names     : list of str labels (primary first)
+        ap_size, annulusIN, annulusOUT, fwhm : aperture/annulus parameters
+        error, mask      : optional 2-D arrays matching *image*
+        """
+        logger = logging.getLogger(__name__)
+        plt.ioff()
+        dir_path = os.path.dirname(os.path.realpath(__file__))
+        style = os.path.join(dir_path, "autophot.mplstyle")
+        if os.path.exists(style):
+            plt.style.use(style)
+
+        fpath = self.input_yaml["fpath"]
+        write_dir = os.path.dirname(fpath)
+        base = os.path.splitext(os.path.basename(fpath))[0]
+
+        n_targets = len(target_centers)
+        # Each column is ~340 pt wide
+        fig = plt.figure(figsize=set_size(340 * n_targets, 1))
+        gs = GridSpec(1, n_targets, wspace=0.25)
+
+        # Pre-compute zoom bounds for each target
+        zoom_bounds = []
+        for cx, cy in target_centers:
+            zoom_size = 1.25 * (annulusOUT + fwhm)
+            x_min = max(0, int(np.floor(cx - zoom_size)))
+            x_max = min(image.shape[1], int(np.ceil(cx + zoom_size)))
+            y_min = max(0, int(np.floor(cy - zoom_size)))
+            y_max = min(image.shape[0], int(np.ceil(cy + zoom_size)))
+            zoom_bounds.append((x_min, x_max, y_min, y_max))
+
+        # Use a shared normalisation computed from ALL target zoom regions
+        # so that panels remain comparable even when targets are far apart
+        # and in different brightness regimes.
+        _all_finite = []
+        for _xb in zoom_bounds:
+            _x0, _x1, _y0, _y1 = _xb
+            _cut = image[_y0:_y1, _x0:_x1]
+            _all_finite.append(_cut[np.isfinite(_cut)])
+        _all_finite = np.concatenate(_all_finite) if _all_finite else np.array([])
+        if _all_finite.size > 0:
+            _med = float(np.nanmedian(_all_finite))
+            _std = float(np.nanstd(_all_finite))
+            if _std <= 0 or not np.isfinite(_std):
+                _std = 1.0
+            vmin_shared = _med - 3 * _std
+            vmax_shared = _med + 3 * _std
+        else:
+            vmin_shared, vmax_shared = 0.0, 1.0
+
+        plot_zero_as_nan = bool(
+            (self.input_yaml.get("plotting") or {}).get("plot_zero_as_nan", True)
+        )
+
+        # Target marker colors: primary=white, others=muted teal (was neon cyan)
+        _target_colors = ["white"] + ["#17A2B8"] * (n_targets - 1)
+
+        for col_idx, (cx, cy) in enumerate(target_centers):
+            x_min, x_max, y_min, y_max = zoom_bounds[col_idx]
+            zoom_image = image[y_min:y_max, x_min:x_max]
+            zoom_error = (
+                error[y_min:y_max, x_min:x_max]
+                if error is not None
+                else np.zeros_like(zoom_image)
+            )
+            zoom_mask = (
+                mask[y_min:y_max, x_min:x_max]
+                if mask is not None
+                else None
+            )
+
+            ax_main = fig.add_subplot(gs[0, col_idx])
+            divider = make_axes_locatable(ax_main)
+            ax_right = divider.append_axes("right", size="20%", pad=0.15, sharey=ax_main)
+            ax_bottom = divider.append_axes("bottom", size="20%", pad=0.15, sharex=ax_main)
+
+            ax_main.tick_params(axis="x", labelbottom=False)
+            ax_right.tick_params(axis="y", labelleft=False)
+            ax_right.yaxis.tick_right()
+            ax_right.xaxis.tick_top()
+            ax_main.xaxis.tick_top()
+            ax_bottom.tick_params(axis="both", labelsize=8)
+            ax_right.tick_params(axis="both", labelsize=8)
+            ax_bottom.tick_params(axis="x", labelrotation=30)
+            ax_right.tick_params(axis="x", labelrotation=30)
+
+            # Title with target name
+            _title = target_names[col_idx] if col_idx < len(target_names) else f"Target {col_idx}"
+            ax_main.set_title(_title, fontsize=9, pad=4)
+
+            # Guard: skip profiles for tiny regions
+            if zoom_image.shape[0] < 5 or zoom_image.shape[1] < 5:
+                logger.warning(
+                    f"Zoom region too small for profile plotting: {zoom_image.shape}"
+                )
+                norm = ImageNormalize(zoom_image, interval=ZScaleInterval())
+                cmap = plt.get_cmap("viridis").copy()
+                cmap.set_bad(color="white")
+                zmask = ~np.isfinite(zoom_image)
+                zoom_disp = np.ma.array(zoom_image, mask=zmask)
+                ax_main.imshow(zoom_disp, origin="lower", norm=norm, cmap=cmap, aspect="auto")
+                ax_main.set_xlim(0, zoom_image.shape[1])
+                ax_main.set_ylim(0, zoom_image.shape[0])
+                cx_local = cx - x_min
+                cy_local = cy - y_min
+                for radius, color, ls in [
+                    (ap_size, "#00AA00", "-"),
+                    (annulusIN, "#FF0000", "--"),
+                    (annulusOUT, "#FF0000", "--"),
+                ]:
+                    ax_main.add_patch(
+                        Circle((cx_local, cy_local), radius, ec=color, fc="none", lw=0.5, ls=ls)
+                    )
+                continue
+
+            # Use shared normalization for all columns
+            norm = ImageNormalize(vmin=vmin_shared, vmax=vmax_shared)
+            cmap = plt.get_cmap("viridis").copy()
+            cmap.set_bad(color="white")
+            zmask = ~np.isfinite(zoom_image)
+            if plot_zero_as_nan:
+                zmask |= (np.asarray(zoom_image, dtype=float) == 0.0)
+            zoom_disp = np.ma.array(zoom_image, mask=zmask)
+
+            ax_main.imshow(zoom_disp, origin="lower", norm=norm, cmap=cmap, aspect="auto")
+            ax_main.set_xlim(0, zoom_image.shape[1])
+            ax_main.set_ylim(0, zoom_image.shape[0])
+
+            # This target's aperture circles
+            cx_local = cx - x_min
+            cy_local = cy - y_min
+            for radius, color, ls in [
+                (ap_size, "#00AA00", "-"),
+                (annulusIN, "#FF0000", "--"),
+                (annulusOUT, "#FF0000", "--"),
+            ]:
+                ax_main.add_patch(
+                    Circle(
+                        (cx_local, cy_local),
+                        radius,
+                        ec=color,
+                        fc="none",
+                        lw=0.6 if color == "#FF0000" else 0.5,
+                        ls=ls,
+                        zorder=5,
+                    )
+                )
+
+            # Mark ALL other targets with crosshairs on this panel
+            for _ti, (_tcx, _tcy) in enumerate(target_centers):
+                if _ti == col_idx:
+                    continue
+                _tcx_local = _tcx - x_min
+                _tcy_local = _tcy - y_min
+                # Only mark if within the zoom region
+                if 0 <= _tcx_local < zoom_image.shape[1] and 0 <= _tcy_local < zoom_image.shape[0]:
+                    _r = fwhm / 2.0
+                    ax_main.plot(
+                        [_tcx_local - _r, _tcx_local + _r],
+                        [_tcy_local, _tcy_local],
+                        color=_target_colors[_ti], lw=1.0, alpha=0.8, zorder=10,
+                    )
+                    ax_main.plot(
+                        [_tcx_local, _tcx_local],
+                        [_tcy_local - _r, _tcy_local + _r],
+                        color=_target_colors[_ti], lw=1.0, alpha=0.8, zorder=10,
+                    )
+                    _tname = target_names[_ti] if _ti < len(target_names) else f"T{_ti}"
+                    ax_main.annotate(
+                        _tname, (_tcx_local, _tcy_local + _r + 2),
+                        color=_target_colors[_ti], fontsize=6, ha="center", zorder=11,
+                    )
+
+            # Crosshairs on this target
+            kw = dict(ls=":", color="white", lw=0.5, alpha=0.7)
+            ax_main.axvline(cx_local, **kw)
+            ax_main.axhline(cy_local, **kw)
+            ax_bottom.axvline(cx_local, **kw)
+            ax_right.axhline(cy_local, **kw)
+
+            # Profiles
+            finite = np.isfinite(zoom_image)
+            if zoom_mask is not None:
+                finite &= ~np.asarray(zoom_mask, dtype=bool)
+            hx = np.nanmean(zoom_image, axis=0)
+            hy = np.nanmean(zoom_image, axis=1)
+            err2 = np.asarray(zoom_error, dtype=float) ** 2
+            err2 = np.where(finite, err2, 0.0)
+            n_col = np.sum(finite, axis=0).astype(float)
+            n_row = np.sum(finite, axis=1).astype(float)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                hx_err = np.sqrt(np.sum(err2, axis=0)) / np.where(n_col > 0, n_col, np.nan)
+                hy_err = np.sqrt(np.sum(err2, axis=1)) / np.where(n_row > 0, n_row, np.nan)
+
+            x_range = np.arange(0, zoom_image.shape[1])
+            y_range = np.arange(0, zoom_image.shape[0])
+
+            kw_step = dict(color="dodgerblue", where="mid", lw=0.5, marker=None, markersize=0)
+            ax_bottom.step(x_range, hx, **kw_step)
+            ax_bottom.fill_between(
+                x_range, hx - hx_err, hx + hx_err,
+                color="dodgerblue", alpha=0.5, step="mid",
+            )
+            ax_bottom.plot(x_range, hx - hx_err, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
+            ax_bottom.plot(x_range, hx + hx_err, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
+
+            n_y = len(y_range)
+            if n_y > 0:
+                y_edges_r = np.empty(2 * n_y)
+                for i in range(n_y):
+                    y_edges_r[2 * i] = i - 0.5 if i > 0 else 0
+                    y_edges_r[2 * i + 1] = i + 0.5 if i < n_y - 1 else (n_y - 1)
+                ax_right.plot(np.repeat(hy, 2), y_edges_r, color="dodgerblue", lw=0.5)
+                ax_right.fill_betweenx(
+                    y_range, hy - hy_err, hy + hy_err,
+                    color="dodgerblue", alpha=0.5, step="mid"
+                )
+                ax_right.plot(np.repeat(hy - hy_err, 2), y_edges_r, color="dodgerblue", lw=0.3, alpha=0.7)
+                ax_right.plot(np.repeat(hy + hy_err, 2), y_edges_r, color="dodgerblue", lw=0.3, alpha=0.7)
+
+            # Background level
+            try:
+                ann = CircularAnnulus(
+                    (cx, cy), r_in=float(annulusIN), r_out=float(annulusOUT)
+                )
+                ann_mask = ann.to_mask(method="center")
+                bkg_pix = ann_mask.get_values(image)
+                bkg_pix = bkg_pix[np.isfinite(bkg_pix)]
+                if bkg_pix.size > 0:
+                    bkg_level = float(np.median(bkg_pix))
+                    kw_bkg = dict(color="#FFA500", lw=0.9, ls="--", alpha=0.95)
+                    ax_bottom.axhline(bkg_level, **kw_bkg, marker=None)
+                    ax_right.axvline(bkg_level, **kw_bkg, marker=None)
+            except Exception:
+                pass
+
+            ax_bottom.set_xlabel("X position (pixels)")
+            ax_bottom.set_ylabel("Flux (e-)")
+            ax_right.set_xlabel("Flux (e-)")
+            ax_right.yaxis.set_label_position("right")
+            ax_bottom.yaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
+            ax_right.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=False))
+
+            # Add legend to the first panel only
+            if col_idx == 0:
+                from matplotlib.lines import Line2D as _Line2D
+                from matplotlib.patches import Patch as _Patch
+                _legend_handles = [
+                    _Patch(facecolor="none", edgecolor="#00AA00", lw=0.5, label="Aperture"),
+                    _Patch(facecolor="none", edgecolor="#FF0000", lw=0.5, ls="--", label="Annulus"),
+                ]
+                # Add target name entries
+                for _ti, _tname in enumerate(target_names):
+                    _mc = _target_colors[_ti] if _ti < len(_target_colors) else "#17A2B8"
+                    _legend_handles.append(
+                        _Line2D([0], [0], marker="x", color=_mc,
+                                markersize=6, markeredgewidth=1.5,
+                                linestyle="None", label=_tname)
+                    )
+                _n_leg = len(_legend_handles)
+                _leg_ncol = 3 if _n_leg >= 8 else (2 if _n_leg >= 5 else 1)
+                ax_main.legend(
+                    handles=_legend_handles, loc="upper left",
+                    frameon=True, facecolor="white", framealpha=1.0,
+                    edgecolor="black", fontsize=7, ncol=_leg_ncol,
+                )
+
+        save_name = f"Aperture_Target_{base}.png"
+        save_name = os.path.join(write_dir, save_name)
+        fig.savefig(save_name, bbox_inches="tight", dpi=150, facecolor="white")
+        plt.close(fig)
+        logger.info(
+            "Saved multi-target aperture plot: %s (%d targets)",
+            os.path.basename(save_name), n_targets,
+        )
 
     # -----------------------------------------------------------------------
     # Diagnostic plot
@@ -2019,7 +2370,8 @@ class Aperture:
             # Legend below the plot, no title overlap
             ax1.legend(
                 loc="lower center", bbox_to_anchor=(0.5, 1.0),
-                frameon=False, fontsize=8, ncol=3,
+                frameon=True, facecolor="white", framealpha=1.0,
+                edgecolor="black", fontsize=8, ncol=3,
             )
 
             per_source = (
@@ -2074,7 +2426,8 @@ class Aperture:
                         zorder=0,
                     )
                 ax2.axvline(optimum_radius, color="black", ls="--", label="Final")
-                ax2.legend(loc="upper right", frameon=False, fontsize=8)
+                ax2.legend(loc="upper right", frameon=True, facecolor="white",
+                           framealpha=1.0, edgecolor="black", fontsize=8)
 
             ax2.set_xlabel("Aperture Radius [FWHM]")
             ax2.set_ylabel("Count")
@@ -2196,8 +2549,18 @@ class Aperture:
         )
         corrections = corrections[~clipped.mask]
         correction = float(np.nanmedian(corrections))
-        correction_err = float(np.nanstd(corrections))
-        logger.info("Aperture correction: %.3f +/- %.3f", correction, correction_err)
+        # Use the standard error of the median (SE = 1.858 * MAD / sqrt(N)),
+        # not the population std.  The correction is a median estimate, so its
+        # uncertainty scales as 1/sqrt(N), not as the scatter itself.
+        # Using std overestimates the error when many sources are available
+        # (e.g. 25 sources: std ~ 0.05 mag, SE ~ 0.01 mag).
+        _n_corr = len(corrections)
+        if _n_corr >= 2:
+            _mad_corr = float(median_abs_deviation(corrections, nan_policy="omit"))
+            correction_err = float(1.858 * _mad_corr / np.sqrt(_n_corr))
+        else:
+            correction_err = float(np.nanstd(corrections))
+        logger.info("Aperture correction: %.3f +/- %.3f (N=%d, SE of median)", correction, correction_err, _n_corr)
 
         if plot:
             plt.ioff()
@@ -2212,7 +2575,9 @@ class Aperture:
             )
             ax.set_xlabel("Aperture Correction [mag]")
             ax.set_ylabel("Frequency")
-            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, fontsize=8)
+            ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
+                      frameon=True, facecolor="white", framealpha=1.0,
+                      edgecolor="black", fontsize=8)
             fig.tight_layout()
             png_path = os.path.join(
                 write_dir, f"Aperture_Correction_{base_name}.png"

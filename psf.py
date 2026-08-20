@@ -2136,6 +2136,99 @@ class PSF:
                         )
                         break  # one reversal is enough
 
+            # Test 4: Secondary-peak detection in core region
+            # The annulus tests above only check beyond 2*FWHM.  A secondary
+            # source within 2*FWHM of the center (in the core region) would
+            # not be caught.  Detect by finding the brightest pixel in the
+            # core that is far from the cutout center — a real PSF has its
+            # peak at the center; a secondary peak off-center indicates a
+            # blended neighbour.
+            core_mask = _rr < ann_inner
+            core_pix = data_clean[core_mask & finite]
+            if np.sum(np.isfinite(core_pix)) > 10:
+                core_data = np.where(finite & core_mask, data, np.nan)
+                # Find the brightest pixel in the core
+                _core_finite = np.isfinite(core_data)
+                if np.any(_core_finite):
+                    _peak_idx = np.unravel_index(
+                        np.nanargmax(np.where(_core_finite, core_data, -np.inf)),
+                        core_data.shape,
+                    )
+                    _peak_val = core_data[_peak_idx]
+                    _peak_dist = np.sqrt(
+                        (_peak_idx[1] - cx_c) ** 2 + (_peak_idx[0] - cy_c) ** 2
+                    )
+                    # Secondary peak: bright pixel far from center
+                    # A real PSF peak should be within ~1 FWHM of the center.
+                    # Use the cutout's own peak as the reference flux.
+                    _secondary_peak_dist_thresh = max(
+                        2.0, 1.0 * fwhm_eff
+                    )
+                    _secondary_peak_sigma = float(
+                        phot_cfg.get("psf_contam_secondary_peak_sigma", 5.0)
+                    )
+                    if (
+                        _peak_dist > _secondary_peak_dist_thresh
+                        and (_peak_val - bg_level) > _secondary_peak_sigma * ann_std
+                    ):
+                        reasons.append(
+                            f"secondary_peak={(_peak_val - bg_level) / ann_std:.1f}sigma"
+                            f"@{_peak_dist:.1f}px"
+                        )
+
+            # Test 5: Streak/trail detection
+            # Satellite trails and cosmic-ray trails produce linear features
+            # that may not trigger the azimuthal asymmetry test if they pass
+            # through the center.  Detect by checking for any row or column
+            # in the annulus whose median is significantly elevated — a
+            # horizontal/vertical streak produces a bright row/column.
+            # Also check diagonals for angled trails.
+            streak_sigma = float(
+                phot_cfg.get("psf_contam_streak_sigma", 5.0)
+            )
+            ann_data = np.where(finite & annulus, data, np.nan)
+            # Row medians (horizontal streak)
+            _row_meds = np.nanmedian(ann_data, axis=1)
+            _row_meds = _row_meds[np.isfinite(_row_meds)]
+            if len(_row_meds) > 3:
+                _row_med = np.nanmedian(_row_meds)
+                _row_max_dev = np.nanmax(_row_meds) - _row_med
+                if _row_max_dev > streak_sigma * ann_std:
+                    reasons.append(
+                        f"streak_row={_row_max_dev / ann_std:.1f}sigma"
+                    )
+            # Column medians (vertical streak)
+            _col_meds = np.nanmedian(ann_data, axis=0)
+            _col_meds = _col_meds[np.isfinite(_col_meds)]
+            if len(_col_meds) > 3:
+                _col_med = np.nanmedian(_col_meds)
+                _col_max_dev = np.nanmax(_col_meds) - _col_med
+                if _col_max_dev > streak_sigma * ann_std:
+                    reasons.append(
+                        f"streak_col={_col_max_dev / ann_std:.1f}sigma"
+                    )
+            # Diagonal streaks: check the two main diagonals through the cutout
+            _diag_data = np.where(finite, data, np.nan)
+            _diag1 = np.diagonal(_diag_data)
+            _diag2 = np.diagonal(np.fliplr(_diag_data))
+            # Only check the annulus portion of each diagonal
+            _diag_mask1 = np.diagonal(annulus & finite)
+            _diag_mask2 = np.diagonal((annulus & finite)[:, ::-1])
+            for _diag_label, _diag_vals, _diag_msk in [
+                ("streak_diag1", _diag1, _diag_mask1),
+                ("streak_diag2", _diag2, _diag_mask2),
+            ]:
+                _diag_ann = _diag_vals[_diag_msk]
+                _diag_ann = _diag_ann[np.isfinite(_diag_ann)]
+                if len(_diag_ann) > 3:
+                    _diag_med = np.nanmedian(_diag_ann)
+                    _diag_max = np.nanmax(_diag_ann)
+                    if (_diag_max - _diag_med) > streak_sigma * ann_std:
+                        reasons.append(
+                            f"{_diag_label}={(_diag_max - _diag_med) / ann_std:.1f}sigma"
+                        )
+                        break  # one diagonal streak is enough
+
             if reasons:
                 reject_flags[i] = True
                 reject_reasons.append(
@@ -2746,12 +2839,42 @@ class PSF:
             if xcol_now is not None and ycol_now is not None and iso_r > 0 and len(df) >= 2:
                 xs = df[xcol_now].to_numpy(dtype=float)
                 ys = df[ycol_now].to_numpy(dtype=float)
-                # Pairwise distance check: keep stars that have no neighbour
-                # within iso_r (excluding self-distance).
+                # Check isolation against ALL catalog sources (not just PSF
+                # candidates).  A PSF candidate may have a nearby non-candidate
+                # neighbour (galaxy, blended source, filtered detection) that
+                # would contaminate the cutout.  The raw SExtractor catalog is
+                # stored in input_yaml by main.py for this purpose.
+                _all_cat = (
+                    self.input_yaml.get("photometry", {}).get("last_raw_sex_catalog")
+                )
+                _neighbour_coords = None
+                if _all_cat is not None and len(_all_cat) > 0:
+                    _ax = next((c for c in (xcol_now, "x_pix", "X_IMAGE") if c in _all_cat.columns), None)
+                    _ay = next((c for c in (ycol_now, "y_pix", "Y_IMAGE") if c in _all_cat.columns), None)
+                    if _ax is not None and _ay is not None:
+                        _neighbour_coords = np.column_stack([
+                            pd.to_numeric(_all_cat[_ax], errors="coerce"),
+                            pd.to_numeric(_all_cat[_ay], errors="coerce"),
+                        ])
+                        _neighbour_coords = _neighbour_coords[
+                            np.isfinite(_neighbour_coords[:, 0])
+                            & np.isfinite(_neighbour_coords[:, 1])
+                        ]
                 from scipy.spatial import cKDTree
-                tree = cKDTree(np.column_stack([xs, ys]))
-                pairs = tree.query_ball_point(np.column_stack([xs, ys]), r=iso_r)
-                isolated = np.array([len(p) == 1 for p in pairs])  # only self within iso_r
+                if _neighbour_coords is not None and len(_neighbour_coords) >= 2:
+                    # Check against ALL catalog sources (including non-candidates)
+                    neighbour_tree = cKDTree(_neighbour_coords)
+                    counts = neighbour_tree.query_ball_point(
+                        np.column_stack([xs, ys]), r=iso_r, return_length=True
+                    )
+                    isolated = counts <= 1  # only self within iso_r
+                    _iso_source = "all catalog sources"
+                else:
+                    # Fallback: pairwise check among PSF candidates only
+                    tree = cKDTree(np.column_stack([xs, ys]))
+                    pairs = tree.query_ball_point(np.column_stack([xs, ys]), r=iso_r)
+                    isolated = np.array([len(p) == 1 for p in pairs])
+                    _iso_source = "PSF candidates only"
                 n_keep_iso = int(isolated.sum())
                 min_keep_iso = max(
                     min_psf_candidates,
@@ -2762,16 +2885,17 @@ class PSF:
                     if n_drop_iso > 0:
                         df = df[isolated].copy()
                         log.info(
-                            "PSF isolation cut (r=%.1f px = %.1f FWHM): removed %d blended candidates (%d kept)",
+                            "PSF isolation cut (r=%.1f px = %.1f FWHM, vs %s): removed %d blended candidates (%d kept)",
                             iso_r,
                             float(phot_cfg.get("psf_isolation_radius_fwhm", 3.0)),
+                            _iso_source,
                             n_drop_iso,
                             n_keep_iso,
                         )
                 else:
                     log.info(
-                        "Skipping isolation cut (r=%.1f px): would leave only %d candidates (< %d).",
-                        iso_r, n_keep_iso, min_keep_iso,
+                        "Skipping isolation cut (r=%.1f px, vs %s): would leave only %d candidates (< %d).",
+                        iso_r, _iso_source, n_keep_iso, min_keep_iso,
                     )
 
             fpath = self.input_yaml["fpath"]
@@ -3071,8 +3195,13 @@ class PSF:
                         n_keep_thr,
                         min_keep_thr,
                     )
-            if "SNR" in df.columns:
-                mask_snr = (df["SNR"] >= snr_min_eff) & (df["SNR"] <= snr_max_eff)
+            _snr_cut_col = next(
+                (c for c in ("SNR", "snr", "signal_to_noise", "flux_snr") if c in df.columns),
+                None,
+            )
+            if _snr_cut_col is not None:
+                _snr_vals = pd.to_numeric(df[_snr_cut_col], errors="coerce")
+                mask_snr = (_snr_vals >= snr_min_eff) & (_snr_vals <= snr_max_eff)
                 n_keep_snr = int(np.sum(mask_snr))
                 min_keep_snr = max(
                     min_psf_candidates,
@@ -3894,7 +4023,7 @@ class PSF:
             Circle(
                 ctr,
                 aperture_radius,
-                color="#FF00FF",
+                color=PLOT_COLORS.get('epsf_aperture', '#CC79A7'),
                 ls="-",
                 fill=False,
                 lw=0.5,
@@ -4126,6 +4255,26 @@ class PSF:
                 # Legacy fallback when no explicit config is provided.
                 xy_bounds = 3.0 * fwhm if undersampled else 2.0 * fwhm
 
+            # For target fits, enforce a FWHM-relative minimum so the fit can
+            # always move enough to center on the correct source even when the
+            # initial WCS position is off by more than the arcsec-based bound
+            # (e.g. ZTF at 1"/px with fitting_xy_bounds=1" gives only 1 px,
+            #  which is less than half a FWHM and too restrictive).
+            if is_target_fit:
+                target_xy_min_fwhm = float(
+                    phot_cfg.get("fitting_xy_bounds_target_fwhm", 1.5)
+                )
+                target_xy_min_fwhm = max(0.5, min(target_xy_min_fwhm, 5.0))
+                xy_bounds_fwhm_floor = target_xy_min_fwhm * fwhm
+                if xy_bounds < xy_bounds_fwhm_floor:
+                    log.info(
+                        "Target fit: xy_bounds %.2f px < FWHM-relative floor %.2f px "
+                        "(%.1f*FWHM=%.1f px); using floor for robust re-centering.",
+                        float(xy_bounds), float(xy_bounds_fwhm_floor),
+                        target_xy_min_fwhm, float(fwhm),
+                    )
+                    xy_bounds = xy_bounds_fwhm_floor
+
         def _effective_xy_bounds_for_shape(fit_shape):
             """
             Constrain search bounds to be consistent with the PSF fit cutout.
@@ -4163,11 +4312,13 @@ class PSF:
         if is_target_fit:
             log.info(
                 "Target-fit:\tshape=%s | scale=%.2g FWHM | "
-                "boost=%.2g (target %.2g) | xy_bounds=%.3g px | undersampled=%s | pix_scale=%s\"/px",
+                "boost=%.2g (target %.2g) | xy_bounds=%.3g px (eff=%.3g px) | "
+                "undersampled=%s | pix_scale=%s\"/px",
                 str(fit_shape[0]),
                 fs_scale,
                 fit_sampling_boost, target_shape_boost,
-                float(xy_bounds), str(bool(undersampled)),
+                float(xy_bounds), float(xy_bounds_eff),
+                str(bool(undersampled)),
                 f"{pixel_scale:.3f}" if has_pixel_scale else "unknown",
             )
         else:
@@ -4373,19 +4524,23 @@ class PSF:
         # (bootstrap should have fixed it). This prevents the target from being
         # excluded from the valid mask.  Still require finite x/y positions -
         # a NaN position means the centroid failed and PSF fitting cannot proceed.
-        if is_target_fit and len(sources) == 1 and not valid[0]:
-            if np.isfinite(x_all[0]) and np.isfinite(y_all[0]) and np.isfinite(flux_all[0]):
-                valid[0] = True
-                log.info("Target PSF: forcing target into valid mask (flux now finite)")
-            elif not np.isfinite(x_all[0]) or not np.isfinite(y_all[0]):
-                log.warning(
-                    "Target PSF: target has non-finite x/y position (%.3g, %.3g); "
-                    "cannot force inclusion into PSF fit.",
-                    float(x_all[0]) if len(x_all) > 0 else float("nan"),
-                    float(y_all[0]) if len(y_all) > 0 else float("nan"),
-                )
-            else:
-                log.warning("Target PSF: target flux still NaN after bootstrap; cannot force inclusion")
+        # In multi-target fits, apply this to every target row (primary + additional).
+        if is_target_fit:
+            for _ti in range(len(valid)):
+                if not valid[_ti]:
+                    if np.isfinite(x_all[_ti]) and np.isfinite(y_all[_ti]) and np.isfinite(flux_all[_ti]):
+                        valid[_ti] = True
+                        log.info("Target PSF: forcing source %d into valid mask (flux now finite)", _ti)
+                    elif not np.isfinite(x_all[_ti]) or not np.isfinite(y_all[_ti]):
+                        log.warning(
+                            "Target PSF: source %d has non-finite x/y position (%.3g, %.3g); "
+                            "cannot force inclusion into PSF fit.",
+                            _ti,
+                            float(x_all[_ti]) if len(x_all) > _ti else float("nan"),
+                            float(y_all[_ti]) if len(y_all) > _ti else float("nan"),
+                        )
+                    else:
+                        log.warning("Target PSF: source %d flux still NaN after bootstrap; cannot force inclusion", _ti)
         # Debug: log target flux status after bootstrap
         if is_target_fit and len(sources) == 1:
             log.debug(
@@ -4422,7 +4577,8 @@ class PSF:
         # np.std of the entire image — on difference images with large subtraction
         # residuals, the global std is much larger than the actual per-pixel noise,
         # which would inflate the initial flux guess and bias the PSF fit.
-        if is_target_fit and len(flux_clipped) == 1:
+        # Apply per-source in multi-target fits as well.
+        if is_target_fit:
             if background_rms is not None:
                 _bkg_rms_for_boost = float(np.nanmedian(background_rms)) * _gain_for_bkg
             else:
@@ -4437,15 +4593,15 @@ class PSF:
                 _bkg_rms_for_boost = 5.0 * _gain_for_bkg
             # Minimum 3-sigma above background (in electrons)
             min_reasonable_flux = 3.0 * _bkg_rms_for_boost
-            if flux_clipped[0] < min_reasonable_flux:
-                log.warning(
-                    "Target PSF init: flux=%.3g e- is below 3-sigma threshold (%.3g e-); "
-                    "boosting to %.3g e- to improve convergence.",
-                    flux_clipped[0],
-                    min_reasonable_flux,
-                    min_reasonable_flux,
-                )
-                flux_clipped[0] = min_reasonable_flux
+            for _fi in range(len(flux_clipped)):
+                if flux_clipped[_fi] < min_reasonable_flux:
+                    log.warning(
+                        "Target PSF init: source %d flux=%.3g e- is below 3-sigma threshold (%.3g e-); "
+                        "boosting to %.3g e- to improve convergence.",
+                        _fi, flux_clipped[_fi],
+                        min_reasonable_flux, min_reasonable_flux,
+                    )
+                    flux_clipped[_fi] = min_reasonable_flux
 
         init_params = QTable(
             {
@@ -4648,38 +4804,48 @@ class PSF:
             # Copy the ePSF model per call to prevent cross-tier/cross-retry
             # parameter contamination if the fitter mutates the model in-place.
             epsf_model_for_call = epsf_model.copy()
-            # For the target (single source), keep the PSF local background estimator aligned with
+            # For the target fit, keep the PSF local background estimator aligned with
             # aperture photometry (annulus median). MMM can behave differently on
             # structured difference-image residuals and produce large AP-vs-PSF flux offsets.
             # Using MedianBackground consistently across all tiers for robust sky estimation.
             # Handle NaN-heavy regions (chip gaps) by shrinking annulus or falling back to global.
-            if is_target_fit and int(np.count_nonzero(mask)) == 1:
-                _x = float(x_all[mask][0])
-                _y = float(y_all[mask][0])
+            # In multi-target fits, check the annulus quality for each source and use
+            # the most conservative (smallest) annulus that works for all sources.
+            if is_target_fit:
+                _n_in_mask = int(np.count_nonzero(mask))
+                _xs = np.asarray(x_all[mask], float)
+                _ys = np.asarray(y_all[mask], float)
                 # Try primary annulus first
                 _inner_r, _outer_r = float(inner_r), float(outer_r)
                 _max_shrink = 3  # Number of shrink attempts
                 _shrink_factor = 0.7  # Reduce radii by this factor each attempt
+                # Pre-allocate coordinate grids once (image shape doesn't change between attempts)
+                yy, xx = np.ogrid[:ndimage.data.shape[0], :ndimage.data.shape[1]]
                 for attempt in range(_max_shrink):
-                    # Create annulus mask to check NaN fraction
-                    yy, xx = np.ogrid[:ndimage.data.shape[0], :ndimage.data.shape[1]]
-                    r2 = (xx - _x)**2 + (yy - _y)**2
-                    in_annulus = (r2 >= _inner_r**2) & (r2 < _outer_r**2)
-                    annulus_pixels = ndimage.data[in_annulus]
-                    finite_pixels = annulus_pixels[np.isfinite(annulus_pixels)]
-                    nan_frac = 1.0 - (len(finite_pixels) / max(1, len(annulus_pixels)))
-                    if len(finite_pixels) >= 10 and nan_frac < 0.5:
-                        # Sufficient finite pixels - use this annulus
+                    # Check NaN fraction for each source's annulus
+                    _all_ok = True
+                    _worst_nan_frac = 0.0
+                    for _si in range(_n_in_mask):
+                        r2 = (xx - _xs[_si])**2 + (yy - _ys[_si])**2
+                        in_annulus = (r2 >= _inner_r**2) & (r2 < _outer_r**2)
+                        annulus_pixels = ndimage.data[in_annulus]
+                        finite_pixels = annulus_pixels[np.isfinite(annulus_pixels)]
+                        nan_frac = 1.0 - (len(finite_pixels) / max(1, len(annulus_pixels)))
+                        _worst_nan_frac = max(_worst_nan_frac, nan_frac)
+                        if len(finite_pixels) < 10 or nan_frac >= 0.5:
+                            _all_ok = False
+                    if _all_ok:
+                        # Sufficient finite pixels for all sources - use this annulus
                         break
                     if attempt < _max_shrink - 1:
                         # Shrink annulus and retry
                         _inner_r = max(3.0, _inner_r * _shrink_factor)
                         _outer_r = max(_inner_r + 2.0, _outer_r * _shrink_factor)
                         log.warning(
-                            "Target PSF: primary annulus (r_in=%.1f, r_out=%.1f) has "
-                            "%.1f%% NaN pixels; shrinking to (r_in=%.1f, r_out=%.1f).",
-                            float(inner_r), float(outer_r), nan_frac * 100.0,
-                            _inner_r, _outer_r,
+                            "Target PSF: annulus (r_in=%.1f, r_out=%.1f) has "
+                            "%.1f%% NaN pixels (worst of %d sources); shrinking to (r_in=%.1f, r_out=%.1f).",
+                            float(inner_r), float(outer_r), _worst_nan_frac * 100.0,
+                            _n_in_mask, _inner_r, _outer_r,
                         )
                     else:
                         # Fallback to global background if all attempts fail
@@ -4714,6 +4880,35 @@ class PSF:
                     progress_bar=False,
                 )
                 sub_init = init_params[mask]
+
+                # Filter out sources that fall on completely masked regions
+                # to avoid ValueError from photutils PSFPhotometry.
+                _fit_mask = getattr(nd_for_fit, "mask", None)
+                if _fit_mask is not None and len(sub_init) > 0:
+                    _half = max(int(np.ceil(max(fit_shape) / 2)), 1)
+                    _sx = np.clip(np.rint(np.asarray(sub_init["x"], dtype=float)).astype(int), 0, nd_for_fit.data.shape[1] - 1) if "x" in sub_init.colnames else None
+                    _sy = np.clip(np.rint(np.asarray(sub_init["y"], dtype=float)).astype(int), 0, nd_for_fit.data.shape[0] - 1) if "y" in sub_init.colnames else None
+                    if _sx is not None and _sy is not None:
+                        _fully_masked = np.zeros(len(sub_init), dtype=bool)
+                        for _i in range(len(sub_init)):
+                            _y0 = max(_sy[_i] - _half, 0)
+                            _y1 = min(_sy[_i] + _half + 1, nd_for_fit.data.shape[0])
+                            _x0 = max(_sx[_i] - _half, 0)
+                            _x1 = min(_sx[_i] + _half + 1, nd_for_fit.data.shape[1])
+                            _region = _fit_mask[_y0:_y1, _x0:_x1]
+                            if _region.size > 0 and np.all(_region):
+                                _fully_masked[_i] = True
+                        if np.any(_fully_masked):
+                            log.warning(
+                                "Filtering %d source(s) that fall on completely masked regions before PSF fit.",
+                                int(np.sum(_fully_masked)),
+                            )
+                            sub_init = sub_init[~_fully_masked]
+                            # Update mask to reflect removed sources so downstream
+                            # retry logic (init_params[mask]) stays aligned.
+                            _mask_indices = np.where(mask)[0]
+                            mask[_mask_indices[_fully_masked]] = False
+
                 res = psfphot(nd_for_fit, init_params=sub_init)
             else:
                 finder = DAOStarFinder(
@@ -4751,7 +4946,16 @@ class PSF:
             sub_init = (
                 sub_init.to_pandas() if hasattr(sub_init, "to_pandas") else sub_init
             )
-            res = res.to_pandas() if hasattr(res, "to_pandas") else res
+            if hasattr(res, "to_pandas"):
+                # Filter out multidimensional columns (e.g. qfit, cfit) that
+                # cannot be converted to a pandas DataFrame.
+                _keep_cols = [
+                    name for name in res.colnames
+                    if len(res[name].shape) <= 1
+                ]
+                res = res[_keep_cols].to_pandas()
+            else:
+                res = res
 
             res["idx"] = (
                 sub_init["__row"].to_numpy()
@@ -4875,6 +5079,10 @@ class PSF:
                 if isinstance(per_src, (list, tuple)) and len(per_src) >= len(res):
                     per_src_batch = per_src[-len(res) :]
                     if len(per_src_batch) == len(res):
+                        # Collect errors in arrays for vectorized column assignment
+                        _x_errs = np.full(len(res), np.nan)
+                        _y_errs = np.full(len(res), np.nan)
+                        _flux_errs = np.full(len(res), np.nan)
                         for i, rec in enumerate(per_src_batch):
                             names = list(rec.get("param_names", []))
                             rec_errs = rec.get("param_errs")
@@ -4897,15 +5105,14 @@ class PSF:
                                         return val
                                 return np.nan
 
-                            res.at[i, "x_fit_err"] = _get_sigma(
-                                ("x", "x_0", "x_mean", "xcenter")
-                            )
-                            res.at[i, "y_fit_err"] = _get_sigma(
-                                ("y", "y_0", "y_mean", "ycenter")
-                            )
-                            res.at[i, "flux_fit_err"] = _get_sigma(
-                                ("flux", "amplitude", "amp")
-                            )
+                            _x_errs[i] = _get_sigma(("x", "x_0", "x_mean", "xcenter"))
+                            _y_errs[i] = _get_sigma(("y", "y_0", "y_mean", "ycenter"))
+                            _flux_errs[i] = _get_sigma(("flux", "amplitude", "amp"))
+
+                        # Assign entire columns at once (vectorized)
+                        res["x_fit_err"] = _x_errs
+                        res["y_fit_err"] = _y_errs
+                        res["flux_fit_err"] = _flux_errs
 
             return res, psfphot
 
@@ -4958,35 +5165,71 @@ class PSF:
             vf_inner = aperture_radius + gap_fwhm * fwhm
             vf_outer = vf_inner + width_fwhm * fwhm
 
-        for mask, inner_r, outer_r, label in [
-            (bright_mask, bright_inner, bright_outer, "bright"),
-            (faint_mask, faint_inner, faint_outer, "faint"),
-            (vfaint_mask, vf_inner, vf_outer, "very faint"),
-        ]:
-            if np.any(mask):
-                use_emcee_this = use_emcee_for_tier(label)
-                tier_fitter = (
-                    emcee_fitter
-                    if use_emcee_this and emcee_fitter is not None
-                    else lsq_fitter
+        # ---- Dispatch per SNR tier -----------------------------------------
+        # For multi-target fits (primary + additional targets), ALL targets
+        # must be fit in a single PSFPhotometry call so that:
+        #   1. SourceGrouper sees all targets and can handle blending
+        #   2. make_residual_image() subtracts ALL fitted PSFs
+        # Tier splitting would break this by fitting each tier separately.
+        results = []
+        psfphot_last = None
+
+        if is_target_fit and len(init_params) > 1:
+            # ---- Single-call fit for all targets ---------------------------
+            all_mask = np.ones(len(init_params), dtype=bool)
+            # Decide fitter: use MCMC if any target has SNR below threshold,
+            # otherwise LSQ.  This keeps simultaneous fitting while still
+            # benefiting from MCMC for faint targets.
+            _any_low_snr = np.any(psf_snr < emcee_s2n) if emcee_s2n > 0 else False
+            use_emcee_all = _any_low_snr and emcee_fitter is not None
+            tier_fitter_all = emcee_fitter if use_emcee_all else lsq_fitter
+            log.info(
+                "[PSF photometry: %d sources] (%s, single-call for simultaneous fit)",
+                len(init_params),
+                "MCMC" if use_emcee_all else "LSQ",
+            )
+            res, psfphot_last = _psf_fit(
+                all_mask, bright_inner, bright_outer,
+                fit_shape, tier_fitter_all, use_emcee_all,
+            )
+            if res is not None:
+                results.append(res)
+            else:
+                log.warning(
+                    "Target PSF fit returned None; "
+                    "may be due to convergence issues or invalid parameters."
                 )
-                log.debug(
-                    "Fitting %d %s sources (%s)",
-                    int(mask.sum()),
-                    label,
-                    "MCMC" if use_emcee_this else "LSQ",
-                )
-                res, psfphot_last = _psf_fit(
-                    mask, inner_r, outer_r, fit_shape, tier_fitter, use_emcee_this
-                )
-                if res is not None:
-                    results.append(res)
-                elif is_target_fit and len(sources) == 1:
-                    log.warning(
-                        "Target PSF fit returned None for %s tier; "
-                        "may be due to convergence issues or invalid parameters.",
-                        label,
+        else:
+            # ---- Standard tier-based dispatch (single target or field stars) ----
+            for mask, inner_r, outer_r, label in [
+                (bright_mask, bright_inner, bright_outer, "bright"),
+                (faint_mask, faint_inner, faint_outer, "faint"),
+                (vfaint_mask, vf_inner, vf_outer, "very faint"),
+            ]:
+                if np.any(mask):
+                    use_emcee_this = use_emcee_for_tier(label)
+                    tier_fitter = (
+                        emcee_fitter
+                        if use_emcee_this and emcee_fitter is not None
+                        else lsq_fitter
                     )
+                    log.debug(
+                        "Fitting %d %s sources (%s)",
+                        int(mask.sum()),
+                        label,
+                        "MCMC" if use_emcee_this else "LSQ",
+                    )
+                    res, psfphot_last = _psf_fit(
+                        mask, inner_r, outer_r, fit_shape, tier_fitter, use_emcee_this
+                    )
+                    if res is not None:
+                        results.append(res)
+                    elif is_target_fit and len(sources) == 1:
+                        log.warning(
+                            "Target PSF fit returned None for %s tier; "
+                            "may be due to convergence issues or invalid parameters.",
+                            label,
+                        )
 
         if not results:
             if is_target_fit and len(sources) == 1:
@@ -5060,32 +5303,50 @@ class PSF:
         results_inverted = []
         psfphot_inverted = None  # Store the psfphot object from inverted fit
         if check_inverted and ndimage_inverted is not None and np.any(needs_inverted_retry):
-            # Get masks for sources needing retry per tier
-            retry_mask_bright = bright_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
-            retry_mask_faint = faint_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
-            retry_mask_vfaint = vfaint_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
-            
-            for mask, inner_r, outer_r, fshape, label in [
-                (retry_mask_bright, bright_inner, bright_outer, fit_shape, "bright"),
-                (retry_mask_faint, faint_inner, faint_outer, fit_shape, "faint"),
-                (retry_mask_vfaint, vf_inner, vf_outer, fit_shape, "very faint"),
-            ]:
-                if np.any(mask):
-                    use_emcee_this = use_emcee_for_tier(label)
-                    tier_fitter = (
-                        emcee_fitter
-                        if use_emcee_this and emcee_fitter is not None
-                        else lsq_fitter
-                    )
-                    log.debug("Fitting %d %s sources on inverted image (fallback)...", int(mask.sum()), label)
+            if is_target_fit and len(init_params) > 1:
+                # Multi-target: fit all needing retry in a single call
+                retry_mask_all = np.isin(idx_keep, idx_out[needs_inverted_retry])
+                if np.any(retry_mask_all):
+                    _any_low_snr = np.any(psf_snr[retry_mask_all] < emcee_s2n) if emcee_s2n > 0 else False
+                    use_emcee_inv = _any_low_snr and emcee_fitter is not None
+                    tier_fitter_inv = emcee_fitter if use_emcee_inv else lsq_fitter
+                    log.debug("Fitting %d sources on inverted image (single-call fallback)...", int(retry_mask_all.sum()))
                     res_inv, psfphot_inv = _psf_fit(
-                        mask, inner_r, outer_r, fshape, tier_fitter, use_emcee_this, nd_override=ndimage_inverted
+                        retry_mask_all, bright_inner, bright_outer,
+                        fit_shape, tier_fitter_inv, use_emcee_inv,
+                        nd_override=ndimage_inverted,
                     )
                     if res_inv is not None:
                         results_inverted.append(res_inv)
-                        # Store the psfphot object from the last successful inverted fit for plotting
                         if psfphot_inv is not None:
                             psfphot_inverted = psfphot_inv
+            else:
+                # Single-target or field stars: tier-based retry
+                retry_mask_bright = bright_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
+                retry_mask_faint = faint_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
+                retry_mask_vfaint = vfaint_mask & np.isin(idx_keep, idx_out[needs_inverted_retry])
+
+                for mask, inner_r, outer_r, fshape, label in [
+                    (retry_mask_bright, bright_inner, bright_outer, fit_shape, "bright"),
+                    (retry_mask_faint, faint_inner, faint_outer, fit_shape, "faint"),
+                    (retry_mask_vfaint, vf_inner, vf_outer, fit_shape, "very faint"),
+                ]:
+                    if np.any(mask):
+                        use_emcee_this = use_emcee_for_tier(label)
+                        tier_fitter = (
+                            emcee_fitter
+                            if use_emcee_this and emcee_fitter is not None
+                            else lsq_fitter
+                        )
+                        log.debug("Fitting %d %s sources on inverted image (fallback)...", int(mask.sum()), label)
+                        res_inv, psfphot_inv = _psf_fit(
+                            mask, inner_r, outer_r, fshape, tier_fitter, use_emcee_this, nd_override=ndimage_inverted
+                        )
+                        if res_inv is not None:
+                            results_inverted.append(res_inv)
+                            # Store the psfphot object from the last successful inverted fit for plotting
+                            if psfphot_inv is not None:
+                                psfphot_inverted = psfphot_inv
 
         # Process inverted results and replace bad normal fits where inverted succeeded
         combined_inv = None
@@ -5554,17 +5815,21 @@ class PSF:
                         "cfit_inverted", "qfit_inverted", "reduced_chi2_inverted", "flags_inverted", "fwhm_psf_inverted"]:
                 if col not in updated.columns:
                     updated[col] = np.nan
-            # Store inverted values
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["x_fit_inverted"])] = x_fit_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["y_fit_inverted"])] = y_fit_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["x_fit_err_inverted"])] = x_err_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["y_fit_err_inverted"])] = y_err_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["cfit_inverted"])] = cfit_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["qfit_inverted"])] = qfit_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["reduced_chi2_inverted"])] = chi2_inv
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["flags_inverted"])] = flags_inv
-            # FWHM for inverted fit is same as normal fit (PSF shape doesn't change)
-            updated.iloc[idx_out_inv, updated.columns.get_indexer(["fwhm_psf_inverted"])] = fwhm
+            # Store inverted values — batch all columns in a single .iloc assignment
+            _inv_cols = ["x_fit_inverted", "y_fit_inverted", "x_fit_err_inverted", "y_fit_err_inverted",
+                         "cfit_inverted", "qfit_inverted", "reduced_chi2_inverted", "flags_inverted", "fwhm_psf_inverted"]
+            _inv_vals = np.column_stack([
+                np.asarray(x_fit_inv, dtype=object),
+                np.asarray(y_fit_inv, dtype=object),
+                np.asarray(x_err_inv, dtype=object),
+                np.asarray(y_err_inv, dtype=object),
+                np.asarray(cfit_inv, dtype=object),
+                np.asarray(qfit_inv, dtype=object),
+                np.asarray(chi2_inv, dtype=object),
+                np.asarray(flags_inv, dtype=object),
+                np.full(len(x_fit_inv), fwhm, dtype=object),
+            ])
+            updated.iloc[idx_out_inv, updated.columns.get_indexer(_inv_cols)] = _inv_vals
             log.info("Inverted PSF fit: measured %d sources with negative PSF detection.", len(idx_out_inv))
 
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -5746,8 +6011,39 @@ class PSF:
                         )
                         break
 
+            # Detect multiple targets for multi-column target plot.
+            # Each target gets its own science column zoomed around it.
+            _target_mask = None
+            if "_is_additional_target" in sources.columns:
+                _target_mask = sources["_is_additional_target"].astype(bool)
+                _target_rows = sources[~_target_mask]
+            else:
+                _target_rows = sources
+            _n_target_cols = 1
+            _target_centers = []  # list of (x, y) per target column
+            _target_names = []    # labels per target column
+            if plotTarget and len(sources) > 1 and "x_pix" in sources.columns:
+                # Primary target = row 0; additional targets = rows with _is_additional_target
+                for _i in range(len(sources)):
+                    _tx = float(sources.at[sources.index[_i], "x_pix"])
+                    _ty = float(sources.at[sources.index[_i], "y_pix"])
+                    if not np.isfinite(_tx) or not np.isfinite(_ty):
+                        continue
+                    _tn = sources.at[sources.index[_i], "_additional_target_name"] if "_additional_target_name" in sources.columns else None
+                    if not _tn or str(_tn) == "nan":
+                        if _i == 0:
+                            _tn = self.input_yaml.get("target_name", "Main target")
+                            # Use "Main target" for generic placeholder names
+                            if _tn in ("Transient", "Center of Field", "Primary", None, "nan"):
+                                _tn = "Main target"
+                        else:
+                            _tn = f"Sub target {_i}"
+                    _target_centers.append((_tx, _ty))
+                    _target_names.append(str(_tn))
+                _n_target_cols = len(_target_centers) if _target_centers else 1
+
             ncols = (
-                1 + (1 if psfphot is not None else 0) + (1 if epsf is not None else 0)
+                _n_target_cols + (1 if psfphot is not None else 0) + (1 if epsf is not None else 0)
             )
             _style = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "autophot.mplstyle"
@@ -5782,140 +6078,7 @@ class PSF:
                 ax_list.append((ax, ax_R, ax_B))
                 cax_list.append(cax)
 
-            x_center = (
-                np.nanmean(sources["x_pix"])
-                if "x_pix" in sources
-                else ndimage.data.shape[1] / 2
-            )
-            y_center = (
-                np.nanmean(sources["y_pix"])
-                if "y_pix" in sources
-                else ndimage.data.shape[0] / 2
-            )
-
-            x0 = max(int(np.floor(x_center - scale)), 0)
-            x1 = min(int(np.ceil(x_center + scale)), ndimage.data.shape[1])
-            y0 = max(int(np.floor(y_center - scale)), 0)
-            y1 = min(int(np.ceil(y_center + scale)), ndimage.data.shape[0])
-
-            # ---- Panel 1: science image ------------------------------------
-            ax1, ax1_R, ax1_B = ax_list[0]
-            cutout1 = first_image[y0:y1, x0:x1]
-            unc_cut = uncertainty[y0:y1, x0:x1]
-            mask_cut = (
-                np.asarray(nd_for_plot.mask[y0:y1, x0:x1], dtype=bool)
-                if getattr(nd_for_plot, "mask", None) is not None
-                else None
-            )
-
-            if plotTarget:
-                if is_inverted:
-                    # Inverted images have full range with negative and positive values.
-                    # Use min/max to ensure no clipping of negative values.
-                    finite_cutout = cutout1[np.isfinite(cutout1)]
-                    vmin1 = float(np.nanmin(finite_cutout)) if len(finite_cutout) > 0 else 0.0
-                    vmax1 = float(np.nanmax(finite_cutout)) if len(finite_cutout) > 0 else 1.0
-                else:
-                    # Scale to +/- 3 sigma (robust) so faint PSF is visible despite bright contaminants
-                    _, med1, std1 = sigma_clipped_stats(cutout1, sigma=3, maxiters=5)
-                    std1 = max(std1, np.finfo(float).tiny)
-                    vmin1 = med1 - 3 * std1
-                    vmax1 = med1 + 3 * std1
-                norm1 = ImageNormalize(vmin=vmin1, vmax=vmax1, stretch=LinearStretch())
-            else:
-                norm1 = ImageNormalize(
-                    cutout1, interval=ZScaleInterval(), stretch=LinearStretch()
-                )
-            cmap_vir = plt.get_cmap("viridis").copy()
-            cmap_vir.set_bad(color="white")
-            im1 = ax1.imshow(
-                np.ma.array(first_image, mask=~np.isfinite(first_image)),
-                origin="lower",
-                cmap='viridis',
-                norm=norm1,
-                interpolation=None,
-            )
-
-            if "x_pix" in sources and "y_pix" in sources:
-                fwhm = float(self.input_yaml.get("fwhm", 3.0))
-                r = fwhm / 2.0
-                from matplotlib.collections import PatchCollection as _PC
-                _xy = sources[["x_pix", "y_pix"]].to_numpy(dtype=float)
-                _circles = [Circle((x, y), r) for x, y in _xy]
-                if _circles:
-                    pc = _PC(_circles, edgecolors="#FF00FF", facecolors="none",
-                              linewidths=1.2, alpha=0.9, zorder=10,
-                              label="Input position")
-                    ax1.add_collection(pc)
-                # Add dashed box showing fitting bounds region
-                phot_cfg = self.input_yaml.get("photometry", {})
-                cfg_xy_bounds_arcsec = phot_cfg.get("fitting_xy_bounds", 3.0)
-                pixel_scale = self.input_yaml.get("pixel_scale", None)
-                if cfg_xy_bounds_arcsec is not None and pixel_scale is not None:
-                    try:
-                        cfg_xy_bounds_arcsec = float(cfg_xy_bounds_arcsec)
-                        pixel_scale = float(pixel_scale)
-                        if pixel_scale > 0:
-                            fitting_radius_px = cfg_xy_bounds_arcsec / pixel_scale
-                            _rects = [
-                                Rectangle(
-                                    (x - fitting_radius_px, y - fitting_radius_px),
-                                    2 * fitting_radius_px,
-                                    2 * fitting_radius_px,
-                                )
-                                for x, y in _xy
-                            ]
-                            if _rects:
-                                rc = _PC(_rects, edgecolors=PLOT_COLORS.get('reference', '#0072B2'), facecolors="none",
-                                          linewidths=1.0, linestyles="--", alpha=0.6,
-                                          label="Fitting bounds")
-                                ax1.add_collection(rc)
-                    except Exception:
-                        pass
-
-            if "x_fit" in sources and "y_fit" in sources:
-                fwhm = float(self.input_yaml.get("fwhm", 3.0))
-                r = fwhm / 2.0
-                xf = sources["x_fit"].values
-                yf = sources["y_fit"].values
-                # Horizontal bars of crosses
-                ax1.plot(
-                    np.column_stack([xf - r, xf + r]).T,
-                    np.column_stack([yf, yf]).T,
-                    color="red", lw=1.2, alpha=0.9, zorder=11,
-                )
-                # Vertical bars of crosses (label only once)
-                ax1.plot(
-                    np.column_stack([xf, xf]).T,
-                    np.column_stack([yf - r, yf + r]).T,
-                    color="red", lw=1.2, alpha=0.9, zorder=11,
-                    label="Fitted position",
-                )
-                # Aperture reference circles
-                _ap_circles = [Circle((x, y), aperture_radius) for x, y in zip(xf, yf)]
-                if _ap_circles:
-                    apc = _PC(_ap_circles, edgecolors="white", facecolors="none",
-                               linewidths=0.5, linestyles="--", alpha=0.6, zorder=9)
-                    ax1.add_collection(apc)
-                # Error ellipses where finite and within bounds
-                xe_arr = sources.get("x_fit_err", pd.Series(np.nan, index=sources.index)).values
-                ye_arr = sources.get("y_fit_err", pd.Series(np.nan, index=sources.index)).values
-                _ellipses, _dummy = [], []
-                for x, y, xe, ye in zip(xf, yf, xe_arr, ye_arr):
-                    if (
-                        np.isfinite(xe) and np.isfinite(ye)
-                        and xe > 0 and ye > 0
-                        and xe < scale and ye < scale
-                    ):
-                        _ellipses.append(Ellipse((x, y), 2 * xe, 2 * ye, angle=0))
-                if _ellipses:
-                    ec = _PC(_ellipses, edgecolors="red", facecolors="none",
-                              linewidths=0.5, alpha=0.6, zorder=9)
-                    ax1.add_collection(ec)
-
-            # ---- Projections helper ----------------------------------------
-            # Right-panel step is drawn separately with _draw_right_step so the profile
-            # is centered in the error band (step constant over same y-blocks as fill).
+            # ---- Projections helper (defined early, used by all panels) -----
             def _proj(main_ax, ax_R, ax_B, data, color="blue", draw_right=True):
                 xl, yl = main_ax.get_xlim(), main_ax.get_ylim()
                 xi0, xi1 = max(int(xl[0]), 0), min(int(xl[1]), data.shape[1])
@@ -5940,13 +6103,9 @@ class PSF:
                 ax_R.set_yticklabels([])
 
             def _draw_right_step(ax_R, x_vals, y0, y1, color="dodgerblue", lw=0.5, alpha=1.0):
-                """Draw right-panel profile as a step constant over the same y-blocks as
-                fill_betweenx(..., step='mid'), so the line is centered in the error band.
-                """
                 n = len(x_vals)
                 if n == 0:
                     return
-                # Blocks match fill_betweenx step='mid': [(y[i-1]+y[i])/2, (y[i]+y[i+1])/2]
                 y_edges = np.empty(2 * n)
                 for i in range(n):
                     y_edges[2 * i] = (y0 + i - 0.5) if i > 0 else y0
@@ -5954,56 +6113,233 @@ class PSF:
                 x_step = np.repeat(x_vals, 2)
                 ax_R.plot(x_step, y_edges, color=color, lw=lw, alpha=alpha)
 
-            for ax, _, _ in ax_list:
-                ax.set_xlim(x0, x1)
-                ax.set_ylim(y0, y1)
+            # Compute per-target zoom bounds.  When multiple targets are
+            # present, each gets its own science column zoomed around it.
+            # The primary target's zoom is also used for the residual panel.
+            if not _target_centers:
+                _tcx = (
+                    np.nanmean(sources["x_pix"])
+                    if "x_pix" in sources
+                    else ndimage.data.shape[1] / 2
+                )
+                _tcy = (
+                    np.nanmean(sources["y_pix"])
+                    if "y_pix" in sources
+                    else ndimage.data.shape[0] / 2
+                )
+                _target_centers = [(_tcx, _tcy)]
+                _target_names = ["Main target"]
+                _n_target_cols = 1
 
-            _proj(ax1, ax1_R, ax1_B, first_image, draw_right=False)
+            _target_zooms = []
+            for _tcx, _tcy in _target_centers:
+                _x0 = max(int(np.floor(_tcx - scale)), 0)
+                _x1 = min(int(np.ceil(_tcx + scale)), ndimage.data.shape[1])
+                _y0 = max(int(np.floor(_tcy - scale)), 0)
+                _y1 = min(int(np.ceil(_tcy + scale)), ndimage.data.shape[0])
+                _target_zooms.append((_x0, _x1, _y0, _y1))
 
-            # Error shading on science panel: mean profiles ignoring NaNs and
-            # SE of the mean = sqrt(sum(sigma^2))/N for finite pixels.
-            finite1 = np.isfinite(cutout1)
-            if mask_cut is not None:
-                finite1 &= ~mask_cut
-            hx = np.nanmean(cutout1, axis=0)
-            hy = np.nanmean(cutout1, axis=1)
-            unc2 = np.asarray(unc_cut, dtype=float) ** 2
-            unc2 = np.where(finite1, unc2, 0.0)
-            n_col = np.sum(finite1, axis=0).astype(float)
-            n_row = np.sum(finite1, axis=1).astype(float)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                exh = np.sqrt(np.sum(unc2, axis=0)) / np.where(n_col > 0, n_col, np.nan)
-                eyh = np.sqrt(np.sum(unc2, axis=1)) / np.where(n_row > 0, n_row, np.nan)
-            y_vals = np.arange(y0, y1, dtype=float)
+            # Primary target zoom (used by residual panel)
+            x0, x1, y0, y1 = _target_zooms[0]
+
+            # Target marker colors: primary=white, others=muted teal (was neon cyan)
+            _tc_colors = ["white"] + [PLOT_COLORS.get('target_secondary', '#17A2B8')] * (len(_target_centers) - 1)
+
             kw_bottom = dict(
                 facecolor="dodgerblue", edgecolor="none", alpha=0.5, step="mid"
             )
-            # Right panel: fill uses step='mid' (constant in y-blocks); profile drawn as
-            # step over same y-blocks so line is centered in the band.
             kw_right = dict(
                 facecolor="dodgerblue", edgecolor="none", alpha=0.5, step="mid"
             )
-            ax1_B.fill_between(np.arange(x0, x1), hx - exh, hx + exh, **kw_bottom)
-            ax1_B.plot(np.arange(x0, x1), hx - exh, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
-            ax1_B.plot(np.arange(x0, x1), hx + exh, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
-            ax1_R.fill_betweenx(y_vals, hy - eyh, hy + eyh, **kw_right)
-            _draw_right_step(ax1_R, hy - eyh, y0, y1, color="dodgerblue", lw=0.3, alpha=0.7)
-            _draw_right_step(ax1_R, hy + eyh, y0, y1, color="dodgerblue", lw=0.3, alpha=0.7)
-            _draw_right_step(ax1_R, hy, y0, y1, color="dodgerblue")
-            # Set right-panel xlim so the error band is visible (same as panel 2).
-            _lo_r1 = np.nanmin(hy - eyh)
-            _hi_r1 = np.nanmax(hy + eyh)
-            _margin_r1 = (
-                max((_hi_r1 - _lo_r1) * 0.05, 1e-9)
-                if np.isfinite(_hi_r1 - _lo_r1)
-                else 0.1
-            )
-            ax1_R.set_xlim(_lo_r1 - _margin_r1, _hi_r1 + _margin_r1)
 
-            # ---- Panel 2: residual -----------------------------------------
-            idx = 1
+            # ---- Science panels (one per target) ---------------------------
+            im1 = None  # keep reference for colorbar
+            ax1 = ax1_R = ax1_B = None  # primary science axes (for labels/legend)
+            _primary_mask_cut = None  # saved for residual panel
+            _primary_unc_cut = None   # saved for residual panel
+            _all_science_axes = []     # saved for model overlay on all targets
+            for _tcol, (_tx0, _tx1, _ty0, _ty1) in enumerate(_target_zooms):
+                _ax, _ax_R, _ax_B = ax_list[_tcol]
+                if _tcol == 0:
+                    ax1, ax1_R, ax1_B = _ax, _ax_R, _ax_B
+                _all_science_axes.append((_ax, _ax_R, _ax_B))
+                _cutout = first_image[_ty0:_ty1, _tx0:_tx1]
+                _unc_cut = uncertainty[_ty0:_ty1, _tx0:_tx1]
+                _mask_cut = (
+                    np.asarray(nd_for_plot.mask[_ty0:_ty1, _tx0:_tx1], dtype=bool)
+                    if getattr(nd_for_plot, "mask", None) is not None
+                    else None
+                )
+                if _tcol == 0:
+                    _primary_mask_cut = _mask_cut
+                    _primary_unc_cut = _unc_cut
+
+                # Title with target name
+                _tname = _target_names[_tcol] if _tcol < len(_target_names) else f"Target {_tcol}"
+                _ax.set_title(_tname, fontsize=8, pad=3)
+
+                if plotTarget:
+                    if is_inverted:
+                        _finite_cut = _cutout[np.isfinite(_cutout)]
+                        _vmin = float(np.nanmin(_finite_cut)) if len(_finite_cut) > 0 else 0.0
+                        _vmax = float(np.nanmax(_finite_cut)) if len(_finite_cut) > 0 else 1.0
+                    else:
+                        _, _med, _std = sigma_clipped_stats(_cutout, sigma=3, maxiters=5)
+                        _std = max(_std, np.finfo(float).tiny)
+                        _vmin = _med - 3 * _std
+                        _vmax = _med + 3 * _std
+                    _norm = ImageNormalize(vmin=_vmin, vmax=_vmax, stretch=LinearStretch())
+                else:
+                    _norm = ImageNormalize(
+                        _cutout, interval=ZScaleInterval(), stretch=LinearStretch()
+                    )
+                _cmap = plt.get_cmap("viridis").copy()
+                _cmap.set_bad(color="white")
+                _im = _ax.imshow(
+                    np.ma.array(first_image, mask=~np.isfinite(first_image)),
+                    origin="lower",
+                    cmap='viridis',
+                    norm=_norm,
+                    interpolation=None,
+                )
+                if _tcol == 0:
+                    im1 = _im  # colorbar reference from primary
+
+                # Mark all input positions
+                if "x_pix" in sources and "y_pix" in sources:
+                    fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                    r = fwhm / 2.0
+                    from matplotlib.collections import PatchCollection as _PC
+                    _xy = sources[["x_pix", "y_pix"]].to_numpy(dtype=float)
+                    _circles = [Circle((x, y), r) for x, y in _xy]
+                    if _circles:
+                        pc = _PC(_circles, edgecolors=PLOT_COLORS.get('epsf_aperture', '#CC79A7'), facecolors="none",
+                                  linewidths=1.2, alpha=0.9, zorder=10,
+                                  label="Input position")
+                        _ax.add_collection(pc)
+                    # Fitting bounds boxes
+                    phot_cfg = self.input_yaml.get("photometry", {})
+                    cfg_xy_bounds_arcsec = phot_cfg.get("fitting_xy_bounds", 3.0)
+                    pixel_scale = self.input_yaml.get("pixel_scale", None)
+                    if cfg_xy_bounds_arcsec is not None and pixel_scale is not None:
+                        try:
+                            cfg_xy_bounds_arcsec = float(cfg_xy_bounds_arcsec)
+                            pixel_scale = float(pixel_scale)
+                            if pixel_scale > 0:
+                                fitting_radius_px = cfg_xy_bounds_arcsec / pixel_scale
+                                _rects = [
+                                    Rectangle(
+                                        (x - fitting_radius_px, y - fitting_radius_px),
+                                        2 * fitting_radius_px,
+                                        2 * fitting_radius_px,
+                                    )
+                                    for x, y in _xy
+                                ]
+                                if _rects:
+                                    rc = _PC(_rects, edgecolors=PLOT_COLORS.get('reference', '#0072B2'), facecolors="none",
+                                              linewidths=1.0, linestyles="--", alpha=0.6,
+                                              label="Fitting bounds")
+                                    _ax.add_collection(rc)
+                        except Exception:
+                            pass
+
+                # Mark fitted positions
+                if "x_fit" in sources and "y_fit" in sources:
+                    fwhm = float(self.input_yaml.get("fwhm", 3.0))
+                    r = fwhm / 2.0
+                    xf = sources["x_fit"].values
+                    yf = sources["y_fit"].values
+                    _ax.plot(
+                        np.column_stack([xf - r, xf + r]).T,
+                        np.column_stack([yf, yf]).T,
+                        color="red", lw=1.2, alpha=0.9, zorder=11,
+                    )
+                    _ax.plot(
+                        np.column_stack([xf, xf]).T,
+                        np.column_stack([yf - r, yf + r]).T,
+                        color="red", lw=1.2, alpha=0.9, zorder=11,
+                        label="Fitted position" if _tcol == 0 else None,
+                    )
+                    _ap_circles = [Circle((x, y), aperture_radius) for x, y in zip(xf, yf)]
+                    if _ap_circles:
+                        apc = _PC(_ap_circles, edgecolors="white", facecolors="none",
+                                   linewidths=0.5, linestyles="--", alpha=0.6, zorder=9)
+                        _ax.add_collection(apc)
+                    xe_arr = sources.get("x_fit_err", pd.Series(np.nan, index=sources.index)).values
+                    ye_arr = sources.get("y_fit_err", pd.Series(np.nan, index=sources.index)).values
+                    _ellipses = []
+                    for x, y, xe, ye in zip(xf, yf, xe_arr, ye_arr):
+                        if (
+                            np.isfinite(xe) and np.isfinite(ye)
+                            and xe > 0 and ye > 0
+                            and xe < scale and ye < scale
+                        ):
+                            _ellipses.append(Ellipse((x, y), 2 * xe, 2 * ye, angle=0))
+                    if _ellipses:
+                        ec = _PC(_ellipses, edgecolors="red", facecolors="none",
+                                  linewidths=0.5, alpha=0.6, zorder=9)
+                        _ax.add_collection(ec)
+
+                # Mark other target centers with colored crosshairs + labels
+                for _oi, (_ocx, _ocy) in enumerate(_target_centers):
+                    if _oi == _tcol:
+                        continue
+                    if (_tx0 <= _ocx < _tx1 and _ty0 <= _ocy < _ty1):
+                        _r = fwhm / 2.0 if "fwhm" in locals() else 1.5
+                        _ax.plot(
+                            [_ocx - _r, _ocx + _r], [_ocy, _ocy],
+                            color=_tc_colors[_oi], lw=1.0, alpha=0.8, zorder=10,
+                        )
+                        _ax.plot(
+                            [_ocx, _ocx], [_ocy - _r, _ocy + _r],
+                            color=_tc_colors[_oi], lw=1.0, alpha=0.8, zorder=10,
+                        )
+                        _oname = _target_names[_oi] if _oi < len(_target_names) else f"T{_oi}"
+                        _ax.annotate(
+                            _oname, (_ocx, _ocy + _r + 2),
+                            color=_tc_colors[_oi], fontsize=6, ha="center", zorder=11,
+                        )
+
+                # Set zoom limits for this panel
+                _ax.set_xlim(_tx0, _tx1)
+                _ax.set_ylim(_ty0, _ty1)
+
+                # Projections and error shading for this science panel
+                _proj(_ax, _ax_R, _ax_B, first_image, draw_right=False)
+                _finite = np.isfinite(_cutout)
+                if _mask_cut is not None:
+                    _finite &= ~_mask_cut
+                _hx = np.nanmean(_cutout, axis=0)
+                _hy = np.nanmean(_cutout, axis=1)
+                _unc2 = np.asarray(_unc_cut, dtype=float) ** 2
+                _unc2 = np.where(_finite, _unc2, 0.0)
+                _nc = np.sum(_finite, axis=0).astype(float)
+                _nr = np.sum(_finite, axis=1).astype(float)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    _exh = np.sqrt(np.sum(_unc2, axis=0)) / np.where(_nc > 0, _nc, np.nan)
+                    _eyh = np.sqrt(np.sum(_unc2, axis=1)) / np.where(_nr > 0, _nr, np.nan)
+                _yv = np.arange(_ty0, _ty1, dtype=float)
+                _ax_B.fill_between(np.arange(_tx0, _tx1), _hx - _exh, _hx + _exh, **kw_bottom)
+                _ax_B.plot(np.arange(_tx0, _tx1), _hx - _exh, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
+                _ax_B.plot(np.arange(_tx0, _tx1), _hx + _exh, color="dodgerblue", lw=0.3, alpha=0.7, drawstyle="steps-mid")
+                _ax_R.fill_betweenx(_yv, _hy - _eyh, _hy + _eyh, **kw_right)
+                _draw_right_step(_ax_R, _hy - _eyh, _ty0, _ty1, color="dodgerblue", lw=0.3, alpha=0.7)
+                _draw_right_step(_ax_R, _hy + _eyh, _ty0, _ty1, color="dodgerblue", lw=0.3, alpha=0.7)
+                _draw_right_step(_ax_R, _hy, _ty0, _ty1, color="dodgerblue")
+                _lo_r = np.nanmin(_hy - _eyh)
+                _hi_r = np.nanmax(_hy + _eyh)
+                _margin_r = (
+                    max((_hi_r - _lo_r) * 0.05, 1e-9)
+                    if np.isfinite(_hi_r - _lo_r)
+                    else 0.1
+                )
+                _ax_R.set_xlim(_lo_r - _margin_r, _hi_r + _margin_r)
+
+            # ---- Residual panel (after science columns) --------------------
+            idx = _n_target_cols
             if psfphot is not None:
                 ax2, ax2_R, ax2_B = ax_list[idx]
+                ax2.set_title("Residual", fontsize=8, pad=3)
                 cutout2 = second_image[y0:y1, x0:x1]
                 if plotTarget:
                     _, med2, std2 = sigma_clipped_stats(cutout2, sigma=3, maxiters=5)
@@ -6028,15 +6364,18 @@ class PSF:
                 )
                 _proj(ax2, ax2_R, ax2_B, second_image, draw_right=False)
 
+                # y-values for residual panel error shading (primary target zoom)
+                y_vals = np.arange(y0, y1, dtype=float)
+
                 # Error shading on residual panel (same SE of mean as science).
                 finite2 = np.isfinite(cutout2)
-                if mask_cut is not None:
-                    finite2 &= ~mask_cut
+                if _primary_mask_cut is not None:
+                    finite2 &= ~_primary_mask_cut
                 hx2 = np.nanmean(cutout2, axis=0)
                 hy2 = np.nanmean(cutout2, axis=1)
                 # Recompute SE-of-mean using the same uncertainty map but the
                 # residual panel's finite mask (NaN patterns can differ).
-                unc2_2 = np.where(finite2, unc2, 0.0)
+                unc2_2 = np.where(finite2, _primary_unc_cut, 0.0)
                 n_col2 = np.sum(finite2, axis=0).astype(float)
                 n_row2 = np.sum(finite2, axis=1).astype(float)
                 with np.errstate(divide="ignore", invalid="ignore"):
@@ -6068,7 +6407,12 @@ class PSF:
                 )
                 ax2_R.set_xlim(_lo_r - _margin_r, _hi_r + _margin_r)
 
-                _proj(ax1, ax1_R, ax1_B, fitted_model, color="#FF0000")
+                # Overlay the fitted PSF model (red) on EVERY target's
+                # profile panels, not just the primary.  _proj reads
+                # xlim/ylim from each panel's main axes to extract the
+                # correct zoom region from the full-image fitted_model.
+                for _sci_ax, _sci_ax_R, _sci_ax_B in _all_science_axes:
+                    _proj(_sci_ax, _sci_ax_R, _sci_ax_B, fitted_model, color="#FF0000")
                 idx += 1
 
             # ---- Panel 3: ePSF ---------------------------------------------
@@ -6091,18 +6435,25 @@ class PSF:
                 )
 
             # ---- Colorbars -------------------------------------------------
-            cbar1 = fig.colorbar(im1, cax=cax_list[0], orientation="horizontal")
-            cbar1.set_label("Inverted Science Flux" if is_inverted else "Science Flux")
-            cax_list[0].xaxis.set_ticks_position("top")
-            cax_list[0].xaxis.set_label_position("top")
+            # Science colorbars: one per target column (all use the same image/norm)
+            for _ci in range(_n_target_cols):
+                _cbar = fig.colorbar(
+                    im1,
+                    cax=cax_list[_ci],
+                    orientation="horizontal",
+                )
+                _cbar.set_label("Inverted Science Flux" if is_inverted else "Science Flux")
+                cax_list[_ci].xaxis.set_ticks_position("top")
+                cax_list[_ci].xaxis.set_label_position("top")
 
             if psfphot is not None:
-                cbar2 = fig.colorbar(im2, cax=cax_list[1], orientation="horizontal")
+                _residual_cax = cax_list[_n_target_cols]
+                cbar2 = fig.colorbar(im2, cax=_residual_cax, orientation="horizontal")
                 cbar2.set_label(
                     "Inverted Residual Flux" if is_inverted else second_label
                 )
-                cax_list[1].xaxis.set_ticks_position("top")
-                cax_list[1].xaxis.set_label_position("top")
+                _residual_cax.xaxis.set_ticks_position("top")
+                _residual_cax.xaxis.set_label_position("top")
 
             if epsf is not None:
                 cbar3 = fig.colorbar(im3, cax=cax_list[-1], orientation="horizontal")
@@ -6131,6 +6482,7 @@ class PSF:
                 _handles, _labels = ax1.get_legend_handles_labels()
             if _handles:
                 from matplotlib.collections import Collection as _MplCollection
+                from matplotlib.lines import Line2D as _Line2D
                 _valid = []
                 _valid_labels = []
                 for _h, _l in zip(_handles, _labels):
@@ -6139,8 +6491,23 @@ class PSF:
                         continue
                     _valid.append(_h)
                     _valid_labels.append(_l)
+                # Add target name entries to the legend so each target is
+                # identified by its marker colour (primary=white, others=muted teal).
+                if len(_target_names) > 1:
+                    for _ti, _tname in enumerate(_target_names):
+                        _mc = _tc_colors[_ti] if _ti < len(_tc_colors) else PLOT_COLORS.get('target_secondary', '#17A2B8')
+                        _valid.append(
+                            _Line2D([0], [0], marker="x", color=_mc,
+                                    markersize=6, markeredgewidth=1.5,
+                                    linestyle="None", label=_tname)
+                        )
+                        _valid_labels.append(_tname)
                 if _valid:
-                    ax1.legend(_valid, _valid_labels, loc="upper left", frameon=False, fontsize=8)
+                    _n_leg = len(_valid)
+                    _leg_ncol = 3 if _n_leg >= 8 else (2 if _n_leg >= 5 else 1)
+                    ax1.legend(_valid, _valid_labels, loc="upper left", frameon=True,
+                               facecolor="white", framealpha=1.0, edgecolor="black",
+                               fontsize=8, ncol=_leg_ncol)
             save_name_png = (
                 f"PSF_Target_{base}.png" if plotTarget else f"PSF_Subtractions_{base}.png"
             )
