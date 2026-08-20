@@ -7645,7 +7645,7 @@ NNW
                         ax1.add_patch(MplRect(
                             (sx * rebin_scale - _sq_half, sy * rebin_scale - _sq_half),
                             _sq_size, _sq_size,
-                            edgecolor="lime", facecolor="none",
+                            edgecolor="#009E73", facecolor="none",
                             linewidth=1.0, linestyle="-", zorder=6,
                         ))
                 for rx, ry in zip(
@@ -7656,11 +7656,11 @@ NNW
                         ax2.add_patch(MplRect(
                             (rx * rebin_scale - _sq_half, ry * rebin_scale - _sq_half),
                             _sq_size, _sq_size,
-                            edgecolor="lime", facecolor="none",
+                            edgecolor="#009E73", facecolor="none",
                             linewidth=1.0, linestyle="-", zorder=6,
                         ))
                 from matplotlib.lines import Line2D as _L2
-                _scamp_handle = _L2([0], [0], marker="s", color="lime",
+                _scamp_handle = _L2([0], [0], marker="s", color="#009E73",
                                    markerfacecolor="none", markersize=6,
                                    linestyle="None", label="SCAMP matched")
                 # Add to legend
@@ -7668,7 +7668,8 @@ NNW
                 handles.append(_scamp_handle)
                 labels.append("SCAMP matched")
                 ax1.legend(handles, labels, loc="lower center",
-                          bbox_to_anchor=(0.5, 1.0), frameon=False,
+                          bbox_to_anchor=(0.5, 1.0), frameon=True,
+                          facecolor="white", framealpha=1.0, edgecolor="black",
                           handlelength=1.5, handletextpad=0.5, ncol=3)
 
             # Plot remaining sources for science image

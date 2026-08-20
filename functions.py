@@ -57,6 +57,52 @@ from photutils.aperture import RectangularAperture
 # Module-level logger
 logger = logging.getLogger(__name__)
 
+# --- FITS I/O cache ---------------------------------------------------------
+# Simple mtime+size keyed cache so repeated get_header / get_image_and_header
+# calls on the same (unmodified) file avoid re-opening and re-parsing the
+# FITS file.  Entries are invalidated automatically when the file changes on
+# disk (mtime/size mismatch) or explicitly via invalidate_fits_cache().
+import threading as _threading
+
+_FITS_CACHE_LOCK = _threading.Lock()
+_FITS_HEADER_CACHE = {}   # key -> header
+_FITS_IMAGE_CACHE = {}    # key -> (image, header)
+_FITS_CACHE_MAX = 64      # max entries per cache
+
+
+def _fits_cache_key(fpath):
+    """Return a cache key tuple (path, mtime, size) or None if stat fails."""
+    try:
+        st = os.stat(fpath)
+        return (os.path.abspath(fpath), st.st_mtime, st.st_size)
+    except OSError:
+        return None
+
+
+def invalidate_fits_cache(fpath=None):
+    """Invalidate cached FITS data for *fpath* (or the entire cache if None).
+
+    Call this after an external tool (SWarp, SFFT, SCAMP, ...) modifies a
+    FITS file on disk so the next read picks up the new content.
+    """
+    with _FITS_CACHE_LOCK:
+        if fpath is None:
+            _FITS_HEADER_CACHE.clear()
+            _FITS_IMAGE_CACHE.clear()
+            return
+        abspath = os.path.abspath(fpath)
+        # Drop all keys for this path (any mtime/size variant)
+        for cache in (_FITS_HEADER_CACHE, _FITS_IMAGE_CACHE):
+            stale = [k for k in cache if k[0] == abspath]
+            for k in stale:
+                del cache[k]
+
+
+def _cache_evict(cache):
+    """Evict oldest entries if cache exceeds the max size (FIFO)."""
+    while len(cache) > _FITS_CACHE_MAX:
+        cache.pop(next(iter(cache)))
+
 
 class PlainFormatter(logging.Formatter):
     """
@@ -861,10 +907,13 @@ def beta_psf(n, flux_psf, flux_psf_err):
         Detection confidence in [0, 1]. Higher values indicate a more
         confident detection above the threshold.
     """
-    flux_psf = np.maximum(np.asarray(flux_psf, dtype=float), 0.0)
+    # Use |flux| for significance — detection confidence is symmetric
+    # (a -5 sigma dip is as significant as a +5 sigma peak).
+    # This is important for inverted fits where flux_PSF is negative.
+    flux_abs = np.abs(np.asarray(flux_psf, dtype=float))
     err = np.maximum(np.asarray(flux_psf_err, dtype=float), np.finfo(float).tiny)
     # Threshold flux = n * (1-sigma error); z-score for "flux above threshold"
-    z = (n * err - flux_psf) / (np.sqrt(2) * err)
+    z = (n * err - flux_abs) / (np.sqrt(2) * err)
     beta = np.clip(0.5 * (1 - erf(z)), 0.0, 1.0)
     return beta
 
@@ -1636,7 +1685,17 @@ def get_header(fpath):
 
     Looks for the ``TELESCOP`` keyword across HDUs and returns the first
     matching header, merging with the primary header if needed.
+
+    Results are cached by (path, mtime, size); call ``invalidate_fits_cache``
+    after external tools modify the file.
     """
+    key = _fits_cache_key(fpath)
+    if key is not None:
+        with _FITS_CACHE_LOCK:
+            cached = _FITS_HEADER_CACHE.get(key)
+            if cached is not None:
+                return cached.copy()
+
     from astropy.io.fits import getheader
     from astropy.io import fits
     try:
@@ -1675,6 +1734,11 @@ def get_header(fpath):
 
         headinfo = combined_header
 
+    if key is not None:
+        with _FITS_CACHE_LOCK:
+            _FITS_HEADER_CACHE[key] = headinfo
+            _cache_evict(_FITS_HEADER_CACHE)
+
     return headinfo
 
 
@@ -1683,9 +1747,20 @@ def get_image_and_header(fpath):
     Load FITS image and header with a single file open. Same semantics as
     get_image(fpath) and get_header(fpath), but avoids opening the file twice.
 
+    Results are cached by (path, mtime, size); call ``invalidate_fits_cache``
+    after external tools modify the file.
+
     :param fpath: Path to the FITS file.
     :return: (image, header) where image is a 2D numpy array copy and header is a copy.
     """
+    key = _fits_cache_key(fpath)
+    if key is not None:
+        with _FITS_CACHE_LOCK:
+            cached = _FITS_IMAGE_CACHE.get(key)
+            if cached is not None:
+                img, hdr = cached
+                return img.copy(), hdr.copy()
+
     import os
     from astropy.io import fits
 
@@ -1800,6 +1875,10 @@ def get_image_and_header(fpath):
                                 headinfo[key] = telescop_header[key]
                         break
             
+            if key is not None:
+                with _FITS_CACHE_LOCK:
+                    _FITS_IMAGE_CACHE[key] = (image, headinfo)
+                    _cache_evict(_FITS_IMAGE_CACHE)
             return image, headinfo
     except KeyError as e:
         raise Exception(f"KeyError: The required header keyword was not found: {e}")
@@ -2027,8 +2106,145 @@ def snr_err(snr_value):
 
 
 def quadrature_add(values):
-    """Return the quadrature sum of *values* (sqrt of sum of squares)."""
-    return np.sqrt(sum([i**2 for i in values]))
+    """Return the quadrature sum of *values* (sqrt of sum of squares).
+
+    NaN terms are **skipped**, not propagated.  This prevents a single
+    missing error term (e.g. NaN zeropoint_error) from silently zeroing
+    out the entire calibrated magnitude error budget.  If *all* terms
+    are NaN, returns NaN.
+    """
+    finite = [v for v in values if np.isfinite(v)]
+    if not finite:
+        return np.nan
+    return float(np.sqrt(sum(v ** 2 for v in finite)))
+
+
+# ---------------------------------------------------------------------------
+# Sampling regime classification (Howell 1989 sampling parameter)
+# ---------------------------------------------------------------------------
+# FWHM in pixels determines how well the PSF is sampled:
+#   < 2 px : undersampled  — PSF core spans < 2 pixels, flux concentrated
+#            in 1-2 pixels.  Need supersampled PSF, broader detection cuts,
+#            larger fixed apertures.
+#   2-3 px : critically sampled — PSF core barely resolved.  Moffat PSF
+#            with free beta, moderate apertures.
+#   3-5 px : well-sampled — standard PSF fitting, curve-of-growth apertures.
+#   > 5 px : oversampled — SNR inefficient, warn user, larger apertures.
+#
+# These thresholds are configurable via input_yaml["photometry"]:
+#   undersampled_fwhm_threshold (default 2.5) — already used by psf.py
+#   critical_fwhm_threshold (default 3.0)
+#   oversampled_fwhm_threshold (default 5.0)
+
+SAMPLING_REGIME_UNDERSAMPLED = "undersampled"
+SAMPLING_REGIME_CRITICAL = "critical"
+SAMPLING_REGIME_WELL_SAMPLED = "well_sampled"
+SAMPLING_REGIME_OVERSAMPLED = "oversampled"
+
+
+def classify_sampling_regime(
+    fwhm_px: float,
+    input_yaml: dict = None,
+) -> str:
+    """Classify the PSF sampling regime from FWHM in pixels.
+
+    Parameters
+    ----------
+    fwhm_px : float
+        FWHM in pixels.
+    input_yaml : dict, optional
+        Configuration dict with optional thresholds under
+        ``photometry``: ``undersampled_fwhm_threshold`` (default 2.5),
+        ``critical_fwhm_threshold`` (default 3.0),
+        ``oversampled_fwhm_threshold`` (default 5.0).
+
+    Returns
+    -------
+    str
+        One of ``SAMPLING_REGIME_UNDERSAMPLED``,
+        ``SAMPLING_REGIME_CRITICAL``, ``SAMPLING_REGIME_WELL_SAMPLED``,
+        ``SAMPLING_REGIME_OVERSAMPLED``.
+    """
+    if not np.isfinite(fwhm_px) or fwhm_px <= 0:
+        return SAMPLING_REGIME_WELL_SAMPLED  # safe default
+
+    phot_cfg = (input_yaml or {}).get("photometry", {}) or {}
+    under_thr = float(phot_cfg.get("undersampled_fwhm_threshold", 2.5))
+    crit_thr = float(phot_cfg.get("critical_fwhm_threshold", 3.0))
+    over_thr = float(phot_cfg.get("oversampled_fwhm_threshold", 5.0))
+
+    if fwhm_px <= under_thr:
+        return SAMPLING_REGIME_UNDERSAMPLED
+    elif fwhm_px <= crit_thr:
+        return SAMPLING_REGIME_CRITICAL
+    elif fwhm_px <= over_thr:
+        return SAMPLING_REGIME_WELL_SAMPLED
+    else:
+        return SAMPLING_REGIME_OVERSAMPLED
+
+
+def adaptive_aperture_radius(
+    fwhm_px: float,
+    input_yaml: dict = None,
+) -> float:
+    """Compute FWHM-regime-aware aperture radius in pixels.
+
+    Undersampled data needs larger fixed apertures (flux concentrated
+    in 1-2 pixels, aperture corrections are large and unstable for
+    small radii).  Well-sampled data uses the standard ~1.5*FWHM.
+
+    Parameters
+    ----------
+    fwhm_px : float
+        FWHM in pixels.
+    input_yaml : dict, optional
+        Configuration dict (for threshold lookup).
+
+    Returns
+    -------
+    float
+        Aperture radius in pixels.
+    """
+    if not np.isfinite(fwhm_px) or fwhm_px <= 0:
+        fwhm_px = 3.0  # safe default
+
+    regime = classify_sampling_regime(fwhm_px, input_yaml)
+    if regime == SAMPLING_REGIME_UNDERSAMPLED:
+        # Minimum 4 px; 2.5*FWHM captures most flux for undersampled PSFs
+        return max(4.0, 2.5 * fwhm_px)
+    elif regime == SAMPLING_REGIME_CRITICAL:
+        return 2.0 * fwhm_px
+    elif regime == SAMPLING_REGIME_OVERSAMPLED:
+        # Larger apertures proportional to FWHM
+        return 1.8 * fwhm_px
+    else:
+        # Well-sampled: standard
+        return 1.5 * fwhm_px
+
+
+def adaptive_annulus_radii(
+    fwhm_px: float,
+    input_yaml: dict = None,
+) -> tuple:
+    """Compute FWHM-regime-aware sky annulus (inner, outer) radii in pixels.
+
+    Returns
+    -------
+    tuple(float, float)
+        (inner_radius, outer_radius) in pixels.
+    """
+    if not np.isfinite(fwhm_px) or fwhm_px <= 0:
+        fwhm_px = 3.0
+
+    regime = classify_sampling_regime(fwhm_px, input_yaml)
+    if regime == SAMPLING_REGIME_UNDERSAMPLED:
+        return 6.0, 9.0  # fixed, wide annulus
+    elif regime == SAMPLING_REGIME_CRITICAL:
+        return 3.0 * fwhm_px, 4.0 * fwhm_px
+    elif regime == SAMPLING_REGIME_OVERSAMPLED:
+        return 2.5 * fwhm_px, 4.0 * fwhm_px
+    else:
+        return 2.5 * fwhm_px, 4.0 * fwhm_px
 
 
 def moffat_2d(image, x0, y0, sky, A, image_params):
@@ -2865,3 +3081,6 @@ def safe_fits_write(fpath: str, image: np.ndarray, header: fits.Header, overwrit
     except (UnicodeEncodeError, ValueError) as e:
         # If sanitization failed, try with even more lenient verification
         fits.writeto(fpath, image_to_write, sanitized_header, overwrite=overwrite, output_verify="fix")
+
+    # Invalidate any cached entry for this path so subsequent reads see the new file
+    invalidate_fits_cache(fpath)

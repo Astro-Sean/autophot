@@ -71,6 +71,7 @@ DIVERGENT_PALETTE = {
 PLOT_COLORS = {
     # --- Source markers (overlays on images) ---
     'target':          '#FF0000',   # Red – target aperture / target marker
+    'target_secondary':'#17A2B8',   # Muted teal – non-primary targets (replaces neon cyan)
     'psf':             '#00AA00',   # Green – PSF source markers
     'reference':       '#0072B2',   # Okabe blue – catalog / reference source markers
     'matched':         '#0072B2',   # Okabe blue – matched source circles (same as reference)
@@ -78,6 +79,8 @@ PLOT_COLORS = {
     'variable':        '#FFD700',   # Gold – variable source crosses and labels
     'variable_label':  '#B8860B',   # Dark goldenrod – variable source text labels
     'fwhm_sources':    'Oranges',   # Colormap name for FWHM-scaled circles
+    'epsf_aperture':   '#CC79A7',   # Okabe reddish-purple – ePSF aperture / input-position circles (replaces neon magenta)
+    'scamp_matched':   '#009E73',   # Okabe bluish-green – SCAMP matched markers (replaces neon lime)
 
     # --- Scatter / offset plots ---
     'scatter_primary':  '#0072B2',  # Okabe blue – fallback scatter when no color-coding
@@ -187,7 +190,10 @@ def ransac_legend_top_outside(ax, *, ncol: int = 2, fontsize: Optional[Union[int
     ax.legend(
         loc="lower center",
         bbox_to_anchor=(0.5, 1.0),
-        frameon=False,
+        frameon=True,
+        facecolor="white",
+        framealpha=1.0,
+        edgecolor="black",
         ncol=ncol,
         fontsize=fontsize,
     )
@@ -207,3 +213,37 @@ def set_mag_axes_inverted_xy(ax):
     """Standard magnitude axis orientation (brighter up/left) for x and y."""
     ax.invert_xaxis()
     ax.invert_yaxis()
+
+
+def add_clean_legend(ax, labels=None, *, loc="best", bbox_to_anchor=None, **kwargs):
+    """Place a legend with automatic ``ncol`` and a non-overlapping layout.
+
+    Picks the number of columns from the handle count so wide legends stay
+    compact (>=8 handles -> 3 cols, >=5 -> 2 cols, else 1 col), and defaults
+    to an opaque white frame so the legend stays readable over data.  Any
+    caller-supplied ``kwargs`` (e.g. ``fontsize``, ``ncol``) override the
+    defaults.  Use ``bbox_to_anchor`` to move the legend outside the axes
+    when it would otherwise cover titles, labels, or key features.
+
+    Returns the created ``Legend`` (or ``None`` if there are no handles).
+    """
+    handles, leg_labels = ax.get_legend_handles_labels()
+    if labels is not None:
+        leg_labels = labels
+    if not handles:
+        return None
+    n = len(handles)
+    ncol = 3 if n >= 8 else (2 if n >= 5 else 1)
+    defaults = dict(
+        loc=loc,
+        frameon=True,
+        facecolor="white",
+        framealpha=1.0,
+        edgecolor="black",
+        fontsize=8,
+        ncol=ncol,
+    )
+    if bbox_to_anchor is not None:
+        defaults["bbox_to_anchor"] = bbox_to_anchor
+    defaults.update(kwargs)
+    return ax.legend(handles, leg_labels, **defaults)

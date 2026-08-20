@@ -22,7 +22,7 @@ import pathlib
 import glob
 import shutil
 from functions import set_size, get_distance_modulus
-from plotting_utils import get_marker_size
+from plotting_utils import get_marker_size, apply_autophot_mplstyle
 from astropy.time import Time
 from collections import Counter
 from pathlib import Path
@@ -94,10 +94,10 @@ cols = {
     "S": "mediumorchid",
     "D": "purple",
     "A": "midnightblue",
-    "F": "hotpink",
-    "N": "magenta",
+    "F": "#8E4585",
+    "N": "#CC79A7",
     "o": "darkorange",
-    "c": "cyan",
+    "c": "#17A2B8",
     "W": "forestgreen",
     "Q": "peru",
 }
@@ -150,7 +150,7 @@ COLOR_INDEX_COLORS = {
     "V-R": "#FFD700",
     "V-I": "#FF8C00",
     "R-I": "#FF6347",
-    "B-R": "#00CED1",
+    "B-R": "#3B9AB2",
     "B-I": "#1E90FF",
     "V-J": "#BDB76B",
     "V-K": "#6B8E23",
@@ -220,6 +220,46 @@ def filter_value_matches_band(band_char: str, raw_filter) -> bool:
         return canon == bc
     except Exception:
         return False
+
+
+def _filter_series_matches_band(band_char: str, fser: pd.Series) -> pd.Series:
+    """Vectorized-friendly version of filter_value_matches_band for a Series.
+
+    Pre-computes the canonical mapping for *unique* filter values only (typically
+    1-5) instead of calling _heuristic_filter_mapping per row (hundreds+).
+    Returns a boolean Series aligned to *fser*.
+    """
+    bc = str(band_char).strip().lower()
+    if not bc:
+        return pd.Series(False, index=fser.index)
+
+    # Fast path: direct string match (no import needed)
+    rs_lower = fser.astype(str).str.strip().str.lower()
+    direct_match = rs_lower == bc
+
+    # Slow path: only for rows that didn't match directly, compute canonical form
+    # Pre-compute for unique values only to minimize _heuristic_filter_mapping calls
+    needs_canon = ~direct_match & fser.notna()
+    if not needs_canon.any():
+        return direct_match.fillna(False)
+
+    try:
+        from main import _heuristic_filter_mapping
+    except Exception:
+        return direct_match.fillna(False)
+
+    unique_vals = fser[needs_canon].unique()
+    canon_map = {}
+    for uv in unique_vals:
+        try:
+            canon_map[uv] = str(_heuristic_filter_mapping(str(uv).strip())).strip().lower()
+        except Exception:
+            canon_map[uv] = ""
+
+    canon_match = fser[needs_canon].map(canon_map).eq(bc)
+    result = direct_match.copy()
+    result[needs_canon] = canon_match
+    return result.fillna(False)
 
 
 def photometry_filter_series(df: pd.DataFrame):
@@ -707,6 +747,7 @@ def plot_lightcurve(
     # so that plt.show() actually displays the window when show=True.
     # plt.switch_backend() works after pyplot is already imported, unlike
     # matplotlib.use() which silently fails once pyplot is loaded.
+    apply_autophot_mplstyle()
     if show:
         import matplotlib
 
@@ -891,7 +932,7 @@ def plot_lightcurve(
         # the full table and the last-drawn band's color dominates (appears "all red").
         if long_form_uniform and fser_disc is not None and fser_disc.notna().any():
             try:
-                m = fser_disc.map(lambda rv: filter_value_matches_band(band, rv)).fillna(False)
+                m = _filter_series_matches_band(band, fser_disc)
                 df = data[m & np.isfinite(data[zp_col])].copy()
             except Exception:
                 df = data[np.isfinite(data[zp_col])].copy()
@@ -1291,7 +1332,8 @@ def plot_lightcurve(
         labels,
         loc="best",
         frameon=True,
-        framealpha=0.95,
+        facecolor="white",
+        framealpha=1.0,
         edgecolor="black",
         ncol=ncol,
     )
@@ -1324,11 +1366,15 @@ def plot_lightcurve(
             ["Positive flux", "Negative flux"],
             loc="lower right",
             frameon=True,
-            framealpha=0.95,
+            facecolor="white",
+            framealpha=1.0,
             edgecolor="black",
         )
 
-    # No plot titles; keep the legend/axis labels only.
+    # No plot titles by default; but if target_name is supplied, use it as
+    # a suptitle so multi-target lightcurves are distinguishable.
+    if target_name:
+        fig.suptitle(str(target_name), fontsize=11, y=0.98)
 
     ax0.invert_yaxis()
 
@@ -1350,8 +1396,8 @@ def plot_lightcurve(
             col2, err2, zp2 = t2
             fser = photometry_filter_series(data)
             if fser is not None:
-                m1 = fser.map(lambda rv: filter_value_matches_band(b1, rv)).fillna(False)
-                m2 = fser.map(lambda rv: filter_value_matches_band(b2, rv)).fillna(False)
+                m1 = _filter_series_matches_band(b1, fser)
+                m2 = _filter_series_matches_band(b2, fser)
                 d1 = data[m1 & np.isfinite(data[zp1])].copy()
                 d2 = data[m2 & np.isfinite(data[zp2])].copy()
             else:
@@ -1558,11 +1604,25 @@ def plot_lightcurve(
                     ls="",
                     zorder=2,
                 )
-        color_ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False)
+        color_ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
+                        frameon=True, facecolor="white", framealpha=1.0,
+                        edgecolor="black")
         color_ax.invert_yaxis()
     # fig.tight_layout()
 
-    outname = f'LightCurve_{method}_{"single" if single_plot else "subplots"}.{format}'
+    # Include target name in the output filename so additional-target
+    # lightcurves don't overwrite the primary target's plot.
+    _plot_tag = f'LightCurve_{method}_{"single" if single_plot else "subplots"}'
+    if target_name:
+        _safe_tn = (
+            str(target_name)
+            .strip()
+            .replace(" ", "_")
+            .replace("/", "_")
+            .replace("\\", "_")
+        )
+        _plot_tag = f'{_plot_tag}_{_safe_tn}'
+    outname = f'{_plot_tag}.{format}'
     outpath = os.path.join(save_path, outname)
     save_kw = dict(dpi=dpi) if format.lower() != "pdf" else {}
     plt.savefig(outpath, **save_kw, bbox_inches="tight", facecolor="white")
@@ -1611,6 +1671,7 @@ def generate_photometry_table(
     include_color_table=True,
     color_match_days=0.5,
     input_yaml=None,
+    target_name=None,
 ):
     """Generate a photometry table with MJD, ISO date, magnitude, error, filter, and limit value.
     Optionally build a same-night colour evolution table (e.g. g-r, r-i).
@@ -1915,7 +1976,17 @@ def generate_photometry_table(
         out_phot.reset_index(drop=True, inplace=True)
 
     save_path = os.path.dirname(output_file)
-    fname = os.path.join(save_path, f"LightCurve_{method}.dat")
+    _table_tag = f"LightCurve_{method}"
+    if target_name:
+        _safe_tn = (
+            str(target_name)
+            .strip()
+            .replace(" ", "_")
+            .replace("/", "_")
+            .replace("\\", "_")
+        )
+        _table_tag = f"{_table_tag}_{_safe_tn}"
+    fname = os.path.join(save_path, f"{_table_tag}.dat")
     # Uniform numeric formatting; non-detections use NaN for Mag/Error (written as empty or "-")
     out_phot.to_csv(fname, index=False, float_format="%.3f", na_rep="-")
 
@@ -2108,7 +2179,7 @@ def generate_photometry_table(
             color_df = pd.DataFrame(color_rows)
             color_df.sort_values(["MJD", "Color"], inplace=True)
             color_table_path = os.path.join(
-                save_path, f"LightCurve_{method}_Colors.dat"
+                save_path, f"{_table_tag}_Colors.dat"
             )
             color_df.to_csv(
                 color_table_path, index=False, float_format="%.3f", na_rep="-"
@@ -2243,7 +2314,7 @@ def check_detection_plots(output_file, method="PSF", *, snr_limit: float = 3.0, 
     assigned_group_by_src = {}
     copied_pairs = set()
 
-    for _, row in data.iterrows():
+    for row in data.to_dict("records"):
         try:
             # `filename` may be either a base stem (new) or a full path (legacy).
             # Prefer `filename_path` when present so we can locate plot files.

@@ -20,6 +20,15 @@ default_input:
   target_ra: null # float --- Target right ascension (degrees, FK5/J2000).
   target_dec: null # float --- Target declination (degrees, FK5/J2000).
 
+  # Additional targets to fit simultaneously with the primary target.
+  # Useful when a nearby contaminating source (e.g. another transient or
+  # bright star) biases the primary target's PSF flux.  All listed targets
+  # are fit together in a single grouped PSF fit so that overlap/blending is
+  # handled self-consistently.  Each additional target gets its own per-image
+  # output CSV and its own lightcurve plot.
+  additional_targets: null # list[str]|null --- Names of additional targets to resolve via TNS (then SIMBAD fallback), e.g. ['SN2021gmj'].
+  additional_targets_ra_dec: null # list[list[float]]|null --- Explicit [RA, Dec] pairs (degrees) for additional targets, e.g. [[123.456, +45.678], [...]]. Used when names are not available or to skip name resolution.
+
   nCPU: 1 # int --- Number of CPU workers used for image-level parallelism (1=serial).
 
   restart: True # bool --- If True, reprocess all files (ignore existing outputs where applicable).
@@ -60,6 +69,9 @@ default_input:
     # - For discovery-style automated source detection: set detection_limit=5.0 to match ZTF/LSST
     # - The upper_limit_snr=5.0 (SNU=5 in ZTF) is used for upper limits on non-detections
     detection_limit: 3.0 # float --- S/N threshold for declaring a forced-photometry measurement a "detection" in the output (SNT in ZTF terminology). Forced photometry is always performed at the target position; this only controls the detection flag. ZTF/LSST automated source detection typically uses 5.0 sigma, but for forced photometry at known coordinates (ZTF forced-photometry service) SNT=3 is common.
+    detection_max_chi2: 10.0 # float --- Maximum reduced chi-squared for a PSF fit to qualify as a detection. High chi2 indicates the PSF model failed and the flux measurement is unreliable. Default 10.0 is permissive; tighten to 5.0 for stricter quality control.
+    detection_flux_consistency: True # bool --- If True, require PSF and aperture flux to agree in sign for a detection. Disagreement indicates a subtraction artifact rather than a real transient.
+    detection_ap_fallback_ratio: 1.5 # float --- AP SNR fallback ratio: when PSF SNR is below threshold but AP SNR >= threshold * this ratio, flag as detection. AP is more robust for faint sources with PSF model mismatch.
     upper_limit_snr: 5.0 # float --- S/N threshold for reporting upper limits for non-detections (SNU in ZTF terminology). If the multi-SNR limiting-magnitude machinery includes this threshold, the corresponding limit is used for non-detection upper limits; otherwise the 50% completeness limit is used.
     aperture_size: 1.7 # float --- Aperture radius in units of FWHM (pixels = `aperture_size * fwhm`).
     enforce_nonnegative_local_background: False # bool --- If True, clamp annulus-estimated local background to >=0 before subtraction (prevents flux inflation when local sky is negative from over-subtraction/miscalibration).
@@ -80,6 +92,7 @@ default_input:
     crowded_field: False # bool --- Photometry crowded-field toggle (affects source selection/cleaning heuristics where implemented).
     redo_sources: False # bool --- If True, redo source detection/photometry even if intermediate outputs exist.
     fitting_xy_bounds: 1.0 # float --- Allowed X/Y fitting offset bound in arcseconds; converted to pixels using image pixel_scale.
+    fitting_xy_bounds_target_fwhm: 1.5 # float --- Minimum X/Y fitting offset bound for TARGET fits, in FWHM units. Ensures the target PSF fit can re-center robustly even when fitting_xy_bounds in pixels is smaller than the FWHM (e.g. coarse pixel scales like ZTF). The larger of this FWHM-relative floor and fitting_xy_bounds is used. Clamped to [0.5, 5.0] FWHM.
     lpi_background_for_target: False # bool --- (In development) If True, apply an LPI-style local background infill under the transient (structured background robustness). Paper: `https://iopscience.iop.org/article/10.3847/1538-4357/ac6875`
     lpi_inner_radius_scale_fwhm: 1.5 # float --- (In development) Hidden-region radius (pixels) = scale * FWHM for LPI-style infill (region treated as "behind the PSF core").
     lpi_outer_radius_scale_fwhm: 4.5 # float --- (In development) Good-pixel outer radius (pixels) = scale * FWHM for LPI-style infill conditioning region.
@@ -119,12 +132,20 @@ default_input:
     psf_contam_border_excess_sigma: 3.0 # float --- Max sigma excess of cutout border pixel median over local background before rejecting cutout (neighbour flux at cutout boundary).
     psf_contam_border_max_sigma: 8.0 # float --- Max sigma excess of any single border pixel over local background before rejecting cutout (trail/streak crossing cutout boundary).
     psf_contam_radial_reversal_frac: 0.3 # float --- Max fractional increase (in ann_std units) allowed between consecutive concentric rings before rejecting cutout (contaminating source in outer region).
+    psf_contam_secondary_peak_sigma: 5.0 # float --- Min sigma of a secondary peak in the core region (within 2*FWHM of center) above background before rejecting cutout (blended neighbour in core).
+    psf_contam_streak_sigma: 5.0 # float --- Min sigma excess of any row, column, or diagonal median in the annulus above the annulus median before rejecting cutout (satellite trail or cosmic-ray streak).
     psf_threshold_limit: 5.0 # float --- Minimum detection threshold for PSF-star candidates (lower is less restrictive).
     psf_snr_min: 5.0 # float --- Minimum SNR for PSF-star candidates.
     psf_snr_max: 1000000.0 # float --- Maximum SNR for PSF-star candidates.
     psf_build_min_keep_frac_after_cut: 0.60 # float --- Do not apply a threshold/SNR cut if it would keep fewer than this fraction of current candidates.
     psf_preselect_factor: 1.3 # float --- Candidate preselection factor before spatial downselection (closer to 1.0 is less restrictive).
     undersampled_fwhm_threshold: 2.5 # float --- Treat FWHM <= this value (pixels) as undersampled for PSF build/fit behavior.
+    critical_fwhm_threshold: 3.0 # float --- FWHM <= this (and > undersampled threshold) is critically sampled. Affects detection params and aperture sizing.
+    oversampled_fwhm_threshold: 5.0 # float --- FWHM > this value is oversampled (SNR inefficient); triggers a warning and larger apertures.
+    systematic_error_floor_mag: 0.0 # float --- Systematic error floor (mag) added in quadrature to all calibrated magnitude errors. Covers flat-fielding (0.5-2%), PSF model error (0.01-0.05 mag), and other untracked systematics. 0.0 = disabled. Typical value: 0.01-0.03 mag.
+    subtraction_downgrade_sys_err_mag: 0.05 # float --- Systematic error (mag) added in quadrature to difference-image photometry when subtraction quality is "downgrade". Covers dipole residuals and correlated noise. Set to 0 to disable.
+    subtraction_fail_sys_err_mag: 0.15 # float --- Systematic error (mag) added in quadrature to difference-image photometry when subtraction quality is "fail". Photometry is unreliable; this large floor prevents false precision. Set to 0 to disable.
+    strict_subtraction_quality: False # bool --- If True, block photometry (return NaN) when diff_quality_class is "fail" instead of adding a systematic error. Use for automated pipelines where unreliable measurements should be suppressed rather than flagged.
     psf_disable_build_quality_cuts_undersampled: True # bool --- In undersampled regime, disable strict threshold/SNR candidate cuts to avoid over-pruning.
     psf_build_sampling_boost_max: 1.6 # float --- Maximum adaptive build-window boost for normal sampling.
     psf_build_sampling_boost_max_undersampled: 2.2 # float --- Maximum adaptive build-window boost for undersampled images.
@@ -378,7 +399,7 @@ default_input:
     injection_strategy: ring_quiet # str --- Local-only injection placement near transient: "ring_quiet" (default; fixed-radius ring), or "annulus_random" (random points inside [inject_min_radius_fwhm, inject_max_radius_fwhm]).
     inject_min_radius_fwhm: 2.0 # float --- Minimum injection radius from the transient (in FWHM units). Prevents injecting on top of the transient.
     inject_max_radius_fwhm: 6.0 # float --- Maximum injection radius from the transient (in FWHM units) when searching for quiet injection sites.
-    inject_use_quiet_sites: false # bool --- If false (default), use a spatially uniform random draw from valid sites for representative limiting magnitude. If true, select only "quiet" (low-|S/N|) sites, which biases the limit spuriously faint by injecting only into the cleanest sky patches.
+    inject_use_quiet_sites: false # bool --- If false (default), use a spatially uniform farthest-point draw from valid sites for representative limiting magnitude. If true, select only "quiet" (low-|S/N|) sites, which biases the limit spuriously faint by injecting only into the cleanest sky patches.
     inject_max_variance_ratio: 3.0 # float --- Pixel-statistics site filter: reject sites whose aperture-pixel variance exceeds this multiple of the expected background variance (from RMS map or local annulus MAD). Catches bright-star template subtraction residuals whose noise is elevated even when their mean is near zero. Set to 0 to disable.
     inject_max_abs_mean_sigma: 2.5 # float --- Pixel-statistics site filter: reject sites whose aperture mean deviates from the local annulus mean by more than this many sigma. Catches positive/negative subtraction pedestals. Set to 0 to disable.
     initial_guess_n_samples: 24 # int --- Number of annulus probe positions used to estimate the injected-limit initial instrumental magnitude.
@@ -386,7 +407,9 @@ default_input:
     initial_guess_sigma_mult: 5.0 # float --- Initial injected-limit guess uses flux ~= (this * sigma_sky * sqrt(Npix)) from annulus probe measurements; converted to instrumental magnitude.
     scale_growth_factor: 1.5 # float --- If no quiet injection sites are found, multiply runtime `scale` by this factor and retry (up to scale_growth_max_px).
     scale_growth_max_px: 600 # int --- Maximum runtime `scale` (pixels) allowed during limiting-magnitude quiet-site retries.
-    injection_n_sites: 25 # int --- Number of quiet injection sites around the target used for injection/recovery trials (more = smoother completeness curve; slower). Default 100, max 500.
+    injection_n_sites: 25 # int --- Legacy: Number of quiet injection sites around the target used for injection/recovery trials. Prefer inject_final_n_sites.
+    inject_final_n_sites: 100 # int --- Target number of final injection sites after filtering and spatial selection (default 100, clamped 10-500). Sites are distributed uniformly around the target via farthest-point sampling.
+    inject_candidate_n_sites: 0 # int --- Candidate pool size before filtering (0 = auto-size to 3x final count, min 150, max 5000). Larger pools improve quiet-site ranking but increase measurement cost.
     injection_jitter_repetitions: 3 # int --- Sub-pixel jitter repetitions per site per magnitude (more = smoother completeness curve; slower).
     completeness_plot_span_mag: 0.8 # float --- Half-span (mag) around the adopted limit used for the completeness plot sampling range (smaller = fewer bins far from transition).
     completeness_plot_nmags: 9 # int --- Number of magnitudes sampled across completeness_plot_span_mag for the completeness bar chart.
@@ -503,7 +526,7 @@ default_input:
     sextractor_crowded: False # bool --- Use crowded-field SExtractor settings for subtraction/source selection (if supported).
     sfft_crowded_method: False # bool --- Force SFFT crowded-field configuration (overrides auto logic). Default False (sparse) for better performance.
     sfft_const_phot_ratio: False # bool --- SFFT ConstPhotRatio; False fits flux scaling polynomial (spatially-varying, like HOTPANTS). True enforces constant photometric ratio (can cause oversubtraction when flux varies).
-    sfft_only_flags: [0, 1, 2, 3, 16, 17, 18, 19] # list[int]|null --- SExtractor FLAGS values kept by SFFT source selection (null disables flag filtering). FLAGS=3 (blended) is common in dense fields; FLAGS=16+ (near invalid/NaN pixels) common in masked images. Restrictive [0,1,2] rejects most sources in ZTF and similar surveys.
+    sfft_only_flags: [0, 1, 16, 17] # list[int]|null --- SExtractor FLAGS values kept by SFFT source selection (null disables flag filtering). Excludes blended sources (FLAGS & 2) which have unreliable photometry and bias the SFFT flux scaling. FLAGS=1 (near edge) and FLAGS=16 (near NaN) are kept since they are common in masked/resampled images and do not bias photometry. If too few sources survive, run_sfft.py falls back to permissive flags [0,1,2,3,16,17,18,19] automatically.
     sfft_allow_crowded_bg_order_override: False # bool --- If True, crowded SFFT may override bg_order=0 to 2 for stability.
     sfft_cvrej_magd_thresh: 0.12 # float --- Coarse variable-rejection magnitude-difference threshold (lower is stricter).
     sfft_coarse_var_rejection: False # bool --- Enable SFFT coarse variable-star rejection. When True, sources with magnitude differences exceeding sfft_cvrej_magd_thresh are excluded from the kernel fit. Disabled by default - in sparse fields with PSF differences, this rejects most sources (e.g. 14/15 killed with 0.12 mag threshold) because aperture mag differences are caused by PSF mismatch, not variability.
@@ -513,8 +536,9 @@ default_input:
     sfft_pac_ratio_thresh: 4.0 # float --- Post-anomaly-check ratio threshold for SFFT source filtering.
     sfft_use_post_anomaly_feedback: True # bool --- If True, run one extra SFFT pass using MeLOn post-anomaly sources as additional banned priors.
     sfft_post_anomaly_min_count: 1 # int --- Minimum number of post-anomaly sources required before feedback retry is triggered. 1=retry on any anomaly (aggressive). 3=only retry when multiple sources flag anomalies (conservative).
-    sfft_post_anomaly_max_fraction: 0.80 # float --- Skip feedback retry if post-anomaly count exceeds this fraction of prior-selected sources.
+    sfft_post_anomaly_max_fraction: 0.80 # float --- Warning threshold for post-anomaly fraction. When exceeded, feedback retry still proceeds but logs a warning that the kernel fit was poor. (Previously a hard skip; high anomaly fraction now triggers retry rather than skipping it.)
     sfft_post_anomaly_match_radius_px: 1.5 # float --- Radius (pixels) for removing prior-selected matches near post-anomaly sources on retry.
+    sfft_flux_discrepancy_retry_pct: 3.0 # float --- Flux scaling discrepancy percentage threshold that triggers a retry with higher kernel_order. When convolution vs photometric flux scaling mismatch exceeds this, SFFT retries with kernel_order+1 (capped at 2) if enough sources are available. Set to a large value (e.g. 100) to disable.
     sfft_pass_masked_sources: False # bool --- If True, pass excluded/masked sources to SFFT via -masked_sources argument. If False, SFFT will not receive source bans from the pipeline.
     sfft_manual_matching_sources: null # list[list[float]]|null --- Optional list of [x, y] pixel coordinates to use as prior matching sources for SFFT. If provided, overrides automatic source matching. Example: [[100.5, 200.3], [150.2, 300.1]]
 
@@ -524,19 +548,52 @@ default_input:
     sfft_save_decorrelated: False # bool --- Save decorrelated difference image separately as *_decorr.fits. Disabled by default since decorrelation is off.
     sfft_kernel_hw_min: 3 # int --- Minimum kernel half-width in pixels (ensures at least 7x7 kernel for stability).
     sfft_kernel_hw_max: 50 # int --- Maximum kernel half-width in pixels (prevents excessive computation for very large FWHM differences).
-    sfft_min_prior_sources: 10 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT performs its own matching; this avoids under-constrained sparse prior lists. With <10 priors, SFFT's internal SExtractor typically finds 20-30 matched sources, giving a better constrained kernel.
-    sfft_min_class_star: 0.0 # float --- Minimum SExtractor CLASS_STAR for SFFT kernel sources. 0=disabled (default). SFFT does its own source vetting (SExtractor FLAGS, cross-match, PostAnomaly, CVREJ/EVREJ), so pre-filtering by CLASS_STAR is redundant and harmful after spline-warp alignment (distorts PSF, lowers CLASS_STAR for real point sources). Set >0 (e.g. 0.7) only if you have a dense field and want stricter pre-filtering.
+    sfft_min_prior_sources: 3 # int --- Minimum number of prior sources required to use them for kernel fitting. If fewer sources are provided, SFFT performs its own matching. Default 3 (lowered from 10): pipeline-vetted sources are higher quality than SFFT's own matching (which allows blended sources). With >=3 vetted sources, SFFT uses them as preferred priors.
+    sfft_min_class_star: 0.4 # float --- Minimum SExtractor CLASS_STAR (0=extended, 1=point-like) for SFFT kernel sources. Default 0.4 rejects obvious galaxies. Set 0 to disable. Ignored for undersampled images (FWHM < 2.5px).
     sfft_max_ellipticity: 0.5 # float --- Maximum SExtractor ellipticity for SFFT kernel sources. 0.5=permissive (default), >=1.0=disabled. SFFT vets its own sources; this is only a coarse pre-filter for obviously elongated objects.
+    sfft_hard_max_elongation: 1.5 # float --- HARD maximum A/B elongation ratio for SFFT kernel sources. Sources with ELONGATION > 1.5 are ALWAYS rejected (no 5-source safety bypass). Elongated sources are blended, extended, or distorted — never suitable for kernel fitting. 1.0=disabled.
+    sfft_fft_rejection: True # bool --- If True, reject SFFT kernel sources whose 2D FFT power spectrum deviates > sfft_fft_n_sigma from the median across all sources. Same technique as PSF build (psf.py detect_fft_outliers). Catches extended/blended/spike-contaminated sources that pass catalog-level cuts.
+    sfft_fft_n_sigma: 4.0 # float --- FFT power-spectrum outlier threshold in sigma (MAD-based). Sources whose median per-frequency deviation exceeds this are rejected. 4.0 = strict (same as PSF build). A relaxed retry at 1.5x this value is attempted if the strict cut leaves too few sources.
     sfft_fwhm_ratio_nsigma: 0.0 # float --- Cross-image FWHM consistency: reject sources whose FWHM ratio (sci/ref) deviates more than this many sigma (MAD) from the median log-ratio. Catches sources blended in one image but isolated in the other. 0=disabled (default). Enable (e.g. 3.0) only if kernel fits are poor and blended sources are suspected.
     sfft_fwhm_ratio_min: 0.5 # float --- Cross-image FWHM consistency: hard minimum on FWHM ratio (sci/ref). Only active when sfft_fwhm_ratio_nsigma > 0.
     sfft_fwhm_ratio_max: 2.0 # float --- Cross-image FWHM consistency: hard maximum on FWHM ratio (sci/ref). Only active when sfft_fwhm_ratio_nsigma > 0.
     sfft_flux_ratio_max_deviation: 0.0 # float --- Cross-image flux-ratio sanity: reject sources whose flux ratio (sci/ref) deviates from the median by more than this factor. Catches mismatched sources, variables, and contamination. 0=disabled (default). RANSAC in find_flux_consistent_sources already does fine filtering; enable only if mismatched sources are suspected.
-    sfft_max_cfit: 0.0 # float --- Maximum PSF fit concentration (cfit) for SFFT kernel sources. High cfit = extended/blended. 0=disabled (default). SFFT does its own source vetting; enable only if kernel fits are poor.
-    sfft_max_qfit: 0.0 # float --- Maximum PSF fit goodness-of-fit (qfit) for SFFT kernel sources. High qfit = bad PSF fit. 0=disabled (default). SFFT does its own source vetting; enable only if kernel fits are poor.
-    sfft_max_reduced_chi2: 0.0 # float --- Maximum PSF fit reduced chi-squared for SFFT kernel sources. High chi2 = poor model fit. 0=disabled (default). SFFT does its own source vetting; enable only if kernel fits are poor.
-    sfft_max_psf_flags: -1 # int --- Maximum PSF fit flags value for SFFT kernel sources. Non-zero flags indicate fit problems (blend, edge, etc). -1=disabled (default). SFFT does its own source vetting; set 0 to reject any flagged source.
-    sfft_allow_unvetted_source_retry: False
+    sfft_flux_mag_residual_threshold: 0.0 # float --- Maximum magnitude residual for flux-consistent source selection (mag). 0=use built-in default (0.3 mag). Tighter values (e.g. 0.15) reject variable/mismatched sources more aggressively before passing to SFFT. Recommended when SFFT PostAnomaly rejects many sources.
+    sfft_flux_linearity_min_corr: 0.90 # float --- Minimum Pearson correlation between science and template magnitudes for flux-consistent sources. Below this, the relationship is non-linear (variables/mismatches present). Warning only; does not reject sources by default.
+    sfft_flux_linearity_max_resid_corr: 0.50 # float --- Maximum absolute Spearman correlation between magnitude and fit residuals. Above this, residuals trend with magnitude (non-linear/curved relationship), indicating flux-dependent bias or variables. Sources following the trend are rejected.
+    sfft_min_consistent_for_nan_add: 10 # int --- Minimum number of flux-consistent sources required before NaN-flux (position-only) sources are added back for SFFT priors. Prevents unvetted sources from dominating the kernel fit when few consistent sources exist.
+    sfft_flux_fallback_max_sources: 30 # int --- Maximum number of sources used in the fallback when flux consistency returns < 5 sources. Sources are ranked by SNR/threshold and the top N are kept. Prevents all sources (including non-linear/variable) from being passed to SFFT.
+    sfft_stamp_contam_sigma: 5.0 # float --- Pixel-level stamp contamination: minimum sigma above background for a secondary peak within the kernel stamp to reject a source. Prevents uncatalogued neighbours from contaminating the SFFT kernel fit.
+    sfft_stamp_contam_frac: 0.3 # float --- Pixel-level stamp contamination: minimum fraction of central source flux for a secondary peak to reject the source. Catches bright uncatalogued sources within the stamp that would bias the kernel.
+    sfft_defects_stamp_radius: 0 # int --- Radius (px) of stamp to check around each matching source for diffraction spike/trail contamination. 0 = auto (uses kernel half-width). Sources with > sfft_defects_max_frac of the stamp masked by hardware defects are rejected.
+    sfft_defects_max_frac: 0.15 # float --- Maximum fraction of the stamp that can be covered by hardware defects (saturation streaks, satellite trails, NaN) before the source is rejected. Lower = stricter; 0.15 means >15% contaminated stamps are rejected.
+    sfft_bright_star_reject: True # bool --- If True, reject matching sources within sfft_bright_star_radius_fwhm * FWHM of any bright star (peak > sfft_bright_star_n_sigma * sigma above background). Prevents contamination from diffraction spikes and PSF wings of bright stars.
+    sfft_bright_star_n_sigma: 50.0 # float --- Bright star detection threshold in sigma above background. 50 sigma catches saturated/near-saturated stars with diffraction spikes. Lower (e.g., 30) catches more stars but may reject good sources.
+    sfft_bright_star_radius_fwhm: 5.0 # float --- Exclusion radius around bright stars in units of FWHM. 5*FWHM covers the typical extent of diffraction spikes. Increase for telescopes with strong spike patterns.
+    sfft_max_cfit: 5.0 # float --- Maximum PSF fit concentration (cfit) for SFFT kernel sources. High cfit = extended/blended. Default 5.0 rejects obviously extended sources. 0=disabled.
+    sfft_max_qfit: 1.0 # float --- Maximum PSF fit goodness-of-fit (qfit) for SFFT kernel sources. High qfit = bad PSF fit = extended/blended. Default 1.0 rejects sources where residuals are as large as the source. 0=disabled.
+    sfft_max_reduced_chi2: 10.0 # float --- Maximum PSF fit reduced chi-squared for SFFT kernel sources. High chi2 = poor model fit = extended or variable. Default 10.0 is permissive. 0=disabled.
+    sfft_max_psf_flags: -1 # int --- Maximum PSF fit flags value for SFFT kernel sources. Non-zero flags indicate fit problems (blend, edge, etc). -1=disabled (default). Set 0 to reject any flagged source.
+    sfft_max_fwhm_ratio: 2.0 # float --- Maximum ratio of source FWHM to image PSF FWHM. Sources with FWHM > 2x the image PSF are extended (galaxies, nebulae) and rejected from kernel fitting. 0=disabled.
+    sfft_point_source_min_ellip: 0.3 # float --- SFFT PointSource_MINELLIP: minimum ellipticity for point-source classification in SFFT's own source vetting. Sources with ellipticity below this are considered extended. Default 0.3 (SFFT default). Lower = more permissive.
+    sfft_allow_unvetted_source_retry: True # bool --- If True, keep vetted prior sources even when < sfft_min_prior_sources; SFFT uses them as preferred sources and may supplement with its own detections. Default True: pipeline-vetted sources are higher quality than SFFT's own matching.
     sfft_timeout: 600 # int --- SFFT subprocess timeout in seconds. 600=10min (default). Large images or crowded fields with kernel_order>=1 may need 900+. Timeout triggers fallback to HOTPANTS.
+
+    # --- Difference-image quality assessment (utils/difference_quality.py) ---
+    # The pipeline computes a structured quality score on every difference image,
+    # including dipole detection, bright-star residual flux, spatial background
+    # variation, residual autocorrelation, and edge artifacts.  The result is
+    # written to the difference image FITS header (DIFFQUAL, DIFFQSCR, etc.)
+    # and a machine-readable JSON manifest (diff_quality_<base>.json).
+    diffqual_dipole_n_sigma: 5.0 # float --- Residual threshold (in sigma) for dipole detection around known sources.
+    diffqual_dipole_radius_fwhm: 1.5 # float --- Search radius for anti-symmetric dipole pairs, in units of FWHM.
+    diffqual_dipole_max_frac_pass: 0.05 # float --- Max fraction of sources with dipoles for "pass" classification (5%).
+    diffqual_dipole_max_frac_fail: 0.20 # float --- Fraction above which quality "fails" (20%). Between pass and fail = "downgrade".
+    diffqual_bright_star_n_sigma: 50.0 # float --- Stars brighter than this sigma are checked for residual flux.
+    diffqual_bright_star_max_resid_sigma: 3.0 # float --- Max allowed bright-star residual RMS in sigma units.
+    diffqual_edge_max_std_ratio: 2.0 # float --- Max allowed edge/std ratio before edge artifacts are flagged.
+    diffqual_pass_threshold: 0.75 # float --- Overall quality score threshold for "pass" classification.
+    diffqual_downgrade_threshold: 0.50 # float --- Score below this = "fail"; between this and pass_threshold = "downgrade".
 
     inpaint_template_cores: False # bool --- Inpaint saturated template star cores before subtraction (helps when template has broken cores).
     inpaint_method: biharmonic # str --- Inpainting algorithm name (e.g. biharmonic).
