@@ -851,6 +851,7 @@ def compute_alignment_rms(
     fwhm_pixels: float,
     input_yaml: Optional[Dict[str, Any]] = None,
     sci_xy_override: Optional[np.ndarray] = None,
+    return_per_quadrant: bool = False,
 ) -> Optional[tuple]:
     """
     Compute robust alignment quality from pre-loaded arrays.
@@ -868,6 +869,13 @@ def compute_alignment_rms(
     with known reference counterparts are used.
 
     Returns (median_offset, rms, p90) tuple in pixels, or None if measurement fails.
+
+    If ``return_per_quadrant=True``, returns (median_offset, rms, p90,
+    quadrant_rms) where ``quadrant_rms`` is a dict with keys 'q1_rms',
+    'q2_rms', 'q3_rms', 'q4_rms', 'max_rms', 'max_quadrant'.
+    The quadrants are defined as:
+      Q1 = top-left,    Q2 = top-right,
+      Q3 = bottom-left, Q4 = bottom-right
     """
     if sci_data.shape != ref_data.shape:
         return None
@@ -977,11 +985,100 @@ def compute_alignment_rms(
             median_offset, _med_dx, _med_dy, rms, p90, len(d_clipped), len(d_mut),
             len(d_mut) - len(d_clipped), max_sep,
         )
+
+        # Per-quadrant alignment quality.
+        # Split the matched sources into 2x2 spatial quadrants and compute
+        # the RMS for each.  This detects spatially-varying alignment errors
+        # (e.g. edge distortion, spline overfitting in one region) that the
+        # global RMS would average away.
+        if return_per_quadrant:
+            _quadrant_rms = _compute_per_quadrant_rms(
+                sci_xy, ref_xy, i_sr, mutual, _mut_idx,
+                _clip_mask, sci_data.shape,
+            )
+            return median_offset, rms, p90, _quadrant_rms
+
         return median_offset, rms, p90
 
     except Exception:
         logger.debug("compute_alignment_rms failed", exc_info=True)
         return None
+
+
+def _compute_per_quadrant_rms(
+    sci_xy: np.ndarray,
+    ref_xy: np.ndarray,
+    i_sr: np.ndarray,
+    mutual: np.ndarray,
+    mut_idx: np.ndarray,
+    clip_mask: np.ndarray,
+    image_shape: tuple,
+) -> dict:
+    """
+    Compute per-quadrant alignment RMS from matched sources.
+
+    Quadrants:
+      Q1 = top-left (x < cx, y < cy)
+      Q2 = top-right (x >= cx, y < cy)
+      Q3 = bottom-left (x < cx, y >= cy)
+      Q4 = bottom-right (x >= cx, y >= cy)
+
+    Returns dict with per-quadrant RMS, max RMS, and max quadrant label.
+    Quadrants with < 3 sources get NaN RMS.
+    """
+    _ny, _nx = image_shape[:2]
+    _cx = _nx / 2.0
+    _cy = _ny / 2.0
+
+    # Matched science source positions (after mutual + clip filtering)
+    _matched_sci = sci_xy[mutual][mut_idx]
+    _kept = ~clip_mask
+    _matched_sci_kept = _matched_sci[_kept]
+    _matched_ref = ref_xy[i_sr[mutual]][mut_idx][_kept]
+
+    # Per-source distances for kept matches
+    _dx = _matched_sci_kept[:, 0] - _matched_ref[:, 0]
+    _dy = _matched_sci_kept[:, 1] - _matched_ref[:, 1]
+    _d = np.sqrt(_dx**2 + _dy**2)
+
+    # Assign each source to a quadrant
+    _qx = _matched_sci_kept[:, 0] < _cx
+    _qy = _matched_sci_kept[:, 1] < _cy
+    _q_labels = np.where(
+        _qx & _qy, "q1",
+        np.where(~_qx & _qy, "q2",
+                 np.where(_qx & ~_qy, "q3", "q4")),
+    )
+
+    _result = {}
+    _max_rms = 0.0
+    _max_quad = "none"
+    for _ql in ("q1", "q2", "q3", "q4"):
+        _sel = _q_labels == _ql
+        _n = int(np.sum(_sel))
+        if _n >= 3:
+            _qrms = float(np.sqrt(np.mean(_d[_sel] ** 2)))
+        else:
+            _qrms = float("nan")
+        _result[f"{_ql}_rms"] = _qrms
+        _result[f"{_ql}_n"] = _n
+        if np.isfinite(_qrms) and _qrms > _max_rms:
+            _max_rms = _qrms
+            _max_quad = _ql
+
+    _result["max_rms"] = _max_rms if _max_rms > 0 else float("nan")
+    _result["max_quadrant"] = _max_quad
+
+    if np.isfinite(_max_rms) and _max_rms > 0:
+        logger.info(
+            "Per-quadrant alignment RMS: Q1=%.3f Q2=%.3f Q3=%.3f Q4=%.3f px "
+            "(max=%s=%.3f px)",
+            _result["q1_rms"], _result["q2_rms"],
+            _result["q3_rms"], _result["q4_rms"],
+            _max_quad, _max_rms,
+        )
+
+    return _result
 
 
 def _reproject_template(
@@ -1653,9 +1750,9 @@ def download_panstarrs_template(
             logger.info("Cannot build download URL for %s-band", band)
             return None
 
-        # Step 3: prepare output path
+        # Step 3: prepare output path (defer mkdir until write succeeds to
+        # avoid leaving empty band subfolders on download failure)
         sub_folder = Path(template_folder) / f"{band}_template"
-        sub_folder.mkdir(parents=True, exist_ok=True)
         template_fpath = sub_folder / f"panstarrs_{band}_band_template.fits"
 
         if template_fpath.exists():
@@ -1684,6 +1781,8 @@ def download_panstarrs_template(
             from functions import update_header_from_wcs
             update_header_from_wcs(new_header, template_wcs)
 
+            # Create the subfolder only when we have data ready to write
+            sub_folder.mkdir(parents=True, exist_ok=True)
             write_fits(str(template_fpath), hdu[0].data, new_header)
 
     except Exception:
@@ -1744,8 +1843,9 @@ def download_sdss_template(
         logger.info("Band '%s' not available in SDSS [ugriz]; skipping.", band)
         return None
 
+    # Compute output path (defer mkdir until write succeeds to avoid
+    # leaving empty band subfolders on download failure)
     sub_folder = Path(template_folder) / f"{band}_template"
-    sub_folder.mkdir(parents=True, exist_ok=True)
     template_fpath = sub_folder / f"sdss_{band}_band_template.fits"
 
     if template_fpath.exists():
@@ -1804,6 +1904,8 @@ def download_sdss_template(
         cutout_data, new_header = nan_crop(
             data, new_header, xc, yc, cutout_size, cutout_size
         )
+        # Create the subfolder only when we have data ready to write
+        sub_folder.mkdir(parents=True, exist_ok=True)
         write_fits(str(template_fpath), cutout_data, new_header)
         logger.debug("SDSS template written: %s", template_fpath)
     except Exception:
@@ -1945,8 +2047,9 @@ def download_legacy_template(
         return None
 
     # Path for requested band; subfolders must match find_templates (g_template, etc.)
+    # Defer mkdir of template_base until we actually need to write a file,
+    # to avoid leaving an empty templates/ folder on download failure.
     template_base = Path(template_folder)
-    template_base.mkdir(parents=True, exist_ok=True)
     out_path = template_base / f"{band}_template" / f"legacy_{band}_band_template.fits"
 
     if out_path.exists():
@@ -1957,6 +2060,10 @@ def download_legacy_template(
     combined_name = f"legacystamps_{ra:.6f}_{dec:.6f}_{LEGACY_CUTOUT_LAYER}.fits"
     combined_path = template_base / combined_name
 
+    # Track whether template_base existed before this call so we can clean up
+    # an empty folder if the download fails.
+    _template_base_existed = template_base.exists()
+
     if not combined_path.exists():
         logger.info(
             "Downloading Legacy Survey template (gri) for (%.4f, %.4f), size=%.2f arcmin",
@@ -1964,6 +2071,8 @@ def download_legacy_template(
             dec,
             size,
         )
+        # Create template_base just before downloading (needed for combined_path)
+        template_base.mkdir(parents=True, exist_ok=True)
         last_error = None
         for attempt in range(1, LEGACY_DOWNLOAD_ATTEMPTS + 1):
             try:
@@ -2001,6 +2110,18 @@ def download_legacy_template(
                 LEGACY_DOWNLOAD_ATTEMPTS,
                 last_error,
             )
+            # Clean up empty template_base if we created it and download failed
+            if not _template_base_existed:
+                try:
+                    _remaining = list(template_base.iterdir())
+                    if not _remaining:
+                        template_base.rmdir()
+                        logger.debug(
+                            "Removed empty templates folder after failed download: %s",
+                            template_base,
+                        )
+                except OSError:
+                    pass
             return None
 
     # Load combined FITS once and save g, r, i band images
@@ -2160,8 +2281,9 @@ def download_2mass_template(
     # Normalise alias
     query_band = "KS" if band == "K" else band
 
+    # Compute output path (defer mkdir until write succeeds to avoid
+    # leaving empty band subfolders on download failure)
     sub_folder = Path(template_folder) / f"{query_band}_template"
-    sub_folder.mkdir(parents=True, exist_ok=True)
     out_path = sub_folder / f"2MASS_{query_band}_band_template.fits"
 
     if out_path.exists():
@@ -2185,6 +2307,8 @@ def download_2mass_template(
 
         img_resp = requests.get(table[0]["download"], timeout=30)
         img_resp.raise_for_status()
+        # Create the subfolder only when we have data ready to write
+        sub_folder.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(img_resp.content)
 
         # Stamp standard header keywords
@@ -2921,10 +3045,16 @@ class Templates:
                 try:
                     sci_al_data, _ = read_fits(sci_al)
                     ref_al_data, _ = read_fits(ref_al)
-                    _smed, _srms, _sp90 = compute_alignment_rms(
+                    _swarp_align = compute_alignment_rms(
                         sci_al_data, ref_al_data, fwhm_pix,
                         input_yaml=self.input_yaml,
+                        return_per_quadrant=True,
                     )
+                    if _swarp_align is not None and len(_swarp_align) == 4:
+                        _smed, _srms, _sp90, _squad_rms = _swarp_align
+                    else:
+                        _smed, _srms, _sp90 = _swarp_align[:3] if _swarp_align else (None, None, None)
+                        _squad_rms = None
                     # Quality gate (backup to post_swarp_verify in run_IDC)
                     if _smed is not None:
                         quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
@@ -2960,6 +3090,32 @@ class Templates:
                     return None, None
                 method_used = res.get("alignment_method", "scamp_swarp")
                 logger.info("Alignment succeeded (method: %s).", method_used)
+                # Store alignment RMS in the aligned reference header for
+                # downstream SFFT kernel sizing and photometry provenance.
+                try:
+                    _alig_kw = {}
+                    if _smed is not None and np.isfinite(_smed):
+                        _alig_kw["ALIGMED"] = (float(_smed), "Alignment median offset (px)")
+                    if _srms is not None and np.isfinite(_srms):
+                        _alig_kw["ALIGRMS"] = (float(_srms), "Alignment RMS (px)")
+                    if _sp90 is not None and np.isfinite(_sp90):
+                        _alig_kw["ALIGP90"] = (float(_sp90), "Alignment P90 offset (px)")
+                    _alig_kw["ALIGMETH"] = (str(method_used), "Alignment method used")
+                    if _squad_rms is not None:
+                        _sqmax = _squad_rms.get("max_rms", np.nan)
+                        if np.isfinite(_sqmax) and _sqmax > 0:
+                            _alig_kw["ALIGQMAX"] = (float(_sqmax), "Max per-quadrant alignment RMS (px)")
+                            _alig_kw["ALIGQREG"] = (
+                                str(_squad_rms.get("max_quadrant", "none")),
+                                "Worst alignment quadrant",
+                            )
+                    if _alig_kw and os.path.isfile(ref_al):
+                        with fits.open(ref_al, mode="update", memmap=False) as _hdl:
+                            for _k, _v in _alig_kw.items():
+                                _hdl[0].header[_k] = _v
+                            _hdl.flush()
+                except Exception:
+                    pass
                 # Update target coordinates to reflect new WCS after alignment
                 self._update_target_coordinates_after_alignment(sci_al, method_used)
                 return sci_al, ref_al
@@ -3167,11 +3323,60 @@ class Templates:
                         _sp_match_radius = max(3.0 * fwhm_pix * _sp_pix_scale, 10.0)
 
                     def _detect_for_spalipy(data, min_sources=20):
-                        """Detect sources via SExtractor, return spalipy-format Table."""
+                        """Detect sources via SExtractor, return spalipy-format Table.
+
+                        If too few point sources are found (< 10), retry with
+                        relaxed ellipticity and FWHM cuts to include extended
+                        sources (galaxies) as additional alignment anchors.
+                        If still too few, retry with a lower detection threshold
+                        (similar to SCAMP's sparse-field sensitivity boost).
+                        """
                         xy, flux, fwhm = _detect_sextractor_sources(
                             data, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
                             thresh=_sp_detect_thresh,
                         )
+                        _xy_len = len(xy) if xy is not None else 0
+                        if _xy_len < 10:
+                            logger.info(
+                                "spalipy: only %d point sources; retrying with "
+                                "relaxed ellipticity (0.9) to include extended sources.",
+                                _xy_len,
+                            )
+                            xy_ext, flux_ext, fwhm_ext = _detect_sextractor_sources(
+                                data, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
+                                thresh=_sp_detect_thresh, ell_max=0.9,
+                            )
+                            _xy_ext_len = len(xy_ext) if xy_ext is not None else 0
+                            if _xy_ext_len > _xy_len:
+                                logger.info(
+                                    "spalipy: extended-source retry found %d sources "
+                                    "(was %d with ell<0.5).",
+                                    _xy_ext_len, _xy_len,
+                                )
+                                xy, flux, fwhm = xy_ext, flux_ext, fwhm_ext
+                                _xy_len = _xy_ext_len
+
+                            # If still too few sources, retry with lower threshold
+                            # (similar to SCAMP's sparse-field DETECT_THRESH=0.5)
+                            if _xy_len < 10 and _sp_detect_thresh > 0.5:
+                                _low_thresh = max(0.5, _sp_detect_thresh * 0.5)
+                                logger.info(
+                                    "spalipy: still only %d sources; retrying with "
+                                    "lower detection threshold (%.1f -> %.1f).",
+                                    _xy_len, _sp_detect_thresh, _low_thresh,
+                                )
+                                xy_low, flux_low, fwhm_low = _detect_sextractor_sources(
+                                    data, input_yaml=self.input_yaml, fwhm_pix=fwhm_pix,
+                                    thresh=_low_thresh, ell_max=0.9,
+                                )
+                                _xy_low_len = len(xy_low) if xy_low is not None else 0
+                                if _xy_low_len > _xy_len:
+                                    logger.info(
+                                        "spalipy: low-threshold retry found %d sources "
+                                        "(was %d).",
+                                        _xy_low_len, _xy_len,
+                                    )
+                                    xy, flux, fwhm = xy_low, flux_low, fwhm_low
                         if xy is None or len(xy) < 4:
                             return None
                         if len(xy) < min_sources:
@@ -3681,11 +3886,17 @@ class Templates:
                             np.asarray(sci_det["x"], float),
                             np.asarray(sci_det["y"], float),
                         ])
-                        _med_off, _rms_off, _p90_off = compute_alignment_rms(
+                        _align_result = compute_alignment_rms(
                             scienceImage, aligned_template, fwhm_pix,
                             input_yaml=self.input_yaml,
                             sci_xy_override=_sci_xy_for_rms,
+                            return_per_quadrant=True,
                         )
+                        if _align_result is not None and len(_align_result) == 4:
+                            _med_off, _rms_off, _p90_off, _quad_rms = _align_result
+                        else:
+                            _med_off, _rms_off, _p90_off = _align_result[:3] if _align_result else (None, None, None)
+                            _quad_rms = None
                         logger.info(
                             "spalipy: alignment RMS median=%.3f px rms=%.3f px.",
                             _med_off, _rms_off,
@@ -3732,6 +3943,29 @@ class Templates:
                     copy_wcs_from_header(scienceHeader, hdr)
                     hdr["NAXIS1"] = aligned_template.shape[1]
                     hdr["NAXIS2"] = aligned_template.shape[0]
+                    # Store alignment quality in header for downstream SFFT
+                    # kernel sizing and photometry provenance.
+                    try:
+                        if _med_off is not None and np.isfinite(_med_off):
+                            hdr["ALIGMED"] = (float(_med_off), "Alignment median offset (px)")
+                        if _rms_off is not None and np.isfinite(_rms_off):
+                            hdr["ALIGRMS"] = (float(_rms_off), "Alignment RMS (px)")
+                        if _p90_off is not None and np.isfinite(_p90_off):
+                            hdr["ALIGP90"] = (float(_p90_off), "Alignment P90 offset (px)")
+                        hdr["ALIGMETH"] = ("spalipy", "Alignment method used")
+                        # Per-quadrant RMS: store the maximum quadrant RMS
+                        # so SFFT can boost the kernel in regions with
+                        # spatially-varying alignment errors.
+                        if _quad_rms is not None:
+                            _qmax = _quad_rms.get("max_rms", np.nan)
+                            if np.isfinite(_qmax) and _qmax > 0:
+                                hdr["ALIGQMAX"] = (float(_qmax), "Max per-quadrant alignment RMS (px)")
+                                hdr["ALIGQREG"] = (
+                                    str(_quad_rms.get("max_quadrant", "none")),
+                                    "Worst alignment quadrant",
+                                )
+                    except Exception:
+                        pass
                     fits.PrimaryHDU(aligned_template, header=hdr).writeto(
                         new_templateFpath, overwrite=True,
                         output_verify="silentfix+ignore",
@@ -4821,6 +5055,15 @@ class Templates:
         if params is None:
             params = FluxMatchParams()
 
+        # Allow YAML override of mag_residual_threshold for SFFT source
+        # selection.  The default 0.3 mag is permissive; users can tighten
+        # it (e.g. 0.15) to reject variable/mismatched sources more
+        # aggressively before passing them to SFFT.
+        _ts_cfg_fc = self.input_yaml.get("template_subtraction", {}) or {}
+        _yaml_thresh = float(_ts_cfg_fc.get("sfft_flux_mag_residual_threshold", 0.0))
+        if _yaml_thresh > 0:
+            params.mag_residual_threshold = _yaml_thresh
+
         empty = pd.DataFrame(columns=catalog_img.columns)
         nan_fit = (np.nan, np.nan)
 
@@ -5126,6 +5369,87 @@ class Templates:
                     intercept = float(np.nanmedian(diffs_final))
                 except Exception:
                     pass
+
+            # --- Linearity check ---
+            # Verify that the magnitude relationship is truly linear (not
+            # just that residuals are small).  A non-linear relationship
+            # indicates variable sources, mismatched sources, or systematic
+            # flux-dependent bias (e.g., different aperture sizes for
+            # different FWHM).  SFFT assumes all prior sources are
+            # non-variable stars with a constant flux ratio.
+            if final_inliers.sum() >= 5:
+                _mi = mag_img_r[final_inliers]
+                _mt = mag_tpl_r[final_inliers]
+                _resid = _mt - (slope * _mi + intercept)
+
+                # Pearson correlation: should be very high (> 0.95) for
+                # a truly linear relationship between non-variable stars.
+                _corr_pearson = float(np.corrcoef(_mi, _mt)[0, 1])
+
+                # Residual-magnitude correlation: if residuals correlate
+                # with magnitude, the relationship is non-linear (curved).
+                # Use Spearman rank correlation for robustness.
+                from scipy.stats import spearmanr
+                _corr_resid, _ = spearmanr(_mi, _resid)
+                _corr_resid = float(_corr_resid) if np.isfinite(_corr_resid) else 0.0
+
+                _min_corr = float(
+                    _ts_cfg_fc.get("sfft_flux_linearity_min_corr", 0.90)
+                )
+                _max_resid_corr = float(
+                    _ts_cfg_fc.get("sfft_flux_linearity_max_resid_corr", 0.50)
+                )
+
+                logger.info(
+                    "Flux linearity: Pearson r=%.3f, residual-mag Spearman rho=%.3f "
+                    "(thresholds: min_r=%.2f, max_resid_rho=%.2f)",
+                    _corr_pearson, _corr_resid, _min_corr, _max_resid_corr,
+                )
+
+                if _corr_pearson < _min_corr:
+                    logger.warning(
+                        "Flux linearity check FAILED: Pearson r=%.3f < %.3f. "
+                        "Magnitude relationship is not linear — sources may "
+                        "include variables, mismatches, or flux-dependent bias. "
+                        "Proceeding with inliers but SFFT may reject many sources.",
+                        _corr_pearson, _min_corr,
+                    )
+
+                if abs(_corr_resid) > _max_resid_corr:
+                    logger.warning(
+                        "Flux linearity check FAILED: residual-mag Spearman rho=%.3f "
+                        "> %.3f. Residuals correlate with magnitude — the flux "
+                        "relationship is non-linear (curved). This indicates "
+                        "systematic flux-dependent bias (e.g., different aperture "
+                        "sizes for different FWHM) or a large fraction of "
+                        "variable sources. SFFT kernel fit may be poor.",
+                        abs(_corr_resid), _max_resid_corr,
+                    )
+                    # Flag non-linear sources: reject inliers whose residuals
+                    # follow the trend (keep only those that don't follow it).
+                    # This removes sources in the magnitude range where the
+                    # non-linearity is strongest.
+                    if abs(_corr_resid) > _max_resid_corr and final_inliers.sum() > 10:
+                        # Fit a low-order polynomial to the residuals and
+                        # reject sources that deviate from the linear fit
+                        # in the direction predicted by the trend.
+                        _poly_coef = np.polyfit(_mi, _resid, 2)
+                        _poly_pred = np.polyval(_poly_coef, _mi)
+                        _poly_resid = _resid - _poly_pred
+                        _poly_std = np.std(_poly_resid)
+                        if _poly_std > 0:
+                            # Reject sources where the quadratic trend explains
+                            # most of the residual (|poly_pred| > 2*poly_std)
+                            _trend_bad = np.abs(_poly_pred) > 2.0 * _poly_std
+                            _n_trend_bad = int(_trend_bad.sum())
+                            if _n_trend_bad > 0 and (_final_inliers_count := final_inliers.sum()) - _n_trend_bad >= 5:
+                                _trend_bad_indices = np.where(final_inliers)[0][_trend_bad]
+                                final_inliers[_trend_bad_indices] = False
+                                logger.info(
+                                    "Non-linearity correction: removed %d sources "
+                                    "following quadratic trend (%d inliers remain).",
+                                    _n_trend_bad, final_inliers.sum(),
+                                )
 
             # --- Build result DataFrame ---
             result = catalog_img.loc[idx_r].copy()
@@ -5778,7 +6102,7 @@ class Templates:
             # after cross-matching and quality filtering only ~15-20 survive
             # for kernel fitting.  Use 20 as a conservative estimate.
             _n_matched_early = len(matching_sources) if matching_sources else 0
-            _min_prior_early = int(ts_cfg_ker.get("sfft_min_prior_sources", 10) or 10)
+            _min_prior_early = int(ts_cfg_ker.get("sfft_min_prior_sources", 3) or 3)
             _sfft_self_match_early = _n_matched_early < _min_prior_early
             n_eff = 10 if _sfft_self_match_early else _n_matched_early
 
@@ -5836,34 +6160,119 @@ class Templates:
                         fwhm_conv,
                     )
 
-                # Half-width must comfortably contain the kernel and floor at 2x the
-                # broad PSF to capture PSF wings for flux-conserving photometry.
-                # A floor of only 1x FWHM_broad truncates the PSF wings, causing the
-                # convolution-based flux scaling to disagree with photometric scaling.
+                # --- Kernel half-width sizing (ringing-prevention) ---
+                # Ringing artifacts in the difference image are caused by kernel
+                # overfitting: the delta-function basis has (2*hw+1)^2 free
+                # parameters per spatial order, and when the kernel is too large
+                # relative to the number of sources, the outer pixels fit noise
+                # instead of the PSF difference.
                 #
-                # With auto ForceConv, we always convolve the sharper image to match
-                # the broader one (never deconvolve), so a standard 2x FWHM_broad
-                # floor is sufficient.
-                # Base floor: 2.5xFWHM_broad for good PSF wing coverage.
-                # Cap down for sparse fields where a smaller kernel is more
-                # constrained (BUG 120: 32px half-width with order 1 gives
-                # 12675 unknowns vs ~17 sources -> flux scaling discrepancy).
-                _floor_mult = 2.5
-                if n_eff < 15:
-                    _floor_mult = 2.0
-                elif n_eff < 25:
-                    _floor_mult = 2.25
+                # The convolution kernel FWHM is sqrt(FWHM_broad^2 - FWHM_narrow^2).
+                # The kernel half-width only needs to contain this convolution PSF,
+                # NOT the full broad PSF.  Using 2.5*FWHM_broad as a floor (as was
+                # done previously) inflates the kernel massively when PSFs differ:
+                #   FWHM_sci=12, FWHM_ref=6 -> floor=30px (3721 params for 25 sources!)
+                #   but FWHM_conv=10.4, so 2*FWHM_conv=21px would suffice.
+                #
+                # New strategy:
+                #   1. Primary: hw = ceil(mult * FWHM_conv)  — contains the kernel
+                #   2. Floor: hw >= ceil(floor_mult * FWHM_broad) — captures PSF wings
+                #      but floor_mult is adaptive: 1.5 for sparse, 2.0 for dense
+                #   3. Source-count cap: hw <= max_hw_for_sources(n_eff)
+                #      ensures the kernel is not under-constrained
+                #
+                # The source-count cap prevents overfitting.  With the delta-function
+                # basis, each source provides ~(2*hw+1)^2 pixels of data, but the
+                # effective number of independent constraints is much less (PSF is
+                # smooth, outer pixels are noise-dominated).  We require at least
+                # ~5 sources per 100 kernel pixels as a heuristic.
                 ker_hw_from_conv = int(np.ceil(_mult_effective * fwhm_conv))
+
+                # Adaptive floor multiplier based on source count.
+                # Fewer sources -> smaller floor to prevent overfitting.
+                _floor_mult = 2.0
+                if n_eff < 15:
+                    _floor_mult = 1.5
+                elif n_eff < 30:
+                    _floor_mult = 1.75
                 ker_hw_floor = int(np.ceil(_floor_mult * fwhm_broad))
 
-                ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_from_conv, ker_hw_floor)))
+                ker_hw = max(ker_hw_from_conv, ker_hw_floor)
+
+                # Source-count cap: prevent kernel from being severely
+                # under-constrained.  With the delta-function basis, each source
+                # provides ~(2*hw+1)^2 pixels, so the constraint ratio is
+                # ~n_eff / spatial_terms.  The cap only trims the FLOOR (PSF wing
+                # coverage), never the convolution term (which is the physical
+                # minimum needed to contain the PSF difference).
+                # Heuristic: (2*hw+1)^2 should not exceed 100 * n_eff.
+                # For n_eff=25: max kernel pixels = 2500 -> hw <= 24
+                # For n_eff=50: max kernel pixels = 5000 -> hw <= 35
+                _max_hw_pixels = 100 * max(n_eff, 5)
+                _max_hw_from_sources = int((np.sqrt(_max_hw_pixels) - 1) / 2)
+                # Only cap the floor, never the convolution term
+                _hw_floor_capped = min(ker_hw_floor, _max_hw_from_sources)
+                ker_hw = max(ker_hw_from_conv, _hw_floor_capped)
+
+                ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, ker_hw))
+
+                # Alignment-quality-aware kernel boost.
+                # When the aligned template header carries an alignment RMS
+                # (ALIGRMS keyword from spalipy/SWarp), poor alignment means
+                # the kernel must compensate for residual astrometric offsets.
+                # A kernel that is too small will produce dipole residuals at
+                # source positions because it cannot model the spatially-
+                # varying flux mismatch caused by sub-pixel misregistration.
+                # Boost the kernel by up to 1.5x for RMS > 0.5 px.
+                #
+                # Additionally, when per-quadrant RMS is available (ALIGQMAX),
+                # spatially-varying alignment errors require an extra boost
+                # because the global RMS underestimates the worst-region error.
+                _align_rms_boost = 0
+                try:
+                    _aligrms = float(templateHeader.get("ALIGRMS", 0.0))
+                    _aligqmax = float(templateHeader.get("ALIGQMAX", 0.0))
+                    # Use the larger of global RMS and max-quadrant RMS.
+                    _align_rms_eff = max(_aligrms, _aligqmax)
+                    if np.isfinite(_align_rms_eff) and _align_rms_eff > 0.3:
+                        _align_rms_boost = int(np.ceil(min(_align_rms_eff, 1.5)))
+                        # Extra boost when spatial variation is significant
+                        # (quadrant max >> global RMS means non-uniform errors).
+                        if (
+                            np.isfinite(_aligqmax)
+                            and np.isfinite(_aligrms)
+                            and _aligqmax > 0
+                            and _aligrms > 0
+                            and _aligqmax / _aligrms > 1.5
+                        ):
+                            _align_rms_boost += 1
+                            logger.info(
+                                "Kernel sizing: spatial alignment variation detected "
+                                "(ALIGQMAX=%.3f >> ALIGRMS=%.3f, ratio=%.2f) -> "
+                                "extra +1 px kernel boost.",
+                                _aligqmax, _aligrms, _aligqmax / _aligrms,
+                            )
+                        _ker_hw_before_boost = ker_hw
+                        ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, ker_hw + _align_rms_boost))
+                        if ker_hw != _ker_hw_before_boost:
+                            logger.info(
+                                "Kernel sizing: alignment RMS=%.3f px (qmax=%.3f) -> "
+                                "boosting kernel_hw by %d px (%d -> %d) to compensate "
+                                "for residual astrometric offsets.",
+                                _aligrms, _aligqmax, _align_rms_boost,
+                                _ker_hw_before_boost, ker_hw,
+                            )
+                except Exception:
+                    pass
 
                 logger.info(
                     "Kernel sizing: FWHM_sci=%.2f FWHM_ref=%.2f FWHM_conv=%.2f px | "
-                    "hw_conv=%d hw_floor=%d -> kernel_hw=%d px (clamped %d-%d)",
+                    "hw_conv=%d hw_floor=%d (floor_mult=%.2f, capped=%d) -> kernel_hw=%d px "
+                    "(clamped %d-%d, n_eff=%d, max_hw_sources=%d, align_boost=%d)",
                     fwhm_sci, fwhm_ref, fwhm_conv,
-                    ker_hw_from_conv, ker_hw_floor,
-                    ker_hw, KER_HW_MIN, KER_HW_MAX,
+                    ker_hw_from_conv, ker_hw_floor, _floor_mult, _hw_floor_capped,
+                    ker_hw, KER_HW_MIN, KER_HW_MAX, n_eff, _max_hw_from_sources,
+                    _align_rms_boost,
                 )
 
             # Both SFFT and HOTPANTS use the same physics-based kernel half-width
@@ -6105,7 +6514,7 @@ class Templates:
 
             # n_eff was computed earlier for kernel floor adaptation (BUG 120).
             # Recompute _sfft_self_match for logging purposes.
-            _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 10) or 10)
+            _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 3) or 3)
             _sfft_self_match = n_matched < _min_prior
 
             # Use the conservative n_eff (20 for self-match) for kernel_order
@@ -6127,6 +6536,30 @@ class Templates:
                         "(~7 GB for order 2, ~20 GB for order 3 with typical "
                         "kernel sizes). Ensure sufficient memory is available.",
                         kernel_order,
+                    )
+                # Auto-boost: when user sets kernel_order=0 but the PSF
+                # difference is large, a constant kernel cannot model the
+                # spatially-varying kernel shape.  Boost to 1 with a warning.
+                # This prevents dipole residuals and flux scaling mismatches
+                # that occur when a constant kernel is used for a large PSF
+                # difference (e.g., FWHM_sci=13 vs FWHM_ref=5).
+                _rel_diff_check = abs(science_fwhm - template_fwhm) / max(
+                    (science_fwhm + template_fwhm) / 2, 0.1
+                )
+                if (
+                    kernel_order == 0
+                    and _rel_diff_check > 0.4
+                    and n_eff >= 30
+                ):
+                    kernel_order = 1
+                    logger.warning(
+                        "Auto-boosting kernel_order from 0 to 1: large PSF "
+                        "rel_diff=%.2f (FWHM_sci=%.1f, FWHM_ref=%.1f) with %d "
+                        "matched sources requires a spatially-varying kernel. "
+                        "A constant kernel (order 0) causes flux scaling "
+                        "mismatches and dipole residuals. Set kernel_order: "
+                        "\"auto\" in YAML to suppress this boost.",
+                        _rel_diff_check, science_fwhm, template_fwhm, n_eff,
                     )
             else:
                 # Auto-select kernel polynomial order based on source count.
@@ -6160,7 +6593,7 @@ class Templates:
 
                 if n_eff < 15:
                     kernel_order = 0
-                elif n_eff < 20:
+                elif n_eff < 30:
                     kernel_order = 1
                 else:
                     kernel_order = min(2, _max_auto_order)
@@ -6168,12 +6601,16 @@ class Templates:
                 # Large PSF differences cause spatially-varying kernel shapes
                 # that a constant kernel (order 0) cannot model.  Boost to 1
                 # when rel_diff is large and we have enough sources.
-                if rel_diff > 0.4 and n_eff >= 15 and kernel_order < 1:
+                # Require n_eff >= 30 for order 1 to avoid overfitting:
+                # order 1 triples the free parameters (3 * kernel_pixels),
+                # which needs at least 30 sources for reliable spatial fitting.
+                if rel_diff > 0.4 and n_eff >= 30 and kernel_order < 1:
                     kernel_order = 1
                     logger.info(
                         "Boosting kernel_order to 1 (large PSF rel_diff=%.2f "
-                        "needs spatially-varying kernel).",
+                        "needs spatially-varying kernel, n_eff=%d >= 30).",
                         rel_diff,
+                        n_eff,
                     )
 
                 # Last-resort alignment may have spatially-varying residuals
@@ -6254,6 +6691,82 @@ class Templates:
                 ref_clean = clean_fits_nans(template_work_fpath, str(scienceDir))
                 _sci_clean_path = sci_clean
                 _ref_clean_path = ref_clean
+                # Write per-image FWHM into the cleaned FITS headers so that
+                # run_sfft.py reads the correct per-image FWHM (it reads from
+                # headers for detect_minarea and diagnostic logging).  Without
+                # this, stale or missing FWHM keywords cause wrong source
+                # detection area sizing.
+                try:
+                    for _clean_path, _clean_fwhm, _clean_label in [
+                        (sci_clean, science_fwhm, "science"),
+                        (ref_clean, template_fwhm, "template"),
+                    ]:
+                        if _clean_path and os.path.isfile(_clean_path) and _clean_fwhm and np.isfinite(float(_clean_fwhm)) and float(_clean_fwhm) > 0:
+                            with fits.open(_clean_path, mode="update", memmap=False) as _hdl:
+                                _hdl[0].header["FWHM"] = float(_clean_fwhm)
+                                _hdl.flush()
+                except Exception as _fwhm_e:
+                    logger.debug("Could not write FWHM to cleaned SFFT input FITS: %s", _fwhm_e)
+
+                # --- Filter matching sources against universal mask ---
+                # The universal_mask (built above) includes NaN pixels from
+                # both science and reference images, background defects
+                # (saturation streaks, satellite trails), and source footprints.
+                # Reject matching sources whose kernel stamp would be
+                # significantly contaminated by defects in EITHER image.
+                # This catches diffraction spikes that were not caught by
+                # the science-image-only filtering in main.py (e.g., spikes
+                # present in the reference image but not the science image).
+                if matching_sources and universal_mask is not None:
+                    _um = np.asarray(universal_mask, dtype=bool)
+                    _ny_m, _nx_m = _um.shape
+                    _stamp_r = max(int(sfft_kernel_hw), int(2 * max(science_fwhm, template_fwhm)))
+                    _ts_cfg_m = self.input_yaml.get("template_subtraction", {}) or {}
+                    _max_frac_m = float(_ts_cfg_m.get("sfft_defects_max_frac", 0.15))
+                    _min_keep_m = int(_ts_cfg_m.get("sfft_min_prior_sources", 3))
+                    # Use integral image for O(1) per-source stamp mean
+                    _um_f = _um.astype(np.float64)
+                    _integral_m = np.zeros((_ny_m + 1, _nx_m + 1), dtype=np.float64)
+                    np.cumsum(np.cumsum(_um_f, axis=0), axis=1, out=_integral_m[1:, 1:])
+                    _kept_m = []
+                    _n_rej_m = 0
+                    for _ms in matching_sources:
+                        _mxi = int(round(_ms[0]))
+                        _myi = int(round(_ms[1]))
+                        _y0m = max(0, _myi - _stamp_r)
+                        _y1m = min(_ny_m, _myi + _stamp_r + 1)
+                        _x0m = max(0, _mxi - _stamp_r)
+                        _x1m = min(_nx_m, _mxi + _stamp_r + 1)
+                        _area_m = (_y1m - _y0m) * (_x1m - _x0m)
+                        if _area_m <= 0:
+                            _frac_m = 0.0
+                        else:
+                            _frac_m = float(
+                                _integral_m[_y1m, _x1m]
+                                - _integral_m[_y0m, _x1m]
+                                - _integral_m[_y1m, _x0m]
+                                + _integral_m[_y0m, _x0m]
+                            ) / _area_m
+                        if _frac_m > _max_frac_m:
+                            _n_rej_m += 1
+                        else:
+                            _kept_m.append(_ms)
+                    if _n_rej_m > 0 and len(_kept_m) >= _min_keep_m:
+                        logger.info(
+                            "Universal-mask filtering: rejected %d/%d matching "
+                            "sources on defects (stamp_radius=%d px, max_frac=%.2f, "
+                            "kept=%d).",
+                            _n_rej_m, len(matching_sources), _stamp_r,
+                            _max_frac_m, len(_kept_m),
+                        )
+                        matching_sources = _kept_m
+                    elif _n_rej_m > 0:
+                        logger.warning(
+                            "Universal-mask filtering would leave %d sources "
+                            "(< %d minimum); keeping all %d sources.",
+                            len(_kept_m), _min_keep_m, len(matching_sources),
+                        )
+
                 method = self._subtract_sfft(
                     sci_clean,
                     ref_clean,
@@ -6319,6 +6832,7 @@ class Templates:
             # photometry and diagnostics must treat those pixels as invalid, so we
             # re-impose the combined NaN mask from the original aligned inputs.
             # ------------------------------------------------------------------
+            combined_nan_mask = None
             try:
                 combined_nan_mask = (~np.isfinite(scienceImage)) | (~np.isfinite(templateImage))
                 if np.any(combined_nan_mask) and diff_data.shape == combined_nan_mask.shape:
@@ -6338,8 +6852,25 @@ class Templates:
             # =============================================================
             # 6a. Subtraction quality validation
             # =============================================================
+            # Comprehensive difference-image quality assessment including:
+            #   - Global statistics (median, std, RMS)
+            #   - Dipole detection around known sources
+            #   - Bright-star residual flux
+            #   - Spatial background variation
+            #   - Residual autocorrelation
+            #   - Edge artifacts
+            #   - Structured quality score with pass/downgrade/fail classification
+            #   - Machine-readable JSON manifest for provenance
+            diff_quality_metrics = None
             try:
-                # Mask out NaN, universal mask, and target region for quality checks
+                from utils.difference_quality import (
+                    assess_difference_image,
+                    write_quality_manifest,
+                    write_quality_to_fits_header,
+                    QualityConfig,
+                )
+
+                # Build quality mask: NaN, universal mask, target region
                 quality_mask = ~np.isfinite(diff_data) | (np.abs(diff_data) < 1.1e-20) | universal_mask.astype(bool)
                 try:
                     _tx = float(self.input_yaml.get("target_x_pix", np.nan))
@@ -6353,49 +6884,138 @@ class Templates:
                 except Exception:
                     pass  # Non-fatal: skip target exclusion if it fails
 
-                # Compute quality metrics on valid pixels
-                valid_pixels = diff_data[~quality_mask]
-                if len(valid_pixels) > 0:
-                    diff_median = np.median(valid_pixels)
-                    diff_std = np.nanstd(valid_pixels)
-                    diff_rms = np.sqrt(np.mean(valid_pixels ** 2))
+                # Build quality config from pipeline config
+                _ts_cfg_q = self.input_yaml.get("template_subtraction", {}) or {}
+                _qcfg = QualityConfig(
+                    dipole_n_sigma=float(_ts_cfg_q.get("diffqual_dipole_n_sigma", 5.0)),
+                    dipole_radius_fwhm=float(_ts_cfg_q.get("diffqual_dipole_radius_fwhm", 1.5)),
+                    dipole_max_fraction_pass=float(_ts_cfg_q.get("diffqual_dipole_max_frac_pass", 0.05)),
+                    dipole_max_fraction_fail=float(_ts_cfg_q.get("diffqual_dipole_max_frac_fail", 0.20)),
+                    bright_star_n_sigma=float(_ts_cfg_q.get("diffqual_bright_star_n_sigma", 50.0)),
+                    bright_star_max_residual_sigma=float(_ts_cfg_q.get("diffqual_bright_star_max_resid_sigma", 3.0)),
+                    edge_max_std_ratio=float(_ts_cfg_q.get("diffqual_edge_max_std_ratio", 2.0)),
+                    pass_threshold=float(_ts_cfg_q.get("diffqual_pass_threshold", 0.75)),
+                    downgrade_threshold=float(_ts_cfg_q.get("diffqual_downgrade_threshold", 0.50)),
+                )
 
-                    logger.info(
-                        "Subtraction quality: median=%.3f std=%.3f rms=%.3f | valid=%d px",
-                        diff_median, diff_std, diff_rms, len(valid_pixels)
+                # Source positions for dipole detection: use matching sources
+                # (these are the sources used for kernel fitting; dipoles at
+                # these positions indicate astrometric/PSF mismatch).
+                _dipole_sources = list(matching_sources) if matching_sources else []
+
+                # Bright star positions: use masked_centers (bright/saturated sources)
+                _bright_stars = list(masked_centers) if masked_centers else []
+
+                # Determine the difference-image FWHM for quality checks
+                _diff_fwhm = science_fwhm
+                _convd_hdr = str(diff_header.get("CONVD", "")).strip().upper()
+                _diff_fwhm_hdr = float(diff_header.get("DIFFFWHM", 0.0))
+                if _diff_fwhm_hdr > 0:
+                    _diff_fwhm = _diff_fwhm_hdr
+
+                # Metadata for provenance
+                _qmeta = {
+                    "algorithm": str(diff_header.get("SUBALGO", method if method == "done" else "unknown")),
+                    "forceconv": str(diff_header.get("FORCECON", "")),
+                    "kernel_order": int(kernel_order),
+                    "kernel_half_width": int(kernel_half_width) if kernel_half_width else 0,
+                    "science_fwhm": float(science_fwhm),
+                    "template_fwhm": float(template_fwhm),
+                    "n_matching_sources": len(matching_sources) if matching_sources else 0,
+                    "flux_scale_conv": float(diff_header.get("FSCAL_CONV", 0.0)),
+                    "flux_scale_phot": float(diff_header.get("FSCAL_PHOT", 0.0)),
+                    "flux_scale_discrep_pct": float(diff_header.get("FSCAL_DISC", 0.0)),
+                }
+
+                diff_quality_metrics = assess_difference_image(
+                    diff_data,
+                    quality_mask,
+                    source_positions=_dipole_sources,
+                    bright_star_positions=_bright_stars,
+                    fwhm=_diff_fwhm,
+                    cfg=_qcfg,
+                    metadata=_qmeta,
+                )
+
+                # Write quality keywords to the difference image FITS header
+                # NOTE: The actual write is deferred to after the final
+                # write_fits() call below, because write_fits would
+                # overwrite the header and lose these keywords.
+                pass
+
+                # Write machine-readable JSON manifest
+                _manifest_path = os.path.join(
+                    str(scienceDir), f"diff_quality_{base_name}.json"
+                )
+                _manifest_meta = {
+                    "science_file": str(scienceFpath),
+                    "template_file": str(templateFpath),
+                    "difference_file": str(differenceFpath),
+                    "science_fwhm": float(science_fwhm),
+                    "template_fwhm": float(template_fwhm),
+                    "kernel_order": int(kernel_order),
+                    "kernel_half_width": int(kernel_half_width) if kernel_half_width else 0,
+                    "n_matching_sources": len(matching_sources) if matching_sources else 0,
+                    "n_masked_sources": len(masked_sources) if masked_sources else 0,
+                    "masked_percentage": float(masked_percentage),
+                    "universal_mask_frac": float(np.mean(universal_mask)),
+                }
+                write_quality_manifest(
+                    diff_quality_metrics, _manifest_path, extra_metadata=_manifest_meta
+                )
+
+                # Log warnings for degraded quality
+                if diff_quality_metrics.quality_class == "fail":
+                    logger.error(
+                        "Subtraction quality FAILED (score=%.3f): "
+                        "dipoles=%d (%.1f%%), bright_star_resid=%.1f sigma, "
+                        "bg_spatial_std=%.3f, edge_ratio=%.2f. "
+                        "Downstream photometry should be treated with caution.",
+                        diff_quality_metrics.quality_score,
+                        diff_quality_metrics.dipole_count,
+                        diff_quality_metrics.dipole_fraction * 100,
+                        diff_quality_metrics.bright_star_residual_rms,
+                        diff_quality_metrics.background_spatial_std,
+                        diff_quality_metrics.edge_std_ratio,
+                    )
+                elif diff_quality_metrics.quality_class == "downgrade":
+                    logger.warning(
+                        "Subtraction quality DOWNGRADED (score=%.3f): "
+                        "dipoles=%d (%.1f%%), bright_star_resid=%.1f sigma, "
+                        "bg_spatial_std=%.3f, edge_ratio=%.2f.",
+                        diff_quality_metrics.quality_score,
+                        diff_quality_metrics.dipole_count,
+                        diff_quality_metrics.dipole_fraction * 100,
+                        diff_quality_metrics.bright_star_residual_rms,
+                        diff_quality_metrics.background_spatial_std,
+                        diff_quality_metrics.edge_std_ratio,
                     )
 
-                    # Check for systematic offset
-                    if abs(diff_median) > 0.1 * diff_std:
-                        logger.warning(
-                            "Subtraction has systematic offset (median=%.3f, std=%.3f). This may indicate background subtraction issues.",
-                            diff_median, diff_std
+            except ImportError:
+                logger.debug(
+                    "utils.difference_quality not available; "
+                    "falling back to basic quality checks."
+                )
+                # Fallback: basic checks (original behaviour)
+                try:
+                    quality_mask = ~np.isfinite(diff_data) | (np.abs(diff_data) < 1.1e-20) | universal_mask.astype(bool)
+                    valid_pixels = diff_data[~quality_mask]
+                    valid_pixels = valid_pixels[np.isfinite(valid_pixels)]
+                    if len(valid_pixels) > 0:
+                        diff_median = np.median(valid_pixels)
+                        diff_std = np.nanstd(valid_pixels)
+                        diff_rms = np.sqrt(np.mean(valid_pixels ** 2))
+                        logger.info(
+                            "Subtraction quality (basic): median=%.3f std=%.3f rms=%.3f | valid=%d px",
+                            diff_median, diff_std, diff_rms, len(valid_pixels)
                         )
-
-                    # Check for excessive RMS
-                    if diff_rms > 5.0 * diff_std:
-                        logger.warning(
-                            "Subtraction RMS is high (rms=%.3f, std=%.3f). This may indicate poor subtraction quality.",
-                            diff_rms, diff_std
-                        )
-
-                    # Check for edge artifacts (high residuals at image boundaries)
-                    edge_width = 20  # pixels
-                    if diff_data.shape[0] > 2 * edge_width and diff_data.shape[1] > 2 * edge_width:
-                        edge_mask = np.zeros_like(quality_mask, dtype=bool)
-                        edge_mask[:edge_width, :] = True
-                        edge_mask[-edge_width:, :] = True
-                        edge_mask[:, :edge_width] = True
-                        edge_mask[:, -edge_width:] = True
-                        edge_mask = edge_mask | quality_mask
-                        edge_pixels = diff_data[~edge_mask]
-                        if len(edge_pixels) > 0:
-                            edge_std = np.nanstd(edge_pixels)
-                            if edge_std > 2.0 * diff_std:
-                                logger.warning(
-                                    "Subtraction has edge artifacts (edge std=%.3f, global std=%.3f). This may indicate kernel or alignment issues at image boundaries.",
-                                    edge_std, diff_std
-                                )
+                        if abs(diff_median) > 0.1 * diff_std:
+                            logger.warning(
+                                "Subtraction has systematic offset (median=%.3f, std=%.3f).",
+                                diff_median, diff_std
+                            )
+                except Exception as e:
+                    logger.warning("Subtraction quality validation failed (non-fatal): %s", e)
             except Exception as e:
                 logger.warning("Subtraction quality validation failed (non-fatal): %s", e)
 
@@ -6403,12 +7023,26 @@ class Templates:
             # the subtraction backend's native output is preserved so photometry
             # sees the true pixel values including any DC offset from the sky).
             try:
-                if np.any(combined_nan_mask) and diff_data.shape == combined_nan_mask.shape:
+                if combined_nan_mask is not None and np.any(combined_nan_mask) and diff_data.shape == combined_nan_mask.shape:
                     diff_data = np.asarray(diff_data, dtype=float)
                     diff_data[combined_nan_mask] = np.nan
             except Exception:
                 pass
             write_fits(differenceFpath, diff_data, diff_header)
+
+            # Write quality keywords to the difference image FITS header
+            # AFTER the final write_fits so they are not overwritten.
+            if diff_quality_metrics is not None:
+                try:
+                    from utils.difference_quality import (
+                        write_quality_to_fits_header as _wqfh,
+                    )
+                    _wqfh(differenceFpath, diff_quality_metrics)
+                except Exception as _wq_e:
+                    logger.warning(
+                        "Failed to write quality keywords to FITS header: %s",
+                        _wq_e,
+                    )
 
             elapsed = time.time() - t0
             logger.info("Image subtraction completed in %.1f s", elapsed)
@@ -7037,7 +7671,7 @@ class Templates:
                 else:
                     fwhm_conv_fb = fwhm_broad_fb
                 ker_hw_conv = int(np.ceil(2.0 * fwhm_conv_fb))
-                _fm = 2.0
+                _fm = 1.75  # conservative floor (matches sparse-field subtract())
                 ker_hw_floor = int(np.ceil(_fm * fwhm_broad_fb))
                 kernel_half_width = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_conv, ker_hw_floor)))
                 logger.info(
@@ -7053,7 +7687,7 @@ class Templates:
                 return f"[{coords}]"
 
             def _build_sfft_cmd(run_excluded, run_matching, template_fp, diff_fp):
-                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 10) or 10)
+                min_sources_for_prior = int(ts_sub.get("sfft_min_prior_sources", 3) or 3)
                 if len(run_matching) < min_sources_for_prior:
                     logger.warning(
                         "Only %d vetted point-source priors are available (minimum=%d); "
@@ -7125,7 +7759,9 @@ class Templates:
                     cmd_local += ["-detect_thresh", str(float(detect_thresh))]
 
                 # Robust SFFT source rejection controls.
-                only_flags_cfg = ts_sub.get("sfft_only_flags", [0, 1, 2, 3, 16, 17, 18, 19])
+                # Default: exclude blended sources (FLAGS & 2) which bias flux scaling.
+                # Fallback to permissive flags is handled by the retry logic below.
+                only_flags_cfg = ts_sub.get("sfft_only_flags", [0, 1, 16, 17])
                 if only_flags_cfg is None:
                     cmd_local += ["-only_flags", "none"]
                 elif isinstance(only_flags_cfg, (list, tuple)):
@@ -7183,12 +7819,12 @@ class Templates:
                     cmd_local += ["-kernel_hw_fwhm_multiplier", str(float(_ker_mult))]
 
                 # Prior source validation
-                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 10)
+                min_prior_sources = ts_sub.get("sfft_min_prior_sources", 3)
                 cmd_local += ["-min_prior_sources", str(int(min_prior_sources))]
                 cmd_local += [
                     "-allow_unvetted_source_retry",
                     "true" if _as_bool(
-                        ts_sub.get("sfft_allow_unvetted_source_retry", False), False
+                        ts_sub.get("sfft_allow_unvetted_source_retry", True), True
                     ) else "false",
                 ]
 
@@ -7198,6 +7834,10 @@ class Templates:
                 # Higher values = tighter matching.
                 _match_tol_factor = ts_sub.get("sfft_match_tol_factor", 2.0)
                 cmd_local += ["-match_tol_factor", str(float(_match_tol_factor))]
+
+                # Point-source ellipticity threshold for SFFT's own source vetting.
+                _ps_min_ellip = ts_sub.get("sfft_point_source_min_ellip", 0.3)
+                cmd_local += ["-point_source_min_ellip", str(float(_ps_min_ellip))]
 
                 if sfft_crowded:
                     cmd_local.append("-crowded")
@@ -7210,6 +7850,7 @@ class Templates:
                 .replace("_ERROR", "")
             )
             post_anomaly_csv = scienceDir / f"SFFT_PostAnomaly_Sources_{out_base}.csv"
+            matching_sources_csv = scienceDir / f"SFFT_Matching_Sources_{out_base}.csv"
             log_path = scienceDir / f"SFFT_{Path(base_name).stem}.txt"
             # Force single process/CPU: one thread for BLAS/OpenMP and common env limits.
             sfft_env = {**os.environ}
@@ -7249,6 +7890,7 @@ class Templates:
                 ts_sub.get("sfft_post_anomaly_match_radius_px", 1.5)
             )
             if use_post_anom_feedback and post_anomaly_csv.exists():
+              try:
                 try:
                     df_anom = pd.read_csv(post_anomaly_csv)
                     xcol = (
@@ -7273,11 +7915,70 @@ class Templates:
                 n_post = len(post_anom_xy)
                 n_ref = max(1, len(current_matching_sources))
                 frac_post = float(n_post) / float(n_ref)
-                if n_post >= post_anom_min_count and frac_post <= post_anom_max_frac:
-                    # Extend prior-ban list.
-                    current_excluded = current_excluded + post_anom_xy
+                # High anomaly fraction (frac_post > max_frac) does NOT mean
+                # we should skip the retry.  It means the kernel was bad
+                # (e.g., constant kernel with large PSF difference).  This is
+                # exactly when the retry is most valuable: SFFT-vetted sources
+                # replace the bad priors, anomaly sources are banned, and the
+                # kernel gets a second chance.  Only skip when there are zero
+                # anomalies (nothing to fix) or below the minimum count.
+                _high_anomaly = frac_post > post_anom_max_frac
+                if _high_anomaly:
+                    logger.warning(
+                        "SFFT post-anomaly fraction=%.2f exceeds threshold=%.2f "
+                        "(%d/%d sources anomalous). High anomaly fraction "
+                        "indicates a bad kernel fit - proceeding with retry "
+                        "using SFFT-vetted sources.",
+                        frac_post, post_anom_max_frac, n_post, n_ref,
+                    )
+                if n_post >= post_anom_min_count:
+                    # --- Improve matching sources using SFFT-vetted results ---
+                    # After the first SFFT pass, SFFT writes the sources it
+                    # actually used for the kernel fit to
+                    # SFFT_Matching_Sources_<base>.csv.  These are vetted by
+                    # SFFT's own SExtractor + cross-match + quality checks
+                    # (PostAnomaly, CVREJ, EVREJ), so they are more robust
+                    # than the pipeline's original priors.  Use them as the
+                    # matching sources for the retry, minus any near
+                    # post-anomaly sources.
+                    sfft_vetted_sources = []
+                    if matching_sources_csv.exists():
+                        try:
+                            df_match = pd.read_csv(matching_sources_csv)
+                            _mx = (
+                                "X_IMAGE_REF_SCI_MEAN"
+                                if "X_IMAGE_REF_SCI_MEAN" in df_match.columns
+                                else None
+                            )
+                            _my = (
+                                "Y_IMAGE_REF_SCI_MEAN"
+                                if "Y_IMAGE_REF_SCI_MEAN" in df_match.columns
+                                else None
+                            )
+                            if _mx and _my:
+                                _mxy = df_match[[_mx, _my]].apply(
+                                    pd.to_numeric, errors="coerce"
+                                )
+                                _mxy = _mxy.replace(
+                                    [np.inf, -np.inf], np.nan
+                                ).dropna()
+                                sfft_vetted_sources = [
+                                    tuple(v) for v in _mxy.to_numpy(float)
+                                ]
+                        except Exception:
+                            sfft_vetted_sources = []
 
-                    # Remove prior-selected matches too close to anomaly sources.
+                    if sfft_vetted_sources:
+                        logger.info(
+                            "SFFT post-anomaly feedback: using %d SFFT-vetted "
+                            "matching sources from first pass (replacing %d "
+                            "pipeline priors).",
+                            len(sfft_vetted_sources),
+                            len(current_matching_sources),
+                        )
+                        current_matching_sources = sfft_vetted_sources
+
+                    # Remove matching sources too close to anomaly sources.
                     if post_anom_xy and current_matching_sources:
                         anom_arr = np.asarray(post_anom_xy, float)
                         filtered_matching = []
@@ -7295,38 +7996,71 @@ class Templates:
                     else:
                         dropped_matching = 0
 
-                    logger.info(
-                        "SFFT post-anomaly feedback: banning %d sources and removing %d prior matches; rerunning subtraction once.",
-                        n_post,
-                        dropped_matching,
+                    # Safety: don't retry if too few matching sources remain
+                    # after removing anomaly-adjacent sources.  SFFT needs at
+                    # least sfft_min_prior_sources to produce a valid kernel.
+                    _min_for_retry = max(
+                        2, int(ts_sub.get("sfft_min_prior_sources", 3) or 3)
                     )
-                    cmd_retry = _build_sfft_cmd(
-                        current_excluded,
-                        current_matching_sources,
-                        template_work_fpath,
-                        outputFpath,
-                    )
-                    retry_log_path = scienceDir / f"sfft_{Path(base_name).stem}_postanom_retry.txt"
-                    with open(retry_log_path, "w") as lf:
-                        subprocess.run(
-                            cmd_retry,
-                            check=True,
-                            text=True,
-                            stdout=lf,
-                            stderr=lf,
-                            env=sfft_env,
-                            timeout=sfft_timeout,
+                    if len(current_matching_sources) < _min_for_retry:
+                        logger.warning(
+                            "SFFT post-anomaly feedback: only %d matching "
+                            "sources remain after removing %d anomaly-adjacent "
+                            "sources (min=%d). Skipping retry; keeping "
+                            "first-pass result.",
+                            len(current_matching_sources),
+                            dropped_matching,
+                            _min_for_retry,
                         )
+                    else:
+                        # Extend prior-ban list (only if we're actually retrying).
+                        current_excluded = current_excluded + post_anom_xy
+
+                        logger.info(
+                            "SFFT post-anomaly feedback: banning %d sources and "
+                            "removing %d matching sources; rerunning subtraction.",
+                            n_post,
+                            dropped_matching,
+                        )
+                        cmd_retry = _build_sfft_cmd(
+                            current_excluded,
+                            current_matching_sources,
+                            template_work_fpath,
+                            outputFpath,
+                        )
+                        retry_log_path = scienceDir / f"sfft_{Path(base_name).stem}_postanom_retry.txt"
+                        with open(retry_log_path, "w") as lf:
+                            subprocess.run(
+                                cmd_retry,
+                                check=True,
+                                text=True,
+                                stdout=lf,
+                                stderr=lf,
+                                env=sfft_env,
+                                timeout=sfft_timeout,
+                            )
                 elif n_post > 0:
                     logger.info(
-                        "SFFT post-anomaly feedback skipped (count=%d, fraction=%.2f, limits: min=%d, max_frac=%.2f).",
+                        "SFFT post-anomaly feedback skipped (count=%d below min=%d).",
                         n_post,
-                        frac_post,
                         post_anom_min_count,
-                        post_anom_max_frac,
                     )
+              except Exception as exc_pa:
+                # Post-anomaly feedback retry failed.  Don't propagate - the
+                # first-pass SFFT result is already written to outputFpath.
+                # Keep the first-pass result rather than falling back to
+                # HOTPANTS.
+                log_warning_from_exception(
+                    logger,
+                    "SFFT post-anomaly feedback retry failed; "
+                    "keeping first-pass SFFT result",
+                    exc_pa,
+                )
 
             # Parse SFFT log for flux scaling discrepancy warning.
+            _conv_scale = None
+            _phot_scale = None
+            _discrep_pct = None
             # SFFT's MeLOn logs two independent flux scaling estimates:
             #   - Convolution-based: "The Flux Scaling through the Convolution ..."
             #   - Photometric:       "The approximated Flux Scaling from Photometry ..."
@@ -7410,12 +8144,165 @@ class Templates:
             except Exception:
                 pass
 
+            # --- Flux scaling discrepancy retry ---
+            # If the first pass produced a large flux scaling discrepancy
+            # (>3%), the kernel integral doesn't match the true flux ratio.
+            # A higher kernel_order allows spatial variation that can better
+            # model the PSF difference, reducing the discrepancy.  Retry once
+            # with kernel_order+1 (capped at 2) if we have enough sources.
+            _discrep_retry_thresh = float(
+                ts_sub.get("sfft_flux_discrepancy_retry_pct", 3.0)
+            )
+            # Compute n_eff from the matching sources available to this method.
+            # (n_eff is defined in subtract() but not in scope here.)
+            _n_matched_local = len(current_matching_sources) if current_matching_sources else 0
+            _min_prior_local = int(ts_sub.get("sfft_min_prior_sources", 3) or 3)
+            _n_eff_local = 10 if _n_matched_local < _min_prior_local else _n_matched_local
+            _do_discrep_retry = (
+                _conv_scale is not None
+                and _phot_scale is not None
+                and _conv_scale > 0
+                and _discrep_pct > _discrep_retry_thresh
+                and kernel_order < 2
+                and _n_eff_local >= 20
+            )
+            if _do_discrep_retry:
+                _retry_kernel_order = min(kernel_order + 1, 2)
+                logger.warning(
+                    "SFFT flux scaling discrepancy=%.1f%% > %.1f%% threshold. "
+                    "Retrying with kernel_order=%d (was %d) to improve kernel "
+                    "spatial variation.",
+                    _discrep_pct, _discrep_retry_thresh,
+                    _retry_kernel_order, kernel_order,
+                )
+                _saved_kernel_order = kernel_order
+                kernel_order = _retry_kernel_order
+                try:
+                    cmd_discrep_retry = _build_sfft_cmd(
+                        current_excluded,
+                        current_matching_sources,
+                        template_work_fpath,
+                        outputFpath,
+                    )
+                    discrep_log_path = scienceDir / f"sfft_{Path(base_name).stem}_discrep_retry.txt"
+                    with open(discrep_log_path, "w") as lf:
+                        subprocess.run(
+                            cmd_discrep_retry,
+                            check=True,
+                            text=True,
+                            stdout=lf,
+                            stderr=lf,
+                            env=sfft_env,
+                            timeout=sfft_timeout,
+                        )
+                    # Re-parse the retry log for updated flux scaling
+                    if discrep_log_path.exists():
+                        _retry_text = discrep_log_path.read_text(errors="ignore")
+                        _rc = _re.search(
+                            r"Flux Scaling through the Convolution.*?\[(-?[\d.]+)", _retry_text
+                        )
+                        _rp = _re.search(
+                            r"Flux Scaling from Photometry.*?\[(-?[\d.]+)", _retry_text
+                        )
+                        if _rc and _rp:
+                            _conv_scale2 = float(_rc.group(1))
+                            _phot_scale2 = float(_rp.group(1))
+                            _discrep_pct2 = abs(_conv_scale2 - _phot_scale2) / max(
+                                abs(_conv_scale2), abs(_phot_scale2), 1e-10
+                            ) * 100.0
+                            try:
+                                if outputFpath and os.path.isfile(outputFpath):
+                                    with fits.open(outputFpath, mode="update", memmap=False) as _hdul:
+                                        _hdul[0].header["FSCAL_CONV"] = float(_conv_scale2)
+                                        _hdul[0].header["FSCAL_PHOT"] = float(_phot_scale2)
+                                        _hdul[0].header["FSCAL_DISC"] = float(_discrep_pct2)
+                                        _hdul.flush()
+                            except Exception:
+                                pass
+                            if _discrep_pct2 < _discrep_pct:
+                                logger.info(
+                                    "SFFT discrepancy retry improved: %.1f%% -> %.1f%% "
+                                    "(kernel_order=%d).",
+                                    _discrep_pct, _discrep_pct2, _retry_kernel_order,
+                                )
+                            else:
+                                logger.warning(
+                                    "SFFT discrepancy retry did not improve: %.1f%% -> %.1f%% "
+                                    "(kernel_order=%d). Keeping retry result.",
+                                    _discrep_pct, _discrep_pct2, _retry_kernel_order,
+                                )
+                    logger.info("SFFT subtraction succeeded (discrepancy retry)")
+                    return "done"
+                except Exception as exc_dr:
+                    log_warning_from_exception(
+                        logger,
+                        "SFFT flux scaling discrepancy retry failed; "
+                        "keeping first-pass result",
+                        exc_dr,
+                    )
+                finally:
+                    kernel_order = _saved_kernel_order
+
             logger.info("SFFT subtraction succeeded")
             return "done"
         except Exception as exc:
-            log_warning_from_exception(
-                logger, "SFFT failed, falling back to HOTPANTS", exc
+            # --- Fallback: retry with permissive ONLY_FLAGS if restrictive
+            # flags were used.  Restrictive flags (excluding blended sources)
+            # can starve SFFT of sources in dense fields.  Retry once with
+            # the full permissive set before falling back to HOTPANTS.
+            _restrictive_flags = ts_sub.get("sfft_only_flags", [0, 1, 16, 17])
+            _permissive_flags = [0, 1, 2, 3, 16, 17, 18, 19]
+            _is_restrictive = (
+                _restrictive_flags is not None
+                and isinstance(_restrictive_flags, (list, tuple))
+                and set(_restrictive_flags) != set(_permissive_flags)
             )
+            if _is_restrictive:
+                logger.warning(
+                    "SFFT failed with restrictive only_flags=%s (%s). "
+                    "Retrying with permissive flags=%s before HOTPANTS fallback.",
+                    _restrictive_flags, str(exc), _permissive_flags,
+                )
+                _saved_flags = ts_sub.get("sfft_only_flags")
+                ts_sub["sfft_only_flags"] = _permissive_flags
+                try:
+                    cmd_fallback = _build_sfft_cmd(
+                        current_excluded,
+                        current_matching_sources,
+                        template_work_fpath,
+                        outputFpath,
+                    )
+                    fallback_log_path = scienceDir / f"sfft_{Path(base_name).stem}_flags_retry.txt"
+                    with open(fallback_log_path, "w") as lf:
+                        subprocess.run(
+                            cmd_fallback,
+                            check=True,
+                            text=True,
+                            stdout=lf,
+                            stderr=lf,
+                            env=sfft_env,
+                            timeout=sfft_timeout,
+                        )
+                    logger.info(
+                        "SFFT succeeded with permissive flags fallback."
+                    )
+                    return "done"
+                except Exception as exc2:
+                    log_warning_from_exception(
+                        logger,
+                        "SFFT permissive-flags retry also failed; falling back to HOTPANTS",
+                        exc2,
+                    )
+                finally:
+                    # Restore original flags
+                    if _saved_flags is not None:
+                        ts_sub["sfft_only_flags"] = _saved_flags
+                    else:
+                        ts_sub.pop("sfft_only_flags", None)
+            else:
+                log_warning_from_exception(
+                    logger, "SFFT failed, falling back to HOTPANTS", exc
+                )
             return "hotpants"
 
     def _subtract_hotpants(

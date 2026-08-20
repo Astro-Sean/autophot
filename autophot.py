@@ -1874,6 +1874,30 @@ class AutomatedPhotometry:
                     )
                     sys.exit("Stopped: No target coordinates provided.")
 
+            # ------------------------------------------------------------------
+            # Additional targets: resolve names/coords and de-duplicate against
+            # the primary target.  The resolved list is stored in the input
+            # dict so per-image subprocesses (main.py) can use it directly.
+            # ------------------------------------------------------------------
+            try:
+                from additional_targets import resolve_additional_targets
+                _additional = resolve_additional_targets(
+                    default_input, prepare_db=prepare_db
+                )
+                default_input["_additional_targets_resolved"] = _additional
+                if _additional:
+                    _log(
+                        log_step(
+                            f"Additional targets ({len(_additional)}): "
+                            + ", ".join(t["name"] for t in _additional)
+                        )
+                    )
+                else:
+                    default_input["_additional_targets_resolved"] = []
+            except Exception as _at_exc:
+                _log(f"[WARNING] Additional-target resolution failed: {_at_exc}")
+                default_input["_additional_targets_resolved"] = []
+
             # Clean and validate input files
             file_list = prepare_db.clean()
             if not default_input.get("skip_file_check", False):
@@ -2191,7 +2215,7 @@ class AutomatedPhotometry:
                             ra_deg=default_input["target_ra"],
                             dec_deg=default_input["target_dec"],
                         )
-                        variable_sources = [r.to_dict() for _, r in vars_df.iterrows()]
+                        variable_sources = vars_df.to_dict("records")
 
                         backup_yaml["variable_sources"] = variable_sources
                     except Exception as e:
@@ -2342,6 +2366,32 @@ class AutomatedPhotometry:
                 output_filename=output_loc,
                 loc_file="Output_*.csv",
             )
+
+            # Concatenate additional-target per-image CSVs into per-target
+            # lightcurve files.  Each additional target's per-image CSV is
+            # named AdditionalTarget_{safe_name}_{base}.csv.
+            # All additional-target outputs go into a sub_targets/ subfolder.
+            _additional_lc_paths = []
+            _at_resolved = default_input.get("_additional_targets_resolved") or []
+            if _at_resolved:
+                from additional_targets import sanitize_target_name_for_filename as _stfn
+                _sub_targets_dir = os.path.join(reduced_loc, "sub_targets")
+                os.makedirs(_sub_targets_dir, exist_ok=True)
+                for _at in _at_resolved:
+                    _at_safe = _stfn(str(_at.get("name", "AdditionalTarget")))
+                    _at_pattern = f"AdditionalTarget_{_at_safe}_*.csv"
+                    _at_lc_path = os.path.join(
+                        _sub_targets_dir, f"LightCurve_Output_{_at_safe}.csv"
+                    )
+                    concatenate_csv_files(
+                        folder_path=reduced_loc,
+                        output_filename=_at_lc_path,
+                        loc_file=_at_pattern,
+                    )
+                    _additional_lc_paths.append(_at_lc_path)
+                    _log(f"Additional-target light curve: {_at_lc_path}")
+            default_input["_additional_targets_lightcurve_paths"] = _additional_lc_paths
+
             _log_always(
                 f"Photometry pipeline completed in {time.perf_counter() - t0:.3f} seconds."
             )
@@ -2355,6 +2405,19 @@ class AutomatedPhotometry:
             out_dir_name = "_" + str(default_input.get("outdir_name", "REDUCED"))
             reduced_loc = f"{work_dir}{out_dir_name}"
 
+            # Resolve additional targets so their lightcurves can be recovered
+            # even when skipping reductions.
+            if not default_input.get("_additional_targets_resolved"):
+                try:
+                    from additional_targets import resolve_additional_targets
+                    _additional = resolve_additional_targets(
+                        default_input, prepare_db=None
+                    )
+                    default_input["_additional_targets_resolved"] = _additional
+                except Exception as _at_exc:
+                    _log(f"[WARNING] Additional-target resolution failed in recovery mode: {_at_exc}")
+                    default_input["_additional_targets_resolved"] = []
+
             # Concatenate existing per-image outputs into one light curve CSV
             _log(log_step(f"Collect photometry: {reduced_loc}"))
             output_photometry = os.path.join(reduced_loc, "LightCurve_Output.csv")
@@ -2366,6 +2429,28 @@ class AutomatedPhotometry:
                     loc_file="Output_*.csv",
                 )
                 _log_always(f"Output light curve: {output_photometry}")
+
+                # Recover additional-target lightcurves too
+                _at_resolved = default_input.get("_additional_targets_resolved") or []
+                if _at_resolved:
+                    from additional_targets import sanitize_target_name_for_filename as _stfn
+                    _sub_targets_dir = os.path.join(reduced_loc, "sub_targets")
+                    os.makedirs(_sub_targets_dir, exist_ok=True)
+                    _additional_lc_paths = []
+                    for _at in _at_resolved:
+                        _at_safe = _stfn(str(_at.get("name", "AdditionalTarget")))
+                        _at_pattern = f"AdditionalTarget_{_at_safe}_*.csv"
+                        _at_lc_path = os.path.join(
+                            _sub_targets_dir, f"LightCurve_Output_{_at_safe}.csv"
+                        )
+                        concatenate_csv_files(
+                            folder_path=reduced_loc,
+                            output_filename=_at_lc_path,
+                            loc_file=_at_pattern,
+                        )
+                        _additional_lc_paths.append(_at_lc_path)
+                        _log(f"Additional-target light curve: {_at_lc_path}")
+                    default_input["_additional_targets_lightcurve_paths"] = _additional_lc_paths
             else:
                 _log_always(f"[WARNING] Reduced directory not found: {reduced_loc}")
                 output_photometry = ""

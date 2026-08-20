@@ -1317,6 +1317,84 @@ class Limits:
                     pass
                 return np.nan, np.nan
 
+            def _stratified_annular_candidates(
+                n_sites: int,
+                cx: float,
+                cy: float,
+                r_min: float,
+                r_max: float,
+                rng: np.random.Generator,
+                jitter_pix: float = 0.5,
+            ) -> pd.DataFrame:
+                """
+                Generate approximately *n_sites* candidate positions uniformly
+                distributed in area within the annulus [r_min, r_max] using a
+                Fibonacci-spiral (sunflower) pattern.
+
+                A small random sub-pixel jitter is added so repeated runs with
+                different seeds explore slightly different positions while
+                retaining the uniform large-scale coverage.
+
+                Returns a DataFrame with ``x_pix`` and ``y_pix`` columns.
+                """
+                n_sites = max(1, int(n_sites))
+                r_min = float(r_min)
+                r_max = float(r_max)
+                if r_max <= r_min:
+                    r_max = r_min + 1.0
+                # Golden-angle spiral for area-uniform coverage of the annulus.
+                golden = np.pi * (3.0 - np.sqrt(5.0))
+                indices = np.arange(n_sites, dtype=float)
+                # Map indices to a radius that is uniform in area between r_min and r_max.
+                # Fraction of area inside radius r: (r^2 - r_min^2) / (r_max^2 - r_min^2)
+                frac = (indices + 0.5) / n_sites
+                rr = np.sqrt(frac * (r_max ** 2 - r_min ** 2) + r_min ** 2)
+                theta = indices * golden
+                # Optional sub-pixel jitter for stochastic exploration.
+                if jitter_pix > 0:
+                    rr = rr + rng.uniform(-jitter_pix, jitter_pix, n_sites)
+                    theta = theta + rng.uniform(-jitter_pix, jitter_pix, n_sites) / np.maximum(rr, 1.0)
+                x_pix = cx + rr * np.cos(theta)
+                y_pix = cy + rr * np.sin(theta)
+                return pd.DataFrame({"x_pix": x_pix, "y_pix": y_pix})
+
+            def _farthest_point_select(
+                coords: np.ndarray,
+                n_select: int,
+                *,
+                start_idx: int | None = None,
+            ) -> np.ndarray:
+                """
+                Greedy farthest-point sampling for spatial uniformity.
+
+                Given an ``(N, 2)`` array of candidate coordinates, select
+                ``n_select`` indices that are maximally spread apart.
+
+                The first point is either *start_idx* (if given) or the point
+                closest to the centroid of all candidates.
+
+                Runs in O(N * n_select) which is cheap for N~500, n_select~100.
+                """
+                N = coords.shape[0]
+                n_select = min(n_select, N)
+                if n_select <= 0:
+                    return np.array([], dtype=int)
+                if n_select == N:
+                    return np.arange(N)
+                # Distance from each candidate to all others (squared).
+                # We maintain the minimum distance to any already-selected point.
+                if start_idx is None:
+                    centroid = coords.mean(axis=0)
+                    start_idx = int(np.argmin(np.sum((coords - centroid) ** 2, axis=1)))
+                selected = [start_idx]
+                min_dist_sq = np.sum((coords - coords[start_idx]) ** 2, axis=1)
+                for _ in range(1, n_select):
+                    nxt = int(np.argmax(min_dist_sq))
+                    selected.append(nxt)
+                    new_dist_sq = np.sum((coords - coords[nxt]) ** 2, axis=1)
+                    min_dist_sq = np.minimum(min_dist_sq, new_dist_sq)
+                return np.array(selected, dtype=int)
+
             # If aperture_radius equals fwhm (default fallback), try to calculate optimum
             if configured_radius == fwhm:
                 try:
@@ -1642,28 +1720,46 @@ class Limits:
             injection_df = pd.DataFrame()
 
             # -----------------------------------------------------------------
-            # Fully sample the environment around the transient and choose the
-            # quietest sites (lowest |SNR|) for injection.
+            # Generate candidate injection sites and select ~100 final sites
+            # distributed as uniformly as possible around the target.
+            #
+            # Two modes:
+            #   * Representative (default): stratified annular candidates +
+            #     farthest-point selection for spatial uniformity.  No bias
+            #     toward quiet patches.
+            #   * Quiet: stratified candidates, rank by quietness/similarity,
+            #     farthest-point selection from the top-ranked pool.
             # -----------------------------------------------------------------
-            n_candidates = int(lim_cfg.get("inject_candidate_n_sites", 2000))
-            n_candidates = max(200, min(n_candidates, 20000))
-            n_quiet = int(lim_cfg.get("inject_quiet_n_sites", 100))
-            n_quiet = max(10, min(n_quiet, 500))
+            n_final = int(lim_cfg.get("inject_final_n_sites",
+                                      lim_cfg.get("inject_quiet_n_sites", 100)))
+            n_final = max(10, min(n_final, 500))
 
-            # Sample uniformly in area within [r_min, r_max].
+            # Candidate pool: modest oversampling of the final count.
+            # Default 300 (was 2000) -- enough to survive filtering while
+            # keeping per-candidate measurement cost low.
+            n_candidates = int(lim_cfg.get("inject_candidate_n_sites", 0))
+            if n_candidates <= 0:
+                # Auto-size: 3x final count, clamped to a sensible range.
+                n_candidates = max(3 * n_final, 150)
+            n_candidates = max(100, min(n_candidates, 5000))
+
+            # Legacy key kept for backward compatibility but no longer drives
+            # heavy jitter/KMeans workloads.
+            redo_default = int(lim_cfg.get("injection_jitter_repetitions", 3))
+            redo_default = max(1, min(redo_default, 20))
+
             r_min_with_jitter = float(r_min) + 1.0
             r_min_with_jitter = min(r_min_with_jitter, float(r_max))
-            theta = self._rng.random(n_candidates) * (2.0 * np.pi)
-            rr = (
-                np.sqrt(self._rng.random(n_candidates))
-                * (float(r_max) - float(r_min_with_jitter))
-                + float(r_min_with_jitter)
-            )
-            cand_df = pd.DataFrame(
-                {
-                    "x_pix": cutout_cx + rr * np.cos(theta),
-                    "y_pix": cutout_cy + rr * np.sin(theta),
-                }
+
+            # Use stratified (Fibonacci-spiral) sampling for area-uniform
+            # coverage instead of pure random polar.  A small jitter keeps
+            # runs with different seeds from being identical.
+            cand_df = _stratified_annular_candidates(
+                n_candidates,
+                cutout_cx, cutout_cy,
+                r_min_with_jitter, r_max,
+                self._rng,
+                jitter_pix=0.5,
             )
 
             # Apply geometric constraints first.
@@ -1720,7 +1816,12 @@ class Limits:
                 return np.nan
 
             if use_quiet_sites:
-                # Calculate target annulus statistics to use as reference for site selection
+                # ----------------------------------------------------------
+                # Quiet-site mode: rank candidates by quietness + annulus
+                # similarity, then select final sites with farthest-point
+                # sampling for spatial uniformity (replaces heavy
+                # jitter + KMeans pipeline).
+                # ----------------------------------------------------------
                 target_mean, target_std = _calculate_annulus_statistics(
                     cutout_cx, cutout_cy, cutout,
                     float(annulus_in_local), float(annulus_out_local)
@@ -1729,8 +1830,8 @@ class Limits:
                     "Target annulus statistics: mean=%.3f, std=%.3f",
                     target_mean, target_std
                 )
-                
-                # Stage 1: Measure S/N at each candidate site (no jitter).
+
+                # Measure S/N at each candidate site.
                 ini_ap = Aperture(input_yaml=local_input_yaml, image=cutout)
                 cand_df = ini_ap.measure(
                     sources=cand_df,
@@ -1739,8 +1840,8 @@ class Limits:
                     verbose=0,
                 )
                 cand_df = _robust_site_snr(cand_df)
-                
-                # Calculate annulus statistics for each candidate site
+
+                # Annulus statistics per candidate (vectorised where possible).
                 ann_means = []
                 ann_stds = []
                 for _, row in cand_df.iterrows():
@@ -1754,31 +1855,23 @@ class Limits:
                     _annulus_mean=ann_means,
                     _annulus_std=ann_stds
                 )
-                
-                # Score candidates by combined metric:
-                # 1. Primary: |SNR| (quietness) - lower is better
-                # 2. Secondary: Similarity to target annulus statistics
+
                 snr_col = np.asarray(cand_df.get("SNR", np.nan), dtype=float)
                 mean_col = np.asarray(cand_df.get("_annulus_mean", np.nan), dtype=float)
                 std_col = np.asarray(cand_df.get("_annulus_std", np.nan), dtype=float)
-                
-                # Calculate similarity scores (lower is more similar)
+
                 mean_diff = np.abs(mean_col - target_mean) if np.isfinite(target_mean) else np.zeros_like(mean_col)
                 std_diff = np.abs(std_col - target_std) if np.isfinite(target_std) else np.zeros_like(std_col)
-                
-                # Normalize differences by target values (relative difference)
                 mean_sim = mean_diff / (np.abs(target_mean) + 1e-6) if np.isfinite(target_mean) and target_mean != 0 else mean_diff
                 std_sim = std_diff / (np.abs(target_std) + 1e-6) if np.isfinite(target_std) and target_std != 0 else std_diff
-                
-                # Combined score: weighted sum of SNR and similarity
-                # Weight SNR more heavily (0.7) but still consider similarity (0.3)
+
                 similarity_weight = 0.3
                 snr_weight = 0.7
                 combined_score = snr_weight * np.abs(snr_col) + similarity_weight * (mean_sim + std_sim)
-                
+
                 cand_df = cand_df.assign(_combined_score=combined_score)
                 cand_df = cand_df[np.isfinite(cand_df["_combined_score"])].copy()
-                
+
                 if len(cand_df) == 0:
                     logger.warning(
                         "All candidate sites have non-finite scores; cannot find injection sites."
@@ -1787,93 +1880,42 @@ class Limits:
                         return {"inject_lmag": np.nan, "bracket_steps": [], "bisect_steps": [], "completeness_target": locals().get('completeness_target', 0.5), "detection_cutoff": detection_cutoff, "zeropoint": zeropoint, "recovery_method": None, "snr_limit": None, "image_zeropoint": image_zeropoint}
                     return np.nan
 
-                # Select the n_quiet candidates with best combined score (quiet + similar to target)
-                cand_df = cand_df.sort_values("_combined_score", ascending=True)
-                # Apply SNR filter as a hard constraint (must be quiet enough)
-                quiet_mask = np.abs(snr_col) <= float(effective_snr_limit)
-                cand_quiet = cand_df[quiet_mask].copy()
-                stage1_chosen = cand_quiet.head(n_quiet) if len(cand_quiet) >= n_quiet else cand_df.head(n_quiet)
-                
-                # Log statistics about the selected sites
-                if len(stage1_chosen) > 0:
-                    selected_mean = np.mean(np.abs(stage1_chosen["SNR"]))
-                    selected_mean_sim = np.mean(np.abs(stage1_chosen["_annulus_mean"] - target_mean)) if np.isfinite(target_mean) else 0
-                    selected_std_sim = np.mean(np.abs(stage1_chosen["_annulus_std"] - target_std)) if np.isfinite(target_std) else 0
-                    logger.info(
-                        "Stage 1 site selection: sampled %d candidates -> selected %d sites with best combined score (|S/N|<=%.3g).",
-                        int(n_candidates),
-                        int(len(stage1_chosen)),
-                        float(effective_snr_limit),
-                    )
-                    logger.info(
-                        "Selected sites: mean |S/N|=%.3f, mean similarity (mean=%.3f, std=%.3f)",
-                        selected_mean, selected_mean_sim, selected_std_sim
-                    )
-                else:
-                    logger.warning(
-                        "No candidate sites passed the S/N filter (|S/N|<=%.3g); cannot find injection sites.",
-                        float(effective_snr_limit),
-                    )
+                # Sort by combined score (lower = quieter + more similar).
+                cand_df = cand_df.sort_values("_combined_score", ascending=True).reset_index(drop=True)
 
-                # Stage 2: Jitter the selected candidates, measure S/N, apply K-means spatial
-                # uniformity selection on the quietest jittered positions.
-                _jitter_rng = np.random.default_rng(42)
-                _jitter_dx = _jitter_rng.uniform(-0.5, 0.5, (len(stage1_chosen), redo_default))
-                _jitter_dy = _jitter_rng.uniform(-0.5, 0.5, (len(stage1_chosen), redo_default))
-                x0_vals = np.asarray(stage1_chosen["x_pix"].values, float)
-                y0_vals = np.asarray(stage1_chosen["y_pix"].values, float)
-                jittered_x = (x0_vals[:, None] + _jitter_dx).ravel()
-                jittered_y = (y0_vals[:, None] + _jitter_dy).ravel()
-                jittered_df = pd.DataFrame({"x_pix": jittered_x, "y_pix": jittered_y})
-                jittered_df = ini_ap.measure(
-                    sources=jittered_df,
-                    plot=False,
-                    background_rms=cutout_rms,
-                    verbose=0,
+                # Build a ranked pool of ~3x final count, then farthest-point
+                # select from it so chosen sites are both quiet and spatially
+                # spread out.
+                pool_size = min(3 * n_final, len(cand_df))
+                pool_df = cand_df.head(pool_size).copy()
+                pool_coords = np.column_stack([pool_df["x_pix"].values, pool_df["y_pix"].values])
+                chosen_idx = _farthest_point_select(pool_coords, n_final)
+                injection_df = pool_df.iloc[chosen_idx][["x_pix", "y_pix"]].reset_index(drop=True)
+
+                selected_mean_snr = float(np.mean(np.abs(pool_df.iloc[chosen_idx]["SNR"])))
+                logger.info(
+                    "Quiet site selection: %d valid candidates -> ranked pool of %d -> "
+                    "%d final sites via farthest-point sampling (mean |S/N|=%.3f).",
+                    int(len(cand_df)), int(pool_size), int(len(injection_df)),
+                    selected_mean_snr,
                 )
-                jittered_df = _robust_site_snr(jittered_df)
-                jittered_df["_abs_snr"] = np.abs(jittered_df["SNR"])
-                jittered_df = jittered_df[np.isfinite(jittered_df["_abs_snr"])].copy()
-                jittered_df = jittered_df.sort_values("_abs_snr", ascending=True)
-                pool_size = min(3 * n_quiet, len(jittered_df))
-                pool = jittered_df.head(pool_size).copy()
-
-                try:
-                    from sklearn.cluster import KMeans
-                    coords = np.column_stack([pool["x_pix"].values, pool["y_pix"].values])
-                    kmeans = KMeans(n_clusters=n_quiet, random_state=42, n_init=10)
-                    kmeans.fit(coords)
-                    chosen_indices = []
-                    for center in kmeans.cluster_centers_:
-                        distances = np.sum((coords - center) ** 2, axis=1)
-                        chosen_indices.append(np.argmin(distances))
-                    jittered_chosen = pool.iloc[chosen_indices].copy()
-                    logger.info(
-                        "Stage 2 jittered quiet selection: %d candidates x %d jitters -> %d jittered -> %d spatially uniform quiet sites via K-means from pool of %d.",
-                        int(len(stage1_chosen)), int(redo_default),
-                        int(len(jittered_df)), int(len(jittered_chosen)), int(pool_size),
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "K-means spatial selection failed (%s); falling back to simple selection.",
-                        str(exc),
-                    )
-                    jittered_chosen = pool.head(n_quiet)
-                    logger.info(
-                        "Stage 2 jittered quiet selection: %d candidates x %d jitters -> using lowest %d (K-means fallback).",
-                        int(len(stage1_chosen)), int(redo_default), int(len(jittered_chosen)),
-                    )
-                injection_df = jittered_chosen[["x_pix", "y_pix"]].reset_index(drop=True)
 
             else:
-                # Representative-site mode (inject_use_quiet_sites=False):
-                # Use a spatially uniform random draw from the full candidate pool.
-                # This gives a limit representative of the actual local background,
-                # rather than cherry-picked quiet patches which bias the depth faint.
-                n_draw = min(n_quiet, len(cand_df))
-                injection_df = cand_df[["x_pix", "y_pix"]].sample(
-                    n=n_draw, random_state=42, replace=False
-                ).reset_index(drop=True)
+                # ----------------------------------------------------------
+                # Representative-site mode (default):
+                # Select final sites from the valid candidate pool using
+                # farthest-point sampling for maximal spatial uniformity.
+                # No bias toward quiet patches -- the limit reflects the
+                # actual local background distribution.
+                # ----------------------------------------------------------
+                cand_coords = np.column_stack([cand_df["x_pix"].values, cand_df["y_pix"].values])
+                chosen_idx = _farthest_point_select(cand_coords, n_final)
+                injection_df = cand_df.iloc[chosen_idx][["x_pix", "y_pix"]].reset_index(drop=True)
+                logger.info(
+                    "Representative site selection: %d valid candidates -> %d final sites "
+                    "via farthest-point sampling (target=%d).",
+                    int(len(cand_df)), int(len(injection_df)), int(n_final),
+                )
                 
             # Use only these jittered positions for injection trials.
             sourceNum = int(len(injection_df))
@@ -2655,7 +2697,8 @@ class Limits:
             ax.set_ylabel("Recovery fraction")
 
             ax.invert_xaxis()
-            ax.legend(loc="upper left", fontsize=8, frameon=False)
+            ax.legend(loc="upper left", fontsize=8, frameon=True,
+                      facecolor="white", framealpha=1.0, edgecolor="black")
             fig.tight_layout()
             fig.savefig(save_png, dpi=150, bbox_inches="tight", facecolor=PLOT_COLORS.get('figure_facecolor', 'white'))
             plt.close(fig)
@@ -2827,7 +2870,8 @@ class Limits:
         ax.set_ylabel("Apparent magnitude [mag]", fontsize=10)
         ax.set_xscale("log")
         ax.invert_yaxis()
-        ax.legend(fontsize=8, frameon=False)
+        ax.legend(fontsize=8, frameon=True, facecolor="white",
+                  framealpha=1.0, edgecolor="black")
         ax.grid(True, alpha=0.3, linestyle="--")
         
         fig.tight_layout()
@@ -2987,7 +3031,7 @@ class Limits:
                 ("#4CAF50", "#1B5E20"),  # green / dark-green
                 ("#FF9800", "#E65100"),  # orange / dark-orange
                 ("#9C27B0", "#4A148C"),  # purple / dark-purple
-                ("#00BCD4", "#006064"),  # cyan / dark-cyan
+                ("#17A2B8", "#0D6577"),  # muted teal / dark-teal (was neon cyan)
             ]
             _markers = ["o", "s", "^", "D", "v", "P"]
 
@@ -3110,7 +3154,8 @@ class Limits:
                 # do not call secax.invert_xaxis() as it would double-invert.
 
             ncol = 2 if (multi_snr_details is not None and len(multi_snr_details) > 1) else 1
-            ax.legend(loc="best", fontsize=8, frameon=False, ncol=ncol)
+            ax.legend(loc="best", fontsize=8, frameon=True, facecolor="white",
+                      framealpha=1.0, edgecolor="black", ncol=ncol)
 
             if owns_figure:
                 fig.tight_layout()
@@ -4029,7 +4074,9 @@ class Limits:
             margin = 0.5  # 0.5 mag margin
             ax.set_xlim(mag_max + margin, mag_min - margin)  # Inverted for magnitude
             ax.set_ylim(mag_max + margin, mag_min - margin)  # Inverted for magnitude
-        ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False, ncol=2, fontsize=8)
+        ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
+                  frameon=True, facecolor="white", framealpha=1.0,
+                  edgecolor="black", ncol=2, fontsize=8)
         ax.grid(True, linestyle="--", alpha=0.5, zorder=0, lw=0.5)
 
         fig.tight_layout()

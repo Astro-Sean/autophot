@@ -219,50 +219,84 @@ class BackgroundSubtractor:
             self.logger.warning("Invalid pixel scale (%s), skipping galaxy masking", pix_scale_arcsec)
             return np.zeros_like(image, dtype=bool)
 
-        valid = galaxies["galdim_majaxis"].apply(
-            lambda x: isinstance(x, (int, float)) and not pd.isna(x) and x > 0
-        ) & galaxies["galdim_minaxis"].apply(
-            lambda x: isinstance(x, (int, float)) and not pd.isna(x) and x > 0
+        valid = (
+            pd.to_numeric(galaxies["galdim_majaxis"], errors="coerce").notna()
+            & (pd.to_numeric(galaxies["galdim_majaxis"], errors="coerce") > 0)
+            & pd.to_numeric(galaxies["galdim_minaxis"], errors="coerce").notna()
+            & (pd.to_numeric(galaxies["galdim_minaxis"], errors="coerce") > 0)
         )
         filtered_galaxies = galaxies[valid]
         if len(filtered_galaxies) > 0:
             self.logger.info("Masking %s galaxies from SIMBAD", len(filtered_galaxies))
 
         mask = np.zeros(image.shape, dtype=bool)
-        y_grid, x_grid = np.mgrid[0 : image.shape[0], 0 : image.shape[1]]
 
-        for _, row in filtered_galaxies.iterrows():
+        if len(filtered_galaxies) == 0:
+            return mask
+
+        # Batch WCS conversion: convert all galaxy RA/Dec to pixel coords at once
+        # instead of per-galaxy wcs.world_to_pixel() calls
+        try:
+            ra_arr = filtered_galaxies["RA"].values.astype(float)
+            dec_arr = filtered_galaxies["DEC"].values.astype(float)
+            xpix_arr, ypix_arr = wcs.all_world2pix(ra_arr, dec_arr, 0)
+        except Exception as exc:
+            self.logger.warning("Batch WCS conversion failed, falling back to per-galaxy: %s", exc)
+            xpix_arr = np.full(len(filtered_galaxies), np.nan)
+            ypix_arr = np.full(len(filtered_galaxies), np.nan)
+
+        delta = 1 if rotation_angle < 0 else -1
+        ny, nx = image.shape
+
+        for i, row in enumerate(filtered_galaxies.itertuples(index=False)):
             try:
-                sky_pos = SkyCoord(ra=row["RA"] * u.deg, dec=row["DEC"] * u.deg)
-                xpix, ypix = wcs.world_to_pixel(sky_pos)
+                xpix = float(xpix_arr[i])
+                ypix = float(ypix_arr[i])
+                if not (np.isfinite(xpix) and np.isfinite(ypix)):
+                    # Fallback to per-galaxy WCS if batch failed for this row
+                    sky_pos = SkyCoord(ra=row.RA * u.deg, dec=row.DEC * u.deg)
+                    xpix, ypix = wcs.world_to_pixel(sky_pos)
 
                 # FIX: scale_factor ensures faint galaxy outskirts are masked.
                 maj_pix = (
-                    scale_factor * (row["galdim_majaxis"] * 60.0) / pix_scale_arcsec
+                    scale_factor * (row.galdim_majaxis * 60.0) / pix_scale_arcsec
                 )
                 min_pix = (
-                    scale_factor * (row["galdim_minaxis"] * 60.0) / pix_scale_arcsec
+                    scale_factor * (row.galdim_minaxis * 60.0) / pix_scale_arcsec
                 )
 
-                delta = 1 if rotation_angle < 0 else -1
                 ellipse_angle = (
-                    90.0 + delta * (row["galdim_angle"] + rotation_angle)
+                    90.0 + delta * (row.galdim_angle + rotation_angle)
                 ) % 360.0
 
                 theta = np.radians(ellipse_angle)
                 cos_t, sin_t = np.cos(-theta), np.sin(-theta)
 
-                x_rel = x_grid - xpix
-                y_rel = y_grid - ypix
+                # Compute ellipse mask only within the galaxy's bounding box
+                # (not the full image) to avoid O(N_galaxies * image_size) work
+                _margin = int(np.ceil(max(maj_pix, min_pix))) + 2
+                _x0 = max(0, int(xpix) - _margin)
+                _x1 = min(nx, int(xpix) + _margin + 1)
+                _y0 = max(0, int(ypix) - _margin)
+                _y1 = min(ny, int(ypix) + _margin + 1)
+                if _x1 <= _x0 or _y1 <= _y0:
+                    continue
+
+                _y_sub, _x_sub = np.mgrid[_y0:_y1, _x0:_x1]
+                x_rel = _x_sub - xpix
+                y_rel = _y_sub - ypix
 
                 x_rot = cos_t * x_rel - sin_t * y_rel
                 y_rot = sin_t * x_rel + cos_t * y_rel
 
-                mask |= (x_rot / maj_pix) ** 2 + (y_rot / min_pix) ** 2 <= 1.0
+                mask[_y0:_y1, _x0:_x1] |= (
+                    (x_rot / maj_pix) ** 2 + (y_rot / min_pix) ** 2 <= 1.0
+                )
 
             except Exception as exc:
+                _gid = getattr(row, "MAIN_ID", "unknown")
                 self.logger.info(
-                    f"Error masking galaxy {row.get('MAIN_ID', 'unknown')}: {exc}"
+                    f"Error masking galaxy {_gid}: {exc}"
                 )
 
         n_masked = np.sum(mask)
@@ -1234,6 +1268,51 @@ class BackgroundSubtractor:
             return 1e12
         return saturate
 
+    def _estimate_effective_saturation(
+        self, image: np.ndarray, bkg_median: float, bkg_std: float
+    ) -> float:
+        """
+        Estimate the effective saturation level from image data when the header
+        SATURATE value is missing or unreasonably high.
+
+        Bright stars that are effectively saturated (flat-topped PSF, diffraction
+        spikes) have pixel peaks well below the formal saturation limit but still
+        produce artifacts.  We estimate the effective saturation as the peak of
+        the brightest stellar-like source, which is where diffraction spikes and
+        bleed trails start to appear.
+
+        Returns the estimated saturation level, or np.inf if no bright sources
+        are found.
+        """
+        finite = np.isfinite(image)
+        if not np.any(finite) or bkg_std <= 0:
+            return np.inf
+
+        # Find bright peaks: > 50 sigma above background
+        bright_thresh = bkg_median + 50.0 * bkg_std
+        bright = (image >= bright_thresh) & finite
+        if not np.any(bright):
+            return np.inf
+
+        # The effective saturation is approximately the brightest pixel value
+        # that appears in multiple pixels (a saturated star has a flat top).
+        # Use the 99.99th percentile of bright pixels as the effective saturation.
+        bright_vals = image[bright]
+        if len(bright_vals) < 5:
+            return float(np.max(bright_vals))
+
+        eff_sat = float(np.percentile(bright_vals, 99.99))
+        # Sanity: must be well above background
+        if eff_sat < bkg_median + 20.0 * bkg_std:
+            return np.inf
+
+        self.logger.info(
+            f"Estimated effective saturation: {eff_sat:.1f} ADU "
+            f"(from bright pixel percentile; bkg={bkg_median:.1f}, "
+            f"std={bkg_std:.1f}, n_bright={len(bright_vals)})"
+        )
+        return eff_sat
+
     # -------------------------------------------------------------------------
     # Figure saving helper
     # -------------------------------------------------------------------------
@@ -1343,9 +1422,30 @@ class BackgroundSubtractor:
             mesh_scale=mesh_scale,
         )
 
-        # ---- Saturation mask (NEW) ----
+        # ---- Saturation mask ----
+        # When the header SATURATE is unreasonably high (inf or > 1e8), the
+        # formal saturation mask never triggers.  This is common when the
+        # SATURATE keyword is missing or set to a placeholder value (1e10).
+        # In this case, estimate the effective saturation from the image data
+        # so that bright stars with diffraction spikes are still masked.
+        _saturate_for_mask = self.config["saturate"]
+        if not np.isfinite(_saturate_for_mask) or _saturate_for_mask > 1e8:
+            _bkg_med = float(np.nanmedian(image[np.isfinite(image)]))
+            _bkg_std = float(np.nanstd(image[np.isfinite(image)]))
+            _eff_sat = self._estimate_effective_saturation(
+                image, _bkg_med, _bkg_std
+            )
+            if np.isfinite(_eff_sat) and _eff_sat > 0:
+                _saturate_for_mask = _eff_sat
+                # Also update config so the streak mask uses the same value
+                self.config["saturate"] = _eff_sat
+                self.logger.info(
+                    f"Using data-driven saturation ({_eff_sat:.1f} ADU) for "
+                    f"saturation/streak masks (header value was {_saturate_for_mask:.1e})."
+                )
+
         sat_mask = self._make_saturation_mask(
-            image, self.config["saturate"]
+            image, _saturate_for_mask
         )
         # ---- Saturation streak / bleed mask (avoid regions from saturated stars) ----
         bleed_half = int(self.config.get("saturate_streak_bleed_half_length", 100))
@@ -1355,7 +1455,7 @@ class BackgroundSubtractor:
         if bleed_half > 0:
             streak_mask = self._make_saturation_streak_mask(
                 image,
-                self.config["saturate"],
+                _saturate_for_mask,
                 saturate_frac=0.90,
                 bleed_half_length=bleed_half,
                 use_principal_axis=use_pa,

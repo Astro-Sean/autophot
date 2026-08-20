@@ -1248,7 +1248,10 @@ class Plot:
                 by_label.keys(),
                 loc="lower center",
                 bbox_to_anchor=(0.5, 1.0),
-                frameon=False,
+                frameon=True,
+                facecolor="white",
+                framealpha=1.0,
+                edgecolor="black",
                 fontsize=8,
                 handlelength=1.5,
                 handletextpad=0.5,
@@ -1354,8 +1357,8 @@ class Plot:
                 "I": "chocolate", "G": "salmon", "E": "salmon",
                 "J": "darkred", "H": "orangered", "K": "saddlebrown",
                 "S": "mediumorchid", "D": "purple", "A": "midnightblue",
-                "F": "hotpink", "N": "magenta", "o": "darkorange",
-                "c": "cyan", "W": "forestgreen", "Q": "peru",
+                "F": "#8E4585", "N": "#CC79A7", "o": "darkorange",
+                "c": "#17A2B8", "W": "forestgreen", "Q": "peru",
             }
 
         # Maintains order from blue to red effective wavelength
@@ -1694,18 +1697,21 @@ class Plot:
         handles, labels = ax1.get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
 
-        ncols = len(by_label.values()) % 3
-        if ncols == 0:
-            ncols = len(by_label.values())
+        _n_entries = len(by_label.values())
+        ncols = 3 if _n_entries >= 8 else (2 if _n_entries >= 5 else 1)
         ax1.legend(
             by_label.values(),
             by_label.keys(),
             loc="lower center",
             bbox_to_anchor=(0.5, 1.0),
-            frameon=False,
+            frameon=True,
+            facecolor="white",
+            framealpha=1.0,
+            edgecolor="black",
             fontsize=8,
             handlelength=1.5,
             handletextpad=0.5,
+            ncol=ncols,
         )
         fig.tight_layout(rect=[0, 0, 1, 0.94])
 
@@ -2596,7 +2602,8 @@ class Plot:
             if _legend_handles:
                 ax1.legend(
                     handles=_legend_handles, loc="upper right",
-                    frameon=False, fontsize=8,
+                    frameon=True, facecolor="white", framealpha=1.0,
+                    edgecolor="black", fontsize=8,
                 )
 
             # Stats text

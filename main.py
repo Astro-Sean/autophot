@@ -149,7 +149,7 @@ from psf import PSF
 from templates import Templates
 from utils import run_IDC
 from utils.run_sex import SExtractorWrapper
-from wcs import WCSSolver, get_wcs
+from wcs import WCSSolver, get_wcs, invalidate_wcs_cache
 from zeropoint import Zeropoint
 from background import BackgroundSubtractor
 
@@ -693,11 +693,17 @@ def run_photometry():
         reduced_dir_name = fits_basename + output_dir_suffix
         new_output_dir = os.path.join(os.path.dirname(wdir), reduced_dir_name)
 
-        # Creates the new output directory if it does not exist.
-        Path(new_output_dir).mkdir(parents=True, exist_ok=True)
-        os.chdir(
-            new_output_dir
-        )  # Change the current working directory to the new output directory.
+        # In template-preparation mode, outputs go to the science file's
+        # original directory, so we must NOT create new_output_dir (it would
+        # be left empty).  Only create it for normal photometry runs.
+        if not prepare_template:
+            Path(new_output_dir).mkdir(parents=True, exist_ok=True)
+            os.chdir(
+                new_output_dir
+            )  # Change the current working directory to the new output directory.
+        else:
+            # Still chdir to the parent so relative paths behave sensibly.
+            os.chdir(os.path.dirname(wdir))
 
         #  Check for Existing Output
         # Checks if the output file already exists to avoid reprocessing.
@@ -709,7 +715,14 @@ def run_photometry():
             .replace("_APT", "")
             .replace("_ERROR", "")
         )
-        cur_dir = os.path.join(new_output_dir, base)
+        if prepare_template:
+            # In template-preparation mode, cur_dir is the science file's
+            # original directory; do NOT create a per-image subdirectory
+            # under new_output_dir (it would be unused and left empty).
+            cur_dir = os.path.dirname(science_file)
+        else:
+            cur_dir = os.path.join(new_output_dir, base)
+            Path(cur_dir).mkdir(parents=True, exist_ok=True)
         # Standardized per-image outputs (must include the FITS filename stem).
         # In template-preparation mode, the completion marker is the generated
         # template catalog rather than the normal per-image output CSV.
@@ -747,10 +760,10 @@ def run_photometry():
             return None
 
         #  Set Current Directory Based on Template Flag
-        # Sets the current directory based on whether a template is being prepared.
-        if prepare_template:
-            cur_dir = os.path.dirname(science_file)
-        else:
+        # In template-preparation mode, cur_dir was already set to the science
+        # file's original directory above.  In normal mode, build the nested
+        # per-image output directory under new_output_dir.
+        if not prepare_template:
             # Creates a subdirectory system based on the input directory structure.
             root = os.path.dirname(science_file)
             sub_dirs = root.replace(wdir, "").split("/")
@@ -974,6 +987,12 @@ def run_photometry():
                                     )
                                     break
                         hdul.flush()
+                # Invalidate FITS cache so subsequent reads see the updated header
+                try:
+                    from functions import invalidate_fits_cache
+                    invalidate_fits_cache(fpath)
+                except Exception:
+                    pass
             except Exception as e:
                 logging.debug("Could not ensure template headers: %s", e)
 
@@ -1970,11 +1989,14 @@ def run_photometry():
         # =============================================================================
         logging.info(border_msg("Source detection and FWHM"))
         # Runs SExtractor to measure the image FWHM and detect sources.
+        _fwhm_err = np.nan
         try:
-            ImageFWHM, FWHMSources, scale = SExtractorWrapper(config=input_yaml).run(
+            _sex_wrapper = SExtractorWrapper(config=input_yaml)
+            ImageFWHM, FWHMSources, scale = _sex_wrapper.run(
                 fpath,
                 crowded=input_yaml.get("photometry", {}).get("crowded_field", False),
             )
+            _fwhm_err = getattr(_sex_wrapper, "fwhm_err", np.nan)
         except Exception as e:
             log_exception(e, "SEXtractor failed - trying pythonic source detection")
 
@@ -1982,11 +2004,16 @@ def run_photometry():
             image = get_image(fpath)
 
             # Measures the image FWHM, isolated sources, and scale.
-            ImageFWHM, FWHMSources, scale = Find_FWHM(
+            _find_fwhm = Find_FWHM(
                 input_yaml=input_yaml
-            ).measure_image(
+            )
+            ImageFWHM, FWHMSources, scale = _find_fwhm.measure_image(
                 image=image,
             )
+            _fwhm_err = getattr(_find_fwhm, "fwhm_err", np.nan)
+
+        # Store FWHM uncertainty for downstream modules (calibration, output).
+        input_yaml["fwhm_err"] = float(_fwhm_err) if np.isfinite(_fwhm_err) else float("nan")
 
         # Filter sources near NaN/masked regions to improve FWHM accuracy
         if FWHMSources is not None and len(FWHMSources) > 0:
@@ -2048,9 +2075,16 @@ def run_photometry():
         input_yaml["undersampled_mode"] = bool(
             np.isfinite(ImageFWHM) and float(ImageFWHM) <= undersampled_thr
         )
+        # 4-tier sampling regime classification (extends the binary flag).
+        from functions import classify_sampling_regime
+        _sampling_regime = classify_sampling_regime(
+            float(ImageFWHM) if np.isfinite(ImageFWHM) else 3.0, input_yaml
+        )
+        input_yaml["sampling_regime"] = _sampling_regime
         logging.info(
-            "Undersampled mode: %s (FWHM=%.2f px, threshold=%.2f px)",
+            "Undersampled mode: %s | Sampling regime: %s (FWHM=%.2f px, threshold=%.2f px)",
             input_yaml["undersampled_mode"],
+            _sampling_regime,
             float(ImageFWHM),
             undersampled_thr,
         )
@@ -2211,6 +2245,7 @@ def run_photometry():
                     logging.info("Falling back to pre-existing WCS")
                     from functions import update_header_from_wcs
                     update_header_from_wcs(header, WCSvalues_old)
+                    invalidate_wcs_cache()  # WCS keywords changed after fallback
                     break
                 else:
                     raise Exception(
@@ -2221,6 +2256,7 @@ def run_photometry():
                 if apply_solved_to_fits:
                     header = updated_header
                     safe_fits_write(fpath, image, header)
+                    invalidate_wcs_cache()  # WCS keywords changed after plate solve
                     wcs_updated = True
                 else:
                     # Use solved WCS only to update pixel_scale in YAML; leave FITS header unchanged for better subtraction
@@ -2243,6 +2279,7 @@ def run_photometry():
                 if imageWCS is not None and apply_solved_to_fits:
                     header = updated_header
                     safe_fits_write(fpath, image, header)
+                    invalidate_wcs_cache()  # WCS keywords changed after recovery
                     logging.info(
                         "Recovered usable WCS from solved header and wrote it to FITS."
                     )
@@ -2995,7 +3032,7 @@ def run_photometry():
         _pre_remeasure_fwhm = _initial_measured_fwhm  # use measured FWHM, not config default
         try:
             sex_crowded = input_yaml.get("photometry", {}).get("crowded_field", False)
-            ImageFWHM, FWHMSources, scale = _run_sextractor_two_pass(
+            _sex_wrapper_2 = _run_sextractor_two_pass(
                 config=input_yaml,
                 fpath=fpath,
                 pixel_scale=pixel_scale,
@@ -3003,16 +3040,22 @@ def run_photometry():
                 weight_path=weight_fpath,
                 crowded=sex_crowded,
             )
+            ImageFWHM, FWHMSources, scale = _sex_wrapper_2
+            # _run_sextractor_two_pass returns a 3-tuple; fwhm_err is on the wrapper
+            # instance if accessible.  For now, keep existing fwhm_err from first pass.
         except Exception as e:
             log_exception(e, "Issue with SExtractor")
 
             # Measures the image FWHM, isolated sources, and scale.
-            ImageFWHM, FWHMSources, scale = Find_FWHM(
+            _find_fwhm_2 = Find_FWHM(
                 input_yaml=input_yaml
-            ).measure_image(
+            )
+            ImageFWHM, FWHMSources, scale = _find_fwhm_2.measure_image(
                 image=image,
                 mask=defects_mask,
             )
+            _fwhm_err = getattr(_find_fwhm_2, "fwhm_err", _fwhm_err)
+            input_yaml["fwhm_err"] = float(_fwhm_err) if np.isfinite(_fwhm_err) else float("nan")
 
         input_yaml["fwhm"] = ImageFWHM
         # Measured science-frame seeing FWHM (pixels); same quantity as output `image_fwhm`.
@@ -3025,6 +3068,16 @@ def run_photometry():
         input_yaml["undersampled_mode"] = bool(
             np.isfinite(ImageFWHM) and float(ImageFWHM) <= undersampled_thr
         )
+        # Update 4-tier sampling regime after post-alignment FWHM re-measurement.
+        input_yaml["sampling_regime"] = classify_sampling_regime(
+            float(ImageFWHM) if np.isfinite(ImageFWHM) else 3.0, input_yaml
+        )
+        if input_yaml["sampling_regime"] == "oversampled":
+            logging.warning(
+                "Oversampled regime (FWHM=%.2f px > 5 px): SNR is inefficient. "
+                "Consider 2x2 binning if read noise permits. Using larger apertures.",
+                float(ImageFWHM),
+            )
 
         # Preserve the initial FWHM if the post-alignment re-measurement is
         # inflated.  The initial "Source detection and FWHM" step (above)
@@ -3307,25 +3360,26 @@ def run_photometry():
             frame="icrs",
         )
 
-        source_coords = SkyCoord(
-            ra=IsolatedSources["RA"] * u.degree,
-            dec=IsolatedSources["DEC"] * u.degree,
-            unit="deg",
-            frame="icrs",
-        )
+        if len(IsolatedSources) > 0:
+            source_coords = SkyCoord(
+                ra=IsolatedSources["RA"] * u.degree,
+                dec=IsolatedSources["DEC"] * u.degree,
+                unit="deg",
+                frame="icrs",
+            )
 
-        # Calculates separations.
-        separations = source_coords.separation(target_skycoord)
+            # Calculates separations.
+            separations = source_coords.separation(target_skycoord)
 
-        # Filters sources that are at least the specified distance away.
-        min_separation = input_yaml["catalog"].get("max_distance", 10) * u.arcmin
-        initial_source_count = len(IsolatedSources)
-        IsolatedSources = IsolatedSources[separations < min_separation]
-        final_source_count = len(IsolatedSources)
+            # Filters sources that are at least the specified distance away.
+            min_separation = input_yaml["catalog"].get("max_distance", 10) * u.arcmin
+            initial_source_count = len(IsolatedSources)
+            IsolatedSources = IsolatedSources[separations < min_separation]
+            final_source_count = len(IsolatedSources)
 
-        if initial_source_count != final_source_count:
-            logging.info(
-                f"Using {final_source_count} sources within {min_separation} arcminutes from target"
+            if initial_source_count != final_source_count:
+                logging.info(
+                    f"Using {final_source_count} sources within {min_separation} arcminutes from target"
             )
 
         # Updates the input YAML with the FWHM and scale.
@@ -3558,6 +3612,12 @@ def run_photometry():
 
             # Transfer per-source FWHM and peak_flux from SExtractor (FWHMSources) to catalog sources.
             # peak_flux (FLUX_MAX in ADU) is needed by zeropoint.clean() for saturation/non-linear rejection.
+            # Also transfer SExtractor quality columns (flags, class_star, sharpness, elongation)
+            # so that supplemented PSF candidates can be quality-cut during ePSF build.
+            _sex_quality_cols = [
+                "fwhm", "peak_flux", "flags", "class_star", "sharpness",
+                "roundness", "a", "b", "mu_max", "flux_radius",
+            ]
             if (
                 FWHMSources is not None
                 and len(FWHMSources) > 0
@@ -3574,12 +3634,20 @@ def run_photometry():
                     distances, idxs = tree.query(cat_coords, k=1)
                     # Only assign if match is within 3 px (generous for catalog vs detection mismatch)
                     match_ok = distances <= 3.0
-                    CatalogSources["fwhm"] = np.nan
-                    CatalogSources.loc[match_ok, "fwhm"] = FWHMSources.iloc[idxs[match_ok]]["fwhm"].values
-                    # Also transfer peak_flux (SExtractor FLUX_MAX in ADU) for saturation checks
-                    if "peak_flux" in FWHMSources.columns:
-                        CatalogSources["peak_flux"] = np.nan
-                        CatalogSources.loc[match_ok, "peak_flux"] = FWHMSources.iloc[idxs[match_ok]]["peak_flux"].values
+                    # Transfer all available SExtractor quality columns
+                    for _sqc in _sex_quality_cols:
+                        if _sqc in FWHMSources.columns:
+                            CatalogSources[_sqc] = np.nan
+                            CatalogSources.loc[match_ok, _sqc] = (
+                                FWHMSources.iloc[idxs[match_ok]][_sqc].values
+                            )
+                    # Compute elongation from a/b if both available
+                    if "a" in CatalogSources.columns and "b" in CatalogSources.columns:
+                        _a = pd.to_numeric(CatalogSources["a"], errors="coerce")
+                        _b = pd.to_numeric(CatalogSources["b"], errors="coerce")
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            _elong = np.where((_b > 0) & np.isfinite(_a) & np.isfinite(_b), _a / _b, np.nan)
+                        CatalogSources["ELONGATION"] = _elong
                     n_matched = int(match_ok.sum())
                     if n_matched > 0:
                         logging.info(
@@ -3587,13 +3655,13 @@ def run_photometry():
                         )
                 except Exception as e:
                     logging.warning("Could not match catalog sources to SExtractor FWHM: %s", e)
-                    CatalogSources["fwhm"] = np.nan
-                    if "peak_flux" not in CatalogSources.columns:
-                        CatalogSources["peak_flux"] = np.nan
+                    for _sqc in _sex_quality_cols:
+                        if _sqc not in CatalogSources.columns:
+                            CatalogSources[_sqc] = np.nan
             else:
-                CatalogSources["fwhm"] = np.nan
-                if "peak_flux" not in CatalogSources.columns:
-                    CatalogSources["peak_flux"] = np.nan
+                for _sqc in _sex_quality_cols:
+                    if _sqc not in CatalogSources.columns:
+                        CatalogSources[_sqc] = np.nan
 
             # ---- Diagnostic plot: FWHM vs instrumental magnitude ----
             try:
@@ -3707,7 +3775,8 @@ def run_photometry():
                         _ax.set_xlabel(r"Instrumental magnitude $[-2.5\,\log_{10}(\mathrm{Flux})]$")
                         _ax.set_ylabel("FWHM [pixels]")
                         _ax.invert_xaxis()
-                        _ax.legend(loc="best", frameon=False, fontsize=8)
+                        _ax.legend(loc="best", frameon=True, facecolor="white",
+                                   framealpha=1.0, edgecolor="black", fontsize=8)
                         _ax.set_title(
                             f"FWHM vs Instrumental Magnitude ({input_yaml.get('imageFilter', '')})"
                         )
@@ -3845,7 +3914,8 @@ def run_photometry():
                     _pax.set_xlabel(r"Instrumental magnitude $[-2.5\,\log_{10}(\mathrm{Flux})]$")
                     _pax.set_ylabel("FWHM [pixels]")
                     _pax.invert_xaxis()
-                    _pax.legend(loc="best", frameon=False, fontsize=8)
+                    _pax.legend(loc="best", frameon=True, facecolor="white",
+                                framealpha=1.0, edgecolor="black", fontsize=8)
                     _pax.set_title(
                         f"PSF Source Pool: FWHM vs Inst Mag ({input_yaml.get('imageFilter', '')})"
                     )
@@ -3872,6 +3942,130 @@ def run_photometry():
                     logging.info("Saved PSF pool FWHM vs inst_mag plot: %s", _plot_path_psf)
         except Exception as _e:
             logging.debug("PSF pool FWHM vs inst_mag plot failed: %s", _e)
+
+        # =============================================================================
+        # Supplement PSF pool with catalog sources when SExtractor pool is too small
+        # =============================================================================
+        # In sparse fields or images with NaN borders, the SExtractor-detected PSF
+        # pool may have too few valid sources (or all may fail with aperture_has_nan).
+        # The catalog sources (measured above via Calibrate_Catalog.measure) have
+        # already passed aperture photometry successfully, so they are valid PSF
+        # candidates.  Supplement the pool when it is below the minimum threshold.
+        #
+        # Quality filtering:
+        #   - SNR >= psf_snr_min (default 5) to exclude low-S/N sources
+        #   - Isolation check against ALL catalog sources (not just the supplement)
+        #     to avoid blended cutouts corrupting the ePSF
+        #   - Carry all useful columns (SNR, flux_AP, threshold, fwhm, flags,
+        #     class_star, sharpness, elongation, peak_flux) so the PSF build can
+        #     apply its full suite of quality cuts.
+        if (
+            psf_source_pool is not None
+            and len(psf_source_pool) < min_psf_pool
+            and CatalogSources is not None
+            and len(CatalogSources) > 0
+            and {"x_pix", "y_pix", "flux_AP"}.issubset(CatalogSources.columns)
+        ):
+            _psf_snr_min = float(phot_cfg.get("psf_snr_min", 5.0))
+            _psf_iso_fwhm = float(phot_cfg.get("psf_isolation_radius_fwhm", 3.0))
+            _hdr_fwhm = input_yaml.get("fwhm", 3.0)
+            _iso_radius = _psf_iso_fwhm * float(_hdr_fwhm) if _hdr_fwhm > 0 else 15.0
+
+            # Start with basic validity: finite coords, positive flux
+            _cat_valid = CatalogSources[
+                np.isfinite(CatalogSources["x_pix"])
+                & np.isfinite(CatalogSources["y_pix"])
+                & np.isfinite(CatalogSources["flux_AP"])
+                & (CatalogSources["flux_AP"] > 0)
+            ].copy()
+
+            # SNR cut: use "SNR" (aperture) or "snr" (catalog measure) column
+            _snr_col = "SNR" if "SNR" in _cat_valid.columns else (
+                "snr" if "snr" in _cat_valid.columns else None
+            )
+            if _snr_col is not None:
+                _snr_vals = pd.to_numeric(_cat_valid[_snr_col], errors="coerce")
+                _snr_ok = _snr_vals >= _psf_snr_min
+                _n_low_snr = int((~_snr_ok).sum())
+                if _n_low_snr > 0:
+                    logging.info(
+                        "PSF supplement: excluding %d low-S/N catalog sources (SNR < %.1f).",
+                        _n_low_snr, _psf_snr_min,
+                    )
+                    _cat_valid = _cat_valid.loc[_snr_ok].copy()
+
+            # Isolation check: reject catalog sources with a neighbour within iso_radius
+            # Check against ALL catalog sources (including non-supplemented ones) to
+            # avoid blended cutouts.
+            if len(_cat_valid) >= 2:
+                from scipy.spatial import cKDTree
+                _all_cat_xy = CatalogSources[["x_pix", "y_pix"]].to_numpy(dtype=float)
+                _valid_xy = _cat_valid[["x_pix", "y_pix"]].to_numpy(dtype=float)
+                _all_tree = cKDTree(_all_cat_xy)
+                _neighbour_counts = _all_tree.query_ball_point(
+                    _valid_xy, r=_iso_radius, return_length=True
+                )
+                _isolated = _neighbour_counts <= 1  # only self within iso_radius
+                _n_blended = int((~_isolated).sum())
+                if _n_blended > 0:
+                    logging.info(
+                        "PSF supplement: excluding %d non-isolated catalog sources "
+                        "(neighbour within %.1f px = %.1f FWHM).",
+                        _n_blended, _iso_radius, _psf_iso_fwhm,
+                    )
+                    _cat_valid = _cat_valid.loc[_isolated].copy()
+
+            if len(_cat_valid) > 0:
+                logging.info(
+                    "PSF pool has only %d sources; supplementing with %d quality-filtered "
+                    "catalog sources (SNR >= %.1f, isolated at %.1f FWHM).",
+                    len(psf_source_pool), len(_cat_valid), _psf_snr_min, _psf_iso_fwhm,
+                )
+                # Carry all useful columns for PSF build quality cuts
+                _carry_cols = ["x_pix", "y_pix"]
+                for _c in [
+                    "flux_AP", "flux_AP_err", "SNR", "snr", "threshold",
+                    "fwhm", "peak_flux", "maxPixel", "flags", "class_star",
+                    "sharpness", "roundness", "ELONGATION", "a", "b",
+                    "mu_max", "flux_radius",
+                ]:
+                    if _c in _cat_valid.columns:
+                        _carry_cols.append(_c)
+                _supplement = _cat_valid[_carry_cols].copy()
+
+                # Combine with existing pool, avoiding duplicates by position
+                _existing_xy = (
+                    psf_source_pool[["x_pix", "y_pix"]].to_numpy(dtype=float)
+                    if len(psf_source_pool) > 0
+                    else np.empty((0, 2))
+                )
+                _supplement_xy = _supplement[["x_pix", "y_pix"]].to_numpy(dtype=float)
+                _is_new = np.ones(len(_supplement), dtype=bool)
+                if len(_existing_xy) > 0:
+                    from scipy.spatial import cKDTree as _cKDTree
+                    _tree = _cKDTree(_existing_xy)
+                    _dups, _ = _tree.query(_supplement_xy, k=1)
+                    _is_new = _dups > 2.0  # not within 2 px of existing source
+                _supplement = _supplement.loc[_is_new].reset_index(drop=True)
+                if len(_supplement) > 0:
+                    psf_source_pool = pd.concat(
+                        [psf_source_pool, _supplement], ignore_index=True
+                    )
+                    logging.info(
+                        "PSF pool supplemented to %d sources.", len(psf_source_pool)
+                    )
+                    # If we now have enough sources, clear aperture-only mode
+                    if (
+                        do_aperture_ONLY
+                        and not input_yaml["photometry"].get("do_AperturePhotometry", False)
+                        and len(psf_source_pool) >= min_sources_for_psf
+                    ):
+                        do_aperture_ONLY = False
+                        logging.info(
+                            "PSF pool now has %d sources; re-enabling PSF photometry "
+                            "(was in aperture-only mode due to insufficient SExtractor sources).",
+                            len(psf_source_pool),
+                        )
 
         # By default, build the ePSF from the aligned image to ensure the PSF model
         # matches the data it will be applied to. This avoids PSF shape mismatches when
@@ -5306,16 +5500,33 @@ def run_photometry():
                     )
                     logging.info("Flux-consistent matching: output %s sources", len(MatchingSources))
                     # Fallback: if flux consistency removed too many sources,
-                    # use all well-aligned sources. The RANSAC + bin-wise filter
-                    # can remove 50%+ in sparse fields, which is worse than
-                    # passing all well-aligned sources to SFFT.
+                    # use the best-ranked well-aligned sources instead of ALL
+                    # sources.  Using all sources (including non-linear/
+                    # variable ones) can bias the SFFT kernel.  Instead, rank
+                    # by SNR/threshold and keep the top sources — these are
+                    # more likely to be clean, non-variable stars.
                     if len(MatchingSources) < 5 and len(image_sources) >= 5:
-                        logging.info(
-                            f"Flux consistency returned only {len(MatchingSources)} sources "
-                            f"(from {len(image_sources)} input). Using all well-aligned sources "
-                            f"as fallback for SFFT priors."
+                        _fallback_sources = image_sources.copy()
+                        # Rank by SNR or threshold (higher = better)
+                        _rank_col = None
+                        for _rc in ("SNR", "snr", "threshold", "flux_AP"):
+                            if _rc in _fallback_sources.columns:
+                                _rank_col = _rc
+                                break
+                        if _rank_col is not None:
+                            _fallback_sources = _fallback_sources.sort_values(
+                                _rank_col, ascending=False
+                            )
+                        _max_fallback = int(
+                            _ts_cfg.get("sfft_flux_fallback_max_sources", 30)
                         )
-                        MatchingSources = image_sources.copy()
+                        MatchingSources = _fallback_sources.head(_max_fallback)
+                        logging.warning(
+                            f"Flux consistency returned only {len(MatchingSources)} sources "
+                            f"(from {len(image_sources)} input). Using top {len(MatchingSources)} "
+                            f"well-aligned sources by {_rank_col or 'index order'} as fallback "
+                            f"(capped at {_max_fallback}). SFFT will vet sources independently."
+                        )
                     # Add back sources with NaN flux (failed aperture photometry).
                     # SFFT only needs (x,y) positions as priors - it does its own
                     # PSF fitting and photometric ratio estimation.  Sources with
@@ -5324,7 +5535,33 @@ def run_photometry():
                     # BUT only if the source center pixel is valid in both
                     # images.  Sources whose template center is NaN are in a
                     # NaN region and cannot be used by SFFT.
-                    if "flux_AP" in image_sources.columns and not MatchingSources.empty:
+                    #
+                    # IMPORTANT: NaN-flux sources bypass the flux consistency
+                    # check.  Only add them if we already have enough
+                    # flux-consistent sources (>= 10) so the SFFT kernel fit
+                    # is dominated by vetted sources, not unvetted position-only
+                    # priors.  If we have very few flux-consistent sources,
+                    # adding unvetted ones could bias the kernel.
+                    _min_consistent_for_nan_add = int(
+                        _ts_cfg.get("sfft_min_consistent_for_nan_add", 10)
+                    )
+                    _can_add_nan_flux = (
+                        len(MatchingSources) >= _min_consistent_for_nan_add
+                    )
+                    if not _can_add_nan_flux and "flux_AP" in image_sources.columns:
+                        _n_nan = int((
+                            ~np.isfinite(image_sources["flux_AP"].values)
+                            | ~np.isfinite(template_sources["flux_AP"].values)
+                        ).sum())
+                        if _n_nan > 0:
+                            logging.info(
+                                f"Skipping NaN-flux source addition: only "
+                                f"{len(MatchingSources)} flux-consistent sources "
+                                f"(need >= {_min_consistent_for_nan_add}). "
+                                f"{_n_nan} NaN-flux sources would bypass "
+                                f"consistency check."
+                            )
+                    if "flux_AP" in image_sources.columns and not MatchingSources.empty and _can_add_nan_flux:
                         _nan_flux_mask = ~np.isfinite(
                             image_sources["flux_AP"].values
                         ) | ~np.isfinite(
@@ -5395,30 +5632,84 @@ def run_photometry():
                     _has_class_star = "class_star" in ms.columns
                     _has_roundness = "roundness" in ms.columns
                     _has_fwhm = any(c in ms.columns for c in ("fwhm", "fwhm_psf", "fwhm_model"))
+                    _has_elong = any(c in ms.columns for c in ("ELONGATION", "elongation", "a", "b"))
                     logging.info(
                         f"Source refinement input: {n_before_refine} sources, "
                         f"columns present: class_star={_has_class_star}, "
-                        f"roundness={_has_roundness}, fwhm={_has_fwhm}"
+                        f"roundness={_has_roundness}, fwhm={_has_fwhm}, "
+                        f"elongation={_has_elong}"
+                        f"roundness={_has_roundness}, fwhm={_has_fwhm}, "
+                        f"elongation={_has_elong}"
                     )
                     try:
+                        # --- HARD elongation filter (no safety bypass) ---
+                        # Elongated sources (A/B > threshold) are NEVER suitable
+                        # for SFFT kernel fitting: they are either blended,
+                        # extended, or stretched by astrometric distortion.
+                        # Unlike other filters, this has NO 5-source minimum
+                        # safety bypass — elongated sources are always rejected
+                        # even in sparse fields.  Using an elongated source is
+                        # worse than having fewer sources.
+                        _ts_cfg_hard = input_yaml.get("template_subtraction", {}) or {}
+                        _hard_max_elong = float(
+                            _ts_cfg_hard.get("sfft_hard_max_elongation", 1.5)
+                        )
+                        if _hard_max_elong > 1.0:
+                            _elong_col = None
+                            for _ec in ("ELONGATION", "elongation"):
+                                if _ec in ms.columns:
+                                    _elong_col = _ec
+                                    break
+                            if _elong_col is not None:
+                                _elong_vals = pd.to_numeric(
+                                    ms[_elong_col], errors="coerce"
+                                )
+                                _elong_finite = _elong_vals.notna()
+                                if _elong_finite.any():
+                                    _elong_bad = _elong_finite & (_elong_vals > _hard_max_elong)
+                                    _n_elong_bad = int(_elong_bad.sum())
+                                    if _n_elong_bad > 0:
+                                        logging.info(
+                                            f"HARD elongation filter: removed {_n_elong_bad} "
+                                            f"elongated sources (ELONGATION > {_hard_max_elong}, "
+                                            f"no safety bypass). "
+                                            f"{len(ms) - _n_elong_bad} sources remain."
+                                        )
+                                        ms = ms[~_elong_bad]
+                            elif "a" in ms.columns and "b" in ms.columns:
+                                _a_vals = pd.to_numeric(ms["a"], errors="coerce")
+                                _b_vals = pd.to_numeric(ms["b"], errors="coerce")
+                                _ab_valid = _a_vals.notna() & _b_vals.notna() & (_b_vals > 0)
+                                if _ab_valid.any():
+                                    _ab_elong = _a_vals / _b_vals
+                                    _ab_bad = _ab_valid & (_ab_elong > _hard_max_elong)
+                                    _n_ab_bad = int(_ab_bad.sum())
+                                    if _n_ab_bad > 0:
+                                        logging.info(
+                                            f"HARD elongation filter (A/B): removed {_n_ab_bad} "
+                                            f"elongated sources (A/B > {_hard_max_elong}, "
+                                            f"no safety bypass). "
+                                            f"{len(ms) - _n_ab_bad} sources remain."
+                                        )
+                                        ms = ms[~_ab_bad]
+
                         # --- Point-source selection via CLASS_STAR ---
                         # SExtractor's CLASS_STAR ranges from 0 (extended) to 1
-                        # (point-like).  This filter is DISABLED by default
-                        # (sfft_min_class_star=0) because:
+                        # (point-like).  This filter is ENABLED by default
+                        # (sfft_min_class_star=0.4) to reject galaxies and
+                        # extended sources from the SFFT kernel fit.
+                        # Extended sources have different PSF profiles in the
+                        # science and reference images, making them non-linear
+                        # and biasing the kernel solution.
                         #
-                        # 1. SFFT does its own source vetting: it runs SExtractor
-                        #    on both images, excludes bad FLAGS, cross-matches,
-                        #    and does PostAnomaly/CVREJ/EVREJ rejection of
-                        #    variable/extended sources AFTER the kernel fit.
-                        # 2. After spline-warp alignment (spalipy), the PSF is
-                        #    distorted, causing SExtractor to classify real point
-                        #    sources as extended (CLASS_STAR < 0.7).  This removes
-                        #    valid kernel-fitting sources.
-                        # 3. In sparse fields, the filter leaves too few sources
-                        #    for a reliable kernel fit.
+                        # The threshold of 0.4 is conservative: it rejects
+                        # obvious galaxies (CLASS_STAR < 0.4) while keeping
+                        # marginally classified sources.  SFFT's PostAnomaly
+                        # check provides additional vetting after the fit.
                         #
-                        # Users who want stricter pre-filtering can set
-                        # sfft_min_class_star > 0 in their YAML config.
+                        # The filter is skipped for undersampled images (FWHM <
+                        # 2.5 px) where SExtractor's CLASS_STAR is unreliable,
+                        # and when it would leave fewer than 5 sources.
                         if "class_star" in ms.columns:
                             cs = pd.to_numeric(ms["class_star"], errors="coerce")
                             cs_finite = cs.notna()
@@ -5437,7 +5728,7 @@ def run_photometry():
                                 else:
                                     cs_threshold = float(
                                         input_yaml["template_subtraction"].get(
-                                            "sfft_min_class_star", 0.0
+                                            "sfft_min_class_star", 0.4
                                         )
                                     )
                                 if cs_threshold > 0:
@@ -5460,9 +5751,8 @@ def run_photometry():
                                         ms = ms[cs_pass | ~cs_finite]
                                 else:
                                     logging.info(
-                                        f"CLASS_STAR filter disabled (sfft_min_class_star=0). "
-                                        f"SFFT will vet sources independently. "
-                                        f"Keeping all {len(ms)} sources."
+                                        f"CLASS_STAR filter disabled (sfft_min_class_star=0 or "
+                                        f"undersampled). Keeping all {len(ms)} sources."
                                     )
 
                         # --- Ellipticity filter (backup for point-source selection) ---
@@ -5518,6 +5808,22 @@ def run_photometry():
                                 good_size = finite & (
                                     np.abs(size - med) <= n_sigma * mad
                                 )
+                                # Absolute FWHM check: reject sources with FWHM
+                                # significantly larger than the image PSF FWHM.
+                                # Point sources should have FWHM ~ ImageFWHM.
+                                # Extended sources have FWHM >> ImageFWHM.
+                                _max_fwhm_ratio = float(
+                                    input_yaml.get("template_subtraction", {}).get(
+                                        "sfft_max_fwhm_ratio", 2.0
+                                    )
+                                )
+                                _img_fwhm = float(
+                                    input_yaml.get("science_fwhm", ImageFWHM)
+                                )
+                                if _max_fwhm_ratio > 1.0 and _img_fwhm > 0:
+                                    _max_fwhm_abs = _max_fwhm_ratio * _img_fwhm
+                                    _too_big = finite & (size > _max_fwhm_abs)
+                                    good_size &= ~_too_big
                                 n_size_rejected = len(ms) - good_size.sum()
                                 # With small samples, MAD is unstable and can
                                 # reject the majority of sources (e.g. 6/9).
@@ -5525,7 +5831,8 @@ def run_photometry():
                                 if n_size_rejected > 0 and good_size.sum() >= 5:
                                     logging.info(
                                         f"Size-based rejection: removed {n_size_rejected} sources "
-                                        f"(FWHM sigma-clipping, n_sigma={n_sigma})"
+                                        f"(FWHM sigma-clipping n_sigma={n_sigma}"
+                                        f"+ absolute max={_max_fwhm_ratio:.1f}*FWHM_img={_img_fwhm:.1f}px)"
                                     )
                                     ms = ms[good_size]
                                 elif n_size_rejected > 0:
@@ -5535,40 +5842,207 @@ def run_photometry():
                                         f"Keeping all {len(ms)} sources."
                                     )
 
-                        # Crowding rejection: require each prior star to be relatively
-                        # isolated from OTHER prior stars within a radius ~2.5*FWHM.
-                        # Self-query ms only - a source should not be rejected because
-                        # of a neighbour that was already filtered out by CLASS_STAR or
-                        # flux consistency.
+                        # --- Kernel-stamp isolation rejection ---
+                        # SFFT fits the convolution kernel on stamps of size
+                        # (2*kernel_half_width+1) around each matching source.
+                        # If a neighbouring source (even one not in the matching
+                        # list) falls within this stamp, its flux contaminates the
+                        # kernel fit, causing dipole residuals and flux scaling
+                        # discrepancies.
+                        #
+                        # The isolation radius must be >= kernel_half_width to
+                        # ensure no contaminating flux enters the stamp.  We use
+                        # the physics-based quadrature formula (same as subtract())
+                        # to compute the expected kernel_half_width, then check
+                        # isolation against ALL detected sources (not just other
+                        # matching sources) in the science image.
                         if len(ms) > 3 and {"x_pix", "y_pix"}.issubset(ms.columns):
                             from scipy.spatial import cKDTree
 
                             ms_xy = np.vstack(
                                 [ms["x_pix"].values, ms["y_pix"].values]
                             ).T
-                            ms_tree = cKDTree(ms_xy)
-                            fwhm_pix = float(input_yaml.get("science_fwhm", ImageFWHM))
-                            crowd_r = 2.5 * max(fwhm_pix, 1.0)
+
+                            # Compute expected SFFT kernel half-width using the
+                            # same physics-based formula as subtract().
+                            _fwhm_sci_k = float(input_yaml.get("science_fwhm", ImageFWHM))
+                            _fwhm_tpl_k = float(template_header.get("FWHM", _fwhm_sci_k))
+                            _fwhm_broad_k = max(_fwhm_sci_k, _fwhm_tpl_k)
+                            _fwhm_narrow_k = min(_fwhm_sci_k, _fwhm_tpl_k)
+                            if _fwhm_broad_k > _fwhm_narrow_k and _fwhm_broad_k > 0:
+                                _fwhm_conv_k = np.sqrt(
+                                    max(_fwhm_broad_k**2 - _fwhm_narrow_k**2, 0.0)
+                                )
+                            else:
+                                _fwhm_conv_k = _fwhm_broad_k
+                            _ts_cfg_k = input_yaml.get("template_subtraction", {}) or {}
+                            _hw_mult = float(_ts_cfg_k.get("kernel_hw_multiplier", 2.0))
+                            # Match the floor multiplier used in subtract()
+                            # (2.0 for dense, 1.75 for moderate, 1.5 for sparse).
+                            _n_for_floor = len(ms)
+                            if _n_for_floor < 15:
+                                _hw_floor_mult = 1.5
+                            elif _n_for_floor < 30:
+                                _hw_floor_mult = 1.75
+                            else:
+                                _hw_floor_mult = 2.0
+                            _ker_hw_conv = int(np.ceil(_hw_mult * _fwhm_conv_k))
+                            _ker_hw_floor = int(np.ceil(_hw_floor_mult * _fwhm_broad_k))
+                            # Source-count cap (matches subtract() logic)
+                            _max_hw_pixels = 100 * max(_n_for_floor, 5)
+                            _max_hw_sources = int((np.sqrt(_max_hw_pixels) - 1) / 2)
+                            _hw_floor_capped = min(_ker_hw_floor, _max_hw_sources)
+                            _ker_hw = max(_ker_hw_conv, _hw_floor_capped)
+                            _ker_hw = max(
+                                int(_ts_cfg_k.get("kernel_hw_min", 3)),
+                                min(int(_ts_cfg_k.get("kernel_hw_max", 50)), _ker_hw),
+                            )
+
+                            # Isolation radius = kernel stamp half-width.
+                            # This ensures no neighbour flux enters the SFFT
+                            # stamp.  Add a small margin (0.5 * FWHM_broad) to
+                            # account for the PSF wings of the neighbour.
+                            _isolation_r = _ker_hw + 0.5 * _fwhm_broad_k
+
+                            # Build a tree of ALL detected sources in the science
+                            # image (not just matching sources).  This catches
+                            # neighbours that were filtered out of the matching
+                            # list but still contaminate the stamp.
+                            _all_xy = None
+                            if detected_sources is not None and len(detected_sources) > 0:
+                                _all_xy = np.vstack(
+                                    [detected_sources["x_pix"].values,
+                                     detected_sources["y_pix"].values]
+                                ).T
+                            # Also include the matching sources themselves
+                            _all_tree_xy = ms_xy
+                            if _all_xy is not None:
+                                _all_tree_xy = np.vstack([_all_tree_xy, _all_xy])
+                            _all_tree = cKDTree(_all_tree_xy)
+
+                            # Count neighbours within isolation radius (excluding self)
+                            counts = np.array(
+                                [len(nb) - 1 for nb in _all_tree.query_ball_point(ms_xy, _isolation_r)]
+                            )
                             # Adaptive: allow up to 2 neighbours for sparse fields
                             # (< 10 sources), 1 for moderate fields.
                             max_nei = 2 if len(ms) < 10 else 1
-                            counts = np.array(
-                                [len(nb) - 1 for nb in ms_tree.query_ball_point(ms_xy, crowd_r)]
-                            )
                             isolated = counts <= max_nei
                             n_crowd_rejected = len(ms) - isolated.sum()
                             # Skip if it would leave < 5 sources
                             if n_crowd_rejected > 0 and isolated.sum() >= 5:
                                 logging.info(
-                                    f"Crowding rejection: removed {n_crowd_rejected} sources "
-                                    f"(radius={crowd_r:.1f}px, max_nei={max_nei})"
+                                    f"Kernel-stamp isolation: removed {n_crowd_rejected} sources "
+                                    f"(isolation_radius={_isolation_r:.1f}px = ker_hw={_ker_hw} + "
+                                    f"0.5*FWHM_broad={0.5*_fwhm_broad_k:.1f}, "
+                                    f"max_nei={max_nei}, checked against {len(_all_tree_xy)} sources)"
                                 )
                                 ms = ms[isolated]
                             elif n_crowd_rejected > 0:
                                 logging.info(
-                                    f"Crowding rejection skipped: would remove {n_crowd_rejected} "
+                                    f"Kernel-stamp isolation skipped: would remove {n_crowd_rejected} "
                                     f"sources leaving only {isolated.sum()} (< 5). "
                                     f"Keeping all {len(ms)} sources."
+                                )
+
+                        # --- Pixel-level stamp contamination check ---
+                        # Even if no catalogued source is nearby, a bright
+                        # uncatalogued source (e.g., a galaxy, a source below
+                        # the detection threshold, or a source missed by
+                        # SExtractor) can contaminate the kernel stamp.  Check
+                        # both science and template images for secondary flux
+                        # peaks within the kernel stamp.
+                        if (
+                            len(ms) > 3
+                            and {"x_pix", "y_pix"}.issubset(ms.columns)
+                            and "image" in dir()
+                            and "template_image" in dir()
+                        ):
+                            _stamp_r = _ker_hw  # reuse kernel half-width from above
+                            _stamp_contam_sigma = float(
+                                _ts_cfg_refine.get("sfft_stamp_contam_sigma", 5.0)
+                            )
+                            _stamp_contam_frac = float(
+                                _ts_cfg_refine.get("sfft_stamp_contam_frac", 0.3)
+                            )
+                            _contam_mask = np.ones(len(ms), dtype=bool)
+                            _n_contam = 0
+                            # Pre-allocate coordinate grids for the standard stamp size
+                            # (2*_stamp_r+1) to avoid per-source np.mgrid allocation
+                            _stamp_size = 2 * _stamp_r + 1
+                            _yy_grid, _xx_grid = np.mgrid[0:_stamp_size, 0:_stamp_size]
+                            _xs_arr = ms["x_pix"].values
+                            _ys_arr = ms["y_pix"].values
+                            for _i in range(len(ms)):
+                                _sx, _sy = _xs_arr[_i], _ys_arr[_i]
+                                _xi, _yi = int(_sx), int(_sy)
+                                for _img, _label in [
+                                    (image, "science"),
+                                    (template_image, "template"),
+                                ]:
+                                    _x0 = max(0, _xi - _stamp_r)
+                                    _x1 = min(_img.shape[1], _xi + _stamp_r + 1)
+                                    _y0 = max(0, _yi - _stamp_r)
+                                    _y1 = min(_img.shape[0], _yi + _stamp_r + 1)
+                                    _stamp = _img[_y0:_y1, _x0:_x1]
+                                    _finite = np.isfinite(_stamp)
+                                    if _finite.sum() < 10:
+                                        continue
+                                    # Central source flux (median of central 3x3)
+                                    _cx = _xi - _x0
+                                    _cy = _yi - _y0
+                                    _c_lo_x = max(0, _cx - 1)
+                                    _c_hi_x = min(_stamp.shape[1], _cx + 2)
+                                    _c_lo_y = max(0, _cy - 1)
+                                    _c_hi_y = min(_stamp.shape[0], _cy + 2)
+                                    _central_flux = np.nanmedian(
+                                        _stamp[_c_lo_y:_c_hi_y, _c_lo_x:_c_hi_x]
+                                    )
+                                    if not np.isfinite(_central_flux) or _central_flux <= 0:
+                                        continue
+                                    # Mask out central source region (within 1*FWHM)
+                                    # Reuse pre-allocated grids; slice to actual stamp size
+                                    # and offset by the per-source center
+                                    _sh = _stamp.shape
+                                    _dist2 = (
+                                        (_xx_grid[:_sh[0], :_sh[1]] - _cx) ** 2
+                                        + (_yy_grid[:_sh[0], :_sh[1]] - _cy) ** 2
+                                    )
+                                    _central_mask = _dist2 <= (_fwhm_broad_k ** 2)
+                                    _outer = _finite & ~_central_mask
+                                    if _outer.sum() < 10:
+                                        continue
+                                    # Check for secondary peak in the outer region
+                                    _outer_vals = _stamp[_outer]
+                                    _bg_med = np.nanmedian(_outer_vals)
+                                    _bg_std = 1.4826 * np.nanmedian(
+                                        np.abs(_outer_vals - _bg_med)
+                                    )
+                                    if not np.isfinite(_bg_std) or _bg_std <= 0:
+                                        _bg_std = np.nanstd(_outer_vals) or 1.0
+                                    _peak_val = np.nanmax(_stamp[_outer])
+                                    # Secondary peak if: peak > bg + N*sigma AND
+                                    # peak > fraction * central flux
+                                    if (
+                                        _peak_val > _bg_med + _stamp_contam_sigma * _bg_std
+                                        and _peak_val > _stamp_contam_frac * _central_flux
+                                    ):
+                                        _contam_mask[_i] = False
+                                        _n_contam += 1
+                                        break  # no need to check other image
+                            if _n_contam > 0 and _contam_mask.sum() >= 5:
+                                logging.info(
+                                    f"Stamp contamination check: removed {_n_contam} sources "
+                                    f"(secondary peak > {_stamp_contam_sigma}sigma and "
+                                    f">{_stamp_contam_frac*100:.0f}% of central flux within "
+                                    f"{_stamp_r}px stamp)"
+                                )
+                                ms = ms[_contam_mask]
+                            elif _n_contam > 0:
+                                logging.info(
+                                    f"Stamp contamination check skipped: would remove "
+                                    f"{_n_contam} sources leaving only "
+                                    f"{_contam_mask.sum()} (< 5). Keeping all."
                                 )
 
                         # --- PSF fit quality cuts ---
@@ -5585,9 +6059,13 @@ def run_photometry():
                         _psf_quality_mask = np.ones(len(ms), dtype=bool)
 
                         # cfit cut (concentration/shape)
+                        # cfit measures how well the source profile matches the
+                        # PSF model.  High cfit = extended or blended.  Default
+                        # 5.0 rejects obviously extended sources while keeping
+                        # marginally-fit stars.
                         if "cfit" in ms.columns:
                             _cfit = pd.to_numeric(ms["cfit"], errors="coerce").values
-                            _cfit_max = float(_ts_cfg_refine.get("sfft_max_cfit", 0.0))
+                            _cfit_max = float(_ts_cfg_refine.get("sfft_max_cfit", 5.0))
                             if _cfit_max > 0:
                                 _cfit_bad = np.isfinite(_cfit) & (_cfit > _cfit_max)
                                 _n_cfit_bad = int(_cfit_bad.sum())
@@ -5603,9 +6081,13 @@ def run_photometry():
                                     )
 
                         # qfit cut (goodness-of-fit)
+                        # qfit is the ratio of residual RMS to source flux.
+                        # High qfit = poor PSF model fit = extended or blended.
+                        # Default 1.0 rejects sources where residuals are as
+                        # large as the source itself.
                         if "qfit" in ms.columns:
                             _qfit = pd.to_numeric(ms["qfit"], errors="coerce").values
-                            _qfit_max = float(_ts_cfg_refine.get("sfft_max_qfit", 0.0))
+                            _qfit_max = float(_ts_cfg_refine.get("sfft_max_qfit", 1.0))
                             if _qfit_max > 0:
                                 _qfit_bad = np.isfinite(_qfit) & (_qfit > _qfit_max)
                                 _n_qfit_bad = int(_qfit_bad.sum())
@@ -5623,7 +6105,7 @@ def run_photometry():
                         # reduced chi-squared cut
                         if "reduced_chi2" in ms.columns:
                             _chi2 = pd.to_numeric(ms["reduced_chi2"], errors="coerce").values
-                            _chi2_max = float(_ts_cfg_refine.get("sfft_max_reduced_chi2", 0.0))
+                            _chi2_max = float(_ts_cfg_refine.get("sfft_max_reduced_chi2", 10.0))
                             if _chi2_max > 0:
                                 _chi2_bad = np.isfinite(_chi2) & (_chi2 > _chi2_max)
                                 _n_chi2_bad = int(_chi2_bad.sum())
@@ -5659,11 +6141,265 @@ def run_photometry():
                         if _psf_quality_mask.sum() < len(ms):
                             ms = ms[_psf_quality_mask]
 
+                        # --- FFT power-spectrum outlier rejection ---
+                        # Same technique used by the PSF build (psf.py
+                        # detect_fft_outliers): extract a cutout around each
+                        # source in BOTH the science and template images,
+                        # compute 2D FFT power spectra, and reject sources
+                        # whose power spectrum deviates significantly from the
+                        # median in EITHER image.
+                        #
+                        # Checking both images is critical: a source could be
+                        # point-like in the science image but extended/blended
+                        # in the template (e.g., a galaxy that's sharper in
+                        # the science due to better seeing, or a neighbour that
+                        # only appears in one image).  The SFFT kernel fit
+                        # convolves one image to match the other, so both must
+                        # have clean point sources.
+                        #
+                        # This catches:
+                        #   - Extended sources (different spatial frequency content)
+                        #   - Blended sources (double-peaked power spectrum)
+                        #   - Diffraction-spike-contaminated sources (high-freq power)
+                        #   - Sources with invisible neighbours (asymmetric spectrum)
+                        #   - Sources that are point-like in one image but not the other
+                        _fft_cfg_sfft = _ts_cfg_refine
+                        _do_fft_sfft = _fft_cfg_sfft.get("sfft_fft_rejection", True)
+                        _fft_n_sigma = float(_fft_cfg_sfft.get("sfft_fft_n_sigma", 4.0))
+                        _fft_min_keep = max(
+                            3, int(_fft_cfg_sfft.get("sfft_min_prior_sources", 3))
+                        )
+                        # Collect available images: always check science, and
+                        # also template if available.
+                        _fft_images = {}
+                        if "image" in dir() and image is not None:
+                            _fft_images["science"] = np.asarray(image, dtype=float)
+                        if "template_image" in dir() and template_image is not None:
+                            _fft_images["template"] = np.asarray(template_image, dtype=float)
+
+                        if (
+                            _do_fft_sfft
+                            and len(ms) >= 4
+                            and {"x_pix", "y_pix"}.issubset(ms.columns)
+                            and len(_fft_images) >= 1
+                        ):
+                            try:
+                                _fft_cutout_r = int(max(
+                                    _ker_hw if "_ker_hw" in dir() and _ker_hw else 0,
+                                    int(2 * ImageFWHM),
+                                ))
+
+                                # Helper: extract and validate a single cutout
+                                def _extract_fft_cutout(img_arr, cx, cy, radius):
+                                    """Extract cutout, validate, return (valid, cutout_clean)."""
+                                    ny, nx = img_arr.shape
+                                    y0 = max(0, int(cy) - radius)
+                                    y1 = min(ny, int(cy) + radius + 1)
+                                    x0 = max(0, int(cx) - radius)
+                                    x1 = min(nx, int(cx) + radius + 1)
+                                    cutout = img_arr[y0:y1, x0:x1]
+                                    if (cutout.shape[0] < 5
+                                            or cutout.shape[1] < 5
+                                            or np.isfinite(cutout).sum() < cutout.size * 0.8):
+                                        return False, None
+                                    med = np.nanmedian(cutout[np.isfinite(cutout)])
+                                    clean = np.where(np.isfinite(cutout), cutout, med)
+                                    # Check source is roughly centred
+                                    cy_c = (cutout.shape[0] - 1) / 2.0
+                                    cx_c = (cutout.shape[1] - 1) / 2.0
+                                    peak_idx = np.unravel_index(
+                                        np.nanargmax(clean), cutout.shape
+                                    )
+                                    peak_offset = np.hypot(
+                                        peak_idx[1] - cx_c, peak_idx[0] - cy_c
+                                    )
+                                    if peak_offset > 0.3 * radius:
+                                        return False, None
+                                    # Normalize: subtract min, clip negatives
+                                    c_min = np.nanmin(clean)
+                                    c_norm = clean - c_min
+                                    c_norm = np.where(c_norm < 0, 0, c_norm)
+                                    return True, c_norm.astype(np.float64)
+
+                                # Helper: compute per-source FFT deviation metrics
+                                def _compute_fft_metrics(cutouts_list):
+                                    """Given list of 2D arrays, return per-source
+                                    median FFT deviation from the median spectrum."""
+                                    valid_idxs = [i for i, c in enumerate(cutouts_list) if c is not None]
+                                    if len(valid_idxs) < 4:
+                                        return None, valid_idxs
+                                    stacked = np.stack([cutouts_list[i] for i in valid_idxs])
+                                    spectra = np.array([
+                                        np.abs(np.fft.fft2(c)) ** 2 for c in stacked
+                                    ])
+                                    spectra = np.fft.fftshift(spectra, axes=(1, 2))
+                                    med_spec = np.nanmedian(spectra, axis=0)
+                                    mad_spec = 1.4826 * np.nanmedian(
+                                        np.abs(spectra - med_spec), axis=0
+                                    )
+                                    mad_spec = np.where(mad_spec > 1e-12, mad_spec, 1e-12)
+                                    deviations = np.abs(spectra - med_spec) / mad_spec
+                                    metrics = np.nanmedian(deviations, axis=(1, 2))
+                                    return metrics, valid_idxs
+
+                                # Extract cutouts for each image
+                                _fft_cutouts_by_img = {}  # {img_label: [cutout or None per source]}
+                                _fft_valid_by_img = {}    # {img_label: [bool per source]}
+                                for _img_label, _img_arr in _fft_images.items():
+                                    _cuts = []
+                                    _vals = []
+                                    for _sx, _sy in zip(
+                                        ms["x_pix"].values, ms["y_pix"].values
+                                    ):
+                                        _v, _c = _extract_fft_cutout(
+                                            _img_arr, _sx, _sy, _fft_cutout_r
+                                        )
+                                        _cuts.append(_c)
+                                        _vals.append(_v)
+                                    _fft_cutouts_by_img[_img_label] = _cuts
+                                    _fft_valid_by_img[_img_label] = _vals
+
+                                # Compute FFT metrics per image
+                                _fft_metrics_by_img = {}
+                                _fft_valid_idxs_by_img = {}
+                                for _img_label in _fft_images:
+                                    _m, _vi = _compute_fft_metrics(
+                                        _fft_cutouts_by_img[_img_label]
+                                    )
+                                    _fft_metrics_by_img[_img_label] = _m
+                                    _fft_valid_idxs_by_img[_img_label] = _vi
+
+                                # A source is valid only if it has a valid cutout
+                                # in ALL available images.  Build the combined
+                                # validity mask.
+                                _all_valid = np.ones(len(ms), dtype=bool)
+                                for _img_label in _fft_images:
+                                    for _i, _v in enumerate(_fft_valid_by_img[_img_label]):
+                                        if not _v:
+                                            _all_valid[_i] = False
+
+                                # Compute combined FFT deviation: take the MAX
+                                # deviation across images (worst case).  A source
+                                # is rejected if it's an outlier in EITHER image.
+                                _combined_metrics = np.full(len(ms), np.nan)
+                                _vi_offset = {lbl: 0 for lbl in _fft_images}
+                                for _i in range(len(ms)):
+                                    if not _all_valid[_i]:
+                                        continue
+                                    _max_dev = 0.0
+                                    for _img_label in _fft_images:
+                                        _vi = _fft_valid_idxs_by_img[_img_label]
+                                        if _i in _vi:
+                                            _idx = _vi.index(_i)
+                                            _m = _fft_metrics_by_img[_img_label]
+                                            if _m is not None and _idx < len(_m):
+                                                _dev = _m[_idx]
+                                                if np.isfinite(_dev):
+                                                    _max_dev = max(_max_dev, _dev)
+                                    _combined_metrics[_i] = _max_dev
+
+                                # Build keep mask
+                                _fft_keep = np.ones(len(ms), dtype=bool)
+                                for _i in range(len(ms)):
+                                    if not _all_valid[_i]:
+                                        _fft_keep[_i] = False
+                                    elif np.isfinite(_combined_metrics[_i]):
+                                        if _combined_metrics[_i] >= _fft_n_sigma:
+                                            _fft_keep[_i] = False
+
+                                _n_fft_rej = int((~_fft_keep).sum())
+                                _n_fft_keep = int(_fft_keep.sum())
+                                _img_labels_str = "+".join(_fft_images.keys())
+
+                                # Log per-image details for rejected sources
+                                if _n_fft_rej > 0:
+                                    for _i in range(len(ms)):
+                                        if _fft_keep[_i]:
+                                            continue
+                                        _sx = ms["x_pix"].values[_i]
+                                        _sy = ms["y_pix"].values[_i]
+                                        _reasons = []
+                                        for _img_label in _fft_images:
+                                            if not _fft_valid_by_img[_img_label][_i]:
+                                                _reasons.append(f"{_img_label}:invalid cutout")
+                                            else:
+                                                _vi = _fft_valid_idxs_by_img[_img_label]
+                                                if _i in _vi:
+                                                    _idx = _vi.index(_i)
+                                                    _m = _fft_metrics_by_img[_img_label]
+                                                    if _m is not None and _idx < len(_m):
+                                                        _reasons.append(
+                                                            f"{_img_label}:dev={_m[_idx]:.1f}"
+                                                        )
+                                        logging.debug(
+                                            "SFFT FFT rejected source (%.1f, %.1f): %s",
+                                            _sx, _sy, ", ".join(_reasons),
+                                        )
+
+                                if _n_fft_rej > 0 and _n_fft_keep >= _fft_min_keep:
+                                    logging.info(
+                                        f"SFFT FFT rejection: removed {_n_fft_rej} "
+                                        f"sources (power-spectrum outlier > "
+                                        f"{_fft_n_sigma} sigma in {_img_labels_str}, "
+                                        f"cutout_r={_fft_cutout_r} px, kept="
+                                        f"{_n_fft_keep}/{len(ms)})."
+                                    )
+                                    ms = ms[_fft_keep]
+                                elif _n_fft_rej > 0:
+                                    # Retry with relaxed sigma
+                                    _relaxed = _fft_n_sigma * 1.5
+                                    _fft_keep_relaxed = np.ones(len(ms), dtype=bool)
+                                    for _i in range(len(ms)):
+                                        if not _all_valid[_i]:
+                                            _fft_keep_relaxed[_i] = False
+                                        elif (np.isfinite(_combined_metrics[_i])
+                                              and _combined_metrics[_i] >= _relaxed):
+                                            _fft_keep_relaxed[_i] = False
+                                    _n_keep_relaxed = int(_fft_keep_relaxed.sum())
+                                    if _n_keep_relaxed >= _fft_min_keep and _n_keep_relaxed > _n_fft_keep:
+                                        logging.info(
+                                            f"SFFT FFT rejection (relaxed "
+                                            f"{_relaxed:.1f} sigma, images="
+                                            f"{_img_labels_str}): removed "
+                                            f"{int((~_fft_keep_relaxed).sum())} "
+                                            f"sources (kept="
+                                            f"{_n_keep_relaxed}/{len(ms)})."
+                                        )
+                                        ms = ms[_fft_keep_relaxed]
+                                    else:
+                                        logging.info(
+                                            f"SFFT FFT rejection skipped: would "
+                                            f"leave {_n_fft_keep} sources "
+                                            f"(< {_fft_min_keep} minimum). "
+                                            f"Keeping all {len(ms)} sources."
+                                        )
+                                elif len(ms) >= 4:
+                                    _n_valid = int(_all_valid.sum())
+                                    if _n_valid < 4:
+                                        logging.info(
+                                            "SFFT FFT rejection skipped: only %d "
+                                            "valid cutouts in %s (need >= 4).",
+                                            _n_valid, _img_labels_str,
+                                        )
+                            except Exception as _fft_err:
+                                logging.debug(
+                                    "SFFT FFT rejection failed (non-fatal): %s",
+                                    _fft_err,
+                                )
+
                         n_after_refine = len(ms)
                         if n_after_refine < n_before_refine:
                             logging.info(
                                 f"Source refinement: {n_before_refine} -> {n_after_refine} sources "
                                 f"({n_before_refine - n_after_refine} removed)"
+                            )
+                        if n_after_refine < 5:
+                            logging.warning(
+                                f"Only {n_after_refine} vetted point-source priors "
+                                f"remain after refinement (was {n_before_refine}). "
+                                f"SFFT kernel fit may be under-constrained; "
+                                f"consider providing more sources or relaxing "
+                                f"quality cuts if kernel residuals are poor."
                             )
 
                         MatchingSources = ms
@@ -5894,6 +6630,237 @@ def run_photometry():
                     combined_scale,
                 )
 
+                # --- Filter matching sources against defects mask ---
+                # Reject sources that fall on diffraction spikes, saturation
+                # streaks, satellite trails, or other hardware defects.  These
+                # features contaminate the source's PSF stamp with extended flux
+                # that is not present in the reference image, causing the source
+                # to be non-linear and biasing the SFFT kernel fit.
+                #
+                # We check a stamp around each source (not just the central pixel)
+                # because diffraction spikes are extended features.  The stamp
+                # radius is based on the kernel half-width so we reject sources
+                # whose kernel stamp would be significantly contaminated.
+                if (
+                    ConsistentSources
+                    and hardware_defects_mask is not None
+                    and np.ndim(hardware_defects_mask) == 2
+                ):
+                    _ts_cfg_def = input_yaml.get("template_subtraction", {}) or {}
+                    _defects_stamp_radius = int(
+                        _ts_cfg_def.get("sfft_defects_stamp_radius", 0)
+                    )
+                    # Default: use the kernel half-width (computed above as
+                    # _ker_hw in the isolation section, or fall back to 2*FWHM)
+                    if _defects_stamp_radius <= 0:
+                        try:
+                            _kh = int(_ker_hw) if "_ker_hw" in dir() and _ker_hw else 0
+                        except Exception:
+                            _kh = 0
+                        _defects_stamp_radius = max(_kh, int(2 * ImageFWHM))
+                    _defects_max_frac = float(
+                        _ts_cfg_def.get("sfft_defects_max_frac", 0.15)
+                    )
+                    _defects_min_keep = int(
+                        _ts_cfg_def.get("sfft_min_prior_sources", 10)
+                    )
+
+                    _hdm = hardware_defects_mask
+                    _ny, _nx = _hdm.shape
+                    _r = _defects_stamp_radius
+                    # Use integral image (cumulative sum) for O(1) per-source stamp mean
+                    # instead of O(stamp_area) per source
+                    _hdm_f = _hdm.astype(np.float64)
+                    _integral = np.zeros((_ny + 1, _nx + 1), dtype=np.float64)
+                    np.cumsum(np.cumsum(_hdm_f, axis=0), axis=1, out=_integral[1:, 1:])
+
+                    _kept = []
+                    _rejected = []
+                    for _sx, _sy in ConsistentSources:
+                        _xi = int(round(_sx))
+                        _yi = int(round(_sy))
+                        _y0 = max(0, _yi - _r)
+                        _y1 = min(_ny, _yi + _r + 1)
+                        _x0 = max(0, _xi - _r)
+                        _x1 = min(_nx, _xi + _r + 1)
+                        # Window sum via integral image: S = I[y1,x1] - I[y0,x1] - I[y1,x0] + I[y0,x0]
+                        _area = (_y1 - _y0) * (_x1 - _x0)
+                        if _area <= 0:
+                            _frac = 0.0
+                        else:
+                            _frac = float(
+                                _integral[_y1, _x1]
+                                - _integral[_y0, _x1]
+                                - _integral[_y1, _x0]
+                                + _integral[_y0, _x0]
+                            ) / _area
+                        if _frac > _defects_max_frac:
+                            _rejected.append((_sx, _sy, _frac))
+                        else:
+                            _kept.append([float(_sx), float(_sy)])
+
+                    # Don't reject below the minimum source count
+                    if len(_kept) < _defects_min_keep and len(_rejected) > 0:
+                        logging.warning(
+                            "Defects-mask filtering would leave only %d sources "
+                            "(< %d minimum); keeping all %d sources but flagging "
+                            "contaminated ones.",
+                            len(_kept), _defects_min_keep, len(ConsistentSources),
+                        )
+                        # Sort rejected by contamination fraction (least contaminated first)
+                        _rejected.sort(key=lambda r: r[2])
+                        for _sx, _sy, _frac in _rejected:
+                            if len(_kept) >= _defects_min_keep:
+                                break
+                            _kept.append([float(_sx), float(_sy)])
+                            logging.info(
+                                "Re-added source (%.1f, %.1f) with defect frac "
+                                "%.2f to maintain minimum source count.",
+                                _sx, _sy, _frac,
+                            )
+
+                    if len(_rejected) > 0 and len(_kept) < len(ConsistentSources):
+                        logging.info(
+                            "Defects-mask filtering: rejected %d/%d matching "
+                            "sources on diffraction spikes/streaks/trails "
+                            "(stamp_radius=%d px, max_frac=%.2f, kept=%d).",
+                            len(ConsistentSources) - len(_kept),
+                            len(ConsistentSources),
+                            _defects_stamp_radius,
+                            _defects_max_frac,
+                            len(_kept),
+                        )
+                        for _sx, _sy, _frac in _rejected:
+                            logging.debug(
+                                "  Rejected source (%.1f, %.1f): defect fraction "
+                                "%.2f in %dpx stamp.",
+                                _sx, _sy, _frac, _defects_stamp_radius,
+                            )
+                        ConsistentSources = _kept
+                        # Update MatchingSources for consistency
+                        MatchingSources = pd.DataFrame(
+                            ConsistentSources, columns=["x_pix", "y_pix"]
+                        )
+
+                # --- Bright star proximity check ---
+                # Reject matching sources that are too close to very bright
+                # stars, even if those stars are not formally saturated.  Bright
+                # stars produce diffraction spikes and PSF wings that contaminate
+                # nearby sources, making them non-linear between science and
+                # reference images.  This is especially important for telescopes
+                # with strong diffraction spike patterns (e.g., GROND).
+                if ConsistentSources and image is not None:
+                    _ts_cfg_bs = input_yaml.get("template_subtraction", {}) or {}
+                    _bs_enabled = _ts_cfg_bs.get("sfft_bright_star_reject", True)
+                    if _bs_enabled:
+                        _bs_n_sigma = float(_ts_cfg_bs.get("sfft_bright_star_n_sigma", 50.0))
+                        _bs_radius_fwhm = float(
+                            _ts_cfg_bs.get("sfft_bright_star_radius_fwhm", 5.0)
+                        )
+                        _bs_min_keep = int(
+                            _ts_cfg_bs.get("sfft_min_prior_sources", 10)
+                        )
+                        _img_arr = np.asarray(image, dtype=float)
+                        _finite = np.isfinite(_img_arr)
+                        if np.any(_finite):
+                            _bkg_med = float(np.nanmedian(_img_arr[_finite]))
+                            _bkg_std = float(np.nanstd(_img_arr[_finite]))
+                            _bright_thresh = _bkg_med + _bs_n_sigma * _bkg_std
+                            _bright_mask = (_img_arr >= _bright_thresh) & _finite
+                            if np.any(_bright_mask):
+                                from scipy.ndimage import label as _ndi_label
+                                _struct = np.ones((3, 3), dtype=int)
+                                _labels_bs, _n_bright = _ndi_label(
+                                    _bright_mask, structure=_struct
+                                )
+                                from scipy.ndimage import center_of_mass as _com
+                                _bright_centers = []
+                                for _i_bs in range(1, _n_bright + 1):
+                                    _mask_bs = _labels_bs == _i_bs
+                                    if np.sum(_mask_bs) < 2:
+                                        continue
+                                    _cy_bs, _cx_bs = _com(_mask_bs * _img_arr)
+                                    _peak_bs = float(np.max(_img_arr[_mask_bs]))
+                                    _bright_centers.append((_cx_bs, _cy_bs, _peak_bs))
+
+                                if _bright_centers:
+                                    _bs_radius = _bs_radius_fwhm * ImageFWHM
+                                    # Use cKDTree for O(n log m) nearest-bright-star search
+                                    # instead of O(n*m) nested loop
+                                    _bs_xy = np.array(
+                                        [[_bx, _by] for _bx, _by, _bp in _bright_centers]
+                                    )
+                                    _bs_peaks = np.array(
+                                        [_bp for _bx, _by, _bp in _bright_centers]
+                                    )
+                                    from scipy.spatial import cKDTree as _bs_cKDTree
+                                    _bs_tree = _bs_cKDTree(_bs_xy)
+                                    _src_arr = np.asarray(
+                                        ConsistentSources, dtype=float
+                                    )  # shape (n, 2)
+                                    _nn_dist, _nn_idx = _bs_tree.query(
+                                        _src_arr, k=1, distance_upper_bound=_bs_radius
+                                    )
+                                    # cKDTree returns inf for no neighbor within radius
+                                    _too_close_mask = np.isfinite(_nn_dist)
+                                    _kept_bs = []
+                                    _rejected_bs = []
+                                    for _si in range(len(_src_arr)):
+                                        if _too_close_mask[_si]:
+                                            _bi = _nn_idx[_si]
+                                            _rejected_bs.append(
+                                                (
+                                                    _src_arr[_si, 0],
+                                                    _src_arr[_si, 1],
+                                                    float(_nn_dist[_si]),
+                                                    float(_bs_peaks[_bi]),
+                                                )
+                                            )
+                                        else:
+                                            _kept_bs.append(
+                                                [float(_src_arr[_si, 0]), float(_src_arr[_si, 1])]
+                                            )
+
+                                    # Don't reject below minimum
+                                    if len(_kept_bs) < _bs_min_keep and len(_rejected_bs) > 0:
+                                        logging.warning(
+                                            "Bright-star filtering would leave "
+                                            "only %d sources (< %d minimum); "
+                                            "keeping all %d sources.",
+                                            len(_kept_bs), _bs_min_keep,
+                                            len(ConsistentSources),
+                                        )
+                                        _kept_bs = [
+                                            [float(s[0]), float(s[1])]
+                                            for s in ConsistentSources
+                                        ]
+
+                                    if len(_rejected_bs) > 0 and len(_kept_bs) < len(ConsistentSources):
+                                        logging.info(
+                                            "Bright-star filtering: rejected "
+                                            "%d/%d matching sources near bright "
+                                            "stars (radius=%.0f px = %.1f*FWHM, "
+                                            "threshold=%.0f sigma, n_bright=%d, "
+                                            "kept=%d).",
+                                            len(ConsistentSources) - len(_kept_bs),
+                                            len(ConsistentSources),
+                                            _bs_radius, _bs_radius_fwhm,
+                                            _bs_n_sigma, len(_bright_centers),
+                                            len(_kept_bs),
+                                        )
+                                        for _sx, _sy, _dist, _bp in _rejected_bs:
+                                            logging.debug(
+                                                "  Rejected source (%.1f, %.1f): "
+                                                "%.1f px from bright star "
+                                                "(peak=%.0f).",
+                                                _sx, _sy, _dist, _bp,
+                                            )
+                                        ConsistentSources = _kept_bs
+                                        MatchingSources = pd.DataFrame(
+                                            ConsistentSources,
+                                            columns=["x_pix", "y_pix"],
+                                        )
+
                 fpath, subtraction_mask, masked_centers, kernel_half_width = Templates(input_yaml=input_yaml).subtract(
                     scienceFpath=fpath,
                     templateFpath=templateFpath,
@@ -5915,6 +6882,51 @@ def run_photometry():
                     PreformSubtraction = False
                 else:
                     PreformSubtraction = True
+
+                    # Read difference-image quality classification from header.
+                    # The quality metrics are written by utils.difference_quality
+                    # via write_quality_to_fits_header() in templates.subtract().
+                    try:
+                        _diff_hdr = get_header(fpath)
+                        _diff_qual_class = str(_diff_hdr.get("DIFFQUAL", "")).strip().lower()
+                        _diff_qual_score = float(_diff_hdr.get("DIFFQSCR", -1.0))
+                        _diff_dipoles = int(_diff_hdr.get("DIFFDIPO", 0))
+                        _diff_dip_frac = float(_diff_hdr.get("DIFFDIPF", 0.0))
+                        if _diff_qual_class == "fail":
+                            logging.error(
+                                "Difference-image quality FAILED (score=%.3f, "
+                                "dipoles=%d (%.1f%%). Photometry on this difference "
+                                "image is unreliable; results should be flagged.",
+                                _diff_qual_score, _diff_dipoles,
+                                _diff_dip_frac * 100,
+                            )
+                            # Store quality flag for downstream use
+                            input_yaml["diff_quality_class"] = "fail"
+                            input_yaml["diff_quality_score"] = _diff_qual_score
+                        elif _diff_qual_class == "downgrade":
+                            logging.warning(
+                                "Difference-image quality DOWNGRADED (score=%.3f, "
+                                "dipoles=%d (%.1f%%). Photometry results should be "
+                                "treated with caution.",
+                                _diff_qual_score, _diff_dipoles,
+                                _diff_dip_frac * 100,
+                            )
+                            input_yaml["diff_quality_class"] = "downgrade"
+                            input_yaml["diff_quality_score"] = _diff_qual_score
+                        elif _diff_qual_class == "pass":
+                            logging.info(
+                                "Difference-image quality PASSED (score=%.3f, "
+                                "dipoles=%d (%.1f%%).",
+                                _diff_qual_score, _diff_dipoles,
+                                _diff_dip_frac * 100,
+                            )
+                            input_yaml["diff_quality_class"] = "pass"
+                            input_yaml["diff_quality_score"] = _diff_qual_score
+                    except Exception as _dq_e:
+                        logging.debug(
+                            "Could not read difference-image quality from header: %s",
+                            _dq_e,
+                        )
 
                 if os.path.exists(sfft_matched_sources):
                     MatchingSources = pd.read_csv(sfft_matched_sources)
@@ -5992,6 +7004,111 @@ def run_photometry():
                     logging.info(
                         "VSCALE=%.4f applied to background_rms for consistent error model on difference image.",
                         _vscale_header,
+                    )
+
+        # -----------------------------------------------------------------------
+        # Per-pixel variance correction for SFFT difference images.
+        #
+        # SFFT convolves one image with a matching kernel before subtraction.
+        # The convolution amplifies noise by the kernel's L2 norm
+        # (sum(kernel^2)), which varies spatially for kernel_order > 0.
+        # VSCALE handles the global rescaling, but the spatially-varying
+        # component is not captured.  For a constant kernel (order 0), the
+        # noise amplification is uniform and already absorbed by VSCALE.
+        # For spatially-varying kernels (order > 0), we compute a per-pixel
+        # correction map from the SFFT solution and apply it to background_rms.
+        #
+        # The noise variance of the convolved image is:
+        #   Var(conv) = sigma^2 * sum(kernel^2)
+        # The difference image variance is:
+        #   Var(diff) = sigma_conv^2 + sigma_ref^2
+        #             = sigma_sci^2 * sum(K^2) + sigma_ref^2
+        # The correction factor relative to the un-convolved noise is:
+        #   correction(x,y) = sqrt(1 + sigma_sci^2 * (sum(K(x,y)^2) - 1) / (sigma_sci^2 + sigma_ref^2))
+        # For simplicity and robustness (we don't always know sigma_sci/ref
+        # separately at the target position), we use the kernel L2 norm
+        # directly as a multiplicative correction on the convolved side.
+        # -----------------------------------------------------------------------
+        _kernel_noise_factor = None  # scalar or 2D, multiplicative on RMS
+        if PreformSubtraction and background_rms is not None:
+            _solpath = str(header.get("SOLPATH", "")).strip()
+            _kerhw = int(header.get("KERHW", 0))
+            _kerorder = int(header.get("KERORDER", header.get("KERPOLY", 0)))
+            if (
+                _solpath
+                and os.path.isfile(_solpath)
+                and _kerhw > 0
+                and _kerorder > 0
+            ):
+                try:
+                    from sfft.utils.SFFTSolutionReader import Realize_MatchingKernel
+
+                    _ny_img, _nx_img = image.shape
+                    _L = 2 * _kerhw + 1
+                    _Fpq_raw = int(header.get("BGORDER", header.get("BGPOLY", 0)))
+                    _Fpq = int((_Fpq_raw + 1) * (_Fpq_raw + 2) // 2)
+
+                    # Sample the kernel at a 4x4 grid across the image to
+                    # estimate the spatial variation of the noise amplification.
+                    _grid_n = 4
+                    _xs = np.linspace(0, _nx_img, _grid_n)
+                    _ys = np.linspace(0, _ny_img, _grid_n)
+                    _XY_q = np.array(
+                        [[x, y] for y in _ys for x in _xs]
+                    )
+                    _ker_stack = Realize_MatchingKernel(_XY_q).FromFITS(_solpath)
+                    _l2_norms = []
+                    for _k in _ker_stack:
+                        _ker_2d = np.asarray(_k).squeeze().T
+                        if _ker_2d.ndim == 2 and _ker_2d.shape[0] == _L:
+                            _l2_norms.append(float(np.sqrt(np.nansum(_ker_2d**2))))
+                    if _l2_norms:
+                        _l2_arr = np.array(_l2_norms)
+                        _l2_med = float(np.median(_l2_arr))
+                        _l2_spread = float(np.std(_l2_arr))
+                        # Only apply spatial correction if the kernel L2 norm
+                        # varies significantly across the image (> 5% spread).
+                        if _l2_med > 0 and _l2_spread / _l2_med > 0.05:
+                            # Build a 2D correction map by bilinear interpolation
+                            _l2_grid = _l2_arr.reshape(_grid_n, _grid_n)
+                            from scipy.ndimage import zoom
+                            _corr_map = zoom(
+                                _l2_grid,
+                                (_ny_img / _grid_n, _nx_img / _grid_n),
+                                order=1, mode="nearest",
+                            )
+                            _corr_map = _corr_map[:_ny_img, :_nx_img]
+                            # The correction is relative to the median L2 norm
+                            # (which VSCALE already absorbs).  We apply only
+                            # the *excess* variation to avoid double-counting
+                            # the global rescaling.
+                            _kernel_noise_factor = np.where(
+                                _l2_med > 0,
+                                _corr_map / _l2_med,
+                                1.0,
+                            )
+                            # Clamp to reasonable range
+                            _kernel_noise_factor = np.clip(
+                                _kernel_noise_factor, 0.5, 2.0
+                            ).astype(np.float32)
+                            logging.info(
+                                "SFFT kernel noise amplification: median L2=%.4f, "
+                                "spread=%.4f (%.1f%%). Applying per-pixel variance "
+                                "correction to background_rms.",
+                                _l2_med, _l2_spread,
+                                100 * _l2_spread / _l2_med if _l2_med > 0 else 0,
+                            )
+                            background_rms = background_rms * _kernel_noise_factor
+                        else:
+                            logging.debug(
+                                "SFFT kernel L2 norm uniform (median=%.4f, spread=%.4f); "
+                                "no per-pixel variance correction needed.",
+                                _l2_med, _l2_spread,
+                            )
+                except Exception as _ker_var_e:
+                    logging.debug(
+                        "Per-pixel kernel variance correction skipped: %s",
+                        _ker_var_e,
                     )
 
         # -----------------------------------------------------------------------
@@ -6405,6 +7522,80 @@ def run_photometry():
                                     "PSF model now matches difference-image PSF (FWHM=%.2f px).",
                                     _kerhw, _kerorder, _ref_fwhm_hdr,
                                 )
+
+                                # --- SFFT kernel uncertainty estimation ---
+                                # For spatially-varying kernels (order > 0), the
+                                # kernel realized at the target position has
+                                # uncertainty from the polynomial fit to the
+                                # spatially-varying kernel coefficients.  We
+                                # estimate this by sampling the kernel at
+                                # multiple positions and measuring the pixel-
+                                # to-pixel variation.  The fractional PSF
+                                # model error is propagated as a systematic
+                                # on the PSF photometry.
+                                if _kerorder > 0:
+                                    try:
+                                        _n_sample = 9
+                                        _xs_k = np.linspace(
+                                            0, _nx, _n_sample
+                                        )
+                                        _ys_k = np.linspace(
+                                            0, _ny, _n_sample
+                                        )
+                                        _XY_sample = np.array(
+                                            [[x, y] for y in _ys_k for x in _xs_k]
+                                        )
+                                        _ker_sample = Realize_MatchingKernel(
+                                            _XY_sample
+                                        ).FromFITS(_solpath)
+                                        _ker_arrays = []
+                                        for _ks in _ker_sample:
+                                            _k2d = np.asarray(_ks).squeeze().T
+                                            if (
+                                                _k2d.ndim == 2
+                                                and _k2d.shape[0] == _L
+                                            ):
+                                                _ker_arrays.append(_k2d)
+                                        if len(_ker_arrays) >= 4:
+                                            _ker_stack_arr = np.stack(_ker_arrays)
+                                            # Pixel-to-pixel variation across
+                                            # spatial positions, normalized by
+                                            # the median kernel at each pixel.
+                                            _ker_med = np.median(_ker_stack_arr, axis=0)
+                                            _ker_std = np.std(_ker_stack_arr, axis=0)
+                                            _nonzero = np.abs(_ker_med) > 1e-8
+                                            if np.any(_nonzero):
+                                                _frac_var = np.median(
+                                                    _ker_std[_nonzero]
+                                                    / np.abs(_ker_med[_nonzero])
+                                                )
+                                                # The PSF model error is the
+                                                # fractional kernel variation
+                                                # times the flux fraction in
+                                                # the convolved PSF (typically
+                                                # ~0.5 for a matching kernel).
+                                                # Clamp to [0, 0.2] (20% is
+                                                # extreme; indicates bad fit).
+                                                _psf_model_err_frac = float(
+                                                    np.clip(_frac_var * 0.5, 0.0, 0.20)
+                                                )
+                                                if _psf_model_err_frac > 0.005:
+                                                    input_yaml["psf_kernel_model_err_frac"] = (
+                                                        _psf_model_err_frac
+                                                    )
+                                                    logging.info(
+                                                        "SFFT kernel spatial variation: "
+                                                        "median fractional variation=%.4f -> "
+                                                        "PSF model error fraction=%.4f "
+                                                        "(will be added as systematic to PSF photometry).",
+                                                        _frac_var,
+                                                        _psf_model_err_frac,
+                                                    )
+                                    except Exception as _ker_unc_e:
+                                        logging.debug(
+                                            "Kernel uncertainty estimation skipped: %s",
+                                            _ker_unc_e,
+                                        )
 
                                 # --- Diagnostic plot: original ePSF / kernel / convolved ePSF ---
                                 try:
@@ -6947,6 +8138,63 @@ def run_photometry():
         # exclude_inner_radius=8, dilate_factor=2.0
 
         # -------------------------------------------------------------------------
+        # Additional targets: compute pixel coordinates for simultaneous fitting
+        # -------------------------------------------------------------------------
+        # _additional_targets_in_image: list of dicts with keys
+        #   name, ra, dec, x_pix, y_pix, in_image (bool)
+        # Targets outside the image frame are kept (with in_image=False) so a
+        # NaN row can be written to their output CSV, but they are excluded
+        # from the simultaneous PSF fit.
+        _additional_targets_in_image = []
+        _additional_targets_for_fit = []  # only those inside the image
+        _has_additional_targets = False
+        try:
+            _at_resolved = input_yaml.get("_additional_targets_resolved") or []
+            if _at_resolved:
+                _has_additional_targets = True
+                for _at in _at_resolved:
+                    _at_name = str(_at.get("name", "AdditionalTarget"))
+                    _at_ra = float(_at["ra"])
+                    _at_dec = float(_at["dec"])
+                    try:
+                        _at_x, _at_y = imageWCS.all_world2pix(
+                            _at_ra, _at_dec, wcs_origin
+                        )
+                    except Exception:
+                        _at_x, _at_y = np.nan, np.nan
+                    _in_img = (
+                        np.isfinite(_at_x)
+                        and np.isfinite(_at_y)
+                        and 0 <= _at_x < image.shape[1]
+                        and 0 <= _at_y < image.shape[0]
+                    )
+                    _entry = {
+                        "name": _at_name,
+                        "ra": _at_ra,
+                        "dec": _at_dec,
+                        "x_pix": float(_at_x),
+                        "y_pix": float(_at_y),
+                        "in_image": bool(_in_img),
+                    }
+                    _additional_targets_in_image.append(_entry)
+                    if _in_img:
+                        _additional_targets_for_fit.append(_entry)
+                    else:
+                        logging.info(
+                            "Additional target '%s' is outside image bounds "
+                            "(pix %.1f, %.1f); will write NaN output only.",
+                            _at_name, float(_at_x), float(_at_y),
+                        )
+                if _additional_targets_for_fit:
+                    logging.info(
+                        "Additional targets for simultaneous PSF fit: %s",
+                        ", ".join(t["name"] for t in _additional_targets_for_fit),
+                    )
+        except Exception as _at_exc:
+            logging.warning("Additional-target pixel-coordinate computation failed: %s", _at_exc)
+            _has_additional_targets = False
+
+        # -------------------------------------------------------------------------
         # Build a shared target cutout for AP / PSF / limiting magnitude
         # -------------------------------------------------------------------------
         target_cutout = None
@@ -7037,6 +8285,36 @@ def run_photometry():
             )
 
         # Fallback: if local cutout wasn't built, use full image as before.
+        # When additional targets are present, force the full image so that all
+        # targets (which may be spread across the frame) are in the data passed
+        # to the simultaneous PSF fit.
+        if _has_additional_targets and target_cutout is not None:
+            # Check whether every additional target for fitting falls inside
+            # the cutout.  If any is outside, discard the cutout and use the
+            # full image.
+            _all_in_cutout = True
+            for _at in _additional_targets_for_fit:
+                _lx = _at["x_pix"] - cutout_x0
+                _ly = _at["y_pix"] - cutout_y0
+                if not (
+                    0 <= _lx < target_cutout.shape[1]
+                    and 0 <= _ly < target_cutout.shape[0]
+                ):
+                    _all_in_cutout = False
+                    break
+            if not _all_in_cutout:
+                logging.info(
+                    "Additional targets span beyond the target cutout; using full "
+                    "image for simultaneous PSF fit."
+                )
+                target_cutout = None
+                target_cutout_rms = None
+                target_cutout_mask = None
+                cutout_x0 = 0
+                cutout_y0 = 0
+                cutout_target_x = float(bg_target_x_pix)
+                cutout_target_y = float(bg_target_y_pix)
+
         image_for_target = target_cutout if target_cutout is not None else image
         background_rms_for_target = (
             target_cutout_rms if target_cutout_rms is not None else background_rms
@@ -7062,15 +8340,41 @@ def run_photometry():
         # Prepares initial target coordinates.
         # Run target AP/PSF on the shared cutout when available.
         # We'll shift fitted positions back to full-image pixels afterwards.
+        # Row 0 is always the primary target.  When additional targets are
+        # configured and inside the image, append one row per additional target
+        # so the PSF fit handles blending simultaneously.
+        _tp_x = [cutout_target_x if target_cutout is not None else target_x_pix]
+        _tp_y = [cutout_target_y if target_cutout is not None else target_y_pix]
+        _tp_is_additional = [False]
+        _tp_additional_name = [None]
+        for _at in _additional_targets_for_fit:
+            if target_cutout is not None:
+                _atx = _at["x_pix"] - cutout_x0
+                _aty = _at["y_pix"] - cutout_y0
+            else:
+                _atx = _at["x_pix"]
+                _aty = _at["y_pix"]
+            _tp_x.append(float(_atx))
+            _tp_y.append(float(_aty))
+            _tp_is_additional.append(True)
+            _tp_additional_name.append(_at["name"])
         TargetPosition = pd.DataFrame(
             {
-                "x_pix": [cutout_target_x if target_cutout is not None else target_x_pix],
-                "y_pix": [cutout_target_y if target_cutout is not None else target_y_pix],
+                "x_pix": _tp_x,
+                "y_pix": _tp_y,
+                "_is_additional_target": _tp_is_additional,
+                "_additional_target_name": _tp_additional_name,
             }
         )
         logging.info(
             f"Transient's expected location: x = {target_x_pix:.3f} pixels, y = {target_y_pix:.3f} pixels"
         )
+        if _additional_targets_for_fit:
+            logging.info(
+                "Simultaneous fit with %d additional target(s): %s",
+                len(_additional_targets_for_fit),
+                ", ".join(t["name"] for t in _additional_targets_for_fit),
+            )
 
         # Refines the centroid with COM inside ~1xFWHM box (odd box size).
         boxsize = int(np.ceil(ImageFWHM))
@@ -7135,10 +8439,12 @@ def run_photometry():
         perform_ForcePhotometry = False
 
         # Sets up the target position for PSF fitting.
-        TargetPosition["x_fit"] = [np.nan]
-        TargetPosition["y_fit"] = [np.nan]
-        TargetPosition["x_fit_err"] = [np.nan]
-        TargetPosition["y_fit_err"] = [np.nan]
+        # Use np.full to match the number of rows (primary + any additional targets).
+        _n_tp = len(TargetPosition)
+        TargetPosition["x_fit"] = np.full(_n_tp, np.nan)
+        TargetPosition["y_fit"] = np.full(_n_tp, np.nan)
+        TargetPosition["x_fit_err"] = np.full(_n_tp, np.nan)
+        TargetPosition["y_fit_err"] = np.full(_n_tp, np.nan)
 
         # Use the global photometry fitting bound configured in arcseconds.
         # Conversion to pixels is handled in PSF.fit; here we log the expected
@@ -7224,18 +8530,20 @@ def run_photometry():
 
         
         # If we used a cutout for the target fit, shift results back to full-image pixels
-        # so downstream logging/output stays consistent.
+        # so downstream logging/output stays consistent.  Shift ALL rows (the
+        # primary target plus any additional targets that were fit simultaneously).
         if target_cutout is not None:
             try:
                 for col in ("x_pix", "y_pix", "x_fit", "y_fit", "x_fit_normal", "y_fit_normal"):
-                    if col in TargetPosition.columns and np.isfinite(TargetPosition[col].iloc[0]):
-                        old_val = float(TargetPosition[col].iloc[0])
-                        if col.startswith("x"):
-                            new_val = old_val + float(cutout_x0)
-                            TargetPosition.loc[TargetPosition.index[0], col] = new_val
-                        else:
-                            new_val = old_val + float(cutout_y0)
-                            TargetPosition.loc[TargetPosition.index[0], col] = new_val
+                    if col in TargetPosition.columns:
+                        for _row_i in range(len(TargetPosition)):
+                            if np.isfinite(TargetPosition[col].iloc[_row_i]):
+                                old_val = float(TargetPosition[col].iloc[_row_i])
+                                if col.startswith("x"):
+                                    new_val = old_val + float(cutout_x0)
+                                else:
+                                    new_val = old_val + float(cutout_y0)
+                                TargetPosition.loc[TargetPosition.index[_row_i], col] = new_val
             except Exception as e:
                 logging.warning("Failed to convert cutout coordinates: %s", e)
 
@@ -7265,6 +8573,22 @@ def run_photometry():
                         else:
                             # Single source (list of str)
                             logging.info("Target fitting issues: %s", issues)
+
+        # -------------------------------------------------------------------------
+        # Extract additional-target rows from TargetPosition.
+        # The remaining downstream code (calibration, output, limiting magnitude)
+        # assumes a single-row TargetPosition for the primary target, so we split
+        # off the additional-target rows here and process them separately.
+        # -------------------------------------------------------------------------
+        _additional_targets_fit_results = None
+        if "_is_additional_target" in TargetPosition.columns and len(TargetPosition) > 1:
+            _addl_mask = TargetPosition["_is_additional_target"].astype(bool)
+            _additional_targets_fit_results = TargetPosition[_addl_mask].copy()
+            TargetPosition = TargetPosition[~_addl_mask].copy().reset_index(drop=True)
+            logging.info(
+                "Extracted %d additional-target fit result(s); primary target row retained.",
+                len(_additional_targets_fit_results),
+            )
 
         # logging.info(TargetPosition.columns)
         # Check if inverted PSF fit was used
@@ -7775,6 +9099,26 @@ def run_photometry():
                 logging.info("%s zeropoint not available - skipping", method)
                 continue
             idx = 0
+            # Strict subtraction quality mode: block photometry on failed
+            # subtraction rather than returning unreliable measurements.
+            _strict_sub = bool(
+                (input_yaml.get("photometry") or {}).get(
+                    "strict_subtraction_quality", False
+                )
+            )
+            if (
+                PreformSubtraction
+                and _strict_sub
+                and str(input_yaml.get("diff_quality_class", "unknown")) == "fail"
+            ):
+                logging.error(
+                    "%s: Strict subtraction quality mode enabled and difference "
+                    "image quality is FAILED. Returning NaN for photometry.",
+                    method,
+                )
+                TargetPosition.at[idx, f"{input_yaml['imageFilter']}_{method}"] = np.nan
+                TargetPosition.at[idx, f"{input_yaml['imageFilter']}_{method}_err"] = np.nan
+                continue
             inst_col = f"inst_{input_yaml['imageFilter']}_{method}"
             if inst_col not in TargetPosition.columns:
                 logging.info(
@@ -7785,6 +9129,35 @@ def run_photometry():
                 TargetPosition[f"{input_yaml['imageFilter']}_{method}"] = [np.nan]
                 TargetPosition[f"{input_yaml['imageFilter']}_{method}_err"] = [np.nan]
                 continue
+            # Add SFFT kernel model uncertainty to PSF flux error.
+            # The kernel's spatial variation (for kernel_order > 0) introduces
+            # a PSF model error that is not captured by the PSF fit covariance.
+            # This is a fractional error on the flux, added in quadrature.
+            if (
+                method == "PSF"
+                and PreformSubtraction
+                and "psf_kernel_model_err_frac" in input_yaml
+            ):
+                _ker_err_frac = float(input_yaml.get("psf_kernel_model_err_frac", 0.0))
+                if _ker_err_frac > 0 and "flux_PSF" in TargetPosition.columns:
+                    _f_psf = float(TargetPosition["flux_PSF"].iloc[0])
+                    if np.isfinite(_f_psf) and abs(_f_psf) > 0:
+                        _ker_flux_err = _ker_err_frac * abs(_f_psf)
+                        _inst_err_col = f"{inst_col}_err"
+                        if _inst_err_col in TargetPosition.columns:
+                            _old_inst_err = float(TargetPosition[_inst_err_col].iloc[0])
+                            if np.isfinite(_old_inst_err):
+                                # Convert flux error to magnitude error and
+                                # add in quadrature: dm = 1.0857 * dF / F
+                                _ker_mag_err = 1.0857 * _ker_flux_err / abs(_f_psf)
+                                TargetPosition.at[idx, _inst_err_col] = float(
+                                    np.sqrt(_old_inst_err**2 + _ker_mag_err**2)
+                                )
+                                logging.info(
+                                    "PSF: Adding kernel model uncertainty %.4f mag "
+                                    "(fractional=%.4f) to instrumental magnitude error.",
+                                    _ker_mag_err, _ker_err_frac,
+                                )
             try:
                 # Calibrated magnitude: inst_mag + ZP. For AP, optionally subtract
                 # aperture correction (only when apply_aperture_correction is True;
@@ -7912,6 +9285,44 @@ def run_photometry():
                 TargetPosition.at[idx, f"{input_yaml['imageFilter']}_{method}"] = (
                     cal_mag
                 )
+                # Add systematic error floor (flat-fielding, PSF model, etc.)
+                _sys_floor = float(
+                    (input_yaml.get("photometry") or {}).get(
+                        "systematic_error_floor_mag", 0.0
+                    )
+                )
+                if _sys_floor > 0:
+                    errorTerms.append(_sys_floor)
+                # Subtraction-quality-dependent systematic error.
+                # When the difference image is downgraded or failed, the
+                # subtraction residuals (dipoles, correlated noise) add
+                # an untracked systematic to the photometry.  Add it in
+                # quadrature so users see inflated errors rather than
+                # falsely precise measurements.
+                _diff_qual = str(input_yaml.get("diff_quality_class", "unknown"))
+                _sub_sys_cfg = float(
+                    (input_yaml.get("photometry") or {}).get(
+                        "subtraction_downgrade_sys_err_mag", 0.05
+                    )
+                )
+                _sub_fail_cfg = float(
+                    (input_yaml.get("photometry") or {}).get(
+                        "subtraction_fail_sys_err_mag", 0.15
+                    )
+                )
+                if PreformSubtraction and _diff_qual == "downgrade" and _sub_sys_cfg > 0:
+                    errorTerms.append(_sub_sys_cfg)
+                    logging.info(
+                        "%s: Adding %.3f mag systematic for downgraded subtraction quality.",
+                        method, _sub_sys_cfg,
+                    )
+                elif PreformSubtraction and _diff_qual == "fail" and _sub_fail_cfg > 0:
+                    errorTerms.append(_sub_fail_cfg)
+                    logging.warning(
+                        "%s: Adding %.3f mag systematic for FAILED subtraction quality. "
+                        "Photometry is unreliable.",
+                        method, _sub_fail_cfg,
+                    )
                 TargetPosition.at[idx, f"{input_yaml['imageFilter']}_{method}_err"] = (
                     quadrature_add(errorTerms)
                 )
@@ -8561,39 +9972,9 @@ def run_photometry():
         except Exception:
             pass
 
-        # Explicit detection flag for downstream light-curve processing.
-        # Forced photometry is always performed; this records whether the measured
-        # S/N exceeds the configured detection threshold.  Uses the SNR from the
-        # primary photometry method (PSF when available, AP otherwise) for
-        # consistency with the magnitudes reported downstream.
-        # Note: We check SNR only (not magnitude finiteness) because magnitudes are
-        # populated later in the code (after zeropoint application). The SNR is
-        # sufficient for detection classification.
-        #
-        # AP SNR fallback: when PSF SNR is marginal (below threshold) but AP SNR
-        # is clearly above (>= 1.5x threshold), flag as detection.  The PSF fit
-        # can underperform aperture photometry for faint/marginal sources due to
-        # PSF model mismatch, poor centroiding, or subtraction residuals.  The
-        # aperture is more robust in these cases because it simply sums pixels.
-        # The reported SNR and magnitude still come from the primary method; only
-        # the detection flag uses the fallback.
-        try:
-            best_snr = float(output.get("snr", np.nan))
-            det_thresh = float(detection_limit)
-            is_det = bool(np.isfinite(best_snr) and best_snr >= det_thresh)
-            if not is_det and not do_aperture_ONLY:
-                ap_snr = float(output.get("snr_ap", np.nan))
-                if np.isfinite(ap_snr) and ap_snr >= det_thresh * 1.5:
-                    is_det = True
-                    logging.info(
-                        "Detection fallback: PSF SNR=%.2f < %.1f but AP SNR=%.2f >= %.1f; "
-                        "flagging as detection.",
-                        best_snr, det_thresh, ap_snr, det_thresh * 1.5,
-                    )
-            output["is_detection"] = is_det
-        except Exception:
-            output["is_detection"] = False
-
+        # --- Extract flux values BEFORE detection flag computation ---
+        # The detection logic needs flux_psf, flux_ap, and reduced_chi2 to make
+        # a robust decision.  These are extracted from TargetPosition here.
         try:
             if "flux_AP" in TargetPosition.columns:
                 output["flux_ap"] = float(TargetPosition.at[idx, "flux_AP"])
@@ -8603,8 +9984,150 @@ def run_photometry():
                 output["flux_psf"] = float(TargetPosition.at[idx, "flux_PSF"])
             if "flux_PSF_err" in TargetPosition.columns:
                 output["flux_psf_err"] = float(TargetPosition.at[idx, "flux_PSF_err"])
-            
+            if "reduced_chi2" in TargetPosition.columns:
+                output["reduced_chi2"] = float(TargetPosition.at[idx, "reduced_chi2"])
+        except Exception:
+            pass
+
+        # -------------------------------------------------------------------------
+        # Robust multi-criteria detection flag
+        # -------------------------------------------------------------------------
+        # Forced photometry is always performed at the target position.  This
+        # block decides whether the measurement constitutes a detection or a
+        # non-detection (upper limit).  The decision uses multiple criteria
+        # beyond simple SNR, following best practices from ZTF, LSST, and the
+        # image-subtraction literature (Zackay & Ofek 2016):
+        #
+        # 1. SNR threshold: |flux|/flux_err >= detection_limit (primary criterion)
+        # 2. Positive flux: the flux must be positive (negative flux = oversub-
+        #    traction or noise dip, NOT a detection).  Exception: inverted fits
+        #    where the transient is in the template.
+        # 3. Fit quality: reduced_chi2 must be reasonable (not so bad that the
+        #    PSF model failed, which would make the flux unreliable).
+        # 4. PSF/AP consistency: for detections, PSF and AP flux should agree in
+        #    sign.  A detection where PSF is positive but AP is strongly negative
+        #    (or vice versa) is likely a subtraction artifact.
+        # 5. AP SNR fallback: when PSF SNR is marginal but AP SNR is clearly
+        #    above threshold, flag as detection (AP is more robust for faint
+        #    sources with PSF model mismatch).
+        #
+        # Config keys (under photometry):
+        #   detection_limit: float (default 3.0) — SNR threshold
+        #   detection_max_chi2: float (default 10.0) — max reduced chi2 for det
+        #   detection_flux_consistency: bool (default True) — require PSF/AP sign agreement
+        #   detection_ap_fallback_ratio: float (default 1.5) — AP SNR / threshold
+        try:
+            _det_cfg = input_yaml.get("photometry", {}) or {}
+            best_snr = float(output.get("snr", np.nan))
+            det_thresh = float(detection_limit)
+            _max_chi2 = float(_det_cfg.get("detection_max_chi2", 10.0))
+            _fc_raw = _det_cfg.get("detection_flux_consistency", True)
+            _flux_consistency = str(_fc_raw).lower() in ("true", "1", "yes") if not isinstance(_fc_raw, bool) else _fc_raw
+            _ap_fallback_ratio = float(
+                _det_cfg.get("detection_ap_fallback_ratio", 1.5)
+            )
+
+            # --- Criterion 1: SNR threshold ---
+            is_det = bool(np.isfinite(best_snr) and best_snr >= det_thresh)
+
+            # --- Criterion 2: Positive flux (not oversubtraction) ---
+            _is_inverted = bool(output.get("_inverted_fit", False))
+            if is_det and not _is_inverted:
+                _flux_psf_val = float(output.get("flux_psf", np.nan))
+                _flux_ap_val = float(output.get("flux_ap", np.nan))
+                # Primary flux must be positive (we're looking for a transient
+                # that brightened, i.e., positive on the difference image).
+                # For inverted fits, the sign is reversed so we skip this check.
+                _primary_flux = _flux_psf_val if not do_aperture_ONLY else _flux_ap_val
+                if np.isfinite(_primary_flux) and _primary_flux < 0:
+                    is_det = False
+                    logging.info(
+                        "Detection rejected: primary flux negative (%.4f) — "
+                        "likely oversubtraction or noise dip, not a real "
+                        "detection.",
+                        _primary_flux,
+                    )
+
+            # --- Criterion 3: Fit quality (reduced chi2) ---
+            if is_det and not do_aperture_ONLY:
+                _chi2 = float(output.get("reduced_chi2", np.nan))
+                if np.isfinite(_chi2) and _chi2 > _max_chi2:
+                    is_det = False
+                    logging.info(
+                        "Detection rejected: reduced_chi2=%.1f > %.1f — "
+                        "PSF fit quality too poor for reliable detection.",
+                        _chi2, _max_chi2,
+                    )
+
+            # --- Criterion 4: PSF/AP flux consistency ---
+            if is_det and _flux_consistency and not do_aperture_ONLY:
+                _flux_psf_val = float(output.get("flux_psf", np.nan))
+                _flux_ap_val = float(output.get("flux_ap", np.nan))
+                if (
+                    np.isfinite(_flux_psf_val)
+                    and np.isfinite(_flux_ap_val)
+                    and abs(_flux_psf_val) > 0
+                    and abs(_flux_ap_val) > 0
+                ):
+                    # Both must be positive for a normal detection
+                    if _flux_psf_val < 0 and _flux_ap_val > 0:
+                        is_det = False
+                        logging.info(
+                            "Detection rejected: PSF flux negative (%.4f) but "
+                            "AP flux positive (%.4f) — inconsistent, likely "
+                            "subtraction artifact.",
+                            _flux_psf_val, _flux_ap_val,
+                        )
+                    elif _flux_psf_val > 0 and _flux_ap_val < 0:
+                        is_det = False
+                        logging.info(
+                            "Detection rejected: PSF flux positive (%.4f) but "
+                            "AP flux negative (%.4f) — inconsistent, likely "
+                            "subtraction artifact.",
+                            _flux_psf_val, _flux_ap_val,
+                        )
+
+            # --- Criterion 5: AP SNR fallback ---
+            if not is_det and not do_aperture_ONLY:
+                ap_snr = float(output.get("snr_ap", np.nan))
+                if np.isfinite(ap_snr) and ap_snr >= det_thresh * _ap_fallback_ratio:
+                    # Re-check positive flux for the fallback
+                    _flux_ap_val = float(output.get("flux_ap", np.nan))
+                    if np.isfinite(_flux_ap_val) and _flux_ap_val > 0:
+                        is_det = True
+                        logging.info(
+                            "Detection fallback: PSF SNR=%.2f < %.1f but AP "
+                            "SNR=%.2f >= %.1f (flux_ap=%.4f > 0); flagging "
+                            "as detection.",
+                            best_snr, det_thresh,
+                            ap_snr, det_thresh * _ap_fallback_ratio,
+                            _flux_ap_val,
+                        )
+
+            # --- Log detection decision with all metrics ---
+            _det_status = "DETECTION" if is_det else "non-detection"
+            logging.info(
+                "Detection decision: %s | SNR=%.2f (threshold=%.1f) | "
+                "flux_psf=%.4f flux_ap=%.4f | chi2=%s | inverted=%s",
+                _det_status,
+                best_snr if np.isfinite(best_snr) else -1,
+                det_thresh,
+                float(output.get("flux_psf", np.nan)),
+                float(output.get("flux_ap", np.nan)),
+                f"{float(output.get('reduced_chi2', np.nan)):.2f}"
+                if np.isfinite(output.get("reduced_chi2", np.nan))
+                else "N/A",
+                _is_inverted,
+            )
+
+            output["is_detection"] = is_det
+        except Exception as _det_exc:
+            logging.debug("Detection flag computation failed: %s", _det_exc)
+            output["is_detection"] = False
+
+        try:
             # Add inverted fit parameters if inverted fit was used
+            # (flux_ap/flux_psf already extracted above before detection flag)
             if "_inverted_fit" in TargetPosition.columns and TargetPosition.at[idx, "_inverted_fit"]:
                 # Add the flag itself to output so lightcurve can detect it
                 output["_inverted_fit"] = True
@@ -8707,6 +10230,80 @@ def run_photometry():
                 "ra_err_arcsec": ra_err,
                 "dec_err_arcsec": dec_err,
             }
+        )
+
+        # Add FWHM metadata and sampling regime to output for provenance.
+        output["image_fwhm"] = float(ImageFWHM) if np.isfinite(ImageFWHM) else np.nan
+        output["image_fwhm_err"] = float(
+            input_yaml.get("fwhm_err", np.nan)
+        ) if np.isfinite(input_yaml.get("fwhm_err", np.nan)) else np.nan
+        output["sampling_regime"] = str(
+            input_yaml.get("sampling_regime", "unknown")
+        )
+
+        # Subtraction quality provenance (from difference_quality.py assessment).
+        # Stored in input_yaml by the post-subtraction quality readback above.
+        output["diff_quality_class"] = str(
+            input_yaml.get("diff_quality_class", "unknown")
+        )
+        _diff_score = input_yaml.get("diff_quality_score", np.nan)
+        output["diff_quality_score"] = float(_diff_score) if np.isfinite(_diff_score) else np.nan
+        # Flux scaling discrepancy from SFFT (FSCAL_DISC header keyword).
+        if PreformSubtraction:
+            try:
+                _fscal_disc = float(header.get("FSCAL_DISC", np.nan))
+                output["flux_scale_discrep_pct"] = _fscal_disc if np.isfinite(_fscal_disc) else np.nan
+            except Exception:
+                output["flux_scale_discrep_pct"] = np.nan
+        else:
+            output["flux_scale_discrep_pct"] = np.nan
+
+        # Alignment quality provenance from the aligned template header.
+        # The alignment RMS keywords (ALIGRMS, ALIGMED, etc.) are written
+        # to the aligned template FITS header by templates.py, not to the
+        # difference image header.  Read from the template if available.
+        if PreformSubtraction:
+            try:
+                _alig_hdr = None
+                # templateFpath points to the aligned template used for
+                # subtraction; its header carries the alignment quality.
+                if templateFpath and os.path.isfile(templateFpath):
+                    _alig_hdr = get_header(templateFpath)
+                if _alig_hdr is None:
+                    # Fallback: try the difference image header (some
+                    # pipelines may copy alignment keywords there).
+                    _alig_hdr = header
+                output["alignment_rms_px"] = float(
+                    _alig_hdr.get("ALIGRMS", np.nan)
+                ) if np.isfinite(_alig_hdr.get("ALIGRMS", np.nan)) else np.nan
+                output["alignment_med_offset_px"] = float(
+                    _alig_hdr.get("ALIGMED", np.nan)
+                ) if np.isfinite(_alig_hdr.get("ALIGMED", np.nan)) else np.nan
+                output["alignment_p90_px"] = float(
+                    _alig_hdr.get("ALIGP90", np.nan)
+                ) if np.isfinite(_alig_hdr.get("ALIGP90", np.nan)) else np.nan
+                output["alignment_max_quadrant_rms_px"] = float(
+                    _alig_hdr.get("ALIGQMAX", np.nan)
+                ) if np.isfinite(_alig_hdr.get("ALIGQMAX", np.nan)) else np.nan
+                output["alignment_method"] = str(
+                    _alig_hdr.get("ALIGMETH", "unknown")
+                )
+            except Exception:
+                output["alignment_rms_px"] = np.nan
+                output["alignment_med_offset_px"] = np.nan
+                output["alignment_p90_px"] = np.nan
+                output["alignment_max_quadrant_rms_px"] = np.nan
+                output["alignment_method"] = "unknown"
+        else:
+            output["alignment_rms_px"] = np.nan
+            output["alignment_med_offset_px"] = np.nan
+            output["alignment_p90_px"] = np.nan
+            output["alignment_max_quadrant_rms_px"] = np.nan
+            output["alignment_method"] = "none"
+
+        # SFFT kernel model uncertainty fraction (for PSF photometry).
+        output["psf_kernel_model_err_frac"] = float(
+            input_yaml.get("psf_kernel_model_err_frac", 0.0)
         )
 
         # Adds zeropoint values.
@@ -8852,6 +10449,237 @@ def run_photometry():
             index=False,
             float_format="%.6f",
         )
+
+        # =====================================================================
+        # Save additional-target outputs (one CSV per additional target)
+        # =====================================================================
+        # Each additional target gets its own per-image CSV with the same
+        # long-form schema as the primary target output, so the lightcurve
+        # plotting code can consume it without modification.
+        if _has_additional_targets:
+            from additional_targets import sanitize_target_name_for_filename as _stfn
+            _image_filter = input_yaml.get("imageFilter", "")
+            _ap_corr = float(input_yaml.get("aperture_correction", 0.0) or 0.0)
+            _ap_corr_err = float(input_yaml.get("aperture_correction_err", 0.0) or 0.0)
+            _apply_ap_corr = bool(
+                (input_yaml.get("photometry") or {}).get(
+                    "apply_aperture_correction", False
+                )
+            )
+
+            # Map additional target name -> fit row (if it was in the image)
+            _fit_by_name = {}
+            if _additional_targets_fit_results is not None:
+                for _r_i in range(len(_additional_targets_fit_results)):
+                    _nm = _additional_targets_fit_results["_additional_target_name"].iloc[_r_i]
+                    _fit_by_name[str(_nm)] = _additional_targets_fit_results.iloc[_r_i]
+
+            for _at_entry in _additional_targets_in_image:
+                _at_name = str(_at_entry["name"])
+                _at_safe = _stfn(_at_name)
+                _at_csv_path = os.path.join(
+                    os.path.dirname(output_csv_path),
+                    f"AdditionalTarget_{_at_safe}_{input_yaml['base']}.csv",
+                )
+
+                _at_row = _fit_by_name.get(_at_name)
+
+                # --- Build the output dict mirroring the primary target schema ---
+                _at_out = {
+                    "filename": input_yaml["base"],
+                    "filename_path": fpath,
+                    "date": date,
+                    "mjd": date_mjd,
+                    "telescope": telescope,
+                    "instrument": instrument,
+                    "image_fwhm": ImageFWHM,
+                    "airmass": airmass,
+                    "exposure_time": input_yaml["exposure_time"],
+                    "filter": _image_filter,
+                    "target_fwhm": np.nan,
+                    "fwhm_psf": np.nan,
+                    "separation": np.nan,
+                    "beta": np.nan,
+                    "limiting_inst_mag": (
+                        float(InjectedLimit) if np.isfinite(InjectedLimit) else np.nan
+                    ),
+                    "PreformSubtractioned": (
+                        PreformSubtraction if "PreformSubtraction" in locals() else False
+                    ),
+                    "etime": time.time() - start,
+                    "mag_ap": np.nan,
+                    "mag_ap_err": np.nan,
+                    "mag_psf": np.nan,
+                    "mag_psf_err": np.nan,
+                    "inst_mag_ap": np.nan,
+                    "inst_mag_ap_err": np.nan,
+                    "inst_mag_psf": np.nan,
+                    "inst_mag_psf_err": np.nan,
+                    "zp_ap": np.nan,
+                    "zp_ap_err": np.nan,
+                    "zp_psf": np.nan,
+                    "zp_psf_err": np.nan,
+                }
+
+                if _at_row is not None:
+                    # Fitted position
+                    _at_out["xpix"] = float(_at_row.get("x_fit", np.nan))
+                    _at_out["ypix"] = float(_at_row.get("y_fit", np.nan))
+                    _at_out["xpix_err"] = float(_at_row.get("x_fit_err", np.nan))
+                    _at_out["ypix_err"] = float(_at_row.get("y_fit_err", np.nan))
+
+                    # Fluxes
+                    _at_out["flux_psf"] = float(_at_row.get("flux_PSF", np.nan))
+                    _at_out["flux_psf_err"] = float(_at_row.get("flux_PSF_err", np.nan))
+                    _at_out["flux_ap"] = float(_at_row.get("flux_AP", np.nan))
+                    _at_out["flux_ap_err"] = float(_at_row.get("flux_AP_err", np.nan))
+
+                    # SNR
+                    _at_out["snr_ap"] = float(_at_row.get("SNR", np.nan))
+                    _psf_flux = _at_out["flux_psf"]
+                    _psf_flux_err = _at_out["flux_psf_err"]
+                    if (
+                        np.isfinite(_psf_flux)
+                        and np.isfinite(_psf_flux_err)
+                        and _psf_flux_err > 0
+                    ):
+                        _at_out["snr_psf"] = float(abs(_psf_flux) / _psf_flux_err)
+                    else:
+                        _at_out["snr_psf"] = np.nan
+                    _at_out["snr"] = (
+                        _at_out["snr_psf"]
+                        if np.isfinite(_at_out["snr_psf"])
+                        else _at_out["snr_ap"]
+                    )
+
+                    # Threshold
+                    _at_out["threshold"] = float(_at_row.get("threshold", np.nan))
+
+                    # FWHM
+                    if "fwhm_psf" in _at_row.index:
+                        _at_out["fwhm_psf"] = float(_at_row.get("fwhm_psf", np.nan))
+                    _at_out["target_fwhm"] = _at_out["fwhm_psf"]
+
+                    # Fitted RA/Dec
+                    _xf = _at_out["xpix"]
+                    _yf = _at_out["ypix"]
+                    if np.isfinite(_xf) and np.isfinite(_yf):
+                        try:
+                            _wp = imageWCS.all_pix2world(_xf, _yf, 0)
+                            _at_out["ra"] = float(_wp[0])
+                            _at_out["dec"] = float(_wp[1])
+                            # Separation from expected position
+                            _exp_sky = SkyCoord(
+                                _at_entry["ra"] * u.deg,
+                                _at_entry["dec"] * u.deg,
+                            )
+                            _fit_sky = SkyCoord(
+                                _at_out["ra"] * u.deg,
+                                _at_out["dec"] * u.deg,
+                            )
+                            _at_out["separation"] = float(
+                                _fit_sky.separation(_exp_sky).arcsecond
+                            )
+                            # RA/Dec errors in arcsec
+                            if np.isfinite(_at_out["xpix_err"]) and np.isfinite(_at_out["ypix_err"]):
+                                _sky_c = SkyCoord(
+                                    _at_out["ra"] * u.deg,
+                                    _at_out["dec"] * u.deg,
+                                )
+                                _sky_dx = imageWCS.pixel_to_world(
+                                    _xf + _at_out["xpix_err"], _yf
+                                )
+                                _sky_dy = imageWCS.pixel_to_world(
+                                    _xf, _yf + _at_out["ypix_err"]
+                                )
+                                _at_out["ra_err_arcsec"] = float(
+                                    _sky_c.separation(_sky_dx).arcsecond
+                                )
+                                _at_out["dec_err_arcsec"] = float(
+                                    _sky_c.separation(_sky_dy).arcsecond
+                                )
+                        except Exception as _e:
+                            logging.debug("Additional target WCS conversion failed: %s", _e)
+
+                    # Instrumental magnitudes (already computed by PSF/aperture code)
+                    _inst_psf = f"inst_{_image_filter}_PSF"
+                    _inst_psf_err = f"inst_{_image_filter}_PSF_err"
+                    _inst_ap = f"inst_{_image_filter}_AP"
+                    _inst_ap_err = f"inst_{_image_filter}_AP_err"
+                    if _inst_psf in _at_row.index:
+                        _at_out["inst_mag_psf"] = float(_at_row.get(_inst_psf, np.nan))
+                    if _inst_psf_err in _at_row.index:
+                        _at_out["inst_mag_psf_err"] = float(_at_row.get(_inst_psf_err, np.nan))
+                    if _inst_ap in _at_row.index:
+                        _at_out["inst_mag_ap"] = float(_at_row.get(_inst_ap, np.nan))
+                    if _inst_ap_err in _at_row.index:
+                        _at_out["inst_mag_ap_err"] = float(_at_row.get(_inst_ap_err, np.nan))
+
+                    # Calibrated magnitudes using the same zeropoints
+                    for _method in ["AP", "PSF"]:
+                        if _method not in image_zeropoint or "zeropoint" not in image_zeropoint[_method]:
+                            continue
+                        _zp = float(image_zeropoint[_method].get("zeropoint", np.nan))
+                        _zp_err = float(image_zeropoint[_method].get("zeropoint_error", np.nan))
+                        _m_low = _method.lower()
+                        _inst_val = _at_out.get(f"inst_mag_{_m_low}", np.nan)
+                        _inst_err = _at_out.get(f"inst_mag_{_m_low}_err", np.nan)
+                        _at_out[f"zp_{_m_low}"] = _zp
+                        _at_out[f"zp_{_m_low}_err"] = _zp_err
+                        if np.isfinite(_inst_val) and np.isfinite(_zp):
+                            _cal = _inst_val + _zp
+                            _err_terms = [_inst_err, _zp_err]
+                            if _method == "AP" and _apply_ap_corr and np.isfinite(_ap_corr):
+                                _cal += _ap_corr
+                                _err_terms.append(_ap_corr_err)
+                            _at_out[f"mag_{_m_low}"] = _cal
+                            _at_out[f"mag_{_m_low}_err"] = quadrature_add(
+                                [e for e in _err_terms if np.isfinite(e)]
+                            ) if any(np.isfinite(e) for e in _err_terms) else np.nan
+                        # ZP nsrc
+                        _at_out[f"zp_{_m_low}_nsrc"] = int(
+                            image_zeropoint[_method].get("n_sources", 0) or 0
+                        )
+
+                    # Detection flag
+                    _det_snr = _at_out["snr"]
+                    _det_threshold = _at_out.get("threshold", np.nan)
+                    _is_det = False
+                    if np.isfinite(_det_snr) and _det_snr >= float(detection_limit):
+                        _is_det = True
+                    _at_out["is_detection"] = _is_det
+                else:
+                    # Target outside image: write NaN row with expected position
+                    _at_out["xpix"] = _at_entry["x_pix"]
+                    _at_out["ypix"] = _at_entry["y_pix"]
+                    _at_out["ra"] = _at_entry["ra"]
+                    _at_out["dec"] = _at_entry["dec"]
+                    _at_out["snr"] = np.nan
+                    _at_out["snr_psf"] = np.nan
+                    _at_out["snr_ap"] = np.nan
+                    _at_out["is_detection"] = False
+
+                # Normalise and order columns (same schema as primary output)
+                _at_norm = {str(k).strip().lower(): v for k, v in _at_out.items()}
+                _at_ordered = {}
+                for k in preferred:
+                    if k in _at_norm:
+                        _at_ordered[k] = _at_norm[k]
+                for k in _at_norm.keys():
+                    if k not in _at_ordered:
+                        _at_ordered[k] = _at_norm[k]
+                _at_df = pd.DataFrame(_at_ordered, index=[0])
+                _at_df.to_csv(
+                    _at_csv_path,
+                    index=False,
+                    float_format="%.6f",
+                )
+                logging.info(
+                    "Saved additional-target output: %s (%s, mag_psf=%.3f)",
+                    os.path.basename(_at_csv_path),
+                    _at_name,
+                    float(_at_out.get("mag_psf", np.nan)) if np.isfinite(_at_out.get("mag_psf", np.nan)) else float("nan"),
+                )
 
         # Remove verbose multi_snr_limits dict from CALIB output (individual columns remain)
         output.pop("multi_snr_limits", None)
