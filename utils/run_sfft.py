@@ -287,6 +287,12 @@ def run_sfft() -> Optional[int]:
     parser.add_argument(
         "-diff", type=str, default=None, help="Output difference FITS path."
     )
+    parser.add_argument(
+        "-out_base",
+        type=str,
+        default=None,
+        help="Base name for output files (overrides derivation from science filename).",
+    )
     parser.add_argument("-mask", type=str, default=None, help="Boolean mask FITS path.")
     parser.add_argument(
         "-crowded", action="store_true", help="Use crowded-field solver."
@@ -586,13 +592,16 @@ def run_sfft() -> Optional[int]:
     out_dir = os.path.dirname(os.path.abspath(FITS_SCI)) or "."
     # Standardize to the same "base" used by main.py (remove suffixes, normalize
     # punctuation), so output file names include the FITS filename stem.
-    fits_sci_stem = os.path.splitext(os.path.basename(FITS_SCI))[0]
-    out_base = (
-        fits_sci_stem.replace(" ", "_")
-        .replace(".", "_")
-        .replace("_APT", "")
-        .replace("_ERROR", "")
-    )
+    if args.out_base:
+        out_base = args.out_base
+    else:
+        fits_sci_stem = os.path.splitext(os.path.basename(FITS_SCI))[0]
+        out_base = (
+            fits_sci_stem.replace(" ", "_")
+            .replace(".", "_")
+            .replace("_APT", "")
+            .replace("_ERROR", "")
+        )
     FITS_DIFF = args.diff or os.path.join(out_dir, f"diff_{os.path.basename(FITS_SCI)}")
 
     # --- Load Headers (Once) ---
@@ -732,9 +741,16 @@ def run_sfft() -> Optional[int]:
     matching_sources = _sanitize_xy_sources(
         matching_sources, "Matching sources", nx, ny, invalid_mask=combined_invalid_mask
     )
+    # masked_sources arrive as 1-based FITS coordinates (SExtractor convention
+    # from main.py). Convert to 0-based for sanitization (bounds check uses
+    # 0-based limits), then convert back to 1-based for SFFT's XY_PriorBan.
+    if masked_sources is not None:
+        masked_sources = masked_sources - 1.0
     masked_sources = _sanitize_xy_sources(
         masked_sources, "Masked sources", nx, ny, invalid_mask=combined_invalid_mask
     )
+    if masked_sources is not None:
+        masked_sources = masked_sources + 1.0
 
     # SFFT's XY_PriorSelect and XY_PriorBan expect 1-based FITS pixel coordinates
     # (SExtractor convention).  masked_sources are already converted to 1-based in
@@ -1130,8 +1146,10 @@ def run_sfft() -> Optional[int]:
         f"StarExt_iter={StarExt_iter}, DETECT_THRESH={DETECT_THRESH:.1f}, DEBLEND_MINCONT={DEBLEND_MINCON:.4f}"
     )
 
-    BACK_SIZE = int(max(16, args.back_size))
-    BACK_FILTERSIZE = int(max(1, args.back_filtersize))
+    _bs = args.back_size if args.back_size is not None else 128
+    _bf = args.back_filtersize if args.back_filtersize is not None else 6
+    BACK_SIZE = int(max(16, _bs))
+    BACK_FILTERSIZE = int(max(1, _bf))
     log_info(
         f"SExtractor background mesh:\n"
         f"  BACK_SIZE: {BACK_SIZE} px\n"

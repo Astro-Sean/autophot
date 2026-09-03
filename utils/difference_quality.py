@@ -453,7 +453,11 @@ def compute_quality_score(metrics: QualityMetrics, cfg: QualityConfig) -> None:
         metrics.score_bright_star = 1.0  # no bright stars to check
 
     # Edge score: penalize edge artifacts
-    metrics.score_edge = max(0.0, 1.0 - max(0.0, metrics.edge_std_ratio - 1.0) / (cfg.edge_max_std_ratio - 1.0))
+    _edge_denom = cfg.edge_max_std_ratio - 1.0
+    if _edge_denom > 0:
+        metrics.score_edge = max(0.0, 1.0 - max(0.0, metrics.edge_std_ratio - 1.0) / _edge_denom)
+    else:
+        metrics.score_edge = 0.0 if metrics.edge_std_ratio > 1.0 else 1.0
 
     # Autocorrelation score: penalize correlated noise
     metrics.score_autocorr = max(0.0, 1.0 - metrics.autocorr_peak / cfg.autocorr_max_peak)
