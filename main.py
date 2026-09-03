@@ -2188,6 +2188,10 @@ def run_photometry():
                 dilate_iterations=_cr_dilate_iters,
                 plot=_cr_plot,
             )
+            # Persist the CR-cleaned image immediately so the CRAY_RMD header
+            # keyword and cleaned data survive a pipeline crash before the
+            # next FITS write (which is after the second background pass).
+            safe_fits_write(fpath, image, header)
 
         # =============================================================================
         #          Check for Existing WCS
@@ -6774,12 +6778,22 @@ def run_photometry():
                                     _bright_mask, structure=_struct
                                 )
                                 from scipy.ndimage import center_of_mass as _com
+                                # Zero out NaN/inf pixels so center_of_mass
+                                # produces finite coordinates.  NaN pixels in
+                                # the mask region would otherwise propagate
+                                # into the centroid, causing cKDTree to raise
+                                # "data must be finite".
+                                _img_arr_finite = np.where(
+                                    _finite, _img_arr, 0.0
+                                )
                                 _bright_centers = []
                                 for _i_bs in range(1, _n_bright + 1):
                                     _mask_bs = _labels_bs == _i_bs
                                     if np.sum(_mask_bs) < 2:
                                         continue
-                                    _cy_bs, _cx_bs = _com(_mask_bs * _img_arr)
+                                    _cy_bs, _cx_bs = _com(
+                                        _mask_bs * _img_arr_finite
+                                    )
                                     _peak_bs = float(np.max(_img_arr[_mask_bs]))
                                     _bright_centers.append((_cx_bs, _cy_bs, _peak_bs))
 
@@ -6793,73 +6807,94 @@ def run_photometry():
                                     _bs_peaks = np.array(
                                         [_bp for _bx, _by, _bp in _bright_centers]
                                     )
-                                    from scipy.spatial import cKDTree as _bs_cKDTree
-                                    _bs_tree = _bs_cKDTree(_bs_xy)
-                                    _src_arr = np.asarray(
-                                        ConsistentSources, dtype=float
-                                    )  # shape (n, 2)
-                                    _nn_dist, _nn_idx = _bs_tree.query(
-                                        _src_arr, k=1, distance_upper_bound=_bs_radius
+                                    # Guard against non-finite coordinates
+                                    # (can happen if center_of_mass hits
+                                    # edge cases despite NaN zeroing).
+                                    _bs_finite_mask = np.all(
+                                        np.isfinite(_bs_xy), axis=1
                                     )
-                                    # cKDTree returns inf for no neighbor within radius
-                                    _too_close_mask = np.isfinite(_nn_dist)
-                                    _kept_bs = []
-                                    _rejected_bs = []
-                                    for _si in range(len(_src_arr)):
-                                        if _too_close_mask[_si]:
-                                            _bi = _nn_idx[_si]
-                                            _rejected_bs.append(
-                                                (
-                                                    _src_arr[_si, 0],
-                                                    _src_arr[_si, 1],
-                                                    float(_nn_dist[_si]),
-                                                    float(_bs_peaks[_bi]),
+                                    if not np.all(_bs_finite_mask):
+                                        _bs_xy = _bs_xy[_bs_finite_mask]
+                                        _bs_peaks = _bs_peaks[_bs_finite_mask]
+                                    if len(_bs_xy) == 0:
+                                        logging.debug(
+                                            "Bright-star filter: no finite "
+                                            "centroids; skipping."
+                                        )
+                                    else:
+                                        from scipy.spatial import cKDTree as _bs_cKDTree
+                                        _bs_tree = _bs_cKDTree(_bs_xy)
+                                        _src_arr = np.asarray(
+                                            ConsistentSources, dtype=float
+                                        )  # shape (n, 2)
+                                        # Guard query points too
+                                        _src_finite = np.all(
+                                            np.isfinite(_src_arr), axis=1
+                                        )
+                                        if not np.all(_src_finite):
+                                            _src_arr = _src_arr[_src_finite]
+                                        _nn_dist, _nn_idx = _bs_tree.query(
+                                            _src_arr, k=1, distance_upper_bound=_bs_radius
+                                        )
+                                        # cKDTree returns inf for no neighbor within radius
+                                        _too_close_mask = np.isfinite(_nn_dist)
+                                        _kept_bs = []
+                                        _rejected_bs = []
+                                        for _si in range(len(_src_arr)):
+                                            if _too_close_mask[_si]:
+                                                _bi = _nn_idx[_si]
+                                                _rejected_bs.append(
+                                                    (
+                                                        _src_arr[_si, 0],
+                                                        _src_arr[_si, 1],
+                                                        float(_nn_dist[_si]),
+                                                        float(_bs_peaks[_bi]),
+                                                    )
                                                 )
-                                            )
-                                        else:
-                                            _kept_bs.append(
-                                                [float(_src_arr[_si, 0]), float(_src_arr[_si, 1])]
-                                            )
+                                            else:
+                                                _kept_bs.append(
+                                                    [float(_src_arr[_si, 0]), float(_src_arr[_si, 1])]
+                                                )
 
-                                    # Don't reject below minimum
-                                    if len(_kept_bs) < _bs_min_keep and len(_rejected_bs) > 0:
-                                        logging.warning(
-                                            "Bright-star filtering would leave "
-                                            "only %d sources (< %d minimum); "
-                                            "keeping all %d sources.",
-                                            len(_kept_bs), _bs_min_keep,
-                                            len(ConsistentSources),
-                                        )
-                                        _kept_bs = [
-                                            [float(s[0]), float(s[1])]
-                                            for s in ConsistentSources
-                                        ]
-
-                                    if len(_rejected_bs) > 0 and len(_kept_bs) < len(ConsistentSources):
-                                        logging.info(
-                                            "Bright-star filtering: rejected "
-                                            "%d/%d matching sources near bright "
-                                            "stars (radius=%.0f px = %.1f*FWHM, "
-                                            "threshold=%.0f sigma, n_bright=%d, "
-                                            "kept=%d).",
-                                            len(ConsistentSources) - len(_kept_bs),
-                                            len(ConsistentSources),
-                                            _bs_radius, _bs_radius_fwhm,
-                                            _bs_n_sigma, len(_bright_centers),
-                                            len(_kept_bs),
-                                        )
-                                        for _sx, _sy, _dist, _bp in _rejected_bs:
-                                            logging.debug(
-                                                "  Rejected source (%.1f, %.1f): "
-                                                "%.1f px from bright star "
-                                                "(peak=%.0f).",
-                                                _sx, _sy, _dist, _bp,
+                                        # Don't reject below minimum
+                                        if len(_kept_bs) < _bs_min_keep and len(_rejected_bs) > 0:
+                                            logging.warning(
+                                                "Bright-star filtering would leave "
+                                                "only %d sources (< %d minimum); "
+                                                "keeping all %d sources.",
+                                                len(_kept_bs), _bs_min_keep,
+                                                len(ConsistentSources),
                                             )
-                                        ConsistentSources = _kept_bs
-                                        MatchingSources = pd.DataFrame(
-                                            ConsistentSources,
-                                            columns=["x_pix", "y_pix"],
-                                        )
+                                            _kept_bs = [
+                                                [float(s[0]), float(s[1])]
+                                                for s in ConsistentSources
+                                            ]
+
+                                        if len(_rejected_bs) > 0 and len(_kept_bs) < len(ConsistentSources):
+                                            logging.info(
+                                                "Bright-star filtering: rejected "
+                                                "%d/%d matching sources near bright "
+                                                "stars (radius=%.0f px = %.1f*FWHM, "
+                                                "threshold=%.0f sigma, n_bright=%d, "
+                                                "kept=%d).",
+                                                len(ConsistentSources) - len(_kept_bs),
+                                                len(ConsistentSources),
+                                                _bs_radius, _bs_radius_fwhm,
+                                                _bs_n_sigma, len(_bright_centers),
+                                                len(_kept_bs),
+                                            )
+                                            for _sx, _sy, _dist, _bp in _rejected_bs:
+                                                logging.debug(
+                                                    "  Rejected source (%.1f, %.1f): "
+                                                    "%.1f px from bright star "
+                                                    "(peak=%.0f).",
+                                                    _sx, _sy, _dist, _bp,
+                                                )
+                                            ConsistentSources = _kept_bs
+                                            MatchingSources = pd.DataFrame(
+                                                ConsistentSources,
+                                                columns=["x_pix", "y_pix"],
+                                            )
 
                 fpath, subtraction_mask, masked_centers, kernel_half_width = Templates(input_yaml=input_yaml).subtract(
                     scienceFpath=fpath,
