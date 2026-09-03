@@ -5202,7 +5202,7 @@ NNW
             # Robust statistics
             median_dx = float(np.median(dx))
             median_dy = float(np.median(dy))
-            rms_before = float(np.sqrt(np.median(dx**2 + dy**2)))
+            rms_before = float(np.sqrt(np.mean(dx**2 + dy**2)))
             n_sources = len(dx)
 
             self.logger.info(
@@ -5319,7 +5319,7 @@ NNW
                 x_pred_c, y_pred_c = sci_wcs.all_world2pix(ra_c, dec_c, 0)
                 dx_c = sx - x_pred_c
                 dy_c = sy - y_pred_c
-                rms_after = float(np.sqrt(np.median(dx_c**2 + dy_c**2)))
+                rms_after = float(np.sqrt(np.mean(dx_c**2 + dy_c**2)))
                 median_after = float(np.sqrt(np.median(dx_c)**2 + np.median(dy_c)**2))
                 self.logger.info(
                     "Relative WCS correction verified: median %.3f -> %.3f px, "

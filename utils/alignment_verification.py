@@ -249,9 +249,23 @@ class AlignmentVerifier:
             results['max_offset_pixels'] = max(offsets)
             results['mean_offset_pixels'] = np.mean(offsets)
             results['std_offset_pixels'] = np.std(offsets)
-            
-            # Consider alignment precise if max offset < 0.5 pixels
-            if results['max_offset_pixels'] > 0.5:
+
+            # Consider alignment precise if max offset < 0.5 pixels.
+            # When pixel scales differ (pre-resampling), the round-trip
+            # naturally produces offsets proportional to the scale ratio.
+            # Use a scale-relative threshold in that case.
+            try:
+                from astropy.wcs.utils import proj_plane_pixel_scales
+                _sci_scales = proj_plane_pixel_scales(sci_wcs)
+                _ref_scales = proj_plane_pixel_scales(ref_wcs)
+                _scale_ratio = max(
+                    abs(float(_sci_scales[0]) / float(_ref_scales[0])),
+                    abs(float(_ref_scales[0]) / float(_sci_scales[0])),
+                )
+            except Exception:
+                _scale_ratio = 1.0
+            _threshold = 0.5 * max(1.0, _scale_ratio - 1.0) if _scale_ratio > 1.01 else 0.5
+            if results['max_offset_pixels'] > _threshold:
                 results['consistent'] = False
         
         return results

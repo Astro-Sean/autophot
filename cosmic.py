@@ -59,14 +59,20 @@ class RemoveCosmicRays:
     # --- Mask Creation ---
     def _create_mask(self, image: np.ndarray, satlevel: float = np.inf) -> np.ndarray:
         """
-        Create a mask for saturated and bright pixels in the image.
+        Create a mask for saturated, bright, and non-finite pixels.
+
+        This mask is passed to astroscrappy/ccdproc as ``inmask`` to
+        **protect** these pixels from being flagged as cosmic rays.
+        Without this protection, bright star cores can be misidentified
+        as CRs and replaced with local median values, which destroys the
+        PSF shape and corrupts all downstream photometry.
 
         Args:
             image: Input image as a numpy array.
             satlevel: Saturation level (default: infinity).
 
         Returns:
-            Boolean mask as a numpy array.
+            Boolean mask: True = protect this pixel (skip CR detection).
         """
         sat_mask = image > satlevel
         # Use robust MAD-based sigma instead of np.std - cosmic rays and
@@ -78,8 +84,18 @@ class RemoveCosmicRays:
         med = np.median(finite)
         mad = np.median(np.abs(finite - med))
         robust_sigma = 1.4826 * mad if mad > 0 else np.std(finite)
+        # Guard against degenerate case: if all pixels are identical (or
+        # nearly so), robust_sigma can be 0, which would make bright_mask
+        # match everything above the median.  Use a small floor to prevent
+        # masking half the image.
+        if robust_sigma <= 0:
+            robust_sigma = 1.0
         bright_mask = image > (med + 5 * robust_sigma)
-        return sat_mask | bright_mask
+        # Also protect non-finite pixels (NaN/inf) so astroscrappy doesn't
+        # attempt to detect/clean them — they are chip gaps or bad pixels,
+        # not cosmic rays.
+        nan_mask = ~np.isfinite(image)
+        return sat_mask | bright_mask | nan_mask
 
     # --- Cosmic Ray Mask Dilation and Hole Filling ---
     def dilate_cosmic_ray_mask(
@@ -104,8 +120,14 @@ class RemoveCosmicRays:
             Processed boolean mask as a numpy array.
         """
         try:
-            # Calculate the dilation radius
-            r = max(1, int(dilate_factor * fwhm_pixels))
+            # Calculate the dilation radius.
+            # The dilation should cover the CR pixel plus a small margin to
+            # catch residual wings/bleed, NOT the full PSF diameter.  Cosmic
+            # rays are narrow (1-3 px); dilating by the full FWHM (especially
+            # with iterations=2) masks enormous regions around each CR,
+            # excluding real sources.  Cap the radius at 5 px regardless of
+            # FWHM — this covers CR wings without masking nearby sources.
+            r = max(1, min(5, int(dilate_factor * fwhm_pixels)))
 
             # Use skimage's optimised disk structuring element
             selem = disk(r)
@@ -277,20 +299,42 @@ class RemoveCosmicRays:
             readnoise = 0.0
 
         # --- Masking ---
+        # The mask protects pixels from CR detection: masked pixels are
+        # skipped by astroscrappy/ccdproc, preserving star cores and PSF
+        # shape.  Without this, bright star cores can be flagged as CRs
+        # and replaced with median values.
         if mask is None:
             mask = self._create_mask(self.image, satlevel)
-            self.logger.info("Created mask for saturated and bright pixels.")
         else:
             if mask.shape != self.image.shape:
                 self.logger.warning("Mask shape doesn't match image. Ignoring mask.")
                 mask = self._create_mask(self.image, satlevel)
+        _n_protected = int(np.count_nonzero(mask))
+        _frac_protected = _n_protected / mask.size
+        self.logger.info(
+            "Protecting %d pixels (%.2f%%) from CR detection "
+            "(saturated/bright/NaN).",
+            _n_protected, _frac_protected * 100,
+        )
+        if _frac_protected > 0.5:
+            self.logger.warning(
+                "Over 50%% of pixels are masked — CR detection will be "
+                "severely limited. Check satlevel and image quality."
+            )
 
         # --- Variance map (astroscrappy/ccdproc expect variance = sigma^2 in counts^2) ---
         if invar is None:
             from photutils.utils import calc_total_error
 
             if bkg_rms is None:
-                bkg_rms = np.zeros_like(self.image, dtype=np.float32)
+                # When no background RMS is provided, use a constant floor
+                # based on read noise rather than zeros.  Zero RMS would
+                # produce Poisson-only variance, underestimating noise in
+                # low-signal regions and causing false CR detections.
+                bkg_rms = np.full_like(
+                    self.image, float(readnoise) / max(gain, 1.0),
+                    dtype=np.float32,
+                )
             else:
                 bkg_rms = np.asarray(bkg_rms, dtype=np.float32)
                 if np.any(np.isnan(bkg_rms)):
@@ -336,6 +380,7 @@ class RemoveCosmicRays:
                     gain_apply=False,
                     inbkg=bkg,
                     invar=invar,
+                    inmask=mask,
                 )
             else:
                 self.logger.info("Using astroscrappy for cosmic ray removal")
@@ -343,6 +388,7 @@ class RemoveCosmicRays:
                     warnings.simplefilter("ignore")
                     cr_mask, clean_image = astroscrappy.detect_cosmics(
                         self.image,
+                        inmask=mask,
                         gain=gain,
                         inbkg=bkg,
                         invar=invar,
@@ -370,16 +416,18 @@ class RemoveCosmicRays:
             )
 
             # --- Log Results ---
+            n_cr_raw = np.count_nonzero(cr_mask)
             n_cr = np.count_nonzero(processed_mask)
             total_pixels = self.image.size
             cr_fraction = n_cr / total_pixels
 
-            if cr_fraction > 0.1:
+            if cr_fraction > 0.02:
                 self.logger.warning(
                     f"High cosmic ray fraction: {cr_fraction:.2%}. Check parameters."
                 )
             self.logger.info(
-                f"Removed {n_cr:,} contaminated cosmic ray pixels ({cr_fraction:.2%} of image)"
+                f"Detected {n_cr_raw:,} CR pixels, dilated to {n_cr:,} "
+                f"({cr_fraction:.2%} of image for source exclusion)"
             )
 
             # --- Plot Comparison ---
@@ -394,8 +442,8 @@ class RemoveCosmicRays:
                 "ccdproc.cosmicray_lacosmic" if self.use_lacosmic else "astroscrappy"
             )
             self.header["CRAY_RMD"] = (True, "Cosmic rays removed; skip CR step on rerun")
-            self.header.add_history(f"Cosmic ray removal: {n_cr} pixels cleaned")
-            self.header["CRPIXELS"] = (n_cr, "Cosmic ray pixels removed")
+            self.header.add_history(f"Cosmic ray removal: {n_cr_raw} pixels cleaned (dilated mask: {n_cr})")
+            self.header["CRPIXELS"] = (n_cr_raw, "Cosmic ray pixels removed")
             self.header["CRMETHOD"] = (method, "Cosmic ray removal method")
             self.header["CRSTATUS"] = ("success", "Cosmic ray removal successful")
             self.header["CRPARAMS"] = (

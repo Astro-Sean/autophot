@@ -189,7 +189,7 @@ try:
 except (ModuleNotFoundError, ImportError):
     run_IDC = None
 
-from functions import log_warning_from_exception
+from functions import log_warning_from_exception, safe_fits_write
 try:
     from functions import download_zogy
 except ImportError:
@@ -486,14 +486,17 @@ def _zogy_subtract(N, R, Pn, Pr, sn, sr, fn=1.0, fr=None,
     # Variance: V = N + sigma^2 (background-subtracted + read noise)
     # When per-pixel noise maps are available, use them for spatially
     # varying noise (e.g. near chip gaps, bright galaxy backgrounds).
+    # Poisson variance from source counts: negative pixels (noise
+    # fluctuations after sky subtraction) contribute zero Poisson
+    # variance, not negative variance.
     if sn_map is not None:
-        Vn = N + np.asarray(sn_map, dtype=np.float64) ** 2
+        Vn = np.maximum(N, 0.0) + np.asarray(sn_map, dtype=np.float64) ** 2
     else:
-        Vn = N + sn2
+        Vn = np.maximum(N, 0.0) + sn2
     if sr_map is not None:
-        Vr = R + np.asarray(sr_map, dtype=np.float64) ** 2
+        Vr = np.maximum(R, 0.0) + np.asarray(sr_map, dtype=np.float64) ** 2
     else:
-        Vr = R + sr2
+        Vr = np.maximum(R, 0.0) + sr2
     Vn_hat = np.fft.fft2(Vn)
     Vr_hat = np.fft.fft2(Vr)
 
@@ -975,8 +978,10 @@ def compute_alignment_rms(
         # This measures the systematic offset, not the typical per-source
         # distance (which includes centroid noise and is always >= this).
         # Matches the post-SWarp verification logic in run_IDC.py.
-        _med_dx = float(np.nanmedian(_dx_mut))
-        _med_dy = float(np.nanmedian(_dy_mut))
+        # Use post-clipping data for consistency with RMS and P90.
+        _kept_mask = ~_clip_mask
+        _med_dx = float(np.nanmedian(_dx_mut[_kept_mask])) if np.sum(_kept_mask) > 0 else float(np.nanmedian(_dx_mut))
+        _med_dy = float(np.nanmedian(_dy_mut[_kept_mask])) if np.sum(_kept_mask) > 0 else float(np.nanmedian(_dy_mut))
         median_offset = float(np.sqrt(_med_dx**2 + _med_dy**2))
         p90 = float(np.nanpercentile(d_clipped, 90.0))
         rms = float(np.sqrt(np.mean(d_clipped**2)))
@@ -1089,6 +1094,7 @@ def _reproject_template(
     output_path: str,
     cfg: ReprojectConfig,
     fwhm_pixels: float = 3.0,
+    input_yaml: Optional[Dict[str, Any]] = None,
 ) -> AlignmentResult:
     """
     Reproject template onto the science pixel grid.
@@ -1282,7 +1288,8 @@ def _reproject_template(
     # ------------------------------------------------------------------
     try:
         align_metrics = compute_alignment_rms(
-            science_image, to_write, fwhm_pixels
+            science_image, to_write, fwhm_pixels,
+            input_yaml=input_yaml,
         )
         if align_metrics is not None:
             median_offset, rms_offset, p90_offset = align_metrics
@@ -3042,6 +3049,10 @@ class Templates:
                 ref_al = res["reference_aligned"]
                 # Load outputs for RMS diagnostic (separate from alignment I/O)
                 _swarp_ok = True
+                _smed = None
+                _srms = None
+                _sp90 = None
+                _squad_rms = None
                 try:
                     sci_al_data, _ = read_fits(sci_al)
                     ref_al_data, _ = read_fits(ref_al)
@@ -3085,7 +3096,7 @@ class Templates:
                             )
                             _swarp_ok = False
                 except Exception:
-                    pass
+                    logger.debug("swarp: quality measurement failed", exc_info=True)
                 if not _swarp_ok:
                     return None, None
                 method_used = res.get("alignment_method", "scamp_swarp")
@@ -3115,7 +3126,7 @@ class Templates:
                                 _hdl[0].header[_k] = _v
                             _hdl.flush()
                 except Exception:
-                    pass
+                    logger.debug("swarp: failed to write quality header", exc_info=True)
                 # Update target coordinates to reflect new WCS after alignment
                 self._update_target_coordinates_after_alignment(sci_al, method_used)
                 return sci_al, ref_al
@@ -3133,13 +3144,18 @@ class Templates:
                 sci_al = res["science_aligned"]
                 ref_al = res["reference_aligned"]
                 _aa_ok = True
+                _amed = None
+                _arms = None
+                _ap90 = None
                 try:
                     sci_al_data, _ = read_fits(sci_al)
                     ref_al_data, _ = read_fits(ref_al)
-                    _amed, _arms, _ap90 = compute_alignment_rms(
+                    _aa_metrics = compute_alignment_rms(
                         sci_al_data, ref_al_data, fwhm_pix,
                         input_yaml=self.input_yaml,
                     )
+                    if _aa_metrics is not None:
+                        _amed, _arms, _ap90 = _aa_metrics
                     if _amed is not None:
                         quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
                         max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
@@ -3169,11 +3185,29 @@ class Templates:
                             )
                             _aa_ok = False
                 except Exception:
-                    pass
+                    logger.debug("astroalign: quality measurement failed", exc_info=True)
                 if not _aa_ok:
                     return None, None
                 method_used = res.get("alignment_method", "astroalign")
                 logger.info("Alignment succeeded (method: %s).", method_used)
+                # Store alignment RMS in the aligned reference header for
+                # downstream SFFT kernel sizing and photometry provenance.
+                try:
+                    _alig_kw = {}
+                    if _amed is not None and np.isfinite(_amed):
+                        _alig_kw["ALIGMED"] = (float(_amed), "Alignment median offset (px)")
+                    if _arms is not None and np.isfinite(_arms):
+                        _alig_kw["ALIGRMS"] = (float(_arms), "Alignment RMS (px)")
+                    if _ap90 is not None and np.isfinite(_ap90):
+                        _alig_kw["ALIGP90"] = (float(_ap90), "Alignment P90 offset (px)")
+                    _alig_kw["ALIGMETH"] = (str(method_used), "Alignment method used")
+                    if _alig_kw and os.path.isfile(ref_al):
+                        with fits.open(ref_al, mode="update", memmap=False) as _hdl:
+                            for _k, _v in _alig_kw.items():
+                                _hdl[0].header[_k] = _v
+                            _hdl.flush()
+                except Exception:
+                    logger.debug("astroalign: failed to write quality header", exc_info=True)
                 # Update target coordinates to reflect new WCS after alignment
                 self._update_target_coordinates_after_alignment(sci_al, method_used)
                 return sci_al, ref_al
@@ -3187,6 +3221,7 @@ class Templates:
                     output_path=new_templateFpath,
                     cfg=reproject_cfg,
                     fwhm_pixels=fwhm_pix,
+                    input_yaml=self.input_yaml,
                 )
                 if result.template_path is None:
                     return None, None
@@ -3607,11 +3642,23 @@ class Templates:
 
                     # min_n_match: minimum matched sources for alignment.
                     # Lower for sparse fields so spalipy doesn't reject valid
-                    # matches.  Floor at 6 (need >=4 for affine, +2 for robustness).
+                    # matches.  Default floor is 6 (need >=4 for affine, +2 for
+                    # robustness), but when fewer sources than the floor are
+                    # available, lower to the source count (floored at 4, the
+                    # absolute minimum for an affine transform).  This lets
+                    # spalipy attempt alignment in very sparse fields instead of
+                    # failing immediately.
                     if _yaml_min_match is not None:
                         _min_match = int(_yaml_min_match)
                     else:
                         _min_match = max(6, min(_n_sources // 3, 20))
+                    if _min_match > _n_sources:
+                        _min_match = max(4, _n_sources)
+                        logger.info(
+                            "spalipy: lowering min_n_match to %d (only %d "
+                            "sources available).",
+                            _min_match, _n_sources,
+                        )
 
                     # max_match_dist: maximum matching distance in template
                     # (science) pixel frame after affine transform.  spalipy
@@ -3874,13 +3921,26 @@ class Templates:
                     # correction that was already removed).  The alignment
                     # quality gate below measures the actual spalipy output.
 
-                    # Alignment quality check - reject if RMS exceeds gates
+                    # Alignment quality measurement (diagnostic only).
                     # Use the pre-matched science sources (sci_det) instead of
                     # re-detecting in the science image.  sci_det was already
                     # RA/DEC matched to the reference, so it contains only real
                     # sources — no ghost/stacking artifacts that would create
                     # false matches and inflate the RMS.
-                    _align_ok = True
+                    #
+                    # NOTE: spalipy alignments are NOT rejected on the basis of
+                    # a high RMS / offset / P90.  A successful spalipy result is
+                    # accepted even when the measured quality is poor — the
+                    # metrics are still computed, logged, and written to the
+                    # aligned template header (ALIGMED/ALIGRMS/ALIGP90) so that
+                    # downstream SFFT kernel sizing and photometry provenance
+                    # can expose the degraded alignment.  Spalipy is only
+                    # bypassed when it fails to produce a usable aligned image
+                    # (handled above via `sp.aligned_data is None`).
+                    _med_off = None
+                    _rms_off = None
+                    _p90_off = None
+                    _quad_rms = None
                     try:
                         _sci_xy_for_rms = np.column_stack([
                             np.asarray(sci_det["x"], float),
@@ -3901,7 +3961,8 @@ class Templates:
                             "spalipy: alignment RMS median=%.3f px rms=%.3f px.",
                             _med_off, _rms_off,
                         )
-                        # Check against quality gates (same logic as reproject)
+                        # Warn (but do NOT reject) when quality gates are
+                        # exceeded, so the degraded alignment is transparent.
                         quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
                         max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
                         max_rms = float(quality_cfg.get("alignment_max_rms_px", 0.75))
@@ -3911,12 +3972,12 @@ class Templates:
                         max_offset *= _tpl_scale
                         max_rms *= _tpl_scale
                         max_p90 *= _tpl_scale
-                        _reject = (
+                        _poor = (
                             (_med_off is not None and np.isfinite(_med_off) and _med_off > max_offset)
                             or (_rms_off is not None and np.isfinite(_rms_off) and _rms_off > max_rms)
                             or (_p90_off is not None and np.isfinite(_p90_off) and _p90_off > max_p90)
                         )
-                        if _reject:
+                        if _poor:
                             _reasons = []
                             if _med_off is not None and np.isfinite(_med_off) and _med_off > max_offset:
                                 _reasons.append("offset=%.3f px (> %.2f px)" % (_med_off, max_offset))
@@ -3925,16 +3986,12 @@ class Templates:
                             if _p90_off is not None and np.isfinite(_p90_off) and _p90_off > max_p90:
                                 _reasons.append("P90=%.3f px (> %.2f px)" % (_p90_off, max_p90))
                             logger.warning(
-                                "spalipy alignment rejected: %s. "
-                                "Falling back to next alignment method.",
+                                "spalipy alignment has poor quality (%s) but "
+                                "is being accepted; metrics recorded in header.",
                                 "; ".join(_reasons) if _reasons else "unknown",
                             )
-                            _align_ok = False
                     except Exception:
-                        pass
-
-                    if not _align_ok:
-                        return None, None
+                        logger.debug("spalipy: quality measurement failed", exc_info=True)
 
                     # Write aligned template with science WCS
                     hdr = templateHeader.copy()
@@ -3965,7 +4022,7 @@ class Templates:
                                     "Worst alignment quadrant",
                                 )
                     except Exception:
-                        pass
+                        logger.debug("spalipy: failed to write quality header", exc_info=True)
                     fits.PrimaryHDU(aligned_template, header=hdr).writeto(
                         new_templateFpath, overwrite=True,
                         output_verify="silentfix+ignore",
@@ -4144,26 +4201,21 @@ class Templates:
                         return None, None
                     aligned_tpl[~fp_mask] = np.nan
 
-                    # Write aligned template with science WCS
-                    hdr = templateHeader.copy()
-                    hdr = remove_wcs_from_header(hdr)
-                    from functions import copy_wcs_from_header
-                    copy_wcs_from_header(scienceHeader, hdr)
-                    hdr["NAXIS1"] = aligned_tpl.shape[1]
-                    hdr["NAXIS2"] = aligned_tpl.shape[0]
+                    # Compute alignment quality BEFORE writing so the metrics
+                    # can be stored in the output header for downstream SFFT
+                    # kernel sizing and photometry provenance.
                     to_write = np.asarray(aligned_tpl, dtype=np.float32)
-                    fits.PrimaryHDU(to_write, header=hdr).writeto(
-                        new_templateFpath, overwrite=True,
-                        output_verify="silentfix+ignore",
-                    )
-
-                    # Quality diagnostic - reject if RMS exceeds gates
+                    _tmed = None
+                    _trms = None
+                    _tp90 = None
                     _tweak_ok = True
                     try:
-                        _tmed, _trms, _tp90 = compute_alignment_rms(
+                        _tmetrics = compute_alignment_rms(
                             scienceImage, to_write, fwhm_pix,
                             input_yaml=self.input_yaml,
                         )
+                        if _tmetrics is not None:
+                            _tmed, _trms, _tp90 = _tmetrics
                         if _tmed is not None:
                             quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
                             max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
@@ -4193,10 +4245,32 @@ class Templates:
                                 )
                                 _tweak_ok = False
                     except Exception:
-                        pass
+                        logger.debug("tweakwcs: quality measurement failed", exc_info=True)
 
                     if not _tweak_ok:
                         return None, None
+
+                    # Write aligned template with science WCS + quality keywords
+                    hdr = templateHeader.copy()
+                    hdr = remove_wcs_from_header(hdr)
+                    from functions import copy_wcs_from_header
+                    copy_wcs_from_header(scienceHeader, hdr)
+                    hdr["NAXIS1"] = to_write.shape[1]
+                    hdr["NAXIS2"] = to_write.shape[0]
+                    try:
+                        if _tmed is not None and np.isfinite(_tmed):
+                            hdr["ALIGMED"] = (float(_tmed), "Alignment median offset (px)")
+                        if _trms is not None and np.isfinite(_trms):
+                            hdr["ALIGRMS"] = (float(_trms), "Alignment RMS (px)")
+                        if _tp90 is not None and np.isfinite(_tp90):
+                            hdr["ALIGP90"] = (float(_tp90), "Alignment P90 offset (px)")
+                        hdr["ALIGMETH"] = ("tweakwcs", "Alignment method used")
+                    except Exception:
+                        pass
+                    fits.PrimaryHDU(to_write, header=hdr).writeto(
+                        new_templateFpath, overwrite=True,
+                        output_verify="silentfix+ignore",
+                    )
 
                     method_used = "tweakwcs"
                     logger.info("Alignment succeeded (method: %s).", method_used)
@@ -4258,15 +4332,24 @@ class Templates:
                         xoff, yoff, total_offset, float(exoff or 0), float(eyoff or 0),
                     )
 
-                    # Quality gate
+                    # Quality gate: reject spurious correlations.
+                    # Offsets >= 100 px or non-finite are almost certainly
+                    # failed cross-correlations (noise peak), not real shifts.
                     quality_cfg = self.input_yaml.get("template_subtraction", {}) or {}
                     max_offset = float(quality_cfg.get("alignment_max_offset_px", 0.5))
                     _fwhm = float(self.input_yaml.get("fwhm", 3.0))
                     _scale = max(0.5, min(3.0, _fwhm / 3.0))
                     max_offset *= _scale
 
-                    if total_offset > max_offset and total_offset < 100:
-                        # Reject large offsets (likely spurious correlation)
+                    if not np.isfinite(total_offset) or total_offset >= 100.0:
+                        logger.warning(
+                            "chi2_shift alignment rejected: offset=%.2f px is "
+                            "non-finite or >= 100 px (spurious correlation). "
+                            "Falling back to next alignment method.",
+                            total_offset,
+                        )
+                        return None, None
+                    if total_offset > max_offset:
                         logger.warning(
                             "chi2_shift alignment rejected: offset=%.2f px (> %.2f px). "
                             "Falling back to next alignment method.",
@@ -4282,6 +4365,23 @@ class Templates:
                     )
                     aligned_tpl = np.asarray(aligned_tpl, dtype=np.float32)
 
+                    # Ensure output matches science image shape.  shiftnd
+                    # preserves the input (template) shape; if template and
+                    # science differ, crop or pad to the science dimensions so
+                    # the WCS and pixel grid are consistent for subtraction.
+                    _sci_shape = scienceImage.shape
+                    if aligned_tpl.shape != _sci_shape:
+                        logger.info(
+                            "chi2_shift: cropping/padding aligned template "
+                            "from %s to science shape %s.",
+                            aligned_tpl.shape, _sci_shape,
+                        )
+                        _padded = np.full(_sci_shape, np.nan, dtype=np.float32)
+                        _h = min(aligned_tpl.shape[0], _sci_shape[0])
+                        _w = min(aligned_tpl.shape[1], _sci_shape[1])
+                        _padded[:_h, :_w] = aligned_tpl[:_h, :_w]
+                        aligned_tpl = _padded
+
                     # Write with science WCS
                     hdr = templateHeader.copy()
                     hdr = remove_wcs_from_header(hdr)
@@ -4289,6 +4389,30 @@ class Templates:
                     copy_wcs_from_header(scienceHeader, hdr)
                     hdr["NAXIS1"] = aligned_tpl.shape[1]
                     hdr["NAXIS2"] = aligned_tpl.shape[0]
+                    # Store alignment quality in header for downstream SFFT
+                    # kernel sizing and photometry provenance.
+                    _cmed = total_offset
+                    _crms = None
+                    _cp90 = None
+                    try:
+                        _cmetrics = compute_alignment_rms(
+                            scienceImage, aligned_tpl, fwhm_pix,
+                            input_yaml=self.input_yaml,
+                        )
+                        if _cmetrics is not None:
+                            _cmed, _crms, _cp90 = _cmetrics
+                    except Exception:
+                        logger.debug("chi2_shift: RMS computation failed", exc_info=True)
+                    try:
+                        if _cmed is not None and np.isfinite(_cmed):
+                            hdr["ALIGMED"] = (float(_cmed), "Alignment median offset (px)")
+                        if _crms is not None and np.isfinite(_crms):
+                            hdr["ALIGRMS"] = (float(_crms), "Alignment RMS (px)")
+                        if _cp90 is not None and np.isfinite(_cp90):
+                            hdr["ALIGP90"] = (float(_cp90), "Alignment P90 offset (px)")
+                        hdr["ALIGMETH"] = ("chi2_shift", "Alignment method used")
+                    except Exception:
+                        pass
                     fits.PrimaryHDU(aligned_tpl, header=hdr).writeto(
                         new_templateFpath, overwrite=True,
                         output_verify="silentfix+ignore",
@@ -4307,13 +4431,13 @@ class Templates:
             # ------------------------------------------------------------------
             if method == "swarp":
                 out = _swarp()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _reproject()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _astroalign()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 logger.error(
                     "All alignment methods failed (swarp->reproject->astroalign). "
@@ -4323,13 +4447,13 @@ class Templates:
 
             if method == "astroalign":
                 out = _astroalign()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _reproject()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _swarp()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 logger.error(
                     "All alignment methods failed (astroalign->reproject->swarp). "
@@ -4343,13 +4467,13 @@ class Templates:
                     "alignment method. Consider switching to spalipy."
                 )
                 out = _reproject()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _swarp()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _astroalign()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 logger.error(
                     "All alignment methods failed (reproject->swarp->astroalign). "
@@ -4360,16 +4484,16 @@ class Templates:
             if method == "spalipy":
                 # spalipy: spline-warp registration for non-homogeneous distortion
                 out = _spalipy()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _swarp()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _reproject()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _astroalign()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 logger.error(
                     "All alignment methods failed (spalipy->swarp->reproject->astroalign). "
@@ -4380,16 +4504,16 @@ class Templates:
             if method == "tweakwcs":
                 # tweakwcs: STScI WCS tweaking + reproject (HST/JWST-grade)
                 out = _tweakwcs()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _swarp()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _reproject()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _astroalign()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 logger.error(
                     "All alignment methods failed (tweakwcs->swarp->reproject->astroalign). "
@@ -4400,16 +4524,16 @@ class Templates:
             if method == "chi2_shift":
                 # chi2_shift: cross-correlation for extended-source-dominated fields
                 out = _chi2_shift()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _swarp()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _reproject()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 out = _astroalign()
-                if out[0]:
+                if out[0] and out[1]:
                     return out
                 logger.error(
                     "All alignment methods failed (chi2_shift->swarp->reproject->astroalign). "
@@ -4425,16 +4549,16 @@ class Templates:
                 method,
             )
             out = _spalipy()
-            if out[0]:
+            if out[0] and out[1]:
                 return out
             out = _swarp()
-            if out[0]:
+            if out[0] and out[1]:
                 return out
             out = _reproject()
-            if out[0]:
+            if out[0] and out[1]:
                 return out
             out = _astroalign()
-            if out[0]:
+            if out[0] and out[1]:
                 return out
             logger.error(
                 "All alignment methods failed. "
@@ -6100,11 +6224,22 @@ class Templates:
             # adaptation.  SFFT self-matches when pipeline provides too few
             # sources.  SFFT's SExtractor typically finds 25-35 sources, but
             # after cross-matching and quality filtering only ~15-20 survive
-            # for kernel fitting.  Use 20 as a conservative estimate.
+            # for kernel fitting.
+            #
+            # When the pipeline provides too few priors, SFFT will self-match
+            # using its own SExtractor detection.  Using n_eff=10 (the old
+            # default) when SFFT actually has 20+ sources causes:
+            #   - kernel_order=0 (too rigid for large PSF differences)
+            #   - floor_mult=1.5 (too small to contain PSF wings)
+            #   - source-count cap too aggressive (shrinks kernel below PSF)
+            #
+            # Use 20 as the self-match estimate, which matches the typical
+            # post-filtering source count.  This prevents under-sizing the
+            # kernel in the common case where SFFT self-matches successfully.
             _n_matched_early = len(matching_sources) if matching_sources else 0
             _min_prior_early = int(ts_cfg_ker.get("sfft_min_prior_sources", 3) or 3)
             _sfft_self_match_early = _n_matched_early < _min_prior_early
-            n_eff = 10 if _sfft_self_match_early else _n_matched_early
+            n_eff = 20 if _sfft_self_match_early else _n_matched_early
 
             # Override: user directly specifies kernel half-width in pixels
             _ker_hw_override = ts_cfg_ker.get("kernel_hw_override", None)
@@ -6210,8 +6345,18 @@ class Templates:
                 # For n_eff=50: max kernel pixels = 5000 -> hw <= 35
                 _max_hw_pixels = 100 * max(n_eff, 5)
                 _max_hw_from_sources = int((np.sqrt(_max_hw_pixels) - 1) / 2)
-                # Only cap the floor, never the convolution term
-                _hw_floor_capped = min(ker_hw_floor, _max_hw_from_sources)
+                # Enforce a PHYSICAL MINIMUM: the kernel must contain at least
+                # ceil(1.5 * fwhm_broad) to enclose the broader PSF's core.
+                # The source-count cap can only reduce the floor down to this
+                # minimum, never below it.  A kernel smaller than the PSF
+                # itself cannot model the PSF difference, causing dipoles and
+                # flux scaling mismatch regardless of how few sources are
+                # available.
+                _phys_min_hw = int(np.ceil(1.5 * fwhm_broad))
+                _hw_floor_capped = max(
+                    _phys_min_hw,
+                    min(ker_hw_floor, _max_hw_from_sources),
+                )
                 ker_hw = max(ker_hw_from_conv, _hw_floor_capped)
 
                 ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, ker_hw))
@@ -6223,7 +6368,13 @@ class Templates:
                 # A kernel that is too small will produce dipole residuals at
                 # source positions because it cannot model the spatially-
                 # varying flux mismatch caused by sub-pixel misregistration.
-                # Boost the kernel by up to 1.5x for RMS > 0.5 px.
+                #
+                # The boost scales with the ratio of alignment RMS to FWHM:
+                # a 1 px offset on a 3 px FWHM image is far more damaging than
+                # on a 8 px FWHM image.  We boost by ceil(rms / fwhm_broad *
+                # fwhm_broad) = ceil(rms) as a minimum, but scale up when the
+                # RMS is a significant fraction of the PSF.  The maximum boost
+                # is capped at ceil(0.5 * fwhm_broad) to avoid excessive kernels.
                 #
                 # Additionally, when per-quadrant RMS is available (ALIGQMAX),
                 # spatially-varying alignment errors require an extra boost
@@ -6235,7 +6386,16 @@ class Templates:
                     # Use the larger of global RMS and max-quadrant RMS.
                     _align_rms_eff = max(_aligrms, _aligqmax)
                     if np.isfinite(_align_rms_eff) and _align_rms_eff > 0.3:
-                        _align_rms_boost = int(np.ceil(min(_align_rms_eff, 1.5)))
+                        # Scale boost with RMS relative to FWHM.
+                        # A sub-pixel RMS (< 1 px) still gets at least 1 px boost
+                        # because even sub-pixel misregistration causes dipoles.
+                        # Cap at ceil(0.5 * fwhm_broad) to avoid excessive kernels.
+                        _max_boost = int(np.ceil(0.5 * fwhm_broad))
+                        _align_rms_boost = max(
+                            1,
+                            int(np.ceil(_align_rms_eff)),
+                        )
+                        _align_rms_boost = min(_align_rms_boost, _max_boost)
                         # Extra boost when spatial variation is significant
                         # (quadrant max >> global RMS means non-uniform errors).
                         if (
@@ -6245,7 +6405,7 @@ class Templates:
                             and _aligrms > 0
                             and _aligqmax / _aligrms > 1.5
                         ):
-                            _align_rms_boost += 1
+                            _align_rms_boost = min(_align_rms_boost + 1, _max_boost + 1)
                             logger.info(
                                 "Kernel sizing: spatial alignment variation detected "
                                 "(ALIGQMAX=%.3f >> ALIGRMS=%.3f, ratio=%.2f) -> "
@@ -6513,12 +6673,11 @@ class Templates:
             n_matched = len(matching_sources) if matching_sources else 0
 
             # n_eff was computed earlier for kernel floor adaptation (BUG 120).
+            # It uses 20 for self-match cases (SFFT typically finds 20+ sources
+            # via its own SExtractor), consistent with the kernel floor fix.
             # Recompute _sfft_self_match for logging purposes.
             _min_prior = int(ts_cfg.get("sfft_min_prior_sources", 3) or 3)
             _sfft_self_match = n_matched < _min_prior
-
-            # Use the conservative n_eff (20 for self-match) for kernel_order
-            # selection as well, consistent with BUG 120 kernel floor fix.
 
             if user_kernel is not None and user_kernel >= 0:
                 # User override: respect it but warn if likely under-constrained
@@ -6789,6 +6948,17 @@ class Templates:
                 )
 
             if method == "hotpants":
+                # Restore original science path for HOTPANTS: the sky-subtracted
+                # temp file was created for SFFT sparse flavor, but HOTPANTS has
+                # its own background modeling (-bgo) and expects the original
+                # image.  Using the sky-subtracted image can cause DC offset
+                # issues in the HOTPANTS difference image.
+                if _sci_prepared_path and scienceFpath == _sci_prepared_path:
+                    scienceFpath = str(scienceDir / sci_name)
+                    logger.info(
+                        "Restored original science image for HOTPANTS "
+                        "(sky-subtracted temp not needed for HOTPANTS)."
+                    )
                 success = self._subtract_hotpants(
                     scienceFpath,
                     template_work_fpath,
@@ -7536,8 +7706,17 @@ class Templates:
         )
         try:
             script = Path(__file__).parent / "utils" / "run_sfft.py"
-            # Only pass masked_sources (variable sources), not masked_centers (segmentation)
-            excluded = list(masked_sources)
+            ts_sub = self.input_yaml["template_subtraction"]
+            # Allow user to control whether variable sources are passed to SFFT
+            pass_masked_sources = _as_bool(
+                ts_sub.get("sfft_pass_masked_sources", False), False
+            )
+            # Only pass variable sources when the user enables it.  The
+            # transient is ALWAYS banned from the kernel fit regardless.
+            if pass_masked_sources:
+                excluded = list(masked_sources)
+            else:
+                excluded = []
             # Always ban the transient position from SFFT's kernel fit.
             # The transient is a new source not present in the template; its
             # pixels bias the DFT-based kernel solution, causing flux scaling
@@ -7550,7 +7729,6 @@ class Templates:
             current_excluded = list(excluded)
             current_matching_sources = list(matching_sources)
 
-            ts_sub = self.input_yaml["template_subtraction"]
             phot_cfg = self.input_yaml.get("photometry", {})
 
             # ForceConv: which image to convolve to match the other's PSF.
@@ -7604,11 +7782,6 @@ class Templates:
             # the true value. The convolution-based approach is more robust even
             # for sparse fields because it uses all pixels in the kernel fit,
             # not just source fluxes.
-            # Allow user to control whether masked/excluded sources are passed to SFFT
-            pass_masked_sources = _as_bool(
-                ts_sub.get("sfft_pass_masked_sources", False), False
-            )
-
             # crowded_field is a shortcut: when True, use SFFT crowded (ECP) unless
             # the user *explicitly* forces sparse via `force_sparse_sfft`.
             sfft_crowded = ts_sub.get(
@@ -7661,7 +7834,9 @@ class Templates:
                     kernel_half_width,
                 )
             else:
-                # Pure fallback: no scale passed; use quadrature formula directly
+                # Pure fallback: no scale passed; use quadrature formula directly.
+                # Use the same multiplier and adaptive floor as subtract() for
+                # consistency.
                 fwhm_ref_fb = float(template_fwhm)
                 fwhm_sci_fb = float(science_fwhm)
                 fwhm_broad_fb = max(fwhm_ref_fb, fwhm_sci_fb)
@@ -7670,16 +7845,70 @@ class Templates:
                     fwhm_conv_fb = np.sqrt(max(fwhm_broad_fb ** 2 - fwhm_narrow_fb ** 2, 0.0))
                 else:
                     fwhm_conv_fb = fwhm_broad_fb
-                ker_hw_conv = int(np.ceil(2.0 * fwhm_conv_fb))
-                _fm = 1.75  # conservative floor (matches sparse-field subtract())
-                ker_hw_floor = int(np.ceil(_fm * fwhm_broad_fb))
+                _fb_mult = float(ts_sub.get("kernel_hw_fwhm_multiplier") or 2.5)
+                if not np.isfinite(_fb_mult) or _fb_mult <= 0:
+                    _fb_mult = 2.5
+                _fb_mult = max(1.0, min(_fb_mult, 5.0))
+                ker_hw_conv = int(np.ceil(_fb_mult * fwhm_conv_fb))
+                _fm_fb = 2.0  # consistent with subtract() default floor
+                ker_hw_floor = int(np.ceil(_fm_fb * fwhm_broad_fb))
                 kernel_half_width = max(KER_HW_MIN, min(KER_HW_MAX, max(ker_hw_conv, ker_hw_floor)))
                 logger.info(
-                    "SFFT kernel half-width: %d px (fallback quadrature formula, FWHM_sci=%.1f FWHM_ref=%.1f FWHM_conv=%.1f)",
-                    kernel_half_width, fwhm_sci_fb, fwhm_ref_fb, fwhm_conv_fb,
+                    "SFFT kernel half-width: %d px (fallback quadrature formula, "
+                    "FWHM_sci=%.1f FWHM_ref=%.1f FWHM_conv=%.1f mult=%.2f)",
+                    kernel_half_width, fwhm_sci_fb, fwhm_ref_fb, fwhm_conv_fb, _fb_mult,
                 )
             kernel_half_width = max(KER_HW_MIN, min(KER_HW_MAX, kernel_half_width))
-            
+
+            # Decide whether to pass our computed kernel_half_width to
+            # run_sfft.py or let run_sfft.py auto-size it.
+            #
+            # run_sfft.py has a robust auto-sizing path that uses:
+            #   hw_broad = ceil(mult * fwhm_broad)       — full PSF support (SFFT/LSST)
+            #   hw_conv  = ceil(3 * fwhm_conv / 2.355)   — 3-sigma PSF-difference lobe
+            #   kernel_hw = max(hw_broad, hw_conv)
+            #
+            # This is the SFFT (Hu et al. 2022) and LSST ip_diffim convention:
+            # the kernel must contain the BROADER PSF, not just the convolution
+            # (difference) PSF.  The templates.py formula uses fwhm_conv as the
+            # primary term, which can produce a smaller kernel that doesn't
+            # fully contain the PSF wings, causing dipole residuals, flux
+            # scaling mismatch, and over/undersubtraction.
+            #
+            # By default, let run_sfft.py auto-size (pass 0).  The
+            # templates.py-computed kernel_half_width is still used for:
+            #   - logging and diagnostics
+            #   - the kernel_half_width return value
+            #   - the universal-mask stamp radius for source filtering
+            #
+            # If kernel_hw_override is set, always pass it (user knows what
+            # they want).  If sfft_auto_kernel_size is False, pass the
+            # templates.py-computed value (backward compat).
+            _sfft_pass_kernel_hw = kernel_half_width
+            _user_override_hw = ts_sub.get("kernel_hw_override", None)
+            _auto_kernel = _as_bool(
+                ts_sub.get("sfft_auto_kernel_size", True), True
+            )
+            if _user_override_hw is not None:
+                _sfft_pass_kernel_hw = int(_user_override_hw)
+                logger.info(
+                    "SFFT: passing kernel_hw=%d (user override).",
+                    _sfft_pass_kernel_hw,
+                )
+            elif _auto_kernel:
+                _sfft_pass_kernel_hw = 0  # let run_sfft.py auto-size
+                logger.info(
+                    "SFFT: letting run_sfft.py auto-size kernel "
+                    "(templates.py computed %d px for diagnostics).",
+                    kernel_half_width,
+                )
+            else:
+                logger.info(
+                    "SFFT: passing templates.py kernel_hw=%d px "
+                    "(sfft_auto_kernel_size=False).",
+                    kernel_half_width,
+                )
+
             def _serialize_xy_pairs(xy_list) -> str:
                 if not xy_list:
                     return "[]"
@@ -7709,12 +7938,13 @@ class Templates:
                     str(diff_fp),
                     "-mask",
                     str(mask_loc),
+                    "-out_base",
+                    out_base,
                 ]
                 
-                # Always pass -masked_sources when we have excluded coordinates.
-                # sfft_pass_masked_sources controls whether *variable sources* are
-                # passed, but the transient must ALWAYS be banned from the kernel fit.
-                if pass_masked_sources or len(run_excluded) > 0:
+                # Always pass -masked_sources: the transient is always banned,
+                # and variable sources are included only when sfft_pass_masked_sources=True.
+                if len(run_excluded) > 0:
                     cmd_local.extend(["-masked_sources", excl_str])
                 
                 cmd_local.extend([
@@ -7733,7 +7963,7 @@ class Templates:
                     "-matching_sources",
                     match_str,
                     "-kernel_half_width",
-                    str(kernel_half_width),
+                    str(_sfft_pass_kernel_hw),
                     "-gain_sci",
                     str(float(science_gain)),
                     "-gain_ref",
@@ -7906,7 +8136,10 @@ class Templates:
                     if xcol and ycol:
                         xy = df_anom[[xcol, ycol]].apply(pd.to_numeric, errors="coerce")
                         xy = xy.replace([np.inf, -np.inf], np.nan).dropna()
-                        post_anom_xy = [tuple(v) for v in xy.to_numpy(float)]
+                        post_anom_xy = [
+                            (float(v[0]) - 1.0, float(v[1]) - 1.0)
+                            for v in xy.to_numpy(float)
+                        ]
                     else:
                         post_anom_xy = []
                 except Exception:
@@ -7963,7 +8196,8 @@ class Templates:
                                     [np.inf, -np.inf], np.nan
                                 ).dropna()
                                 sfft_vetted_sources = [
-                                    tuple(v) for v in _mxy.to_numpy(float)
+                                    (float(v[0]) - 1.0, float(v[1]) - 1.0)
+                                    for v in _mxy.to_numpy(float)
                                 ]
                         except Exception:
                             sfft_vetted_sources = []
@@ -8014,7 +8248,36 @@ class Templates:
                         )
                     else:
                         # Extend prior-ban list (only if we're actually retrying).
-                        current_excluded = current_excluded + post_anom_xy
+                        current_excluded = current_excluded + [
+                            (x + 1.0, y + 1.0) for x, y in post_anom_xy
+                        ]
+
+                        # When the anomaly fraction is high, the kernel was
+                        # likely too small to model the PSF difference.  Boost
+                        # the kernel half-width for the retry to give SFFT more
+                        # freedom to fit the PSF.  This is especially important
+                        # when sfft_auto_kernel_size=False (manual sizing).
+                        _retry_kernel_boost = 0
+                        if _high_anomaly:
+                            _retry_kernel_boost = max(
+                                3,
+                                int(np.ceil(0.25 * kernel_half_width)),
+                            )
+                            _saved_pass_hw = _sfft_pass_kernel_hw
+                            if _sfft_pass_kernel_hw > 0:
+                                _sfft_pass_kernel_hw = min(
+                                    KER_HW_MAX,
+                                    _sfft_pass_kernel_hw + _retry_kernel_boost,
+                                )
+                            # If auto-sizing (pass 0), the boost is handled by
+                            # run_sfft.py's own sizing; we just log it.
+                            logger.info(
+                                "SFFT post-anomaly retry: boosting kernel by %d px "
+                                "(%d -> %d) due to high anomaly fraction.",
+                                _retry_kernel_boost,
+                                kernel_half_width,
+                                kernel_half_width + _retry_kernel_boost,
+                            )
 
                         logger.info(
                             "SFFT post-anomaly feedback: banning %d sources and "
@@ -8028,6 +8291,9 @@ class Templates:
                             template_work_fpath,
                             outputFpath,
                         )
+                        # Restore the pass value after building the retry cmd.
+                        if _high_anomaly and _sfft_pass_kernel_hw > 0:
+                            _sfft_pass_kernel_hw = _saved_pass_hw
                         retry_log_path = scienceDir / f"sfft_{Path(base_name).stem}_postanom_retry.txt"
                         with open(retry_log_path, "w") as lf:
                             subprocess.run(

@@ -867,8 +867,14 @@ def beta_aperture(n, flux_aperture, npix, sigma, noise=0):
         Detection confidence in [0, 1]. Higher values indicate a more
         confident detection above the threshold.
     """
-    # Ensure non-negative flux after background subtraction
-    source_flux = np.maximum(flux_aperture - noise * npix, 0.0)
+    # Compute background-subtracted source flux.
+    # Use abs() for the significance calculation so that detection
+    # confidence is symmetric — a -5 sigma dip on a difference image is
+    # as significant as a +5 sigma peak.  This is consistent with the
+    # beta_psf fix (BUG-5).  The sign of the flux is checked separately
+    # in the detection logic (main.py is_detection), so this only
+    # affects the confidence value, not the detection decision.
+    source_flux = np.abs(flux_aperture - noise * npix)
 
     # Total noise in the aperture
     sigma_aperture = sigma * np.sqrt(npix)

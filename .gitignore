@@ -80,3 +80,6 @@ docs/
 # Agent session notes
 agents.md
 *.egg-info/
+
+# Test suite (local validation only)
+tests/

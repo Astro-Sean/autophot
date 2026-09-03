@@ -534,6 +534,7 @@ class MCMCFitter:
         background_rms=None,
         threads: int = 1,
         store_samples: bool = False,
+        allow_negative_flux: bool = False,
     ):
         self.nwalkers = int(nwalkers)
         self.nsteps = int(nsteps) if nsteps is not None else None
@@ -546,6 +547,10 @@ class MCMCFitter:
         self.jitter_scale = float(jitter_scale)
         self.threads = int(threads)
         self.store_samples = bool(store_samples)
+        # When True, the flux prior allows negative values (for difference-image
+        # photometry of fading sources).  Default False preserves existing
+        # behavior for science images.
+        self.allow_negative_flux = bool(allow_negative_flux)
         self.random_state = (
             np.random.RandomState(random_state)
             if random_state is not None
@@ -573,7 +578,11 @@ class MCMCFitter:
                 return -np.inf
             n = name.lower()
             if any(k in n for k in ("flux", "amplitude", "amp")) and param_value < 0:
-                return -np.inf
+                # Allow negative flux for difference-image photometry
+                # (fading sources).  The sign is checked separately in
+                # the detection logic, so this only affects the prior.
+                if not self.allow_negative_flux:
+                    return -np.inf
             if (
                 any(k in n for k in ("sigma", "stddev", "fwhm", "alpha", "beta"))
                 and param_value <= 0
