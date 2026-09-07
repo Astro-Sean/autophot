@@ -3290,8 +3290,20 @@ def run_photometry():
 
             # Avoid building a huge list of masked-pixel coordinates (np.argwhere can
             # dominate memory/time on large masks). Use a distance transform instead.
-            if not np.any(cosmic_rays_mask):
-                logging.info("No cosmic ray pixels found. Skipping source exclusion.")
+            # Exclude sources near ALL detected defects, not just cosmic rays:
+            #   cosmic_rays_mask      — pixels flagged by RemoveCosmicRays
+            #   hardware_defects_mask — NaN, zeros, saturation, bleed streaks,
+            #                           satellite trails (from BackgroundSubtractor)
+            # Sources near hardware defects (bad columns, hot pixels, saturation
+            # cores, streaks) would corrupt the PSF model if included in the
+            # source pool.  The mask is used for pixel-level exclusion during
+            # PSF fitting, but sources whose stamps overlap defects must be
+            # removed from the candidate list entirely.
+            _bad_pixel_mask = cosmic_rays_mask.copy()
+            if hardware_defects_mask is not None and np.ndim(hardware_defects_mask) == 2:
+                _bad_pixel_mask = _bad_pixel_mask | hardware_defects_mask
+            if not np.any(_bad_pixel_mask):
+                logging.info("No defect pixels found. Skipping source exclusion.")
                 excluded_sources = FWHMSources.iloc[
                     []
                 ]  # Empty DataFrame with same columns
@@ -3300,7 +3312,7 @@ def run_photometry():
 
                 # distance to nearest masked pixel for every pixel (float64, but avoids
                 # allocating an (N_mask, 2) coordinate array which can be much larger).
-                distmap = distance_transform_edt(~cosmic_rays_mask)
+                distmap = distance_transform_edt(~_bad_pixel_mask)
                 xy = FWHMSources[["x_pix", "y_pix"]].to_numpy(dtype=float)
                 xi = np.clip(np.rint(xy[:, 0]).astype(int), 0, distmap.shape[1] - 1)
                 yi = np.clip(np.rint(xy[:, 1]).astype(int), 0, distmap.shape[0] - 1)
@@ -3312,10 +3324,15 @@ def run_photometry():
                 FWHMSources = FWHMSources[min_distances > distance_threshold]
 
                 if not excluded_sources.empty:
+                    n_cosmic = int(np.sum(cosmic_rays_mask)) if np.any(cosmic_rays_mask) else 0
+                    n_hw = int(np.sum(hardware_defects_mask)) if (
+                        hardware_defects_mask is not None and np.ndim(hardware_defects_mask) == 2
+                    ) else 0
                     logging.info(
-                        "Excluded %d sources due to proximity to removed cosmic rays "
-                        "(threshold: %.2f pixels).",
+                        "Excluded %d sources due to proximity to defects "
+                        "(cosmic=%d px, hardware=%d px, threshold=%.2f px).",
                         len(excluded_sources),
+                        n_cosmic, n_hw,
                         distance_threshold,
                     )
 
@@ -5880,7 +5897,32 @@ def run_photometry():
                             else:
                                 _fwhm_conv_k = _fwhm_broad_k
                             _ts_cfg_k = input_yaml.get("template_subtraction", {}) or {}
-                            _hw_mult = float(_ts_cfg_k.get("kernel_hw_multiplier", 2.0))
+                            # Use the SAME config key as run_sfft.py
+                            # (kernel_hw_fwhm_multiplier, NOT kernel_hw_multiplier
+                            # which doesn't exist in the config and always falls
+                            # back to 2.0).  This ensures the isolation radius
+                            # matches the actual SFFT kernel half-width.
+                            _hw_mult = float(
+                                _ts_cfg_k.get("kernel_hw_fwhm_multiplier", 2.5) or 2.5
+                            )
+                            if not np.isfinite(_hw_mult) or _hw_mult <= 0:
+                                _hw_mult = 2.5
+                            _hw_mult = max(1.0, min(_hw_mult, 5.0))
+
+                            # Compute the expected SFFT kernel half-width using
+                            # the SAME formula as run_sfft.py auto-sizing:
+                            #   hw_broad = ceil(mult * FWHM_broad)   — primary
+                            #   hw_conv  = ceil(3 * FWHM_conv / 2.355) — secondary
+                            #   kernel_hw = max(hw_broad, hw_conv)
+                            # This is the SFFT/LSST convention: the kernel must
+                            # contain the BROADER PSF.  Previously this used
+                            # FWHM_conv as the primary term (templates.py
+                            # formula), which gave a smaller isolation radius
+                            # than the actual SFFT kernel, allowing contaminating
+                            # neighbours to pass the isolation check.
+                            _hw_broad_sfft = int(np.ceil(_hw_mult * _fwhm_broad_k))
+                            _hw_conv_sfft = int(np.ceil(3.0 * _fwhm_conv_k / 2.355))
+
                             # Match the floor multiplier used in subtract()
                             # (2.0 for dense, 1.75 for moderate, 1.5 for sparse).
                             _n_for_floor = len(ms)
@@ -5890,13 +5932,16 @@ def run_photometry():
                                 _hw_floor_mult = 1.75
                             else:
                                 _hw_floor_mult = 2.0
-                            _ker_hw_conv = int(np.ceil(_hw_mult * _fwhm_conv_k))
                             _ker_hw_floor = int(np.ceil(_hw_floor_mult * _fwhm_broad_k))
                             # Source-count cap (matches subtract() logic)
                             _max_hw_pixels = 100 * max(_n_for_floor, 5)
                             _max_hw_sources = int((np.sqrt(_max_hw_pixels) - 1) / 2)
                             _hw_floor_capped = min(_ker_hw_floor, _max_hw_sources)
-                            _ker_hw = max(_ker_hw_conv, _hw_floor_capped)
+
+                            # Use the max of run_sfft.py's formula and the
+                            # templates.py floor, so the isolation radius is
+                            # always >= the actual SFFT kernel half-width.
+                            _ker_hw = max(_hw_broad_sfft, _hw_conv_sfft, _hw_floor_capped)
                             _ker_hw = max(
                                 int(_ts_cfg_k.get("kernel_hw_min", 3)),
                                 min(int(_ts_cfg_k.get("kernel_hw_max", 50)), _ker_hw),
@@ -5948,6 +5993,14 @@ def run_photometry():
                                     f"sources leaving only {isolated.sum()} (< 5). "
                                     f"Keeping all {len(ms)} sources."
                                 )
+
+                        # Define _ts_cfg_refine here so it is available for the
+                        # stamp contamination check, PSF quality cuts, and FFT
+                        # rejection below.  Previously this was only defined at
+                        # line ~6062 (inside the PSF quality cuts section),
+                        # causing a NameError in the stamp contamination check
+                        # that silently discarded ALL refinement work.
+                        _ts_cfg_refine = input_yaml.get("template_subtraction", {}) or {}
 
                         # --- Pixel-level stamp contamination check ---
                         # Even if no catalogued source is nearby, a bright
@@ -6059,7 +6112,8 @@ def run_photometry():
                         #   - flags: non-zero = fit problem
                         # Sources with bad PSF fits will bias the SFFT kernel
                         # because SFFT assumes all prior sources are point-like.
-                        _ts_cfg_refine = input_yaml.get("template_subtraction", {}) or {}
+                        # (_ts_cfg_refine is already defined above, before the
+                        # stamp contamination check.)
                         _psf_quality_mask = np.ones(len(ms), dtype=bool)
 
                         # cfit cut (concentration/shape)
@@ -6408,9 +6462,11 @@ def run_photometry():
 
                         MatchingSources = ms
                     except Exception as e:
-                        logging.getLogger(__name__).debug(
-                            "Refining matching sources for SFFT/HOTPANTS failed (non-fatal): %s",
+                        logging.getLogger(__name__).warning(
+                            "Refining matching sources for SFFT/HOTPANTS failed (non-fatal): %s. "
+                            "Unrefined sources (%d) will be passed to SFFT — kernel quality may be degraded.",
                             e,
+                            len(MatchingSources) if MatchingSources is not None else 0,
                         )
 
                     # For ZOGY: same stars for both PSFs; keep native pixel convention
@@ -6978,6 +7034,50 @@ def run_photometry():
                         MatchingSources["y_pix"] = MatchingSources["y_center"]
                     elif {"x_pix", "y_pix"}.issubset(MatchingSources.columns):
                         pass
+                    elif {
+                        "X_IMAGE_REF", "Y_IMAGE_REF", "X_IMAGE_SCI", "Y_IMAGE_SCI"
+                    }.issubset(MatchingSources.columns):
+                        # SFFT wrote the full native catalog (no MEAN column).
+                        # SExtractor coords are 1-based; the mean of the ref/sci
+                        # positions reproduces the REF_SCI_MEAN convention.
+                        # Convert to 0-based to match the pipeline convention.
+                        _xr = pd.to_numeric(MatchingSources["X_IMAGE_REF"], errors="coerce")
+                        _yr = pd.to_numeric(MatchingSources["Y_IMAGE_REF"], errors="coerce")
+                        _xs = pd.to_numeric(MatchingSources["X_IMAGE_SCI"], errors="coerce")
+                        _ys = pd.to_numeric(MatchingSources["Y_IMAGE_SCI"], errors="coerce")
+                        MatchingSources["x_pix"] = ((_xr + _xs) / 2.0 - 1.0)
+                        MatchingSources["y_pix"] = ((_yr + _ys) / 2.0 - 1.0)
+                        logging.info(
+                            "SFFT matched-sources: derived x_pix/y_pix from "
+                            "X_IMAGE_REF/SCI mean (%d sources).",
+                            len(MatchingSources),
+                        )
+                    elif {"X_IMAGE_SCI", "Y_IMAGE_SCI"}.issubset(MatchingSources.columns):
+                        # Only science-frame coords available (diff image is in
+                        # the science frame). SExtractor 1-based -> 0-based.
+                        MatchingSources["x_pix"] = pd.to_numeric(
+                            MatchingSources["X_IMAGE_SCI"], errors="coerce"
+                        ) - 1
+                        MatchingSources["y_pix"] = pd.to_numeric(
+                            MatchingSources["Y_IMAGE_SCI"], errors="coerce"
+                        ) - 1
+                        logging.info(
+                            "SFFT matched-sources: derived x_pix/y_pix from "
+                            "X_IMAGE_SCI (%d sources).",
+                            len(MatchingSources),
+                        )
+                    elif {"X_IMAGE_REF", "Y_IMAGE_REF"}.issubset(MatchingSources.columns):
+                        MatchingSources["x_pix"] = pd.to_numeric(
+                            MatchingSources["X_IMAGE_REF"], errors="coerce"
+                        ) - 1
+                        MatchingSources["y_pix"] = pd.to_numeric(
+                            MatchingSources["Y_IMAGE_REF"], errors="coerce"
+                        ) - 1
+                        logging.info(
+                            "SFFT matched-sources: derived x_pix/y_pix from "
+                            "X_IMAGE_REF (%d sources).",
+                            len(MatchingSources),
+                        )
                     else:
                         logging.warning(
                             "SFFT matched-sources file missing expected coordinate columns; available=%s",

@@ -1,2 +1,10 @@
+# conda_build_config.yaml
+# This is a noarch: python package, but conda-build still uses variant
+# pins when solving the host and test environments.  Without an explicit
+# numpy pin, conda-build falls back to its internal default of numpy 1.23,
+# which conflicts with the recipe's `numpy >=2.0` requirement and causes
+# the solver to hang on the second environment solve.
 numpy:
-  - 2.4.6
+  - 2.0
+python:
+  - 3.12
