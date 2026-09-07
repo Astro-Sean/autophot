@@ -31,4 +31,4 @@ dependencies:
   - pip:
     - aafitrans==0.2.1
     - mastcasjobs==0.0.7
-    - sfft==1.7.1
+    - sfft==1.7.3

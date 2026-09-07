@@ -91,6 +91,43 @@ class RemoveCosmicRays:
         if robust_sigma <= 0:
             robust_sigma = 1.0
         bright_mask = image > (med + 5 * robust_sigma)
+
+        # The bright_mask is intended to protect EXTENDED bright sources
+        # (star cores) from being flagged as CRs and replaced with median
+        # values, which would destroy the PSF.  A single bright pixel above
+        # the threshold is equally likely to be a cosmic ray as a star
+        # core — protecting it prevents its detection.
+        #
+        # A real star core is a smooth, extended source: multiple connected
+        # bright pixels.  A CR is a sharp, isolated spike: typically 1-3
+        # connected pixels.  We protect only connected bright regions with
+        # >= 4 pixels — this excludes single-pixel CRs while still catching
+        # compact star cores.  For a compact star (FWHM ~2-3 px) with only
+        # 2-3 pixels above the 5*sigma threshold, the algorithm should be
+        # able to distinguish it from a CR using the PSF model — the risk
+        # of misidentifying a compact star is lower than the risk of
+        # missing real CRs.
+        from scipy import ndimage as _ndi
+        _bright_labels, _n_bright = _ndi.label(bright_mask)
+        if _n_bright > 0:
+            _bright_sizes = np.asarray(
+                _ndi.sum(bright_mask, _bright_labels, range(1, _n_bright + 1)),
+                dtype=int,
+            )
+            # Only protect bright regions with >= 4 connected pixels.
+            # Single/double/triple-pixel bright spots are likely CRs or
+            # hot pixels and should NOT be protected — they need to be
+            # checked by the CR detection algorithm.
+            _min_star_pixels = 4
+            _big_labels = np.isin(
+                _bright_labels,
+                np.where(_bright_sizes >= _min_star_pixels)[0] + 1,
+            )
+            bright_mask = _big_labels
+        else:
+            # No bright regions at all — nothing to protect.
+            bright_mask = np.zeros_like(bright_mask)
+
         # Also protect non-finite pixels (NaN/inf) so astroscrappy doesn't
         # attempt to detect/clean them — they are chip gaps or bad pixels,
         # not cosmic rays.

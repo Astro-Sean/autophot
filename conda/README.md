@@ -5,7 +5,19 @@
 From the repository root (or adjust paths):
 
 ```bash
+# Ensure the fast solver is installed (the classic solver hangs on 20+ deps)
+conda install -n base -c conda-forge conda-libmamba-solver
+conda config --set solver libmamba
+
+# Build the package
 conda build conda/recipe -c conda-forge
+```
+
+Or use the wrapper script (handles version bumping, requirements sync, testing,
+and upload in one step):
+
+```bash
+./scripts/build_and_upload_conda.sh --env astro --label dev
 ```
 
 ## Upload conflicts (HTTP 409)

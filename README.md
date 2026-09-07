@@ -37,7 +37,7 @@ AutoPhOT performs precision photometry of a transient or variable source at a fi
 
 - **Gaia XP synthetic photometry** - Calibrate optical/NIR frames directly against Gaia DR3 XP spectra, avoiding cross-filter transformations when standard catalogs are unavailable. Supports custom transmission curves via `gaia_custom` catalog mode.
 
-- **Robust difference imaging** - Multiple subtraction backends (SFFT, HOTPANTS, ZOGY) with automatic fallback, kernel-order auto-selection, noise decorrelation (SFFT v1.5.0+), PSF-source pool supplementation for sparse fields, and optional inpainting of saturated template star cores.
+- **Robust difference imaging** - Multiple subtraction backends (SFFT, HOTPANTS, ZOGY) with automatic fallback, kernel-order auto-selection, noise decorrelation (SFFT v1.7.3+), PSF-source pool supplementation for sparse fields, and optional inpainting of saturated template star cores.
 
 - **Multi-S/N limiting magnitudes** - Generates limiting magnitude columns at multiple signal-to-noise thresholds (e.g., `Limit_3p0S2N`, `Limit_5p0S2N`) in a single run, using source injection with quiet-site selection and logistic-emcee recovery fitting.
 
@@ -64,10 +64,16 @@ AutoPhOT performs precision photometry of a transient or variable source at a fi
 
 ### Conda (Recommended)
 
-**Important**: AutoPHOT requires the `conda-forge` channel for dependency resolution.
+**Important**: AutoPHOT requires the `conda-forge` channel for dependency resolution. AutoPhOT has 20+ conda dependencies; the default classic solver can be very slow. Ensure the libmamba solver is installed for fast resolution:
 
 ```bash
-# Method 1: Install with conda-forge (recommended)
+# Install the fast solver (one-time setup)
+conda install -n base -c conda-forge conda-libmamba-solver
+conda config --set solver libmamba
+```
+
+```bash
+# Method 1: Install into an existing env (recommended)
 conda install -c conda-forge -c astro-sean autophot
 
 # Method 2: Add conda-forge permanently
@@ -76,9 +82,8 @@ conda config --set channel_priority strict
 conda install -c astro-sean autophot
 
 # Method 3: Create dedicated environment
-conda create -n autophot -c conda-forge -c astro-sean python=3.11
+conda create -n autophot -c conda-forge -c astro-sean python=3.11 autophot
 conda activate autophot
-conda install -c astro-sean autophot
 ```
 
 > [!NOTE]
@@ -88,7 +93,7 @@ conda install -c astro-sean autophot
 > pip install sfft==1.7.3 sip_tpv==1.1
 > ```
 
-If conda struggles to resolve the environment, prefer `mamba`:
+Alternatively, use `mamba` (uses libmamba by default):
 
 ```bash
 conda install -c conda-forge mamba
@@ -105,13 +110,52 @@ autophot-main -h
 
 ### Install from source (developer / latest)
 
-If you are running from a cloned repository, install it in editable mode so
-internal modules are importable:
+If you are running from a cloned repository, two options are available:
+
+**Option A: Editable pip install (lightweight)**
 
 ```bash
 git clone https://github.com/Astro-Sean/autophot.git
 cd autophot
 pip install -e .
+pip install sfft==1.7.3 sip_tpv==1.1  # not on conda
+```
+
+**Option B: Full conda environment from `environment.yml` (reproducible)**
+
+The repository includes an `environment.yml` with pinned versions for all
+dependencies. This creates a fully reproducible environment:
+
+```bash
+git clone https://github.com/Astro-Sean/autophot.git
+cd autophot
+conda env create -f environment.yml
+conda activate autophot
+pip install -e .  # editable install into the env
+```
+
+> [!NOTE]
+> `environment.yml` includes `sfft==1.7.3` in the pip section, so the
+> pip-only dependencies are installed automatically.
+
+---
+
+## Testing
+
+The repository includes a test suite (186 tests) covering core functions,
+data validation, PSF validation, uncertainty calibration, MCMC diagnostics,
+injection/recovery, quality flags, and regression tests. Tests use
+synthetic data generators (no external data required).
+
+```bash
+# Install test dependencies
+pip install -e ".[test]"
+
+# Run all tests
+pytest
+
+# Run fast tests only (skip slow/mcmc/injection tests)
+pytest -m "not slow and not mcmc and not injection"
 ```
 
 ---
@@ -184,10 +228,10 @@ conda install -c conda-forge astromatic-source-extractor astromatic-scamp astrom
 
 ### SFFT
 
-For SFFT-based template subtraction:
+For SFFT-based template subtraction (default subtraction backend):
 
 ```bash
-pip install sfft
+pip install sfft==1.7.3
 ```
 
 ### HOTPANTS
@@ -204,10 +248,10 @@ cd hotpants && make
 
 AutoPhOT aligns the template image to the science image before difference
 imaging.  Six methods are available, each with different strengths.  The
-default is `spalipy` (RA/DEC source pre-matching + spline-warp), which is
-the most robust method.  Setting `alignment_method` to a
-specific method skips the cascade and uses only that method (with fallback
-to the cascade on failure).
+default is `spalipy` (RA/DEC source pre-matching + spline-warp), which
+achieves the best sub-pixel accuracy (~0.05-0.2 px RMS).  Setting
+`alignment_method` to a specific method skips the cascade and uses only
+that method (with fallback to the cascade on failure).
 
 #### Method overview
 
@@ -216,11 +260,11 @@ to the cascade on failure).
 | **SWarp** (SCAMP+SWarp) | `swarp` | Astromatic suite (required) | 0.1-0.5 px | Fast |
 | **WCS Reproject** | `reproject` | `reproject` (bundled) | 0.1-0.3 px | Fast |
 | **AstroAlign** | `astroalign` | `astroalign` (bundled) | 0.2-1.0 px | Medium |
-| **spalipy** | `spalipy` | `pip install spalipy>=3.5` | 0.05-0.2 px | Medium |
+| **spalipy** (default) | `spalipy` | `pip install spalipy>=3.5` | 0.05-0.2 px | Medium |
 | **tweakwcs** | `tweakwcs` | `pip install tweakwcs>=0.8` | 0.1-0.5 px | Medium |
 | **chi2_shift** | `chi2_shift` | `pip install image-registration>=0.2` | 0.5-2.0 px | Fast |
 
-#### SWarp (SCAMP + SWarp) - `swarp` (default)
+#### SWarp (SCAMP + SWarp) - `swarp`
 
 Runs SExtractor on both images, cross-matches the source catalogs with
 SCAMP to derive a per-frame astrometric solution, then resamples the
@@ -281,7 +325,7 @@ transform.
 - Typically achieves 0.2-1.0 px RMS, which may be insufficient for
   sharp PSFs or sub-pixel photometry.
 
-#### spalipy - `spalipy` (recommended for wide-field)
+#### spalipy - `spalipy` (default; recommended for wide-field)
 
 Quad-based asterism matching for an initial affine transform, followed
 by 2D thin-plate spline fitting to the residual source-position field.
@@ -362,7 +406,8 @@ fit - no rotation, scale, or distortion correction.
 
 | Scenario | Recommended method |
 |----------|--------------------|
-| General use, good WCS headers | `swarp` (default) |
+| General use, sub-pixel accuracy | `spalipy` (default) |
+| Good WCS headers, no pip packages wanted | `swarp` |
 | Good WCS, no SExtractor/SCAMP available | `reproject` |
 | Wide-field, sub-pixel accuracy needed | `spalipy` |
 | HST/JWST data, WCS refinement needed | `tweakwcs` |
@@ -487,7 +532,7 @@ photometry:
 
 | Method | `method` value | Install | Notes |
 |--------|---------------|---------|-------|
-| **SFFT** | `sfft` | `pip install sfft` | Default; supports noise decorrelation, B-spline kernel, variable-star rejection |
+| **SFFT** | `sfft` | `pip install sfft==1.7.3` | Default; supports noise decorrelation, B-spline kernel, variable-star rejection |
 | **HOTPANTS** | `hotpants` | Build from source | Classic kernel-matching algorithm |
 | **ZOGY** | `zogy` | Auto-downloaded from [pmvreeswijk/ZOGY](https://github.com/pmvreeswijk/ZOGY) | Optimal for PSF-matched subtraction; propagates noise correctly |
 
@@ -496,13 +541,13 @@ photometry:
 ```yaml
 template_subtraction:
   method: sfft
-  kernel_order: 0                  # 0=constant, 1=linear, 2=quadratic, 3=cubic, or "auto"
+  kernel_order: "auto"             # 0=constant, 1=linear, 2=quadratic, 3=cubic, or "auto"
   kernel_hw_fwhm_multiplier: 2.5   # kernel half-width as FWHM multiplier
-  sfft_forceconv: AUTO             # AUTO, REF, or SCI - which image to convolve
-  sfft_decorrelate_noise: True     # apply noise decorrelation (SFFT v1.5.0+)
-  sfft_save_decorrelated: True     # save decorrelated difference image separately
+  forceconv: REF                   # REF (default), SCI, or AUTO - which image to convolve
+  sfft_decorrelate_noise: False    # apply noise decorrelation (SFFT v1.7.3+)
+  sfft_save_decorrelated: False    # save decorrelated difference image separately
   sfft_use_bspline_kernel: False   # B-spline kernel (requires CUDA/Cupy)
-  sfft_bg_order: 1                 # background spatial polynomial order
+  sfft_bg_order: 0                 # background spatial polynomial order
   sfft_crowded_auto: False         # auto-enable crowded-field tuning
   sfft_use_post_anomaly_feedback: True  # extra pass using post-anomaly sources
 ```
@@ -531,8 +576,8 @@ and `Limit_5p0S2N` columns in the output table.
 ```yaml
 limiting_magnitude:
   snr_thresholds: [3, 5]           # S/N thresholds for limit columns
-  recovery_method: logistic_emcee  # recovery fitting method
-  injection_strategy: ring_quait   # injection placement: ring_quiet or uniform
+  recovery_method: auto            # auto=match transient (AP or PSF); or PSF, AP, EMCEE
+  injection_strategy: ring_quiet   # injection placement: ring_quiet or annulus_random
   injection_n_sites: 25            # number of injection sites
   inject_min_radius_fwhm: 2.0      # min injection radius from target
   inject_max_radius_fwhm: 6.0      # max injection radius from target
@@ -849,7 +894,7 @@ if __name__ == "__main__":
 
 1. Set subtraction options:
    - `autophot_input["template_subtraction"]["do_subtraction"] = True`
-   - `autophot_input["template_subtraction"]["alignment_method"] = "spalipy"` (recommended; most robust) or `"swarp"` (SCAMP+SWarp, best subpixel)
+   - `autophot_input["template_subtraction"]["alignment_method"] = "spalipy"` (default; best sub-pixel accuracy) or `"swarp"` (SCAMP+SWarp; no pip packages needed)
    - `autophot_input["template_subtraction"]["method"] = "sfft"` (or `hotpants`, `zogy`)
 2. Create template directories:
    - Call `prepare_template_directory(...)`.

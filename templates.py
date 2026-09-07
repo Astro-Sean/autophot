@@ -6359,6 +6359,31 @@ class Templates:
                 )
                 ker_hw = max(ker_hw_from_conv, _hw_floor_capped)
 
+                # For sparse fields, also cap the convolution term.
+                # A large under-constrained kernel (e.g., 55x55=3025 params
+                # for 8 sources = 378 params/source) fits noise rather than
+                # the PSF, producing worse residuals than a smaller kernel
+                # that under-fits the PSF but is better constrained.
+                # The physical minimum is a hard constraint — never go below
+                # it regardless of source count.
+                _sparse_cap_thresh = int(
+                    ts_cfg_ker.get("sfft_sparse_field_threshold", 10) or 10
+                )
+                if n_eff < _sparse_cap_thresh:
+                    _ker_hw_before_sparse_cap = ker_hw
+                    ker_hw = max(
+                        _phys_min_hw,
+                        min(ker_hw, _max_hw_from_sources),
+                    )
+                    if ker_hw != _ker_hw_before_sparse_cap:
+                        logger.info(
+                            "Kernel sizing: sparse field (%d sources < %d) — "
+                            "capping kernel_hw at %d px (was %d, max_hw_sources=%d) "
+                            "to prevent under-constrained kernel fit.",
+                            n_eff, _sparse_cap_thresh,
+                            ker_hw, _ker_hw_before_sparse_cap, _max_hw_from_sources,
+                        )
+
                 ker_hw = max(KER_HW_MIN, min(KER_HW_MAX, ker_hw))
 
                 # Alignment-quality-aware kernel boost.
@@ -7728,6 +7753,13 @@ class Templates:
                 excluded.append((_tx + 1.0, _ty + 1.0))
             current_excluded = list(excluded)
             current_matching_sources = list(matching_sources)
+            # Save the ORIGINAL matching sources before the post-anomaly
+            # feedback may modify them.  The post-anomaly feedback replaces
+            # current_matching_sources with SFFT-vetted sources and may remove
+            # all of them, which would prevent the ConstPhotRatio retry from
+            # firing (n_matched_local >= 3 check fails with 0 sources).
+            _orig_matching_sources = list(matching_sources)
+            _orig_n_matching = len(matching_sources)
 
             phot_cfg = self.input_yaml.get("photometry", {})
 
@@ -7889,18 +7921,50 @@ class Templates:
             _auto_kernel = _as_bool(
                 ts_sub.get("sfft_auto_kernel_size", True), True
             )
+            # For sparse fields, run_sfft.py's auto-size formula
+            # (hw_broad = ceil(mult * FWHM_broad)) can produce a kernel
+            # that is too large relative to the number of sources, leading
+            # to an under-constrained kernel fit.  The templates.py formula
+            # uses FWHM_conv as the primary term with an adaptive floor
+            # and source-count cap, producing a smaller, better-constrained
+            # kernel.  When the field is sparse (< 10 vetted sources),
+            # pass the templates.py-computed kernel_hw directly instead of
+            # letting run_sfft.py auto-size.
+            _n_matching_sfft = len(current_matching_sources)
+            _sparse_threshold = int(ts_sub.get("sfft_sparse_field_threshold", 10) or 10)
+            _sparse_field = _n_matching_sfft < _sparse_threshold
             if _user_override_hw is not None:
                 _sfft_pass_kernel_hw = int(_user_override_hw)
                 logger.info(
                     "SFFT: passing kernel_hw=%d (user override).",
                     _sfft_pass_kernel_hw,
                 )
-            elif _auto_kernel:
+            elif _auto_kernel and not _sparse_field:
                 _sfft_pass_kernel_hw = 0  # let run_sfft.py auto-size
                 logger.info(
                     "SFFT: letting run_sfft.py auto-size kernel "
-                    "(templates.py computed %d px for diagnostics).",
+                    "(templates.py computed %d px for diagnostics, "
+                    "%d vetted sources).",
                     kernel_half_width,
+                    _n_matching_sfft,
+                )
+            elif _auto_kernel and _sparse_field:
+                # Sparse field: pass templates.py-computed kernel_hw to
+                # avoid an under-constrained kernel from run_sfft.py's
+                # auto-size (which uses FWHM_broad as primary term).
+                _sfft_pass_kernel_hw = kernel_half_width
+                logger.info(
+                    "SFFT: sparse field (%d vetted sources < %d threshold) — "
+                    "passing templates.py kernel_hw=%d px instead of auto-sizing "
+                    "(run_sfft.py would use ~%d px = ceil(%.1f*FWHM_broad), "
+                    "under-constrained for %d sources).",
+                    _n_matching_sfft,
+                    _sparse_threshold,
+                    kernel_half_width,
+                    int(np.ceil(float(ts_sub.get("kernel_hw_fwhm_multiplier", 2.5) or 2.5)
+                                * max(float(science_fwhm), float(template_fwhm)))),
+                    float(ts_sub.get("kernel_hw_fwhm_multiplier", 2.5) or 2.5),
+                    _n_matching_sfft,
                 )
             else:
                 logger.info(
@@ -8165,15 +8229,6 @@ class Templates:
                         frac_post, post_anom_max_frac, n_post, n_ref,
                     )
                 if n_post >= post_anom_min_count:
-                    # --- Improve matching sources using SFFT-vetted results ---
-                    # After the first SFFT pass, SFFT writes the sources it
-                    # actually used for the kernel fit to
-                    # SFFT_Matching_Sources_<base>.csv.  These are vetted by
-                    # SFFT's own SExtractor + cross-match + quality checks
-                    # (PostAnomaly, CVREJ, EVREJ), so they are more robust
-                    # than the pipeline's original priors.  Use them as the
-                    # matching sources for the retry, minus any near
-                    # post-anomaly sources.
                     sfft_vetted_sources = []
                     if matching_sources_csv.exists():
                         try:
@@ -8202,28 +8257,77 @@ class Templates:
                         except Exception:
                             sfft_vetted_sources = []
 
+                    # --- Improve matching sources using SFFT-vetted results ---
+                    # After the first SFFT pass, SFFT writes the sources it
+                    # actually used for the kernel fit to
+                    # SFFT_Matching_Sources_<base>.csv.  These are vetted by
+                    # SFFT's own SExtractor + cross-match + quality checks
+                    # (PostAnomaly, CVREJ, EVREJ), so they are more robust
+                    # than the pipeline's original priors.  Use them as the
+                    # matching sources for the retry, minus any near
+                    # post-anomaly sources.
+                    #
+                    # However, when ALL SFFT-vetted sources coincide with
+                    # anomaly positions (which happens when the kernel is
+                    # under-constrained and every source has a residual),
+                    # replacing the priors would leave zero sources for the
+                    # retry.  Check whether the removal would leave enough
+                    # sources BEFORE committing to the replacement.
+                    _min_for_retry = max(
+                        2, int(ts_sub.get("sfft_min_prior_sources", 3) or 3)
+                    )
+
+                    # Determine which source list to use for the retry.
+                    # Prefer SFFT-vetted sources, but keep pipeline priors
+                    # if the SFFT list is empty or would be emptied by
+                    # anomaly removal.
+                    _candidate_sources = list(current_matching_sources)
                     if sfft_vetted_sources:
-                        logger.info(
-                            "SFFT post-anomaly feedback: using %d SFFT-vetted "
-                            "matching sources from first pass (replacing %d "
-                            "pipeline priors).",
-                            len(sfft_vetted_sources),
-                            len(current_matching_sources),
-                        )
-                        current_matching_sources = sfft_vetted_sources
+                        # Check how many SFFT-vetted sources survive anomaly
+                        # removal before committing to the replacement.
+                        _anom_arr_check = np.asarray(post_anom_xy, float)
+                        _surviving_vetted = []
+                        for x0, y0 in sfft_vetted_sources:
+                            _dist2 = (_anom_arr_check[:, 0] - float(x0)) ** 2 + (
+                                _anom_arr_check[:, 1] - float(y0)
+                            ) ** 2
+                            if not np.any(_dist2 <= post_anom_match_radius_px**2):
+                                _surviving_vetted.append((x0, y0))
+                        if len(_surviving_vetted) >= _min_for_retry:
+                            logger.info(
+                                "SFFT post-anomaly feedback: using %d SFFT-vetted "
+                                "matching sources from first pass (replacing %d "
+                                "pipeline priors, %d removed as anomaly-adjacent).",
+                                len(_surviving_vetted),
+                                len(current_matching_sources),
+                                len(sfft_vetted_sources) - len(_surviving_vetted),
+                            )
+                            _candidate_sources = _surviving_vetted
+                        else:
+                            logger.warning(
+                                "SFFT post-anomaly feedback: %d SFFT-vetted sources "
+                                "would leave %d after anomaly removal (< %d). "
+                                "Keeping %d original pipeline priors.",
+                                len(sfft_vetted_sources),
+                                len(_surviving_vetted),
+                                _min_for_retry,
+                                len(current_matching_sources),
+                            )
+                            # Keep original priors; anomaly positions are
+                            # banned via current_excluded below.
 
                     # Remove matching sources too close to anomaly sources.
-                    if post_anom_xy and current_matching_sources:
+                    if post_anom_xy and _candidate_sources:
                         anom_arr = np.asarray(post_anom_xy, float)
                         filtered_matching = []
-                        for x0, y0 in current_matching_sources:
+                        for x0, y0 in _candidate_sources:
                             dist2 = (anom_arr[:, 0] - float(x0)) ** 2 + (
                                 anom_arr[:, 1] - float(y0)
                             ) ** 2
                             if np.any(dist2 <= post_anom_match_radius_px**2):
                                 continue
                             filtered_matching.append((x0, y0))
-                        dropped_matching = len(current_matching_sources) - len(
+                        dropped_matching = len(_candidate_sources) - len(
                             filtered_matching
                         )
                         current_matching_sources = filtered_matching
@@ -8233,9 +8337,6 @@ class Templates:
                     # Safety: don't retry if too few matching sources remain
                     # after removing anomaly-adjacent sources.  SFFT needs at
                     # least sfft_min_prior_sources to produce a valid kernel.
-                    _min_for_retry = max(
-                        2, int(ts_sub.get("sfft_min_prior_sources", 3) or 3)
-                    )
                     if len(current_matching_sources) < _min_for_retry:
                         logger.warning(
                             "SFFT post-anomaly feedback: only %d matching "
@@ -8419,9 +8520,12 @@ class Templates:
             _discrep_retry_thresh = float(
                 ts_sub.get("sfft_flux_discrepancy_retry_pct", 3.0)
             )
-            # Compute n_eff from the matching sources available to this method.
-            # (n_eff is defined in subtract() but not in scope here.)
-            _n_matched_local = len(current_matching_sources) if current_matching_sources else 0
+            # Compute n_eff from the ORIGINAL matching sources (before
+            # post-anomaly feedback may have emptied the list).  The flux
+            # scaling discrepancy was computed from the original SFFT run
+            # which used the original sources — the retry decision should
+            # be based on that count, not the post-anomaly-emptied list.
+            _n_matched_local = _orig_n_matching
             _min_prior_local = int(ts_sub.get("sfft_min_prior_sources", 3) or 3)
             _n_eff_local = 10 if _n_matched_local < _min_prior_local else _n_matched_local
             _do_discrep_retry = (
@@ -8446,7 +8550,7 @@ class Templates:
                 try:
                     cmd_discrep_retry = _build_sfft_cmd(
                         current_excluded,
-                        current_matching_sources,
+                        _orig_matching_sources,
                         template_work_fpath,
                         outputFpath,
                     )
@@ -8508,6 +8612,106 @@ class Templates:
                     )
                 finally:
                     kernel_order = _saved_kernel_order
+
+            # --- ConstPhotRatio retry for sparse fields ---
+            # When the field is sparse (< ~10 sources), the convolution-based
+            # flux scaling is unreliable because the kernel is under-constrained.
+            # The kernel integral (FSCAL_CONV) can differ from the true
+            # photometric flux ratio (FSCAL_PHOT) by >10%, leaving systematic
+            # over/under-subtraction residuals at source positions.
+            #
+            # The standard discrepancy retry (kernel_order+1) requires >= 20
+            # sources and is skipped for sparse fields.  Instead, retry with
+            # ConstPhotRatio=True which constrains the kernel sum to the
+            # photometric flux ratio, eliminating the discrepancy.
+            #
+            # Trade-off: ConstPhotRatio uses the photometric scaling which can
+            # be biased by bright outliers.  But for a sparse field where the
+            # convolution scaling is clearly wrong (>10% off), the photometric
+            # constraint is the lesser evil — it at least ensures flux
+            # conservation.
+            _const_phot_retry_thresh = float(
+                ts_sub.get("sfft_const_phot_retry_pct", 10.0)
+            )
+            _do_const_phot_retry = (
+                not _do_discrep_retry  # standard retry didn't fire
+                and _conv_scale is not None
+                and _phot_scale is not None
+                and _conv_scale > 0
+                and _discrep_pct > _const_phot_retry_thresh
+                and not const_phot_ratio  # not already enabled
+                and _n_matched_local >= 3  # need at least a few sources
+            )
+            if _do_const_phot_retry:
+                logger.warning(
+                    "SFFT flux scaling discrepancy=%.1f%% > %.1f%% with only %d "
+                    "vetted sources. Retrying with ConstPhotRatio=True to "
+                    "constrain kernel sum to photometric flux ratio "
+                    "(phot=%.4f vs conv=%.4f).",
+                    _discrep_pct, _const_phot_retry_thresh, _n_matched_local,
+                    _phot_scale, _conv_scale,
+                )
+                _saved_cpr = const_phot_ratio
+                const_phot_ratio = True
+                try:
+                    cmd_cpr_retry = _build_sfft_cmd(
+                        current_excluded,
+                        _orig_matching_sources,
+                        template_work_fpath,
+                        outputFpath,
+                    )
+                    cpr_log_path = scienceDir / f"sfft_{Path(base_name).stem}_constphot_retry.txt"
+                    with open(cpr_log_path, "w") as lf:
+                        subprocess.run(
+                            cmd_cpr_retry,
+                            check=True,
+                            text=True,
+                            stdout=lf,
+                            stderr=lf,
+                            env=sfft_env,
+                            timeout=sfft_timeout,
+                        )
+                    # Re-parse the retry log for updated flux scaling
+                    if cpr_log_path.exists():
+                        _cpr_text = cpr_log_path.read_text(errors="ignore")
+                        _rc2 = _re.search(
+                            r"Flux Scaling through the Convolution.*?\[(-?[\d.]+)", _cpr_text
+                        )
+                        _rp2 = _re.search(
+                            r"Flux Scaling from Photometry.*?\[(-?[\d.]+)", _cpr_text
+                        )
+                        if _rc2 and _rp2:
+                            _conv_scale3 = float(_rc2.group(1))
+                            _phot_scale3 = float(_rp2.group(1))
+                            _discrep_pct3 = abs(_conv_scale3 - _phot_scale3) / max(
+                                abs(_conv_scale3), abs(_phot_scale3), 1e-10
+                            ) * 100.0
+                            try:
+                                if outputFpath and os.path.isfile(outputFpath):
+                                    with fits.open(outputFpath, mode="update", memmap=False) as _hdul:
+                                        _hdul[0].header["FSCAL_CONV"] = float(_conv_scale3)
+                                        _hdul[0].header["FSCAL_PHOT"] = float(_phot_scale3)
+                                        _hdul[0].header["FSCAL_DISC"] = float(_discrep_pct3)
+                                        _hdul.flush()
+                            except Exception:
+                                pass
+                            logger.info(
+                                "SFFT ConstPhotRatio retry: flux scaling discrepancy "
+                                "%.1f%% -> %.1f%% (conv=%.4f phot=%.4f).",
+                                _discrep_pct, _discrep_pct3,
+                                _conv_scale3, _phot_scale3,
+                            )
+                    logger.info("SFFT subtraction succeeded (ConstPhotRatio retry)")
+                    return "done"
+                except Exception as exc_cpr:
+                    log_warning_from_exception(
+                        logger,
+                        "SFFT ConstPhotRatio retry failed; "
+                        "keeping first-pass result",
+                        exc_cpr,
+                    )
+                finally:
+                    const_phot_ratio = _saved_cpr
 
             logger.info("SFFT subtraction succeeded")
             return "done"
