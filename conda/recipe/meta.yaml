@@ -1,5 +1,5 @@
 {% set name = "autophot" %}
-{% set version = "1.1.11" %}
+{% set version = "1.1.21" %}
 
 package:
   name: {{ name|lower }}
@@ -8,11 +8,20 @@ package:
 source:
   path: ../..
 
+# Pin channels so conda-build only searches conda-forge, not defaults.
+# Without this, conda-build processes both channels' repodata, which doubles
+# the solver time for the host environment.
+channels:
+  - conda-forge
+
 # IMPORTANT: This package requires conda-forge channel
 # Install with: conda install -c conda-forge -c astro-sean autophot
 # Or add conda-forge to your channels: conda config --add channels conda-forge
 #
-# SFFT and sip_tpv are pip-only (not on conda-forge); installed via pip in build.sh.
+# sfft and sip_tpv are pip-only (not on conda-forge) and have compiled Cython
+# extensions that are platform-specific.  They are NOT bundled in this package
+# to preserve the noarch: python declaration.  After conda install, run:
+#   pip install sfft==1.7.3 sip_tpv==1.1
 
 build:
   noarch: python
@@ -25,34 +34,6 @@ requirements:
     - pip
     - setuptools
     - wheel
-    - cython >=3.0
-    - numpy >=2.0
-    - pandas >=3.0
-    - scikit-image >=0.24
-    - matplotlib >=3.10
-    - astroquery >=0.4.11
-    - photutils >=3.0
-    - lmfit >=1.3.4
-    - emcee >=3.1.6
-    - corner >=2.2.3
-    - ccdproc >=2.5.1
-    - scipy >=1.17
-    - reproject >=0.20
-    - requests >=2.34
-    - pyyaml >=6.0
-    - astroalign >=2.6.2
-    - astropy >=7.0
-    - astroscrappy ==1.2.0
-    - tqdm >=4.68
-    - scikit-learn >=1.9
-    # SFFT dependencies
-    - fastremap >=1.20
-    - llvmlite >=0.36
-    - numba >=0.53
-    - pyfftw >=0.12
-    - sep >=1.0
-    # pip-only packages (not available on conda-forge)
-    - pip
   run:
     - python >=3.11,<3.13
     - astroalign >=2.6.2
@@ -77,15 +58,17 @@ requirements:
     - scikit-learn >=1.9
     - scipy >=1.17
     - tqdm >=4.68
-    # SFFT dependencies (available on conda-forge)
+    # SFFT dependencies (available on conda-forge) — needed because sfft
+    # is installed via pip by the user, and pip needs these conda packages
+    # to already be present for sfft's compiled extensions to work.
     - fastremap >=1.20
     - llvmlite >=0.36
     - numba >=0.53
     - pyfftw >=0.12
     - sep >=1.0
     # sfft==1.7.3 and sip_tpv==1.1 are pip-only (not on conda-forge).
-    # They are installed via pip during build (build.sh runs pip install .).
-    # Users installing from conda channel should also run:
+    # They are NOT bundled in this package (would break noarch: python).
+    # Users must install them separately after conda install:
     #   pip install sfft==1.7.3 sip_tpv==1.1
     - pip
 
@@ -99,21 +82,6 @@ test:
     - autophot-main -h
   requires:
     - python >=3.11,<3.13
-    - pandas >=3.0
-    - scikit-image >=0.24
-    - matplotlib >=3.10
-    - astroquery >=0.4.11
-    - photutils >=3.0
-    - lmfit >=1.3.4
-    - emcee >=3.1.6
-    - corner >=2.2.3
-    - ccdproc >=2.5.1
-    # SFFT dependencies
-    - fastremap >=1.20
-    - llvmlite >=0.36
-    - numba >=0.53
-    - pyfftw >=0.12
-    - sep >=1.0
 
 about:
   home: https://github.com/Astro-Sean/autophot

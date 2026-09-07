@@ -166,6 +166,8 @@ def run_sfft() -> Optional[int]:
             ("x", "y"),
             ("x_pix", "y_pix"),
             ("X_IMAGE", "Y_IMAGE"),
+            ("X_IMAGE_SCI", "Y_IMAGE_SCI"),
+            ("X_IMAGE_REF", "Y_IMAGE_REF"),
         ]
         for xcol, ycol in candidates:
             if xcol in df.columns and ycol in df.columns:
@@ -1337,37 +1339,31 @@ def run_sfft() -> Optional[int]:
                 log_info(
                     f"Number of sources used in crowded-field matching: {len(matched_sources)}"
                 )
-                xcol = (
-                    "X_IMAGE_REF_SCI_MEAN"
-                    if "X_IMAGE_REF_SCI_MEAN" in matched_sources.columns
-                    else None
-                )
-                ycol = (
-                    "Y_IMAGE_REF_SCI_MEAN"
-                    if "Y_IMAGE_REF_SCI_MEAN" in matched_sources.columns
-                    else None
-                )
-                if xcol is None:
-                    for a, b in [
-                        ("x_center", "y_center"),
-                        ("X_IMAGE_REF_SCI_MEAN", "Y_IMAGE_REF_SCI_MEAN"),
-                    ]:
-                        if (
-                            a in matched_sources.columns
-                            and b in matched_sources.columns
-                        ):
-                            xcol, ycol = a, b
-                            break
+                xcol, ycol = _pick_xy_columns(matched_sources)
                 out_csv = os.path.join(
                     out_dir, f"SFFT_Matching_Sources_{out_base}.csv"
                 )
                 if xcol and ycol:
-                    df_out = matched_sources[[xcol, ycol]].rename(
-                        columns={
-                            xcol: "X_IMAGE_REF_SCI_MEAN",
-                            ycol: "Y_IMAGE_REF_SCI_MEAN",
-                        }
-                    )
+                    if (
+                        xcol == "X_IMAGE_REF"
+                        and "X_IMAGE_SCI" in matched_sources.columns
+                        and "Y_IMAGE_SCI" in matched_sources.columns
+                    ):
+                        _xr = pd.to_numeric(matched_sources["X_IMAGE_REF"], errors="coerce")
+                        _yr = pd.to_numeric(matched_sources["Y_IMAGE_REF"], errors="coerce")
+                        _xs = pd.to_numeric(matched_sources["X_IMAGE_SCI"], errors="coerce")
+                        _ys = pd.to_numeric(matched_sources["Y_IMAGE_SCI"], errors="coerce")
+                        df_out = pd.DataFrame({
+                            "X_IMAGE_REF_SCI_MEAN": (_xr + _xs) / 2.0,
+                            "Y_IMAGE_REF_SCI_MEAN": (_yr + _ys) / 2.0,
+                        })
+                    else:
+                        df_out = matched_sources[[xcol, ycol]].rename(
+                            columns={
+                                xcol: "X_IMAGE_REF_SCI_MEAN",
+                                ycol: "Y_IMAGE_REF_SCI_MEAN",
+                            }
+                        )
                     df_out.to_csv(out_csv, index=False, float_format="%.6f")
                 else:
                     matched_sources.to_csv(out_csv, index=False, float_format="%.6f")
@@ -1606,24 +1602,7 @@ def run_sfft() -> Optional[int]:
                 )
 
             # main.py expects columns X_IMAGE_REF_SCI_MEAN, Y_IMAGE_REF_SCI_MEAN
-            xcol = (
-                "X_IMAGE_REF_SCI_MEAN"
-                if "X_IMAGE_REF_SCI_MEAN" in matched_sources.columns
-                else None
-            )
-            ycol = (
-                "Y_IMAGE_REF_SCI_MEAN"
-                if "Y_IMAGE_REF_SCI_MEAN" in matched_sources.columns
-                else None
-            )
-            if xcol is None or ycol is None:
-                for a, b in [
-                    ("x_center", "y_center"),
-                    ("X_IMAGE_REF_SCI_MEAN", "Y_IMAGE_REF_SCI_MEAN"),
-                ]:
-                    if a in matched_sources.columns and b in matched_sources.columns:
-                        xcol, ycol = a, b
-                        break
+            xcol, ycol = _pick_xy_columns(matched_sources)
 
             # --- Position consistency check: verify SFFT matched sources are
             # close to pipeline-vetted prior positions.  Sources that SFFT
@@ -1659,9 +1638,25 @@ def run_sfft() -> Optional[int]:
                 out_dir, f"SFFT_Matching_Sources_{out_base}.csv"
             )
             if xcol and ycol:
-                df_out = matched_sources[[xcol, ycol]].rename(
-                    columns={xcol: "X_IMAGE_REF_SCI_MEAN", ycol: "Y_IMAGE_REF_SCI_MEAN"}
-                )
+                if (
+                    xcol == "X_IMAGE_REF"
+                    and "X_IMAGE_SCI" in matched_sources.columns
+                    and "Y_IMAGE_SCI" in matched_sources.columns
+                ):
+                    # Have both ref and sci positions: write the mean (matches
+                    # the REF_SCI_MEAN convention) instead of ref-only.
+                    _xr = pd.to_numeric(matched_sources["X_IMAGE_REF"], errors="coerce")
+                    _yr = pd.to_numeric(matched_sources["Y_IMAGE_REF"], errors="coerce")
+                    _xs = pd.to_numeric(matched_sources["X_IMAGE_SCI"], errors="coerce")
+                    _ys = pd.to_numeric(matched_sources["Y_IMAGE_SCI"], errors="coerce")
+                    df_out = pd.DataFrame({
+                        "X_IMAGE_REF_SCI_MEAN": (_xr + _xs) / 2.0,
+                        "Y_IMAGE_REF_SCI_MEAN": (_yr + _ys) / 2.0,
+                    })
+                else:
+                    df_out = matched_sources[[xcol, ycol]].rename(
+                        columns={xcol: "X_IMAGE_REF_SCI_MEAN", ycol: "Y_IMAGE_REF_SCI_MEAN"}
+                    )
                 df_out.to_csv(out_csv, index=False, float_format="%.6f")
             else:
                 matched_sources.to_csv(out_csv, index=False, float_format="%.6f")
